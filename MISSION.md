@@ -501,6 +501,38 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P37 — Two collapses, two DIFFERENT mechanisms (2026-08-20, sample building)
+
+The second collapse landed and it is not the same failure as the first. Both spend their last
+third going nowhere; how they do it differs completely.
+
+| | `102014Z` (93.7 m3/min) | `112141Z` (91.7 m3/min) |
+|---|---|---|
+| last-third distance | **0.3, 0.1 m/min** | 18, 22, 31 m/min |
+| span | 0.0 m | **1.9, 2.7, 3.4 m** |
+| deg per metre | 366 | 144, 110, 90 |
+| commanded axis | **exactly 0** | driving normally |
+| signature | **PARKED** — nothing asked of it | **CIRCLING** — orbiting a 3 m box |
+
+So "the run collapsed" is at least two conditions, and a fix aimed at one would have done nothing
+for the other. That is the argument for collecting several before proposing anything.
+
+**The diagnostic now covers both.** `motion.per_minute` was already recorded; a whole minute with
+span under 4 m while still flying 5 m or more now raises a CIRCLING finding alongside the PARKED
+one. Circling is the harder of the two to see by eye, because **distance, speed and stop counts
+all read normal while the aircraft orbits already-mapped floor** — the SPAN is the only column
+that gives it away.
+
+**Calibration matters, and it cuts against reading too much into this.** Circling minutes are not
+automatically a collapse: `113154Z` scored 167.6 with two of them, and `114209Z` 157.4 with two.
+The two collapses had 1 and 3.
+
+**A correlation exists and is deliberately NOT being reported as a finding.** Within `max_vel`
+0.8, circling minutes against coverage gives -0.72 at **n=7** — below this file's own bar of
+n>=15 within one configuration, which exists precisely because three earlier leads at this sample
+size evaporated. `motion.per_minute` lands in every run now, so the sample reaches 15 in about
+two hours of flying on its own. Re-run it then; do not act on it before.
+
 ### P36 — Vertical reference error predicts a collapsed run (2026-08-20, OPEN)
 
 Coverage now has a median near 190 and an occasional run at ~95. Finding what separates them is

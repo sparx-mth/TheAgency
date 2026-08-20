@@ -849,6 +849,23 @@ def _rank(m):
                "/".join("%.1f" % r["distance_m"] for r in parked),
                "/".join("%.1f" % r["span_m"] for r in parked)))
 
+    # The other half of "went nowhere": still flying, but round in circles. It
+    # costs as much as parking and looks healthy in every rate metric —
+    # distance, speed and stop counts all read normal while the aircraft orbits
+    # a few metres of already-mapped floor.
+    circling = [row for row in (mo.get("per_minute") or [])[:-1]
+                if row["span_m"] < 4.0 and row["distance_m"] >= 5.0]
+    if circling:
+        add(55.0 + len(circling),
+            "CIRCLING for %d whole minute(s) (from t=%s): flew %s m inside a "
+            "%s m box at %s deg/m. Distance and speed look normal; the SPAN is "
+            "what says it went nowhere. Check turning per metre against the "
+            "41-70 healthy band, then whether the reference is orbiting it."
+            % (len(circling), ", ".join(str(r["t"]) for r in circling),
+               "/".join("%.0f" % r["distance_m"] for r in circling),
+               "/".join("%.1f" % r["span_m"] for r in circling),
+               "/".join(str(r["deg_per_m"]) for r in circling)))
+
     add(mo["stops_per_min"],
         "P1 stop/go stutter: %s stops in %ss (%s/min); stop duration %s s, "
         "%ss stopped in total; %s%% of flight below %s m/s; %ss moving "
