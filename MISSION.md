@@ -497,6 +497,23 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P35 — A cold FCU needs longer than a warm one (harness, 2026-08-20)
+
+Two cycles in a row ended `unhealthy stack; flew nothing` with `armable: false`, each having
+already restarted Sphera itself ("battery is fine but the FCU is not armable"). The third cycle
+found the drone armable immediately and flew normally. About nine minutes of flying time lost to
+a timeout, not to a fault.
+
+The bring-up already waits for armable before taking its verdict — but at a flat 90 s, which was
+measured on a WARM stack where the FCU had merely not finished connecting. A drone that has just
+been respawned by a Sphera restart is a colder start than that. `restart_sphera` now sets
+`SPHERA_WAS_RESTARTED`, and the wait becomes **240 s after a restart, 90 s otherwise**, so the
+cheap case stays cheap and the expensive one gets the time it actually needs.
+
+Nothing was broken: the harness's detect-and-restart path worked, it just charged two cycles for
+what one should have covered. Worth knowing for the next unexplained pair of dead cycles — check
+`armable` in the health line before assuming a real fault.
+
 ### P34 — One more speed step: max_vel 1.0 (2026-08-20)
 
 0.6 -> 0.8 gave the campaign's two best runs and its lowest stall, so take the next step. The

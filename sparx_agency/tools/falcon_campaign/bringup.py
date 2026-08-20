@@ -250,6 +250,11 @@ def battery_fraction():
 
 
 # ── steps ────────────────────────────────────────────────────────────────
+#: Set by :func:`restart_sphera` so the bring-up downstream knows the FCU has
+#: only just spawned and deserves a longer grace period than a warm one.
+SPHERA_WAS_RESTARTED = False
+
+
 def restart_sphera(reentry_attempts=4):
     """Restart Sphera and drive its GUI back into the scenario.
 
@@ -268,6 +273,8 @@ def restart_sphera(reentry_attempts=4):
     Returns:
         True if a fresh drone container came back.
     """
+    global SPHERA_WAS_RESTARTED
+    SPHERA_WAS_RESTARTED = True
     r = sh(C.SPHERA_RESTART_CMD, timeout=420)
     if r.returncode != 0:
         # Say so loudly rather than fall through to the container check: an
@@ -676,7 +683,13 @@ def full_bringup(follower=None, extra="", min_battery=None):
     # reads unarmable for another minute after everything else is up -- observed
     # false at 16:27 and armed fine at 16:28 -- so an instantaneous read here
     # would fail cycles that were only ever going to need a few more seconds.
-    wait_for_armable()
+    #
+    # A drone that has just been respawned by a Sphera restart needs longer than
+    # one that was already up: measured 2026-08-20, two cycles in a row ended
+    # "unhealthy, flew nothing" with armable=false after their own restart, and
+    # the third found it armable straight away. That is ~9 minutes of flying
+    # time lost to a 90 s timeout being wrong for the cold case.
+    wait_for_armable(240.0 if SPHERA_WAS_RESTARTED else 90.0)
     return health_report()
 
 
