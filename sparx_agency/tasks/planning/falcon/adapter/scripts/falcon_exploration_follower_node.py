@@ -234,6 +234,19 @@ class FalconExplorationFollowerNode:
         self._escapes_since_progress = 0
         self._moving_since = None
         self._pinned_hold = False
+        self._pinned_hold_since = None
+        #: How long the pinned hold may keep translation at zero before it
+        #: re-arms and tries again.
+        #:
+        #: The hold used to be released only by "the aircraft moves for
+        #: escape_progress_sec" -- but the hold itself commands zero
+        #: translation, so an aircraft that is genuinely wedged can never
+        #: satisfy it, and one whose obstruction has since cleared is never
+        #: given the chance to. Measured 2026-08-20: a run flew normally for
+        #: 180 s and then covered 0.0-0.7 m per MINUTE for the remaining 250 s,
+        #: latched, re-logging the same suppression message every 10 s while
+        #: coverage flatlined. A bounded hold turns that into a periodic retry.
+        self.pinned_hold_sec = float(G("~pinned_hold_sec", 4.0))
 
         # ── Rooster force shaping: fixed-magnitude pulses, no docking gait ──
         # See the module docstring for why ClosureGait is deliberately not used
@@ -572,6 +585,21 @@ class FalconExplorationFollowerNode:
         """
         now = rospy.Time.now().to_sec()
 
+        # Bounded hold: let the airframe settle and the integrator unwind, then
+        # try again. Being parked is only better than grinding for as long as it
+        # takes to settle -- after that it is just a stopped flight.
+        if self._pinned_hold and self._pinned_hold_since is not None:
+            if now - self._pinned_hold_since >= self.pinned_hold_sec:
+                rospy.logwarn(
+                    "falcon_exploration_follower: pinned hold expired after "
+                    "%.0fs -- re-arming the escape budget and driving again",
+                    self.pinned_hold_sec)
+                self._pinned_hold = False
+                self._pinned_hold_since = None
+                self._escapes_since_progress = 0
+                self._stall_since = None
+                self._escape_ready_at = None
+
         if self._escape_until is not None:
             if now < self._escape_until:
                 return self._escape_sign * math.radians(self.escape_yaw_rate_deg)
@@ -599,6 +627,7 @@ class FalconExplorationFollowerNode:
             elif now - self._moving_since >= self.escape_progress_sec:
                 self._escapes_since_progress = 0
                 self._pinned_hold = False
+                self._pinned_hold_since = None
             self._stall_since = None
             return None
         self._moving_since = None
@@ -634,6 +663,8 @@ class FalconExplorationFollowerNode:
             # translation lets the integrator unwind and the airframe settle,
             # while yaw is left alone so the aircraft can still turn and let
             # FALCON replan from a different heading.
+            if not self._pinned_hold:
+                self._pinned_hold_since = now
             self._pinned_hold = True
             return None
 

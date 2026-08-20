@@ -462,6 +462,35 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P29 — The pinned hold was a latch with an unreachable release (fix applied 2026-08-20)
+
+The stall is now the single biggest determinant of coverage: across **94 reliable runs**,
+`corr(stall_frac, coverage) = -0.79`. Nothing else comes close. So what the remaining stalls are
+made of is THE question, and the answer is not one of the three known signatures.
+
+Run `20260820_050749Z` flew normally for 180 s — 28-32 m/min, 39-55 deg/m — and then covered
+**0.0-0.7 m per MINUTE for the remaining 250 s**. Not a lock (P16), not a spin (P17: span 0.0-0.3
+m, it is not circling), not a frontier famine (P21). The aircraft was simply **parked**, and its
+own log says why, every 10 s:
+
+> `4 escapes without regaining motion -- suppressing further escapes until the aircraft moves`
+
+That is P13's pinned hold, and its release condition is unreachable by construction: the hold
+commands **zero translation**, so an aircraft that is genuinely wedged can never "move for 5 s"
+to earn its release — and one whose obstruction has since cleared is never given the chance to.
+P13's own comment says "commanding normally and letting FALCON replan is strictly better than a
+manoeuvre that is not working"; the code did the opposite and commanded nothing at all.
+
+**Fix:** the hold is now bounded by `~pinned_hold_sec` (4.0 s). When it expires the escape budget
+re-arms and normal driving resumes, so a permanent stop becomes a periodic retry. P13's actual
+purpose survives — the airframe still gets its seconds to settle and the servo integrator to
+unwind, which is what stopped the 20-35 deg pitch lock-up.
+
+**Verify:** no run should show a flat multi-minute tail with distance under 1 m/min; `stall_frac`
+below ~20 % consistently; coverage's low end rising from ~101 toward the 170-187 the good runs
+already reach. **Watch:** if PINNED counts climb a lot without coverage improving, the retry is
+grinding — raise `pinned_hold_sec` rather than restoring the latch.
+
 ### P28 — Exploration is TIME-limited, not map-limited (2026-08-20)
 
 Measured at the end of a current-configuration flight: **33.2 % of the box floor has mapped free
