@@ -780,6 +780,13 @@ Nothing was broken: the harness's detect-and-restart path worked, it just charge
 what one should have covered. Worth knowing for the next unexplained pair of dead cycles — check
 `armable` in the health line before assuming a real fault.
 
+**Observed rate after the fix (2026-08-20 20:48):** the not-armable restart trigger has fired
+**3 times in 250 cycles (~1.2 %)**, and the most recent one still cost a cycle even with the
+240 s grace — the restart happened, the FCU was still not armable when the window closed, and the
+NEXT cycle flew normally. So the fix reduced the cost from two cycles to one; it did not
+eliminate it. At ~1 cycle lost per 80, that is not worth further engineering. Investigate only if
+it starts repeating within consecutive cycles again.
+
 ### P34 — One more speed step: max_vel 1.0 (2026-08-20)
 
 0.6 -> 0.8 gave the campaign's two best runs and its lowest stall, so take the next step. The
