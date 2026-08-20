@@ -484,10 +484,34 @@ spots the smoothness term wins and the curve is pushed into a wall that is alrea
 three times harder to trade away. `safe_distance` stays 0.55 — it moved the median correctly and
 raising a soft target further does nothing about a term that is being outvoted.
 
-**Verify:** PINNED events below ~6/flight (they are 9-13), clearance p10 at the moment of a pin
-above 0.2 m, coverage holding at 130-176. **Watch:** a heavily weighted clearance term can make
-the curve wander or fail to fit a doorway — rising "collision detected on the trajectory" or
-publish failures means 100 rather than 150.
+**VERIFIED over three runs — the best flights of the campaign, on every axis at once:**
+
+| | weight 50 | weight 150 |
+|---|---|---|
+| coverage m3/min | 129.2, 148.8, 129.7 | **174.2, 187.4, 168.8** |
+| final volume m3 | 1307, 1622, 1465 | **1786, 1798, 1714** |
+| PINNED per flight | 13, 13, 9 | **10, 7, 9** |
+| time below stop speed | 0.22, 0.20, 0.18 | **0.20, 0.14, 0.11** |
+| reference clearance AT a pin | 0.15 | **0.38** |
+
+1798 m3 is a new record and all three runs beat the previous best of 1700. The mechanism did
+exactly what it was meant to: at the moments that matter the plan is now 0.38 m off the wall
+instead of 0.15.
+
+**But the aircraft is still at 0.09 m (p10 0.02) when it pins, with none of the 17 events beyond
+0.40 m.** The plan has stopped driving into walls; the aircraft still arrives at them. That is a
+~0.3 m gap between reference and aircraft at exactly the wrong moment, so **the contact problem
+is now a TRACKING problem** (pos_err p50 0.32, p90 1.26) rather than a planning one.
+
+**Next lever, and note what it is not:** the follower zeroes lateral velocity entirely (Rooster's
+lateral axis is dead until ~1000 counts and then rolls 30 deg), so crosstrack error can only be
+corrected by turning, and `course_slew_deg_s` caps that at 45. The limit cycle P17 fixed was
+caused by the demand OSCILLATING faster than the plant could follow, which is a different thing
+from a large, persistent heading error — so an adaptive slew (fast when the demand has been
+consistently one-sided, slow when it is thrashing) would keep P17's property while correcting
+crosstrack promptly. Do not simply raise the cap and undo P17.
+
+
 
 ### P23 — The reference itself flies inside the safety margin (2026-08-20)
 
