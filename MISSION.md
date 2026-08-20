@@ -480,16 +480,25 @@ override (`~/rooster-private-parameters/developer.params.yaml`), which makes it 
 of change that improves the number without improving the system, and it would break comparison
 with every run in this file.
 
-**Candidate, measured but not yet acted on:** the forward axis sits between 1 and 619 counts —
-inside the dead band, where the platform does not move — for **93 s of a 445 s flight** across
-129 episodes (p50 0.45 s, p90 1.65 s, max 4.2 s); 29 episodes longer than a second account for
-55 s. Release transients explain only ~0.2 s each, so most of that is something else.
+**The "dead band wastes a quarter of the flight" candidate is an ARTIFACT — closed, no work
+needed.** `nav_debug_recorder` already logs the follower's own `/cmd_vel` to
+`telemetry.jsonl`, so the demand could be joined to the axis without adding anything. Doing that
+across a full flight:
 
-**Before chasing it, settle what it means:** on this platform a released stick IS the brake, so
-any value inside the dead band is equivalent to zero, and the servo is *allowed* to go there
-deliberately when braking. The loss is only real for episodes where motion was actually wanted.
-`truth.jsonl` records the axis but not the demand, so answering this needs `/cmd_vel` alongside
-it — check what `nav_debug_recorder` already captures before adding anything.
+* 2361 of 8925 ticks had the axis inside the dead band **with a genuine demand** (p50 0.296 m/s,
+  95 % above 0.15) — so this was not the servo braking.
+* But during those very ticks the aircraft was **moving at p50 0.39 m/s**, with only **1 %**
+  genuinely stopped, and the axis sat at **p50 551**.
+
+551 is below the *standing* dead band of 620 and well above the *moving* one of 412 — and the
+adapter has carried both curves since P5, because momentum lowers the deflection needed to keep
+going. The analyzer was judging a moving aircraft against the standing curve. Fixed: each tick
+is now measured against the regime it is actually in, and `frac_dead_band` falls from 0.23-0.29
+to **0.02-0.03**.
+
+**Consequence for the record:** `actuation.*.gain` before 2026-08-20 08:00 was computed from the
+wrong curve too (it now reads 0.45-0.60 where it read 0.16-0.41), so do not compare a gain from
+an older run against a newer one. Coverage, clearance and stall numbers are unaffected.
 
 ### P27 — Contacts are set by WHERE the aircraft flies, not by tuning (2026-08-20, CLOSED)
 

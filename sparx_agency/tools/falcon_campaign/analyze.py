@@ -60,6 +60,19 @@ ALIGN_GATE_DEG = 85.0
 #: tools/rooster_axis_calibration.py.
 AXIS_CURVE = {"x": (620.0, 1.25), "y": (700.0, 1.02)}
 
+#: The same curve for an aircraft that is ALREADY MOVING, which is a different
+#: curve entirely -- the adapter carries both (``deadzone_moving`` /
+#: ``v_full_moving``) because momentum lowers the deflection needed to keep
+#: going. Judging a moving aircraft against the standing dead band is what
+#: produced the long-standing finding "29 % of ticks below 620 counts -- motion
+#: demanded, none produced": measured 2026-08-20 against the follower's own
+#: /cmd_vel, the aircraft was moving at p50 0.39 m/s during exactly those ticks,
+#: with only 1 % genuinely stopped, and the axis sat at p50 551 -- well above the
+#: moving dead band of 412. Nothing was being lost; the yardstick was wrong.
+AXIS_CURVE_MOVING = {"x": (412.0, 1.847)}
+#: Measured speed above which the moving curve applies (the adapter's move_eps).
+MOVE_EPS_MPS = 0.10
+
 STALE_AGE_S = 1.0        # a stream older than this is not flowing
 ALT_BAND_M = 0.15        # ranger error that counts as "on target"
 ALT_CONVERGED_S = 5.0    # time inside the band before we call it converged
@@ -397,7 +410,7 @@ def actuation_metrics(samples):
     """Commanded axis counts vs achieved body speed, per horizontal axis."""
     out = {}
     for axis, key in (("x", "ax"), ("y", "ay")):
-        dead, v_full = AXIS_CURVE[axis]
+        standing = AXIS_CURVE[axis]
         counts, ratios, want_all, got_all, dead_ticks = [], [], [], [], 0
         pairs = []                     # (commanded, achieved), for the slope
         for sample in samples:
@@ -405,10 +418,14 @@ def actuation_metrics(samples):
             if value is None:
                 continue
             counts.append(abs(value))
+            # Which curve applies depends on whether the aircraft is moving.
+            got = _body_speed(sample, axis)
+            moving = got is not None and abs(got) >= MOVE_EPS_MPS
+            dead, v_full = (AXIS_CURVE_MOVING.get(axis, standing) if moving
+                            else standing)
             if 0.0 < abs(value) < dead:
                 dead_ticks += 1  # motion demanded, none physically produced
             want = max(0.0, (abs(value) - dead) / (1000.0 - dead)) * v_full
-            got = _body_speed(sample, axis)
             if want > STOP_SPEED_MPS:
                 want_all.append(want)
                 if got is not None:

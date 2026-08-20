@@ -1523,3 +1523,24 @@ Two fixes, and the second is the general one: the missing geometry now raises a 
 retry loop waits 180 s rather than 90 for a window Sphera can genuinely take minutes to
 restore, and re-runs the restart itself halfway through, because re-clicking a Sphera that was
 never restarted cannot produce a fresh drone however many times it is tried.
+
+## Judge a measurement against the regime the system is actually in (2026-08-20)
+
+Every run report carried a finding like *"29 % of ticks below 620 counts — motion demanded,
+none produced"*, which reads as a quarter of the flight thrown away. It was an artifact.
+
+The adapter has carried two curves for the forward axis since the calibration work: a standing
+dead band of 620 counts and a moving one of 412, because momentum lowers the deflection needed
+to keep going. The analyzer only knew the standing one. Joining the follower's own `/cmd_vel`
+(already logged by `nav_debug_recorder`) to the recorded axis showed what was really happening
+during those ticks: the aircraft was **moving at p50 0.39 m/s**, only 1 % genuinely stopped,
+with the axis at p50 551 — below the standing dead band, comfortably above the moving one.
+
+Measuring each tick against its own regime drops `frac_dead_band` from 0.23-0.29 to 0.02-0.03.
+Nothing about the aircraft changed; the yardstick was wrong.
+
+**Two habits this reinforces.** When a system has an explicit mode or regime, every metric
+derived from it needs the same mode awareness the controller has — a single global constant
+will quietly mislabel one whole regime. And before chasing a loss a metric reports, check the
+loss exists in a *different* signal: here the aircraft's own measured speed refuted it in one
+query.
