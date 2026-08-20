@@ -238,7 +238,7 @@ FRONTIER_CLUSTER_MIN = 50.0
 #: Seconds the coverage tour may hold its chosen cell before re-picking. The
 #: bound is the safety property, not the feature: a commitment to an unreachable
 #: cell is the lock P16 fixed, and the timeout is what keeps one cheap.
-TOUR_COMMIT_MAX_S = 8.0
+TOUR_COMMIT_MAX_S = 0.0
 
 #: Range at which the TSDF stops raycasting. 5.0 discarded 4.8 % of every depth
 #: frame; sensing max_depth already allows 10 m.

@@ -529,6 +529,34 @@ REVERT IF — coverage drops below 140, or `no_path_fails` rises sharply (commit
 unreachable cell is exactly the P16 lock this campaign already fixed once; that is what the
 timeout bounds).
 
+**RESULT: the patch works, the hypothesis is REFUTED. Disabled (`tour_commit_max_s = 0`).**
+
+| | baseline | with commitment |
+|---|---|---|
+| target changes / min | 12.1, 10.0 | **2.5, 3.3** |
+| target dwell p50 | 2.0 s, 0.7 s | **15.8 s, 9.3 s** |
+| cells per metre | 0.75, 0.84 | 0.73, 0.76 |
+| coverage m3/min | 169.6, 185.6 | 146.7, 164.4 |
+
+Churn fell 4-5x exactly as intended, and **transit efficiency did not move at all**. Holding the
+target steady is not what makes the aircraft cover ground twice. Neither revert condition fired
+(coverage stayed above 140, `no_path_fails` did not rise), but neither WANT was met, so the
+change is neutral — and a neutral change that costs a C++ patch, a rosparam and a marker is not
+worth keeping switched on. It stays compiled into the image, disabled, so the next hypothesis
+about the tour has the mechanism available.
+
+**Two measurement lessons, both mine:**
+
+* **The patch contaminated its own metric.** Parsing `next cell id: (\d+)` matched BOTH the TSP's
+  pick and the new "Holding tour target" line, which now differ — so the target looked like it was
+  changing 44-49 times a minute, twice the baseline, when it was actually changing 2.5. Reading
+  only the final `Current cell id: N, next cell id: N` line gives the true figure. A patch that
+  adds log lines can break the parser that measures it.
+* **The threshold was set from too small a sample.** "cells-per-metre above 0.8" came from three
+  runs reading 0.41-0.72; two other baseline runs read 0.75 and 0.84. The metric's own spread is
+  0.41-0.84, so the bar was inside the noise before the experiment started. Measure a metric's
+  spread BEFORE pre-registering a threshold on it.
+
 **Build trap, now guarded:** the first build put the patch step AFTER `catkin_make`, and the only
 later step that rebuilds (`fix_falcon_sop.sh`) short-circuits with "already patched" — so the
 image carried the patched source and an unpatched binary, with matching timestamps. `strings` on

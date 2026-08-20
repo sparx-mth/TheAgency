@@ -1370,7 +1370,14 @@
        committing to a cell the aircraft cannot reach is the lock this campaign
        already fixed once, and the timeout keeps a bad commitment cheap.
        0 disables (re-pick every cycle, upstream behaviour). -->
-  <arg name="tour_commit_max_s" default="8.0" />
+  <!-- 0 = upstream (re-pick every cycle). Set to 8.0 and measured: the patch
+       worked and the hypothesis did not. Target churn fell 4-5x (12.1 and 10.0
+       changes/min -> 2.5 and 3.3; dwell p50 0.7-2.0 s -> 9.3-15.8 s) and
+       cells-per-metre did NOT move (0.75, 0.84 -> 0.73, 0.76), with coverage
+       146.7 and 164.4 against 169.6 and 185.6. Churn was real; it was not what
+       made transit inefficient. Left in the image, disabled, so the next
+       hypothesis about the tour can use it. -->
+  <arg name="tour_commit_max_s" default="0.0" />
   <param name="/exploration/tour_commit_max_s" value="$(arg tour_commit_max_s)"/>
 
   <arg name="frontier_cluster_min" default="50" />
