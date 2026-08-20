@@ -526,11 +526,29 @@ Arithmetic checked first, per the standing rule: 0.8 m/s asks **863** counts sta
 moving, both under the 900 ceiling. 1.0 m/s would ask 924 and clip, so 0.8 is the last step this
 airframe has.
 
-**Pre-registered:** WANT coverage above 185.6 (the best single run) on at least one of three, and
-a median above the 143-177 band. REVERT IF coverage median drops below 143, if
-`actuation.x.axis_counts.p90` pins at 900 (saturation, which is where this platform misbehaves),
-or if tilt-cut firings or PINNED counts climb materially — a faster plan makes harder demands,
-and that is what the whole lock-up chain used to start from.
+**RESULT: KEPT. Two runs of two beat the campaign record, and the stall is the lowest yet.**
+
+| | max_vel 0.6 | max_vel 0.8 |
+|---|---|---|
+| coverage m3/min | 169.6, 185.6, 146.7, 164.4 | **190.9, 190.5** |
+| final volume m3 | 1580, 1807, 1560, 1648 | 1752, 1764 |
+| stalled share | 16-17 % | **5 %, 4 %** |
+| axis frac at 900 | 0.123, 0.121, 0.141, 0.114 | 0.153, 0.103 |
+| PINNED / tilt cuts | ~9-13 / 2-19 | 12 / 13, 12 / 11 |
+
+**One pre-registered revert condition fired and I am overriding it — with the reason stated.**
+"REVERT IF `actuation.x.axis_counts.p90` pins at 900" was met... and it was **already met by every
+baseline run**, because p90 sits at the ceiling whenever the aircraft asks for a hard push at all.
+The condition could never discriminate, so it tested nothing. The substantive version of that
+concern is the FRACTION of ticks at the ceiling, and it did not move: 0.114-0.141 before, 0.103
+and 0.153 after. Tilt cuts and contacts did not climb either. This is a mis-specified condition
+being corrected against evidence, not a goalpost being moved: the WANT was met outright, on both
+runs, with the largest stall reduction of the campaign alongside it.
+
+**The pattern to break — two in two turns:** P32's threshold was set from a partial sample of the
+metric's own spread, and P33's was set to a value the baseline already satisfied. **Measure the
+baseline value of every pre-registered condition before flying the change.** A criterion that the
+control case also meets is not a criterion.
 
 ### P32 — The coverage tour re-picks its target 22 times a minute (2026-08-20, NEXT CANDIDATE)
 

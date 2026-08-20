@@ -1555,3 +1555,20 @@ that was correct when written and silently stopped matching anything once wall t
 `\[(\d{10}\.\d+)\]` costs nothing and does not expire. More generally, when a parser returns a
 suspiciously clean answer — nothing happened, zero events, a perfectly flat series — check that
 it matched anything at all before believing it.
+
+## A revert condition the baseline already meets is not a condition (2026-08-20)
+
+Two experiments in a row were pre-registered against thresholds that could not discriminate.
+
+* P32 wanted "cells per metre above 0.8", chosen from three runs reading 0.41-0.72 — while two
+  other baseline runs read 0.75 and 0.84. The bar sat inside the metric's own spread.
+* P33 said "revert if `axis_counts.p90` pins at 900". Every baseline run already had p90 at 900,
+  because that percentile reaches the ceiling whenever the aircraft asks for a hard push. Had the
+  condition been applied literally, a change that beat the campaign record twice and produced its
+  lowest-ever stall would have been reverted for a property it did not cause.
+
+Pre-registration only protects against self-deception if the condition can come out either way.
+**Measure the baseline value of every WANT and every REVERT-IF before the change flies** — the
+same three commands that will judge the experiment afterwards. Where a percentile saturates,
+use the fraction beyond the threshold instead: `p90 = 900` said nothing, while "12 % of ticks at
+the ceiling, unchanged" said everything.
