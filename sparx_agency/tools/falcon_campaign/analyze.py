@@ -612,6 +612,45 @@ def _stall_metrics(rows):
                 t95_s=round(t95, 1))
 
 
+def clearance_metrics(run_dir):
+    """Distance from the aircraft AND its reference to the nearest obstacle.
+
+    Half the mission's goal is "minimum collisions", and until this existed
+    nothing measured proximity at all -- only the aftermath, as PINNED events.
+    Recording both numbers is what separates a plan that goes too close from a
+    plan that is merely followed badly; measured 2026-08-20, it was the plan.
+
+    Args:
+        run_dir: The run folder, expected to hold ``clearance.jsonl``.
+
+    Returns:
+        Stats for each, plus the fraction of samples inside the planner's
+        inflation radius.
+    """
+    path = run_dir / "clearance.jsonl"
+    air, ref, err = [], [], []
+    if path.exists():
+        for line in path.read_text(errors="ignore").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("nearest_m") is not None:
+                air.append(row["nearest_m"])
+            if row.get("ref_nearest_m") is not None:
+                ref.append(row["ref_nearest_m"])
+            if row.get("pos_err_m") is not None:
+                err.append(row["pos_err_m"])
+    inflation = getattr(config, "OBSTACLES_INFLATION", 0.4)
+    frac = lambda v: (None if not v
+                      else sum(1 for x in v if x < inflation) / float(len(v)))
+    return dict(samples=len(air),
+                aircraft_m=_stats(air), reference_m=_stats(ref),
+                xy_pos_err_m=_stats(err),
+                aircraft_frac_inside_inflation=frac(air),
+                reference_frac_inside_inflation=frac(ref))
+
+
 def exploration_metrics(lines):
     """FSM transitions, replan verdicts, and whether exploration finished."""
     transitions, replans, plan_fail, finish_t = [], {}, 0, None
@@ -919,7 +958,8 @@ def analyze(run_dir):
         altitude=altitude_metrics(flying, lines),
         coverage=coverage_metrics(run_dir, motion.get('duration_s')),
         health=health_metrics(samples, lines),
-        exploration=exploration_metrics(lines))
+        exploration=exploration_metrics(lines),
+        clearance=clearance_metrics(run_dir))
     metrics["data_gaps"] = _data_gaps(metrics, samples, bad_lines, log_files)
     metrics["ranked_findings"] = _rank(metrics)
     (run_dir / "metrics.json").write_text(

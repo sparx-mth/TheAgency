@@ -60,6 +60,29 @@ def new_run_dir():
     return run
 
 
+def start_clearance_probe():
+    """Trace clearance to the nearest mapped obstacle for the whole flight.
+
+    Collisions are half the mission's goal and nothing measured them: the
+    aircraft was found flying inside its own safety margin 66 % of the time, and
+    its REFERENCE 73 %, which is what showed the fault was in the plan rather
+    than in the tracking. That took a hand-run probe and a container that had to
+    survive long enough to copy the file off, so it now runs every flight.
+
+    Failure here must never cost a cycle -- it is instrumentation, not flight.
+    """
+    bringup.sh(
+        "docker cp %s %s:/tmp/probe_clearance_trace.py 2>/dev/null"
+        % (shlex.quote(str(C.REPO_ROOT / "sparx_agency" / "tools" /
+                          "falcon_campaign" / "probe_clearance_trace.py")),
+           C.FALCON_CONTAINER), 30)
+    bringup.sh(
+        "docker exec -d %s bash -lc %s"
+        % (C.FALCON_CONTAINER,
+           shlex.quote(C.FALCON_ENV + "python3 -u /tmp/probe_clearance_trace.py "
+                       "> /tmp/clearance.jsonl 2>/tmp/clearance.err")), 30)
+
+
 def start_recorder(run_dir, duration_s):
     """Launch the flight recorder inside the vendor container, detached.
 
@@ -117,6 +140,8 @@ def collect_logs(run_dir, recorded):
     else:
         log(run_dir, "no recorder ran this cycle -- not copying telemetry, it "
                      "would be the previous flight's")
+    bringup.sh("docker cp %s:/tmp/clearance.jsonl %s/ 2>/dev/null"
+               % (C.FALCON_CONTAINER, shlex.quote(str(run_dir))), 30)
     # The follower/FSM logs live in falcon's rotating roslaunch log dir.
     #
     # rosout* is excluded on purpose. It is the master's AGGREGATE of the very
@@ -248,6 +273,7 @@ def fly(run_dir, duration_s):
 
     log(run_dir, "hover settled -- starting recorder and handing over to FALCON")
     start_recorder(run_dir, duration_s)
+    start_clearance_probe()
     result["recorded"] = True
     time.sleep(2)
     bringup.start_twist_adapter()
