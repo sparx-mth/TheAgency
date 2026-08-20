@@ -16,10 +16,25 @@
 the point — it is what stops a later session re-running a refuted experiment — but you do not
 need all of it to act. This section is the orientation; the rest is evidence.*
 
-**Where it stands (2026-08-20 17:35):** the campaign has done its job. Coverage per flight went
-from a 1060 m3 / 75 m3/min median to a repeatable ~1800 m3 / ~190 m3/min, and the share of each
-flight spent gaining nothing fell from 53 % to 4-10 %. The top five flights are within 25 m3 of
-each other, so that ceiling is reproducible rather than lucky.
+**Where it stands — measured over all 36 settled-configuration runs (2026-08-20 20:15):**
+
+| | opening median | settled config, n=36 |
+|---|---|---|
+| final volume | 1060 m3 | **median 1578** (p25 1444, p75 1722, max 1823) |
+| coverage rate | 75 m3/min | **median 163** (clean runs, n=30) |
+| stalled share of flight | 53 % | **median 17 %** (p25 9, p75 31, max 77) |
+| runs below 1300 m3 | — | **5 of 36 (14 %)** |
+
+*An earlier version of this summary said "a repeatable ~1800 m3 / ~190 m3/min" and "4-10 %
+stalled". Those were the BEST runs, not the distribution: 1823 and 190 are the maxima, and 4-10 %
+came from two flights. The medians above are what the configuration actually delivers, and the
+p25/p75 spread is the honest picture — a fifty percent range between quartiles on final volume,
+with one run in seven landing below 1300.*
+
+**No drift.** Six consecutive blocks of six runs give final medians 1554, 1662, 1612, 1566, 1574,
+1485 and stall medians 30, 13, 15, 20, 15, 16 % — wobble, not trend. A short window can mislead:
+the last seven runs alone read 1417, which is the low end of ordinary variation plus one
+collapse, not a regression.
 
 **Settled configuration — change nothing here without a pre-registered test:**
 `raycast_max 8.0`, `cluster_min 50`, `safe_distance 0.55`, bspline distance weight `150`,
