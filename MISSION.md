@@ -462,6 +462,29 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P27 — Contacts are set by WHERE the aircraft flies, not by tuning (2026-08-20, CLOSED)
+
+Across **16 runs** with clearance traces, correlating each run's median reference clearance
+against its contact count and its coverage:
+
+* **corr(reference clearance, PINNED) = -0.65** — tight runs have more contacts. When the plan
+  has room (median clearance 0.83-0.96 m) there are 6-8 pins; when it is tight (0.32-0.38) there
+  are 9-15.
+* **corr(reference clearance, coverage) = -0.54** — and tight runs cover MORE. The unexplored
+  volume is in the tight parts of the building; the open corridors are already mapped.
+
+So contacts and coverage are **positively linked through the environment**: going where the
+volume is means going where it is tight. Every control-side attempt to reduce contacts has now
+failed to move them (P23 raised clearance, P26 raised the position gain — neither changed the
+count), while the one change that DID reduce them, the clearance weight in P24, also raised
+coverage, because it improved the plan rather than avoiding the hard places.
+
+**This closes the contact line of investigation.** ~6-15 contacts per flight is not a defect to
+be tuned out; it is what exploring the difficult two-thirds of this building costs with a 0.62 m
+sensor near floor and a dead lateral axis. Reducing it by avoiding tight spaces would cost
+coverage, which is the mission. Chase coverage; treat contacts as its price and keep the escape
+ladder healthy so each one is cheap.
+
 ### P26 — Bending the course harder to close cross-track (change applied 2026-08-20)
 
 Cross-track is now measured over four flights and it is stable: **p50 0.18-0.23 m, p90
@@ -477,10 +500,12 @@ dropped outright. At 1.6 the same offset bends it 33 deg.
 Exposed as `~tracker_pos_kp` (default 1.0 = previous behaviour, so it is one launch arg to
 revert) and set to 1.6, guarded in `EXPECTED_ROSPARAMS`.
 
-**Verify:** `clearance.abs_cross_track_m` p50 below 0.15 and p90 below 0.5, PINNED below ~7,
-coverage holding at 135-187. **Watch:** the position loop has real lag — the axis dead band and
-the 45 deg/s course slew — so a higher gain can oscillate. `motion.turning_deg_per_m_late`
-leaving the 41-70 band, or stops rising, means back to 1.3 and then 1.0.
+**RESULT: no effect, REVERTED to 1.0 after four runs.** Cross-track p50 0.18, 0.25, 0.19, 0.19
+against a 0.18-0.23 baseline; p90 0.52, 0.79, 0.63, 0.57 against 0.59-0.84. The metric it was
+aimed at did not move, while `stops_per_min` rose to 3.3-8.2 from 0.5-5 and coverage sat at
+107-170 against 135-187. Bending the course harder does not close cross-track on this airframe —
+the limit is downstream of the command, in the dead band and the turn rate. The `~tracker_pos_kp`
+wiring stays (default 1.0), because being able to try a gain from a launch arg is worth keeping.
 
 **Note for whoever tries the next step:** the follower only ever sees ONE point
 (`/planning/pos_cmd`), not the path, so a true pure-pursuit aim point is a bigger change than

@@ -1244,7 +1244,11 @@
        reference clearance of ~0.5 m, so it is what puts the aircraft into walls
        its own plan was clear of. At the stock 1.0 a 0.2 m offset bends the
        course only 22 deg against a 0.5 m/s feedforward; 1.6 makes it 33. -->
-  <arg name="explore_tracker_pos_kp" default="1.6" />
+  <!-- REVERTED to 1.0 after four runs: cross-track p50 stayed 0.18-0.25 against
+       a 0.18-0.23 baseline and p90 0.52-0.79 against 0.59-0.84 — no effect on
+       the metric it was aimed at — while stops rose to 3.3-8.2/min from 0.5-5.
+       Kept as a parameter because the wiring is the useful part. -->
+  <arg name="explore_tracker_pos_kp" default="1.0" />
   <arg name="explore_course_slew_deg" default="45.0" />
   <arg name="explore_max_yaw_rate_deg" default="90.0" />
 

@@ -216,7 +216,7 @@ BRIDGE_CMD = (
 #: Gain on horizontal position error in the follower's tracker. Cross-track
 #: error is the only half of the tracking error that can cause a collision, and
 #: it measured p50 0.20 m against a reference clearance of ~0.5 m.
-TRACKER_POS_KP = 1.6
+TRACKER_POS_KP = 1.0
 
 TILT_LIMIT_DEG = 35.0
 TILT_RESUME_DEG = 27.0
