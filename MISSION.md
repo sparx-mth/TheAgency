@@ -497,6 +497,41 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P33 — Transit is near its floor; planning speed RE-OPENED on new grounds (2026-08-20)
+
+P32 refuted target churn as the cause of transit inefficiency, so what is left of it? Counting
+VISITS per 1 m cell rather than samples:
+
+| | cells | visits/cell | p50 | busiest 10 % of cells | entered exactly ONCE |
+|---|---|---|---|---|---|
+| `080304Z` | 187 | 1.5 | 1 | 18 % of visits | **61 %** |
+| `085936Z` | 178 | 1.7 | 1 | 21 % of visits | **58 %** |
+
+No chokepoint pathology and no looping: the median cell is entered once, the busiest cells 4-5
+times, and nearly two thirds are visited a single time. **The earlier framing — "a third to a
+half of the path is over ground already covered" — overstated it.** At 1 m cells and a curving
+path, travelling more than a metre per new cell is geometry, not waste. Transit is close to its
+practical floor and is not where the remaining coverage is.
+
+**So: `max_vel` 0.6 -> 0.8, and the follower ceiling 0.8 -> 1.0.**
+
+This deliberately re-opens P14, which was closed as "speed is not the lever". That verdict was
+correct **for the regime it was measured in**: the test ran when 60 % of every flight was
+stalled, so the aircraft's planned speed could not matter — it was not flying. The stall is now
+9-17 %, the failure modes behind it are fixed, and coverage is bounded by rate x window with the
+window fixed by the battery. Re-opening a closed question needs a reason; "the thing that made
+the earlier answer uninformative has since been fixed" is one.
+
+Arithmetic checked first, per the standing rule: 0.8 m/s asks **863** counts standing and **667**
+moving, both under the 900 ceiling. 1.0 m/s would ask 924 and clip, so 0.8 is the last step this
+airframe has.
+
+**Pre-registered:** WANT coverage above 185.6 (the best single run) on at least one of three, and
+a median above the 143-177 band. REVERT IF coverage median drops below 143, if
+`actuation.x.axis_counts.p90` pins at 900 (saturation, which is where this platform misbehaves),
+or if tilt-cut firings or PINNED counts climb materially — a faster plan makes harder demands,
+and that is what the whole lock-up chain used to start from.
+
 ### P32 — The coverage tour re-picks its target 22 times a minute (2026-08-20, NEXT CANDIDATE)
 
 Following P31 (the remaining loss is transit through mapped space), the question is why transit
