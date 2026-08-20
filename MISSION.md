@@ -497,6 +497,41 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P31 — The remaining "stall" is TRANSIT, not failure (2026-08-20)
+
+Two measurements over three baseline runs (1277 s of flight) change what is worth optimising.
+
+**1. Recovery time does not cost coverage.** 28 % of flight time sits inside a recovery window
+(from a PINNED event to sustained motion again) and 26 % has coverage flat — but the **overlap is
+27 s, 7 % of recovery time**. The two are almost disjoint: while the aircraft reverses and turns
+its way out of a contact, the camera sweeps geometry it had not seen, so the mapping continues.
+
+*This kills the queued `escape_cooldown_sec` 6.0 experiment before it cost three runs.* Making
+recoveries faster optimises time that was never lost. (P30's revert to 4.0 stands on its own
+evidence — shorter was worse at recovering — it simply matters less than it looked.)
+
+**2. What IS flat is the aircraft flying normally.** During coverage-flat windows it moves at
+**0.46 m/s mean**, against 0.48 in productive windows, with only 6 % of that time stationary.
+The remaining loss is **transit through space already mapped** — not a lock, a spin, a park, a
+wedge or a famine. Every failure mode this campaign has chased is gone; what is left is the cost
+of getting from one frontier to the next.
+
+**Path efficiency, and a correction to how it was first measured.** Distinct 1 m cells visited
+per metre flown: **0.41, 0.72, 0.58** across the three runs (90-137 cells for 187-238 m). A
+non-repeating sweep would be ~1.0, so roughly a third to a half of the path is over ground
+already covered — moderate, and partly inherent to a building where every room is reached
+through the same corridors.
+
+*The first version of this measurement reported "97-99 % of the path is revisiting", which was
+nonsense: it credited a cell as "fresh" only for the single 0.025 m step that crossed into it,
+so the fresh fraction was tiny by construction rather than by behaviour. Cells-per-metre is the
+honest form of the same question.*
+
+**Consequence:** parameter tuning is close to its ceiling here. The remaining levers are
+algorithmic — the coverage tour's ordering, which is FALCON's HGrid TSP — and the campaign's own
+evidence (the `cluster_min` sweep) is that frontier-side parameters trade sharply against each
+other. Any attempt needs 3+ runs a point and a revert condition written first.
+
 ### P30 — Getting unstuck costs 74 s a flight; the cooldown is most of it (2026-08-20)
 
 With contacts accepted as the price of coverage (P27), the question is what each one COSTS.
