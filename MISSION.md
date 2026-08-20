@@ -492,9 +492,26 @@ stays at 0.40. A*'s inflation decides what is reachable at all — 0.85 there on
 exploration fail outright — so doorways stay plannable and only the curve through them is asked
 to ride nearer the middle.
 
-**Verify:** reference clearance p50 above 0.45, PINNED events below ~6/flight, and the
-stationary fraction below 0.27. Coverage must hold at 135-176. **Watch:** more "collision
-detected on the trajectory" and publish failures; if coverage drops, 0.48 before reverting.
+**RESULT — the clearance target is met, the contacts are not.** First healthy run traced at
+0.55 (`20260820_014131Z`, 239 samples):
+
+| | reference p50 | inside 0.40 m | aircraft p50 | inside 0.40 m | pos_err p50 |
+|---|---|---|---|---|---|
+| safe_distance 0.40 | 0.36 | 73 % | 0.23 | 66 % | 0.52 |
+| safe_distance 0.55 | **0.50** | **40 %** | **0.40** | **50 %** | **0.32** |
+
+The plan moved off the walls exactly as intended and the aircraft followed it there. Coverage
+held (129.7 m3/min, stall 13 %, final 1465 m3). **But PINNED events did not fall: 13, against
+7-12 before.** So proximity to *mapped* geometry was not what was causing the contacts — which
+points back at the 0.62 m near floor of the depth sensor (P22): the aircraft is being stopped by
+things the map never had.
+
+Keep 0.55 — it is free (coverage held, tracking improved) and it is the right margin for a
+0.4 m-inflation planner. But the contact problem needs the other half.
+
+**A trace is only usable if the flight was:** the first 0.55 trace read p50 0.11 m and looked
+catastrophic — it came from a run that spent 78 % of its samples inside one 1 m cell, stuck.
+Check the spatial spread of a trace before believing its distribution.
 
 ### P22 — The depth measurement that killed the raycast change was wrong (2026-08-20)
 
