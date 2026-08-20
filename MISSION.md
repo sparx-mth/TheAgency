@@ -497,6 +497,34 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P32 — The coverage tour re-picks its target 22 times a minute (2026-08-20, NEXT CANDIDATE)
+
+Following P31 (the remaining loss is transit through mapped space), the question is why transit
+is inefficient — 0.41-0.72 distinct 1 m cells per metre flown. Parsing the HGrid tour's own log:
+
+* the next-cell target changed **190 times in 517 s — 22 per minute**, across 19 distinct cells;
+* **median dwell on a target: 0.3 s** (p25 0.1, p75 2.1, max 92);
+* three cells account for two thirds of the samples, so it is oscillating between a handful of
+  candidates rather than progressing through a tour.
+
+A target that survives 0.3 s cannot be driven to. The aircraft is partly protected from this
+downstream — the course slew (P17) refuses to chase direction changes faster than the airframe
+can turn — which is likely why this has not shown up as a spin. But it means the aircraft is
+steering toward an average of several cells rather than committing to one.
+
+**Candidate fix:** commitment/hysteresis on the tour target — keep the current cell until it is
+reached, exhausted, or has been beaten by a clear margin for a sustained period. FALCON exposes
+no such parameter, so this is a C++ patch against the exploration manager (the templates are in
+`patches/`, and `verify_patch.sh` compiles one in ~1 min before a 2-min image rebuild).
+
+**Before flying it, write down:** WANT — cells-per-metre above 0.8, coverage above the 143-177
+band. REVERT IF — coverage drops below 140, or `no_path_fails` rises sharply (committing to an
+unreachable cell is exactly the P16 lock this campaign already fixed once).
+
+**Measurement note that cost twenty minutes:** the log-parsing scripts in this file matched
+timestamps as `\[(17871\d{5}\.\d+)\]`. Wall time has since ticked into `17872…`, so those
+regexes now silently match NOTHING and every derived count reads zero. Use `\[(\d{10}\.\d+)\]`.
+
 ### P31 — The remaining "stall" is TRANSIT, not failure (2026-08-20)
 
 Two measurements over three baseline runs (1277 s of flight) change what is worth optimising.

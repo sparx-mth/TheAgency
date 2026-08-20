@@ -1544,3 +1544,14 @@ derived from it needs the same mode awareness the controller has — a single gl
 will quietly mislabel one whole regime. And before chasing a loss a metric reports, check the
 loss exists in a *different* signal: here the aircraft's own measured speed refuted it in one
 query.
+
+## A hardcoded epoch prefix expires (2026-08-20)
+
+Several analysis scripts matched ROS log timestamps with `\[(17871\d{5}\.\d+)\]` — a pattern
+that was correct when written and silently stopped matching anything once wall time ticked into
+`17872…`. The failure mode is the dangerous one: not an error, but zero rows, which reads as
+"the tour never changed target" rather than "the parser found nothing".
+
+`\[(\d{10}\.\d+)\]` costs nothing and does not expire. More generally, when a parser returns a
+suspiciously clean answer — nothing happened, zero events, a perfectly flat series — check that
+it matched anything at all before believing it.
