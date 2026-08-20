@@ -533,13 +533,37 @@ safety net it was built to be.
 |---|---|---|---|---|---|
 | 190.9, 190.5 | 5 %, 4 % | 0.153, 0.103 | 12, 12 | 13, 11 | 0.49, 0.51 m/s |
 
-**Pre-registered against those numbers:** WANT coverage above 200 on at least one of three, and a
+**Pre-registered against those numbers:** WANT coverage above 200 on at least one of three, AND a
 median above 175. REVERT IF the median falls below 165, OR the fraction of ticks at 900 exceeds
-0.25 (against 0.10-0.15 now — the fraction, not the p90, which saturates and says nothing), OR
-PINNED exceeds 20 a run, OR tilt cuts exceed 30.
+0.25 (the fraction, not the p90, which saturates and says nothing), OR PINNED exceeds 20 a run,
+OR tilt cuts exceed 30. Every one of those bars sits outside the control's own range, which the
+last two experiments' conditions did not.
 
-Every one of those bars is outside the control's own range, which the last two experiments'
-conditions were not.
+**RESULT: the WANT failed, so 1.0 is REVERTED to 0.8. Speed is now CLOSED.**
+
+| | max_vel 0.8 | max_vel 1.0 |
+|---|---|---|
+| coverage m3/min | 190.9, 190.5 | 177.1, 182.1, **93.7** |
+| median | **190.7** | 177.1 |
+| final volume m3 | 1752, 1764 | 1735, 1801, 1254 |
+| stalled share | 5 %, 4 % | 8 %, 10 %, **40 %** |
+| ticks at 900 | 0.153, 0.103 | 0.110, 0.206, 0.213 |
+| mean speed | 0.49, 0.51 | 0.57, 0.44, 0.31 |
+
+No revert condition fired — the median held at 177.1 above the 165 floor, saturation stayed under
+0.25, contacts and tilt cuts stayed inside their bars. But the WANT was a **conjunction** and its
+first half never happened: no run of three reached 200, and the median came out 13 m3/min BELOW
+the control. Asking for more speed did not produce more speed either — mean speed went 0.49-0.51
+to 0.57, 0.44, 0.31, i.e. down on two of three runs, because the extra demand buys saturation
+(0.10-0.15 -> 0.11-0.21) rather than motion.
+
+**Speed is closed for good.** 0.8 is the settled value: at 1.0 the moving curve already asks 730
+counts and the standing one clips at 924, so there is no further step this airframe can take, and
+the step that exists makes things worse. The 0.6 -> 0.8 gain (P33) stands.
+
+*Note the asymmetry that makes this call honest: P33 fired a revert condition and was KEPT
+because the condition was proven non-discriminative; P34 fired none and is REVERTED because the
+thing it was meant to achieve did not happen. Conditions are evidence, not verdicts.*
 
 ### P33 — Transit is near its floor; planning speed RE-OPENED on new grounds (2026-08-20)
 
