@@ -52,6 +52,20 @@ battery capacity — it would improve the number without improving the system.
 
 ---
 
+### Operator note — disk, and why the campaign did NOT act on it (2026-08-20 19:45)
+
+`docker system df` reports **377 GB of reclaimable images and 26 GB of reclaimable build cache**,
+with 77 dangling images — mostly layers orphaned by this campaign's own `falcon-ros:noetic`
+rebuilds (13.2 GB each). The root filesystem is at 73 % with **486 GB free**, so nothing is at
+risk and the flight loop is unaffected.
+
+**Deliberately not pruned.** This machine hosts other people's work — 143 images, and containers
+belonging to `detector_dev`, `R2` and others — so `docker image prune` is not a safe unattended
+action taken on someone else's behalf. It is flagged here for the operator to decide.
+
+The campaign's own footprint is small and bounded: `runs/` is 1.9 GB with logs kept for the
+newest 30 runs only, and the depth frame directory is capped at 500 files (381 MB).
+
 ## 1. The goal
 
 Fly a **complete, autonomous FALCON exploration of the whole `sphera_jail` map** with the
