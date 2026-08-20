@@ -27,10 +27,12 @@ course slew `45 deg/s`, tilt `35/27` with hysteresis, `tracker_pos_kp 1.0`, pinn
 with 4/8/16/30 backoff, escape cooldown `4.0`, tour commit `0` (off), `max_vel 0.8`,
 follower cap `1.0`.
 
-**The one open question:** roughly one run in five collapses to ~900 m3 instead of ~1800. Three
-have been dissected and they have THREE DIFFERENT mechanisms (P37, P38), so there is no single
-fix. One pre-registered test is running — see P38 — and until it reaches n>=15 on fresh runs,
-the honest answer is "not known yet".
+**The one open question, now closed as "not known":** roughly one run in five collapses to
+~900-1300 m3 instead of ~1800. Three have been dissected and have THREE DIFFERENT mechanisms
+(P37, P38), and every candidate predictor has been tested and failed — circling (-0.09, n=14),
+dz p90 (-0.12, n=74), tracking error (+0.20, n=15, pre-registered on fresh data). Detection is in
+place even though prevention is not: the analyzer flags PARKED, CIRCLING and coverage-PLATEAU
+with the next question attached. Do not re-open any of those three without new evidence.
 
 **What NOT to do**, each closed with evidence in the sections below: planning speed (P34), the
 coverage tour (P32), reducing contacts directly (P27), the axis dead band (P28), the escape
@@ -588,7 +590,30 @@ coverage.final_m3) <= -0.5` within `config.max_vel == 0.8`, tested on **FRESH ru
 flown after 2026-08-20 16:30 — with n>=15. No other metric gets scanned on that set, and no fix
 is proposed before it passes.
 
-**The analysis is fixed in code, written before the data existed:**
+**RESULT (2026-08-20 19:11): FAILED. The fifth dead lead, and the cleanest refutation yet.**
+
+    n=15, correlation = **+0.200** against a hypothesis of <= -0.5
+
+Not merely below the threshold — **the opposite sign**. On the fourteen runs that GENERATED the
+hypothesis, `pos_err` scored -0.77; on fifteen fresh runs it is +0.20. Two runs make the point
+without any statistics: `153824Z` had the WORST tracking of the sample (1.96 m) and tied the best
+volume ever recorded (1823 m3), while `143628Z` had the BEST tracking (0.52 m) and one of the
+lowest volumes (1201 m3).
+
+So tracking error does not predict coverage, and the -0.77 was entirely an artifact of picking
+the winner from a seven-way scan of data already in hand. **This is the strongest evidence in the
+campaign for the method itself**: the same metric, the same configuration, the same analysis —
+and reversing sign between the sample that suggested it and the sample that tested it.
+
+**The open question is therefore CLOSED as "not known".** Roughly one run in five collapses to
+~900-1300 m3 instead of ~1800. Three have been dissected and have three distinct mechanisms
+(P37/P38), and no single metric predicts which runs will collapse: circling (-0.09 at n=14),
+dz p90 (-0.12 at n=74), and now tracking error (+0.20 at n=15) have all been tested and failed.
+What IS in place is detection — the analyzer flags PARKED, CIRCLING and coverage-PLATEAU
+automatically with the next diagnostic question attached — so a future session inherits the
+evidence rather than the archaeology.
+
+**The analysis was fixed in code, written before the data existed:**
 `sparx_agency/tools/falcon_campaign/test_p38.py`. It encodes the filter, the metric, the
 threshold and the minimum sample, refuses to report a coefficient below n=15, and prints one
 verdict. Every one of the five dead leads shared a cause — the analysis was chosen, or adjusted,

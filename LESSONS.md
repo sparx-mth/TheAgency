@@ -1605,3 +1605,22 @@ is exactly how the previous four leads were born.
 
 The fix is not a bigger sample of the same runs. It is fresh data: name the single hypothesis,
 name the threshold, and test it only on runs flown afterwards.
+
+## The same metric reversed sign between the sample that suggested it and the one that tested it (2026-08-20)
+
+`tracking.pos_err_m.mean` was the strongest of seven metrics scanned against final volume on
+fourteen runs already in hand: **-0.77**. Pre-registered properly — one hypothesis, threshold
+declared, analysis written into a script before the data existed, tested only on runs flown
+afterwards — it came back at **+0.200** on n=15. Opposite sign.
+
+Two runs show it without statistics. `153824Z` had the worst tracking in the sample (1.96 m) and
+tied the best volume ever recorded (1823 m3). `143628Z` had the best tracking (0.52 m) and one of
+the lowest volumes (1201 m3).
+
+Nothing about the system changed between the two samples: same configuration, same metric, same
+analysis. The only difference was that one sample chose the metric and the other tested it.
+
+That is the whole case for the discipline, in one number. A seven-way scan will always produce
+something around -0.7; it means nothing until fresh data agrees. Five hypotheses in this campaign
+died this way, and the four that were caught early were caught by refusing to read a coefficient
+below n=15.
