@@ -218,6 +218,11 @@ BRIDGE_CMD = (
 #: it measured p50 0.20 m against a reference clearance of ~0.5 m.
 TRACKER_POS_KP = 1.0
 
+#: Seconds the follower may hold translation at zero after giving up on escapes,
+#: before re-arming and driving again. The hold was previously unbounded and its
+#: release condition unreachable, which parked one flight for 250 s.
+PINNED_HOLD_SEC = 4.0
+
 TILT_LIMIT_DEG = 35.0
 TILT_RESUME_DEG = 27.0
 
@@ -236,6 +241,7 @@ EXPECTED_ROSPARAMS = {
     "/bspline_opt/pos/distance": BSPLINE_DISTANCE_WEIGHT,
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
     "/falcon_exploration_follower/tracker_pos_kp": TRACKER_POS_KP,
+    "/falcon_exploration_follower/pinned_hold_sec": PINNED_HOLD_SEC,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
     "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,
     "/uav_model/dynamics_parameters/max_linear_velocity": PLAN_MAX_VEL,

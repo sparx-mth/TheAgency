@@ -1249,6 +1249,12 @@
        the metric it was aimed at — while stops rose to 3.3-8.2/min from 0.5-5.
        Kept as a parameter because the wiring is the useful part. -->
   <arg name="explore_tracker_pos_kp" default="1.0" />
+  <!-- How long the pinned hold may keep translation at zero before re-arming.
+       It used to be released only by the aircraft moving for 5 s, which the hold
+       itself made impossible: one run flew normally for 180 s then covered
+       0.0-0.7 m per MINUTE for the remaining 250, latched. Bounded, it becomes a
+       periodic retry while still giving the airframe time to settle. -->
+  <arg name="explore_pinned_hold_sec" default="4.0" />
   <arg name="explore_course_slew_deg" default="45.0" />
   <arg name="explore_max_yaw_rate_deg" default="90.0" />
 
@@ -1664,6 +1670,7 @@
     <param name="tilt_resume_deg" value="$(arg tilt_resume_deg)" />
     <param name="min_vxy"         value="$(arg explore_min_vxy)" />
     <param name="course_slew_deg_s" value="$(arg explore_course_slew_deg)" />
+    <param name="pinned_hold_sec" value="$(arg explore_pinned_hold_sec)" />
     <param name="tracker_pos_kp" value="$(arg explore_tracker_pos_kp)" />
   </node>
 
