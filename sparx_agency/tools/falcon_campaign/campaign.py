@@ -231,7 +231,42 @@ def liveness_check(run_dir, tick):
         return "camera frames went stale (video_trigger froze)"
     if tick % 4 == 0 and not bringup.rosnode_exists("/exploration_node"):
         return "exploration_node died"
+    # FALCON present but never actually exploring. Measured 2026-08-20: one
+    # cycle flew its whole 430 s window and mapped 225 m3 -- the aircraft moved
+    # 9 m in total -- because roslaunch stalled part-way through, so the
+    # follower and bev_publisher never spawned. Every existing check passed:
+    # the containers were up, frames were fresh, and /exploration_node was
+    # registered, because the node HAD started; it simply never planned. The
+    # only signal that separates that from a healthy flight is the map itself.
+    #
+    # Deliberately late and generous. A slow start is normal -- the first
+    # samples of a good run gain 80-190 m3 each, but a genuinely stuck one gains
+    # nothing at all -- so this asks only that SOMETHING was mapped by the
+    # ~2 minute mark, and only ends a cycle that would otherwise be six more
+    # minutes of hovering.
+    if tick == 8:
+        gained = _coverage_gained(run_dir)
+        if gained is not None and gained < 20.0:
+            return ("FALCON is not exploring: %.0f m3 mapped in the first ~2 "
+                    "minutes. The stack came up but nothing is planning."
+                    % gained)
     return None
+
+
+def _coverage_gained(run_dir):
+    """Volume mapped since the first coverage sample, or None if unreadable."""
+    rows = []
+    path = run_dir / "coverage.jsonl"
+    if not path.exists():
+        return None
+    for line in path.read_text(errors="ignore").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("coverage_m3") is not None:
+            rows.append(row["coverage_m3"])
+    return (rows[-1] - rows[0]) if len(rows) >= 2 else None
 
 
 def fly(run_dir, duration_s):

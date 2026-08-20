@@ -577,6 +577,32 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P39 — A cycle flew its whole window without FALCON ever planning (2026-08-20, guard added)
+
+`171142Z` mapped **225 m3** — against a 1578 median — and the per-minute table says why in one
+glance: 0.8-1.5 m per minute from t=0, span 0.2-0.3 m, **9 m travelled in the entire flight**,
+`no_path_fails` 0. Exploration never started. This is not the PARKED collapse of P37, which
+followed healthy flying; nothing ever drove the aircraft at all.
+
+`falcon_roslaunch.log` is 352 lines against tens of thousands in a normal run, ends mid-startup
+just after the MapServer allocation, and the run has **no `falcon_exploration_follower` and no
+`bev_publisher` log** — roslaunch stalled part-way through spawning its nodes.
+
+**Every existing check passed.** Containers up, frames fresh, `/exploration_node` registered — it
+HAD started, it simply never planned — and `assert_launch_params` read its rosparams back
+successfully. So the cycle armed, took off, hovered for 430 s and landed, and the harness called
+it a completed flight.
+
+**Guard added to `liveness_check`:** at tick 8 (~2 minutes in), if less than 20 m3 has been
+mapped since the first sample, abort the cycle. Deliberately late and generous — a healthy run
+gains 80-190 m3 per sample by then, and a stuck one gains nothing — so it separates the two
+without any risk to a slow starter. **Calibrated against all 170 historical runs: it would have
+aborted exactly this one and left the other 169 alone.**
+
+It saves ~6 minutes per occurrence rather than preventing anything, which is the right trade for
+a fault whose root cause (a stalled roslaunch) is not reproducible on demand. The next occurrence
+will now end early and say so, which is also how its frequency gets measured.
+
 ### P38 — Circling REFUTED at n=14; and a warning about how the next lead was found (2026-08-20)
 
 **The circling hypothesis is dead.** Within `max_vel` 0.8 against final volume, the correlation
