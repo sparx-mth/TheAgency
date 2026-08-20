@@ -677,6 +677,49 @@ def _stall_metrics(rows):
                 t95_s=round(t95, 1))
 
 
+#: Parameters that define "which configuration was this run flown under".
+#: Read from the roslaunch parameter dump, which the supervisor prunes after 30
+#: runs -- so they are copied into metrics.json while the log still exists.
+#: Without this, a run silently drops out of any within-configuration comparison
+#: the moment its logs are pruned, which is exactly when the sample is finally
+#: large enough to be worth analysing.
+_CONFIG_PARAMS = (
+    ("max_vel", r"max_linear_velocity: ([\d.]+)"),
+    ("raycast_max", r"raycast_max: ([\d.]+)"),
+    ("cluster_min", r"cluster_min: ([\d.]+)"),
+    ("bspline_distance", r"pos/distance: ([\d.]+)"),
+    ("safe_distance", r"bspline_opt/safe_distance: ([\d.]+)"),
+    ("course_slew_deg_s", r"course_slew_deg_s: ([\d.]+)"),
+    ("tilt_limit_deg", r"tilt_limit_deg: ([\d.]+)"),
+    ("tracker_pos_kp", r"tracker_pos_kp: ([\d.]+)"),
+)
+
+
+def config_metrics(run_dir):
+    """The flight configuration, lifted out of the launch log before it is pruned.
+
+    Args:
+        run_dir: The run folder.
+
+    Returns:
+        A dict of parameter name to value (float), empty if the log is gone.
+    """
+    log = run_dir / "logs" / "falcon_roslaunch.log"
+    if not log.is_file():
+        return {}
+    found, patterns = {}, list(_CONFIG_PARAMS)
+    with log.open(errors="ignore") as handle:
+        for line in handle:
+            for name, pattern in list(patterns):
+                hit = re.search(pattern, line)
+                if hit:
+                    found[name] = float(hit.group(1))
+                    patterns = [p for p in patterns if p[0] != name]
+            if not patterns:
+                break
+    return found
+
+
 def clearance_metrics(run_dir):
     """Distance from the aircraft AND its reference to the nearest obstacle.
 
@@ -1062,7 +1105,8 @@ def analyze(run_dir):
         coverage=coverage_metrics(run_dir, motion.get('duration_s')),
         health=health_metrics(samples, lines),
         exploration=exploration_metrics(lines),
-        clearance=clearance_metrics(run_dir))
+        clearance=clearance_metrics(run_dir),
+        config=config_metrics(run_dir))
     metrics["data_gaps"] = _data_gaps(metrics, samples, bad_lines, log_files)
     metrics["ranked_findings"] = _rank(metrics)
     (run_dir / "metrics.json").write_text(

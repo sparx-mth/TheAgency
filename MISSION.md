@@ -528,10 +528,17 @@ automatically a collapse: `113154Z` scored 167.6 with two of them, and `114209Z`
 The two collapses had 1 and 3.
 
 **A correlation exists and is deliberately NOT being reported as a finding.** Within `max_vel`
-0.8, circling minutes against coverage gives -0.72 at **n=7** — below this file's own bar of
-n>=15 within one configuration, which exists precisely because three earlier leads at this sample
-size evaporated. `motion.per_minute` lands in every run now, so the sample reaches 15 in about
-two hours of flying on its own. Re-run it then; do not act on it before.
+0.8, circling minutes against coverage gives **-0.72 at n=7, then -0.68 at n=8** — below this
+file's own bar of n>=15 within one configuration, which exists precisely because three earlier
+leads at this sample size evaporated. Re-run it at 15; do not act on it before. The newest run
+argues for that patience on its own: 187.7 m3/min WITH a circling minute.
+
+**The sample was quietly eroding, and now cannot.** Which configuration a run flew under was only
+recoverable from its roslaunch log — which the supervisor prunes after 30 runs. Two runs had
+already dropped out of this comparison that way, and pruning catches up with a run at roughly the
+same age the sample finally becomes worth analysing. `metrics.json` now carries a `config` block
+(max_vel, raycast_max, cluster_min, bspline distance, safe_distance, course slew, tilt limit,
+tracker gain), lifted from the log while it still exists.
 
 ### P36 — Vertical reference error predicts a collapsed run (2026-08-20, OPEN)
 
