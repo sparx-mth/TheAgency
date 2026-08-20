@@ -20,10 +20,10 @@ need all of it to act. This section is the orientation; the rest is evidence.*
 
 | | opening median | settled config, n=36 |
 |---|---|---|
-| final volume | 1060 m3 | **median 1578** (p25 1444, p75 1722, max 1823) |
+| final volume | 1060 m3 | **median 1586** (p25 1427, p75 1711, max **1871**) |
 | coverage rate | 75 m3/min | **median 163** (clean runs, n=30) |
 | stalled share of flight | 53 % | **median 17 %** (p25 9, p75 31, max 77) |
-| runs below 1300 m3 | — | **8 of 45 (18 %)** |
+| runs below 1300 m3 | — | **8 of 54 (15 %)** |
 
 *An earlier version of this summary said "a repeatable ~1800 m3 / ~190 m3/min" and "4-10 %
 stalled". Those were the BEST runs, not the distribution: 1823 and 190 are the maxima, and 4-10 %
@@ -31,8 +31,11 @@ came from two flights. The medians above are what the configuration actually del
 p25/p75 spread is the honest picture — a fifty percent range between quartiles on final volume,
 with one run in seven landing below 1300.*
 
-**No drift, re-checked at n=45 (21:55).** Blocks of eight give final medians 1588, 1557, 1657,
-1574, **1400**, 1580 with 1, 1, 1, 1, **3**, 1 collapses. Splitting in half: first 22 runs median
+**No drift, re-checked at n=54 (23:32).** Blocks of eight give final medians 1588, 1557, 1657,
+1574, **1400**, 1576, **1706** — the newest block is the highest yet, and the collapse rate has
+fallen from 18 % to 15 % as more runs land, which settles the 1400 block as noise. The best
+flight is now **1871 m3** at 178.6 m3/min (`200301Z`, reliable, no gaps, no parked or circling
+minutes, 255 m flown). Earlier blocks read 1, 1, 1, 1, **3**, 1 collapses. Splitting in half: first 22 runs median
 1602 with 3 collapses, last 23 median 1520 with 5. That looks like mild worsening and is not:
 at an 18 % base rate a block of eight expects ~1.5 collapses, so seeing 3 has roughly a 13 %
 chance on its own, and the block after it recovers to 1580 with 1. Small integers make a run of
