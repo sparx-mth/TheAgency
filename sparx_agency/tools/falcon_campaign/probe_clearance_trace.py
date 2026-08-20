@@ -44,6 +44,7 @@ class Trace(object):
         self.cloud = None
         self.pose = None
         self.ref = None
+        self.ref_vel = None
         rospy.Subscriber(OCC, PointCloud2, self._cloud, queue_size=1)
         rospy.Subscriber(POSE, Odometry, self._pose, queue_size=1)
         rospy.Subscriber(REF, PositionCommand, self._ref, queue_size=1)
@@ -59,6 +60,7 @@ class Trace(object):
 
     def _ref(self, msg):
         self.ref = (msg.position.x, msg.position.y, msg.position.z)
+        self.ref_vel = (msg.velocity.x, msg.velocity.y)
 
     def nearest_to(self, point):
         """Nearest mapped obstacle to an arbitrary point, in its height band."""
@@ -98,9 +100,18 @@ def main():
                    "nearest_m": round(nearest, 3)}
             if ref_clear is not None:
                 row["ref_nearest_m"] = round(ref_clear, 3)
-                row["pos_err_m"] = round(float(np.hypot(
-                    trace.ref[0] - trace.pose[0],
-                    trace.ref[1] - trace.pose[1])), 3)
+                ex = trace.ref[0] - trace.pose[0]
+                ey = trace.ref[1] - trace.pose[1]
+                row["pos_err_m"] = round(float(np.hypot(ex, ey)), 3)
+                # Lag ALONG the path is harmless for collisions; only the
+                # CROSS-track half can put the aircraft into a wall its
+                # reference is clear of. A single distance mixes the two.
+                if trace.ref_vel is not None:
+                    speed = float(np.hypot(*trace.ref_vel))
+                    if speed > 1e-3:
+                        ux, uy = trace.ref_vel[0] / speed, trace.ref_vel[1] / speed
+                        row["along_m"] = round(float(ex * ux + ey * uy), 3)
+                        row["cross_m"] = round(float(-ex * uy + ey * ux), 3)
             print(json.dumps(row))
             sys.stdout.flush()
         rate.sleep()

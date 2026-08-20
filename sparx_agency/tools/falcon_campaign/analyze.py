@@ -628,7 +628,7 @@ def clearance_metrics(run_dir):
         inflation radius.
     """
     path = run_dir / "clearance.jsonl"
-    air, ref, err = [], [], []
+    air, ref, err, cross = [], [], [], []
     if path.exists():
         for line in path.read_text(errors="ignore").splitlines():
             try:
@@ -641,12 +641,17 @@ def clearance_metrics(run_dir):
                 ref.append(row["ref_nearest_m"])
             if row.get("pos_err_m") is not None:
                 err.append(row["pos_err_m"])
+            if row.get("cross_m") is not None:
+                cross.append(abs(row["cross_m"]))
     inflation = getattr(config, "OBSTACLES_INFLATION", 0.4)
     frac = lambda v: (None if not v
                       else sum(1 for x in v if x < inflation) / float(len(v)))
     return dict(samples=len(air),
                 aircraft_m=_stats(air), reference_m=_stats(ref),
                 xy_pos_err_m=_stats(err),
+                # Only this half of the error can drive the aircraft into a wall
+                # its reference is clear of; along-track lag cannot.
+                abs_cross_track_m=_stats(cross),
                 aircraft_frac_inside_inflation=frac(air),
                 reference_frac_inside_inflation=frac(ref))
 

@@ -462,6 +462,35 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P25 — Contacts are structural: clearance and tracking error are the same size (2026-08-20)
+
+After P24 the plan is 0.38 m off the wall at the moment of a contact and the aircraft is at
+0.09. The obvious reading is a tracking excursion — **it is not.** Measured across the same
+three runs, 17 pins:
+
+| | flight median | at the pin |
+|---|---|---|
+| `pos_err` | 0.45 m | **0.48 m** |
+
+Tracking at a contact is completely ordinary. Nothing spikes. What is actually happening is
+simpler and harder: **the reference's clearance (p50 0.50 m) is no larger than the ordinary
+tracking error (p50 0.45 m)**, so whenever that ordinary error happens to point at a wall, the
+aircraft touches it. No amount of "fix the excursions" helps, because there are no excursions.
+
+Two ways out, and the second needs a measurement first:
+* **More clearance than error.** Would need ~0.9 m of reference clearance to have real margin,
+  which this building's doorways will not allow. P24 already took the cheap part of this.
+* **Less error.** 0.45 m at 0.5 m/s is nearly a second of lag. But a single distance mixes
+  ALONG-track lag, which cannot cause a collision, with CROSS-track error, which is the only
+  half that can. The probe now records both (`clearance.abs_cross_track_m`); decide from that,
+  because the fixes differ completely: along-track lag points at the axis dead band and the
+  servo, cross-track at the follower dropping lateral velocity entirely.
+
+**Do not "fix" this by raising `course_slew_deg_s`.** P17's limit cycle came from the demand
+OSCILLATING faster than the plant could follow; a large persistent heading error is a different
+thing, and an adaptive slew would have to tell them apart — an orbit also looks persistent, so
+that discriminator needs care, not a hunch.
+
 ### P24 — Every contact is against MAPPED geometry, in the optimiser's TAIL (2026-08-20)
 
 The working assumption after P23 was that the remaining contacts had to be against obstacles the
