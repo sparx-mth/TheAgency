@@ -501,6 +501,48 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P38 — Circling REFUTED at n=14; and a warning about how the next lead was found (2026-08-20)
+
+**The circling hypothesis is dead.** Within `max_vel` 0.8 against final volume, the correlation
+went **-0.72 (n=7) -> -0.71 (n=11) -> -0.09 (n=14)**. Holding to the n>=15 bar was right: at n=11
+it looked like the answer. What killed it was one run — `131429Z`, the worst collapse yet at
+**873 m3 with ZERO circling minutes**.
+
+That makes four leads in this campaign that looked strong at small n and evaporated. The bar
+stays.
+
+**A third collapse, and a third mechanism.** `131429Z` flew normally all the way through — 11-44
+m/min, spans 4-15 m, turning 19-79 deg/m, all healthy — while **coverage plateaued for its last
+286 s**. The map was still being fed: `mapping_sync` emitted a flat 640 fused frames per minute
+from start to finish, so this is not a perception stall. The aircraft was simply flying around
+ground it had already mapped, with a tracking error of mean 3.72 m, p90 8.25, **max 16.69**.
+
+So the three collapses are: **parked** (commanded axis zero), **circling** (3 m box, driving
+normally), and now **wandering** (flying well, mapping nothing, reference far away). One symptom,
+three causes. Any single fix would address at most a third of them.
+
+**The next lead, and why it is NOT yet a candidate.** Scanning seven metrics against final volume
+on that same n=14 sample:
+
+| metric | corr |
+|---|---|
+| `tracking.pos_err_m.mean` | **-0.77** |
+| distance flown | +0.56 |
+| frac below stop speed | -0.48 |
+| stops per minute | -0.42 |
+| `no_path_fails` | +0.21 |
+| circling minutes | -0.09 |
+| deg/m late | +0.04 |
+
+`pos_err` is the strongest — **and it is the winner of a seven-way scan on data that was already
+in hand, which is precisely how the previous four dead leads were born.** A scan generates a
+hypothesis; it cannot also confirm it.
+
+**So it is pre-registered properly:** the single hypothesis is `corr(tracking.pos_err_m.mean,
+coverage.final_m3) <= -0.5` within `config.max_vel == 0.8`, tested on **FRESH runs only** — those
+flown after 2026-08-20 16:30 — with n>=15. No other metric gets scanned on that set, and no fix
+is proposed before it passes.
+
 ### P37 — Two collapses, two DIFFERENT mechanisms (2026-08-20, sample building)
 
 The second collapse landed and it is not the same failure as the first. Both spend their last

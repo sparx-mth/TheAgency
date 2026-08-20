@@ -1590,3 +1590,18 @@ configuration changed is measuring the configuration, not the variable.
 **Rule: compute correlations within ONE configuration, with n >= 15, or do not report them.**
 Two earlier findings survived this test (contacts vs clearance at n=16, stall vs coverage at
 n=94) and are still trusted; this one did not.
+
+## A scan generates a hypothesis; it cannot also confirm it (2026-08-20)
+
+The circling hypothesis was pre-specified and died honestly: -0.72 at n=7, -0.71 at n=11, -0.09
+at n=14, killed by the worst collapse of the campaign having zero circling minutes. That is the
+n>=15 rule earning its keep for the fourth time.
+
+The temptation immediately afterwards was worse. Scanning seven metrics against final volume on
+the same fourteen runs produced `pos_err` at -0.77 — a bigger number than circling ever had. But
+the strongest of seven candidates on data already in hand is not evidence of the same kind as one
+candidate named in advance: with seven tries, a coefficient that size is unremarkable, and this
+is exactly how the previous four leads were born.
+
+The fix is not a bigger sample of the same runs. It is fresh data: name the single hypothesis,
+name the threshold, and test it only on runs flown afterwards.
