@@ -159,9 +159,9 @@ BSPLINE_DISTANCE_WEIGHT = 150.0
 #: the plan -- not the follower -- was the binding constraint. A 0.6 m/s demand
 #: asks 802 axis counts standing and 603 moving, both under the 900 ceiling;
 #: 1.0 m/s would ask 924 and clip.
-PLAN_MAX_VEL = 0.8
+PLAN_MAX_VEL = 1.0
 #: Must exceed PLAN_MAX_VEL with headroom; full stick measures ~1.25 m/s.
-EXPLORE_MAX_SPEED_XY = 1.0
+EXPLORE_MAX_SPEED_XY = 1.2
 #: The slow-trajectory rescale targets the planner's own max_vel; a lower value
 #: would quietly undo the raise on exactly the segments it fires on.
 FSM_SLOW_TRAJ_TARGET_VEL = PLAN_MAX_VEL

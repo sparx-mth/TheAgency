@@ -497,6 +497,29 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P34 — One more speed step: max_vel 1.0 (2026-08-20)
+
+0.6 -> 0.8 gave the campaign's two best runs and its lowest stall, so take the next step. The
+airframe's ceiling is real but not here yet: at 1.0 m/s the MOVING curve asks **730** counts and
+the standing one 924, so only an acceleration from rest clips — and an aircraft that cannot reach
+its commanded speed instantly from a standstill is already the normal case, not a new failure.
+Follower ceiling 1.0 -> 1.2 so it does not bind; the 1.5 m/s measured-speed backstop stays as the
+safety net it was built to be.
+
+**Baseline MEASURED first (n=2 at max_vel 0.8), which is the point:**
+
+| coverage | stall | frac of ticks at 900 | PINNED | tilt cuts | mean speed |
+|---|---|---|---|---|---|
+| 190.9, 190.5 | 5 %, 4 % | 0.153, 0.103 | 12, 12 | 13, 11 | 0.49, 0.51 m/s |
+
+**Pre-registered against those numbers:** WANT coverage above 200 on at least one of three, and a
+median above 175. REVERT IF the median falls below 165, OR the fraction of ticks at 900 exceeds
+0.25 (against 0.10-0.15 now — the fraction, not the p90, which saturates and says nothing), OR
+PINNED exceeds 20 a run, OR tilt cuts exceed 30.
+
+Every one of those bars is outside the control's own range, which the last two experiments'
+conditions were not.
+
 ### P33 — Transit is near its floor; planning speed RE-OPENED on new grounds (2026-08-20)
 
 P32 refuted target churn as the cause of transit inefficiency, so what is left of it? Counting
