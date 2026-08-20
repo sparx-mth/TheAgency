@@ -588,6 +588,14 @@ coverage.final_m3) <= -0.5` within `config.max_vel == 0.8`, tested on **FRESH ru
 flown after 2026-08-20 16:30 — with n>=15. No other metric gets scanned on that set, and no fix
 is proposed before it passes.
 
+**The analysis is fixed in code, written before the data existed:**
+`sparx_agency/tools/falcon_campaign/test_p38.py`. It encodes the filter, the metric, the
+threshold and the minimum sample, refuses to report a coefficient below n=15, and prints one
+verdict. Every one of the five dead leads shared a cause — the analysis was chosen, or adjusted,
+after the numbers were in view — and a script written in advance is the only thing that makes
+that impossible rather than merely discouraged. Run it with:
+`PYTHONPATH=. .venv/bin/python -m sparx_agency.tools.falcon_campaign.test_p38`
+
 *Sample integrity checked at n=9 (18:07), before relying on the count: 10 run folders exist since
 the cutoff, 9 qualify, and the tenth is simply the flight still in the air — so nothing is
 dropping out silently. The metric itself is sound too: heartbeat counts run 487-497 across all
