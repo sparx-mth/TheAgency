@@ -1,0 +1,535 @@
+<launch>
+  <!--
+    bspline_follower.launch — fly FALCON's B-spline on the SJTU Gazebo drone.
+
+    This launches OUR follower and the camera parameters FALCON maps with. It
+    deliberately does not re-declare FALCON's own planner arguments: those live
+    in the exploration launch and are the planner's business, not the
+    controller's.
+
+    ════════════════════════════════════════════════════════════════════
+    THE CAMERA INTRINSICS BELOW ARE A CORRECTION, NOT A COPY.
+    ════════════════════════════════════════════════════════════════════
+    The previous stack told FALCON  fx=fy=320, cx=320, cy=240 at 640x480.
+    The sensor it was reading is     600x600 at horizontal_fov 1.3098 rad,
+    which is                         fx=fy=390.64, cx=cy=300.5
+    (verified live off /simple_drone/front_depth/depth/camera_info, and
+    derivable from sjtu_drone.urdf.xacro: fx = (width/2) / tan(hfov/2)).
+
+    Two independent errors followed from that, and both corrupt the MAP rather
+    than the flight:
+
+      * fx 18% low  ->  every depth ray back-projects about 22% too far out
+        laterally, so obstacles are mapped wider and further apart than they
+        are, and the free space between them is fiction.
+      * cy 60.5 px high in a frame FALCON also believed was 480 rows tall
+        ->  about 8.8 degrees of spurious downward tilt in all reconstructed
+        geometry, so the floor climbs and the ceiling descends with range.
+
+    A planner given that map routes through walls that are not where it thinks,
+    and no amount of controller tuning recovers it. Fix the map before drawing
+    any conclusion about tracking.
+  -->
+
+  <arg name="drone_ns"       default="/simple_drone" />
+  <arg name="ctrl_rate_hz"   default="50.0" />
+
+  <!-- Measured off the airframe, not assumed. See
+       robots/SJTU/config/airframe.yaml and the README for the step-response
+       method. Re-measure if the plugin's gains or the sim's real-time factor
+       change: a wrong time constant makes the lead term push the wrong amount
+       and reads exactly like a mistuned position gain. -->
+  <arg name="plant_xy_tau"   default="0.51" />
+  <arg name="plant_xy_delay" default="0.18" />
+  <arg name="plant_z_tau"    default="0.41" />
+  <arg name="plant_z_delay"  default="0.04" />
+  <arg name="plant_yaw_tau"  default="0.48" />
+  <arg name="plant_yaw_delay" default="0.06" />
+
+  <!-- Speed ceilings. `max_overspeed` is a CLEARANCE setting: FALCON checks its
+       route against the map at the speed it planned, so flying the same curve
+       faster spends that margin on stopping distance.
+
+       History, because the number has moved twice for two different reasons.
+       max_speed_xy was 1.2 and was lowered to 0.6 after a capsize post-mortem:
+       the aircraft struck warehouse clutter at ~1 m/s (inside the depth near
+       clip, so FALCON never mapped it), pitched up while pinned and tipped past
+       the plugin's ~35 deg clamp, which thrust-along-body-z cannot recover
+       from. That halved the impact speed, which was the right move and not
+       enough: 0.6 was still chosen rather than derived, and it is 2.4x the
+       0.25 m/s the planner checks its curves at.
+
+       These are DERIVED from the planner's clearance; see the block above the
+       same three args in exploration.launch, which is where they are actually
+       set for a mission. In short: stopping distance at this airframe's 0.30 s
+       of latency and 0.8 m/s^2 of braking must stay inside safe_distance minus
+       the airframe half width (0.45 - 0.26 = 0.19 m). d(0.35) = 0.18 m meets
+       that; d(0.40) = 0.22 m and d(0.60) = 0.41 m do not.
+       The servo's per-tick ceiling is EXACTLY planned_speed + max_overspeed
+       (servo.py:320), so max_overspeed is the correction budget, not a cruise
+       setting: bounding the ceiling by shrinking it also removes the authority
+       to close a cross-track error, which stalled a run at a doorway. The plan
+       speed carries the reduction instead (max_vel 0.20 in exploration.launch)
+       and 0.15 of correction is left everywhere. Raise only with
+       safe_distance. -->
+  <arg name="max_speed_xy"     default="0.35" />
+  <arg name="max_overspeed"    default="0.20" />
+  <arg name="max_catchup_speed" default="0.15" />
+  <arg name="yaw_gain"         default="1.5" />
+
+  <!-- Off reproduces the previous stack's P + velocity-feedforward law, which
+       is what the improvement is measured against. Keep it as a comparison,
+       not as a fallback. -->
+  <arg name="use_feedforward_lead" default="true" />
+  <arg name="predict_reference"    default="true" />
+
+  <!-- Wedge/contact reflex: a velocity-commanded aircraft pinned against a wall
+       is told to keep driving into it and never moves. It backs out on a real
+       Gazebo contact (bumper_states, bridged) or an inferred wedge (commanding
+       motion, net-zero travel), and retreats far enough to bring the wall back
+       outside the ~0.95 m depth near clip so FALCON re-maps it. -->
+  <arg name="wedge_window_s"  default="3.0" />
+  <arg name="wedge_move_m"    default="0.2" />
+  <arg name="wedge_cmd_speed" default="0.08" />
+  <arg name="contact_hold_s"  default="0.4" />
+  <arg name="retreat_time_s"  default="5.0" />
+  <arg name="retreat_speed"   default="0.35" />
+  <arg name="retreat_clear_m" default="1.3" />
+  <!-- Turn-to-look after the back-out: face the struck point and stare so the
+       mapper fuses it; what turns a strike into map evidence instead of a
+       strike, replan, strike loop. -->
+  <arg name="face_time_s"     default="6.0" />
+  <arg name="look_dwell_s"    default="1.5" />
+
+  <!-- Map brake gate: the follower accumulates FALCON's occupied/free voxel
+       streams and refuses to fly the commanded velocity into occupied space;
+       a sustained dead stop is treated like a contact (retreat + look).
+       Exists because FALCON's own runtime safety check never signals this
+       follower (measured: 45 silent pre-publish detections, 0 executing-
+       trajectory detections, 336 contacts in one 40-minute run). -->
+  <arg name="map_gate"              default="true" />
+  <!-- 0.25 is the airframe's on-axis half width: the collision mesh measures
+       0.52 m across the arms (0.63 m corner to corner, which only matters when
+       the aircraft is yawed 45 degrees to an opening). Do NOT round it up to
+       0.30 "to be safe": the gate sweeps a corridor of this half width, and at
+       0.30 the cross-track budget through a 0.90 m doorway falls to +-0.10 m in
+       the worst grid phase, which is inside the follower's own tracking noise. -->
+  <arg name="gate_drone_radius_m"   default="0.25" />
+  <!-- The airframe's HALF-HEIGHT. The collision mesh is z -0.040..0.070, i.e.
+       0.11 m tall; core's 0.35 default modelled a 0.70 m body. The gate tests
+       only the z layers the airframe can strike at its altitude, so an inflated
+       half height makes the aircraft clear obstacles by that figure instead of
+       by its own body: it made a 1.79 m hospital clutter pile unflyable under a
+       1.9 m ceiling (it demanded 2.14 m) and forced 1.8 m of warehouse altitude
+       to overfly a 1.10 m pile. 0.15 = 0.055 measured, plus a 0.1 m voxel. -->
+  <arg name="gate_body_halfheight_m" default="0.15" />
+  <arg name="gate_z_lo"             default="0.4" />
+  <arg name="gate_z_hi"             default="2.0" />
+  <arg name="gate_block_retreat_s"  default="4.0" />
+  <!-- Depth visual bumper: clamp forward speed by the closest raw depth
+       return in the flight corridor. Catches thin obstacles the voxel map
+       flaps (raycast clearing erodes one-voxel silhouettes). -->
+
+  <!-- Two scans, two knobs. survey_revs is the RECOVERY turn after a planner
+       respawn (empty map, never re-triggers itself) and stays at 1.25.
+       takeoff_survey_revs is the turn at the START and is 0: measured, FALCON
+       published its first plan 1.9 s after takeoff with it and 1.8 s without,
+       so it bought nothing — while costing a first trajectory planned from a
+       spinning aircraft. Raise it only if a world needs a seeded map. -->
+  <arg name="takeoff_survey_revs" default="1.25" />
+
+  <!-- Vertical position loop. Bounded by 1/(3*delay): the vertical axis
+       answers in 0.04 s (bound 8.3) against horizontal 0.18 s (bound 1.85),
+       so it carries a much stiffer gain than the horizontal 1.2. core's 1.8
+       left the climb lagging the reference; 3.6 is still under half the
+       bound. -->
+  <arg name="vertical_kp" default="3.6" />
+  <arg name="vertical_ki" default="0.4" />
+
+  <!-- ── Clearance relative reflexes (replaced prox_stop_m/slope/floor) ──
+       The proximity governor used to be an absolute speed versus distance
+       curve, and an absolute curve cannot serve two worlds: with its knee at
+       the airframe radius it left a 1.4 m warehouse aisle alone and, in the
+       hospital, bound 71 to 77 percent of ticks at 0.36x the planned speed
+       because every corridor there puts a wall inside 0.6 m. It was throttling
+       an aircraft that was flying exactly where the planner had put it.
+
+       The reflexes now compare the aircraft's own clearance against the
+       clearance THE PLAN holds at the point being tracked, so the question is
+       "is the aircraft closer to something than its reference is", which means
+       the same thing in both buildings. See
+       core/planning/safety/clearance_envelope.py.
+
+       hard_floor 0.30: the airframe. The collision mesh measures 0.52 m across
+       the arms and 0.63 m corner to corner, so 0.26 m is the on axis half
+       width; against voxel CENTRES on a 0.1 m grid, 0.30 m is the distance at
+       which the next command is a contact. It is the one absolute here and is
+       never relaxed for any plan.
+       tolerance 0.10: tracking noise, not margin. A follower holding a curve
+       to centimetres crosses zero deficit constantly and a reflex chattering
+       on that boundary is worse than one that never fires.
+       span 0.25: the deficit at which speed reaches the creep floor.
+       breach 0.20: past this the aircraft is nearer than the plan ever was and
+       this is a near contact, not a tight intended pass. -->
+  <arg name="clearance_hard_floor_m" default="0.30" />
+  <arg name="clearance_tolerance_m"  default="0.10" />
+  <arg name="clearance_span_m"       default="0.25" />
+  <arg name="clearance_breach_m"     default="0.20" />
+  <arg name="clearance_open_m"       default="0.90" />
+  <!-- Must exceed clearance_open_m, or an open point reports the search limit
+       as its clearance and every deficit is measured against a ceiling. -->
+  <arg name="clearance_search_m"     default="1.00" />
+  <!-- Free width ACROSS travel below which the aircraft counts as inside a
+       passage, where the inferred-wedge reflex does not fire: the map has both
+       jambs, the aircraft is where it should be and merely slow, and backing
+       out 1.3 m only replays the approach. Measured in run 003, whose retreat
+       counter reached 35 while it cycled at one doorway with coverage frozen
+       at 1565.9 m3.
+       1.20 sits above every opening in either world (hospital doorways 0.930
+       and 1.500, warehouse aisles 0.909 to 1.216) and below any room.
+       It is measured by casting a ray to EACH side, not by reading clearance:
+       clearance is direction-agnostic, so beside a single wall both probes
+       return that same wall and the pair reads as a corridor that is not there.
+       Bounded by the paths that CAN resolve a doorway: a real bumper contact
+       is still ungated, the map gate's 4 s hard-block escalation still
+       retreats, and the mission watchdog still ends a run that stops mapping. -->
+  <arg name="passage_width_m"        default="1.20" />
+
+  <!-- ── Fly through the MIDDLE of an opening ─────────────────────────────
+       FALCON's distance cost is soft (pow(dist - safe_distance, 2), weighed
+       against smoothness and feasibility), so its curve is near the middle of
+       a doorway rather than on it, and the follower's tracking error lands on
+       top. In a 0.90 m door a 0.52 m airframe has about 0.19 m of budget, so
+       the two errors together are a jamb strike. This probes the free space
+       laterally and biases toward its peak: bounded, and zero above
+       engage_m so warehouse cruise is untouched.
+       The bias REDIRECTS at constant speed rather than adding to it, so it can
+       never spend the stopping distance budget the brakes are sized against. -->
+  <arg name="centering"            default="true" />
+  <arg name="centering_engage_m"   default="0.85" />
+  <arg name="centering_probe_m"    default="0.25" />
+  <arg name="centering_gain"       default="0.6" />
+  <arg name="centering_max_speed"  default="0.15" />
+  <arg name="centering_min_asym_m" default="0.05" />
+
+  <!-- Depth bumper geometry. hard_block_d_m is a VETO, not a brake, and
+       margin_m + nose_offset is the distance at which allowed speed hits zero.
+       Both must stay under safe_distance or the bumper refuses passes the
+       planner was asked to produce. -->
+  <arg name="depth_block_d_m" default="0.55" />
+  <arg name="depth_margin_m"  default="0.30" />
+  <!-- The cross-section the airframe sweeps, from its collision mesh
+       (0.52 x 0.52 x 0.11 m). core defaults both to 0.35, i.e. a body 0.70 m
+       wide and 0.70 m TALL, and the height is the expensive half: it vetoes on
+       anything within 0.35 m below the camera axis, so a cruise at 1.30 m
+       brakes for a 1.14 m reception desk it clears by 0.11 m, and the hospital
+       is full of 0.7 to 1.2 m furniture. Kept equal to
+       gate_body_halfheight_m so the two brakes agree about the aircraft. -->
+  <arg name="depth_corridor_halfwidth_m"  default="0.30" />
+  <arg name="depth_corridor_halfheight_m" default="0.15" />
+
+  <!-- Creep: the concession the follower makes to a spot it has blocked at
+       twice, pushing through slowly instead of holding. It releases on
+       DISTANCE from that spot, not just on the timer; 2.0 m is past the 1.5 m
+       radius block episodes are grouped by, so leaving cancels it without
+       immediately re-arming it.
+       The timer is 30 s (3.6 m of creep) and, critically, RESTARTS when a
+       retreat ends: a retreat is 5 to 12 s of manoeuvre and it used to run on
+       the concession's clock, so the aircraft emerged with under a metre of
+       creep left, ran out short of the opening and retreated again. Measured:
+       28 retreats cycling on one doorway approach, coverage frozen. -->
+  <!-- Giving up on an approach that keeps ending in contact. A bumper strike
+       retreats the aircraft and nothing stops FALCON re-issuing the same route,
+       so an obstacle standing IN a doorway (a parked BP cart, in the measured
+       case) produces an unbounded strike-retreat-strike loop: 55 bumper reports
+       on two objects at one hospital doorway, the run ending on the
+       confinement watchdog at 216 m3.
+       Retreating is right the first time and the second; by the third it is
+       evidence the approach does not work. HOLDING is then the action, not a
+       failure to act: staying within 2 m of an unreached viewpoint for 25 s is
+       exactly what FALCON's dead-end guard watches for, so the hold converts a
+       grind into a retired viewpoint and a tour that moves on. -->
+  <arg name="give_up_repeats"  default="3" />
+  <arg name="give_up_radius_m" default="1.5" />
+  <arg name="give_up_window_s" default="120.0" />
+  <!-- How many holds are worth doing across a whole mission. Each buys 25 s of
+       confinement for FALCON's dead-end guard to observe; after a handful the
+       planner has all the evidence it will get, and further holds only spend
+       flight time standing where the trouble is - and cannot be rescued while
+       they run, since a holding follower commands no travel and the jam
+       detector stays flat. Measured across six failed hospital legs: 7 to 14
+       give-ups per run at 30 s each, 210 to 420 s of deliberate immobility. -->
+  <!-- Do not fly fast into what you have not looked at. OFF by default; the
+       burden of proof is on turning it on. The depth brake caps forward speed
+       by the nearest return in the corridor, which is about what the camera CAN
+       see: it says nothing about the 0.95 m it cannot, and nothing at all about
+       lateral or reverse motion, so every retreat, back-out and unstick travels
+       at cruise into space nothing has looked at since the manoeuvre began.
+       Across 23 hospital legs the failing ones carry 152 to 454 bumper reports
+       against 1 to 65 on finishing ones, and two capsized from 5 degrees of
+       tilt to unrecoverable between samples, which no attitude reflex can catch.
+       Applied at the send choke point because those manoeuvres bypass the
+       servo. -->
+  <arg name="unknown_brake"       default="false" />
+  <arg name="unknown_max_age_s"   default="3.0" />
+  <arg name="unknown_speed"       default="0.15" />
+  <arg name="camera_half_fov_rad" default="0.655" />
+  <arg name="give_up_hold_budget" default="5" />
+  <arg name="give_up_hold_s"   default="30.0" />
+
+  <arg name="creep_speed"   default="0.12" />
+  <arg name="creep_time_s"  default="30.0" />
+  <arg name="creep_clear_m" default="2.0" />
+
+  <!-- Vertical escape when the horizontal back-out is itself walled.
+       escape_climb_s:=0 restores horizontal-only recovery.
+       max_z 0 means "the flight box ceiling", which is what it should almost
+       always be: it MUST stay inside the box (a planner cannot plan from a
+       pose outside its own box, so an escape that climbs out strands the
+       mission it was rescuing), and any fixed number is wrong for some box.
+       The old 1.65 was chosen when the warehouse ceiling was 1.8 and became
+       both unsafe and wasteful the moment either world's box moved. A positive
+       value is honoured but still clamped to the box. -->
+  <arg name="escape_climb_s"     default="4.0" />
+  <arg name="escape_climb_speed" default="0.4" />
+  <arg name="escape_climb_max_z" default="0.0" />
+
+  <!-- Seconds between binding-limiter histograms; 0 silences them. -->
+  <arg name="limiter_report_s" default="15.0" />
+
+  <arg name="depth_brake"           default="true" />
+
+  <!-- Crash-recovery reflex. FALCON's in-process LKH solver corrupts the heap on
+       degenerate tours and the node respawns with an EMPTY map at wherever the
+       aircraft now hovers; a respawned FSM never re-triggers itself. It also
+       dead-ends without crashing, looping plan-fails on a frontier whose only
+       viewpoint is the current cell. When no plan has arrived for resurvey_after_s,
+       or the aircraft has not moved stall_move_m in stall_window_s, the follower
+       turns a fresh 360 deg scan so the frontier finder fires again; below the
+       silence window but past hold_silent_s it holds rather than flying blind. -->
+  <arg name="resurvey_after_s" default="12.0" />
+  <arg name="hold_silent_s"    default="6.0" />
+  <arg name="stall_window_s"   default="15.0" />
+  <arg name="stall_move_m"     default="1.5" />
+
+  <!-- ── unstick: the OTHER silence, and it needs the opposite answer ──────
+       A re-survey answers a planner that lost its map. It cannot answer a
+       planner that has the map and rejects every trajectory, which is what
+       happens when the aircraft is parked inside an inflated obstacle:
+       checkTrajCollision() tests each candidate from the aircraft's own
+       position, so every one of them collides at its first sample and FALCON
+       re-plans and re-rejects without ever publishing. Turning on the spot does
+       not move the start point out of that cell, so the re-survey spends its
+       four attempts and the follower then holds forever.
+
+       Measured, hospital, 2026-08-13: 1781 of 1808 publish attempts ended
+       "collision also detected on the initial trajectory"; the aircraft held
+       (-8.19, -1.09, 1.50) to the centimetre for 180 s until the watchdog cut
+       the run at 360.7 m3. z = 1.50 was alt_max, and the building's furniture
+       tops out at 1.74-1.83 m, which at obstacles_inflation 0.25 seals the map
+       from 1.49 m up: the aircraft had climbed into an obstacle.
+
+       So when the silence is long AND the aircraft has not moved, move it -
+       sideways on a bearing that rotates each attempt, and back toward the
+       middle of the altitude band, where the fewest inflated shells overlap.
+       unstick_after_s sits above resurvey_after_s so the cheap answer is always
+       tried first, and the manoeuvre itself moves the aircraft far enough to
+       reset the mission watchdog's own no-movement timer. -->
+  <arg name="unstick_after_s"     default="25.0" />
+  <arg name="unstick_time_s"      default="8.0" />
+  <arg name="unstick_speed"       default="0.35" />
+  <arg name="unstick_climb_speed" default="0.25" />
+
+  <!-- ── The yaw probe never once finds a wedge, and that is worth knowing ──
+       MEASURED 2026-08-17, and a fix for it was built, flown and DELETED.
+
+       The probe exists because "possibly stuck" is an inference and a
+       brake-limited crawl reads exactly like a wedge, so it measures before
+       acting. The measurement is emphatic and one-sided: across four hospital
+       legs it returned NOT WEDGED on essentially every attempt and found the
+       aircraft actually held ZERO times — 20 unsticks and 20 clears in a single
+       leg — at 11-16 s of rotation each, commanding zero translation.
+
+       The obvious inference is that after N consecutive fruitless probes the
+       aircraft is not the problem and the TARGET is, so the follower should
+       stop re-probing and hold station for FALCON's dead-end guard. That was
+       implemented twice and both times failed to fire at all:
+
+         * resetting the counter per TICK, on "not jammed right now", which is
+           true on nearly every tick, so it never reached two;
+         * resetting on 1.5 m of displacement since the last clear, which is
+           BELOW the recovery ladder's own excursion — a 1.3 m retreat plus a
+           6 s unstick at 0.20 m/s spans about 2.6 m — so the counter reset
+           every cycle even while the aircraft went nowhere overall. This is
+           the same trap falcon_deadend_looping.patch documents, reproduced.
+
+       A leg that ended ABORT_NO_GROWTH at 802.21 m3 — exactly the failure the
+       give-up targets — still fired it zero times. Deleted rather than left in
+       as dead weight.
+
+       Anyone retrying this needs an anchor that holds at the FIRST clear of an
+       episode rather than moving to each one, and a threshold above the
+       recovery ladder's excursion. But check the premise first: the pinning
+       this was built for was measured BEFORE falcon_open_visib_bar.patch
+       shipped, and the hospital legs after it finished at 861 and 873 m3, the
+       two highest figures this package has recorded. The target may be gone. -->
+  <arg name="unstick_move_m"      default="0.35" />
+  <arg name="max_unsticks"        default="20" />
+
+  <!-- ── the jam: following, unthrottled, bumper quiet, and going nowhere ──
+       Neither a contact nor a silence, so neither reflex caught it. The
+       aircraft is pressed against geometry inside the depth camera's 0.95 m
+       near clip, and the wedge reflex that would back it out is suppressed on
+       purpose inside a tight passage - retreating out of a doorway the aircraft
+       is halfway through is how it never gets through one. That suppression is
+       right; this is the net under it, because a passage the aircraft cannot
+       move in is not a passage it is passing through.
+
+       The test needs no speed threshold: integrate the speed actually put on
+       the wire over jam_window_s (demanded travel) and compare with net
+       displacement (achieved travel). A creep that achieves its creep passes; a
+       cruise that achieves nothing does not. Measured, hospital, 2026-08-14:
+       commanded speed p50 0.24 m/s with 67% of ticks saturated, and the
+       aircraft at (5.12, 16.21) to the centimetre for 181 s, zero bumper
+       contacts, 654 plans delivered. -->
+  <!-- The unstick consults the accumulated occupancy before choosing a bearing.
+       Rotating blindly through back/left/right/forward escaped and was routed
+       straight back in: 15 unsticks in one hospital run against 823 "collision
+       also detected on the initial trajectory", because a direction chosen
+       without looking is as likely to end inside the occupancy that caused the
+       deadlock as outside it. 12 probes is every 30 degrees; 2.5 m is far
+       enough to tell a doorway from a wall and short enough to stay inside the
+       part of the map the aircraft has actually observed. Below
+       min_clear_m the map is not saying anything worth acting on and the
+       rotation takes over again. -->
+  <!-- Minimum quiet time between unsticks, from the end of the last one. Three
+       triggers can call for one (a jam, a second give-up at a place, a watchdog
+       nudge once the surveys are spent) and nothing coordinated them: measured
+       20 unsticks in 574 s, one every 29 s, limiter reading unstick 28-54%, and
+       118 m3 covered. The run that mapped the whole building did 13 in 1995 s.
+       An escape that runs half the time is the flight plan, not an escape. -->
+  <arg name="unstick_cooldown_s"   default="60.0" />
+  <arg name="unstick_probes"       default="12" />
+  <arg name="unstick_probe_m"      default="2.5" />
+  <arg name="unstick_min_clear_m"  default="0.7" />
+
+  <arg name="jam_window_s" default="10.0" />
+  <arg name="jam_demand_m" default="0.6" />
+  <arg name="jam_move_m"   default="0.15" />
+
+  <!-- How much of the box ceiling the vertical escape may not use. 0, and the
+       burden of proof is on any margin. A 0.20 m cap was tried on the theory
+       that obstacle inflation seals the top of the band; obstacles_inflation is
+       read by no node in FALCON (see exploration.launch), and binning coverage
+       growth by altitude across every hospital run says the top of the band is
+       where this aircraft maps FASTEST: 17.9 and 18.1 m3/min at z 1.4 and 1.5,
+       against 7.1 at 1.2, because from up there it sees over the furniture. The
+       cap only removed an escape, and the follower's own log said so:
+       "climbing would not clear it either at 1.25 m". -->
+  <arg name="escape_climb_ceiling_margin_m" default="0.0" />
+
+  <!-- ── camera model FALCON maps with (corrected; see the header) ── -->
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fx" value="390.6427" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fy" value="390.6427" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cx" value="300.5" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cy" value="300.5" />
+  <param name="/uav_model/sensing_parameters/image_width"  value="600" />
+  <param name="/uav_model/sensing_parameters/image_height" value="600" />
+
+  <node pkg="falcon_adapter" type="bspline_follower_node.py"
+        name="bspline_follower" output="screen">
+    <param name="cmd_topic"        value="$(arg drone_ns)/cmd_vel" />
+    <param name="odom_topic"       value="$(arg drone_ns)/odom" />
+    <param name="ctrl_rate_hz"     value="$(arg ctrl_rate_hz)" />
+
+    <param name="plant_xy_tau"     value="$(arg plant_xy_tau)" />
+    <param name="plant_xy_delay"   value="$(arg plant_xy_delay)" />
+    <param name="plant_z_tau"      value="$(arg plant_z_tau)" />
+    <param name="plant_z_delay"    value="$(arg plant_z_delay)" />
+    <param name="plant_yaw_tau"    value="$(arg plant_yaw_tau)" />
+    <param name="plant_yaw_delay"  value="$(arg plant_yaw_delay)" />
+
+    <param name="max_speed_xy"     value="$(arg max_speed_xy)" />
+    <param name="max_overspeed"    value="$(arg max_overspeed)" />
+    <param name="max_catchup_speed" value="$(arg max_catchup_speed)" />
+    <param name="yaw_gain"         value="$(arg yaw_gain)" />
+
+    <param name="use_feedforward_lead" value="$(arg use_feedforward_lead)" />
+    <param name="predict_reference"    value="$(arg predict_reference)" />
+
+    <param name="wedge_window_s"   value="$(arg wedge_window_s)" />
+    <param name="wedge_move_m"     value="$(arg wedge_move_m)" />
+    <param name="wedge_cmd_speed"  value="$(arg wedge_cmd_speed)" />
+    <param name="contact_hold_s"   value="$(arg contact_hold_s)" />
+    <param name="retreat_time_s"   value="$(arg retreat_time_s)" />
+    <param name="retreat_speed"    value="$(arg retreat_speed)" />
+    <param name="retreat_clear_m"  value="$(arg retreat_clear_m)" />
+    <param name="face_time_s"      value="$(arg face_time_s)" />
+    <param name="look_dwell_s"     value="$(arg look_dwell_s)" />
+    <param name="map_gate"             value="$(arg map_gate)" />
+    <param name="gate_drone_radius_m"  value="$(arg gate_drone_radius_m)" />
+    <param name="gate_body_halfheight_m" value="$(arg gate_body_halfheight_m)" />
+    <param name="gate_z_lo"            value="$(arg gate_z_lo)" />
+    <param name="gate_z_hi"            value="$(arg gate_z_hi)" />
+    <param name="gate_block_retreat_s" value="$(arg gate_block_retreat_s)" />
+    <param name="takeoff_survey_revs"  value="$(arg takeoff_survey_revs)" />
+    <param name="vertical_kp"          value="$(arg vertical_kp)" />
+    <param name="vertical_ki"          value="$(arg vertical_ki)" />
+    <param name="clearance_hard_floor_m" value="$(arg clearance_hard_floor_m)" />
+    <param name="clearance_tolerance_m"  value="$(arg clearance_tolerance_m)" />
+    <param name="clearance_span_m"       value="$(arg clearance_span_m)" />
+    <param name="clearance_breach_m"     value="$(arg clearance_breach_m)" />
+    <param name="clearance_open_m"       value="$(arg clearance_open_m)" />
+    <param name="clearance_search_m"     value="$(arg clearance_search_m)" />
+    <param name="passage_width_m"        value="$(arg passage_width_m)" />
+    <param name="centering"              value="$(arg centering)" />
+    <param name="centering_engage_m"     value="$(arg centering_engage_m)" />
+    <param name="centering_probe_m"      value="$(arg centering_probe_m)" />
+    <param name="centering_gain"         value="$(arg centering_gain)" />
+    <param name="centering_max_speed"    value="$(arg centering_max_speed)" />
+    <param name="centering_min_asym_m"   value="$(arg centering_min_asym_m)" />
+    <param name="depth_block_d_m"      value="$(arg depth_block_d_m)" />
+    <param name="depth_margin_m"       value="$(arg depth_margin_m)" />
+    <param name="depth_corridor_halfwidth_m"  value="$(arg depth_corridor_halfwidth_m)" />
+    <param name="depth_corridor_halfheight_m" value="$(arg depth_corridor_halfheight_m)" />
+    <param name="give_up_repeats"      value="$(arg give_up_repeats)" />
+    <param name="give_up_radius_m"     value="$(arg give_up_radius_m)" />
+    <param name="give_up_window_s"     value="$(arg give_up_window_s)" />
+    <param name="unknown_brake"        value="$(arg unknown_brake)" />
+    <param name="unknown_max_age_s"    value="$(arg unknown_max_age_s)" />
+    <param name="unknown_speed"        value="$(arg unknown_speed)" />
+    <param name="camera_half_fov_rad"  value="$(arg camera_half_fov_rad)" />
+    <param name="give_up_hold_budget"  value="$(arg give_up_hold_budget)" />
+    <param name="give_up_hold_s"       value="$(arg give_up_hold_s)" />
+    <param name="creep_speed"          value="$(arg creep_speed)" />
+    <param name="creep_time_s"         value="$(arg creep_time_s)" />
+    <param name="creep_clear_m"        value="$(arg creep_clear_m)" />
+    <param name="escape_climb_s"       value="$(arg escape_climb_s)" />
+    <param name="escape_climb_speed"   value="$(arg escape_climb_speed)" />
+    <param name="escape_climb_max_z"   value="$(arg escape_climb_max_z)" />
+    <param name="limiter_report_s"     value="$(arg limiter_report_s)" />
+    <param name="depth_brake"          value="$(arg depth_brake)" />
+    <param name="depth_topic"          value="$(arg drone_ns)/front_depth/depth/image_raw" />
+
+    <param name="resurvey_after_s" value="$(arg resurvey_after_s)" />
+    <param name="hold_silent_s"    value="$(arg hold_silent_s)" />
+    <param name="stall_window_s"   value="$(arg stall_window_s)" />
+    <param name="stall_move_m"     value="$(arg stall_move_m)" />
+
+    <param name="unstick_after_s"     value="$(arg unstick_after_s)" />
+    <param name="unstick_time_s"      value="$(arg unstick_time_s)" />
+    <param name="unstick_speed"       value="$(arg unstick_speed)" />
+    <param name="unstick_climb_speed" value="$(arg unstick_climb_speed)" />
+    <param name="unstick_move_m"      value="$(arg unstick_move_m)" />
+    <param name="max_unsticks"        value="$(arg max_unsticks)" />
+    <param name="unstick_cooldown_s"  value="$(arg unstick_cooldown_s)" />
+    <param name="unstick_probes"      value="$(arg unstick_probes)" />
+    <param name="unstick_probe_m"     value="$(arg unstick_probe_m)" />
+    <param name="unstick_min_clear_m" value="$(arg unstick_min_clear_m)" />
+    <param name="jam_window_s"        value="$(arg jam_window_s)" />
+    <param name="jam_demand_m"        value="$(arg jam_demand_m)" />
+    <param name="jam_move_m"          value="$(arg jam_move_m)" />
+    <param name="escape_climb_ceiling_margin_m"
+           value="$(arg escape_climb_ceiling_margin_m)" />
+  </node>
+</launch>

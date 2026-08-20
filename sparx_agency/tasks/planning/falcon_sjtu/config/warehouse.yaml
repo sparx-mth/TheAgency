@@ -1,0 +1,267 @@
+# FALCON map_config for the AWS RoboMaker small warehouse (no-roof variant).
+#
+# Geometry measured from the world + collision meshes. THE PREVIOUS NUMBERS IN
+# THIS FILE WERE WRONG, and wrong in a way worth recording because it is easy
+# to repeat: the ShelfD/ShelfE collision DAE carries a 90 degree <node><matrix>
+# that Gazebo applies and a naive vertex-extent parse does not. Reading the raw
+# vertices gave a north-south shelf row at x [4.28, 5.16], y [-9.95, 1.91],
+# "~2.0 m tall" -- the mesh's own half-length quoted as a height. Applying the
+# node transform (the only placement that rests the units on the floor rather
+# than burying them at z -1.959) turns them 90 degrees:
+#
+#   walls (inner shell)   x [-6.861, 6.851]   y [-10.321, 10.321]   9.02 m, NO ROOF
+#   shelf units D/E       SIX of them, each x [2.772, 6.691] (3.918 m ALONG X),
+#                         0.880 m deep in y, decks solid z 0.735..2.643
+#   shelf aisles          EAST-WEST, between the units: 0.909, 0.916, 0.942,
+#                         1.035, 1.044 m, plus a 1.216 m slot at the south wall.
+#                         Every one is a 3.9 m DEAD END -- only 0.160 m separates
+#                         the shelf ends from the east wall.
+#   big shelf F           x [-6.839, -4.737]  y [-9.980, 8.067]  6.53 m tall,
+#                         solid only above 1.642; below that, four open bays
+#                         4.2-4.4 m wide behind 0.15 m fins.
+#   clutter piles         tops 1.00 / 1.10 / 1.41 / 1.50 / 1.79 m, middle floor
+#   spawn                 (1, 1) -- open floor, 1.68 m clear in every direction
+#
+# Two consequences the old numbers got backwards, and both bit:
+#   * "the shelf rows are OUTSIDE box_max_x 3.9, so the aircraft cannot reach
+#     them at any altitude" was false. All six units START at x 2.772, so
+#     1.128 m of every one of them was INSIDE the box -- and box_max_z 2.6 sat
+#     0.043 m BELOW their 2.643 m tops, so the aircraft was among the racking
+#     with no way to climb out of it. That is the "illogical route between
+#     crowded shelves" this config exists to forbid, written into the config.
+#   * "aisles are ~1.4 m wide" was wrong in both directions: the shelf aisles
+#     are 0.909-1.216 m and the north-strip gaps are 0.672-0.703 m.
+#
+# box_min_z 0.6 for the same reason as the hospital: the floor is in the box
+# otherwise and FALCON flies at ankle height among pallet jacks and buckets.
+# box_max_z 1.8: BELOW the 2.0 m shelf tops, so coverage is flown in the
+# aisles like a warehouse inspection, not over the racking -- popping over a
+# shelf and dropping into the next aisle is exactly the blind descent into
+# unmapped space we do not fly.
+#
+# init_* matches the spawn the sjtu bringup hardcodes for every world: the
+# model spawns at (1, 1, 2), free-falls, and rests at (1, 1, 0).
+
+map_config:
+  map_file: ""
+  map_dimension: 2
+  init_x: 1.0
+  init_y: 1.0
+  init_z: 0.0
+  init_yaw: 0.0
+
+  # ── Keep-out volumes: where the aircraft may NOT go ──────────────────────
+  #
+  # Flat groups of six, xmin ymin zmin xmax ymax zmax, in world metres. Read by
+  # the A* node test, by frontier viewpoint sampling and by frontier
+  # categorisation (falcon_keep_out_boxes.patch), so no route, no viewpoint and
+  # no coverage target can be placed inside one. Deliberately NOT enforced in
+  # MapServer::getOccupancy -- frontier detection and coverage read that too,
+  # and changing its meaning for everyone collapsed exploration in both worlds
+  # once already.
+  #
+  # Every value carries a decimal point on purpose: rosparam types a YAML list
+  # by its contents, and one bare integer makes the whole list fail to load as
+  # vector<double> -- silently, leaving the keep-outs empty.
+  #
+  # WHY A KEEP-OUT AND NOT A SMALLER BOX. The racking is not worth entering:
+  # its six units are separated by 0.909-1.216 m dead-end aisles 3.92 m deep,
+  # solid to 2.643 m, which must be reversed out of, and a run allowed in
+  # touched five separate objects doing it. But the aisles do not need to be
+  # ENTERED to be mapped -- each is 3.92 m deep and the depth camera reaches
+  # 5 m, so the aircraft maps one end to end by looking down it from the open
+  # floor at its mouth. Keeping out costs no coverage and removes the wedging
+  # risk entirely. Expressing it with the BOX instead is what excluded
+  # everything beyond the racking too, and that was 60% of the warehouse.
+  #
+  #   1. the east rack block and everything east and south of it. The block
+  #      spans x 2.77-6.69, y -9.11..1.02; this starts 0.75 m west of its faces
+  #      and ends 0.75 m north of its northern end, so the aircraft rounds the
+  #      block through the open floor at y > 1.77 and maps the east side and
+  #      the east wall from there.
+  #   2. ShelfF on the west, x -6.84..-4.74, y -9.98..8.07, plus the same
+  #      0.75 m standoff. North of y 8.82 the west strip stays flyable.
+  keep_out_boxes: [ 2.02, -10.60, -1.0,  7.20,  1.77,  3.2,
+                   -7.20, -10.60, -1.0, -3.99,  8.82,  3.2]
+  map_size:
+    map_min_x: -8.0
+    map_min_y: -12.0
+    map_min_z: -1.0
+    map_max_x:  8.0
+    map_max_y:  12.0
+    map_max_z:  3.0
+    # The box is the OPERATIONALLY FLYABLE floor, not the building: the shelf
+    # row (x 4.28-5.16) is continuous, so x > 4.2 is only the dead 1.6 m slot
+    # between shelf backs and the east wall -- the shakedown run flew straight
+    # into it and churned (exactly the "illogical route between crowded
+    # shelves" failure this config must forbid). Same for the big west shelf
+    # (x < -4.6). Shelf faces map fine from the aisle side.
+    # y capped at 7.2: the north strip (buckets at y 8.1-10.1, pile corners,
+    # the wall) is pocket-land -- runs 024/025 logged every single contact
+    # there and spent half their missions trapped in its 1.4 m gaps. It is
+    # not an aisle; a patrol domain must be flyable, not merely reachable.
+    # 0.4 m standoff from both shelf faces: the top-shelf boards and brackets
+    # extend beyond the face AABB, and ceiling-height flight within ~1 m of the
+    # row grazed them (soak contacts at z=1.9 by ShelfE). Faces map fine from
+    # the aisle at this distance.
+    # ── 2026-08-15: every edge is now DERIVED, and the box still excludes the
+    #    racking on purpose ──
+    #
+    # Two things were wrong with the edges above, and they are opposite errors.
+    #
+    # WRONG IN Y: the box stopped at y -9.0 / 7.2 inside walls at y +-10.45, so
+    # 3.25 m of floor at the north end and 1.45 m at the south were outside the
+    # volume FALCON may plan in. Its frontier finder cannot see them and its
+    # coverage tour can never route there, so the end walls never entered the
+    # map at all -- visible in RViz as a warehouse with its ends missing. That
+    # is a real gap and it is what these new y limits fix.
+    #
+    # WRONG IN X, and this was fixed briefly by making it worse: opening the box
+    # to the whole building (x +-6.5) does let the aircraft reach the shelf
+    # block, and it promptly flew INTO the 0.909-1.216 m dead-end aisles. There
+    # is no reason to. Mapping the inside of a rack slot is not an inspection
+    # product, the aisles are dead ends 3.92 m deep that must be reversed out
+    # of, and the run touched five separate objects doing it. The box excludes
+    # the racking, and that is a judgement about what is worth mapping rather
+    # than a workaround: the rack FACES map perfectly well from the open floor
+    # with a 5 m depth camera, and what is behind them does not need mapping.
+    #
+    # THE INSET IS NOW DERIVED, which no edge here previously was. The box is
+    # where the drone's CENTRE may go, so an edge closer to an obstacle than
+    # safe_distance makes that clearance unsatisfiable -- the planner cannot
+    # hold a margin the box does not contain, and the old edges were 0.17 m off
+    # the rack faces and 0.34 m off ShelfF, both INSIDE the 0.45 m it is asked
+    # for. Measured consequence: eight bumper reports against the south wall at
+    # the full 0.35 m/s ceiling, and two against ShelfF at z 1.63-1.72, while
+    # the follower was tracking its plan to a cross-track p99 of 0.24 m. The
+    # aircraft was flying the plan correctly and the plan was routed into the
+    # wall.
+    #
+    #   inset = safe_distance (0.45) + follower cross-track p99 (0.24) = 0.69,
+    #   rounded up to 0.75.
+    #
+    # Applied to the real faces: ShelfF at x -4.74, rack faces at x 2.77, walls
+    # at y +-10.45. Every edge below is one of those plus or minus 0.75.
+    #
+    # The walls stay OBSERVABLE without being approachable, which is the whole
+    # point of a standoff: at the box edge a wall is 0.75 m away, inside the
+    # 0.95 m depth near clip, but from two metres back it is comfortably in
+    # range. Mapping a wall does not require flying at it.
+    box_min_x: -6.20
+    box_min_y: -9.70
+    # 1.3: above the ClutteringA pile deck (tops 1.10 m; 31 of run 027's 39
+    # contacts were belly strikes on those tops). No doorway lintels exist in
+    # this world, so the high band costs nothing -- the tall C-piles (1.78 m)
+    # must be avoided laterally at ANY altitude below the shelf ceiling.
+    # 0.6 floor / 1.8 ceiling: a REAL volume to explore. Progressively
+    # narrowing this band to dodge contact classes ended at a 0.25 m slab
+    # with so little explorable space that FALCON's frontier finder came up
+    # empty and declared the mission complete after a few metres of flight --
+    # five "clean" runs that mapped nothing. Obstacle heights (A-piles 1.10,
+    # buckets 1.41, C-piles 1.78) are the 3D brake gate's job, at the exact
+    # altitude layers they occupy; the ceiling stays below the 1.96 m shelf
+    # tops so coverage is flown in the aisles.
+    box_min_z:  0.6
+    # 2.6, lowered from 3.9. The six shelf units begin at x = 2.772 and their
+    # decks are solid to 2.643 m, above any ceiling this box can offer, so
+    # every centimetre of box east of 2.772 was solid racking or a dead-end
+    # aisle stub: 5.95 m2 of the box footprint was inside a shelf, and the six
+    # stubs (1.128 m deep, 0.909-1.216 m wide, eroding to a 0.41-0.72 m ribbon
+    # once the airframe is accounted for) contributed about 3 m2 of flyable
+    # floor while offering the frontier finder six pockets to keep proposing
+    # viewpoints in. Stopping 0.17 m short of the shelf faces removes all six
+    # without losing anything the aircraft could map from inside them -- the
+    # faces themselves map perfectly well from the open floor to the west.
+    # 6.20 / 9.70: the box is the BUILDING now, inset 0.75-0.79 m from the walls.
+    # What must not be entered is expressed by keep_out_boxes below instead,
+    # because a single AABB cannot say "the whole floor except the racking" --
+    # and using the box for it also excluded everything BEYOND the racking,
+    # which was 60% of the warehouse and the reason its east half never
+    # appeared in the map at all.
+    box_max_x:  6.20
+    box_max_y:  9.70
+    # 2.4 ceiling: the 1.55-1.8 band was 0.25 m tall and vertical inflation
+    # (0.35) let ANY voxel mapped above 1.2 seal an aisle -- one depth speckle
+    # walled off the maze and run soak-001 no-pathed for 30 minutes. No roof
+    # in this world: give the planner headroom no pile can close.
+    # 2.6, raised from 1.8. The ceiling is the ONLY vertical room the planner
+    # has, and at 1.8 no overflight in this world could satisfy safe_distance
+    # 0.85: a 1.10 m ClutteringA pile needs 1.95 m of altitude for full
+    # clearance, buckets (1.41) need 2.26, the tall C-piles (1.78) need 2.63.
+    # The optimiser could only trade the margin away and skim the tops, which
+    # is the "no space under the route" the belly strikes came from. 2.6 gives
+    # every pile inside the box real headroom.
+    #
+    # 2.4, from 2.6. The tallest thing left inside the box once the racking is
+    # excluded is a 1.79 m ClutteringC pile, which needs 2.24 m of altitude to
+    # be overflown at safe_distance 0.45. 2.4 clears that with margin and does
+    # not spend the mission mapping 0.2 m of empty air over the whole floor.
+    # (The old 2.6 was sized for safe_distance 0.85, which this stack no longer
+    # asks for -- see the note on the unified clearance in run_falcon_sjtu.sh.)
+    # There is no roof in this world, so nothing above the box is structure.
+    # 2.4. RAISING THIS WAS TRIED ON 2026-08-16 AND IS A MEASURED FAILURE.
+    #
+    # The reasoning looked sound: a C-pile top of 1.79 plus safe_distance 0.55
+    # needs 2.34 m to overfly, so a 2.4 ceiling leaves 0.06 m of slack on a SOFT
+    # cost, and the aircraft's measured MEDIAN altitude was 1.79-1.82 m against
+    # a 1.79 m pile with 41-65% of samples inside the 1.60-1.90 m band. Raising
+    # the ceiling to 2.7 should have given the optimiser somewhere to go.
+    #
+    # MEASURED 2026-08-17, now that the plan's own commanded altitude is logged
+    # (tracking.csv field.data13). That 0.06 m of slack is not slack at all: of
+    # 7873 commanded altitudes across three legs, the fraction at or above the
+    # 2.34 m needed to overfly a C-pile at full safe_distance is 0.0%. NONE.
+    # 27.1% of the plan is commanded inside the 1.60-1.90 m crate band, and
+    # 31.1% within safe_distance of a 1.79 m top. So overflight of a C-pile is
+    # not merely rare here, it is geometrically UNAVAILABLE -- the optimiser can
+    # only ever route laterally past a pile, and whatever vertical margin it
+    # holds near one is necessarily less than the clearance it is being
+    # penalised for missing. It is permanently inside a cost bowl it cannot
+    # leave, which is the same shape of defect as the viewpoint-clearance bug
+    # and explains why weighting the distance term harder (tried at 100 and 200,
+    # refuted -- see exploration.launch) cut contacts but stopped the aircraft
+    # moving: asked to satisfy an unsatisfiable constraint, it declines to move.
+    #
+    # It did not go there. At 2.7 the aircraft flew LOWER, not higher -- median
+    # 1.74 m, and 0.1% of samples above 2.40 -- while time spent in the
+    # 1.60-1.90 crate band rose from 41% to 58%. Three legs per arm, same image,
+    # only this value differing:
+    #
+    #   ceiling 2.7   1/3 finished, 1 FATAL, contacts 937/34/251 (mean 407), 483 s
+    #   ceiling 2.4   2/3 finished, 1 FATAL, contacts 184/48/24  (mean  85), 336 s
+    #
+    # Fewer finishes, 4.8x the contacts, 44% slower. (Coverage rose, 428.8
+    # against 344.4 m3, and is NOT evidence: a taller box affords more volume.)
+    #
+    # THE MECHANISM, which is the part worth keeping. Cruise altitude is not set
+    # by this ceiling at all. sampleViewpoints() places candidates on a
+    # HORIZONTAL ring at the frontier cluster's own z --
+    # `frontier.average_ + rc * (cos, sin, 0)` -- so the aircraft flies to
+    # whatever altitude the frontiers happen to sit at, and nothing in that
+    # placement consults clearance. Headroom the planner never asks about cannot
+    # help; all the extra volume does is create more frontiers above the clutter,
+    # which puts MORE of the flight in the band the piles occupy.
+    #
+    # So do not reach for the ceiling to fix contacts in this world, in either
+    # direction: lowering it was already recorded above as ending in five
+    # "clean" runs that mapped nothing. The lever is viewpoint placement.
+    box_max_z:  2.4
+    vbox_min_x: -8.0
+    vbox_min_y: -12.0
+    vbox_min_z: -1.0
+    vbox_max_x:  8.0
+    vbox_max_y:  12.0
+    vbox_max_z:  3.0
+  scale: 1.0
+  # Body (FLU) -> camera optical (RDF); identical to the hospital config -- a
+  # property of the drone, not the world.
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]

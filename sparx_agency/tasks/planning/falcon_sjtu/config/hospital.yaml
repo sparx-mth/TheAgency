@@ -1,0 +1,153 @@
+# FALCON map_config for the AWS RoboMaker hospital world.
+#
+# Ported from sjtu_project/falcon_docker/hospital.yaml, with the same box_min_z
+# lift the small_house config carries and for the same measured reason:
+#
+#   box_min_z: 0.0 -> 0.6.  FALCON plans anywhere inside the box, and with the
+#   floor in the box it flies at ankle height among the hospital's floor
+#   clutter -- beds, wheelchairs, reception desks, gurneys. The Pegasus campaign
+#   measured this exact failure ("it wedged itself against furniture twice" at
+#   desk height) and raised its floor. The band is the airspace above the
+#   clutter, not the whole room; hospital ceilings are ~2.9 m, so 0.6-2.0 leaves
+#   1.4 m of usable band with the top face closed by structure, not open air.
+#
+# init_* MUST match the drone's spawn pose. Verified live off /simple_drone/odom
+# on the running hospital sim: the model spawns at (1.0, 1.0, 2.0) and settles
+# to rest at (1.0, 1.0, 0.0) on the floor, so the ground-level init below is
+# (1, 1, 0). traj_server parks its pre-trajectory command at init_*, and an init
+# pose that is not where the aircraft rests makes the first reference a step
+# jump.
+
+map_config:
+  map_file: ""
+  map_dimension: 2
+  init_x: 1.0
+  init_y: 1.0
+  init_z: 0.0
+  init_yaw: 0.0
+  # ── The building, measured, not assumed ─────────────────────────────────
+  # Parsed from aws_robomaker_hospital_floor_01_walls' COLLADA collision mesh
+  # (the exporter bakes rotateY(90)+rotateZ(-270) into the scene nodes, so the
+  # node-transformed centimetre coordinates ARE Gazebo Z-up metres; the reading
+  # is confirmed by the walls landing at z 0.000..3.000 and by the live drone
+  # pose sitting mid-corridor in this frame):
+  #
+  #   inner walls   x [-12.442, 12.442]   y [-34.942, 20.942]   3.00 m tall
+  #   roof          NONE. hospital.world omits the ceiling model that
+  #                 hospital_.world includes; z > 3.005 is empty.
+  #   doorways      26 of them, ALL with the lintel at exactly z = 2.350 and
+  #                 solid wall from 2.385 to 3.000. 18 are 0.930 m clear,
+  #                 8 are 1.500 m.
+  #   wall openings 4 unglazed 3.505 x 1.500 m holes at x = +-6.5, sill 1.000,
+  #                 head 2.500 -- extra connectivity for anything above 1.25 m.
+  #   sealed        both elevators (solid door slabs) and 7 closed cubicle
+  #                 curtains (solid 0.095..2.483). Those bays cannot be mapped
+  #                 at any altitude and are not a stuck aircraft.
+  #
+  # The box used to be x,y +-20, which was BOTH too big and too small: it
+  # claimed 7.6 m of solid ground beyond each side wall, and it cut the
+  # building off at y = -20 while the south wing runs to y = -34.94. Roughly a
+  # quarter of the hospital -- the whole south lounge and operating wing --
+  # was outside the volume FALCON is allowed to plan in, so its frontier
+  # finder could not see it and its coverage tour could never route there. A
+  # run would exhaust the reachable frontiers and then grind on the box edge:
+  # measured, the baseline stalled at (-4.3, -18.0), 2 m short of that face.
+  map_size:
+    map_min_x: -14.0
+    map_min_y: -37.0
+    map_min_z:  -1.0
+    map_max_x:  14.0
+    map_max_y:  23.0
+    map_max_z:   3.2
+    # 0.4 m inside the wall faces: the box is where the drone's CENTRE may go,
+    # and a 0.52 m airframe asked to reach a face it is standing on cannot.
+    box_min_x: -12.0
+    box_min_y: -34.5
+    # 0.90, raised from 0.60, and the ceiling above is what forced it.
+    #
+    # The old note here says a 1.25 floor "traded one failure for a worse one:
+    # 2.0 m doorway lintels inflate down into the band; rooms seal shut". That
+    # reasoning is void -- the lintels are at 2.350, not 2.0 (measured off the
+    # collision mesh, all 26 of them), so a floor anywhere in this range leaves
+    # every doorway wide open in z. What remains true is that the floor cannot
+    # go much higher, for a completely different reason given below.
+    #
+    # What 0.60 cost: with the ceiling at 1.60 the usable band was 0.70..1.50 m
+    # and the aircraft flew most of it at 0.87..1.05, i.e. INSIDE the hospital's
+    # floor-clutter layer -- beds, gurneys, wheelchairs, toilets, sinks, carts,
+    # all 0.5..1.2 m. It could route between them and then not manoeuvre, which
+    # is how it ended up boxed into a 2 m bathroom stub with FALCON offering it
+    # a viewpoint 1.6 m away it could not reach: 23 retreats, coverage frozen at
+    # 297.7 m3, watchdog abort. Lowering a ceiling to stop skimming TALL
+    # furniture is only half a decision; the floor has to follow it up.
+    #
+    # At 0.90 the band is 1.00..1.50 m of usable altitude. The voxel gate tests
+    # the z layers the airframe can strike, so at 1.50 m those are 1.2..1.8 and
+    # everything topping out under 1.2 m stops being an obstacle at all -- most
+    # of the clutter above. Items over 1.2 m still have to be flown around,
+    # which is correct and which a room has space for.
+    #
+    # DO NOT RAISE IT PAST 1.0. FALCON's coverage tour reduces each hgrid cell
+    # by connected-component labelling on ONE horizontal slice at a HARDCODED
+    # z = 1.0 m (map_dimension 2 selects getCCLCenters2D,
+    # hierarchical_grid.cpp:1571-1575). A box whose floor is above 1.0 puts that
+    # slice outside the box entirely and the tour's model of the world goes
+    # blank. This is the constraint that decides the floor; the clutter only
+    # decides that it should be as high as this allows.
+    box_min_z:   0.9
+    box_max_x:  12.0
+    box_max_y:  20.5
+    # 1.60, and the number is set by the FURNITURE, not by the doorways.
+    #
+    # The doorway arithmetic gives 1.90: lintels are all at 2.350 and FALCON's
+    # distance cost is isotropic and 3D, so above 1.90 no route through any of
+    # the 26 doorways can satisfy safe_distance 0.45 and the optimiser can only
+    # trade the margin away. That is a real ceiling and 1.90 respects it.
+    #
+    # It is not the binding one. This building's tall furniture clusters at
+    # 1.74-1.83 m -- storage racks 1.740 and 1.799, vending machines 1.830, the
+    # ClutteringC crate 1.790 -- so a band whose top is 1.90 lets the planner
+    # route OVER those items with 0.00-0.16 m of clearance instead of going
+    # around them. The optimiser cannot satisfy 0.45 m there at any altitude the
+    # box allows (a 1.79 m crate would need 2.24 m), so it spends the margin and
+    # skims, and the aircraft grinds along the top: measured at z = 1.78-1.81
+    # over a 1.79 m crate, 25 bumper reports in one corner with coverage frozen.
+    # This is the same failure the warehouse ceiling note describes, arriving
+    # from the opposite direction.
+    #
+    # 1.60 puts the whole band cleanly BELOW that cluster. The rule it buys is a
+    # simple one the aircraft can always satisfy: overfly anything under about
+    # 1.35 m (desks at 1.14, counters, beds), go around anything taller. It also
+    # keeps the aircraft out of reach of the tops entirely -- alt_max is
+    # box_max_z - 0.10 = 1.50 -- so neither the planner nor the vertical escape
+    # can put it there.
+    #
+    # Coverage in m3 is measured over the BOX, so shrinking the band changes the
+    # denominator: the 1583.3 m3 explorable figure quoted in the README is for
+    # the 1.9 box and must be recomputed before it is compared against a run
+    # flown under this one. The building is no less mapped -- the camera still
+    # observes full room height from inside the band -- but the number moves.
+    box_max_z:   1.6
+    vbox_min_x: -14.0
+    vbox_min_y: -37.0
+    vbox_min_z:  -1.0
+    vbox_max_x:  14.0
+    vbox_max_y:  23.0
+    vbox_max_z:   3.2
+  scale: 1.0
+  # Body (FLU) -> camera optical (RDF). A property of the drone, not the world;
+  # the same rotation sensor_pose_node.py composes into /map_ros/pose.
+  #   cam_x (right)   = -body_y  ->  [ 0, -1,  0]
+  #   cam_y (down)    = -body_z  ->  [ 0,  0, -1]
+  #   cam_z (forward) =  body_x  ->  [ 1,  0,  0]
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+
