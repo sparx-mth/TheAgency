@@ -974,13 +974,24 @@ def analyze(run_dir):
 
 
 def newest_run():
-    """The most recently modified run directory under ``config.RUNS_DIR``."""
-    runs = ([p for p in config.RUNS_DIR.glob("*") if p.is_dir()]
+    """The latest run directory under ``config.RUNS_DIR``, by its timestamp name.
+
+    Not by mtime: the supervisor prunes logs from old runs, and deleting a
+    subdirectory bumps the parent's mtime, so an hours-old run that was just
+    pruned sorts as the newest one. Run directories are named for their start
+    time, so lexicographic order IS chronological order and cannot be disturbed
+    by anything touching the files afterwards.
+    """
+    # Only flight runs: the folder also holds axiscal_* sweeps, and "a" sorts
+    # after "2", so an unfiltered name-max picks a calibration folder.
+    stamped = re.compile(r"^\d{8}_\d{6}Z$")
+    runs = ([p for p in config.RUNS_DIR.glob("*")
+             if p.is_dir() and stamped.match(p.name)]
             if config.RUNS_DIR.is_dir() else [])
     if not runs:
         raise NotADirectoryError(
             "no run directories under %s" % config.RUNS_DIR)
-    return max(runs, key=lambda p: p.stat().st_mtime)
+    return max(runs, key=lambda p: p.name)
 
 
 def main(argv=None):
