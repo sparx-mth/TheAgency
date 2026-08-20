@@ -480,11 +480,21 @@ aircraft touches it. No amount of "fix the excursions" helps, because there are 
 Two ways out, and the second needs a measurement first:
 * **More clearance than error.** Would need ~0.9 m of reference clearance to have real margin,
   which this building's doorways will not allow. P24 already took the cheap part of this.
-* **Less error.** 0.45 m at 0.5 m/s is nearly a second of lag. But a single distance mixes
+* **Less error.** 0.45 m at 0.5 m/s is nearly a second of lag. A single distance mixes
   ALONG-track lag, which cannot cause a collision, with CROSS-track error, which is the only
-  half that can. The probe now records both (`clearance.abs_cross_track_m`); decide from that,
-  because the fixes differ completely: along-track lag points at the axis dead band and the
-  servo, cross-track at the follower dropping lateral velocity entirely.
+  half that can — so the probe now records both (`clearance.abs_cross_track_m`).
+
+  **First decomposition (one flight, n=81):** |along| p50 0.21 / p90 1.08, |cross| p50 0.22 /
+  p90 0.84. The two halves are the same size, so the harmless-lag hope is dead: cross-track
+  error really is ~0.2 m typical and ~0.8 m in the tail, against a reference clearance of
+  0.45-0.50 m at the tight moments. **Cross-track is the lever**, and it is structural: the
+  follower zeroes lateral velocity outright (Rooster's lateral axis is dead until ~1000 counts
+  and then rolls 30 deg), so the only way it can close a crosstrack offset is to turn.
+
+  Accumulate `abs_cross_track_m` over several runs before choosing a fix — n=81 from one flight
+  is thin. Candidates, in order of how little they risk: a pure-pursuit aim point ON the path
+  rather than the time-parameterised reference (converges to the path by construction), a
+  shorter lookahead, and only then any use of the lateral axis.
 
 **Do not "fix" this by raising `course_slew_deg_s`.** P17's limit cycle came from the demand
 OSCILLATING faster than the plant could follow; a large persistent heading error is a different
