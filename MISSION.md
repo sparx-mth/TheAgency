@@ -533,6 +533,13 @@ file's own bar of n>=15 within one configuration, which exists precisely because
 leads at this sample size evaporated. Re-run it at 15; do not act on it before. The newest run
 argues for that patience on its own: 187.7 m3/min WITH a circling minute.
 
+**Use `final_m3`, not the rate, for this test — the gap filter was excluding the collapses.**
+"Never trust a coverage rate whose run has gaps" is right, but the gaps come from FALCON going
+quiet, which is itself part of a collapse. Filtering them out therefore removes the very runs the
+test is about: of the two gap-runs at `max_vel` 0.8, one is the 1224 m3 collapse. Final volume is
+unaffected by missing intermediate samples and keeps them in. On that basis, n=11 and
+**corr(circling minutes, final volume) = -0.71**, still under the bar.
+
 **The sample was quietly eroding, and now cannot.** Which configuration a run flew under was only
 recoverable from its roslaunch log — which the supervisor prunes after 30 runs. Two runs had
 already dropped out of this comparison that way, and pruning catches up with a run at roughly the
