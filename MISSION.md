@@ -462,6 +462,34 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P30 — Getting unstuck costs 74 s a flight; the cooldown is most of it (2026-08-20)
+
+With contacts accepted as the price of coverage (P27), the question is what each one COSTS.
+Measured across **62 PINNED events in eight runs**, timing from each event to the aircraft next
+holding above 0.20 m/s for two seconds:
+
+| regained motion | p25 | p50 | p75 | p90 | max |
+|---|---|---|---|---|---|
+| 82 % within 60 s | 2.4 s | **10.6 s** | 20.1 s | 29.7 s | 31.5 s |
+
+**588 s across eight runs — about 74 s per flight, ~17 % of the window.** The other 18 % of
+events are the wedges that P29 covers.
+
+An escape is 2.5 s of reversing plus a 4 s cooldown, so a median recovery of 10.6 s is roughly
+1.6 cycles and the p75/p90 tail is 3-5 — **most of the cost is the cycle, not the manoeuvre**.
+`escape_cooldown_sec` 4.0 -> 2.0 takes a cycle from 6.5 s to 4.5.
+
+**Verify:** the same measurement re-run — median time-to-recover below ~8 s and the per-flight
+total under ~55 s — with coverage holding at 143-177. **Watch:** the cooldown exists so the
+airframe settles between attempts; if PINNED counts rise or recoveries get *longer* (attempts
+interfering with each other), put it back to 4.0 rather than lower it further.
+
+**Note on the diagnosis that got here:** run `060944Z` parked for 120 s with the follower
+reporting `ref_ready=True holding=False` throughout — it was commanding motion the whole time,
+and the give-up never fired. Only 2 tilt cuts and 2 overspeed scalings in that window. The
+follower's own heartbeat cannot distinguish "tracking normally" from "wedged and tracking
+normally"; the aircraft's measured speed is what tells them apart.
+
 ### P29 — The pinned hold was a latch with an unreachable release (fix applied 2026-08-20)
 
 The stall is now the single biggest determinant of coverage: across **94 reliable runs**,

@@ -1254,6 +1254,14 @@
        itself made impossible: one run flew normally for 180 s then covered
        0.0-0.7 m per MINUTE for the remaining 250, latched. Bounded, it becomes a
        periodic retry while still giving the airframe time to settle. -->
+  <!-- Quiet time between escape attempts. Measured 2026-08-20 across 62 PINNED
+       events in eight runs: 82 % regain sustained motion, median 10.6 s, p75
+       20.1, p90 29.7 — about 74 s per flight, ~17 % of the window, spent getting
+       unstuck. An escape is 2.5 s of reversing plus this cooldown, so most of
+       that time is cycles rather than the manoeuvre; 4.0 -> 2.0 shortens a cycle
+       from 6.5 s to 4.5. Raise it again if contacts start compounding — settling
+       is what the cooldown is for. -->
+  <arg name="explore_escape_cooldown_sec" default="2.0" />
   <arg name="explore_pinned_hold_sec" default="4.0" />
   <arg name="explore_course_slew_deg" default="45.0" />
   <arg name="explore_max_yaw_rate_deg" default="90.0" />
@@ -1671,6 +1679,7 @@
     <param name="min_vxy"         value="$(arg explore_min_vxy)" />
     <param name="course_slew_deg_s" value="$(arg explore_course_slew_deg)" />
     <param name="pinned_hold_sec" value="$(arg explore_pinned_hold_sec)" />
+    <param name="escape_cooldown_sec" value="$(arg explore_escape_cooldown_sec)" />
     <param name="tracker_pos_kp" value="$(arg explore_tracker_pos_kp)" />
   </node>
 

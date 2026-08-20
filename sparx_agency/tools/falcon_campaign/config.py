@@ -223,6 +223,10 @@ TRACKER_POS_KP = 1.0
 #: release condition unreachable, which parked one flight for 250 s.
 PINNED_HOLD_SEC = 4.0
 
+#: Quiet time between escape attempts. Getting unstuck costs ~74 s of a 430 s
+#: flight, most of it in escape-plus-cooldown cycles rather than the manoeuvre.
+ESCAPE_COOLDOWN_SEC = 2.0
+
 TILT_LIMIT_DEG = 35.0
 TILT_RESUME_DEG = 27.0
 
@@ -242,6 +246,7 @@ EXPECTED_ROSPARAMS = {
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
     "/falcon_exploration_follower/tracker_pos_kp": TRACKER_POS_KP,
     "/falcon_exploration_follower/pinned_hold_sec": PINNED_HOLD_SEC,
+    "/falcon_exploration_follower/escape_cooldown_sec": ESCAPE_COOLDOWN_SEC,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
     "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,
     "/uav_model/dynamics_parameters/max_linear_velocity": PLAN_MAX_VEL,
