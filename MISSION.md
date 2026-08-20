@@ -23,7 +23,7 @@ need all of it to act. This section is the orientation; the rest is evidence.*
 | final volume | 1060 m3 | **median 1578** (p25 1444, p75 1722, max 1823) |
 | coverage rate | 75 m3/min | **median 163** (clean runs, n=30) |
 | stalled share of flight | 53 % | **median 17 %** (p25 9, p75 31, max 77) |
-| runs below 1300 m3 | — | **5 of 36 (14 %)** |
+| runs below 1300 m3 | — | **8 of 45 (18 %)** |
 
 *An earlier version of this summary said "a repeatable ~1800 m3 / ~190 m3/min" and "4-10 %
 stalled". Those were the BEST runs, not the distribution: 1823 and 190 are the maxima, and 4-10 %
@@ -31,10 +31,13 @@ came from two flights. The medians above are what the configuration actually del
 p25/p75 spread is the honest picture — a fifty percent range between quartiles on final volume,
 with one run in seven landing below 1300.*
 
-**No drift.** Six consecutive blocks of six runs give final medians 1554, 1662, 1612, 1566, 1574,
-1485 and stall medians 30, 13, 15, 20, 15, 16 % — wobble, not trend. A short window can mislead:
-the last seven runs alone read 1417, which is the low end of ordinary variation plus one
-collapse, not a regression.
+**No drift, re-checked at n=45 (21:55).** Blocks of eight give final medians 1588, 1557, 1657,
+1574, **1400**, 1580 with 1, 1, 1, 1, **3**, 1 collapses. Splitting in half: first 22 runs median
+1602 with 3 collapses, last 23 median 1520 with 5. That looks like mild worsening and is not:
+at an 18 % base rate a block of eight expects ~1.5 collapses, so seeing 3 has roughly a 13 %
+chance on its own, and the block after it recovers to 1580 with 1. Small integers make a run of
+bad luck look like a trend — which is why drift is judged in blocks, and why one low block is not
+acted on.
 
 **Settled configuration — change nothing here without a pre-registered test:**
 `raycast_max 8.0`, `cluster_min 50`, `safe_distance 0.55`, bspline distance weight `150`,
