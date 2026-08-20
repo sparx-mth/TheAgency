@@ -462,6 +462,40 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P23 — The reference itself flies inside the safety margin (2026-08-20)
+
+The aircraft is stuck (PINNED) about a dozen times a flight, costing ~27 % of it. Two causes
+were consistent with that and they need opposite fixes, so `probe_clearance_trace.py` was
+written to log, twice a second for a whole flight, the distance from both the AIRCRAFT and its
+REFERENCE to the nearest mapped obstacle in their own height band.
+
+| | p5 | p25 | p50 | p75 | fraction inside 0.40 m |
+|---|---|---|---|---|---|
+| aircraft | 0.03 | 0.06 | 0.23 | 0.51 | **66 %** |
+| reference | 0.06 | 0.30 | **0.36** | 0.49 | **73 %** |
+
+The plan is not being followed badly *into* danger — **the plan is already there.** When the
+aircraft is inside 0.30 m, the reference is inside 0.40 m in 85 % of samples. Tracking error
+(p50 0.52 m, p90 1.23) then makes it worse, but it is the second cause, not the first.
+
+**Ruled out: map noise.** Zero isolated occupied voxels in 532 880, only 1.9 % with 4 or fewer
+of 26 neighbours, median 13 — the surfaces are real, not speckle. (Worth keeping as a habit: a
+clearance number is only as good as the map it is measured against.)
+
+**Cause:** `safe_distance` is a SOFT cost in the B-spline optimiser (weight 50 against
+smoothness 20), not a constraint, so at 0.40 it simply gets traded away — the spline cuts the
+corner its own waypoints went round, which is what the publish-fail patch's comment already
+said about `checkTrajCollision` being a point test with no radius.
+
+**Change:** `SAFE_DISTANCE` 0.40 -> 0.55, and deliberately NOT `OBSTACLES_INFLATION`, which
+stays at 0.40. A*'s inflation decides what is reachable at all — 0.85 there once made
+exploration fail outright — so doorways stay plannable and only the curve through them is asked
+to ride nearer the middle.
+
+**Verify:** reference clearance p50 above 0.45, PINNED events below ~6/flight, and the
+stationary fraction below 0.27. Coverage must hold at 135-176. **Watch:** more "collision
+detected on the trajectory" and publish failures; if coverage drops, 0.48 before reverting.
+
 ### P22 — The depth measurement that killed the raycast change was wrong (2026-08-20)
 
 On 2026-08-19 I ruled out raising the mapper's `raycast_max` on the strength of a live depth

@@ -127,7 +127,19 @@ EXPLORATION_FOLLOWER = "reference"
 #: Clearance FALCON's planner and optimiser keep from occupied voxels, metres.
 #: See adapter_launch_cmd for why this is 0.40 rather than the inherited 0.85.
 OBSTACLES_INFLATION = 0.40
-SAFE_DISTANCE = 0.40
+#: The B-spline optimiser's own clearance, which is a SOFT cost (weight 50
+#: against smoothness 20), not a constraint — so it gets traded away. Measured
+#: 2026-08-20 with it at 0.40: the published reference passed within 0.40 m of
+#: mapped geometry 73 % of the time, median 0.36, and the aircraft (0.52 m of
+#: tracking error on top) sat at median 0.23 m and got PINNED a dozen times a
+#: flight. The map is not to blame — it has zero isolated voxels and a median of
+#: 13 occupied neighbours out of 26, so those surfaces are real.
+#:
+#: Deliberately raised ABOVE ``OBSTACLES_INFLATION``: A*'s inflation decides what
+#: is reachable at all, and 0.85 there once made exploration fail outright, so it
+#: stays at 0.40 and narrow doorways stay plannable. This only asks the curve
+#: fitted through them to ride nearer the middle.
+SAFE_DISTANCE = 0.55
 
 #: Speed FALCON PLANS at, m/s, and the follower's ceiling above it.
 #:
@@ -210,6 +222,7 @@ VOXEL_RAYCAST_MAX = 8.0
 
 EXPECTED_ROSPARAMS = {
     "/voxel_mapping/tsdf/raycast_max": VOXEL_RAYCAST_MAX,
+    "/bspline_opt/safe_distance": SAFE_DISTANCE,
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
     "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,
