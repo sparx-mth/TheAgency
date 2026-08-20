@@ -462,6 +462,30 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P26 — Bending the course harder to close cross-track (change applied 2026-08-20)
+
+Cross-track is now measured over four flights and it is stable: **p50 0.18-0.23 m, p90
+0.59-0.84**, against a reference clearance of 0.51-0.86 m. So the p90 of the error that can
+cause a collision is the same size as the median clearance available — P25's structural
+mismatch, quantified.
+
+The tracker is not missing a correction; it is slow. `horizontal_pid.kp` is 1.0, so a 0.2 m
+cross-track offset against a 0.5 m/s feedforward bends the commanded course only **22 deg** off
+the path — and on this airframe the course IS the correction, because lateral velocity is
+dropped outright. At 1.6 the same offset bends it 33 deg.
+
+Exposed as `~tracker_pos_kp` (default 1.0 = previous behaviour, so it is one launch arg to
+revert) and set to 1.6, guarded in `EXPECTED_ROSPARAMS`.
+
+**Verify:** `clearance.abs_cross_track_m` p50 below 0.15 and p90 below 0.5, PINNED below ~7,
+coverage holding at 135-187. **Watch:** the position loop has real lag — the axis dead band and
+the 45 deg/s course slew — so a higher gain can oscillate. `motion.turning_deg_per_m_late`
+leaving the 41-70 band, or stops rising, means back to 1.3 and then 1.0.
+
+**Note for whoever tries the next step:** the follower only ever sees ONE point
+(`/planning/pos_cmd`), not the path, so a true pure-pursuit aim point is a bigger change than
+it sounds — it would need `/planning/bspline`, which is the other follower's input.
+
 ### P25 — Contacts are structural: clearance and tracking error are the same size (2026-08-20)
 
 After P24 the plan is 0.38 m off the wall at the moment of a contact and the aircraft is at

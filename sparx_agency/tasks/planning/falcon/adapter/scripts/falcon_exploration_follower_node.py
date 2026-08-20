@@ -49,6 +49,7 @@ Usage: roslaunch falcon_adapter sphera_exploration.launch
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import rospy
 from geometry_msgs.msg import Twist, Vector3
@@ -162,8 +163,20 @@ class FalconExplorationFollowerNode:
             max_accel_xy=float(G("~max_accel_xy", 1.5)),
             max_accel_z=float(G("~max_accel_z", 1.0)),
         )
+        # Gain on horizontal position error. It decides how far the COMMANDED
+        # course bends away from the path to close a cross-track offset, which
+        # on this airframe is the only way one can be closed at all -- lateral
+        # velocity is dropped outright below, so the nose has to point at the
+        # correction. Measured 2026-08-20: cross-track sits at p50 0.20 m and
+        # p90 0.6-0.8 against a reference clearance of ~0.5 m, so it is the
+        # error that puts the aircraft into walls its plan was clear of. At the
+        # stock kp=1.0 a 0.2 m offset bends the course only 22 deg off the path
+        # against a 0.5 m/s feedforward. 1.0 restores the previous behaviour.
+        pos_kp = float(G("~tracker_pos_kp", 1.0))
+        horizontal = replace(ReferenceTrackerParams().horizontal_pid, kp=pos_kp)
         self.tracker = ReferenceTracker3D(ReferenceTrackerParams(
             limits=limits,
+            horizontal_pid=horizontal,
             reference_timeout_s=float(G("~reference_timeout_s", 1.0)),
         ))
         self.yaw_kp = float(G("~yaw_kp", 1.0))

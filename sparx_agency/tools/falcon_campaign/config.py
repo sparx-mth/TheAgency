@@ -213,6 +213,11 @@ BRIDGE_CMD = (
 #: Tilt at which the follower cuts drive, and the tilt it must fall back below
 #: before drive resumes. Both live here so the readback guard covers them: the
 #: limit is declared in BOTH launch files and the entry one wins.
+#: Gain on horizontal position error in the follower's tracker. Cross-track
+#: error is the only half of the tracking error that can cause a collision, and
+#: it measured p50 0.20 m against a reference clearance of ~0.5 m.
+TRACKER_POS_KP = 1.6
+
 TILT_LIMIT_DEG = 35.0
 TILT_RESUME_DEG = 27.0
 
@@ -230,6 +235,7 @@ EXPECTED_ROSPARAMS = {
     "/bspline_opt/safe_distance": SAFE_DISTANCE,
     "/bspline_opt/pos/distance": BSPLINE_DISTANCE_WEIGHT,
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
+    "/falcon_exploration_follower/tracker_pos_kp": TRACKER_POS_KP,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
     "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,
     "/uav_model/dynamics_parameters/max_linear_velocity": PLAN_MAX_VEL,

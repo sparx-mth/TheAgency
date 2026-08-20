@@ -1237,6 +1237,14 @@
        converging because the demand swung as fast as the nose could chase it.
        Half the yaw ceiling keeps the aircraft faster than its own reference.
        0 disables the limit. -->
+  <!-- Gain on horizontal position error, which is what decides how far the
+       commanded course bends off the path to close a cross-track offset — the
+       only correction this airframe has, since lateral velocity is dropped.
+       Measured 2026-08-20: cross-track is p50 0.20 m, p90 0.6-0.8, against a
+       reference clearance of ~0.5 m, so it is what puts the aircraft into walls
+       its own plan was clear of. At the stock 1.0 a 0.2 m offset bends the
+       course only 22 deg against a 0.5 m/s feedforward; 1.6 makes it 33. -->
+  <arg name="explore_tracker_pos_kp" default="1.6" />
   <arg name="explore_course_slew_deg" default="45.0" />
   <arg name="explore_max_yaw_rate_deg" default="90.0" />
 
@@ -1652,6 +1660,7 @@
     <param name="tilt_resume_deg" value="$(arg tilt_resume_deg)" />
     <param name="min_vxy"         value="$(arg explore_min_vxy)" />
     <param name="course_slew_deg_s" value="$(arg explore_course_slew_deg)" />
+    <param name="tracker_pos_kp" value="$(arg explore_tracker_pos_kp)" />
   </node>
 
   <node pkg="falcon_adapter" type="rooster_bspline_follower_node.py"
