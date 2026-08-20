@@ -462,6 +462,35 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P28 — Exploration is TIME-limited, not map-limited (2026-08-20)
+
+Measured at the end of a current-configuration flight: **33.2 % of the box floor has mapped free
+space, 38.1 % has been seen at all**, and the free footprint now spans the full box
+(x 38.5-70.5, y -29.5-1.0) — the aircraft reaches every extreme but fills a third of it. Against
+30.1 % / 35.9 % before the raycast and cluster changes.
+
+The decisive part is not the percentage, it is that **exploration never reaches FINISH any more**
+("never reached FINISH in 445 s") and the coverage curve is still climbing when the battery
+window closes. The building is not exhausted and the frontier finder is not starved — the flight
+simply ends. So **coverage rate is the only lever that matters**, and every second of the 430 s
+window spent not exploring is directly lost volume.
+
+Do NOT raise the simulator's battery capacity to buy a longer flight. It is a configurable
+override (`~/rooster-private-parameters/developer.params.yaml`), which makes it exactly the kind
+of change that improves the number without improving the system, and it would break comparison
+with every run in this file.
+
+**Candidate, measured but not yet acted on:** the forward axis sits between 1 and 619 counts —
+inside the dead band, where the platform does not move — for **93 s of a 445 s flight** across
+129 episodes (p50 0.45 s, p90 1.65 s, max 4.2 s); 29 episodes longer than a second account for
+55 s. Release transients explain only ~0.2 s each, so most of that is something else.
+
+**Before chasing it, settle what it means:** on this platform a released stick IS the brake, so
+any value inside the dead band is equivalent to zero, and the servo is *allowed* to go there
+deliberately when braking. The loss is only real for episodes where motion was actually wanted.
+`truth.jsonl` records the axis but not the demand, so answering this needs `/cmd_vel` alongside
+it — check what `nav_debug_recorder` already captures before adding anything.
+
 ### P27 — Contacts are set by WHERE the aircraft flies, not by tuning (2026-08-20, CLOSED)
 
 Across **16 runs** with clearance traces, correlating each run's median reference clearance
