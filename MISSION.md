@@ -127,6 +127,41 @@ Metrics computed per run: mean/max cross-track, mean commanded-vs-achieved speed
 number and duration of full stops, % of flight time moving, voxels mapped, distance flown,
 collisions, whether exploration completed or froze.
 
+## 6b. Where the campaign has got to (108 reliable runs, 2026-08-18 → 2026-08-20)
+
+Median of the first ten reliable runs against the last ten:
+
+| | first 10 | last 10 |
+|---|---|---|
+| coverage | 75.2 m3/min | **154.9** |
+| final volume | 1060 m3 | **1596** |
+| stalled share of flight | 53 % | **9 %** |
+
+Coverage per minute has doubled, volume per flight is up half again, and the share of each
+flight spent gaining nothing has fallen sixfold. Block medians, ten runs each, show where it
+came from — the step at 08-19 22:32 is the course-slew fix (P17), and the one at 08-20 00:19 is
+raycast_max (P22) with the clearance weight (P24) following it:
+
+```
+08-18 18:51   75.2 m3/min   1060 m3   53 % stalled
+08-19 14:06   61.0           910      70 %
+08-19 20:49  111.4          1120      41 %
+08-19 22:32  118.7          1146      18 %
+08-20 00:19  143.5          1559      18 %
+08-20 05:38  147.1          1547      13 %
+```
+
+Harness health at the same point: 130 cycles completed, 1 failed, 0 refusals, disk 1.3 GB of
+493 GB free.
+
+**What produced the gains, in order of size:** the yaw limit cycle (P17), the mapper's raycast
+range (P22), the optimiser's clearance weight (P24), the frontier cluster floor (P21), the
+dead-end guard's boundary bug (P16), the tilt reflex's hysteresis (P20).
+
+**What did not, and is closed:** raising planning speed (P14), altitude setpoints (P18), the
+tracker position gain (P26), the escape cooldown (P30), and every attempt to reduce contacts
+directly (P23, P26, P27 — contacts are environmental and are the price of coverage).
+
 ## 7. Problems — the live queue
 
 Ranked. **Delete a problem when it is fixed and verified in flight. Add new ones as found.**
