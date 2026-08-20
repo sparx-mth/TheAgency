@@ -10,6 +10,46 @@
 
 ---
 
+## 0. Current state — read this, then section 3, then whatever the task needs
+
+*This file is 1600+ lines because it records how every conclusion was reached. That history is
+the point — it is what stops a later session re-running a refuted experiment — but you do not
+need all of it to act. This section is the orientation; the rest is evidence.*
+
+**Where it stands (2026-08-20 17:35):** the campaign has done its job. Coverage per flight went
+from a 1060 m3 / 75 m3/min median to a repeatable ~1800 m3 / ~190 m3/min, and the share of each
+flight spent gaining nothing fell from 53 % to 4-10 %. The top five flights are within 25 m3 of
+each other, so that ceiling is reproducible rather than lucky.
+
+**Settled configuration — change nothing here without a pre-registered test:**
+`raycast_max 8.0`, `cluster_min 50`, `safe_distance 0.55`, bspline distance weight `150`,
+course slew `45 deg/s`, tilt `35/27` with hysteresis, `tracker_pos_kp 1.0`, pinned hold `4 s`
+with 4/8/16/30 backoff, escape cooldown `4.0`, tour commit `0` (off), `max_vel 0.8`,
+follower cap `1.0`.
+
+**The one open question:** roughly one run in five collapses to ~900 m3 instead of ~1800. Three
+have been dissected and they have THREE DIFFERENT mechanisms (P37, P38), so there is no single
+fix. One pre-registered test is running — see P38 — and until it reaches n>=15 on fresh runs,
+the honest answer is "not known yet".
+
+**What NOT to do**, each closed with evidence in the sections below: planning speed (P34), the
+coverage tour (P32), reducing contacts directly (P27), the axis dead band (P28), the escape
+cooldown in either direction (P30/P31), the tracker position gain (P26), altitude setpoints as a
+mean argument (P18), the dz correlation (P36), circling (P38). Do not raise the simulator's
+battery capacity — it would improve the number without improving the system.
+
+**The method that produced the gains, and matters more than any single fix:**
+1. Measure the mechanism before changing anything — four of the biggest wins came from a
+   measurement that contradicted the obvious story.
+2. Write the WANT and the REVERT-IF down *before* flying a change, and measure the control's own
+   value for each — a criterion the control case also meets is not a criterion.
+3. Correlations: within ONE configuration, n >= 15. Five leads have died at smaller n.
+4. A scan over many metrics generates a hypothesis; only fresh data can confirm it.
+5. Verify a change reached the running system (`rosparam get`, or `strings` on the binary) before
+   measuring whether it helped.
+
+---
+
 ## 1. The goal
 
 Fly a **complete, autonomous FALCON exploration of the whole `sphera_jail` map** with the
