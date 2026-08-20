@@ -361,6 +361,16 @@ RUN chmod +x /tmp/fix_falcon_degenerate_traj.sh && /tmp/fix_falcon_degenerate_tr
 # CMakeLists.txt here is a no-op for the Jetson/XTEND build either way --
 # the file is patched but never compiled there.
 # ============================================
+# ── Hold the coverage-tour target steady ──────────────────────
+# The HGrid TSP is re-solved every planning cycle and its first element taken as
+# "next cell", so small cost changes flip it: measured 190 target changes in
+# 517 s, median dwell 0.3 s. MUST sit before the catkin_make below — placed
+# after it once, and fix_falcon_sop.sh (the only later step that rebuilds)
+# short-circuits with "already patched", so the source carried the change and
+# the binary did not.
+COPY patches/fix_falcon_tour_commit.sh /tmp/fix_falcon_tour_commit.sh
+RUN chmod +x /tmp/fix_falcon_tour_commit.sh && /tmp/fix_falcon_tour_commit.sh
+
 COPY patches/fix_falcon_so3_gencfg.sh /tmp/fix_falcon_so3_gencfg.sh
 RUN chmod +x /tmp/fix_falcon_so3_gencfg.sh && /tmp/fix_falcon_so3_gencfg.sh
 

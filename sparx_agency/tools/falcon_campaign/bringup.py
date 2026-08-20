@@ -147,6 +147,10 @@ _PATCH_MARKERS = {
         "publish_fail_blacklist",   # falcon_publish_fail_blacklist.patch
         "replan_from_pose",         # falcon_replan_from_pose.patch
         "finish_reopen",            # fix_falcon_finish_reopen.sh
+        # fix_falcon_tour_commit.sh. Worth a marker of its own: the first build
+        # of it patched the SOURCE after the compile step, so the image carried
+        # the change and the binary did not, and only a strings check caught it.
+        "tour_commit_max_s",
     ],
     "/catkin_ws/devel/lib/fast_planner/traj_server": [
         "exit_on_finish",           # fix_falcon_finish_reopen.sh (traj_server half)

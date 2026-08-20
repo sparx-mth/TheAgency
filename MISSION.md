@@ -517,9 +517,23 @@ reached, exhausted, or has been beaten by a clear margin for a sustained period.
 no such parameter, so this is a C++ patch against the exploration manager (the templates are in
 `patches/`, and `verify_patch.sh` compiles one in ~1 min before a 2-min image rebuild).
 
-**Before flying it, write down:** WANT — cells-per-metre above 0.8, coverage above the 143-177
-band. REVERT IF — coverage drops below 140, or `no_path_fails` rises sharply (committing to an
-unreachable cell is exactly the P16 lock this campaign already fixed once).
+**IMPLEMENTED 2026-08-20** as `patches/fix_falcon_tour_commit.sh`: the chosen (cell, center)
+pair is held until it drops out of the tour (its frontiers are gone, which is also what happens
+once the aircraft arrives), or `/exploration/tour_commit_max_s` (8.0, a rosparam, guarded)
+expires. The TSP still runs and the tour is still published; only which element is handed
+downstream as "next" is held steady. Compile-verified with `verify_patch.sh`, then built into
+the image and confirmed in the BINARY, not just the source.
+
+**Pre-registered:** WANT — cells-per-metre above 0.8, coverage above the 143-177 band.
+REVERT IF — coverage drops below 140, or `no_path_fails` rises sharply (committing to an
+unreachable cell is exactly the P16 lock this campaign already fixed once; that is what the
+timeout bounds).
+
+**Build trap, now guarded:** the first build put the patch step AFTER `catkin_make`, and the only
+later step that rebuilds (`fix_falcon_sop.sh`) short-circuits with "already patched" — so the
+image carried the patched source and an unpatched binary, with matching timestamps. `strings` on
+the binary is what caught it. The step now sits before the compile, and `tour_commit_max_s` is in
+`_PATCH_MARKERS` so bring-up refuses a stale image.
 
 **Measurement note that cost twenty minutes:** the log-parsing scripts in this file matched
 timestamps as `\[(17871\d{5}\.\d+)\]`. Wall time has since ticked into `17872…`, so those

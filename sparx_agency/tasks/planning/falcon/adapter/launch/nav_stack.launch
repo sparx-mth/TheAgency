@@ -1362,6 +1362,17 @@
   <arg name="voxel_raycast_max" default="8.0" />
   <param name="/voxel_mapping/tsdf/raycast_max" value="$(arg voxel_raycast_max)"/>
 
+  <!-- How long the coverage tour may hold its chosen cell before re-picking.
+       The TSP is re-solved every cycle and its first element taken as "next",
+       so the target changed 190 times in 517 s (median dwell 0.3 s) and the
+       aircraft steered toward an average of several cells. Held steady, it
+       progresses through a tour instead. The BOUND is the safety property:
+       committing to a cell the aircraft cannot reach is the lock this campaign
+       already fixed once, and the timeout keeps a bad commitment cheap.
+       0 disables (re-pick every cycle, upstream behaviour). -->
+  <arg name="tour_commit_max_s" default="8.0" />
+  <param name="/exploration/tour_commit_max_s" value="$(arg tour_commit_max_s)"/>
+
   <arg name="frontier_cluster_min" default="50" />
   <param name="/frontier_finder/cluster_min" value="$(arg frontier_cluster_min)"/>
 

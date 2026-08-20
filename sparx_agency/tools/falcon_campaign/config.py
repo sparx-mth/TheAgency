@@ -235,6 +235,11 @@ TILT_RESUME_DEG = 27.0
 #: — hence the readback below.
 FRONTIER_CLUSTER_MIN = 50.0
 
+#: Seconds the coverage tour may hold its chosen cell before re-picking. The
+#: bound is the safety property, not the feature: a commitment to an unreachable
+#: cell is the lock P16 fixed, and the timeout is what keeps one cheap.
+TOUR_COMMIT_MAX_S = 8.0
+
 #: Range at which the TSDF stops raycasting. 5.0 discarded 4.8 % of every depth
 #: frame; sensing max_depth already allows 10 m.
 VOXEL_RAYCAST_MAX = 8.0
@@ -244,6 +249,7 @@ EXPECTED_ROSPARAMS = {
     "/bspline_opt/safe_distance": SAFE_DISTANCE,
     "/bspline_opt/pos/distance": BSPLINE_DISTANCE_WEIGHT,
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
+    "/exploration/tour_commit_max_s": TOUR_COMMIT_MAX_S,
     "/falcon_exploration_follower/tracker_pos_kp": TRACKER_POS_KP,
     "/falcon_exploration_follower/pinned_hold_sec": PINNED_HOLD_SEC,
     "/falcon_exploration_follower/escape_cooldown_sec": ESCAPE_COOLDOWN_SEC,
