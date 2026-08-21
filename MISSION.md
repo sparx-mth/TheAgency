@@ -316,6 +316,20 @@ now raises `BringupError` if it is missing. Note the running instance logs to
 `/tmp/video_watchdog.log`, not the `/tmp/video_freshness_watchdog.log` a fresh spawn would use --
 check both when looking for its history.
 
+**Instrumentation check (2026-08-21).** `check_instrumentation.py` compares the last 10 runs
+against the prior 50 and names any metric family that used to be produced and is not any more.
+It exists because three probes have died silently in this campaign — a hardcoded epoch prefix
+that matched nothing once wall time rolled over, `rosout` duplicating FSM lines, and coverage
+gaps deleting the stalls they should have recorded — and each was found by accident, late. A dead
+probe is worse than a loud failure because the number it feeds still looks plausible.
+
+Run it after any change to the recorder or analyzer. **It only alarms on ABSENT or NULL, never on
+empty**: `collapse_signature: []` means no failure shape matched and `data_gaps: []` means the
+recording had no holes — both are the healthy case, and an earlier version of this check reported
+them as failures because it conflated the two. Verified against synthetic runs that it catches a
+family which stops, and stays quiet about one that was already broken. Current state: every
+family still being produced.
+
 **Pause sentinel:** `runs/PAUSE` — while this file exists the supervisor finishes the current
 flight and then waits. Touch it before editing code, remove it after. The supervisor also
 `py_compile`s changed modules before each run and refuses to fly on a syntax error.
