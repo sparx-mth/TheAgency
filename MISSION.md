@@ -262,19 +262,28 @@ plus copies of every relevant log.
 
 **Video freshness watchdog (2026-08-21).** `video_trigger.py` keeps writing byte-identical
 frames after its video session dies, so a file-mtime check reads healthy through a total freeze;
-the watchdog hashes the newest frame instead and restarts the trigger after 3 identical ones. It
-is load-bearing, not belt-and-braces: **1550 restarts** logged over the campaign's first three
-days, against **4 cycles (~1% of 392)** that still aborted with "camera frames went stale". It
-detects and repairs but does not always repair in time.
+the watchdog hashes the newest frame instead and restarts the trigger after 3 identical ones.
+
+**Correction, same day.** I first recorded "1550 restarts in three days, therefore load-bearing".
+The count is real; the interpretation was wrong. Dating the log and aligning it to cycle
+boundaries: **92 % of restarts land within 60 s AFTER a cycle start** (n=453 where cycle times
+are known, against ~10 % expected by chance at a 620 s cadence), in a tight bimodal cluster at
++16 s and +33 s. Frames legitimately stop while the stack is torn down and brought back up, the
+watchdog reads that as staleness, and restarts the trigger twice per cycle. Those are artifacts,
+not repairs. The genuine mid-flight repair rate is the other ~8 %: **~38 repairs over 210 cycles,
+about 0.18 per cycle.** Still useful, still worth keeping -- but an order of magnitude less
+dramatic than the raw count suggested. *This is the file's own rule 4 catching me: a big number
+generated the hypothesis, and only a test against cycle phase could confirm it.*
+
+The restarts do NOT accumulate processes -- both the watchdog and `bringup` kill `video_trigger`
+before starting it, verified live: exactly one process in `it`.
 
 It was also running on borrowed luck. `bringup.start_video_watchdog()` spawned
 `sparx_agency/robots/ROBOTICAN/video_freshness_watchdog.sh` -- a path that **did not exist in the
 repo**. The campaign had a watchdog only because an instance started by hand out of `/tmp` on
 2026-08-18 never died, so the `pgrep` check short-circuited and the spawn that would have failed
-was never attempted. Had it been killed, `bash <missing file>` returns non-zero into a spawn
-nobody checks, and the campaign would have flown watchdog-less until cycles started aborting.
-Fixed: the script is in the repo at that path, and `start_video_watchdog()` now raises
-`BringupError` if it is missing rather than failing silently. Note the running instance logs to
+was never attempted. Fixed: the script is in the repo at that path, and `start_video_watchdog()`
+now raises `BringupError` if it is missing. Note the running instance logs to
 `/tmp/video_watchdog.log`, not the `/tmp/video_freshness_watchdog.log` a fresh spawn would use --
 check both when looking for its history.
 
@@ -1853,6 +1862,7 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Failed cycles no longer inherit the previous flight's telemetry | two takeoff failures had reported the last good flight's 336 m and 12309 samples as their own | 2026-08-19 |
 | 2026-08-19 | Wait for `RoosterState.armable` before arming | "Arm refused: Not connected to FCU" cost two whole cycles to a startup race | 2026-08-19 |
 | 2026-08-19 | Restart Sphera when the FCU is unarmable, and gate health on it | six cycles were lost re-attempting a dead aircraft, because the battery read 0.99 so nothing ever restarted | 2026-08-19 |
+| 2026-08-21 | Stale-frame abort needs TWO consecutive samples | 4 cycles (~1 %) were lost to a single sample taken while the watchdog was mid-restart | pending |
 
 ## 9. Resuming after a context loss
 

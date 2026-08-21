@@ -1627,11 +1627,22 @@ below n=15.
 
 ## A dependency that is only alive by luck looks exactly like one that is managed
 
-The campaign's video watchdog ran for three days, logged 1550 repairs, and was genuinely
-load-bearing. It was also started by hand out of `/tmp` and the repo path its own bring-up code
+The campaign's video watchdog ran for three days and logged 1550 restarts. (Most of those turned
+out to be cycle-boundary artifacts rather than repairs -- see the next lesson -- but it does do
+real work.) It was also started by hand out of `/tmp` and the repo path its own bring-up code
 spawned did not exist. Nothing ever noticed, because the liveness check ran first: `pgrep` found
 the orphan, returned early, and the broken spawn was never reached. A guard of the form "start it
 if it is not running" tests the *symptom* of health and hides the fact that the recovery path is
 dead. When something is important enough to have a watchdog, check that the watchdog can actually
 be restarted -- not just that it is currently up -- and make the missing-file case raise instead
 of returning a non-zero exit code into a spawn nobody reads.
+
+## A large count is not a large effect until you know what generated it
+
+"1550 restarts in three days" reads as a component working hard, and I recorded it that way.
+Aligning the same log against cycle phase showed 92 % of those restarts landing within 60 s after
+a cycle start, in a tight cluster at +16 s and +33 s -- the stack tears down, frames stop, the
+watchdog calls that staleness and restarts twice. The real repair rate was ~0.18 per cycle, an
+order of magnitude smaller. The count never lied; the causal story attached to it did. Before
+citing a total as evidence of importance, check whether the events cluster against some phase of
+the system that would produce them for free.

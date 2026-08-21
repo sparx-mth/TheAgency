@@ -216,6 +216,10 @@ def sample_coverage(run_dir):
         pass
 
 
+#: Consecutive stale-frame observations; see ``liveness_check``.
+_STALE_STREAK = 0
+
+
 def liveness_check(run_dir, tick):
     """Cheap mid-flight checks. Returns a reason to abort, or None.
 
@@ -227,8 +231,24 @@ def liveness_check(run_dir, tick):
         return "the drone container disappeared (Sphera died)"
     if not bringup.container_up(C.FALCON_CONTAINER):
         return "the falcon container died"
-    if tick % 4 == 0 and not bringup.frames_fresh(max_age_s=25):
-        return "camera frames went stale (video_trigger froze)"
+    # Two consecutive observations, not one. The freshness watchdog restarts
+    # video_trigger ~0.18 times per cycle, and a restart leaves frames frozen or
+    # absent for 15-25 s BY DESIGN -- so a single stale sample cannot tell a
+    # repair in progress from a permanent freeze, and killing the cycle on it
+    # throws away a flight that was about to heal. Samples are 60 s apart, which
+    # is comfortably longer than a restart takes. Cost of the change: a genuinely
+    # dead camera now ends the run one sample later.
+    global _STALE_STREAK
+    if tick % 4 == 0:
+        if bringup.frames_fresh(max_age_s=25):
+            _STALE_STREAK = 0
+        else:
+            _STALE_STREAK += 1
+            log(run_dir, "frames stale (%d consecutive) -- the watchdog restarts "
+                         "video_trigger, so allow one sample to recover"
+                         % _STALE_STREAK)
+            if _STALE_STREAK >= 2:
+                return "camera frames went stale twice in a row (video_trigger froze)"
     if tick % 4 == 0 and not bringup.rosnode_exists("/exploration_node"):
         return "exploration_node died"
     # FALCON present but never actually exploring. Measured 2026-08-20: one
@@ -313,6 +333,8 @@ def fly(run_dir, duration_s):
     time.sleep(2)
     bringup.start_twist_adapter()
 
+    global _STALE_STREAK
+    _STALE_STREAK = 0
     started = time.time()
     tick = 0
     while time.time() - started < duration_s:
