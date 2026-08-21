@@ -1624,3 +1624,14 @@ That is the whole case for the discipline, in one number. A seven-way scan will 
 something around -0.7; it means nothing until fresh data agrees. Five hypotheses in this campaign
 died this way, and the four that were caught early were caught by refusing to read a coefficient
 below n=15.
+
+## A dependency that is only alive by luck looks exactly like one that is managed
+
+The campaign's video watchdog ran for three days, logged 1550 repairs, and was genuinely
+load-bearing. It was also started by hand out of `/tmp` and the repo path its own bring-up code
+spawned did not exist. Nothing ever noticed, because the liveness check ran first: `pgrep` found
+the orphan, returned early, and the broken spawn was never reached. A guard of the form "start it
+if it is not running" tests the *symptom* of health and hides the fact that the recovery path is
+dead. When something is important enough to have a watchdog, check that the watchdog can actually
+be restarted -- not just that it is currently up -- and make the missing-file case raise instead
+of returning a non-zero exit code into a spawn nobody reads.

@@ -254,6 +254,24 @@ Lives in `sparx_agency/tools/falcon_campaign/`.
 Run artifacts: `runs/<UTC timestamp>/` — `truth.jsonl`, `metrics.json`, `findings.md`, `summary.json`,
 plus copies of every relevant log.
 
+**Video freshness watchdog (2026-08-21).** `video_trigger.py` keeps writing byte-identical
+frames after its video session dies, so a file-mtime check reads healthy through a total freeze;
+the watchdog hashes the newest frame instead and restarts the trigger after 3 identical ones. It
+is load-bearing, not belt-and-braces: **1550 restarts** logged over the campaign's first three
+days, against **4 cycles (~1% of 392)** that still aborted with "camera frames went stale". It
+detects and repairs but does not always repair in time.
+
+It was also running on borrowed luck. `bringup.start_video_watchdog()` spawned
+`sparx_agency/robots/ROBOTICAN/video_freshness_watchdog.sh` -- a path that **did not exist in the
+repo**. The campaign had a watchdog only because an instance started by hand out of `/tmp` on
+2026-08-18 never died, so the `pgrep` check short-circuited and the spawn that would have failed
+was never attempted. Had it been killed, `bash <missing file>` returns non-zero into a spawn
+nobody checks, and the campaign would have flown watchdog-less until cycles started aborting.
+Fixed: the script is in the repo at that path, and `start_video_watchdog()` now raises
+`BringupError` if it is missing rather than failing silently. Note the running instance logs to
+`/tmp/video_watchdog.log`, not the `/tmp/video_freshness_watchdog.log` a fresh spawn would use --
+check both when looking for its history.
+
 **Pause sentinel:** `runs/PAUSE` — while this file exists the supervisor finishes the current
 flight and then waits. Touch it before editing code, remove it after. The supervisor also
 `py_compile`s changed modules before each run and refuses to fly on a syntax error.

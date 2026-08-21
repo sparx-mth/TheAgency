@@ -612,12 +612,29 @@ def frames_fresh(max_age_s=10):
 
 
 def start_video_watchdog():
-    """Run the frame-freshness watchdog for the whole campaign, once."""
+    """Run the frame-freshness watchdog for the whole campaign, once.
+
+    Load-bearing, not belt-and-braces: it logged 1550 restarts over the
+    campaign's first three days, against four cycles that still aborted on stale
+    frames. Raises if its script is missing, because the failure is otherwise
+    silent -- `bash <missing path>` just returns non-zero into a spawn nobody
+    checks, and the campaign then flies without a watchdog until a cycle aborts.
+    That was the live state on 2026-08-21: this path did not exist, and only an
+    instance running out of /tmp since 2026-08-18 kept the pgrep check happy.
+
+    Raises:
+        BringupError: If the watchdog script is not where it should be.
+    """
+    script = C.REPO_ROOT / "sparx_agency" / "robots" / "ROBOTICAN" / \
+        "video_freshness_watchdog.sh"
+    if not script.is_file():
+        raise BringupError(
+            "the video freshness watchdog is missing from %s -- without it a "
+            "frozen video_trigger is only caught by a mid-flight abort" % script)
     r = sh("pgrep -f video_freshness_watchdog >/dev/null && echo up || echo down", 15)
     if "up" in r.stdout:
         return
-    spawn("bash %s/sparx_agency/robots/ROBOTICAN/video_freshness_watchdog.sh"
-          % C.REPO_ROOT, "/tmp/video_freshness_watchdog.log")
+    spawn("bash %s" % shlex.quote(str(script)), "/tmp/video_freshness_watchdog.log")
 
 
 def health_report():
