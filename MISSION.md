@@ -96,6 +96,21 @@ Nothing here is speculative or half-finished: every behaviour change is either v
 measured control or reverted, and each commit message carries the evidence. Review at your
 convenience; the loop keeps running and keeps committing locally either way.
 
+### Watch — hover altitude outlier at 1.74 m (2026-08-21 05:25, one occurrence)
+
+One cycle hovered at **1.74 m** before handover. Across the last 60 cycles hover is min 1.01,
+p25 1.12, **median 1.19**, p90 1.27 — so this is the single highest and well outside the band.
+Everything else about the cycle looked normal.
+
+Not acted on: one occurrence, no mechanism, and the altitude path is a known weak spot rather
+than a suspected regression (P18 — the hold has almost no authority in the band it operates in,
+so where the aircraft settles is largely aerodynamic).
+
+**Watch condition:** if hover exceeds ~1.5 m again, investigate the altitude path — compare
+`rooster_command_unit`'s target and `wanted_z` against P18's measurements, and check whether the
+high-hover runs score differently. Flying 0.5 m higher changes what the camera sees, so it would
+matter if it became common. A single outlier in 60 does not.
+
 ### Operator note — disk, and why the campaign did NOT act on it (2026-08-20 19:45)
 
 `docker system df` reports **377 GB of reclaimable images and 26 GB of reclaimable build cache**,
