@@ -132,6 +132,26 @@ is a worse trade. The collapse itself is never missed (final volume and stall fr
 and the flag is a label rather than the alarm — so read the span SEQUENCE, not the count, when
 judging severity.
 
+### P39 confirmed — the liveness guard's first real firing (2026-08-21 11:00)
+
+`105442Z` ended early: *"FALCON is not exploring: 1 m3 mapped in the first ~2 minutes."*
+**Applied the false-positive test and it passes cleanly** — the test being that an aircraft moving
+above 5 m/min when the guard fires means the threshold is wrong:
+
+    distance 3.8 m TOTAL over 190 s   (1.1-1.5 m per minute)
+    span per minute 0.3 / 0.2 / 0.2 / 0.1 m
+
+The aircraft sat still. Tagged PARKED+NEVER-STARTED, altitude never converged (ranger 0.67-1.29 m
+against a 0.90 m target), 232 FSM transitions and never reached FINISH. A true positive, and the
+guard saved the six wasted minutes it was written to save.
+
+**Measured frequency: 1 firing in 103 cycles (~1 %)** since it was added on 2026-08-20 21:23 —
+which is what P39 said the guard would be for: *"the next occurrence will now end early and say
+so, which is also how its frequency gets measured."* No change needed; the threshold stands.
+
+*Note on counting:* `grep -c 'FALCON is not exploring'` returns 4 for this single event — the
+ABORT line, the cycle-end line, and two copies inside the run's JSON. One firing, four lines.
+
 ### Watch — reference divergence, two runs 20x outside the tested range (2026-08-21 07:35)
 
 `064835Z` (1261 m3, a collapse) logged **pos_err mean 17.6 m, median 23.1, max 45.4** over 496
@@ -161,20 +181,27 @@ work — read the FSM log around the transit minute and establish whether the di
 the coverage stall or followed it. Waiting for n=15 is not an option here: at a 2 % base rate
 that is ~750 cycles, about five days.
 
-### Watch — hover altitude outlier at 1.74 m (2026-08-21 05:25, one occurrence)
+### CLOSED — hover altitude does not matter (2026-08-21 11:50)
 
-One cycle hovered at **1.74 m** before handover. Across the last 60 cycles hover is min 1.01,
-p25 1.12, **median 1.19**, p90 1.27 — so this is the single highest and well outside the band.
-Everything else about the cycle looked normal.
+Opened when one cycle hovered at 1.74 m instead of the usual ~1.1, with the trigger "act if hover
+exceeds ~1.5 m again". **Tested and closed: hover height has no relationship to coverage.**
 
-Not acted on: one occurrence, no mechanism, and the altitude path is a known weak spot rather
-than a suspected regression (P18 — the hold has almost no authority in the band it operates in,
-so where the aircraft settles is largely aerodynamic).
+    corr(hover_m, final_volume_m3) = -0.120   (n=142 settled reliable runs)
+    hover <= 1.20 m : median volume 1614  (n=89)
+    hover  > 1.30 m : median volume 1614  (n=14)
 
-**Watch condition:** if hover exceeds ~1.5 m again, investigate the altitude path — compare
-`rooster_command_unit`'s target and `wanted_z` against P18's measurements, and check whether the
-high-hover runs score differently. Flying 0.5 m higher changes what the camera sees, so it would
-matter if it became common. A single outlier in 60 does not.
+Identical medians. The distribution over 232 cycles is median 1.16, p90 1.30, max 1.74; above
+1.5 m happens 2 times in 232 (0.9 %).
+
+**The trigger was also mis-specified**, which is rule 2 again: "exceeds 1.5 m" had already
+happened twice before the watch was written, so it was a criterion the baseline already met. It
+would have fired on ordinary tail behaviour and cost a future session an investigation for
+nothing. No trigger replaces it — the watch is closed, not re-tuned.
+
+*Measurement note:* the first pass at this counted 462 hovers with 4 above 1.5 m. The supervisor
+log prints each hover line twice — once plain, once inside the cycle's JSON — so the raw grep
+double-counts, exactly like `grep -c 'cycle .* completed'` does. The rate was right, the
+denominator was not. When counting anything out of `supervisor.stdout.log`, deduplicate by cycle.
 
 ### Operator note — disk, and why the campaign did NOT act on it (2026-08-20 19:45)
 

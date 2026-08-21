@@ -1646,3 +1646,12 @@ watchdog calls that staleness and restarts twice. The real repair rate was ~0.18
 order of magnitude smaller. The count never lied; the causal story attached to it did. Before
 citing a total as evidence of importance, check whether the events cluster against some phase of
 the system that would produce them for free.
+
+## A log line printed twice makes every count out of that log twice as large
+
+Three separate counts from `supervisor.stdout.log` have now come out doubled or quadrupled:
+cycles completed (the plain line plus the banner both match `cycle .* completed`), P39 firings
+(the ABORT line, the cycle-end line, and two copies inside the run's JSON), and hover altitudes
+(once plain, once inside JSON). Each time the RATE was right and the DENOMINATOR was wrong, which
+is the dangerous shape -- the error hides when you quote a percentage and appears when you quote
+a total. Deduplicate by cycle before counting anything out of a log that also embeds its own JSON.
