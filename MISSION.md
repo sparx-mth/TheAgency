@@ -115,6 +115,10 @@ in kind — only in degree:
 Both flew a normal 230-235 m; they simply flew it in a small box. The run immediately after was
 1744 m3 with zero circling minutes, so nothing persisted.
 
+**Followed up 2026-08-21 06:20:** nine reliable runs since, none with a single circling minute
+(threshold: a minute above 300 deg/m while covering >5 m), none below 1286 m3. The pair was an
+excursion, not a regime. The trigger stays armed but no longer expects to fire.
+
 **No new hypothesis** — the signature is one of the four already known, and Priority 2's rule is
 that only an unmatched signature reopens the question. Recorded because two consecutive extremes
 is worth being able to date later if it becomes a pattern.
