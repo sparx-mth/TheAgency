@@ -83,33 +83,55 @@ battery capacity — it would improve the number without improving the system.
 
 ---
 
-### Operator note — 26 local commits are waiting, nothing has been pushed (2026-08-20 22:30, count refreshed 2026-08-21 06:50)
+### Operator note — 38 local commits are waiting, nothing has been pushed (refreshed 2026-08-21 17:10)
 
 Per your instruction, everything since `d5e3f2df` is committed locally and **nothing has been
-pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 26 commits ahead of its remote;
-`c213b56b` ("give a freshly respawned FCU longer to become armable") is the last commit that is
-on `origin`.
+pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 38 commits ahead of its remote;
+`c213b56b` ("give a freshly respawned FCU longer to become armable") is the last commit on
+`origin`. The loop has run unattended since 2026-08-20 02:17 — 41 hours, ~230 cycles, no
+intervention.
 
-What those 26 contain, grouped:
+**Where the system is: unchanged and stable.** n=173 settled runs, median 1618 m3, collapses 14 %.
+No flight behaviour has been altered since `max_vel` was reverted to 0.8 on 2026-08-20 — the
+configuration has now reproduced its own distribution across 173 runs, and drift is null on both
+pre-specified tests (spearman +0.03 on run order; halves 11/86 vs 14/87).
 
-* **Two flight-behaviour changes, both measured and both kept:** `max_vel` reverted to 0.8 after
-  1.0 failed its pre-registered test, and a liveness guard that ends a cycle in which FALCON
-  never starts exploring.
-* **Four analysis/instrumentation additions:** the per-minute motion table, the circling and
-  parked findings, the run configuration recorded into `metrics.json`, and `test_p38.py` — an
-  analysis written before its data existed.
-* **The rest are records**, including three corrections to my own earlier claims: the dz
-  correlation withdrawn, the best-run headline replaced with the real distribution, and the
-  collapse rate updated from 14 % to 18 %.
+What the 38 contain, grouped:
 
-* **Seven added since (2026-08-21)**, all consolidation rather than new behaviour: the vertical
-  reference-error analysis, the extreme-circling and hover-altitude watches, and the restored
-  video freshness watchdog (a bring-up path that pointed at a file which did not exist in the
-  repo).
+* **Two flight-behaviour changes, both measured and both kept** (from 2026-08-20): `max_vel`
+  reverted to 0.8 after 1.0 failed its pre-registered test, and a liveness guard (P39) that ends
+  a cycle in which FALCON never starts exploring. **P39 has since had its first real firing** and
+  passed its own false-positive test cleanly: the aircraft had moved 3.8 m in 190 s. 1 in 103
+  cycles.
+* **One harness fix:** the stale-frame abort now needs two consecutive samples. A single sample
+  was killing cycles while the video watchdog was mid-restart — 4 cycles (~1 %) went that way.
+  Still unverified, because the failure is too rare to have recurred yet, and it is marked as
+  such rather than assumed good.
+* **One real result — the first pre-registered hypothesis in this campaign to PASS.** P41: an
+  untagged run almost never collapses (0 of 25 fresh, against 7 of 16 tagged, Fisher p = 0.0005).
+  Use it as triage, not as an explanation — 56 % of tags sit on healthy flights. `findings.md`
+  now opens with that verdict.
+* **Four tools**, each written because something had already gone wrong once: the collapse
+  signature classifier, a backfill that made 280 historical runs queryable by failure shape,
+  `check_instrumentation.py` (three probes have died silently in this campaign), and the restored
+  video watchdog — whose repo path did not exist, so the campaign had one only because a hand-
+  started copy in `/tmp` never died.
+* **The rest are records, including five corrections to my own claims.** The watchdog's 1550
+  restarts were 92 % cycle-boundary artifacts, not repairs. A "cluster" of PARKED collapses was
+  not clustered (p = 0.94). A 16-run window with 6 collapses gave a naive p = 0.015 but 0.59 once
+  corrected for having chosen the window after seeing it — and the next block recovered to
+  1667(1), confirming it. The hover-altitude watch was closed outright (corr -0.12, identical
+  medians) rather than re-tuned. And a false-positive check I ran against the 20 best runs gave
+  zero, which was an artifact of picking the cleanest sample.
+
+**Two of those five cost nothing because they were caught before acting.** That is the part worth
+your attention: the campaign spent today refusing to chase three things that looked real, and the
+one hypothesis it did commit to is the one that survived a pre-registered test on fresh data.
 
 Nothing here is speculative or half-finished: every behaviour change is either verified against a
-measured control or reverted, and each commit message carries the evidence. Review at your
-convenience; the loop keeps running and keeps committing locally either way.
+measured control or reverted, every unverified claim is labelled unverified, and each commit
+message carries its evidence. Review at your convenience; the loop keeps running and keeps
+committing locally either way.
 
 ### Watch — two consecutive extreme-circling collapses (2026-08-21 05:57)
 
