@@ -1867,6 +1867,35 @@ harder demands, and the lock-up chain is exactly what harder demands used to tri
 - Robustness to DA3 depth noise.
 - Harness reliability: no hangs, no silent death, always recovering.
 
+### The "recent runs look worse" false alarm, and the test that settles it (2026-08-21 12:50)
+
+Two consecutive full blocks came in at 1689(3) and 1542(3) — **6 collapses in 16 runs, 38 %,
+against a 13.6 % rate over the prior 132.** The naive test agrees it is alarming:
+
+    P(>= 6 collapses in 16 | prior rate 0.136) = 0.015
+
+**That number is wrong, and the way it is wrong is the single most common trap in this campaign.**
+The 16-run window was CHOSEN because it looked bad. The honest question is not "how unlikely is
+this window" but "how unlikely is it that SOME window looks this bad", and over a 148-run sequence
+with 20 000 shuffles:
+
+    P(some 16-run window reaches 6+ collapses under random placement) = **0.59**
+
+Completely unremarkable. Two pre-specified tests — chosen without looking — agree:
+
+    spearman(run order, final volume) = +0.040   (n=148, no trend, if anything upward)
+    first half 9/74 collapses vs second half 15/74   Fisher exact p = 0.265
+    first half median 1600   second half median 1640
+
+**And my own changes were ruled out first**, as they must be: the last ten flights ran 435-458 s
+and every recent cycle ended `completed`, so the two-sample stale-abort edit to `liveness_check`
+is not truncating anything. The only short flight in the last twenty is `105442Z`, which P39
+correctly aborted.
+
+**Action: none.** Recorded because this alarm will recur — it is the same shape as the PARKED
+cluster above, and it is how five earlier leads were born. **The rule: a window selected because
+it looks bad is not evidence. Either correct for the search, or pick the test before looking.**
+
 ### Watch answered — a PARKED cluster that was not a cluster (2026-08-21 10:45)
 
 Three of four consecutive runs collapsed, all tagged PARKED: `095301Z` (967 m3), `101341Z` (1278),

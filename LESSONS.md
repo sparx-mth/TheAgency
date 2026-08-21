@@ -1655,3 +1655,16 @@ cycles completed (the plain line plus the banner both match `cycle .* completed`
 (once plain, once inside JSON). Each time the RATE was right and the DENOMINATOR was wrong, which
 is the dangerous shape -- the error hides when you quote a percentage and appears when you quote
 a total. Deduplicate by cycle before counting anything out of a log that also embeds its own JSON.
+
+## Correct for the search, or the p-value is measuring your attention
+
+Six collapses in the last sixteen runs, against 13.6 % before: p = 0.015, which reads as a real
+regression. But the window was chosen because it looked bad, and the question that follows from
+that is not "how unlikely is this window" but "how unlikely is it that some window looks this
+bad". Shuffling the same 148-run sequence 20 000 times, some 16-run window reaches six or more
+collapses 59 % of the time. The effect was entirely in the choosing.
+
+Two defences, and they are cheap: correct for the search by asking how often ANY window would
+look this extreme, or pick the test before looking -- a rank correlation against run order, or a
+fixed half-split, both of which came back null here. The naive p-value is not a weaker version of
+the corrected one; on searched data it is measuring where you happened to look.
