@@ -96,6 +96,31 @@ Nothing here is speculative or half-finished: every behaviour change is either v
 measured control or reverted, and each commit message carries the evidence. Review at your
 convenience; the loop keeps running and keeps committing locally either way.
 
+### Watch — two consecutive extreme-circling collapses (2026-08-21 05:57)
+
+`022010Z` (642 m3, stall 96 %) and `023024Z` (499 m3, stall 100 %) are the two worst genuine
+flights of the campaign, back to back. Both are the known CIRCLING signature and neither is new
+in kind — only in degree:
+
+```
+022010Z  span/min  36 14  3  5  4  4  4  4     (7 of 8 minutes inside a 3-5 m box)
+023024Z  span/min  27  3  2  3  2  2  2  2     (7 of 8 minutes inside a 2-3 m box)
+```
+
+Both flew a normal 230-235 m; they simply flew it in a small box. The run immediately after was
+1744 m3 with zero circling minutes, so nothing persisted.
+
+**No new hypothesis** — the signature is one of the four already known, and Priority 2's rule is
+that only an unmatched signature reopens the question. Recorded because two consecutive extremes
+is worth being able to date later if it becomes a pattern.
+
+**One detector limitation, deliberately NOT changed:** the CIRCLING flag needs `span_m < 4.0`, so
+`022010Z`'s 4-5 m minutes went uncounted — it flagged 2 of 7 bad minutes. Raising the threshold
+to 6 m would catch them and would also flag 2 minutes of the healthy 1744 m3 run beside it, which
+is a worse trade. The collapse itself is never missed (final volume and stall fraction both scream),
+and the flag is a label rather than the alarm — so read the span SEQUENCE, not the count, when
+judging severity.
+
 ### Watch — hover altitude outlier at 1.74 m (2026-08-21 05:25, one occurrence)
 
 One cycle hovered at **1.74 m** before handover. Across the last 60 cycles hover is min 1.01,
