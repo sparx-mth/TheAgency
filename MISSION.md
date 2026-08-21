@@ -56,6 +56,8 @@ course slew `45 deg/s`, tilt `35/27` with hysteresis, `tracker_pos_kp 1.0`, pinn
 with 4/8/16/30 backoff, escape cooldown `4.0`, tour commit `0` (off), `max_vel 0.8`,
 follower cap `1.0`.
 
+**First pre-registered hypothesis to PASS (P41, 2026-08-21):** an untagged run almost never collapses — 0 of 25 fresh untagged runs, against 7 of 16 tagged (Fisher p=0.0005). Use it as triage, not as an explanation: 56 % of tags sit on healthy flights.
+
 **The one open question, now closed as "not known":** roughly one run in five collapses to
 ~900-1300 m3 instead of ~1800. Three have been dissected and have THREE DIFFERENT mechanisms
 (P37, P38), and every candidate predictor has been tested and failed — circling (-0.09, n=14),
@@ -1935,7 +1937,7 @@ and the sequence as a whole shows no clustering anywhere.
 will have exactly the same instinct, and this is the cheap test that answers it. At a 14 % base
 rate, 3-in-7 has about a 7 % chance on its own, and there have been ~17 such windows.
 
-### P41 — The four signatures LABEL a collapse; they do not explain one (2026-08-21 07:55)
+### P41 — A tag does not explain a collapse; the ABSENCE of one predicts health (2026-08-21, PASSED)
 
 Classified all 120 settled runs against the known failure shapes (PARKED, CIRCLING, WANDERING,
 NEVER-STARTED, plus the new DIVERGED). 16 of 17 collapses carry a tag. The one that does not,
@@ -1966,13 +1968,35 @@ construction — the check was rigged by the sample I chose. Against all 103 hea
 fire 43 % of the time. Second time in one day that a badly chosen comparison set produced a
 confident wrong answer (the other: a +/-300 s window on a 620 s cycle).
 
-**Not claimed, because it would be circular.** The five thresholds were chosen by looking at
-collapses, so their enrichment on those same collapses proves nothing — the
-scan-generates-a-hypothesis problem in structural form. **Pre-registered in `test_p41.py`:**
-`P(collapse | no tag) <= 5 %` on runs started after 2026-08-21 08:00, `n >= 40` (~7 hours of
-flying). One claim, nothing else scanned on that set. If it passes, "no tag" becomes a usable
-triage signal — *this run is almost certainly fine* — which is worth having even though no tag
-explains a collapse.
+**RESULT (2026-08-21 15:05): PASSED — the first pre-registered hypothesis in this campaign to
+survive, after five refutations.**
+
+    41 fresh runs since the cutoff
+    untagged: 25 runs, 0 collapsed   ->  P(collapse | no tag) = 0.0 %   (bar: <= 5 %)
+
+**Checked first that the result is not vacuous.** Zero collapses among untagged runs proves
+nothing if the window contained no collapses at all. It contained **seven, and every one of them
+was tagged**:
+
+    tagged    16 runs,  7 collapsed  (44 %)
+    untagged  25 runs,  0 collapsed  ( 0 %)
+    Fisher exact two-sided p = 0.0005   [descriptive, NOT the pre-registered claim]
+
+The seven: `105442Z` 224 m3 (PARKED+NEVER-STARTED), `115158Z` 721 (CIRCLING), `095301Z` 967
+(PARKED), `113136Z` 1131 (CIRCLING), `102356Z` 1196 (PARKED), `101341Z` 1278 (PARKED), `122302Z`
+1295 (CIRCLING).
+
+**What this licenses, precisely.** An untagged run is almost certainly fine — that is a usable
+triage signal, and it is now confirmed on fresh data rather than on the circular sample that
+generated it. **What it does NOT license: a tag is still not an explanation.** 9 of the 16 tagged
+runs finished healthy, so 56 % of tags are on good flights, and P38's null result on circling
+stands untouched.
+
+**And the honest limit on the number.** 0 of 25 does not *prove* the rate is <= 5 %; it fails to
+refute it. The rule of three puts the 95 % upper bound at **12 %** — the point estimate is zero,
+the true rate could be a good deal higher, and only more untagged runs will narrow it. The strong
+part of this result is the CONTRAST (p = 0.0005), not the 0.0 %.
+
 
 **Shipped meanwhile:** `analyze.collapse_signature()` writes the tags into `metrics.json`, so
 every run now carries its own diagnosis and the corpus is queryable by failure shape.
