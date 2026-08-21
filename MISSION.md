@@ -16,36 +16,33 @@
 the point — it is what stops a later session re-running a refuted experiment — but you do not
 need all of it to act. This section is the orientation; the rest is evidence.*
 
-**Where it stands — measured over all 36 settled-configuration runs (2026-08-20 20:15):**
+**Where it stands — measured over all 113 settled-configuration runs (2026-08-21 06:50):**
 
-| | opening median | settled config, n=36 |
+| | opening median | settled config, n=113 |
 |---|---|---|
-| final volume | 1060 m3 | **median 1586** (p25 1427, p75 1711, max **1871**) |
-| coverage rate | 75 m3/min | **median 163** (clean runs, n=30) |
-| stalled share of flight | 53 % | **median 17 %** (p25 9, p75 31, max 77) |
-| runs below 1300 m3 | — | **8 of 54 (15 %)** |
+| final volume | 1060 m3 | **median 1614** (p25 1432, p75 1723, max **1873**) |
+| coverage rate | 75 m3/min | **median 158** |
+| stalled share of flight | 53 % | **median 17 %** |
+| runs below 1300 m3 | — | **15 of 113 (13 %)** |
 
-*An earlier version of this summary said "a repeatable ~1800 m3 / ~190 m3/min" and "4-10 %
-stalled". Those were the BEST runs, not the distribution: 1823 and 190 are the maxima, and 4-10 %
-came from two flights. The medians above are what the configuration actually delivers, and the
-p25/p75 spread is the honest picture — a fifty percent range between quartiles on final volume,
-with one run in seven landing below 1300.*
+*These are the DISTRIBUTION, not the best runs. An early version of this summary claimed "a
+repeatable ~1800 m3 / ~190 m3/min" and "4-10 % stalled"; those were the maxima and two flights
+respectively. The honest picture is the p25/p75 spread — roughly a 20 % range between quartiles,
+with about one run in eight landing below 1300.*
 
-**Re-measured at n=100 (2026-08-21 07:33): median 1608 m3, collapses 14 of 100 (14 %).** The
-sample has almost doubled since these figures were set at n=54 (1586 median, 15 %) and they have
-not moved beyond noise — which is the useful result. A converged configuration that reproduces
-its own distribution over a hundred runs is a stronger claim than the numbers themselves.
+**The numbers have not moved as the sample tripled, and that is the useful result.** Successive
+re-measurements: n=36 → 1586 / 15 %, n=54 → 1586 / 15 %, n=100 → 1608 / 14 %, n=113 → 1614 /
+13 %. A configuration that reproduces its own distribution over a hundred-plus runs is a stronger
+claim than any of the individual medians.
 
-**No drift, re-checked at n=54 (23:32).** Blocks of eight give final medians 1588, 1557, 1657,
-1574, **1400**, 1576, **1706** — the newest block is the highest yet, and the collapse rate has
-fallen from 18 % to 15 % as more runs land, which settles the 1400 block as noise. The best
-flight is now **1871 m3** at 178.6 m3/min (`200301Z`, reliable, no gaps, no parked or circling
-minutes, 255 m flown). Earlier blocks read 1, 1, 1, 1, **3**, 1 collapses. Splitting in half: first 22 runs median
-1602 with 3 collapses, last 23 median 1520 with 5. That looks like mild worsening and is not:
-at an 18 % base rate a block of eight expects ~1.5 collapses, so seeing 3 has roughly a 13 %
-chance on its own, and the block after it recovers to 1580 with 1. Small integers make a run of
-bad luck look like a trend — which is why drift is judged in blocks, and why one low block is not
-acted on.
+**No drift, judged in blocks of eight** (median, collapses):
+`1588(1) 1557(1) 1657(1) 1574(1) 1400(3) 1576(1) 1641(0) 1477(0) 1710(0) 1561(1) 1581(2)
+1689(2) 1613(2) 1699(0)`. The 1400 block with 3 collapses looked like decay and was not: at a
+~15 % base rate a block of eight expects ~1.2 collapses, so 3 has roughly a 13 % chance on its
+own, and the next block recovered to 1576. Equally, the newest block at 1699(0) is NOT evidence
+of improvement — the previous high block (1710(0)) was followed by 1561(1). Small integers make
+luck look like a trend in both directions, which is why drift is judged in blocks and why a
+single block is never acted on. Best single flight: **1873 m3** (`052208Z`).
 
 **Settled configuration — change nothing here without a pre-registered test:**
 `raycast_max 8.0`, `cluster_min 50`, `safe_distance 0.55`, bspline distance weight `150`,
@@ -78,14 +75,14 @@ battery capacity — it would improve the number without improving the system.
 
 ---
 
-### Operator note — 19 local commits are waiting, nothing has been pushed (2026-08-20 22:30)
+### Operator note — 26 local commits are waiting, nothing has been pushed (2026-08-20 22:30, count refreshed 2026-08-21 06:50)
 
 Per your instruction, everything since `d5e3f2df` is committed locally and **nothing has been
-pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 19 commits ahead of its remote;
+pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 26 commits ahead of its remote;
 `c213b56b` ("give a freshly respawned FCU longer to become armable") is the last commit that is
 on `origin`.
 
-What those 19 contain, grouped:
+What those 26 contain, grouped:
 
 * **Two flight-behaviour changes, both measured and both kept:** `max_vel` reverted to 0.8 after
   1.0 failed its pre-registered test, and a liveness guard that ends a cycle in which FALCON
@@ -96,6 +93,11 @@ What those 19 contain, grouped:
 * **The rest are records**, including three corrections to my own earlier claims: the dz
   correlation withdrawn, the best-run headline replaced with the real distribution, and the
   collapse rate updated from 14 % to 18 %.
+
+* **Seven added since (2026-08-21)**, all consolidation rather than new behaviour: the vertical
+  reference-error analysis, the extreme-circling and hover-altitude watches, and the restored
+  video freshness watchdog (a bring-up path that pointed at a file which did not exist in the
+  repo).
 
 Nothing here is speculative or half-finished: every behaviour change is either verified against a
 measured control or reverted, and each commit message carries the evidence. Review at your
