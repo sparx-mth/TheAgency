@@ -1840,6 +1840,35 @@ harder demands, and the lock-up chain is exactly what harder demands used to tri
 - Robustness to DA3 depth noise.
 - Harness reliability: no hangs, no silent death, always recovering.
 
+### Watch answered — a PARKED cluster that was not a cluster (2026-08-21 10:45)
+
+Three of four consecutive runs collapsed, all tagged PARKED: `095301Z` (967 m3), `101341Z` (1278),
+`102356Z` (1196). The signature is unambiguous — **distance exactly 0 for 3-4 whole minutes** while
+`pos_err` stayed normal at 0.47-0.83 m, so the follower was tracking fine and the REFERENCE stopped
+moving. Two never recovered; `095301Z` parked for minutes 3-6 and came back.
+
+**First: ruled out my own changes.** All three flew their full ~440 s and ended `completed`, so the
+two-sample stale-abort edit to `liveness_check` was not truncating anything. Everything else changed
+today is analysis-only.
+
+**Then: ruled out environmental drift.** Sphera is restarted almost every cycle (the battery forces
+it), so `R1`, `falcon` and `ros1_bridge` are minutes old on every flight — there is no long-running
+simulator state to accumulate. Memory is unremarkable across every container.
+
+**Then: tested the cluster itself, and it is not one.** Permutation test over all 135 settled runs,
+20 000 shuffles, on the PARKED indicator:
+
+    adjacent PARKED pairs   observed 1   p = 0.94
+    longest PARKED streak   observed 2   p = 0.94
+
+PARKED runs are placed *no more* clumpily than chance — slightly less, in fact. The tail reads
+`...0001011`: three PARKED in four runs, but only ONE adjacent pair. My eye called that a cluster
+and the sequence as a whole shows no clustering anywhere.
+
+**Action: none, deliberately.** Recorded because the next session to see three bad runs in a row
+will have exactly the same instinct, and this is the cheap test that answers it. At a 14 % base
+rate, 3-in-7 has about a 7 % chance on its own, and there have been ~17 such windows.
+
 ### P41 — The four signatures LABEL a collapse; they do not explain one (2026-08-21 07:55)
 
 Classified all 120 settled runs against the known failure shapes (PARKED, CIRCLING, WANDERING,
