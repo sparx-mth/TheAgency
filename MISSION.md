@@ -31,6 +31,11 @@ came from two flights. The medians above are what the configuration actually del
 p25/p75 spread is the honest picture — a fifty percent range between quartiles on final volume,
 with one run in seven landing below 1300.*
 
+**Re-measured at n=100 (2026-08-21 07:33): median 1608 m3, collapses 14 of 100 (14 %).** The
+sample has almost doubled since these figures were set at n=54 (1586 median, 15 %) and they have
+not moved beyond noise — which is the useful result. A converged configuration that reproduces
+its own distribution over a hundred runs is a stronger claim than the numbers themselves.
+
 **No drift, re-checked at n=54 (23:32).** Blocks of eight give final medians 1588, 1557, 1657,
 1574, **1400**, 1576, **1706** — the newest block is the highest yet, and the collapse rate has
 fallen from 18 % to 15 % as more runs land, which settles the 1400 block as noise. The best
