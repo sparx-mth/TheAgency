@@ -864,6 +864,79 @@ def _pct(fraction):
     return "?" if fraction is None else _f(100 * fraction, "%.0f")
 
 
+#: Thresholds for ``collapse_signature``. Derived from the collapses they
+#: label, so see that function's note on circularity before trusting them.
+PARKED_MAX_M = 2.0
+CIRCLING_MAX_SPAN_M = 4.0
+CIRCLING_MIN_DIST_M = 5.0
+DIVERGED_POS_ERR_M = 5.0
+NEVER_STARTED_MAX_M = 60.0
+WANDERING_MIN_STALL_S = 120.0
+
+
+def collapse_signature(metrics):
+    """Which known failure shapes this run matches, as a list of tags.
+
+    COLLAPSE_SIGNATURE_TAGS -- a label, NOT a predictor.
+    
+    Five shapes a bad flight takes, so a run carries its diagnosis instead of
+    needing archaeology. Measured over 120 settled runs (2026-08-21):
+    
+        tag             P(collapse|tag)   lift over the 14% base rate
+        NEVER-STARTED       100% (n=1)        7.1x
+        DIVERGED             50% (n=2)        3.5x
+        PARKED               33% (n=15)       2.4x
+        WANDERING            29% (n=7)        2.0x
+        CIRCLING             24% (n=42)       1.7x
+        any tag              27% (n=60)       1.9x
+        NO tag                2% (n=60)       0.1x
+    
+    Read that table the right way round. A tag is weak evidence: 32 of the 42
+    CIRCLING runs finished healthy, so "it collapsed and it was circling" is not
+    an explanation -- which is exactly why P38 found no correlation between
+    circling minutes and final volume. The informative cell is the last one: an
+    untagged run collapsed once in sixty.
+    
+    And treat even that as provisional. These thresholds were chosen by looking at
+    collapses, so their enrichment on those same collapses is partly circular --
+    the scan-generates-a-hypothesis problem in structural form. The claim is
+    pre-registered in test_p41.py and must be confirmed on fresh runs.
+
+    Args:
+        metrics: The metrics dict, needing ``motion``, ``coverage`` and
+            ``tracking``.
+
+    Returns:
+        list[str]: Matching tags, empty when the flight matches none.
+    """
+    cov = metrics.get("coverage") or {}
+    mo = metrics.get("motion") or {}
+    # The trailing row is a partial minute; judging it as a whole one reports a
+    # short final sample as a parked minute.
+    rows = (mo.get("per_minute") or [])[:-1]
+    parked = [r for r in rows if (r.get("distance_m") or 0) < PARKED_MAX_M]
+    circling = [r for r in rows
+                if (r.get("span_m") or 99.0) < CIRCLING_MAX_SPAN_M
+                and (r.get("distance_m") or 0) >= CIRCLING_MIN_DIST_M]
+    tags = []
+    if parked:
+        tags.append("PARKED")
+    if circling:
+        tags.append("CIRCLING")
+    if (((metrics.get("tracking") or {}).get("pos_err_m") or {}).get("mean")
+            or 0.0) > DIVERGED_POS_ERR_M:
+        tags.append("DIVERGED")
+    if (mo.get("distance_m") or 0.0) < NEVER_STARTED_MAX_M:
+        tags.append("NEVER-STARTED")
+    # Wandering is the residual: motion healthy in every minute, yet the map
+    # stopped growing. Only meaningful once parked and circling are excluded --
+    # otherwise it would absorb both.
+    if (not parked and not circling
+            and (cov.get("longest_stall_s") or 0.0) >= WANDERING_MIN_STALL_S):
+        tags.append("WANDERING")
+    return tags
+
+
 def _rank(m):
     """Score candidate next fixes; the highest score is the most urgent."""
     mo, tr, al, ex, he = (m["motion"], m["tracking"], m["altitude"],
@@ -1128,6 +1201,7 @@ def analyze(run_dir):
         exploration=exploration_metrics(lines),
         clearance=clearance_metrics(run_dir),
         config=config_metrics(run_dir))
+    metrics["collapse_signature"] = collapse_signature(metrics)
     metrics["data_gaps"] = _data_gaps(metrics, samples, bad_lines, log_files)
     metrics["ranked_findings"] = _rank(metrics)
     (run_dir / "metrics.json").write_text(

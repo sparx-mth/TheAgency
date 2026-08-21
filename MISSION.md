@@ -1826,6 +1826,48 @@ harder demands, and the lock-up chain is exactly what harder demands used to tri
 - Robustness to DA3 depth noise.
 - Harness reliability: no hangs, no silent death, always recovering.
 
+### P41 — The four signatures LABEL a collapse; they do not explain one (2026-08-21 07:55)
+
+Classified all 120 settled runs against the known failure shapes (PARKED, CIRCLING, WANDERING,
+NEVER-STARTED, plus the new DIVERGED). 16 of 17 collapses carry a tag. The one that does not,
+`233515Z` at 1152 m3, misses WANDERING on a 113 s stall against a 120 s threshold — a boundary
+case, not a sixth mechanism. **So no unmatched signature, and the closed question stays closed.**
+
+**But the tags fire on healthy runs almost as readily, and that is the finding:**
+
+| tag | P(collapse \| tag) | n | lift over the 14 % base rate |
+|---|---|---|---|
+| NEVER-STARTED | 100 % | 1 | 7.1x |
+| DIVERGED | 50 % | 2 | 3.5x |
+| PARKED | 33 % | 15 | 2.4x |
+| WANDERING | 29 % | 7 | 2.0x |
+| CIRCLING | 24 % | 42 | 1.7x |
+| any tag | 27 % | 60 | 1.9x |
+| **no tag** | **2 %** | **60** | **0.1x** |
+
+**32 of the 42 circling runs finished healthy.** "It collapsed and it was circling" is therefore
+not an explanation, and this is the mechanism behind P38's null result: circling is common on
+good flights too, so it cannot correlate with volume. The same goes, more weakly, for every other
+tag. Read the table for its last row, not its first: the informative cell is that an untagged run
+collapsed **once in sixty**.
+
+**A caution about my own reasoning here.** I first checked false positives against the 20 BEST
+runs, got zero, and briefly had a discriminator. The top 20 are the cleanest runs by
+construction — the check was rigged by the sample I chose. Against all 103 healthy runs the tags
+fire 43 % of the time. Second time in one day that a badly chosen comparison set produced a
+confident wrong answer (the other: a +/-300 s window on a 620 s cycle).
+
+**Not claimed, because it would be circular.** The five thresholds were chosen by looking at
+collapses, so their enrichment on those same collapses proves nothing — the
+scan-generates-a-hypothesis problem in structural form. **Pre-registered in `test_p41.py`:**
+`P(collapse | no tag) <= 5 %` on runs started after 2026-08-21 08:00, `n >= 40` (~7 hours of
+flying). One claim, nothing else scanned on that set. If it passes, "no tag" becomes a usable
+triage signal — *this run is almost certainly fine* — which is worth having even though no tag
+explains a collapse.
+
+**Shipped meanwhile:** `analyze.collapse_signature()` writes the tags into `metrics.json`, so
+every run now carries its own diagnosis and the corpus is queryable by failure shape.
+
 ## 7b. How to judge a change (run-to-run variance is large)
 
 Two consecutive runs with an **identical** configuration measured 133.8 m and 390.1 m flown,
