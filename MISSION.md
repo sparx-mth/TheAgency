@@ -20,7 +20,7 @@ need all of it to act. This section is the orientation; the rest is evidence.*
 
 | | opening median | settled config, n=153 |
 |---|---|---|
-| final volume | 1060 m3 | **median 1626** (p25 1427, p75 1723, max **1883**) |
+| final volume | 1060 m3 | **median 1620** (p25 1427, p75 1720, max **1934**) |
 | coverage rate | 75 m3/min | **median 158** |
 | stalled share of flight | 53 % | **median 17 %** |
 | runs below 1300 m3 | — | **24 of 153 (16 %)** |
@@ -48,7 +48,10 @@ produces false alarms in both directions. Worked example on 2026-08-21: two cons
 with 3 collapses each gave a naive p=0.015 and looked like a real regression; corrected for the
 fact that the window was chosen after seeing it, p=0.59, and the next block recovered to 1667(1)
 with the four runs after it at 1695/1640/1774/1860. **A window selected because it looks bad is
-not evidence.** Best single flight: **1883 m3**.
+not evidence.** Best single flight: **1934 m3** (`171714Z`, 2026-08-21) — and a record is a tail
+event, not a shift: the median moved 1626 -> 1620 over the same 26 runs, and both drift tests
+stayed null. The earlier version of this summary was built on best runs and had to be corrected;
+do not rebuild it.
 
 **Settled configuration — change nothing here without a pre-registered test:**
 `raycast_max 8.0`, `cluster_min 50`, `safe_distance 0.55`, bspline distance weight `150`,
