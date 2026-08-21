@@ -1941,9 +1941,23 @@ correctly aborted.
 after that were 1695 / 1640 / 1774 / 1860, all clean. The search-corrected reading was right and
 chasing it would have burned a day.
 
+**Second worked example, a different shape (2026-08-22 00:20).** The last four block collapse
+counts read **0, 1, 2, 3** — a clean monotone rise, which is far more persuasive than a single bad
+window and feels like watching something degrade. It is not:
+
+    P(some 4 consecutive blocks are monotone non-decreasing by chance) = **0.93**
+
+Near-certain across 24 blocks. Both pre-specified tests were null on the same data — Mann-Whitney
+on run index between collapsed and healthy runs gave z=+0.95, p=0.34 (collapses are not landing
+later), and the fixed half-split gave 13/98 vs 18/99, Fisher p=0.43. The full block sequence
+`1 1 1 1 3 1 0 0 0 1 2 2 2 0 2 0 3 3 1 0 0 1 2 3` also contains an earlier `3 3` that recovered
+straight to `1 0 0`.
+
 **Action: none.** Recorded because this alarm will recur — it is the same shape as the PARKED
-cluster above, and it is how five earlier leads were born. **The rule: a window selected because
-it looks bad is not evidence. Either correct for the search, or pick the test before looking.**
+cluster above, and it is how five earlier leads were born. **The rule generalises past windows:
+ANY pattern you noticed after looking — a bad patch, a cluster, or a monotone trend — needs the
+search correction. Either ask how often chance produces something that striking, or pick the test
+before looking.**
 
 ### Watch answered — a PARKED cluster that was not a cluster (2026-08-21 10:45)
 
