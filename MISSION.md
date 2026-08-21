@@ -132,6 +132,35 @@ is a worse trade. The collapse itself is never missed (final volume and stall fr
 and the flag is a label rather than the alarm — so read the span SEQUENCE, not the count, when
 judging severity.
 
+### Watch — reference divergence, two runs 20x outside the tested range (2026-08-21 07:35)
+
+`064835Z` (1261 m3, a collapse) logged **pos_err mean 17.6 m, median 23.1, max 45.4** over 496
+heartbeats. The corpus median across 115 settled runs is **0.83 m** (p90 1.75). A median of 23 m
+means more than half that flight was spent ~23 m from its reference: that is not tracking lag,
+it is a reference somewhere else entirely. Its per-minute table fits — minutes 1-3 normal, then
+minute 4 covering 83 m across a 55 m span (the aircraft crossing the map), then 6/20/13/5 m for
+the rest, with `escapes: 24` and heading error averaging 35 deg.
+
+**This does NOT contradict the closed tracking-error result.** That test (+0.20, n=15,
+pre-registered on fresh data) covered ordinary variation, roughly 0.5-2 m. Nothing in it speaks
+to a 20x outlier, because a correlation measured across a narrow range says nothing about a point
+far outside it. Two different regimes, not two points on one scale.
+
+**No claim, and deliberately no action.** Only **2 of 115** runs exceed 5 m mean (`064835Z` 17.6,
+`051153Z` 5.28 — and the latter has median 1.2, so it is a brief excursion, not sustained
+divergence like the former). n=2 against the campaign's own n>=15 rule. Both landed low (1261,
+1322) and the median volume of the pair is 1292 against 1618 for the rest, which is suggestive
+and nothing more; at n=2 that comparison has no power.
+
+**What was done instead:** the analyzer now emits a `REFERENCE DIVERGENCE` finding above 5 m mean,
+reporting mean/median/p90/max so sustained divergence is distinguishable from an excursion. This
+is the same detection-without-prevention stance already taken for PARKED, CIRCLING and PLATEAU.
+
+**Trigger:** a THIRD sustained case (mean > 5 m *and* median > 5 m) makes it worth an hour of
+work — read the FSM log around the transit minute and establish whether the divergence preceded
+the coverage stall or followed it. Waiting for n=15 is not an option here: at a 2 % base rate
+that is ~750 cycles, about five days.
+
 ### Watch — hover altitude outlier at 1.74 m (2026-08-21 05:25, one occurrence)
 
 One cycle hovered at **1.74 m** before handover. Across the last 60 cycles hover is min 1.01,

@@ -909,6 +909,27 @@ def _rank(m):
                "/".join("%.1f" % r["span_m"] for r in circling),
                "/".join(str(r["deg_per_m"]) for r in circling)))
 
+    # A reference the aircraft is not merely lagging but is nowhere near. The
+    # ordinary spread is 0.83 m median, 1.75 m p90 across 115 settled runs, and
+    # tracking error in THAT range was tested and closed as a collapse predictor
+    # (+0.20, n=15, pre-registered). This flag is for the other regime: two runs
+    # have sat above 5 m mean -- 17.6 m on 064835Z, median 23 m, i.e. more than
+    # half the flight spent ~23 m from the reference -- which is not lag, it is
+    # a reference somewhere else entirely. Too rare to correlate (2 of 115), so
+    # this LABELS it rather than claiming it causes anything; without the label
+    # the next occurrence costs the same archaeology this one did.
+    pe_mean = ((tr.get("pos_err_m") or {}).get("mean")) or 0.0
+    if pe_mean > 5.0:
+        pe = tr["pos_err_m"]
+        add(50.0 + pe_mean,
+            "REFERENCE DIVERGENCE: pos_err mean %.1f m (median %.1f, p90 %.1f, "
+            "max %.1f) against a 0.83 m corpus median -- the aircraft was not "
+            "tracking this reference, it was chasing one somewhere else. Read "
+            "the per-minute span table for a long transit minute, and check "
+            "whether the divergence PRECEDED the coverage stall or followed it."
+            % (pe_mean, pe.get("median") or -1, pe.get("p90") or -1,
+               pe.get("max") or -1))
+
     add(mo["stops_per_min"],
         "P1 stop/go stutter: %s stops in %ss (%s/min); stop duration %s s, "
         "%ss stopped in total; %s%% of flight below %s m/s; %ss moving "
