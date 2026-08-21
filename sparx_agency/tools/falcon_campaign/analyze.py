@@ -872,6 +872,8 @@ CIRCLING_MIN_DIST_M = 5.0
 DIVERGED_POS_ERR_M = 5.0
 NEVER_STARTED_MAX_M = 60.0
 WANDERING_MIN_STALL_S = 120.0
+#: Final volume below which a run is called a collapse.
+COLLAPSE_M3 = 1300.0
 
 
 def collapse_signature(metrics):
@@ -1103,6 +1105,31 @@ def _rank(m):
     return [text for _, text in out]
 
 
+def _triage_line(metrics):
+    """One line saying whether this run needs reading at all.
+
+    Wording is bounded by what P41 actually established on fresh data (0 of 25
+    untagged runs collapsed, against 7 of 16 tagged, Fisher p=0.0005): the
+    ABSENCE of a signature predicts health, while a tag does NOT explain a
+    collapse -- 56 % of tags sit on healthy flights. So an untagged run is
+    called almost certainly fine, and a tagged one is only called worth
+    reading. Neither is called a diagnosis.
+    """
+    tags = metrics.get("collapse_signature")
+    if tags is None:
+        return "**Triage: not available** -- this run predates the signature classifier."
+    volume = (metrics.get("coverage") or {}).get("final_m3")
+    collapsed = volume is not None and volume < COLLAPSE_M3
+    if not tags:
+        return ("**Triage: CLEAN** -- no failure signature. Untagged runs collapsed "
+                "0 times in 25 on fresh data, so this one is almost certainly fine%s."
+                % (" -- but it DID land low, which makes it worth a look"
+                   if collapsed else ""))
+    return ("**Triage: %s** -- worth reading. A tag is not a diagnosis: 56 %% of "
+            "tagged runs finish healthy, so read the per-minute table before "
+            "concluding anything." % "+".join(tags))
+
+
 def _render(run_dir, metrics):
     """Build findings.md: ranked actions first, then the supporting numbers."""
     mo = metrics["motion"]
@@ -1116,6 +1143,7 @@ def _render(run_dir, metrics):
              % (_f((metrics.get("coverage") or {}).get("final_m3"), "%.0f"),
                 _pct((metrics.get("coverage") or {}).get("frac_of_box")),
                 _f((metrics.get("coverage") or {}).get("rate_m3_per_min"), "%.1f")),
+             "", _triage_line(metrics),
              "", "## Fix next (ranked)", ""]
     lines += ["%d. %s" % (i, t)
               for i, t in enumerate(metrics["ranked_findings"], 1)] or [
