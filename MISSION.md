@@ -1953,6 +1953,11 @@ later), and the fixed half-split gave 13/98 vs 18/99, Fisher p=0.43. The full bl
 `1 1 1 1 3 1 0 0 0 1 2 2 2 0 2 0 3 3 1 0 0 1 2 3` also contains an earlier `3 3` that recovered
 straight to `1 0 0`.
 
+**Follow-through (2026-08-22 01:20, one hour later):** the next block came in at **1639(1)**, so
+the "trend" reads 0, 1, 2, 3, **1**. Both pre-specified tests moved further toward null as the
+sample grew (Mann-Whitney z=+0.61 p=0.54; halves 14/101 vs 17/102, Fisher p=0.70). Same outcome as
+the first worked example, one block later.
+
 **Action: none.** Recorded because this alarm will recur — it is the same shape as the PARKED
 cluster above, and it is how five earlier leads were born. **The rule generalises past windows:
 ANY pattern you noticed after looking — a bad patch, a cluster, or a monotone trend — needs the
