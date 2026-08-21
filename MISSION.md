@@ -16,33 +16,39 @@
 the point — it is what stops a later session re-running a refuted experiment — but you do not
 need all of it to act. This section is the orientation; the rest is evidence.*
 
-**Where it stands — measured over all 113 settled-configuration runs (2026-08-21 06:50):**
+**Where it stands — measured over all 153 settled-configuration runs (2026-08-21 13:50):**
 
-| | opening median | settled config, n=113 |
+| | opening median | settled config, n=153 |
 |---|---|---|
-| final volume | 1060 m3 | **median 1614** (p25 1432, p75 1723, max **1873**) |
+| final volume | 1060 m3 | **median 1626** (p25 1427, p75 1723, max **1883**) |
 | coverage rate | 75 m3/min | **median 158** |
 | stalled share of flight | 53 % | **median 17 %** |
-| runs below 1300 m3 | — | **15 of 113 (13 %)** |
+| runs below 1300 m3 | — | **24 of 153 (16 %)** |
 
 *These are the DISTRIBUTION, not the best runs. An early version of this summary claimed "a
 repeatable ~1800 m3 / ~190 m3/min" and "4-10 % stalled"; those were the maxima and two flights
 respectively. The honest picture is the p25/p75 spread — roughly a 20 % range between quartiles,
-with about one run in eight landing below 1300.*
+with about one run in six landing below 1300.*
 
-**The numbers have not moved as the sample tripled, and that is the useful result.** Successive
-re-measurements: n=36 → 1586 / 15 %, n=54 → 1586 / 15 %, n=100 → 1608 / 14 %, n=113 → 1614 /
-13 %. A configuration that reproduces its own distribution over a hundred-plus runs is a stronger
-claim than any of the individual medians.
+**The numbers have not moved as the sample quadrupled, and that is the useful result.** Successive
+re-measurements: n=36 → 1586 / 15 %, n=54 → 1586 / 15 %, n=100 → 1608 / 14 %, n=113 → 1614 / 13 %,
+n=153 → 1626 / 16 %. A configuration that reproduces its own distribution over 150 runs is a
+stronger claim than any of the individual medians.
 
-**No drift, judged in blocks of eight** (median, collapses):
-`1588(1) 1557(1) 1657(1) 1574(1) 1400(3) 1576(1) 1641(0) 1477(0) 1710(0) 1561(1) 1581(2)
-1689(2) 1613(2) 1699(0)`. The 1400 block with 3 collapses looked like decay and was not: at a
-~15 % base rate a block of eight expects ~1.2 collapses, so 3 has roughly a 13 % chance on its
-own, and the next block recovered to 1576. Equally, the newest block at 1699(0) is NOT evidence
-of improvement — the previous high block (1710(0)) was followed by 1561(1). Small integers make
-luck look like a trend in both directions, which is why drift is judged in blocks and why a
-single block is never acted on. Best single flight: **1873 m3** (`052208Z`).
+**No drift — and this is now a measured claim, not an eyeballed one.** Two tests, both chosen
+before looking, which is what makes them worth anything:
+
+    spearman(run order, final volume) = +0.040        (n=153, no trend)
+    first half vs second half collapses: 9/74 vs 15/74, Fisher exact p = 0.265
+    first half median 1600, second half median 1640
+
+**Use those two tests, not the block list, to answer "has it drifted?"** The blocks are still
+recorded — `… 1699(0) 1654(2) 1504(0) 1689(3) 1542(3) 1667(1)` — but eyeballing them is what
+produces false alarms in both directions. Worked example on 2026-08-21: two consecutive blocks
+with 3 collapses each gave a naive p=0.015 and looked like a real regression; corrected for the
+fact that the window was chosen after seeing it, p=0.59, and the next block recovered to 1667(1)
+with the four runs after it at 1695/1640/1774/1860. **A window selected because it looks bad is
+not evidence.** Best single flight: **1883 m3**.
 
 **Settled configuration — change nothing here without a pre-registered test:**
 `raycast_max 8.0`, `cluster_min 50`, `safe_distance 0.55`, bspline distance weight `150`,
@@ -1891,6 +1897,10 @@ Completely unremarkable. Two pre-specified tests — chosen without looking — 
 and every recent cycle ended `completed`, so the two-sample stale-abort edit to `liveness_check`
 is not truncating anything. The only short flight in the last twenty is `105442Z`, which P39
 correctly aborted.
+
+**Follow-through (13:50):** the block after those two came in at **1667(1)**, and the four runs
+after that were 1695 / 1640 / 1774 / 1860, all clean. The search-corrected reading was right and
+chasing it would have burned a day.
 
 **Action: none.** Recorded because this alarm will recur — it is the same shape as the PARKED
 cluster above, and it is how five earlier leads were born. **The rule: a window selected because
