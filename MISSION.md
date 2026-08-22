@@ -2183,6 +2183,28 @@ rather than a cause. Verified on two dead runs and one healthy one.
 the median for free — breaking comparability with all 253 recorded runs. The wasted minutes are
 the price of a dataset that still compares. Revisit only with a deliberate decision to re-baseline.
 
+**The evidence was being deleted faster than it could be read (fixed 2026-08-22 08:50).** Of the
+31 planner-death runs, only **2** still had logs — pruning keeps the newest 30 runs and at a 12 %
+rate the interesting ones age out first. The supervisor now exempts any run whose `metrics.json`
+records `process_died` from log pruning. Verified the grep guard against all 423 runs on disk: it
+agrees with the parsed metric on every one, keeping 43 and pruning 380. Cost is a few hundred MB
+against 460 GB free.
+
+**What the two survivors did and did NOT show.** Both died `exit code -6` on `exploration_node`,
+same as `054433Z`. But **neither contains the glog `Check failed` line** — so the planner aborts
+for at least two distinguishable reasons, and I was wrong to generalise the negative-voxel-index
+story from a single sample. Their last trajectory discontinuities were at
+`(55.67, -25.18, 1.68) -> (52.59, -31.13, 2.05)` and `(48.71, -16.26, 1.75) -> (48.13, -16.09,
+0.94)`, with collisions flagged at `(54.05, -30.42, 1.40)` and `(59.16, -20.51, 0.93)` — all
+plausibly inside the box, unlike the z=0.20 m case.
+
+**I also tried and discarded a fix.** I wrote a collector for
+`/root/.ros/log/*/exploration_node-*.log`, then checked the container: that file **does not
+exist** — the node uses glog and roslaunch never creates it, so the collector would have written
+an empty file every cycle and looked like a solution. Reverted unshipped. Same failure shape as
+the missing watchdog script: a no-op that reads as a fix. Where the abort reason actually lands is
+still unknown, and the pruning exemption is what buys the chance to find out.
+
 **The real fix is upstream and is NOT to be attempted unattended:** either bounds-check before
 indexing (a C++ patch in `patches/`, needing a container rebuild) or keep the aircraft inside the
 box. Before either, establish WHICH axis goes out of range — the z = 0.20 m discontinuity is the

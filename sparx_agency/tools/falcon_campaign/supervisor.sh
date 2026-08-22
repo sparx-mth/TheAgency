@@ -157,8 +157,19 @@ EOF
   # raw truth.jsonl are what the campaign actually reads afterwards, so only the
   # newest runs keep their logs. analyze.py refuses to re-analyse a run whose
   # logs are gone rather than overwrite its metrics with zeros.
+  # ...EXCEPT runs where FALCON's planner died. P42 makes those the campaign's
+  # most valuable runs -- the planner SIGABRTs in ~12 % of flights and those
+  # collapse at 52 % against 12 % -- and their abort reason lives only in the
+  # logs. Measured 2026-08-22: of 31 planner-death runs, only 2 still had logs,
+  # so the evidence for the biggest open problem was being deleted faster than
+  # it could be read. Keeping ~12 % of runs' logs costs a few hundred MB against
+  # 460 GB free.
   ls -1dt "$RUNS"/2026*Z 2>/dev/null | tail -n +31 | while read -r old; do
-    [[ -d "$old/logs" ]] && rm -rf "$old/logs"
+    [[ -d "$old/logs" ]] || continue
+    if grep -q '"process_died": [1-9]' "$old/metrics.json" 2>/dev/null; then
+      continue
+    fi
+    rm -rf "$old/logs"
   done
 
   CYCLE=$((CYCLE + 1))
