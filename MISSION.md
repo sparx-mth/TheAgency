@@ -250,17 +250,34 @@ action taken on someone else's behalf. It is flagged here for the operator to de
 The campaign's own footprint is small and bounded: `runs/` is 2.8 GB with logs kept for the
 newest 30 runs only, and the depth frame directory is capped at 500 files (381 MB).
 
-**Measured 2026-08-21, because free space fell 476 -> 467 GB in 13 hours and that looks alarming
-until you attribute it.** It is not the campaign. `runs/` grew 0.5 GB over the same period
-(~0.9 GB/day), and every log the harness writes is small and TRUNCATED rather than appended —
-`spawn()` uses `tee`, not `tee -a`, so per-cycle logs are rewritten each cycle: `bridge.log` 8.6 K,
-`falcon.log` 1.1 K, `video_watchdog.log` 73 K, `supervisor.stdout.log` 4.6 MB after two days.
-Nothing over 100 MB was written anywhere on the disk in the last three hours except a PyCharm
-index. **At ~0.9 GB/day against 467 GB free, the campaign could run for over a year.** The rest of
-the decline is other people's containers and the operator's own IDE, on a shared machine.
+**Measured 2026-08-21, corrected 2026-08-22 00:30.** Free space has been falling steadily
+(476 -> 463 GB over 18 hours, ~17 GB/day) and it is worth knowing what that is, because my first
+attribution got the conclusion wrong.
 
-So: if a future session sees free space dropping, attribute it before acting — and remember that
-pruning is still not this campaign's call to make.
+**The campaign is a small part of it.** `runs/` holds 3.2 GB after two days -- about **1.6 GB/day**,
+not the 0.9 I first quoted from a 13-hour window -- and every log the harness writes is small and
+TRUNCATED rather than appended (`spawn()` uses `tee`, not `tee -a`, so per-cycle logs are rewritten
+each cycle): `bridge.log` 8.6 K, `falcon.log` 1.1 K, `video_watchdog.log` 73 K,
+`supervisor.stdout.log` 4.6 MB after two days.
+
+**The rest is the machine, not the mission.** Overnight, with the operator away, the only large
+files written were **snap package downloads** (`brave`, `pycharm-professional`) plus JetBrains
+index caches. Standing totals: `/var/lib/snapd` **16 GB** with **11 disabled old revisions**
+retained, `~/.cache/JetBrains` **7.2 GB**, and Docker's 377 GB of reclaimable images.
+
+**What I got wrong the first time:** I wrote "at ~0.9 GB/day the campaign could run for over a
+year". That divided the SHARED disk's free space by the CAMPAIGN's own footprint, which answers a
+question nobody asked. The honest figure is the system-wide rate: at ~17 GB/day against 463 GB,
+the horizon is roughly **four weeks**, not a year.
+
+**And treat four weeks as a floor, not a forecast** -- snap refreshes are episodic, so a rate
+measured across one night of downloads over-states the steady state, the same extrapolation error
+this file warns about everywhere else. Nothing is at risk on any timescale the operator is away
+for.
+
+So: if a future session sees free space dropping, attribute it before acting -- and note that
+snapd revisions, IDE caches and Docker images are all someone else's to clean. Pruning is still
+not this campaign's call to make.
 
 ## 1. The goal
 
