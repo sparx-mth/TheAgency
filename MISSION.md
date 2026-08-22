@@ -59,6 +59,11 @@ course slew `45 deg/s`, tilt `35/27` with hysteresis, `tracker_pos_kp 1.0`, pinn
 with 4/8/16/30 backoff, escape cooldown `4.0`, tour commit `0` (off), `max_vel 0.8`,
 follower cap `1.0`.
 
+**P43 PASSED (2026-08-23):** the damage a planner death does is proportional to the flight it
+steals — corr(seconds before death, final volume) = **+0.940** at n=8, pre-registered at >= +0.50.
+So the highest-value fix is to RESTART the planner quickly, not only to stop it aborting; there is
+no respawn today. Not attempted unattended — see P43.
+
 **First pre-registered hypothesis to PASS (P41, 2026-08-21):** an untagged run almost never collapses — 0 of 25 fresh untagged runs, against 7 of 16 tagged (Fisher p=0.0005). Use it as triage, not as an explanation: 56 % of tags sit on healthy flights.
 
 **REOPENED 2026-08-22 by P42.** The collapse question below was closed as "not known" on the
@@ -2097,6 +2102,44 @@ interactive callers (mission_control's "Restart Sphera Now") keep the 90 s defau
 somebody is watching those and would rather hear "failed" than sit for three minutes; this path
 has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
 never touches the GUI.
+
+### P43 PASSED — the cost of a planner death is the flight it steals (2026-08-23 02:50)
+
+Pre-registered: `corr(seconds of flight before the planner died, final volume) >= +0.50`, n >= 8,
+on planner-death runs only. **Result at exactly n=8: +0.940.**
+
+    died  45 s ->  471 m3      died 242 s -> 1287 m3
+    died  73 s ->  677         died 352 s -> 1589
+    died 159 s -> 1040         died 374 s -> 1430
+    died 218 s -> 1323         died 490 s -> 1672
+
+Near-monotonic. Only the second pre-registered hypothesis to pass, against five refutations.
+
+**What it establishes, and what it does not.** It is *partly* mechanical — coverage accrues with
+flight time, so if accumulation stops at the abort then final volume tracks the abort time almost
+by construction. The informative part is that it DOES stop. The alternative was live: mapping is
+fused from depth by `mapping_sync`, not by the planner, so the aircraft could have kept mapping
+usefully after the abort and death time would then barely matter. `092027Z` (died 400 s in, 1657
+m3, healthy spans to the end) hinted at that. At n=8 the answer is clear: **without directed
+exploration the remaining flight adds almost nothing.**
+
+**The actionable consequence, which is a change of priority.** The campaign has been treating P42
+as "stop the planner aborting" — a C++ bounds fix needing a container rebuild. This says the other
+half is worth more per unit of effort: **restart the planner fast.** A death at 45 s cost ~1100 m3
+against the median; recovering even half the remaining flight would recover most of that. There is
+currently NO respawn — roslaunch unregisters `exploration_node` and it stays dead for the rest of
+the run.
+
+**Not attempted unattended.** Adding `respawn="true"` (or a supervisor that relaunches the node)
+changes flight behaviour on a system running without an operator, and the campaign's own rule is
+that the settled configuration does not move without a pre-registered test against a measured
+control. It is written up here as the recommendation with its evidence, for the operator's return.
+
+**Integrity note, restated because it matters for this result.** The test's MECHANISM was fixed
+after data existed — real takeoff times replaced a guessed 330 s bring-up constant, which had been
+dropping cases and mis-timing the rest by ~220 s. The HYPOTHESIS (+0.50), the n>=8 bar and the
+cutoff were all fixed beforehand and never moved, and no coefficient was computed until the test
+printed this one. A reader who wants to discount the result on those grounds has the facts to.
 
 ### CORRECTION — every planner-death timing I have quoted was wrong by ~220 s (2026-08-22 21:00)
 
