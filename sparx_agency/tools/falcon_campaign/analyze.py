@@ -1261,21 +1261,28 @@ def planner_death(run_dir):
     return out
 
 
-def _save_planner_death_excerpt(run_dir, death, context_lines=400):
-    """Copy the log context around a planner abort OUT of ``logs/``.
+def _save_planner_death_excerpt(run_dir, death, before=400, after=40):
+    """Copy the log context AROUND a planner abort out of ``logs/``.
+
+    Centred on the death, not on the end of the file. The first version took
+    the last 400 lines and that was close to useless: after the planner dies
+    ``TrajServer`` keeps re-reporting its last trajectory once a second forever,
+    so the tail is all aftermath. Measured 2026-08-22 on `164231Z`, which died
+    18 s into its flight -- the tail held 144 identical TrajServer lines stamped
+    four minutes AFTER the abort, and none of the run-up. I briefly took that
+    repetition for a signature of the silent abort mode before checking the
+    timestamps; it is the expected consequence of any planner death.
 
     The supervisor also exempts planner-death runs from pruning, but that edit
-    only takes effect when the supervisor process restarts -- it is a bash loop
-    that parsed its body once, on 2026-08-20, and does not re-read the file.
-    Measured 2026-08-22: two planner-death runs were pruned anyway while the
-    guard matched their metrics perfectly. This runs in-process every cycle, so
-    it works now; pruning deletes ``logs/`` and nothing else, so an excerpt
-    written beside it survives either way.
+    is inert until the supervisor process restarts (see LESSONS.md). This runs
+    in-process every cycle, and pruning deletes ``logs/`` and nothing else, so
+    an excerpt written beside it survives either way.
 
     Args:
         run_dir: The run folder.
         death: The ``planner_death`` block.
-        context_lines: How many trailing lines of the roslaunch stdout to keep.
+        before: Lines of run-up to keep before the abort.
+        after: Lines to keep after it, enough to show the aftermath started.
     """
     if not death.get("died"):
         return
@@ -1286,13 +1293,31 @@ def _save_planner_death_excerpt(run_dir, death, context_lines=400):
         lines = source.read_text(errors="replace").splitlines()
     except OSError:
         return
+    # Anchor on the glog abort if there is one, else on the last line that is
+    # not the frozen TrajServer refrain -- for a silent abort that is the
+    # closest thing to a last word the planner leaves.
+    pivot = None
+    for index, line in enumerate(lines):
+        if line.startswith("F") and "Check failed" in line:
+            pivot = index
+            break
+    if pivot is None:
+        for index in range(len(lines) - 1, -1, -1):
+            if "[TrajServer] Flight time:" not in lines[index]:
+                pivot = index
+                break
+    if pivot is None:
+        pivot = len(lines) - 1
     header = ["# Planner abort context, kept outside logs/ so pruning cannot",
               "# remove it. died at: %s" % death.get("wall"),
               "# reason: %s" % (death.get("reason") or
-                                "NONE (exit -6, no glog output)"), ""]
+                                "NONE (exit -6, no glog output)"),
+              "# anchored at log line %d of %d; %d before / %d after."
+              % (pivot + 1, len(lines), before, after), ""]
+    excerpt = lines[max(0, pivot - before):pivot + after + 1]
     try:
         (run_dir / "planner_death_context.log").write_text(
-            "\n".join(header + lines[-context_lines:]) + "\n")
+            "\n".join(header + excerpt) + "\n")
     except OSError:
         pass
 
