@@ -2071,6 +2071,24 @@ somebody is watching those and would rather hear "failed" than sit for three min
 has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
 never touches the GUI.
 
+**Verification status: NOT yet verified, and three clean cycles are not evidence.** Measured
+cycle durations either side of the fix:
+
+    297  20.4 min  <-- stall     301  10.1 min   (post-fix)
+    298  10.0 min                302   9.9 min   (post-fix)
+    299  19.9 min  <-- stall     303  10.0 min   (post-fix)
+    300  10.0 min
+
+Both stalls predate the fix and every cycle since has run ~10 minutes — but **cycle 300 also ran
+10.0 minutes with no fix at all.** The trigger is a slow Sphera window, which appeared twice in
+forty minutes and then stopped on its own. So the post-fix cycles had no opportunity to fail, and
+this sits exactly where the stale-frame abort sits: reasoned from the code, unproven in the field.
+
+What would actually verify it: `Sphera restart command FAILED (rc=1)` ceasing to appear *while
+Sphera is still occasionally slow to render*. Since a slow render cannot be forced, that needs
+patience rather than a test. The reasoning is at least demonstrable rather than speculative —
+the 90 s vs 180 s mismatch is visible in the two call sites.
+
 **If this recurs anyway:** the crash signature to grep is `GameThread timed out waiting for
 RenderThread` in `docker logs drone_simulator`; the *stall* signature is `re-entry not working` in
 the supervisor log. If the latter keeps appearing now, 180 s is still too short and the next thing
