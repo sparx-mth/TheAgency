@@ -2024,6 +2024,35 @@ and the sequence as a whole shows no clustering anywhere.
 will have exactly the same instinct, and this is the cheap test that answers it. At a 14 % base
 rate, 3-in-7 has about a 7 % chance on its own, and there have been ~17 such windows.
 
+### First Sphera crash of the campaign, and the recovery branch that saved it (2026-08-22 01:32)
+
+Cycle 297 found no `R1` at all: `drone_simulator` had **Exited (139)** — SIGSEGV. The container log
+gives the cause outright, and it is Sphera's, not ours:
+
+```
+LowLevelFatalError [File:./Runtime/RenderCore/Private/RenderingThread.cpp] [Line: 1163]
+GameThread timed out waiting for RenderThread after 60.00 secs
+Signal 11 caught.
+```
+
+An Unreal Engine 5.6 render-thread stall. The GPU was healthy immediately afterwards (1.7 of
+24.5 GB, 5 % busy), so it was transient rather than a wedged device.
+
+**What recovered it was the branch nobody had seen fire.** `restart_sphera` drives the GUI back
+into the scenario up to four times, and halfway through it stops trusting the clicking and re-runs
+the restart command itself. That comment — *"re-clicking a Sphera that was never restarted cannot
+produce a fresh drone however many times it is tried"* — was written defensively. Here it was the
+whole fix: two re-entry attempts failed with "window did not reappear within 180s", the mid-way
+re-run fired, and `R1` came back. The cycle then flew normally, health all green, hover 1.10 m.
+
+**Cost: about 12 minutes and one cycle.** No intervention, and deliberately none attempted —
+stepping in on top of a bounded recovery that is already running is how you end up fighting your
+own harness. The path is bounded at ~19 minutes and then returns False, so a permanently dead
+Sphera degrades into slow failing cycles rather than a silent hang.
+
+**If this recurs often:** the signature to grep is `GameThread timed out waiting for RenderThread`
+in `docker logs drone_simulator`. One occurrence in ~300 cycles is not worth acting on.
+
 ### P41 — A tag does not explain a collapse; the ABSENCE of one predicts health (2026-08-21, PASSED)
 
 Classified all 120 settled runs against the known failure shapes (PARKED, CIRCLING, WANDERING,
