@@ -86,18 +86,18 @@ battery capacity — it would improve the number without improving the system.
 
 ---
 
-### Operator note — 38 local commits are waiting, nothing has been pushed (refreshed 2026-08-21 17:10)
+### Operator note — 48 local commits are waiting, nothing has been pushed (refreshed 2026-08-22 09:20)
 
 Per your instruction, everything since `d5e3f2df` is committed locally and **nothing has been
-pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 38 commits ahead of its remote;
+pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 48 commits ahead of its remote;
 `c213b56b` ("give a freshly respawned FCU longer to become armable") is the last commit on
-`origin`. The loop has run unattended since 2026-08-20 02:17 — 41 hours, ~230 cycles, no
-intervention.
+`origin`. The loop has run unattended since 2026-08-20 02:17 — **55 hours, ~322 cycles, no
+intervention.**
 
-**Where the system is: unchanged and stable.** n=173 settled runs, median 1618 m3, collapses 14 %.
+**Where the system is: unchanged and stable.** n=247 settled runs, median 1606 m3, collapses 16 %.
 No flight behaviour has been altered since `max_vel` was reverted to 0.8 on 2026-08-20 — the
-configuration has now reproduced its own distribution across 173 runs, and drift is null on both
-pre-specified tests (spearman +0.03 on run order; halves 11/86 vs 14/87).
+configuration has now reproduced its own distribution across 247 runs, and drift is null on both
+pre-specified tests (Mann-Whitney on run index p=0.35; fixed half-split 17/123 vs 22/124, p=0.49).
 
 What the 38 contain, grouped:
 
@@ -126,6 +126,26 @@ What the 38 contain, grouped:
   1667(1), confirming it. The hover-altitude watch was closed outright (corr -0.12, identical
   medians) rather than re-tuned. And a false-positive check I ran against the 20 best runs gave
   zero, which was an artifact of picking the cleanest sample.
+
+**Overnight 2026-08-21 17:10 -> 2026-08-22 09:20, ten more commits.** Nothing touched flight
+behaviour; the notable items:
+
+* **Sphera crashed for the first time in the campaign** (Unreal Engine "GameThread timed out
+  waiting for RenderThread", SIGSEGV) and recovered without intervention — the branch in
+  `restart_sphera` that stops trusting the GUI clicking halfway through and re-runs the restart
+  itself, written defensively and never previously exercised.
+* **It recurred 30 minutes later, and that exposed a real gap.** Both cycles took 20 minutes
+  instead of 10.3 because `sphera_battery_watchdog` waited only 90 s for Sphera's window while
+  `bringup` had already learned it needs 180 s — the same lesson learned twice and propagated
+  once. Fixed, and **marked unverified**: the trigger is intermittent and has not recurred, so the
+  clean cycles since are not evidence.
+* **The disk headroom claim was wrong and is corrected.** I had divided the SHARED disk's free
+  space by the CAMPAIGN's own footprint and concluded "over a year"; the honest system-wide figure
+  is roughly four weeks, dominated by snap downloads and IDE caches rather than anything of ours.
+  Nothing is at risk on your timescale.
+* **Two more false alarms refused**, both with the search correction: a monotone 0,1,2,3 rise in
+  block collapse counts (p=0.93 that some four blocks look like that by chance — it then broke to
+  0,1,2,3,1), and a six-in-sixteen bad patch.
 
 **Two of those five cost nothing because they were caught before acting.** That is the part worth
 your attention: the campaign spent today refusing to chase three things that looked real, and the
