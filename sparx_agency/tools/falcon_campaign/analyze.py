@@ -1261,6 +1261,42 @@ def planner_death(run_dir):
     return out
 
 
+def _save_planner_death_excerpt(run_dir, death, context_lines=400):
+    """Copy the log context around a planner abort OUT of ``logs/``.
+
+    The supervisor also exempts planner-death runs from pruning, but that edit
+    only takes effect when the supervisor process restarts -- it is a bash loop
+    that parsed its body once, on 2026-08-20, and does not re-read the file.
+    Measured 2026-08-22: two planner-death runs were pruned anyway while the
+    guard matched their metrics perfectly. This runs in-process every cycle, so
+    it works now; pruning deletes ``logs/`` and nothing else, so an excerpt
+    written beside it survives either way.
+
+    Args:
+        run_dir: The run folder.
+        death: The ``planner_death`` block.
+        context_lines: How many trailing lines of the roslaunch stdout to keep.
+    """
+    if not death.get("died"):
+        return
+    source = run_dir / "logs" / "falcon_roslaunch.log"
+    if not source.is_file():
+        return
+    try:
+        lines = source.read_text(errors="replace").splitlines()
+    except OSError:
+        return
+    header = ["# Planner abort context, kept outside logs/ so pruning cannot",
+              "# remove it. died at: %s" % death.get("wall"),
+              "# reason: %s" % (death.get("reason") or
+                                "NONE (exit -6, no glog output)"), ""]
+    try:
+        (run_dir / "planner_death_context.log").write_text(
+            "\n".join(header + lines[-context_lines:]) + "\n")
+    except OSError:
+        pass
+
+
 def analyze(run_dir):
     """Analyse one run directory, writing ``metrics.json`` and ``findings.md``.
 
@@ -1304,6 +1340,7 @@ def analyze(run_dir):
         clearance=clearance_metrics(run_dir),
         config=config_metrics(run_dir))
     metrics["planner_death"] = planner_death(run_dir)
+    _save_planner_death_excerpt(run_dir, metrics["planner_death"])
     metrics["collapse_signature"] = collapse_signature(metrics)
     metrics["data_gaps"] = _data_gaps(metrics, samples, bad_lines, log_files)
     metrics["ranked_findings"] = _rank(metrics)

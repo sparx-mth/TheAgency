@@ -2193,7 +2193,32 @@ rather than a cause. Verified on two dead runs and one healthy one.
 the median for free — breaking comparability with all 253 recorded runs. The wasted minutes are
 the price of a dataset that still compares. Revisit only with a deliberate decision to re-baseline.
 
-**The evidence was being deleted faster than it could be read (fixed 2026-08-22 08:50).** Of the
+### CORRECTION 2026-08-22 13:00 — the pruning exemption was INERT, and I reported it working
+
+I committed a supervisor change exempting planner-death runs from log pruning, then wrote that it
+was "working" because `092027Z` was retained. **Both halves were wrong.** `092027Z` has since been
+pruned despite its guard matching (`"process_died": 1` is right there in its `metrics.json`), and
+`093058Z` with it. The two that still have logs are simply the two most recent.
+
+**Why: `supervisor.sh` is a bash loop that parsed its body once, when the process started on
+2026-08-20 02:17, and does not re-read the file.** Editing it changes nothing until the supervisor
+restarts. Every supervisor.sh change made during this campaign has the same property, and I had
+not been treating them that way. (Editing a running bash script is also mildly hazardous — bash
+tracks a byte offset — which is a second reason not to rely on it mid-run.)
+
+**Fixed where it takes effect now:** `analyze.py` writes a `planner_death_context.log` beside
+`logs/`, not inside it, holding the abort reason plus the last 400 lines of roslaunch stdout.
+Pruning deletes `logs/` and nothing else, so the excerpt survives regardless. It runs in-process
+every cycle, so it is live immediately. Verified on both preserved cases and confirmed silent on a
+healthy run. The supervisor exemption stays as belt-and-braces for whenever it next restarts.
+
+**And what the excerpt already shows about the SILENT abort mode.** `114443Z`'s last 12 log lines
+before dying are `[TrajServer] Flight time: 391.17, path length: 364.42, mean vel: 0.93` repeated
+once a second with **identical values** — the trajectory server was replaying a frozen state, not
+tracking a live plan. That is a different picture from the voxel-index CHECK and worth carrying
+into the eventual diagnosis.
+
+**The evidence was being deleted faster than it could be read (partially fixed 2026-08-22 08:50).** Of the
 31 planner-death runs, only **2** still had logs — pruning keeps the newest 30 runs and at a 12 %
 rate the interesting ones age out first. The supervisor now exempts any run whose `metrics.json`
 records `process_died` from log pruning. Verified the grep guard against all 423 runs on disk: it
