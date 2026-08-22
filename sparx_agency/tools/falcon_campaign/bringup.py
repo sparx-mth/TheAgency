@@ -281,8 +281,23 @@ def restart_sphera(reentry_attempts=4):
         # existing container proves nothing when the restart never ran, and
         # "the old drone is still up" reads identically to "a fresh one came
         # back". A ModuleNotFoundError here once cost six cycles.
-        print("[bringup] Sphera restart command FAILED (rc=%s): %s"
-              % (r.returncode, (r.stderr or r.stdout)[-400:]), flush=True)
+        # Print the watchdog's OWN diagnosis, not just the tail of whatever it
+        # last echoed. Measured 2026-08-22: the 400-char tail showed only the
+        # restart script's "Container drone_simulator Started", while the lines
+        # that say WHICH branch failed -- window-never-appeared versus
+        # window-appeared-but-R1-never-came-back -- were truncated away. Those
+        # two have different fixes (the window wait vs POST_PLAY_VERIFY_TIMEOUT),
+        # so losing them makes the next occurrence undiagnosable too.
+        blob = (r.stdout or "") + (r.stderr or "")
+        verdict = [ln for ln in blob.splitlines()
+                   if ln.startswith("[watchdog]") or ln.startswith("[gui]")]
+        print("[bringup] Sphera restart command FAILED (rc=%s)" % r.returncode,
+              flush=True)
+        for line in verdict[-6:]:
+            print("[bringup]   %s" % line, flush=True)
+        if not verdict:
+            print("[bringup]   no [watchdog]/[gui] lines in its output; tail: %s"
+                  % blob[-400:].replace("\n", " | "), flush=True)
 
     from sparx_agency.tools import sphera_gui_automation
 

@@ -2098,7 +2098,23 @@ somebody is watching those and would rather hear "failed" than sit for three min
 has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
 never touches the GUI.
 
-**Verification status: NOT yet verified, and three clean cycles are not evidence.** Measured
+**RESULT 2026-08-22 07:38Z: the fix did NOT work.** Cycle 331 stalled at **19.7 min** with the
+identical signature — `Sphera restart command FAILED (rc=1)`, two `window did not reappear within
+180s`, then the mid-way re-run rescuing it. So 180 s is not the answer, or not the whole answer.
+
+**And I could not tell which, because the diagnosis was being truncated.** `bringup` printed only
+the last 400 characters of the restart command's output, which is the restart *script's* tail
+("Container drone_simulator Started") — the `[watchdog]`/`[gui]` lines saying WHICH branch failed
+were cut off. Those two branches have different fixes: window-never-appeared points at the window
+wait, window-appeared-but-R1-never-returned points at `POST_PLAY_VERIFY_TIMEOUT_SEC` (30 s).
+Fixed: the failure now prints the watchdog's own verdict lines, with the raw tail as a fallback
+when there are none. Both branches exercised.
+
+**Next occurrence is the experiment.** Do not raise another timeout on a guess — the log will now
+say which branch failed. This is the campaign's own rule 1: measure the mechanism before changing
+anything, which I skipped when I assumed the window wait was the whole story.
+
+**Earlier verification status (superseded): NOT yet verified, and three clean cycles are not evidence.** Measured
 cycle durations either side of the fix:
 
     297  20.4 min  <-- stall     301  10.1 min   (post-fix)
