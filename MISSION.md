@@ -2193,6 +2193,29 @@ rather than a cause. Verified on two dead runs and one healthy one.
 the median for free — breaking comparability with all 253 recorded runs. The wasted minutes are
 the price of a dataset that still compares. Revisit only with a deliberate decision to re-baseline.
 
+### Watch — the planner deaths stopped, and nothing was done to stop them (2026-08-22 16:00)
+
+No planner death in the last **23 runs**, against a 12 % base rate over the prior 302:
+
+    P(0 in 23 | p = 0.12) = 0.053 one-sided, roughly 0.11 two-sided
+
+**Detection verified before believing the drought.** This is exactly where a silent instrumentation
+failure would hide, so it was checked rather than assumed: `health.log_events` is still populated
+on recent runs (altitude_nudges, pinned_escapes, pose_dropped_tilted all non-zero), each run still
+has its roslaunch log, and an independent `grep -c "process has died"` over the last eight runs'
+logs returns zero. The drought is real.
+
+**No action, for two reasons.** The two-sided figure is ~0.11, which is unremarkable; and there is
+no mechanism — every change since 2026-08-22 is analysis-only (`analyze.py` tagging, the
+`planner_death` block, the context excerpt) or lives on a failure path that has not fired. Nothing
+has touched flight, FALCON, or the map. A rate cannot fall because a post-flight analyser gained a
+field.
+
+**What would make it interesting:** the drought reaching ~40 runs (p<0.01 even two-sided) while
+detection still checks out. At that point the question becomes what changed in the ENVIRONMENT —
+Sphera build, GPU state, host load — not in this repo. If instead deaths resume at roughly one in
+eight, this entry is just a record of ordinary variation, which is the likelier outcome.
+
 ### CORRECTION 2026-08-22 13:00 — the pruning exemption was INERT, and I reported it working
 
 I committed a supervisor change exempting planner-death runs from log pruning, then wrote that it
