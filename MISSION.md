@@ -2406,14 +2406,18 @@ plausibly inside the box, unlike the z=0.20 m case.
 (`died`, `wall`, `reason`) so they survive pruning. Verified against both known modes and a
 healthy run.
 
-**THREE cases now carry the same abort signature, so it is a pattern rather than an anecdote.**
+**FOUR cases now carry the same abort signature — and it is NOT specifically a negative index.**
 Every glog-bearing case is `map_base_inl.h:173  Check failed: addr < map_data_->data.size()`,
-through `voxel_mapping::MapBase<>::getVoxel()`, with a NEGATIVE address:
+through `voxel_mapping::MapBase<>::getVoxel()`, but the addresses run off BOTH ends of the array:
 
-    054433Z   -4105        093058Z   -3796        110325Z  -11190
+    054433Z    -4105        093058Z    -3796
+    110325Z   -11190        204954Z  +1402073   (map size 1400000 -- 2073 PAST the end)
 
-The magnitudes differ by 3x, which suggests varying degrees of out-of-bounds rather than one
-specific bad cell. But **four cases have now died `exit code -6` with no glog output at all**
+I described this as "a negative voxel index" for a day on the strength of the first three. It is
+an out-of-range index in either direction, which the CHECK itself says plainly — `addr <
+data.size()` is an unsigned comparison, so a negative index wraps huge and a genuine overflow
+reads as slightly-too-large. **A fix that only guards against negatives would miss `204954Z`.**
+The spread (-11190 to +2073) suggests varying degrees of leaving the box rather than one bad cell. But **four cases have now died `exit code -6` with no glog output at all**
 (`061542Z`, `062603Z`, `092027Z`, `114443Z`), so there really are at least two abort modes and a
 missing reason is a real observation rather than a collection failure. Running tally of the seven
 cases inspected so far: **3 glog CHECK, 4 silent.** The silent mode is the more common one, which
