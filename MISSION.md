@@ -270,6 +270,20 @@ year". That divided the SHARED disk's free space by the CAMPAIGN's own footprint
 question nobody asked. The honest figure is the system-wide rate: at ~17 GB/day against 463 GB,
 the horizon is roughly **four weeks**, not a year.
 
+**The instantaneous rate is bursty, and measuring it is a trap.** Two ADJACENT 150-second windows
+consumed **77 MB and 2 MB** -- extrapolating either gives 43 GB/day or 1.2 GB/day, both nonsense.
+Only the multi-hour average (476 -> 462 GB over 19 hours, ~17 GB/day) means anything. I started
+to replace the average with the 43 GB/day burst figure before checking, which is the same
+extrapolation error this file warns about everywhere else, arrived at from the opposite direction.
+The writers during a burst are the systemd journal (1.3 GB total) and PyCharm's index
+(7.3 GB total); in a quiet window nothing measurable grows at all.
+
+*One unproven lead, recorded rather than acted on:* `runs/` is inside the IDE project tree and is
+NOT in `.idea`'s exclude list (only `.venv` entries are), so the ~150 run folders the campaign
+creates per day are plausibly feeding those indexing bursts. Not confirmed -- the index is binary
+and a name search proved nothing either way -- and excluding a folder from someone's IDE is their
+call, not the campaign's.
+
 **And treat four weeks as a floor, not a forecast** -- snap refreshes are episodic, so a rate
 measured across one night of downloads over-states the steady state, the same extrapolation error
 this file warns about everywhere else. Nothing is at risk on any timescale the operator is away
