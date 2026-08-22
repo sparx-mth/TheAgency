@@ -2221,9 +2221,11 @@ through `voxel_mapping::MapBase<>::getVoxel()`, with a NEGATIVE address:
     054433Z   -4105        093058Z   -3796        110325Z  -11190
 
 The magnitudes differ by 3x, which suggests varying degrees of out-of-bounds rather than one
-specific bad cell. But **three other cases died `exit code -6` with no glog output at all**, so
-there really are at least two abort modes and a missing reason is a real observation rather than
-a collection failure.
+specific bad cell. But **four cases have now died `exit code -6` with no glog output at all**
+(`061542Z`, `062603Z`, `092027Z`, `114443Z`), so there really are at least two abort modes and a
+missing reason is a real observation rather than a collection failure. Running tally of the seven
+cases inspected so far: **3 glog CHECK, 4 silent.** The silent mode is the more common one, which
+matters — a fix aimed only at the voxel-index CHECK would address under half of these.
 
 *Not drawing the obvious inference yet:* `110325Z` died 128 s into its flight and still reached
 **1589 m3**, which cuts against the timing story the first two cases suggested. That is precisely
