@@ -61,6 +61,13 @@ follower cap `1.0`.
 
 **First pre-registered hypothesis to PASS (P41, 2026-08-21):** an untagged run almost never collapses — 0 of 25 fresh untagged runs, against 7 of 16 tagged (Fisher p=0.0005). Use it as triage, not as an explanation: 56 % of tags sit on healthy flights.
 
+**REOPENED 2026-08-22 by P42.** The collapse question below was closed as "not known" on the
+strength of every *metric* failing to predict it. It was reopened by an *event*: FALCON's
+`exploration_node` aborts mid-flight in ~12 % of runs, and those runs collapse at 52 % against
+12 % (Fisher p=1.1e-06). Read P42 before anything else here. The text below remains accurate about
+what was tested and refuted — circling, dz, tracking error — and those closures still stand; what
+it got wrong was concluding that no cause existed because no *correlate* did.
+
 **The one open question, now closed as "not known":** roughly one run in five collapses to
 ~900-1300 m3 instead of ~1800. Three have been dissected and have THREE DIFFERENT mechanisms
 (P37, P38), and every candidate predictor has been tested and failed — circling (-0.09, n=14),

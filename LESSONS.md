@@ -1668,3 +1668,16 @@ Two defences, and they are cheap: correct for the search by asking how often ANY
 look this extreme, or pick the test before looking -- a rank correlation against run order, or a
 fixed half-split, both of which came back null here. The naive p-value is not a weaker version of
 the corrected one; on searched data it is measuring where you happened to look.
+
+## No correlate is not no cause -- look for events, not just metrics
+
+The collapse question in this campaign was closed as "not known" after five metrics were tested
+and refuted: circling minutes, dz, tracking error, clearance, dead-band fraction. Every one was a
+CONTINUOUS measure of how the flight went. The actual cause was a discrete EVENT sitting in the
+health log the whole time -- FALCON's planner aborting -- which no amount of correlating flight
+quality against volume could ever surface, because a dead planner does not make the flight look
+bad. Distance stays normal; only the map stops growing.
+
+When a scan over metrics comes back empty, that is evidence about the metrics, not about the
+system. Ask what could have HAPPENED rather than what could have been LARGER, and grep the logs
+for processes dying, restarts, timeouts and exceptions before concluding a cause does not exist.
