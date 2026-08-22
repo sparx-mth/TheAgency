@@ -2214,11 +2214,21 @@ plausibly inside the box, unlike the z=0.20 m case.
 (`died`, `wall`, `reason`) so they survive pruning. Verified against both known modes and a
 healthy run.
 
-**A second negative-voxel-index case, so that story is no longer a single observation.**
-`093058Z` (805 m3) carries `Check failed: addr < map_data_->data.size() (-3796 vs. 1400000)` with
-a stack trace through `voxel_mapping::MapBase<>::getVoxel()`, matching `054433Z`'s -4105. But
-**three other cases died `exit code -6` with no glog output at all**, so there really are at least
-two abort modes and a missing reason is a real observation rather than a collection failure.
+**THREE cases now carry the same abort signature, so it is a pattern rather than an anecdote.**
+Every glog-bearing case is `map_base_inl.h:173  Check failed: addr < map_data_->data.size()`,
+through `voxel_mapping::MapBase<>::getVoxel()`, with a NEGATIVE address:
+
+    054433Z   -4105        093058Z   -3796        110325Z  -11190
+
+The magnitudes differ by 3x, which suggests varying degrees of out-of-bounds rather than one
+specific bad cell. But **three other cases died `exit code -6` with no glog output at all**, so
+there really are at least two abort modes and a missing reason is a real observation rather than
+a collection failure.
+
+*Not drawing the obvious inference yet:* `110325Z` died 128 s into its flight and still reached
+**1589 m3**, which cuts against the timing story the first two cases suggested. That is precisely
+what `test_p43.py` is for — it decides at n>=8, and until then these per-case numbers are for
+auditing the extraction, not for updating the narrative.
 
 **The damage looks like it depends on WHEN, and that is now pre-registered rather than believed:**
 
