@@ -930,6 +930,13 @@ def collapse_signature(metrics):
         tags.append("DIVERGED")
     if (mo.get("distance_m") or 0.0) < NEVER_STARTED_MAX_M:
         tags.append("NEVER-STARTED")
+    # FALCON's own planner aborting mid-flight. Measured over 253 runs: with a
+    # dead process the median is 1261 and 52 % collapse; without, 1628 and 12 %
+    # (Fisher p=1.1e-06). By far the strongest signal in the campaign, and the
+    # only tag with an obvious mechanism -- nothing plans new frontiers, so the
+    # aircraft flies out its remaining minutes over ground it already mapped.
+    if ((metrics.get("health") or {}).get("log_events") or {}).get("process_died"):
+        tags.append("PLANNER-DIED")
     # Wandering is the residual: motion healthy in every minute, yet the map
     # stopped growing. Only meaningful once parked and circling are excluded --
     # otherwise it would absorb both.
@@ -950,6 +957,22 @@ def _rank(m):
         """Record a candidate fix unless its evidence is empty/zero."""
         if score:
             out.append((float(score), text))
+
+    # Ranked above every other finding because it is not a symptom, it is the
+    # cause: FALCON's exploration_node aborts and nothing plans after that.
+    # Observed signature is a glog CHECK on a negative voxel index, i.e. the
+    # aircraft reached a position outside the configured map box.
+    died = ((he.get("log_events") or {}).get("process_died") or 0)
+    if died:
+        add(200.0,
+            "PLANNER DIED: FALCON's exploration_node aborted mid-flight (%d "
+            "roslaunch 'process has died' events). Everything below is a "
+            "CONSEQUENCE -- the aircraft kept flying with no new frontiers. "
+            "Root cause seen so far is a glog CHECK on a negative voxel index "
+            "(out of map bounds); read the roslaunch log in this run's logs/ "
+            "for the abort line. NOTE the live liveness check CANNOT see this: "
+            "rosnode list reads the master's registration and ROS1 never "
+            "deregisters a crashed node." % died)
 
     # A parked stretch is the campaign's most expensive single failure and the
     # cheapest to spot: whole minutes with the aircraft going nowhere. Ranked

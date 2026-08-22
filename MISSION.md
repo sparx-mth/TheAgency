@@ -2114,6 +2114,58 @@ RenderThread` in `docker logs drone_simulator`; the *stall* signature is `re-ent
 the supervisor log. If the latter keeps appearing now, 180 s is still too short and the next thing
 to question is `POST_PLAY_VERIFY_TIMEOUT_SEC` (30 s), not the window wait.
 
+### P42 — FALCON's planner crashes in ~12 % of runs, and that IS a large share of the collapses (2026-08-22 10:30)
+
+**The strongest signal found in this campaign, by a wide margin.** Over all 253 settled runs:
+
+| | runs | median | collapse rate | sub-700 |
+|---|---|---|---|---|
+| `process_died > 0` | 31 | **1261** | **52 %** | 5 |
+| `process_died == 0` | 222 | **1628** | **12 %** | 2 |
+
+Fisher exact **p = 1.1e-06**. Compare the collapse-signature tags, whose best lift was 1.9x
+(P41); this is 4.3x, and unlike those it has an obvious mechanism.
+
+**The process that dies is `exploration_node` — FALCON's planner itself — with exit code -6
+(SIGABRT).** From the roslaunch log of `054433Z` (482 m3):
+
+```
+F0822 05:47:42 map_base_inl.h:173] Check failed: addr < map_data_->data.size()
+(-4105 vs. 1400000) Address out of range: -4105
+```
+
+A **negative voxel index**: the aircraft reached a position outside the configured map box and
+FALCON's glog `CHECK` aborts the process. `maps/sphera_jail.yaml` already documents this crash
+class from the 2026-07-28 coordinate-sign work — it is the same abort, arrived at from a different
+direction. The lines just before it show a trajectory discontinuity at **z = 0.20 m**, well below
+the ~1.0 m target, so the out-of-bounds axis may be vertical rather than horizontal.
+
+**Why the runs look like CIRCLING.** Nothing plans new frontiers after the abort, but the follower
+keeps tracking, so the aircraft flies out its remaining minutes over ground it has already mapped:
+`054433Z` covered 268 m and `061542Z` 310 m — *above* average distance — with per-minute spans
+decaying to 2-3 m and coverage flat. Distance and speed look healthy; only the span and the map
+say anything is wrong. **This is very likely a large part of what P37/P38 closed as "not known".**
+
+**The live liveness check cannot see it, by construction.** `rosnode_exists` runs `rosnode list`,
+which reads the ROS1 master's *registration* — and a master never deregisters a node whose process
+aborted. So `/exploration_node` stays listed long after it is gone, every health check passes, and
+the cycle flies on for minutes producing nothing.
+
+**Shipped now (analysis only, no flight behaviour touched):** a `PLANNER-DIED` tag and a
+finding ranked above everything else, saying plainly that the rest of the report is a consequence
+rather than a cause. Verified on two dead runs and one healthy one.
+
+**Deliberately NOT done: aborting these cycles.** It would save ~6 minutes each (~43 min/day at a
+12 % rate), but it would also remove the worst 12 % of runs from the coverage statistics and lift
+the median for free — breaking comparability with all 253 recorded runs. The wasted minutes are
+the price of a dataset that still compares. Revisit only with a deliberate decision to re-baseline.
+
+**The real fix is upstream and is NOT to be attempted unattended:** either bounds-check before
+indexing (a C++ patch in `patches/`, needing a container rebuild) or keep the aircraft inside the
+box. Before either, establish WHICH axis goes out of range — the z = 0.20 m discontinuity is the
+first thing to check, against `map_min_z`/`box_min_z` in `maps/sphera_jail.yaml`. That is a
+pre-registered experiment for when the operator is back, not a change to make while they are away.
+
 ### P41 — A tag does not explain a collapse; the ABSENCE of one predicts health (2026-08-21, PASSED)
 
 Classified all 120 settled runs against the known failure shapes (PARKED, CIRCLING, WANDERING,
