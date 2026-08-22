@@ -65,6 +65,14 @@ SPHERA_RESTART_SCRIPT = Path("~/.sphera/sphera-restart.sh").expanduser()
 # How long to wait, after Play is (supposedly) clicked, for R1 to actually
 # exist and report a readable battery before declaring the re-entry failed.
 POST_PLAY_VERIFY_TIMEOUT_SEC = 30.0
+#: How long to wait for Sphera's window after a restart before giving up on the
+#: GUI re-entry. Deliberately longer than ``enter_scenario``'s own 90 s default:
+#: a cold Sphera regularly takes minutes to put its window back, and 90 s was
+#: measured failing on 2026-08-20 and again twice on 2026-08-22, each time
+#: succeeding when retried a few minutes later. The interactive callers keep the
+#: shorter default -- somebody is watching those and would rather hear "failed"
+#: than sit for three minutes; this path has nobody at the keyboard.
+GUI_WINDOW_WAIT_SEC = 180.0
 
 # Same env `it`-exec commands need to see R1's ROS2 graph — matches the
 # battery-check step in fly-rooster-sphera/SKILL.md.
@@ -176,7 +184,7 @@ def restart_and_reenter(drone_id: str, gui_reentry: bool) -> bool:
         return True
 
     print("[watchdog] restart done, driving Sphera's GUI back into the scenario...", flush=True)
-    if not sphera_gui_automation.enter_scenario():
+    if not sphera_gui_automation.enter_scenario(GUI_WINDOW_WAIT_SEC):
         elapsed = time.time() - start
         notify(f"Sphera restarted, but its window never reappeared ({elapsed:.0f}s) — check manually")
         print(f"[watchdog] GUI re-entry aborted after {elapsed:.1f}s: Sphera window not found", flush=True)

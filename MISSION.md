@@ -2050,8 +2050,31 @@ stepping in on top of a bounded recovery that is already running is how you end 
 own harness. The path is bounded at ~19 minutes and then returns False, so a permanently dead
 Sphera degrades into slow failing cycles rather than a silent hang.
 
-**If this recurs often:** the signature to grep is `GameThread timed out waiting for RenderThread`
-in `docker logs drone_simulator`. One occurrence in ~300 cycles is not worth acting on.
+**It recurred 30 minutes later (cycle 299), and that changed the diagnosis.** Both cycles took
+**20 minutes instead of 10.3**, and both logged the identical sequence: `Sphera restart command
+FAILED (rc=1)` -> two `window did not reappear within 180s` -> `re-entry not working; re-running
+the restart itself` -> recovery. The segfault was the trigger the first time, but the *cost* is
+the same every time and comes from somewhere else.
+
+**Root cause: the same lesson learned twice, propagated once.** There are TWO layers of GUI
+re-entry. `bringup.restart_sphera` was taught on 2026-08-20 to wait **180 s** for Sphera's window,
+with the comment that the 90 s default "all reported window did not reappear... having stalled the
+campaign for eleven [minutes]". But the restart command it invokes —
+`sphera_battery_watchdog --once` — called `enter_scenario()` bare, at that same **90 s default**.
+So every slow Sphera start went: watchdog gives up early and exits 1, bringup then retries
+patiently twice and fails, bringup re-runs the whole restart, and *that* one works. Roughly eleven
+wasted minutes, entirely inside a path that already knew better.
+
+**Fixed:** `GUI_WINDOW_WAIT_SEC = 180.0` in the watchdog, passed to `enter_scenario`. The
+interactive callers (mission_control's "Restart Sphera Now") keep the 90 s default deliberately —
+somebody is watching those and would rather hear "failed" than sit for three minutes; this path
+has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
+never touches the GUI.
+
+**If this recurs anyway:** the crash signature to grep is `GameThread timed out waiting for
+RenderThread` in `docker logs drone_simulator`; the *stall* signature is `re-entry not working` in
+the supervisor log. If the latter keeps appearing now, 180 s is still too short and the next thing
+to question is `POST_PLAY_VERIFY_TIMEOUT_SEC` (30 s), not the window wait.
 
 ### P41 — A tag does not explain a collapse; the ABSENCE of one predicts health (2026-08-21, PASSED)
 
