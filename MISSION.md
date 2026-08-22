@@ -2098,6 +2098,39 @@ somebody is watching those and would rather hear "failed" than sit for three min
 has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
 never touches the GUI.
 
+### The planner-death excerpt took three tries, and the first thing it showed was a dud (2026-08-22 19:15)
+
+**Getting run-up into the excerpt needed three attempts, each killed by a measurement:**
+
+1. *Last 400 lines.* For `164231Z`, which died 18 s in, that was 144 frozen TrajServer lines
+   stamped four minutes AFTER the abort and no run-up at all.
+2. *Anchored on the last non-refrain line.* Still wrong — other nodes keep logging after the
+   planner dies, so the anchor lands near the file's end. On `182508Z`: 432 of 441 lines after.
+3. *Selected by TIMESTAMP* (-120 s/+20 s around `planner_death.wall`). **This works: 22 076 lines
+   before the death against 180 after.**
+
+The reason positional slicing could never work is worth keeping: `falcon_roslaunch.log` is the
+interleaved stdout of a dozen nodes with independent buffering, so **line order is not time
+order**. Anything that selects by position in that file is selecting close to arbitrarily.
+Excerpts run ~2.3 MB each, which at a 12 % death rate is ~40 MB/day against 460 GB free.
+
+**And the first hypothesis the run-up produced did NOT survive its control.** In its final 10 s
+`182508Z` ran 478 full HGrid/SOP planning iterations while logging 352 "Frontier ... cannot be
+reached" warnings — a tight replanning spin, and a tempting story. Checked against five healthy
+runs first:
+
+    182508Z  DIED     478 iters/10s   (1323 m3)
+    184552Z  healthy 1556             (1640 m3)
+    175416Z  healthy  798             (1265 m3)
+    181457Z  healthy   92             (1851 m3)
+    183545Z  healthy   72             (1850 m3)
+    180441Z  healthy    4             (1748 m3)
+
+Healthy runs span 4 to 1556, and the best one in the sample did **three times more** replanning
+than the dead one. Planning rate does not distinguish anything. **No finding** — recorded so
+nobody re-derives it, and noted as the difference from the retracted TrajServer "fingerprint",
+which was written down before its control was checked rather than after.
+
 ### ROOT CAUSE FOUND 2026-08-22 17:50 — it was never the window wait
 
 The diagnostic armed at 08:00Z fired on cycle 386 (20.0 min) and named the branch immediately:

@@ -20,6 +20,8 @@ the Noetic container.
 """
 from __future__ import annotations
 
+import calendar
+import datetime
 import json
 import math
 import re
@@ -1261,28 +1263,38 @@ def planner_death(run_dir):
     return out
 
 
-def _save_planner_death_excerpt(run_dir, death, before=400, after=40):
-    """Copy the log context AROUND a planner abort out of ``logs/``.
+def _epoch_of(wall):
+    """Epoch seconds for a roslaunch UTC wall-clock string, or None."""
+    if not wall:
+        return None
+    try:
+        moment = datetime.datetime.strptime(wall, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return calendar.timegm(moment.timetuple())
 
-    Centred on the death, not on the end of the file. The first version took
-    the last 400 lines and that was close to useless: after the planner dies
-    ``TrajServer`` keeps re-reporting its last trajectory once a second forever,
-    so the tail is all aftermath. Measured 2026-08-22 on `164231Z`, which died
-    18 s into its flight -- the tail held 144 identical TrajServer lines stamped
-    four minutes AFTER the abort, and none of the run-up. I briefly took that
-    repetition for a signature of the silent abort mode before checking the
-    timestamps; it is the expected consequence of any planner death.
+
+def _save_planner_death_excerpt(run_dir, death, before_s=120.0, after_s=20.0):
+    """Copy the log window AROUND a planner abort out of ``logs/``.
+
+    Selected by TIMESTAMP, not by line position. Two earlier versions sliced
+    lines around an anchor and both failed, because ``falcon_roslaunch.log`` is
+    the interleaved stdout of a dozen nodes with independent buffering, so line
+    order is not time order. Measured on `182508Z` (died 18:30:35): the tail
+    version put 407 of 413 lines after the abort, and the anchored version
+    still put 432 of 441 after it. Filtering on the epoch stamp each line
+    carries is the only thing that actually selects the run-up.
 
     The supervisor also exempts planner-death runs from pruning, but that edit
-    is inert until the supervisor process restarts (see LESSONS.md). This runs
+    is inert until the supervisor restarts (see LESSONS.md). This runs
     in-process every cycle, and pruning deletes ``logs/`` and nothing else, so
     an excerpt written beside it survives either way.
 
     Args:
         run_dir: The run folder.
         death: The ``planner_death`` block.
-        before: Lines of run-up to keep before the abort.
-        after: Lines to keep after it, enough to show the aftermath started.
+        before_s: Seconds of run-up to keep.
+        after_s: Seconds after the abort, enough to show the aftermath begin.
     """
     if not death.get("died"):
         return
@@ -1293,31 +1305,37 @@ def _save_planner_death_excerpt(run_dir, death, before=400, after=40):
         lines = source.read_text(errors="replace").splitlines()
     except OSError:
         return
-    # Anchor on the glog abort if there is one, else on the last line that is
-    # not the frozen TrajServer refrain -- for a silent abort that is the
-    # closest thing to a last word the planner leaves.
-    pivot = None
-    for index, line in enumerate(lines):
-        if line.startswith("F") and "Check failed" in line:
-            pivot = index
-            break
-    if pivot is None:
-        for index in range(len(lines) - 1, -1, -1):
-            if "[TrajServer] Flight time:" not in lines[index]:
-                pivot = index
-                break
-    if pivot is None:
-        pivot = len(lines) - 1
+    target = _epoch_of(death.get("wall"))
+    kept, stamped = [], 0
+    for line in lines:
+        match = re.search(r"\[(\d{10}\.\d+)\]", line)
+        if not match:
+            continue
+        stamped += 1
+        when = float(match.group(1))
+        if target is None:
+            continue
+        if target - before_s <= when <= target + after_s:
+            kept.append((when, line))
+    if target is None or not kept:
+        # No usable timestamps: fall back to the tail rather than nothing, and
+        # say so in the header so nobody reads it as run-up.
+        kept = [(0.0, l) for l in lines[-200:]]
+        note = "FALLBACK: no epoch stamps matched; this is the TAIL, all aftermath"
+    else:
+        kept.sort()
+        note = ("%d lines within -%.0fs/+%.0fs of the abort, out of %d stamped"
+                % (len(kept), before_s, after_s, stamped))
     header = ["# Planner abort context, kept outside logs/ so pruning cannot",
               "# remove it. died at: %s" % death.get("wall"),
               "# reason: %s" % (death.get("reason") or
                                 "NONE (exit -6, no glog output)"),
-              "# anchored at log line %d of %d; %d before / %d after."
-              % (pivot + 1, len(lines), before, after), ""]
-    excerpt = lines[max(0, pivot - before):pivot + after + 1]
+              "# %s" % note,
+              "# Selected by TIMESTAMP: this log interleaves many nodes, so line",
+              "# order is not time order and positional slicing does not work.", ""]
     try:
         (run_dir / "planner_death_context.log").write_text(
-            "\n".join(header + excerpt) + "\n")
+            "\n".join(header + [l for _, l in kept]) + "\n")
     except OSError:
         pass
 
