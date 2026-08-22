@@ -2163,8 +2163,18 @@ class from the 2026-07-28 coordinate-sign work — it is the same abort, arrived
 direction. The lines just before it show a trajectory discontinuity at **z = 0.20 m**, well below
 the ~1.0 m target, so the out-of-bounds axis may be vertical rather than horizontal.
 
-**Why the runs look like CIRCLING.** Nothing plans new frontiers after the abort, but the follower
-keeps tracking, so the aircraft flies out its remaining minutes over ground it has already mapped:
+**Why the runs look like CIRCLING — and why only HALF of them collapse (refined 2026-08-22 09:30).**
+A planner death does not stop mapping. The map is fused from depth by `mapping_sync`; the planner
+only chooses WHERE TO GO. So after the abort the aircraft keeps flying and the map keeps growing
+if its residual motion happens to cross unmapped ground — which is why the collapse rate is 52 %
+rather than 100 %. `092027Z` is the proof: planner dead at 09:28:53, and the run still finished at
+**1657 m3, above the campaign median**, with healthy spans right through its last minute. There is
+no respawn — roslaunch unregisters the node and it stays dead.
+
+That makes **WHEN it dies** the thing to measure, not merely whether. Log preservation (below) now
+keeps the death timestamp, so this becomes testable once a handful of cases accumulate.
+
+When the residual motion does NOT find new ground, the run reads as CIRCLING:
 `054433Z` covered 268 m and `061542Z` 310 m — *above* average distance — with per-minute spans
 decaying to 2-3 m and coverage flat. Distance and speed look healthy; only the span and the map
 say anything is wrong. **This is very likely a large part of what P37/P38 closed as "not known".**
@@ -2197,6 +2207,12 @@ story from a single sample. Their last trajectory discontinuities were at
 `(55.67, -25.18, 1.68) -> (52.59, -31.13, 2.05)` and `(48.71, -16.26, 1.75) -> (48.13, -16.09,
 0.94)`, with collisions flagged at `(54.05, -30.42, 1.40)` and `(59.16, -20.51, 0.93)` — all
 plausibly inside the box, unlike the z=0.20 m case.
+
+**Three consecutive cases now show NO captured abort reason.** `061542Z`, `062603Z` and
+`092027Z` all died `exit code -6` with no `^F[0-9]{4}` or `Check failed` line anywhere in their
+collected logs. Only the very first case (`054433Z`, since pruned) ever showed the glog CHECK. So
+the abort reason is normally NOT captured at all, and the negative-voxel-index story rests on a
+single observation. Finding where glog writes is the open diagnostic question.
 
 **I also tried and discarded a fix.** I wrote a collector for
 `/root/.ros/log/*/exploration_node-*.log`, then checked the container: that file **does not
