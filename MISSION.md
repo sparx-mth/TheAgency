@@ -2098,7 +2098,39 @@ somebody is watching those and would rather hear "failed" than sit for three min
 has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
 never touches the GUI.
 
-**RESULT 2026-08-22 07:38Z: the fix did NOT work.** Cycle 331 stalled at **19.7 min** with the
+### ROOT CAUSE FOUND 2026-08-22 17:50 — it was never the window wait
+
+The diagnostic armed at 08:00Z fired on cycle 386 (20.0 min) and named the branch immediately:
+
+```
+[watchdog] restart done, driving Sphera's GUI back into the scenario...
+[gui] found Sphera content window 25165841, entering scenario
+[gui] window 25165841 reports no geometry ('') -- it is gone or not yet mapped
+[watchdog] GUI re-entry aborted after 28.2s: Sphera window not found
+```
+
+**The window was FOUND, in 28 seconds.** Nowhere near 90 s, let alone 180. So my window-wait fix
+was aimed at a mechanism that was never involved, and would never have helped however high I set
+it — which is exactly what "do not raise a timeout on a guess" was there to prevent, and I did it
+anyway before the diagnostic existed.
+
+**What actually happens is a time-of-check/time-of-use race.** `find_content_window` only returns
+window ids that HAD geometry, so an empty answer moments later in `_click_fraction` means Sphera
+remapped its window while we were reaching for it — it is still settling. The code treated that
+transient state as "window gone", abandoned the re-entry, and the campaign then spent eleven
+minutes restarting Sphera to reach a state it was seconds away from. The misleading part is the
+message: `[watchdog] ... Sphera window not found` when the window had just been found.
+
+**Fix: tolerate a briefly-unmapped window.** `_click_fraction` now polls geometry for up to
+`GEOMETRY_GRACE_SEC = 20 s` before declaring the window gone. It costs nothing when healthy (the
+first read succeeds), recovers the transient case, and still raises for a window that is genuinely
+gone. Verified on all three paths: healthy clicks in 0.00 s, transient recovers in 0.20 s where it
+previously aborted, and a permanently empty window still raises after the grace period.
+
+**Still unverified in the field** — like the last attempt, this needs the ~1-in-30 stall to recur.
+The difference is that this one is aimed at an observed mechanism rather than a guessed one.
+
+**Superseded — RESULT 2026-08-22 07:38Z: the fix did NOT work.** Cycle 331 stalled at **19.7 min** with the
 identical signature — `Sphera restart command FAILED (rc=1)`, two `window did not reappear within
 180s`, then the mid-way re-run rescuing it. So 180 s is not the answer, or not the whole answer.
 

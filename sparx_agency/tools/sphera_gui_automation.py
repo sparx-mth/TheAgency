@@ -94,6 +94,12 @@ def wait_for_window(timeout_sec: float = 90.0, poll_sec: float = 1.0) -> int | N
     return find_content_window()
 
 
+#: How long a found window may report no geometry before we call it gone.
+#: It is a settling race, not a missing window -- see ``_click_fraction``.
+GEOMETRY_GRACE_SEC = 20.0
+GEOMETRY_POLL_SEC = 0.5
+
+
 class ClickTargetGone(RuntimeError):
     """The window we were about to click no longer has a geometry."""
 
@@ -103,8 +109,24 @@ def _click_fraction(window_id: int, fx: float, fy: float) -> None:
     (queried fresh each call — one cheap `xdotool` call, not cached), so
     this adapts to minor size differences instead of assuming a fixed pixel
     position."""
-    geom = _run("xdotool", "getwindowgeometry", "--shell", str(window_id)).stdout
-    dims = dict(line.split("=", 1) for line in geom.splitlines() if "=" in line)
+    # Tolerate a briefly-unmapped window before giving up. `find_content_window`
+    # only returns ids that HAD geometry, so an empty answer here is a
+    # time-of-check/time-of-use race: Sphera is still settling and remaps its
+    # window under us. Measured 2026-08-22 on cycle 386 -- the window was found
+    # in 28 s, reported no geometry, and the whole re-entry was abandoned; the
+    # campaign then spent eleven minutes restarting Sphera to reach a state it
+    # was already moments away from. Polling costs nothing when the window is
+    # healthy, because the first read succeeds.
+    deadline = time.time() + GEOMETRY_GRACE_SEC
+    while True:
+        geom = _run("xdotool", "getwindowgeometry", "--shell",
+                    str(window_id)).stdout
+        dims = dict(line.split("=", 1) for line in geom.splitlines() if "=" in line)
+        if "WIDTH" in dims and "HEIGHT" in dims:
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(GEOMETRY_POLL_SEC)
     if "WIDTH" not in dims or "HEIGHT" not in dims:
         # A window id can outlive the window, and one that is unmapped answers
         # with no geometry at all. Raising ClickTargetGone lets enter_scenario
@@ -112,8 +134,9 @@ def _click_fraction(window_id: int, fx: float, fy: float) -> None:
         # window that never appeared; the bare KeyError instead escaped as a
         # traceback and stalled the campaign for eleven minutes on 2026-08-20.
         raise ClickTargetGone(
-            "window %s reports no geometry (%r) -- it is gone or not yet mapped"
-            % (window_id, geom.strip()[:120]))
+            "window %s still reports no geometry (%r) after %.0fs -- it is gone, "
+            "not merely unmapped" % (window_id, geom.strip()[:120],
+                                     GEOMETRY_GRACE_SEC))
     x = round(fx * int(dims["WIDTH"]))
     y = round(fy * int(dims["HEIGHT"]))
     _run("xdotool", "mousemove", "--window", str(window_id), str(x), str(y))
