@@ -1210,6 +1210,57 @@ def _data_gaps(metrics, samples, bad_lines, log_files):
     return [text for failed, text in checks if failed]
 
 
+def planner_death(run_dir):
+    """When FALCON's planner aborted this run, and why, if it did.
+
+    P42 makes this the campaign's most valuable fact, and pruning used to
+    delete it -- so it is lifted into ``metrics.json`` where it survives.
+    Two files, verified 2026-08-22 against two preserved runs:
+
+    - the death TIMESTAMP is in ``logs/roslaunch-*.log`` ("process has died"),
+    - the REASON, when there is one, is a glog line in
+      ``logs/falcon_roslaunch.log`` (roslaunch's stdout capture).
+
+    The reason is often absent. Three of five known cases died ``exit code -6``
+    with no glog output anywhere, while two carried
+    ``Check failed: addr < map_data_->data.size()`` -- a negative voxel index
+    out of ``voxel_mapping::MapBase<>::getVoxel()``. So there are at least two
+    abort modes and ``reason`` being None is a real observation, not a gap.
+
+    Args:
+        run_dir: The run folder.
+
+    Returns:
+        dict with ``died`` (bool), ``wall`` (ISO timestamp or None) and
+        ``reason`` (the glog line or None).
+    """
+    out = {"died": False, "wall": None, "reason": None}
+    for path in sorted(run_dir.glob("logs/roslaunch-*.log")):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"\[([\d-]+ [\d:]+),\d+\]?:? \[exploration_node[^\]]*\] "
+                          r"process has died", text)
+        if not match:
+            match = re.search(r"([\d-]{10} [\d:]{8}),\d+: \[exploration_node[^\]]*\] "
+                              r"process has died", text)
+        if match:
+            out["died"] = True
+            out["wall"] = match.group(1)
+            break
+    reason_path = run_dir / "logs" / "falcon_roslaunch.log"
+    if out["died"] and reason_path.is_file():
+        try:
+            for line in reason_path.read_text(errors="replace").splitlines():
+                if line.startswith("F") and "Check failed" in line:
+                    out["reason"] = line.strip()[:300]
+                    break
+        except OSError:
+            pass
+    return out
+
+
 def analyze(run_dir):
     """Analyse one run directory, writing ``metrics.json`` and ``findings.md``.
 
@@ -1252,6 +1303,7 @@ def analyze(run_dir):
         exploration=exploration_metrics(lines),
         clearance=clearance_metrics(run_dir),
         config=config_metrics(run_dir))
+    metrics["planner_death"] = planner_death(run_dir)
     metrics["collapse_signature"] = collapse_signature(metrics)
     metrics["data_gaps"] = _data_gaps(metrics, samples, bad_lines, log_files)
     metrics["ranked_findings"] = _rank(metrics)

@@ -2208,7 +2208,30 @@ story from a single sample. Their last trajectory discontinuities were at
 0.94)`, with collisions flagged at `(54.05, -30.42, 1.40)` and `(59.16, -20.51, 0.93)` — all
 plausibly inside the box, unlike the z=0.20 m case.
 
-**Three consecutive cases now show NO captured abort reason.** `061542Z`, `062603Z` and
+**Where the abort reason lives — answered 2026-08-22 10:35.** The glog line is written to
+`logs/falcon_roslaunch.log` (roslaunch's stdout capture); the death TIMESTAMP is in
+`logs/roslaunch-*.log`. Both are now lifted into `metrics.json` as a `planner_death` block
+(`died`, `wall`, `reason`) so they survive pruning. Verified against both known modes and a
+healthy run.
+
+**A second negative-voxel-index case, so that story is no longer a single observation.**
+`093058Z` (805 m3) carries `Check failed: addr < map_data_->data.size() (-3796 vs. 1400000)` with
+a stack trace through `voxel_mapping::MapBase<>::getVoxel()`, matching `054433Z`'s -4105. But
+**three other cases died `exit code -6` with no glog output at all**, so there really are at least
+two abort modes and a missing reason is a real observation rather than a collection failure.
+
+**The damage looks like it depends on WHEN, and that is now pre-registered rather than believed:**
+
+    093058Z  died  90 s into the flight  ->   805 m3  (collapse)
+    092027Z  died 400 s into the flight  ->  1657 m3  (above median)
+
+Two runs. The mechanism is plausible — mapping continues without the planner, so an abort only
+costs the *directed* exploration it steals — which is exactly why it needs testing rather than
+believing. `test_p43.py` pre-registers one claim: `corr(seconds of flight before death, final
+volume) >= +0.5` over `n >= 8` planner-death runs, and refuses to print a coefficient below that.
+If it passes, the fix priority shifts from preventing the abort to restarting the planner quickly.
+
+**Superseded: three consecutive cases showed NO captured abort reason.** `061542Z`, `062603Z` and
 `092027Z` all died `exit code -6` with no `^F[0-9]{4}` or `Check failed` line anywhere in their
 collected logs. Only the very first case (`054433Z`, since pruned) ever showed the glog CHECK. So
 the abort reason is normally NOT captured at all, and the negative-voxel-index story rests on a
