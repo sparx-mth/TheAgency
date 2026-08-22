@@ -2197,6 +2197,38 @@ than the dead one. Planning rate does not distinguish anything. **No finding** �
 nobody re-derives it, and noted as the difference from the retracted TrajServer "fingerprint",
 which was written down before its control was checked rather than after.
 
+### The geometry grace period did NOT fix it either — it is a STALE WINDOW ID (2026-08-23 02:15)
+
+Cycle 419 stalled and the 20 s grace period ran its full course:
+
+```
+[gui] found Sphera content window 25165841, entering scenario
+[gui] window 25165841 still reports no geometry ('') after 20s -- it is gone, not merely unmapped
+[watchdog] GUI re-entry aborted after 48.3s: Sphera window not found
+```
+
+So waiting longer is not the answer, and the message the fix added says why: the window is **gone**,
+not slow. **And the id is the same one — 25165841 — seen in the previous stall hours earlier**,
+which is the tell. Sphera destroys and recreates its window while starting up, so an id captured a
+moment ago can name a window that no longer exists. Polling a dead id cannot succeed at any grace
+period; only asking X again can return the live window.
+
+**Fix: re-SEARCH, do not re-poll.** On `ClickTargetGone`, `enter_scenario` now calls
+`wait_for_window` again for a fresh id and retries the click sequence once with it, giving up if
+the search returns nothing or the same id. Verified on four paths: healthy clicks once with no
+re-search; a stale id retries on the fresh window where it previously aborted; the same id on
+retry gives up after one attempt; an empty re-search returns False and never raises.
+
+**This is the third attempt at this stall, and the pattern in the failures is worth naming.**
+Attempt 1 raised a timeout on a guess and addressed a mechanism never involved. Attempt 2 fixed a
+real race but assumed the window was slow rather than gone. Both were plausible and both were
+wrong, and each was only exposed because the previous fix left behind a MORE specific message.
+The diagnostic, not the fix, is what has made progress each time.
+
+**Unverified, like its predecessors** — needs the ~1-in-30 stall to recur. If it does, the message
+to look for is now `re-searching for a live Sphera window`: if the re-search finds a different id
+and the clicks then work, this was right.
+
 ### ROOT CAUSE FOUND 2026-08-22 17:50 — it was never the window wait
 
 The diagnostic armed at 08:00Z fired on cycle 386 (20.0 min) and named the branch immediately:

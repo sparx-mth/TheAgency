@@ -155,12 +155,29 @@ def enter_scenario(window_wait_sec: float = 90.0) -> bool:
         print(f"[gui] Sphera window did not reappear within {window_wait_sec:.0f}s", flush=True)
         return False
 
-    try:
-        return _enter_scenario_clicks(window_id)
-    except ClickTargetGone as exc:
-        # Contract of this function: never raise. The caller retries.
-        print(f"[gui] {exc}", flush=True)
-        return False
+    for attempt in (1, 2):
+        try:
+            return _enter_scenario_clicks(window_id)
+        except ClickTargetGone as exc:
+            print(f"[gui] {exc}", flush=True)
+            if attempt == 2:
+                break
+            # Re-SEARCH rather than re-poll. Measured 2026-08-23 on cycle 419:
+            # after 20 s of polling, window 25165841 still had no geometry --
+            # the same id seen in the previous stall hours earlier. Sphera
+            # destroys and recreates its window while starting, so an id
+            # captured a moment ago can name a window that no longer exists,
+            # and polling it can never succeed however long the grace period.
+            # Asking X again is the only thing that can return the live window.
+            print("[gui] re-searching for a live Sphera window", flush=True)
+            fresh = wait_for_window(window_wait_sec)
+            if fresh is None or fresh == window_id:
+                print("[gui] re-search found %s -- no fresher window to try"
+                      % ("nothing" if fresh is None else "the same id"), flush=True)
+                break
+            window_id = fresh
+    # Contract of this function: never raise. The caller retries.
+    return False
 
 
 def _enter_scenario_clicks(window_id: int) -> bool:
