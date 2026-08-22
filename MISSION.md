@@ -2193,7 +2193,7 @@ rather than a cause. Verified on two dead runs and one healthy one.
 the median for free — breaking comparability with all 253 recorded runs. The wasted minutes are
 the price of a dataset that still compares. Revisit only with a deliberate decision to re-baseline.
 
-### Watch — the planner deaths stopped, and nothing was done to stop them (2026-08-22 16:00)
+### CLOSED — the planner-death drought was ordinary variation (opened 16:00, broke 17:00)
 
 No planner death in the last **23 runs**, against a 12 % base rate over the prior 302:
 
@@ -2211,10 +2211,10 @@ no mechanism — every change since 2026-08-22 is analysis-only (`analyze.py` ta
 has touched flight, FALCON, or the map. A rate cannot fall because a post-flight analyser gained a
 field.
 
-**What would make it interesting:** the drought reaching ~40 runs (p<0.01 even two-sided) while
-detection still checks out. At that point the question becomes what changed in the ENVIRONMENT —
-Sphera build, GPU state, host load — not in this repo. If instead deaths resume at roughly one in
-eight, this entry is just a record of ordinary variation, which is the likelier outcome.
+**Resolved within the hour: `164231Z` died 18 s into its flight, ending the drought at 24 runs.**
+The likelier outcome happened, exactly as the open version of this entry said it would. No action
+was taken and none was needed — kept as a worked example of waiting a quiet stretch out rather
+than explaining it.
 
 ### CORRECTION 2026-08-22 13:00 — the pruning exemption was INERT, and I reported it working
 
@@ -2235,11 +2235,24 @@ Pruning deletes `logs/` and nothing else, so the excerpt survives regardless. It
 every cycle, so it is live immediately. Verified on both preserved cases and confirmed silent on a
 healthy run. The supervisor exemption stays as belt-and-braces for whenever it next restarts.
 
-**And what the excerpt already shows about the SILENT abort mode.** `114443Z`'s last 12 log lines
-before dying are `[TrajServer] Flight time: 391.17, path length: 364.42, mean vel: 0.93` repeated
-once a second with **identical values** — the trajectory server was replaying a frozen state, not
-tracking a live plan. That is a different picture from the voxel-index CHECK and worth carrying
-into the eventual diagnosis.
+**RETRACTED — the "silent-mode fingerprint" was aftermath, not a signature (2026-08-22 17:05).**
+I wrote here that `114443Z`'s trailing `[TrajServer]` lines — an identical flight time, path length
+and mean velocity repeated once a second — showed the trajectory server replaying a frozen state,
+and called it a different picture from the voxel-index CHECK. `164231Z` repeated the pattern, and
+then converting the epoch stamps killed it: those lines run 16:52:35-16:52:40 while the planner
+died at **16:48:19**, about four minutes EARLIER. TrajServer simply keeps re-reporting the last
+trajectory it ever received, which is what follows ANY planner death. Not a clue, and I should
+have checked the timestamps before writing it down the first time.
+
+**That exposed a flaw in my own excerpt.** It kept the last 400 lines, which for a death 18 s into
+the flight is entirely post-mortem: 144 of them were the frozen refrain and none was run-up. Now
+anchored on the abort — the glog line when there is one, otherwise the last line that is not the
+refrain — keeping 400 lines before and 40 after. Re-verified on both cases: frozen lines fall from
+~all to 154 of 410 and 113 of 399, and real run-up (`sensor_gate hb: state=FUSING ...`) is included.
+The excerpt is written at analysis time only; re-running it on a pruned run correctly does nothing,
+which is why the reason also lives in `metrics.json`.
+
+**Silent tally is now 5** (`061542Z`, `062603Z`, `092027Z`, `114443Z`, `164231Z`) against 3 glog.
 
 **The evidence was being deleted faster than it could be read (partially fixed 2026-08-22 08:50).** Of the
 31 planner-death runs, only **2** still had logs — pruning keeps the newest 30 runs and at a 12 %
