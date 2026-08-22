@@ -2098,6 +2098,44 @@ somebody is watching those and would rather hear "failed" than sit for three min
 has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
 never touches the GUI.
 
+### The SILENT abort leaves no trace in the logs — three discriminators tested, all dead (2026-08-22 20:00)
+
+With real run-up finally captured, I went looking for what separates a planner death from a
+healthy flight in the final 120 s. **Nothing does.** Three candidates, each checked against a
+control of healthy runs BEFORE being written down:
+
+1. **Trailing `[TrajServer]` refrain** — retracted the same day: the lines are stamped minutes
+   AFTER the abort. Post-mortem, not signature.
+2. **Planning iteration rate** — dead runs 478/10 s; healthy runs span **4 to 1556**, and the best
+   healthy run in the sample did three times more replanning than the dead one.
+3. **Error/warning markers in the run-up** — `[UniformGrid] Cell`, `No frontier viewpoint`,
+   `cannot be reached`, `TSP pr`. Every one is MORE common in healthy runs:
+
+```
+ run      state       m3   UniformGrid  no-viewpoint  cannot-reach   TSP
+ 185612   DIED       677       437          267           886         58
+ 182508   DIED      1323       347          352           586         31
+ 184552   healthy   1640      3559         2062          3951        152
+ 174409   healthy   1261      5327         5270          2597          -
+ 181457   healthy   1851       137           67            96          7
+```
+
+**A methodological note on this log.** My first pass compared normalised line TEMPLATES and found
+11 "unique to deaths". They were **torn lines** — `falcon_roslaunch.log` is concurrent stdout from
+a dozen nodes and writes splice mid-line (`Hgrid tour N next[WARN] : [ExplorationManager] Current
+cell id:`). Tearing happens at random offsets, so every torn line is a unique template. Use
+substring search on this file, never exact templates.
+
+**What this narrows.** The silent abort is `exit -6` (SIGABRT) with no glog line, no
+`terminate called`, and no anomalous rate or marker beforehand. A process that aborts itself
+normally says why on stderr, and the glog cases prove stderr IS captured — so the silent ones
+plausibly produce no message at all (a direct `raise`, or an assert built without logging). It is
+NOT an OOM kill: that would be SIGKILL (-9), not SIGABRT.
+
+**Next route is not log analysis** — it is a core dump or running `exploration_node` under a
+debugger, which needs a container change and belongs to the operator. Recorded so the next session
+does not spend another evening grepping the same log.
+
 ### The planner-death excerpt took three tries, and the first thing it showed was a dud (2026-08-22 19:15)
 
 **Getting run-up into the excerpt needed three attempts, each killed by a measurement:**
