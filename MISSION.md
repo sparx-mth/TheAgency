@@ -2098,6 +2098,34 @@ somebody is watching those and would rather hear "failed" than sit for three min
 has nobody at the keyboard. Verified all three branches, including that `gui_reentry=False` still
 never touches the GUI.
 
+### CORRECTION — every planner-death timing I have quoted was wrong by ~220 s (2026-08-22 21:00)
+
+`test_p43.py` converted "cycle start" to "flight start" by subtracting a flat
+`TYPICAL_BRINGUP_S = 330`, a number I guessed. Real bring-up is about **106 s**. Two consequences,
+both found by asking why the test reported n=3 when I knew of five deaths:
+
+* **It silently DROPPED cases.** Any run whose bring-up beat the estimate produced a negative
+  elapsed time and was discarded — `182508Z` (death 327 s after cycle start) and `185612Z` (179 s)
+  both vanished. A test that quietly shrinks its own sample is worse than one that fails.
+* **The times it DID report were ~220 s too small.** `110325Z` was quoted as 128 s; it is 352 s.
+  `164231Z` as 18 s; it is 242 s.
+
+**Fixed by using the real takeoff time** from the supervisor's own `arm + takeoff` line, pairing it
+to the run by the adjacent `cycle start:` line and deriving the local/UTC offset per cycle rather
+than assuming one. Deaths before takeoff are now excluded explicitly as a different question rather
+than by accident.
+
+**This also invalidates a claim I made twice.** I wrote that the first cases were "EARLY deaths
+with HIGH volumes, which cuts against the timing story". With correct times `110325Z` died LATE
+(352 s) and scored high — consistent with the story, not against it. I was reasoning about numbers
+produced by a guessed constant.
+
+**Integrity note on the pre-registered test.** The mechanism changed after data existed, which is
+worth flagging plainly. What did NOT change: the hypothesis (`corr >= +0.5`), the n>=8 bar, and the
+cutoff — all fixed before any of this. And **no coefficient has been computed**; the test still
+refuses at n=5. The change fixes which cases are eligible and how their times are measured, not
+what counts as a pass.
+
 ### The SILENT abort leaves no trace in the logs — three discriminators tested, all dead (2026-08-22 20:00)
 
 With real run-up finally captured, I went looking for what separates a planner death from a
@@ -2314,7 +2342,7 @@ no mechanism — every change since 2026-08-22 is analysis-only (`analyze.py` ta
 has touched flight, FALCON, or the map. A rate cannot fall because a post-flight analyser gained a
 field.
 
-**Resolved within the hour: `164231Z` died 18 s into its flight, ending the drought at 24 runs.**
+**Resolved within the hour: `164231Z` died 242 s into its flight, ending the drought at 24 runs.**
 The likelier outcome happened, exactly as the open version of this entry said it would. No action
 was taken and none was needed — kept as a worked example of waiting a quiet stretch out rather
 than explaining it.
@@ -2347,8 +2375,8 @@ died at **16:48:19**, about four minutes EARLIER. TrajServer simply keeps re-rep
 trajectory it ever received, which is what follows ANY planner death. Not a clue, and I should
 have checked the timestamps before writing it down the first time.
 
-**That exposed a flaw in my own excerpt.** It kept the last 400 lines, which for a death 18 s into
-the flight is entirely post-mortem: 144 of them were the frozen refrain and none was run-up. Now
+**That exposed a flaw in my own excerpt.** It kept the last 400 lines, which for a death partway
+into the flight is entirely post-mortem: 144 of them were the frozen refrain and none was run-up. Now
 anchored on the abort — the glog line when there is one, otherwise the last line that is not the
 refrain — keeping 400 lines before and 40 after. Re-verified on both cases: frozen lines fall from
 ~all to 154 of 410 and 113 of 399, and real run-up (`sensor_gate hb: state=FUSING ...`) is included.
@@ -2391,10 +2419,10 @@ missing reason is a real observation rather than a collection failure. Running t
 cases inspected so far: **3 glog CHECK, 4 silent.** The silent mode is the more common one, which
 matters — a fix aimed only at the voxel-index CHECK would address under half of these.
 
-*Not drawing the obvious inference yet:* `110325Z` died 128 s into its flight and still reached
-**1589 m3**, which cuts against the timing story the first two cases suggested. That is precisely
-what `test_p43.py` is for — it decides at n>=8, and until then these per-case numbers are for
-auditing the extraction, not for updating the narrative.
+*Not drawing the obvious inference yet:* `110325Z` reached **1589 m3** despite a planner death.
+(Its death time was reported here as 128 s and is actually **352 s** — see the timing correction
+below.) `test_p43.py` decides at n>=8; until then these per-case numbers are for auditing the
+extraction, not for updating the narrative.
 
 **The damage looks like it depends on WHEN, and that is now pre-registered rather than believed:**
 

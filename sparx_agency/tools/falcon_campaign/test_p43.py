@@ -35,6 +35,7 @@ import datetime
 import glob
 import json
 import os
+import re
 
 #: Runs started after this instant carry the planner_death block.
 CUTOFF = datetime.datetime(2026, 8, 22, 10, 30)
@@ -42,16 +43,64 @@ CUTOFF = datetime.datetime(2026, 8, 22, 10, 30)
 MIN_RUNS = 8
 #: The pre-registered bar.
 MIN_CORRELATION = 0.5
-#: Bring-up takes about this long before the flight starts; the run directory
-#: is named for the CYCLE start, not the takeoff. Only used as a fallback when
-#: the supervisor log cannot be read.
+#: Bring-up takes roughly this long before the flight starts; the run directory
+#: is named for the CYCLE start, not the takeoff. Used ONLY when the supervisor
+#: log cannot supply the real takeoff time.
+#:
+#: MECHANISM FIX 2026-08-22 21:00, after finding it silently dropped cases: with
+#: a flat 330 s estimate, any run whose bring-up was faster produced a negative
+#: elapsed time and was discarded. `182508Z` (death 327 s after cycle start) and
+#: `185612Z` (179 s) both vanished that way, so the test reported n=3 when five
+#: deaths existed. The HYPOTHESIS and the n>=8 bar are untouched -- this only
+#: fixes which cases are eligible, and no coefficient had been computed, so
+#: there is no result to have biased.
 TYPICAL_BRINGUP_S = 330.0
+#: Deaths before this many seconds of flight happened during bring-up, not
+#: during exploration, and answer a different question.
+MIN_FLIGHT_S = 0.0
 MAX_VEL = 0.8
 RAYCAST_MAX = 8.0
 
 
-def _flight_seconds_before_death(run_dir, metrics):
-    """Seconds of flight elapsed when the planner died, or None."""
+def _takeoff_offsets(supervisor_log):
+    """Map run name -> seconds from cycle start to "arm + takeoff".
+
+    The supervisor stamps its lines in LOCAL time while run directories are
+    named in UTC, so the offset is derived per cycle from its own
+    "cycle start: <run>" line rather than assuming a fixed timezone shift.
+    """
+    out = {}
+    pending = None
+    try:
+        handle = open(supervisor_log, errors="replace")
+    except OSError:
+        return out
+    with handle:
+        for line in handle:
+            match = re.search(r"\[(\d{2}:\d{2}:\d{2})\] === cycle start: (2026\d{4}_\d{6}Z)",
+                              line)
+            if match:
+                pending = (match.group(1), match.group(2))
+                continue
+            if pending and "arm + takeoff" in line:
+                stamp = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", line)
+                if stamp:
+                    start = datetime.datetime.strptime(pending[0], "%H:%M:%S")
+                    lift = datetime.datetime.strptime(stamp.group(1), "%H:%M:%S")
+                    seconds = (lift - start).total_seconds()
+                    if seconds < 0:
+                        seconds += 24 * 3600          # cycle crossed midnight
+                    out[pending[1]] = seconds
+                pending = None
+    return out
+
+
+def _flight_seconds_before_death(run_dir, metrics, takeoffs=None):
+    """Seconds of flight elapsed when the planner died, or None.
+
+    Uses the real takeoff time from the supervisor log when available; the flat
+    bring-up estimate is a fallback and is why cases used to be dropped.
+    """
     death = (metrics.get("planner_death") or {}).get("wall")
     if not death:
         return None
@@ -64,15 +113,21 @@ def _flight_seconds_before_death(run_dir, metrics):
         started = datetime.datetime.strptime(name[:15], "%Y%m%d_%H%M%S")
     except ValueError:
         return None
-    elapsed = (died - started).total_seconds() - TYPICAL_BRINGUP_S
+    bringup = (takeoffs or {}).get(name)
+    if bringup is None:
+        bringup = TYPICAL_BRINGUP_S
+    elapsed = (died - started).total_seconds() - bringup
     duration = (metrics.get("motion") or {}).get("duration_s") or 0.0
-    if elapsed < 0 or (duration and elapsed > duration + 60):
-        return None            # outside the flight: do not guess
+    if elapsed < MIN_FLIGHT_S:
+        return None            # died during bring-up: a different question
+    if duration and elapsed > duration + 60:
+        return None            # after the flight window: do not guess
     return elapsed
 
 
 def _cases(runs_dir):
     """Planner-death runs after the cutoff, with a usable death time."""
+    takeoffs = _takeoff_offsets(os.path.join(runs_dir, "supervisor.stdout.log"))
     out = []
     for path in sorted(glob.glob(os.path.join(runs_dir, "2026*Z"))):
         metrics_path = os.path.join(path, "metrics.json")
@@ -97,7 +152,7 @@ def _cases(runs_dir):
             continue
         if not (metrics.get("planner_death") or {}).get("died"):
             continue
-        elapsed = _flight_seconds_before_death(path, metrics)
+        elapsed = _flight_seconds_before_death(path, metrics, takeoffs)
         if elapsed is None:
             continue
         out.append((os.path.basename(path), elapsed, coverage["final_m3"]))
