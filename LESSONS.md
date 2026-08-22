@@ -1681,3 +1681,19 @@ bad. Distance stays normal; only the map stops growing.
 When a scan over metrics comes back empty, that is evidence about the metrics, not about the
 system. Ask what could have HAPPENED rather than what could have been LARGER, and grep the logs
 for processes dying, restarts, timeouts and exceptions before concluding a cause does not exist.
+
+## A long-running shell script does not re-read itself -- your edit is inert until it restarts
+
+The campaign supervisor is a bash `while` loop that started on 2026-08-20 and has run ever since.
+Bash parsed that loop body once, at startup. Editing `supervisor.sh` afterwards changes the file
+on disk and changes nothing about the running process -- and there is no error, no warning, and no
+log line to say so. I edited the log-pruning rule, watched a run that should have been protected
+get pruned anyway, and only then worked out why. Worse, I had already reported the fix as working,
+because a recent run happened to still have its logs for an unrelated reason.
+
+Two rules follow. First, in a long-running harness, put changes where they are actually re-read:
+Python modules re-imported per cycle take effect immediately, shell loop bodies do not. Second,
+when a fix cannot be observed working, say it is unverified -- the failure mode here was not the
+inert edit, it was claiming success from a coincidence. (Editing a running bash script is also
+mildly hazardous in its own right: bash tracks a byte offset into the file, so an edit that
+shifts offsets can make it parse garbage.)
