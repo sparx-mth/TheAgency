@@ -2485,18 +2485,22 @@ healthy run.
 Every glog-bearing case is `map_base_inl.h:173  Check failed: addr < map_data_->data.size()`,
 through `voxel_mapping::MapBase<>::getVoxel()`, but the addresses run off BOTH ends of the array:
 
-    054433Z    -4105        093058Z    -3796
-    110325Z   -11190        204954Z  +1402073   (map size 1400000 -- 2073 PAST the end)
-    221227Z    -4127
+    054433Z    -4105        093058Z    -3796        110325Z   -11190
+    185612Z    -3856        204954Z  +1402073        221227Z    -4127
+    232424Z    -4112                                 (map size 1400000)
 
-I described this as "a negative voxel index" for a day on the strength of the first three. It is
-an out-of-range index in either direction, which the CHECK itself says plainly — `addr <
-data.size()` is an unsigned comparison, so a negative index wraps huge and a genuine overflow
-reads as slightly-too-large. **A fix that only guards against negatives would miss `204954Z`.**
-The spread (-11190 to +2073) suggests varying degrees of leaving the box rather than one bad cell.
-**Two of the five sit 22 apart** (-4105 and -4127), which may mean a particular boundary is hit
-more often than the rest — worth a glance when the operator has five or six more, but nothing to
-act on at n=5. But **four cases have now died `exit code -6` with no glog output at all**
+**The addresses are not scattered — five of seven fall in two tight clusters:**
+
+    cluster A   -4127, -4112, -4105     spread 22 cells
+    cluster B   -3856, -3796            spread 60 cells
+    outliers    -11190, +1402073
+
+In a 1 400 000-cell array, 22 cells apart is essentially the same voxel. So the planner is not
+wandering out of bounds at random points — it keeps failing at **a small number of specific map
+locations**, twice over. That is a much more tractable thing to fix than a general excursion, and
+it suggests looking at the geometry near those cells (a doorway, a corner, the floor) rather than
+at the aircraft's behaviour in general. `+1402073` running off the OTHER end still means a
+negatives-only guard is insufficient. But **four cases have now died `exit code -6` with no glog output at all**
 (`061542Z`, `062603Z`, `092027Z`, `114443Z`), so there really are at least two abort modes and a
 missing reason is a real observation rather than a collection failure. Running tally of the seven
 cases inspected so far: **3 glog CHECK, 4 silent.** The silent mode is the more common one, which
