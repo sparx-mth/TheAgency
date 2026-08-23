@@ -98,18 +98,18 @@ battery capacity — it would improve the number without improving the system.
 
 ---
 
-### Operator note — 48 local commits are waiting, nothing has been pushed (refreshed 2026-08-22 09:20)
+### Operator note — 72 local commits are waiting, nothing has been pushed (refreshed 2026-08-23 06:00)
 
 Per your instruction, everything since `d5e3f2df` is committed locally and **nothing has been
-pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 48 commits ahead of its remote;
+pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 72 commits ahead of its remote;
 `c213b56b` ("give a freshly respawned FCU longer to become armable") is the last commit on
-`origin`. The loop has run unattended since 2026-08-20 02:17 — **55 hours, ~322 cycles, no
+`origin`. The loop has run unattended since 2026-08-20 02:17 — **76 hours, ~440 cycles, no
 intervention.**
 
-**Where the system is: unchanged and stable.** n=247 settled runs, median 1606 m3, collapses 16 %.
+**Where the system is: unchanged and stable.** n=364 settled runs, median 1611 m3, collapses 17 %.
 No flight behaviour has been altered since `max_vel` was reverted to 0.8 on 2026-08-20 — the
-configuration has now reproduced its own distribution across 247 runs, and drift is null on both
-pre-specified tests (Mann-Whitney on run index p=0.35; fixed half-split 17/123 vs 22/124, p=0.49).
+configuration has now reproduced its own distribution across 364 runs, and drift is null on both
+pre-specified tests (Mann-Whitney on run index p=0.30; fixed half-split 26/182 vs 35/182, p=0.26).
 
 What the 38 contain, grouped:
 
@@ -158,6 +158,37 @@ behaviour; the notable items:
 * **Two more false alarms refused**, both with the search correction: a monotone 0,1,2,3 rise in
   block collapse counts (p=0.93 that some four blocks look like that by chance — it then broke to
   0,1,2,3,1), and a six-in-sixteen bad patch.
+
+**Since 2026-08-22 09:20, 24 more commits — and the most important finding of the campaign.**
+
+* **P42: FALCON's own planner aborts mid-flight in ~12 % of runs, and those runs collapse at 52 %
+  against 12 %** (Fisher p=1.1e-06). It is `exploration_node` dying with SIGABRT. The live health
+  check could never see it: `rosnode list` reads the ROS master's registration and a master never
+  deregisters a crashed node. This reopened the collapse question that had been closed as "not
+  known" — closed because five *metrics* failed to predict it, when the cause was a discrete
+  *event* sitting in the health log all along.
+* **P43 PASSED: the damage is proportional to the flight the abort steals** — corr = **+0.940** at
+  n=8, pre-registered at >= +0.50. So the highest-value fix is to **restart the planner quickly**;
+  there is no respawn today and the node stays dead for the rest of the run. **Not implemented** —
+  it changes flight behaviour on an unattended system, so it is yours to approve.
+* **The abort addresses cluster at a few specific map cells:** `-4127/-4112/-4105` (22 cells
+  apart) and `-3856/-3796`, plus `-11190` and `+1402073` in a 1 400 000-cell map. Not random
+  excursions — a handful of recurring locations, which is far more tractable. Note `+1402073` runs
+  off the OTHER end, so a negatives-only guard is insufficient.
+* **But only about half the deaths have that signature: 7 glog CHECK vs 9 SILENT** (SIGABRT, no
+  output at all). Log analysis of the silent mode is exhausted — three candidate discriminators
+  were tested against healthy controls and all failed. The next route is a core dump or a
+  debugger, which needs a container change: also yours.
+* **Three attempts at the Sphera restart stall, all unverified, and the pattern is instructive.**
+  Attempt 1 raised a timeout on a guess and hit a mechanism never involved; attempt 2 fixed a real
+  race but assumed the window was slow rather than gone; attempt 3 (current) re-searches for a
+  live window id after finding the captured one dead. Each was exposed only because the previous
+  fix left a more specific message behind. **The diagnostics made the progress, not the fixes.**
+
+**Retractions this period, all caught by checking a control first:** a TrajServer "fingerprint"
+that was post-mortem aftermath, a planning-rate "spin" that healthy runs exceed threefold, and my
+own claim that a log-pruning fix was working when it was inert. Also corrected: every
+planner-death timing I had quoted was wrong by ~220 s, from a bring-up constant I guessed.
 
 **Two of those five cost nothing because they were caught before acting.** That is the part worth
 your attention: the campaign spent today refusing to chase three things that looked real, and the
