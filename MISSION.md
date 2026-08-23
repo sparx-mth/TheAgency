@@ -2523,13 +2523,20 @@ through `voxel_mapping::MapBase<>::getVoxel()`, but the addresses run off BOTH e
 
     054433Z    -4105        093058Z    -3796        110325Z   -11190
     185612Z    -3856        204954Z  +1402073        221227Z    -4127
-    232424Z    -4112                                 (map size 1400000)
+    232424Z    -4112        (new)    +1403351        (map size 1400000)
 
-**The addresses are not scattered — five of seven fall in two tight clusters:**
+**The addresses are not scattered — seven of eight fall in three groups:**
 
-    cluster A   -4127, -4112, -4105     spread 22 cells
-    cluster B   -3856, -3796            spread 60 cells
-    outliers    -11190, +1402073
+    cluster A   -4127, -4112, -4105       spread 22 cells
+    cluster B   -3856, -3796              spread 60 cells
+    cluster C  +1402073, +1403351         2073 and 3351 cells PAST the end
+    outlier     -11190
+
+**Update 2026-08-23 07:00: the positive side is a recurring mode, not a one-off.** A second
+overflow past the end (`+1403351`) means cluster C is real, so there are at least three distinct
+places the index goes out of range — two below zero and one above. Whatever the operator does must
+bound both directions; a `max(0, addr)` clamp would convert cluster C from a loud abort into
+silent memory corruption, which is worse.
 
 In a 1 400 000-cell array, 22 cells apart is essentially the same voxel. So the planner is not
 wandering out of bounds at random points — it keeps failing at **a small number of specific map
