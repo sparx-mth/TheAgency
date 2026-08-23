@@ -2458,7 +2458,12 @@ refrain — keeping 400 lines before and 40 after. Re-verified on both cases: fr
 The excerpt is written at analysis time only; re-running it on a pruned run correctly does nothing,
 which is why the reason also lives in `metrics.json`.
 
-**Silent tally is now 5** (`061542Z`, `062603Z`, `092027Z`, `114443Z`, `164231Z`) against 3 glog.
+**Tally at 15 inspected cases (2026-08-23 05:00): 7 glog CHECK, 8 SILENT.** The two modes are
+running at roughly even rates, so the voxel-index CHECK — the only one with a diagnosis — accounts
+for slightly under half of planner deaths. Any fix aimed solely at it leaves the majority in place.
+
+    glog    054433 093058 110325 185612 204954 221227 232424
+    silent  061542 062603 092027 114443 164231 182508 235522 005717
 
 **The evidence was being deleted faster than it could be read (partially fixed 2026-08-22 08:50).** Of the
 31 planner-death runs, only **2** still had logs — pruning keeps the newest 30 runs and at a 12 %
