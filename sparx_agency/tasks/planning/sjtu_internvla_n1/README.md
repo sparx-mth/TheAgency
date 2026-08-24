@@ -70,20 +70,225 @@ the patch exists. **Apply the upstream patch and restart the model server**, or
 the server emits no `trajectory` field and the policy falls back to the discrete
 action (below).
 
-On the occasional **pure-S2 step** — an in-place turn or a look-down, where the
-model genuinely emits no curve — there is no continuous trajectory, so the policy
-renders that one discrete action as a short followable body step
+On a **pure-S2 step** — a turn or a look-down, where the model genuinely emits
+no curve — there is no continuous trajectory, so the policy renders that one
+discrete action as a short followable body step
 (`geometry.trajectory_from_action`): a forward action advances 0.25 m, a turn
 places a waypoint one step ahead bent by **30°** — VLN-CE's own turn granularity,
 and far enough off the nose to cross the follower's `stop_turn_rad`, so the
 aircraft actually rotates instead of creeping 0.25 m sideways. The follower keeps
 moving and the next S1 step returns to flying the curve.
 
-In practice most steps are this fallback: System 1 emits up to four actions per
-call and the agent plays them out before inferring again, so a curve arrives
-roughly every four to six steps. A recording that shows `2 pts, 0.25 m`
-commitments interleaved with `17 pts, 1.4 m` ones is the system working, not
-failing.
+In practice most steps are this fallback, for the reason set out in "What
+decides between a curve and a discrete action" below: System 2 answers with an
+arrow more often than with coordinates, and System 1 runs only on the
+coordinate branch. A recording that shows `2 pts, 0.25 m` commitments
+interleaved with `17 pts, 1.4 m` ones is the system working; the ratio between
+them is the number worth watching, and it is drawn on the video.
+
+## What decides between a curve and a discrete action
+
+This is the question the deployment lives or dies on, and the answer is one
+`if` in the model. `internvla_n1_policy.py::s2_step` ends:
+
+```python
+if bool(re.search(r'\d', self.llm_output)):   # the VLM wrote digits
+    output.output_pixel  = <pixel goal>
+    output.output_latent = self.model.generate_latents(...)   # -> System 1 runs
+else:
+    output.output_action = self.parse_actions(self.llm_output)  # -> no System 1
+```
+
+**System 1 never runs without a latent from System 2, and System 2 only makes a
+latent when its text reply contains a number.** The prompt it is given asks for
+exactly that:
+
+> *"You are an autonomous navigation assistant. Your task is to `<instruction>`.
+> Where should you go next to stay on track? Please output the next waypoint's
+> coordinates in the image. Please output STOP when you have successfully
+> completed the task."*
+
+Its whole vocabulary for the other branch is `STOP`, `↑`, `←`, `→`, `↓`
+(indices 0, 1, 2, 3, 5). So three observations that look like separate
+mysteries are one mechanism:
+
+* **Why so many turns?** Because System 2 replied `→→→→` instead of coordinates
+  — four right-turns queued from one call. It does that when it cannot name a
+  point in the current frame worth flying to: a wall filling the view, or a
+  corridor it has to rotate into before anything navigable is visible.
+* **Why is there only a pixel goal in forward flight?** Because the pixel goal
+  *is* the forward branch. A coordinate reply means "fly to this point"; a
+  turn, a look-down or a stop produces no pixel goal at all. The patched agent
+  keeps the last goal alive on screen while System 1 flies toward it, which is
+  why the ring is visible exactly during the forward legs.
+* **Why does it say STOP so often?** It does not. Measured over 168 System-2
+  replies, System 2 emitted a real `STOP` **zero** times. What the screen used
+  to call STOP was action index **-1**, which the agent emits while a look-down
+  is in progress and whenever System 1 returns an empty action list. It means
+  "no decision this tick", not "the task is finished" — see the next section.
+
+### The look-down is the prelude to every curve
+
+The measurement that matters, over 168 System-2 replies in the hospital:
+
+| System 2 replied | share |
+|---|---:|
+| pixel coordinates → **System 1 runs** | 30.4% |
+| `↓` look-down | 32.7% |
+| `→` / `←` / `↑` | 36.9% |
+| `STOP` | **0%** |
+
+and **92.7% of look-downs are immediately followed by coordinates**. `↓` is not
+a failure or a stall: it is the trained prelude to a pixel goal, and it is very
+nearly a promise of one. The model asks to tilt its camera down, then names the
+waypoint.
+
+Two consequences. First, this stack used to decode that `↓` as STOP and reset
+the plan executor — **it braked the aircraft on the one step that precedes
+every continuous trajectory**, which is about the worst possible place to put a
+spurious stop. Second, the SJTU drone's camera is fixed, so the look-down is
+never actually performed; the model gets the same forward frame again and
+names a waypoint in it. That it still works 92.7% of the time is luck we are
+living on, and it is the most promising thing left to improve — the airframe
+does publish a downward camera on `/simple_drone/bottom/image_raw`.
+
+### The look-down, performed
+
+System 2 asks for a lower view before ~93% of its pixel goals, and computes
+those coordinates **in that lower frame**. This airframe's camera is bolted
+forward, so the stack used to hand it the same cruise-altitude frame and let it
+name a waypoint in a view it believed was different.
+
+It now **dips instead**, using the same forward camera from lower down — the
+airframe does carry a downward camera, and it is deliberately not used: it looks
+straight down, which is not the view the model was trained on either. The
+sequence is: PATCH 6 puts a `look_down` flag on the wire (the action index
+cannot carry it — the agent overwrites the look-down action with `-1`, which is
+also what an empty System-1 list reports); the policy node asks the follower for
+a 0.5 m altitude offset, waits until the aircraft is actually down at 0.70 m,
+sends exactly that one frame, and clears the offset.
+
+Two details that are load-bearing. The offset is **ramped**, not stepped —
+a 0.5 m step puts the altitude error straight past `altitude_release_m` and the
+follower drops out of route tracking to go up or down, turning every look-down
+into a hover at each end. And the arrival test is **one-sided**: a symmetric
+window goes true the instant the aircraft enters it, which sent the frame after
+0.35 m of a 0.50 m dip.
+
+Measured over a 110 s flight: four clean dips to 0.68–0.72 m, each returning to
+the 1.20 m cruise, and the only ground contact is the landing.
+
+### What a commitment costs, and how long it is allowed
+
+Two settings decide whether the aircraft flies or waits, and both were wrong.
+
+**`commit.fraction` is now 1.0.** NavDP's half-commitment exists because NavDP
+re-infers at 3 Hz and its far half is extrapolation; InternVLA-N1 here needs
+2.6–6.8 s per decision, so committing half a curve threw away the half the
+aircraft had time to fly. Published routes went from 17 waypoints to **33** —
+the whole prediction — and arc lengths from ~1.5 m to 2.5 m.
+
+**The expiry deadline is now sized by the route.** A flat `max_commit_s` has to
+be long enough for the longest curve, which makes it ten times too long for the
+0.25 m step that is most commitments: one whose arrival never registers sits out
+the whole ceiling. At `max_commit_s: 12` that was five twelve-second stalls in a
+ninety-second flight. `expected_speed_mps` turns the deadline into
+`arc / speed + commit_grace_s`, capped by `max_commit_s` — 2.6 s for a 0.25 m
+step, 8.2 s for a 2.5 m curve.
+
+And `follower.goal_tolerance_m` has to be small enough for arrival to *fire*:
+`_reason` needs `peak_arc >= commit_arc - min(arrive_radius_m, 0.25 * commit_arc)`,
+so on a 0.25 m route it needs 0.1875 m flown. A follower halting 0.10 m short
+left 0.153 m and the commitment could only ever expire. It is 0.06 now.
+
+Measured on the same 90 s atrium leg, cumulatively:
+
+| | moving | ground track | replan reasons |
+|---|---:|---:|---|
+| half plan, flat 12 s deadline | 42% | 6.4 m | mostly *took too long* |
+| full plan, route-sized deadline | 56% | 10.7 m | 17 flown / 4 expired |
+| + arrival actually firing | **77%** | **10.8 m** | **23 flown / 2 expired** |
+
+### Getting more curve and less action
+
+`policy_params.sys2_max_forward_step` (default 8) is the knob. It is how many
+System-1 steps the agent plays out before calling System 2 again, and since a
+System-2 call is very nearly one chance at a curve, it is how many discrete
+steps separate two chances. Lower is more continuous and slower — System 2 is
+~98.5% of the per-decision budget.
+
+The instruction is **not** the knob, which is worth saying because it is the
+obvious guess. Counterbalanced A/B, same start pose every arm, order reversed
+on the second pass, ~21 System-2 calls per arm:
+
+| instruction | coordinate replies |
+|---|---:|
+| "explore the entire hospital, find every room, enter and exit every room" | 28.6% |
+| "Walk forward down the corridor, pass the reception desk…" | 27.3% |
+| "Go to the doorway ahead of you and stop in front of it." | 45.0% |
+| "Head for the seating area on the far side of the room." | 27.3% |
+
+The concrete-referent instruction trended higher, but at these counts the
+difference is not significant (Fisher's exact against the other three pooled,
+p ≈ 0.17). **An open-ended exploration order is not why the output is mostly
+discrete.**
+
+### Why the route is short and the aircraft keeps waiting
+
+Measured off two recorded runs' bags (54 decisions, 2962 `cmd_vel` samples):
+
+| published committed route | share |
+|---|---:|
+| 2 waypoints — the 0.25 m step rendered from a discrete action | **80%** |
+| 17 waypoints — the committed half of a System 1 curve | 20% |
+
+So four commitments in five are 0.25 m long, because that is what upstream's
+`step_size` means by one forward action. Even a real curve is halved before it
+flies, by `commit.fraction: 0.5`.
+
+That has a second-order consequence that is easy to miss and was costing more
+than the first: the pursuit's `slow_down_distance` defaulted to **1.0 m**, which
+is longer than 80% of the routes, so the aircraft was inside the braking zone
+for the *whole* of every action step and never exceeded 0.19 m/s against a
+0.40 m/s cruise — measured mean while moving, 0.12 m/s. `slow_down_distance_m`
+is now 0.15 and the command reaches full cruise.
+
+**The aircraft is stationary about 43% of the time, and none of it is a STOP.**
+It flies its 0.25 m in about a second and then waits for the next decision, and
+System 2 takes 2.6–6.8 s to produce one. That is the honest shape of the
+system: a 7B VLM on an 8 GB card is the clock. Raising the commanded speed
+helped less than the arithmetic suggests (52% → 57% moving, 0.12 → 0.14 m/s)
+because the airframe's own lag — 0.181 s delay, tau 0.51 s — means it barely
+begins accelerating inside 0.25 m.
+
+The levers, in order of effect: `commit.fraction` (fly more of each curve),
+`sys2_max_forward_step` (more curves, fewer decisions per second), and
+`policy_params.step_m` — though raising the last one makes the aircraft travel
+further than the model asked for, which is a different thing from making it
+follow the model better.
+
+## -1 is not STOP
+
+`INDEX_TO_ACTION.get(index, "STOP")` is the obvious way to decode an action, and
+it is wrong here: it turns every index the map does not know — including the -1
+the agent emits seventeen times in five flights — into a request to stop. This
+stack used to act on that, resetting the plan executor and publishing an empty
+route, so **a routine look-down abandoned a route the aircraft was halfway
+through flying** and it braked for nothing.
+
+`core/planning/vlas/internvla_n1/types.py` now names every index the agent can
+emit (`NO_ACTION` -1, `LOOK_DOWN` 5) and `NON_TERMINAL_IDLE_INDICES` marks the
+two that carry no motion and are not a stop. `InternVLAN1Policy.step` reports
+them as `metadata["idle"]` with `stop=False`, and the policy node's rule is
+**keep flying the current commitment** — the plan already in the air is still
+the best one there is. Only index 0, System 2 literally answering `STOP`, resets
+it.
+
+`metadata["from_curve"]` says which producer each decision came from; the policy
+node publishes it and a running `curve_share_pct` on `/simple_drone/n1/info`,
+and the recorder draws both on the camera panel ("S1 CURVE" in green against
+"action step" in orange). That number is how you read a recording and know what
+you actually got.
 
 ## Layering (nothing here breaks it)
 
@@ -336,6 +541,31 @@ One file: `robots/SJTU/config/vla/internvla_n1.yaml`. The knobs that matter:
 | `/simple_drone/n1/trajectory_full` | `nav_msgs/Path` | out | the whole prediction, for RViz |
 | `/simple_drone/n1/info` | `std_msgs/String` | out | JSON: action, S1/S2 FPS, the S2 pixel goal — what the recorder overlays |
 | `/simple_drone/cmd_vel` | `geometry_msgs/Twist` | out | body FLU — the drone's only control input |
+
+## Reading a run back
+
+Every run writes a rosbag beside its MP4, and it is a real bag: `metadata.yaml`
+and a finalised mcap footer, so `ros2 bag info` opens it and any reader can seek
+it.
+
+That took a fix worth knowing about, because the failure is invisible and
+total. rosbag2 finalises on **SIGINT** -- flushing its cache, closing the mcap
+footer and writing `metadata.yaml` -- but a **non-interactive shell starts every
+background job with SIGINT set to IGNORE** (POSIX: it is what stops a Ctrl-C in
+a script from killing its own children). So `ros2 bag record ... &` inside a
+script cannot be stopped with `kill -INT` at all; the teardown waits out its
+grace and SIGKILLs it, and what lands on disk is a bag with a truncated final
+record and no metadata. `ros2 bag info` refuses it outright. Measured before the
+fix: four of five runs in a campaign unreadable, and the fifth only partly.
+
+The fix is to un-ignore the signal in a subshell before exec'ing:
+
+```bash
+( trap - INT; exec ros2 bag record -o "${BAG_DIR}" "${BAG_TOPICS[@]}" ) &
+```
+
+The same reset is applied to the node launch. SIGTERM also finalises the bag and
+would have worked; SIGINT is what rosbag2 documents, so that is what is sent.
 
 ## Tests
 

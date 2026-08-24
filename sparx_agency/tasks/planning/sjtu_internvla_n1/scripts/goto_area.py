@@ -87,7 +87,12 @@ class Ferry(Node):
         while time.time() < end and rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.05)
 
-    def wait_for_odom(self, timeout=20.0):
+    def wait_for_odom(self, timeout=45.0):
+        # Generous, because this is usually called seconds after a container
+        # restart: the plugin logs "finished loading" as soon as it is up, but
+        # DDS discovery to a subscriber that did not exist yet takes longer
+        # still, and a short timeout here turns a slow start into "could not
+        # reach the area" for the whole run.
         end = time.time() + timeout
         while self.pose is None and time.time() < end and rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)

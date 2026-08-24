@@ -38,6 +38,13 @@ also does not surface the System-2 pixel goal. Two patch sets fix that:
 * **PATCH 5 (continuous trajectory).** Carry S1's **continuous body-frame
   trajectory** through to the HTTP response, so a trajectory follower can fly the
   curve directly instead of the coarse discrete action — the NavDP way.
+* **PATCH 6 (look-down).** Say when a look-down has been requested. The action
+  index cannot carry it: the agent overwrites the look-down action with `-1`,
+  and `-1` is also what an empty System-1 list reports, so on the wire the two
+  are indistinguishable. A client that wants to *perform* the look-down — the
+  model expects the next frame to be a lower view and computes its pixel goal
+  in that frame — has to be told which one it is. One field, `look_down`, added
+  to the response dict.
 
 ## The continuous trajectory is already there
 
@@ -87,9 +94,16 @@ distance is scaled by 4 (or 16), which flies but flies wrong.
 ```json
 {"action": [{"action": [1], "ideal_flag": true,
              "pixel_goal": [y, x],
-             "trajectory": [[0.0, 0.0], [0.24, 0.03], [0.48, 0.07], "..."]}],
+             "trajectory": [[0.0, 0.0], [0.24, 0.03], [0.48, 0.07], "..."],
+             "look_down": false,
+             "s1_ms": 43.4, "s2_ms": 2641.0}],
  "pixel_goal": [y, x], "pixel_goal_step": 12}
 ```
+
+Note `look_down` stays **inside `action[0]`**: `server.py` pops and hoists
+`pixel_goal` / `pixel_goal_step` to the top level and nothing else, so a
+re-implementation that puts it at the top level will be read by this repo's
+client (which checks both) but will not match what the agent actually emits.
 
 `trajectory` is `null` on a pure-S2 discrete step (a turn or look-down, where the
 model genuinely emits no curve); the client falls back to the discrete action for

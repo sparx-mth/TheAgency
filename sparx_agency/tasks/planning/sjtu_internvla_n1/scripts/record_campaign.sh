@@ -96,7 +96,17 @@ restart_world() {
     done
     grep -qa "drone plugin finished loading" "${CAMPAIGN_DIR}/gazebo.log" \
         || { say "the world did not come up; see ${CAMPAIGN_DIR}/gazebo.log"; return 1; }
-    sleep 5
+    # The log line means the plugin is loaded, not that a host subscriber can
+    # hear it: DDS discovery to a process that did not exist when the container
+    # started takes seconds more. Wait for an actual message rather than
+    # guessing, or the ferry opens on an empty graph and the run is written off
+    # as "could not reach the area".
+    local i
+    for i in $(seq 1 30); do
+        timeout 4 ros2 topic echo --once /simple_drone/odom >/dev/null 2>&1 && break
+        sleep 2
+    done
+    sleep 2
 }
 
 # REPEAT: how many passes over the area list. 0 means "keep going" -- one

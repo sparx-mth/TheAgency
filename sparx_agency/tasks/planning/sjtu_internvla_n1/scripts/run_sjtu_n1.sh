@@ -240,7 +240,7 @@ say "launching the N1 policy + follower nodes (CPU, domain ${ROS_DOMAIN_ID}, ${R
 # leader records its own pid, and `exec` hands that pid straight to ros2 launch.
 NODES_PIDFILE="${LOG_DIR}/nodes.pid"
 rm -f "${NODES_PIDFILE}"
-setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "${NODES_PIDFILE}" \
+setsid bash -c 'trap - INT; echo $$ > "$1"; shift; exec "$@"' _ "${NODES_PIDFILE}" \
     ros2 launch "${PKG_DIR}/launch/sjtu_internvla_n1.launch.py" \
     config_file:="${CONFIG_FILE}" \
     record:="$([[ "${RECORD}" == "1" ]] && echo true || echo false)" \
@@ -381,7 +381,17 @@ if [[ "${RECORD}" == "1" ]]; then
         say "BAG_IMAGES=1: bagging the raw camera too (~11 GB/min)"
     fi
     say "recording rosbag -> ${BAG_DIR}"
-    ros2 bag record -o "${BAG_DIR}" "${BAG_TOPICS[@]}" > "${LOG_DIR}/bag.log" 2>&1 &
+    # `( trap - INT; exec ... ) &` -- the subshell and the trap reset are both
+    # load-bearing. A NON-INTERACTIVE shell starts every background job with
+    # SIGINT set to IGNORE (POSIX; it is what stops a Ctrl-C in a script from
+    # killing its own background children), so `kill -INT` on this pid is a
+    # silent no-op. rosbag2 stops on SIGINT and finalises: it writes the
+    # remaining cache, the mcap footer and `metadata.yaml`. Without that it is
+    # eventually SIGKILLed, and what is left on disk is a bag with a truncated
+    # final record and NO metadata -- `ros2 bag info` refuses to open it, and
+    # every run of a campaign is unreadable. Measured: 4 of 5 runs unusable.
+    ( trap - INT; exec ros2 bag record -o "${BAG_DIR}" "${BAG_TOPICS[@]}" ) \
+        > "${LOG_DIR}/bag.log" 2>&1 &
     BAG_PID=$!
 fi
 

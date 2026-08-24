@@ -455,17 +455,26 @@ class InternVLAN1Agent(Agent):
         # PATCH 4/4: Include pixel_goal in return value for HTTP response
         # PATCH 5/5: ...and S1's continuous trajectory, so a trajectory follower
         # can fly the curve instead of the discrete action.
+        # PATCH 6/6: say when a LOOK-DOWN has been requested. The action index
+        # cannot carry it: the branch above overwrites action 5 with -1, and -1
+        # is also what an empty System-1 list reports, so on the wire the two
+        # are indistinguishable. A client that wants to actually PERFORM the
+        # look-down -- the model expects the next frame to be a lower view, and
+        # its pixel goal is computed in that frame -- has to be told which one
+        # it is.
         if 'action' in output:
             return [{'action': output['action'], 'ideal_flag': True,
                      'pixel_goal': self._current_pixel_goal,
                      'pixel_goal_step': self._pixel_goal_step,
                      'trajectory': self._current_trajectory,
+                     'look_down': bool(self.look_down),
                      's1_ms': self._last_s1_ms, 's2_ms': self._last_s2_ms}]
         elif 'velocity' in output:
             return [{'action': output['velocity'], 'ideal_flag': False,
                      'pixel_goal': self._current_pixel_goal,
                      'pixel_goal_step': self._pixel_goal_step,
                      'trajectory': self._current_trajectory,
+                     'look_down': bool(self.look_down),
                      's1_ms': self._last_s1_ms, 's2_ms': self._last_s2_ms}]
         else:
             assert False

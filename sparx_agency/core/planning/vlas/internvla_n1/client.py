@@ -161,8 +161,14 @@ class ModelClient:
             return StepResponse(success=False, error=str(e))
 
     def _parse_response(self, data: Dict, inference_time: float) -> StepResponse:
-        action = "STOP"
-        action_index = 0
+        # `None`, NOT 0. Starting at 0 means every response this parser cannot
+        # read -- a missing `action`, an empty inner list, a null element, a
+        # body from a server that answered 200 with something else entirely --
+        # decodes as index 0, which is STOP, which the caller reads as "the
+        # policy has completed the task" and acts on by abandoning its route.
+        # An unreadable answer is a transport failure, not a decision.
+        action = None
+        action_index = None
         waypoint = None
 
         # Debug: log response structure (use debug level to avoid flooding)
@@ -189,19 +195,47 @@ class ModelClient:
                 elif isinstance(action_data, (int, float)):
                     action_index = int(action_data)
 
-            action = INDEX_TO_ACTION.get(action_index, "STOP")
+            if action_index is not None:
+                action = INDEX_TO_ACTION.get(action_index)
+                if action is None:
+                    # A real index the map has never heard of. Say so rather
+                    # than folding it into STOP; the caller can then treat it
+                    # as "no usable decision" instead of "we have arrived".
+                    self._log("warn", f"unknown action index {action_index}")
+                    action = "UNKNOWN"
         except Exception as e:
             self._log("warn", f"Parse error: {e}")
+            action_index = None
+
+        if action_index is None:
+            return StepResponse(
+                success=False, raw_response=data, inference_time_ms=inference_time,
+                error="response carried no readable action index")
 
         # --- Extract S2 waypoint pixel coordinates ---
         waypoint = self._extract_waypoint(data)
+        waypoint_step = data.get("pixel_goal_step")
+        try:
+            waypoint_step = int(waypoint_step) if waypoint_step is not None else None
+        except (TypeError, ValueError):
+            waypoint_step = None
+        if waypoint_step is not None and waypoint_step < 0:
+            waypoint_step = None      # the agent's "never set" sentinel
+
+        look_down = bool(data.get("look_down"))
+        if not look_down:
+            action_data = data.get("action")
+            if isinstance(action_data, list) and action_data and isinstance(action_data[0], dict):
+                look_down = bool(action_data[0].get("look_down"))
         if waypoint:
             self._log("debug", f"S2 waypoint: ({waypoint[0]}, {waypoint[1]})")
         else:
             self._log("debug", "No S2 waypoint this step")
 
         return StepResponse(action=action, action_index=action_index, waypoint=waypoint,
-                           raw_response=data, inference_time_ms=inference_time, success=True)
+                           waypoint_step=waypoint_step, look_down=look_down,
+                           raw_response=data, inference_time_ms=inference_time,
+                           success=True)
 
     def _extract_waypoint(self, data: Dict):
         """Extract S2 waypoint pixel coords from server response.

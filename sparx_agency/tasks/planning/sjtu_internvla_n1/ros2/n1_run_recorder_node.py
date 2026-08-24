@@ -19,6 +19,7 @@ import os
 import signal
 import threading
 import time
+from dataclasses import replace
 from math import atan2
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -150,6 +151,7 @@ class N1RunRecorderNode(Node):
         if not self._writer.isOpened():
             raise RuntimeError("could not open VideoWriter at %s" % (output,))
         self._frames_written = 0
+        self._goal_fresh_s = float(rec.get("goal_fresh_s", 1.0))
         self._record_seconds = float(self.get_parameter("record_seconds").value or 0.0)
         self._started_s = time.monotonic()
 
@@ -213,7 +215,12 @@ class N1RunRecorderNode(Node):
                 s1_fps=d.get("s1_fps"), s2_fps=d.get("s2_fps"),
                 s1_ms=d.get("s1_ms"), s2_ms=d.get("s2_ms"),
                 pixel_goal=(int(pg[0]), int(pg[1])) if pg else None,
-                pixel_goal_frame=(int(pgf[0]), int(pgf[1])) if pgf else None)
+                pixel_goal_frame=(int(pgf[0]), int(pgf[1])) if pgf else None,
+                from_curve=bool(d.get("from_curve")),
+                curve_share_pct=d.get("curve_share_pct"),
+                pixel_goal_fresh=bool(d.get("pixel_goal_fresh")),
+                pixel_goal_age=d.get("pixel_goal_age"),
+                decision_time=d.get("decision_time"))
 
     # ── the record loop ──────────────────────────────────────────────
     def _record(self):
@@ -230,6 +237,14 @@ class N1RunRecorderNode(Node):
             info = self._info
         if frame is None:
             return
+        # A goal is only "fresh" for about as long as the aircraft has not yet
+        # moved away from the pose it was computed at. Beyond that it is drawn
+        # stale even though the decision that produced it is still the current
+        # one -- the alternative is a solid target ring held for a hundred
+        # frames, which is the lie this whole field exists to stop telling.
+        if info.pixel_goal_fresh and info.decision_time is not None:
+            if (time.time() - float(info.decision_time)) > self._goal_fresh_s:
+                info = replace(info, pixel_goal_fresh=False)
         left = draw_camera_panel(frame, info, (self._panel_w, self._panel_h))
         right = self._topdown.render(pose, committed, full)
         self._writer.write(compose(left, right))

@@ -152,6 +152,19 @@ def trajectory_from_action(action_index, step_m=STEP_SIZE_M, turn_deg=TURN_ANGLE
     pursuit follower curves toward it rather than stalling on a zero-length
     path. STOP has no motion and returns ``None``.
 
+    **A turn is an approximation, and knowing which way it errs matters.**
+    Upstream a turn is a pure rotation: ``trajectory_to_discrete_actions_
+    close_to_goal`` (``vln_utils.py``) advances ``pos`` only on action ``1``
+    and turns change ``yaw`` alone, by a hard-coded ``turn_angle_deg=15``. A
+    rotation is not a path, though, and everything downstream of here -- the
+    plan-commit executor, the pure-pursuit follower -- consumes paths, so a
+    zero-length one is rejected as TOO_SHORT and re-inferred on the next tick
+    for ever. The compromise is a short arc: the aircraft rotates toward the
+    bent waypoint and then flies the reach. Set the follower's
+    ``stop_turn_rad`` BELOW ``turn_deg`` so it rotates first and translates
+    second; above it, the turn is flown as a sideways crab and the aircraft
+    never actually looks anywhere new.
+
     Args:
         action_index: ``0`` STOP, ``1`` FORWARD, ``2`` TURN_LEFT, ``3`` TURN_RIGHT.
         step_m: forward reach of the rendered step, metres.

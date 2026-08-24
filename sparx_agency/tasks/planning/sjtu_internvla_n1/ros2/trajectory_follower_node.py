@@ -67,7 +67,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Int8
+from std_msgs.msg import Float32, Int8
 
 from sparx_agency.core.common.types import (
     KinematicLimits,
@@ -153,6 +153,8 @@ class TrajectoryFollowerNode(Node):
         self._odom_topic = topics.get("odom", "/simple_drone/odom")
         self._cmd_topic = topics.get("cmd_vel", "/simple_drone/cmd_vel")
         self._state_topic = topics.get("state", "/simple_drone/state")
+        self._alt_offset_topic = topics.get("altitude_offset",
+                                            "/simple_drone/n1/altitude_offset")
 
         self._cruise = float(foll.get("cruise_speed", 0.4))
         self._target_alt = float(foll.get("target_altitude_m", 1.2))
@@ -167,6 +169,14 @@ class TrajectoryFollowerNode(Node):
         self._alt_release_m = float(foll.get("altitude_release_m", 0.60))
         self._alt_kp = float(foll.get("altitude_kp", 1.2))
         self._odom_timeout_s = float(foll.get("odom_timeout_s", 1.0))
+        self._alt_offset_limit = abs(float(foll.get("altitude_offset_limit_m", 0.8)))
+        # The offset is RAMPED, not stepped. Stepping it 0.5 m instantly makes
+        # the altitude error jump straight past `altitude_release_m`, so the
+        # gate drops out of route tracking and the aircraft stops dead to go up
+        # or down -- turning every look-down into a two-second hover at each
+        # end. Ramped under the release band, the error never gets there and
+        # the aircraft simply descends along the route it was already flying.
+        self._alt_offset_rate = abs(float(foll.get("altitude_offset_rate_m_s", 0.35)))
         self._capsize_rad = radians(float(foll.get("capsize_deg", 35.0)))
         self._depth_timeout_s = float(foll.get("depth_timeout_s", 3.0))
 
@@ -176,6 +186,8 @@ class TrajectoryFollowerNode(Node):
             max_speed_z=max_speed_z,
             max_yaw_rate=max_yaw_rate,
             base_lookahead=float(foll.get("lookahead_m", 0.8)),
+            slow_down_distance=float(foll.get("slow_down_distance_m", 0.15)),
+            min_speed=float(foll.get("min_speed", 0.1)),
             goal_tolerance=float(foll.get("goal_tolerance_m", 0.10)),
             path_tolerance=float(foll.get("path_tolerance_m", 0.8)),
             yaw_lookahead=float(foll.get("yaw_lookahead_m", 1.5)),
@@ -201,6 +213,13 @@ class TrajectoryFollowerNode(Node):
         self._tracked_epoch = -1  # the epoch the tracker was last reset for
         self._alt_captured = False
         self._flying = None      # None until /simple_drone/state is heard
+        # Commanded departure from the cruise altitude, metres. The policy node
+        # drives it negative to perform System 2's look-down: the model asks for
+        # a lower view of the scene and computes its pixel goal in that frame,
+        # and this airframe has no way to tilt its camera -- so it drops
+        # instead, using the same forward camera from lower down.
+        self._alt_offset = 0.0          # what is being flown, slewed
+        self._alt_offset_target = 0.0   # what was asked for
         self._attitude = (0.0, 0.0)  # (roll, pitch) radians
         self._capsized = False
         self._depth = None
@@ -231,6 +250,7 @@ class TrajectoryFollowerNode(Node):
         self.create_subscription(Path, self._path_topic, self._on_path, latched)
         self.create_subscription(Odometry, self._odom_topic, self._on_odom, sensor_qos)
         self.create_subscription(Int8, self._state_topic, self._on_state, 1)
+        self.create_subscription(Float32, self._alt_offset_topic, self._on_alt_offset, 1)
         if self._brake_enabled:
             self.create_subscription(Image, topics.get(
                 "depth", "/simple_drone/front_depth/depth/image_raw"),
@@ -249,6 +269,14 @@ class TrajectoryFollowerNode(Node):
         with self._lock:
             self._path_xy = xy
             self._path_epoch += 1
+
+    def _on_alt_offset(self, msg):
+        offset = float(msg.data)
+        # Bounded on both sides: a runaway offset would fly the aircraft into
+        # the floor or the ceiling, and neither is recoverable here.
+        offset = max(-self._alt_offset_limit, min(self._alt_offset_limit, offset))
+        with self._lock:
+            self._alt_offset_target = offset
 
     def _on_state(self, msg):
         # The SJTU plugin's flight state: 0 landed, 1 flying. Tracking a route
@@ -287,6 +315,7 @@ class TrajectoryFollowerNode(Node):
             path_xy = list(self._path_xy)
             epoch = self._path_epoch
 
+        self._slew_offset()
         if self._check_capsized(attitude):
             return
         if state is None or (time.monotonic() - stamp) > self._odom_timeout_s:
@@ -316,7 +345,7 @@ class TrajectoryFollowerNode(Node):
 
         # Hold the configured cruise altitude: every reference point sits at it,
         # so the 3D pursuit commands vz toward it while it tracks xy.
-        points = [(x, y, self._target_alt) for (x, y) in path_xy]
+        points = [(x, y, self._commanded_altitude()) for (x, y) in path_xy]
         try:
             trajectory = trajectory_from_points(points, self._cruise)
         except ValueError:
@@ -416,6 +445,21 @@ class TrajectoryFollowerNode(Node):
             throttle_duration_sec=2.0)
         return vx * scale, vy * scale
 
+    def _commanded_altitude(self):
+        """Cruise altitude plus the offset currently being flown."""
+        with self._lock:
+            return self._target_alt + self._alt_offset
+
+    def _slew_offset(self):
+        """Move the flown offset one control step toward the requested one."""
+        step = self._alt_offset_rate / max(1e-3, self._control_rate)
+        with self._lock:
+            delta = self._alt_offset_target - self._alt_offset
+            if abs(delta) <= step:
+                self._alt_offset = self._alt_offset_target
+            else:
+                self._alt_offset += step if delta > 0 else -step
+
     def _altitude_ready(self, state):
         """Climb to the cruise band, and refuse to track until inside it.
 
@@ -423,14 +467,14 @@ class TrajectoryFollowerNode(Node):
             ``True`` when the route may be tracked this cycle. When it returns
             ``False`` it has already published a climb command.
         """
-        error = self._target_alt - state.pose.z
+        error = self._commanded_altitude() - state.pose.z
         if self._alt_captured:
             if abs(error) <= self._alt_release_m:
                 return True
             self._alt_captured = False
             self.get_logger().warn(
                 "altitude lost (%.2f m off %.2f m); climbing before tracking again"
-                % (error, self._target_alt))
+                % (error, self._commanded_altitude()))
         elif abs(error) <= self._alt_capture_m:
             self._alt_captured = True
             self.get_logger().info("cruise altitude captured at %.2f m" % state.pose.z)
@@ -440,7 +484,7 @@ class TrajectoryFollowerNode(Node):
 
     def _hold_altitude(self, state):
         """A twist that only corrects altitude -- no translation, no yaw."""
-        vz = self._alt_kp * (self._target_alt - state.pose.z)
+        vz = self._alt_kp * (self._commanded_altitude() - state.pose.z)
         return twist_fields(
             BodyTwistCommand(vx=0.0, vy=0.0, vz=vz, yaw_rate=0.0),
             self._body_limits)

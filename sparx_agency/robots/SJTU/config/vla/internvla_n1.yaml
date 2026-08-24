@@ -30,6 +30,13 @@ camera:
   cy: 300.0
   hfov_deg: 75.046
 
+# NOTE ON DEPTH. The depth topic below is 32FC1 **metres**, but the wire to the
+# model server is **normalised 0..1 over 10 m** -- the agent multiplies what it
+# receives by 10 and clips at its 5 m System-1 threshold. The conversion lives
+# in `InternVLAN1Policy._to_depth`; do not "simplify" it away. Sending metres
+# does not produce a wrong distance, it flattens the channel: a 3 m wall
+# arrives as 30 and clips to 5, and so does everything else past 0.5 m, so
+# System 1 plans its trajectory against a featureless plane and nothing errors.
 topics:
   rgb: /simple_drone/front/image_raw
   rgb_type: raw                       # raw | compressed
@@ -38,6 +45,7 @@ topics:
   odom: /simple_drone/odom
   instruction: /simple_drone/navigation/instruction
   state: /simple_drone/state                        # Int8: 0 landed, 1 flying
+  altitude_offset: /simple_drone/n1/altitude_offset  # Float32: look-down dip, metres
   trajectory: /simple_drone/n1/trajectory          # committed route (nav_msgs/Path, world)
   trajectory_full: /simple_drone/n1/trajectory_full  # whole prediction, for RViz
   info: /simple_drone/n1/info                        # JSON status: action, S1/S2 FPS, pixel goal
@@ -51,26 +59,85 @@ policy_params:
   inference_rate_hz: 4.0
   default_instruction: "explore the entire hospital, find every room, enter and exit every room"
   step_m: 0.25          # forward reach rendered from a discrete FORWARD action
-  # 30 degrees is VLN-CE's own TURN_LEFT/TURN_RIGHT granularity, which is what
-  # the model was trained to mean by the action. At 15 the rendered step bends
-  # too little to cross the follower's stop_turn_rad, so a turn is flown as a
-  # small sideways translation and the aircraft never actually looks elsewhere.
-  turn_deg: 30.0        # heading a discrete turn action bends its step by
+  # 15 degrees, because that is what THIS producer means by a turn:
+  # `vln_utils.trajectory_to_discrete_actions_close_to_goal` hard-codes
+  # `turn_angle_deg=15` and moves `pos` only on a forward action. 30 was picked
+  # from VLN-CE's general convention and is simply wrong here -- it doubled
+  # every commanded rotation. The reason 15 "bent too little" was not the angle
+  # but the follower's stop_turn_rad sitting ABOVE it; that is fixed below, and
+  # the pair has to stay ordered stop_turn_rad < turn_deg or a turn is flown as
+  # a sideways crab instead of a rotation.
+  turn_deg: 15.0        # heading a discrete turn action bends its step by
+
+  # How many System-1 steps the agent plays out before calling System 2 again.
+  # THIS IS THE KNOB FOR "I want the continuous trajectory, not the discrete
+  # action". Measured over 168 System-2 replies in the hospital: coordinates
+  # 30.4%, look-downs 32.7%, turns/forwards 36.9%, real STOPs 0% -- and 92.7%
+  # of look-downs are followed by coordinates. Coordinates are the ONLY branch
+  # that runs System 1, so a System-2 call is very nearly one chance at a curve
+  # and this number is how many discrete steps separate two chances.
+  #
+  # Lower is more continuous and slower: System 2 is ~98.5% of the per-decision
+  # budget, so halving this roughly halves the decision rate. 8 is the agent's
+  # own default; 4 buys noticeably more curve at about half the decisions.
+  sys2_max_forward_step: 8
+
+  # THE LOOK-DOWN, PERFORMED RATHER THAN IGNORED.
+  #
+  # System 2 answers with a down arrow before almost every pixel goal -- 92.7%
+  # of look-downs are immediately followed by coordinates -- and it expects the
+  # NEXT frame to be that lower view, because the coordinates it then gives are
+  # a pixel in that frame. This airframe's camera is fixed, so the stack used
+  # to hand it the same cruise-altitude frame and let it name a waypoint in a
+  # view it believed was tilted.
+  #
+  # Instead the aircraft DIPS: the follower is asked for a lower altitude, the
+  # policy node waits until it is actually down there, sends exactly that one
+  # frame from the same forward camera, and climbs back. No downward camera is
+  # involved -- the bottom camera sees straight down, which is not the view the
+  # model was trained on either.
+  look_down_dip_m: 0.5        # 1.2 m cruise -> 0.7 m for the look-down frame
+  look_down_tolerance_m: 0.15 # close enough to call it arrived
+  look_down_timeout_s: 6.0    # never got there: send the frame anyway rather
+                              # than wedge the episode, and say so
 
 # Plan-commitment: fly one prediction as a route until roughly half is behind
 # the aircraft, then re-infer -- the same discipline NavDP flies. Kept short
 # because N1's discrete-action fallback produces ~0.25 m steps.
 commit:
-  fraction: 0.5
+  # FLY THE WHOLE PREDICTION, not half of it. NavDP's half-commitment exists
+  # because NavDP re-infers at 3 Hz and its far half is extrapolation into
+  # unseen space; InternVLA-N1 is nothing like that here. System 2 needs
+  # 2.6-6.8 s to produce the next decision, so committing half a ~3 m curve
+  # threw away the half the aircraft had time to fly and left it hovering for
+  # the remainder of the wait. Measured before this change: 43% of the flight
+  # stationary, with 80% of commitments a 0.25 m stub.
+  fraction: 1.0
   lookahead_m: 1.0
   arrive_radius_m: 0.15
   min_commit_m: 0.20
-  # A blocked aircraft never reaches its commit point, so this timeout is the
-  # only thing that frees it. At 8 s a 0.25 m action step meant one hop every
-  # eight seconds against a wall; the pipeline decides at ~1.4 Hz, so 3 s is
-  # still several inferences per commitment and re-plans an order faster.
-  max_commit_s: 3.0
-  max_deviation_m: 1.5
+  # Long enough to actually fly a full curve. A ~3 m System-1 curve at the
+  # 0.4 m/s cruise takes about 8 s, so the old 3 s cut every real trajectory
+  # off a third of the way through and re-inferred -- which looks exactly like
+  # the model producing short plans, and was not. It is still a ceiling, not a
+  # schedule: a blocked aircraft never reaches its commit point and this is the
+  # only thing that frees it.
+  max_commit_s: 12.0
+  # The deadline is SIZED BY THE ROUTE, not a flat clock: a commitment expires
+  # once it has had the time it would take to fly plus the grace, capped by
+  # max_commit_s. Without this, max_commit_s has to be long enough for the
+  # longest curve (about 12 s) and is then ten times too long for the 0.25 m
+  # action step that is most commitments -- a short step whose arrival never
+  # registers sits out the whole ceiling. Measured: five twelve-second stalls
+  # in a ninety-second flight, which was most of the time it spent stationary.
+  expected_speed_mps: 0.4     # the follower's cruise
+  commit_grace_s: 2.0
+  # Matched to the follower's path_tolerance_m (0.8), not left above it. Between
+  # the two thresholds is a dead band: the follower calls path_diverged and
+  # zeroes the twist every cycle, so the aircraft cannot move, so the lateral
+  # error never grows to reach this one and the executor never re-plans. The
+  # aircraft simply freezes until the deadline.
+  max_deviation_m: 0.7
   min_period_s: 0.5
 
 # The pure-pursuit follower. Speeds are held well under the SJTU airframe's 2 m/s
@@ -87,10 +154,13 @@ follower:
   max_speed_xy: 0.6
   max_speed_z: 0.5
   max_yaw_rate: 1.2
-  # MUST stay below commit.arrive_radius_m, or the follower stops exactly where
-  # the executor is still waiting to arrive: neither arrival test can fire, the
-  # commitment only ends on max_commit_s, and the aircraft flies ~3 s in every 8.
-  goal_tolerance_m: 0.10
+  # Small enough that the executor's arrival test can actually fire. It is not
+  # enough to be under commit.arrive_radius_m: `_reason` needs
+  # `peak_arc >= commit_arc - min(arrive_radius_m, 0.25 * commit_arc)`, and on
+  # the 0.25 m step that is most commitments the slack term is only 0.0625 m,
+  # so arrival needs 0.1875 m of the 0.25 m flown. A follower that halts
+  # 0.10 m short leaves 0.153 m and the commitment can only ever EXPIRE.
+  goal_tolerance_m: 0.06
   path_tolerance_m: 0.8       # cross-track beyond which the pursuit re-acquires
   target_altitude_m: 1.2      # cruise altitude the follower holds after takeoff
   altitude_capture_m: 0.25    # enter route tracking inside this band...
@@ -104,8 +174,25 @@ follower:
   odom_timeout_s: 1.0         # no fresh feedback -> zero twist, never the stale one
   lookahead_m: 0.8
   yaw_lookahead_m: 1.5
-  stop_turn_rad: 0.35         # hold position and rotate past ~20 deg off route
-  resume_turn_rad: 0.12       # ...and fly again below ~7 deg (hysteresis band)
+  # How far out the pursuit starts braking for the end of the route. It has to
+  # be SHORTER than the routes actually flown, and here 80% of them are the
+  # 0.25 m step rendered from a discrete action. At the tracker's 1.0 m default
+  # the aircraft is inside the braking zone for the WHOLE of every action step
+  # and never exceeds 0.19 m/s against a 0.40 m/s cruise -- measured mean while
+  # moving, 0.12 m/s. That is most of the reason a recording looks like it is
+  # creeping and pausing rather than flying.
+  slow_down_distance_m: 0.15
+  min_speed: 0.1
+  altitude_offset_limit_m: 0.8  # a runaway offset flies it into the floor
+  # Ramp rate for that offset. Kept slow enough that the altitude error stays
+  # inside altitude_release_m (0.35) while the dip is in progress, so the
+  # aircraft keeps tracking its route instead of stopping to change height.
+  altitude_offset_rate_m_s: 0.35
+  # MUST stay below policy_params.turn_deg (15 deg = 0.262 rad), or a rendered
+  # turn never trips the stop-and-rotate branch and the aircraft crabs sideways
+  # through it without changing where it is looking.
+  stop_turn_rad: 0.18         # hold position and rotate past ~10 deg off route
+  resume_turn_rad: 0.06       # ...and fly again below ~3.5 deg (hysteresis band)
   capsize_deg: 35.0           # past this the plugin cannot act; stop commanding
   depth_timeout_s: 3.0        # older than this is not depth, it is a memory
 

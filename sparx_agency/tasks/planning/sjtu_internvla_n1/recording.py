@@ -87,11 +87,27 @@ class OverlayInfo:
     s2_ms: Optional[float] = None
     pixel_goal: Optional[Tuple[int, int]] = None  # (x, y) in the model's input frame
     pixel_goal_frame: Optional[Tuple[int, int]] = None  # (w, h) that goal was in
+    pixel_goal_fresh: bool = False           # System 2 chose it on THIS decision
+    pixel_goal_age: Optional[int] = None     # decisions since it was chosen
+    decision_time: Optional[float] = None    # wall clock of the decision
+    from_curve: bool = False        # this decision is System 1's continuous curve
+    curve_share_pct: Optional[float] = None  # share of decisions that were curves
 
 
 def _put(img, text, org, scale=0.6, color=(255, 255, 255), thick=2):
     cv2.putText(img, text, org, _FONT, scale, color, thick, cv2.LINE_AA)
 
+
+def _label_beside(img, text, x, y, gap, scale, color, thick):
+    """Write ``text`` next to (x, y), flipping to the left near the right edge.
+
+    The System-2 goal is very often near a frame edge -- it is a navigation
+    target, and those sit where the corridor leaves the picture -- so a label
+    pinned to its right is clipped exactly when it matters most.
+    """
+    (tw, _), _ = cv2.getTextSize(text, _FONT, scale, thick)
+    org_x = x + gap if x + gap + tw <= img.shape[1] - 4 else x - gap - tw
+    _put(img, text, (max(4, org_x), y), scale, color, thick)
 
 def draw_camera_panel(frame_bgr, info, size):
     # type: (np.ndarray, OverlayInfo, Tuple[int, int]) -> np.ndarray
@@ -109,6 +125,15 @@ def draw_camera_panel(frame_bgr, info, size):
     panel = cv2.resize(frame_bgr, (w, h), interpolation=cv2.INTER_AREA)
 
     # Pixel goal (System 2), rescaled from the frame it was computed in.
+    #
+    # DRAWN AS OLD AS IT IS. The agent keeps the last goal alive between
+    # System-2 calls, so this marker is non-null on almost every frame -- but it
+    # is a pixel in the frame System 2 saw, and the aircraft has been moving
+    # since. Drawn identically whether it is this decision's goal or one from
+    # eight decisions ago, it reads as a live tracker locked onto a target,
+    # which is exactly what it is not. Fresh is a solid red ring; stale is a
+    # thin dim one carrying its age, so the eye can tell a decision from a
+    # memory.
     if info.pixel_goal is not None:
         gx, gy = info.pixel_goal
         if info.pixel_goal_frame:
@@ -117,15 +142,33 @@ def draw_camera_panel(frame_bgr, info, size):
             gy = int(gy * h / max(1, fh))
         gx = max(0, min(int(gx), w - 1))
         gy = max(0, min(int(gy), h - 1))
-        cv2.circle(panel, (gx, gy), 16, (0, 0, 255), 3, cv2.LINE_AA)
-        cv2.circle(panel, (gx, gy), 3, (0, 0, 255), -1, cv2.LINE_AA)
-        _put(panel, "S2 goal", (gx + 20, gy), 0.5, (0, 0, 255), 2)
+        if info.pixel_goal_fresh:
+            cv2.circle(panel, (gx, gy), 16, (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.circle(panel, (gx, gy), 3, (0, 0, 255), -1, cv2.LINE_AA)
+            _label_beside(panel, "S2 goal", gx, gy, 20, 0.5, (0, 0, 255), 2)
+        else:
+            cv2.circle(panel, (gx, gy), 13, (70, 70, 150), 1, cv2.LINE_AA)
+            age = "" if info.pixel_goal_age is None else " +%d" % info.pixel_goal_age
+            _label_beside(panel, "S2 goal (stale%s)" % age, gx, gy, 18, 0.42,
+                          (90, 90, 170), 1)
 
     # Top banner: status + action.
     cv2.rectangle(panel, (0, 0), (w, 66), (0, 0, 0), -1)
     _put(panel, "DRONE CAMERA", (10, 24), 0.6, (0, 255, 0), 2)
     _put(panel, "action: %s   status: %s" % (info.action or "-", info.status or "-"),
          (10, 52), 0.55, (255, 255, 255), 1)
+
+    # Where this decision came from. System 1's curve is the continuous output
+    # the dual-system design exists to produce; a discrete action rendered as a
+    # 0.25 m step is the fallback. Showing which, and how often, is the only way
+    # to read a recording and know what you actually got.
+    source = "S1 CURVE" if info.from_curve else "action step"
+    colour = (0, 255, 180) if info.from_curve else (0, 165, 255)
+    label = source if info.curve_share_pct is None else (
+        "%s   (%.0f%% curves)" % (source, info.curve_share_pct))
+    (tw, _), _ = cv2.getTextSize(label, _FONT, 0.5, 2)
+    cv2.rectangle(panel, (w - tw - 24, 70), (w, 96), (0, 0, 0), -1)
+    _put(panel, label, (w - tw - 14, 89), 0.5, colour, 2)
 
     # FPS block, the headline the request asks for, bottom-left.
     def _fps(label, fps, ms):
