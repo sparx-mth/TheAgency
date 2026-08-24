@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import threading
+import time
 from math import atan2
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -57,12 +59,18 @@ def _imgmsg_to_bgr(msg):
         return cv2.cvtColor(buf.reshape(msg.height, msg.width), cv2.COLOR_GRAY2BGR)
     return np.ascontiguousarray(buf.reshape(msg.height, msg.width, -1)[:, :, :3])
 
+from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
+    load_map_backdrop,
+)
 from sparx_agency.tasks.planning.sjtu_internvla_n1.recording import (
     OverlayInfo,
     TopDownRenderer,
     compose,
     draw_camera_panel,
 )
+
+# <repo>/sparx_agency/tasks/planning/sjtu_internvla_n1/ros2/<this file>
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *([os.pardir] * 5)))
 
 
 def _yaw_from_quat(q):
@@ -88,6 +96,14 @@ class N1RunRecorderNode(Node):
     def __init__(self):
         super().__init__("n1_run_recorder_node")
         self.declare_parameter("config_file", "")
+        # Seconds to record before closing the file and exiting; 0 means "until
+        # stopped". This exists because the video must NOT depend on a signal
+        # arriving: `ros2 launch` shutting down in a hurry, a sibling node's
+        # on_exit racing it, or a parent that dies first all leave an mp4 with
+        # every frame in it and no moov atom -- a plausible 15 MB file that
+        # nothing can play. A recorder that knows when it is finished closes its
+        # own file.
+        self.declare_parameter("record_seconds", 0.0)
         self.declare_parameter("output", "")
         cfg = _load_config(self.get_parameter("config_file").value)
         topics = cfg.get("topics", {})
@@ -115,7 +131,18 @@ class N1RunRecorderNode(Node):
         self._committed = None
         self._full = None
         self._info = OverlayInfo()
-        self._topdown = TopDownRenderer(size=(self._panel_w, self._panel_h))
+        # The route is drawn ON the building when a map is configured. The path
+        # is resolved relative to the repo root so the config can name it the
+        # way every other path in this tree is named.
+        map_path = rec.get("map", "")
+        if map_path and not os.path.isabs(map_path):
+            map_path = os.path.join(_REPO_ROOT, map_path)
+        backdrop = load_map_backdrop(map_path, logger=self.get_logger())
+        self._topdown = TopDownRenderer(
+            size=(self._panel_w, self._panel_h),
+            backdrop=backdrop,
+            local_span_m=float(rec.get("local_span_m", 14.0)),
+            overview_fraction=float(rec.get("overview_fraction", 0.42)))
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         self._writer = cv2.VideoWriter(output, fourcc, self._record_fps,
@@ -123,6 +150,8 @@ class N1RunRecorderNode(Node):
         if not self._writer.isOpened():
             raise RuntimeError("could not open VideoWriter at %s" % (output,))
         self._frames_written = 0
+        self._record_seconds = float(self.get_parameter("record_seconds").value or 0.0)
+        self._started_s = time.monotonic()
 
         sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                 history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -188,6 +217,11 @@ class N1RunRecorderNode(Node):
 
     # ── the record loop ──────────────────────────────────────────────
     def _record(self):
+        if self._record_seconds > 0.0 and \
+                (time.monotonic() - self._started_s) >= self._record_seconds:
+            self.get_logger().info("recorded %.0f s; closing" % self._record_seconds)
+            self.close_video()
+            os._exit(0)
         with self._lock:
             frame = None if self._frame is None else self._frame.copy()
             pose = self._pose
@@ -201,12 +235,25 @@ class N1RunRecorderNode(Node):
         self._writer.write(compose(left, right))
         self._frames_written += 1
 
+    def close_video(self):
+        """Release the writer, once, and say what was written.
+
+        THIS IS THE WHOLE RECORDING. An mp4 whose writer is never released has
+        every frame in it and no ``moov`` atom, so nothing will play it -- the
+        file looks like a successful 5 MB result and is worthless. It must
+        therefore happen on every exit path, not only the tidy one.
+        """
+        writer = getattr(self, "_writer", None)
+        if writer is None:
+            return
+        self._writer = None
+        writer.release()
+        self.get_logger().info(
+            "wrote %d frames to %s" % (self._frames_written, self._output))
+
     def destroy_node(self):
         try:
-            if getattr(self, "_writer", None):
-                self._writer.release()
-                self.get_logger().info(
-                    "wrote %d frames to %s" % (self._frames_written, self._output))
+            self.close_video()
         except Exception:  # noqa: BLE001
             pass
         super().destroy_node()
@@ -215,13 +262,37 @@ class N1RunRecorderNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = N1RunRecorderNode()
+
+    # `ros2 launch` stops its children with SIGINT and then, if they linger,
+    # SIGTERM. Python turns SIGINT into KeyboardInterrupt but SIGTERM kills the
+    # process outright with no unwinding at all -- so without this handler a
+    # slightly slow shutdown loses the video even though the code below looks
+    # like it covers everything.
+    def _finish(_signum, _frame):
+        # Close the file, then leave immediately. Raising KeyboardInterrupt out
+        # of the handler is not enough: rclpy.spin blocks in C, so the exception
+        # is only delivered when a callback next returns to Python, and
+        # `ros2 launch`'s shutdown does not always wait that long -- measured
+        # here, SIGINT alone left the process running past four seconds. The
+        # video is fully flushed by close_video, so there is nothing left to
+        # unwind that is worth risking the recording for.
+        try:
+            node.close_video()
+        finally:
+            os._exit(0)
+
+    signal.signal(signal.SIGTERM, _finish)
+    signal.signal(signal.SIGINT, _finish)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 if __name__ == "__main__":

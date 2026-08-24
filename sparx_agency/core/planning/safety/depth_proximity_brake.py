@@ -103,9 +103,33 @@ class DepthProximityBrake(object):
             vert = np.abs(v - cfg.cy) * d / cfg.fy
             mask = (valid & (lat <= cfg.corridor_halfwidth_m)
                     & (vert <= cfg.corridor_halfheight_m))
-        if not mask.any():
-            return None
-        return float(d[mask].min())
+        if mask.any():
+            return float(d[mask].min())
+        # Nothing valid in the corridor. Two very different situations share
+        # that symptom, and returning None for both is what turns this brake
+        # OFF at exactly the range it exists for:
+        #
+        #   * the corridor is genuinely EMPTY -- no returns at all, nothing to
+        #     brake for;
+        #   * every return is CLOSER than ``min_valid_m`` -- the aircraft is up
+        #     against something. On the SJTU drone the front face is at +0.26 m
+        #     and the camera lens at +0.20 m, so a nose-on contact puts the wall
+        #     0.06 m from the lens: below ``min_valid_m`` AND below the sensor's
+        #     own 0.1 m near clip. Every pixel goes invalid at the one moment
+        #     the answer must be "stop".
+        #
+        # So separate them: a corridor full of too-close returns reports
+        # ``min_valid_m``, which the caller turns into a full stop.
+        with np.errstate(invalid="ignore"):
+            present = np.isfinite(d) & (d > 0.0)
+            lat = np.abs(u - cfg.cx) * d / cfg.fx
+            vert = np.abs(v - cfg.cy) * d / cfg.fy
+            near = (present & (d <= cfg.min_valid_m)
+                    & (lat <= cfg.corridor_halfwidth_m)
+                    & (vert <= cfg.corridor_halfheight_m))
+        if near.any():
+            return float(cfg.min_valid_m)
+        return None
 
     def allowed_forward_speed(self, depth_m):
         # type: (np.ndarray) -> tuple

@@ -37,6 +37,7 @@ topics:
   depth_enabled: true
   odom: /simple_drone/odom
   instruction: /simple_drone/navigation/instruction
+  state: /simple_drone/state                        # Int8: 0 landed, 1 flying
   trajectory: /simple_drone/n1/trajectory          # committed route (nav_msgs/Path, world)
   trajectory_full: /simple_drone/n1/trajectory_full  # whole prediction, for RViz
   info: /simple_drone/n1/info                        # JSON status: action, S1/S2 FPS, pixel goal
@@ -48,9 +49,13 @@ frames:
 # The N1 policy node: how often it asks the server, and the default instruction.
 policy_params:
   inference_rate_hz: 4.0
-  default_instruction: "explore the warehouse and avoid the shelves"
+  default_instruction: "explore the entire hospital, find every room, enter and exit every room"
   step_m: 0.25          # forward reach rendered from a discrete FORWARD action
-  turn_deg: 15.0        # heading a discrete turn action bends its step by
+  # 30 degrees is VLN-CE's own TURN_LEFT/TURN_RIGHT granularity, which is what
+  # the model was trained to mean by the action. At 15 the rendered step bends
+  # too little to cross the follower's stop_turn_rad, so a turn is flown as a
+  # small sideways translation and the aircraft never actually looks elsewhere.
+  turn_deg: 30.0        # heading a discrete turn action bends its step by
 
 # Plan-commitment: fly one prediction as a route until roughly half is behind
 # the aircraft, then re-infer -- the same discipline NavDP flies. Kept short
@@ -60,7 +65,11 @@ commit:
   lookahead_m: 1.0
   arrive_radius_m: 0.15
   min_commit_m: 0.20
-  max_commit_s: 8.0
+  # A blocked aircraft never reaches its commit point, so this timeout is the
+  # only thing that frees it. At 8 s a 0.25 m action step meant one hop every
+  # eight seconds against a wall; the pipeline decides at ~1.4 Hz, so 3 s is
+  # still several inferences per commitment and re-plans an order faster.
+  max_commit_s: 3.0
   max_deviation_m: 1.5
   min_period_s: 0.5
 
@@ -70,13 +79,53 @@ commit:
 follower:
   control_rate_hz: 20.0
   cruise_speed: 0.4
-  max_speed_xy: 1.0
+  # Kept well under the 2 m/s airframe ceiling on purpose. The plugin
+  # translates by TILTING, its roll/pitch PIDs are limited to 0.5 rad, and past
+  # about 0.61 rad the airframe capsizes -- after which it cannot climb,
+  # translate or yaw while still reporting healthy odometry. A high speed limit
+  # here does not buy speed, it buys tilt.
+  max_speed_xy: 0.6
   max_speed_z: 0.5
   max_yaw_rate: 1.2
-  goal_tolerance_m: 0.2
+  # MUST stay below commit.arrive_radius_m, or the follower stops exactly where
+  # the executor is still waiting to arrive: neither arrival test can fire, the
+  # commitment only ends on max_commit_s, and the aircraft flies ~3 s in every 8.
+  goal_tolerance_m: 0.10
+  path_tolerance_m: 0.8       # cross-track beyond which the pursuit re-acquires
   target_altitude_m: 1.2      # cruise altitude the follower holds after takeoff
+  altitude_capture_m: 0.25    # enter route tracking inside this band...
+  # Kept well inside path_tolerance_m. The tracker's cross-track test is a 3D
+  # distance to a route laid at target_altitude_m, so an altitude error eats
+  # directly into the lateral budget: at 0.60 m off, only sqrt(0.8^2 - 0.6^2) =
+  # 0.53 m of lateral error is left before the pursuit calls path_diverged and
+  # stops the aircraft dead in a state both knobs call legal.
+  altitude_release_m: 0.35    # ...and hand back to the climb outside this one
+  altitude_kp: 1.2
+  odom_timeout_s: 1.0         # no fresh feedback -> zero twist, never the stale one
   lookahead_m: 0.8
   yaw_lookahead_m: 1.5
+  stop_turn_rad: 0.35         # hold position and rotate past ~20 deg off route
+  resume_turn_rad: 0.12       # ...and fly again below ~7 deg (hysteresis band)
+  capsize_deg: 35.0           # past this the plugin cannot act; stop commanding
+  depth_timeout_s: 3.0        # older than this is not depth, it is a memory
+
+# The forward-speed reflex. N1 decides WHERE to go and nothing in this stack
+# decides whether the way is clear, so this is the only thing between the policy
+# and a wall: core/planning/safety/depth_proximity_brake, the corridor minimum of
+# the raw depth image against a stopping distance. Its defaults were tuned for
+# the same camera on the FALCON hospital campaign; the margins here are tighter
+# because the hospital's 0.93 m doorways are not passable at the FALCON numbers.
+brake:
+  enabled: true
+  corridor_halfwidth_m: 0.35   # airframe radius 0.314 m, plus a little
+  corridor_halfheight_m: 0.35
+  nose_offset_m: 0.10          # depth is to the camera, the strike is at the nose
+  min_valid_m: 0.15
+  brake_decel: 0.8
+  react_s: 0.30
+  margin_m: 0.45
+  hard_block_d_m: 0.70         # anything closer than this is a full stop
+  stride: 4
 
 # The run recorder: drone camera (left) + N1's route top-down (right), with the
 # System-1 / System-2 FPS drawn on. Written with OpenCV's mp4v encoder.
@@ -85,4 +134,12 @@ recorder:
   panel_width: 640
   panel_height: 480
   output: /tmp/sjtu_n1/run.mp4
+  # The occupancy map the route is drawn on, relative to the repo root. Built by
+  # tasks/mapping/gazebo_world_occupancy from the world's own collision meshes,
+  # so it is ground truth in the same frame /simple_drone/odom reports. Leave it
+  # empty (or point at a world with no map) and the route panel falls back to
+  # graph paper.
+  map: sparx_agency/robots/SJTU/maps/hospital.yaml
+  local_span_m: 14.0        # side of the world square the following view shows
+  overview_fraction: 0.42   # share of the panel given to the whole-building view
 

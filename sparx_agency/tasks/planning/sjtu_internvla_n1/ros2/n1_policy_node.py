@@ -35,9 +35,11 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import numpy as np
 import rclpy
 import yaml
+from rclpy._rclpy_pybind11 import RCLError
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image
@@ -51,6 +53,14 @@ from sparx_agency.core.planning.vlas.interfaces.goals import LanguageGoal
 from sparx_agency.core.planning.vlas.interfaces.policy import PolicyObservation
 from sparx_agency.core.planning.vlas.registry import default_vla_registry
 from sparx_agency.tasks.planning.sjtu_internvla_n1.recording import FpsMeter
+
+
+def _polyline_length(xy):
+    """Arc length of an (N, 2) polyline, metres. Zero for fewer than two points."""
+    pts = np.asarray(xy, dtype=float).reshape(-1, 2)
+    if len(pts) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
 
 
 def _yaw_from_quat(q):
@@ -126,6 +136,7 @@ class N1PolicyNode(Node):
             min_period_s=float(commit.get("min_period_s", max(0.1, 1.0 / self._inference_rate))),
         ))
         self._last_inference_s = 0.0
+        self._commits = 0
         self._min_inference_interval = 1.0 / max(1e-3, self._inference_rate)
 
         sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -235,6 +246,13 @@ class N1PolicyNode(Node):
 
     # ── the loop ─────────────────────────────────────────────────────
     def _tick(self):
+        if not rclpy.ok():
+            # The context is being torn down. Publishing into it raises
+            # RCLError out of the timer callback, the node exits 1, and the
+            # launch file's `on_exit=Shutdown()` reports a normal teardown as
+            # "this node died" -- which makes the one alarm that exists for a
+            # node dying at import useless.
+            return
         with self._lock:
             pose = self._pose
             rgb = None if self._rgb is None else self._rgb.copy()
@@ -272,6 +290,24 @@ class N1PolicyNode(Node):
         self._executor.commit(result.trajectory[:, :2], (pose[0], pose[1], pose[3]), now)
         self._publish_path(self._path_pub, self._executor.plan.committed_xy, pose)
         self._publish_path(self._full_path_pub, self._executor.plan.world_xy, pose)
+        # One line per commitment, because "the server answered 200" and "a route
+        # was actually flown" are different claims and only this one is evidence
+        # of the second. run_sjtu_n1.sh counts these to decide whether a
+        # recording is a result at all.
+        #
+        # The [curve]/[action] tag is read off the committed shape rather than a
+        # metadata flag: `trajectory_from_action` renders exactly one waypoint,
+        # so an anchored commitment of two points IS the discrete fallback and
+        # anything longer is System 1's integrated curve. Whether the curve is
+        # being flown at all is the whole question the patched server exists to
+        # answer, so this label has to be derived from something real.
+        committed = self._executor.plan.committed_xy
+        self._commits += 1
+        self.get_logger().info(
+            "committed #%d: %d pts, %.2f m, from (%.2f, %.2f) after %s [%s]"
+            % (self._commits, len(committed), _polyline_length(committed),
+               pose[0], pose[1], tick.replan_reason,
+               "curve" if len(committed) > 2 else "action"))
 
     def _publish_info(self, result, instruction, now):
         """Fold the step's timings into the FPS meters and publish a JSON status.
@@ -327,11 +363,24 @@ def main(args=None):
     node = N1PolicyNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException, RCLError):
+        # An orderly stop, not a fault. Letting any of these escape exits 1,
+        # which the launch file reads as "this node died" and turns into an
+        # ERROR and an emergency shutdown of its siblings -- so a clean Ctrl-C
+        # produces a log that looks like a crash, and the one alarm that exists
+        # for a node dying at import becomes noise.
+        #
+        # RCLError belongs here because rclpy does NOT always raise the tidy
+        # ExternalShutdownException: a shutdown that lands between spin
+        # iterations surfaces as `failed to initialize wait set: the given
+        # context is not valid`, and one that lands inside a callback as
+        # `failed to publish: publisher's context is invalid`. Both are the
+        # same event.
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

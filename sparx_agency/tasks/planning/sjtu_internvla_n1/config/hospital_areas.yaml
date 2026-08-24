@@ -1,0 +1,57 @@
+# Start areas for InternVLA-N1 recordings in the SJTU Gazebo hospital.
+#
+# Five places to begin a flight, one per part of the building, so a campaign of
+# recordings covers the hospital instead of five variations on the lobby. The
+# aircraft is ferried to one of these above the walls by scripts/goto_area.py
+# and the policy takes over from there.
+#
+# `clearance_m` is the distance to the nearest occupied cell, measured off the
+# occupancy map rather than guessed -- it is in the file because a start pose
+# 0.2 m from a wall is the difference between a recording and a collision, and
+# it should be visible before the run rather than after it. Re-measure with:
+#
+#   .venv/bin/python sparx_agency/tasks/planning/sjtu_internvla_n1/scripts/area_clearance.py
+#
+# Measured against sparx_agency/robots/SJTU/maps/hospital.yaml -- the ground
+# truth built from the world's own collision meshes over the 0.30-2.00 m band,
+# so the numbers include the furniture the aircraft can actually hit, not just
+# the walls.
+#
+# Frame: the Gazebo world frame /simple_drone/odom reports. x east, y north,
+# yaw counter-clockwise from +x. The drone spawns at (1, 1) facing +x.
+
+areas:
+  atrium:
+    x: -0.09
+    y: 11.84
+    yaw_deg: -90.0
+    clearance_m: 4.11
+    note: the open main hall north of the reception desk, facing back down the spine
+
+  north_wing:
+    x: -0.09
+    y: 14.04
+    yaw_deg: 90.0
+    clearance_m: 3.01
+    note: the north corridor, facing the far end of the building
+
+  reception:
+    x: 1.07
+    y: 2.08
+    yaw_deg: 90.0
+    clearance_m: 1.54
+    note: beside the curved reception desk, facing the atrium
+
+  east_wards:
+    x: 8.47
+    y: -7.28
+    yaw_deg: 180.0
+    clearance_m: 1.75
+    note: the east ward corridor, facing back across the building
+
+  south_hall:
+    x: -1.61
+    y: -27.96
+    yaw_deg: 90.0
+    clearance_m: 1.85
+    note: the south hall at the far end, facing the whole length of the hospital

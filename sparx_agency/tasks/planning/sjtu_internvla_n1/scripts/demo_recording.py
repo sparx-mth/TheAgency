@@ -20,6 +20,9 @@ import os
 import cv2
 import numpy as np
 
+from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
+    load_map_backdrop,
+)
 from sparx_agency.tasks.planning.sjtu_internvla_n1.recording import (
     OverlayInfo,
     TopDownRenderer,
@@ -66,6 +69,10 @@ def main(argv=None):
     ap.add_argument("--panel-height", type=int, default=480)
     ap.add_argument("--s1-fps", type=float, default=22.99)
     ap.add_argument("--s2-fps", type=float, default=1.41)
+    ap.add_argument("--map", default=os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), *([os.pardir] * 5),
+        "sparx_agency", "robots", "SJTU", "maps", "hospital.yaml"),
+        help="occupancy map to draw the route on; empty for graph paper")
     args = ap.parse_args(argv)
 
     w, h = args.panel_width, args.panel_height
@@ -75,7 +82,9 @@ def main(argv=None):
     if not writer.isOpened():
         raise SystemExit("could not open VideoWriter at %s" % (args.output,))
 
-    topdown = TopDownRenderer(size=(w, h))
+    # Draw on the real hospital map when it is there, so the demo shows the
+    # format a recording actually has rather than a simplified one.
+    topdown = TopDownRenderer(size=(w, h), backdrop=load_map_backdrop(args.map))
     n_frames = int(args.seconds * args.fps)
     x, y, yaw = 1.0, 1.0, 0.0
     actions = ["MOVE_FORWARD", "MOVE_FORWARD", "TURN_LEFT", "MOVE_FORWARD", "TURN_RIGHT"]

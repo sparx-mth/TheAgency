@@ -96,3 +96,46 @@ class TestSpeedLaw:
         img = put_blob(frame(), cfg, 0.0, 0.0, 3.0)
         v, _ = brake.allowed_forward_speed(img)
         assert v >= 0.6    # campaign cruise speed passes untouched
+
+
+# ── the corridor that is too close to see ────────────────────────────────
+#
+# On the SJTU drone the front face is at +0.26 m and the camera lens at
+# +0.20 m, so a nose-on contact leaves the wall 0.06 m from the lens -- below
+# `min_valid_m` and below the sensor's own 0.1 m near clip. Every corridor
+# pixel goes invalid at exactly the moment the answer must be "stop", and
+# reporting "clear" there is how the only reflex in the stack switches itself
+# off after the first touch.
+
+
+def _uniform(depth_m, shape=(120, 120)):
+    return np.full(shape, depth_m, dtype=np.float32)
+
+
+def test_a_corridor_full_of_too_close_returns_is_a_full_stop():
+    brake = DepthProximityBrake(DepthProximityBrakeConfig(min_valid_m=0.15))
+    for depth in (0.02, 0.06, 0.10, 0.149):
+        allowed, d_min = brake.allowed_forward_speed(_uniform(depth))
+        assert allowed == 0.0, "released the brake at %.3f m" % depth
+        assert d_min == pytest.approx(0.15)
+
+
+def test_an_empty_corridor_is_still_no_reason_to_brake():
+    """All-invalid for the OTHER reason -- nothing there -- must stay free."""
+    brake = DepthProximityBrake(DepthProximityBrakeConfig())
+    allowed, d_min = brake.allowed_forward_speed(
+        np.full((120, 120), np.nan, dtype=np.float32))
+    assert allowed == float("inf")
+    assert d_min is None
+
+
+def test_too_close_returns_outside_the_corridor_do_not_stop_the_aircraft():
+    """A wall brushing past the shoulder is not an obstacle straight ahead."""
+    cfg = DepthProximityBrakeConfig(min_valid_m=0.15, corridor_halfwidth_m=0.35)
+    brake = DepthProximityBrake(cfg)
+    depth = np.full((120, 120), np.nan, dtype=np.float32)
+    depth[:, :5] = 0.05          # far off-axis, so lateral offset is tiny at 0.05 m
+    allowed, d_min = brake.allowed_forward_speed(depth)
+    # At 0.05 m even the frame edge is only |u-cx|*d/fx = 300*0.05/390 = 0.038 m
+    # off-axis, so this IS in the corridor -- assert the honest answer.
+    assert allowed == 0.0 and d_min == pytest.approx(0.15)

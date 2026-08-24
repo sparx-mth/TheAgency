@@ -24,6 +24,27 @@ systems.
 - Noise filtering and outlier rejection
 - Continuous map refinement
 
+### Geometry Rasterisation (`geometry_raster/`)
+
+Turns 3D triangle geometry into a 2D occupancy slice. The caller brings vertices
+and faces already placed in world coordinates, and the package answers which
+grid cells the geometry occupies between two heights. Pure numpy — no mesh
+library, no scipy, no ROS.
+
+- `rasterise_mesh_slab()` is the entry point. `GridSpec` carries the five
+  numbers that make a raster a map: resolution, origin x/y, width, height.
+- Triangles are culled, clipped to the height band, and the surviving convex
+  polygons are both **filled** (cell centres inside the polygon) and
+  **edge-stamped** (4-connected cell chains along the boundary). Filling alone
+  leaves holes in thin walls, and a vertical wall sliced by a horizontal slab
+  projects to zero area, so its edges are the entire answer.
+- Row 0 is **minimum y**, as everywhere else in `core/` — deliberately not the
+  top-down row order of a nav2 PGM.
+
+Its first consumer is `tasks/mapping/gazebo_world_occupancy`, which computes the
+ground-truth maps committed under `robots/SJTU/maps/`. Conventions and the
+reasoning behind the two-pass raster: `geometry_raster/README.md`.
+
 ### Multi-Agent Support
 
 - Distributed map building

@@ -123,12 +123,31 @@ Three details that are easy to get wrong:
   costs a period. Otherwise a server that is down is hammered every tick, and
   the aircraft keeps flying a commitment it should have replaced.
 
+## A prediction that starts at the robot
+
+Some policies emit their first waypoint AT the robot -- InternVLA-N1 does, in
+both of its producers -- and `anchor_plan` prepends the anchor itself, so that
+first waypoint would be duplicated. `anchor_plan` therefore drops a leading
+waypoint within a millimetre of the body origin.
+
+On a long curve the duplicate is invisible. On a two-point prediction it is
+fatal: the commitment becomes two identical points 0.00 m apart, the executor
+calls it `TOO_SHORT`, re-infers immediately, and the aircraft hovers while the
+log fills with commitments it never flew. That is measured, not hypothetical.
+
+One consequence to keep in mind when reading indices: for such a policy,
+`world_xy[k]` is prediction waypoint `k` (the anchor having replaced the
+dropped origin), and `commit_index_for` counts the waypoints that survived the
+drop.
+
 ## Who uses it
 
 * `tasks/planning/vlas/navdp/finetune/world_goal/fly_navdp.py` — the closed-loop
   PEGASUS comparison, trained against untrained.
 * `tasks/planning/falcon/adapter/scripts/navdp_click_node.py` — the real
   aircraft, so what flies in the simulator is what flies outdoors.
+* `tasks/planning/sjtu_internvla_n1/ros2/n1_policy_node.py` — InternVLA-N1 on the
+  SJTU Gazebo drone, and the consumer that surfaced the leading-origin rule.
 
-Nothing here knows which policy produced the trajectory, which is the point:
+Nothing here knows which policy produced the trajectory, which is the point -- the one exception is the leading-origin rule above, which is a normalisation of the *shape* a prediction arrives in, not of the policy that made it:
 FlowNav and anything after it get the same behaviour for free.

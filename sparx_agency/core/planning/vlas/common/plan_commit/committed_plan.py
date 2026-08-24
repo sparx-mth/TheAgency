@@ -187,6 +187,12 @@ class CommittedPlan(object):
                 self.segment_heading(segment))
 
 
+# How close to the body origin a leading waypoint has to be to count as "the
+# robot itself" rather than a step. A millimetre: below any distance a policy
+# means, above any float noise from the integration that produced it.
+_ORIGIN_EPS_M = 1e-3
+
+
 def commit_index_for(waypoints: int, fraction: float) -> int:
     """Which waypoint a ``fraction`` commitment ends at.
 
@@ -233,9 +239,13 @@ def anchor_plan(trajectory: np.ndarray, pose: Sequence[float], issued_s: float,
     Returns:
         The anchored plan.
 
+    A leading waypoint sitting at the body origin is dropped, because the
+    anchor prepended here already is that point -- see the comment below. The
+    returned plan can therefore hold one fewer waypoint than ``trajectory`` did.
+
     Raises:
-        ValueError: The trajectory holds no waypoints, or either the trajectory
-            or the pose holds a non-finite value.
+        ValueError: The trajectory holds no waypoints, holds nothing but the
+            body origin, or either it or the pose holds a non-finite value.
     """
     # Shape first, and the column count with it: `atleast_2d` turns an empty
     # (0,) array into (1, 0) and a bare (N,) into (1, N), so a row-count test
@@ -256,6 +266,21 @@ def anchor_plan(trajectory: np.ndarray, pose: Sequence[float], issued_s: float,
     # NavDP yaw channel full of junk is still ignored rather than fatal.
     if not np.all(np.isfinite(body)):
         raise ValueError("trajectory holds non-finite waypoints")
+    # A policy that starts its prediction AT the robot -- which both of N1's
+    # producers do, the integrated System-1 curve and the single step rendered
+    # from a discrete action -- would otherwise have that first waypoint
+    # duplicated by the anchor prepended below. On a 33-point curve the
+    # duplicate is invisible; on the 2-point action step it is fatal, because
+    # `commit_index_for(2, 0.5)` then commits through the copy and the
+    # commitment is two identical points 0.00 m apart. The executor calls that
+    # TOO_SHORT, re-infers immediately, and the aircraft hovers while the log
+    # fills with commitments it never flew.
+    if float(np.hypot(body[0, 0], body[0, 1])) <= _ORIGIN_EPS_M:
+        body = body[1:]
+    if body.shape[0] < 1:
+        raise ValueError(
+            "a prediction needs at least one waypoint away from the robot; got shape %r"
+            % (tuple(np.shape(trajectory)),))
     at_x, at_y, at_yaw = float(pose[0]), float(pose[1]), float(pose[2])
     if not (np.isfinite(at_x) and np.isfinite(at_y) and np.isfinite(at_yaw)):
         raise ValueError("anchor pose must be finite; got (%r, %r, %r)"
