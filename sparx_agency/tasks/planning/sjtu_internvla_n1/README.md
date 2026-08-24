@@ -7,9 +7,21 @@ Nothing here is N1-specific below the wire; swap the policy node for the NavDP o
 and the follower would not notice.
 
 **Everything runs on the CPU except the InternVLA-N1 network, which owns the GPU
-(~8 GB) alone.** That is the whole design constraint. Gazebo has no GPU physics,
-the mapper is Gazebo's own depth, and both ROS2 nodes are pure numpy with
-`CUDA_VISIBLE_DEVICES=""`. The only thing on the card is the model server.
+(~8 GB) alone.** That is the whole design constraint, and it is now enforced
+rather than assumed. Both ROS2 nodes are pure numpy with
+`CUDA_VISIBLE_DEVICES=""`, and **Gazebo renders on the CPU** — `bringup_world.sh`
+passes no `--gpus` and forces llvmpipe.
+
+That last part is not a preference. Gazebo Classic has no GPU physics, but it
+renders its camera sensors through OGRE, and with `--gpus all` that context
+landed on the same card the server was holding at ~7.2 of 8.1 GB. Asking for a
+GL context in the remaining ~900 MB **hard-locked the host** — twice. Software
+rendering turned out to be *faster* here anyway, because it stops competing:
+RGB went from 5.6–9.0 Hz to 12.5–14.9 Hz and depth from 4.0–5.0 to ~6.3 Hz on
+this 32-thread box, with the card reading 13 MiB before the server starts.
+
+`SJTU_SIM_GPU=1` gives the simulator the card back, for a machine with a second
+GPU or no VLA resident. Do not set it on this one.
 
 ## The chain
 

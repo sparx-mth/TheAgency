@@ -22,8 +22,9 @@ must be, so the network keeps the whole card. It imports no torch and sets
 """
 from __future__ import annotations
 
-import os
 import json
+import os
+import signal
 import threading
 import time
 from math import atan2
@@ -35,8 +36,8 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import numpy as np
 import rclpy
 import yaml
-from rclpy._rclpy_pybind11 import RCLError
 from cv_bridge import CvBridge
+from rclpy._rclpy_pybind11 import RCLError
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.executors import ExternalShutdownException
@@ -361,6 +362,19 @@ class N1PolicyNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = N1PolicyNode()
+
+    def _finish(_signum, _frame):
+        # Leave at once. This node spends most of its life blocked in an HTTP
+        # call to the model server -- seconds at a time, since System 2 is a 7B
+        # VLM -- and a signal delivered mid-request is not seen until that
+        # request returns. Waiting for it means the teardown's grace expires and
+        # the node is SIGKILLed instead, which the launch file then reports as
+        # "this node died". Nothing here needs unwinding: the aircraft belongs
+        # to the follower, and there is no file to flush.
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _finish)
+    signal.signal(signal.SIGINT, _finish)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):

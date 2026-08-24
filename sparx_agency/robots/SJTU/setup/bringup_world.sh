@@ -244,8 +244,33 @@ if [[ -t 0 ]]; then
   TTY_ARGS=(-it)
 fi
 
+# THE SIMULATOR DOES NOT GET THE GPU.
+#
+# Gazebo Classic renders its camera sensors through OGRE, and with `--gpus all`
+# that rendering context lands on the same card a VLA server is holding. On an
+# 8 GB card with InternVLA-N1 resident at ~7.2 GB there is under a gigabyte
+# left, and Gazebo asking for a GL context in what remains takes the whole
+# machine down -- not the container, the machine. Software rendering costs
+# frames on a box with 32 threads to spare; the alternative costs the session.
+#
+# So: no `--gpus`, and llvmpipe forced below, unless someone deliberately asks
+# for the card with SJTU_SIM_GPU=1 (a machine with a second GPU, or no VLA
+# running). The physics never touched the GPU in the first place -- Gazebo
+# Classic has no GPU physics -- so this only moves the rendering.
+GPU_ARGS=()
+RENDER_ENV=(-e LIBGL_ALWAYS_SOFTWARE=1 -e GALLIUM_DRIVER=llvmpipe -e MESA_LOADER_DRIVER_OVERRIDE=llvmpipe)
+if [[ "${SJTU_SIM_GPU:-0}" == "1" ]]; then
+  GPU_ARGS=(--gpus all)
+  RENDER_ENV=()
+  echo "[sjtu/bringup] SJTU_SIM_GPU=1: the simulator is taking the GPU." >&2
+  echo "  If a VLA server is resident on the same card this can hard-lock the host." >&2
+else
+  echo "[sjtu/bringup] rendering on the CPU (llvmpipe); the GPU is left free."
+fi
+
 docker run "${TTY_ARGS[@]}" --rm \
-  --gpus all \
+  "${GPU_ARGS[@]}" \
+  "${RENDER_ENV[@]}" \
   --privileged \
   --net=host \
   --ipc=host \

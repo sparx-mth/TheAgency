@@ -303,6 +303,14 @@ sparx_agency/robots/SJTU/setup/bringup_world.sh hospital           # gzserver on
 sparx_agency/robots/SJTU/setup/bringup_world.sh --gui playground   # with a viewer
 ```
 
+The simulator renders on the **CPU** (llvmpipe), and takes no GPU. Gazebo Classic
+has no GPU physics, so the card was only ever carrying the camera sensors' OGRE
+context -- and on a machine where a VLA server holds 7.2 of 8.1 GB, asking for
+that context in what is left hard-locks the host. Measured after the change: the
+card reads 13 MiB with the world up, and the cameras are FASTER (RGB 12.5-14.9 Hz
+against 5.6-9.0 Hz on the GPU) because they are no longer competing for it.
+`SJTU_SIM_GPU=1` restores `--gpus all` for a machine that can spare it.
+
 Flags: `--gui` / `--headless` (default), `--domain <N>` (ROS_DOMAIN_ID, default
 20 — a mismatch drops all traffic silently and looks exactly like a simulator
 that never started), `--name <NAME>`, `--skip-build`, `--help`. `--help` lists
