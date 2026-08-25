@@ -63,6 +63,27 @@ FALCON_PREFLIGHT_ORDER: list[tuple[str, float]] = [
     ("rooster_planner_rviz", 8),
 ]
 
+#: Bring-up for hand-flown work: manual control, axis calibration, any test a
+#: human drives. Deliberately a SUBSET of FALCON_PREFLIGHT_ORDER -- no falcon
+#: container, no ros1_bridge, no frame capture, no depth, no RViz. None of
+#: those sits in the manual command path, and each one is a process that can
+#: fail, hold a stale handle, or publish onto a topic the human is using.
+#:
+#: The twist adapter is absent BY DESIGN and the caller must stop it: its idle
+#: watchdog publishes {"action": "stop"} at 20 Hz whenever /cmd_vel is quiet,
+#: and the command unit zeroes x/y/r on every one. Measured 2026-08-25 --
+#: 1575 stops in 90 s, which cancelled every directional press, cancelled the
+#: climb ("Climb cancelled - holding z=700"), and left only ARM/DISARM and the
+#: altitude nudge working, because those touch no axis. It reads exactly like
+#: a dead UI, and it cost six bring-ups to pin down.
+MANUAL_BRINGUP_ORDER: list[tuple[str, float]] = [
+    ("rooster_it_container", 15),     # vendor backend, everything execs into it
+    ("rooster_gtl_R1", 8),            # /R1/localization; the recorder reads it too
+    ("rooster_video_trigger_R1", 8),  # rebind after every R1 respawn or the picture freezes
+    ("rooster_command_unit_R1", 8),   # sole owner of /R1/manual_control
+    ("rooster_manual_ui_R1", 8),
+]
+
 # Started only once the aircraft is confirmed hovering.
 TWIST_ADAPTER_KEY = "rooster_twist_control_R1"
 

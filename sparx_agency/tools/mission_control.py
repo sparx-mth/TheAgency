@@ -21,6 +21,7 @@ import yaml
 
 from sparx_agency.tools.falcon_flight_sequence import (
     FALCON_PREFLIGHT_ORDER,
+    MANUAL_BRINGUP_ORDER,
     TWIST_ADAPTER_KEY,
     send_cmd_nav,
     wait_for_stable_hover,
@@ -1392,6 +1393,11 @@ def _run_falcon_sequence(follow_altitude: bool = False) -> None:
         say("ℹ️ Altitude follow disabled — FALCON steers, the command unit "
             "holds the height.")
     say(f"⏳ {twist.name}…")
+    # Clear any user-stopped mark first. The manual bring-up sets it so the
+    # auto-restart supervisor cannot revive the adapter mid-calibration;
+    # leaving it set here would mean a FALCON run whose adapter dies never
+    # gets it back, which is the one case that supervisor exists for.
+    st.session_state.setdefault("user_stopped", set()).discard(TWIST_ADAPTER_KEY)
     err = start_service(twist)
     if err:
         say(f"⚠️ {twist.name} — start error: {err}")
@@ -1399,6 +1405,277 @@ def _run_falcon_sequence(follow_altitude: bool = False) -> None:
     ok = _wait_until(twist, timeout=10)
     say(f"{'✅' if ok else '⚠️ (timed out)'} {twist.name}")
     say("🚁 FALCON has control — exploration drives itself from here.")
+
+
+#: Every exec into the vendor container needs this: ROS 2 Foxy on domain 9
+#: with the vendor's own CycloneDDS config. Without CYCLONEDDS_URI the node
+#: binds the wrong interface and receives nothing while looking healthy.
+_IT_DDS_ENV = [
+    "-e", "ROS_DOMAIN_ID=9",
+    "-e", "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp",
+    "-e", "CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml",
+]
+
+
+def start_calibration_recorder(drone_id: str = "R1", seconds: int = 3600) -> str | None:
+    """Start the six-stream telemetry recorder inside the vendor container.
+
+    Stops any recorder already running first, so clicking the button twice
+    leaves one recorder and not two racing for the same topics -- the same
+    thing ``campaign.start_recorder`` does before every flight. The stop is a
+    SIGTERM, which lets the old one write its final ``recorder_meta.json``
+    with real per-stream counts; that is what distinguishes a completed
+    recording from a crashed one afterwards.
+
+    Writes to a fresh timestamped directory rather than a fixed one, so
+    starting it twice can never overwrite a session, and leaves the path in
+    ``/tmp/axiscal_current`` for the readback below.
+
+    Args:
+        drone_id: Rooster id whose topics to record.
+        seconds: Self-terminate after this long, so a forgotten recorder does
+            not run for days.
+
+    Returns:
+        Error string, or None on success.
+    """
+    # Bracket glob, then kill by PID: `pkill -f falcon_campaign.recorder`
+    # matches its own command line and kills this shell instead.
+    stop = (
+        "for p in $(ps -eo pid,args | grep '[f]alcon_campaign.recorder' "
+        "| grep -v 'bash -lc' | awk '{print $1}'); do kill $p; done; sleep 2"
+    )
+    try:
+        subprocess.run(["docker", "exec", "it", "bash", "-lc", stop],
+                       capture_output=True, check=False, timeout=30)
+    except subprocess.TimeoutExpired:
+        pass  # A stuck stop must not block starting a fresh recording.
+
+    script = (
+        "source /opt/ros/foxy/setup.bash; "
+        "source /home/rooster/workspace/install/setup.bash; "
+        "export PYTHONPATH=$PYTHONPATH:/home/rooster; "
+        "D=/tmp/axiscal_$(date +%Y%m%d_%H%M%S); mkdir -p $D; "
+        "echo $D > /tmp/axiscal_current; "
+        f"python3 -m sparx_agency.tools.falcon_campaign.recorder --run-dir $D "
+        f"--rooster-id {drone_id} --hz 20 --duration-sec {int(seconds)} "
+        "> /tmp/axiscal_recorder.log 2>&1"
+    )
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "-d", *_IT_DDS_ENV, "it", "bash", "-lc", script],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return "timed out starting the recorder"
+    return (proc.stderr or "").strip()[:200] or None
+
+
+def recorder_reception() -> tuple[bool, str]:
+    """Whether the running recorder is actually receiving anything.
+
+    "The process is up" is the wrong success criterion: a recorder started
+    while R1 is down writes a perfectly plausible file in which every stream's
+    ``age`` is null, and nothing downstream can tell that from a quiet flight.
+    So this reads the newest telemetry row back and counts the dead streams.
+
+    Returns:
+        tuple: ``(live, detail)`` -- ``live`` is True only when all six
+        streams carry a real age.
+    """
+    script = (
+        'D=$(cat /tmp/axiscal_current 2>/dev/null); '
+        '[ -z "$D" ] && { echo "NODIR"; exit 0; }; '
+        'echo "$D"; tail -1 "$D/truth.jsonl" 2>/dev/null | grep -o \'"age": null\' | wc -l'
+    )
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "it", "bash", "-lc", script],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "timed out reading the recording back"
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not lines or lines[0] == "NODIR":
+        return False, "no recorder directory -- did it start?"
+    run_dir = lines[0]
+    try:
+        dead = int(lines[-1])
+    except (ValueError, IndexError):
+        return False, f"{run_dir}: no telemetry rows written yet"
+    if dead:
+        return False, f"{run_dir}: {dead}/6 streams receiving NOTHING -- do not fly"
+    return True, f"{run_dir}: all six streams live"
+
+
+def _run_manual_sequence(with_recorder: bool = True) -> None:
+    """Bring the stack up for hand-flown work, with no FALCON anywhere.
+
+    Starts only what the manual command path needs, stops the twist adapter
+    and marks it user-stopped so the auto-restart supervisor cannot revive it,
+    then verifies the two things that have silently wasted whole sessions:
+    that nothing else is publishing ``cmd_nav``, and that the recorder is
+    actually receiving. It never arms and never takes off -- the human flies.
+
+    Args:
+        with_recorder: Also start the telemetry recorder and verify reception.
+    """
+    svc_map = {s.key: s for s in ROBOTICAN_SERVICES}
+    progress = st.empty()
+    log: list[str] = []
+
+    def say(line: str) -> None:
+        log.append(line)
+        progress.markdown("  \n".join(log))
+
+    # 1. The twist adapter FIRST, before anything can start publishing at it.
+    #    Marking it user-stopped is the load-bearing half: _supervise_auto_
+    #    restart skips only that set, so a plain stop gets undone within a
+    #    page interaction.
+    twist = svc_map[TWIST_ADAPTER_KEY]
+    st.session_state.setdefault("user_stopped", set()).add(TWIST_ADAPTER_KEY)
+    st.session_state.setdefault("auto_restart", set()).discard(TWIST_ADAPTER_KEY)
+    if _is_running(twist):
+        say("⏸️ Stopping the twist adapter — it cancels every manual command "
+            "within ~50 ms…")
+        stop_service(twist)
+        time.sleep(1.5)
+    # Only the user_stopped mark does any work: the supervisor consults that
+    # set alone, and it already ran for this page render. The auto_restart
+    # discard above is best-effort -- the adapter's own card re-adds the key
+    # from its keyed checkbox further down the same render -- so do not claim
+    # it here. "Launch All" and "Run All for FALCON" start the adapter
+    # deliberately and no mark can stop them.
+    say("🔒 Twist adapter marked user-stopped — the auto-restart supervisor "
+        "will leave it alone. (Launch All / Run All for FALCON still start it.)")
+
+    # 2. The minimal manual stack, in dependency order.
+    for key, timeout in MANUAL_BRINGUP_ORDER:
+        svc = svc_map[key]
+        if _is_running(svc):
+            say(f"✅ {svc.name} — already running")
+            continue
+        say(f"⏳ {svc.name}…")
+        err = start_service(svc)
+        if err:
+            say(f"⚠️ {svc.name} — start error: {err}")
+            continue
+        ok = _wait_until(svc, timeout=timeout)
+        say(f"{'✅' if ok else '⚠️ (timed out, continuing)'} {svc.name}")
+        # Measured 2026-08-25: this node died instantly on its first launch
+        # after a Sphera restart with "munmap_chunk(): invalid pointer" (the
+        # vendor CDR bug) and came up cleanly on a retry. One retry is
+        # cheaper than a session spent wondering why nothing responds.
+        if key == "rooster_command_unit_R1" and not ok:
+            say("↻ Command unit did not come up — retrying once…")
+            start_service(svc)
+            say(f"{'✅' if _wait_until(svc, timeout=timeout) else '❌'} {svc.name} (retry)")
+
+    # 3. Recorder BEFORE the cmd_nav check: that check reads the recording,
+    #    so running it first would read a stale file from a previous session
+    #    (frozen ages -> a false "something is publishing") or nothing at all
+    #    (-> an unfounded pass).
+    if with_recorder:
+        say("⏳ Starting the telemetry recorder…")
+        err = start_calibration_recorder()
+        if err:
+            say(f"⚠️ Recorder start error: {err}")
+        else:
+            time.sleep(8)
+            live, detail = recorder_reception()
+            say(f"{'✅' if live else '❌'} {detail}")
+
+    # 4. Verify, rather than assume, that the channel is the human's alone.
+    say("⏳ Checking nothing else is publishing cmd_nav…")
+    quiet, detail = _cmd_nav_is_quiet()
+    say(f"{'✅' if quiet else '❌'} {detail}")
+
+    say("🎮 Ready — **arm and take off from the Manual UI when you are.** "
+        "Nothing here armed anything.")
+
+
+def _last_telemetry_row() -> dict | None:
+    """Newest row of the recording currently being written, or None.
+
+    Cheap: reads a file the recorder is already writing, rather than spending
+    ~10 s on a ``ros2 topic echo`` that is block-buffered and unreliable here.
+    """
+    script = (
+        'D=$(cat /tmp/axiscal_current 2>/dev/null); [ -z "$D" ] && exit 1; '
+        'tail -1 "$D/truth.jsonl" 2>/dev/null'
+    )
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "it", "bash", "-lc", script],
+            capture_output=True, text=True, check=False, timeout=25,
+        )
+        return json.loads((proc.stdout or "").strip() or "{}") or None
+    except (subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _r1_airborne() -> bool | None:
+    """Whether R1 is in the air.
+
+    Returns:
+        True, False, or None when it genuinely cannot be determined -- which
+        callers must treat as "unknown", never as "safe". There is no reading
+        of a missing answer that makes stopping the twist adapter on a flying
+        aircraft acceptable.
+    """
+    row = _last_telemetry_row()
+    if not row:
+        return None
+    state = row.get("state") or {}
+    if state.get("age") is None:
+        return None
+    return bool(state.get("airborne"))
+
+
+def _cmd_nav_is_quiet(samples: int = 2, gap: float = 4.0) -> tuple[bool, str]:
+    """Whether anything other than the human is publishing ``cmd_nav``.
+
+    Reads the recorder's own view rather than counting publishers, because the
+    question that matters is not "how many endpoints exist" but "is my command
+    being overwritten". A stale age that GROWS between samples means nobody is
+    talking; one pinned near zero means a watchdog is.
+
+    Args:
+        samples: How many readings to take.
+        gap: Seconds between readings.
+
+    Returns:
+        tuple: ``(quiet, detail)``.
+    """
+    script = (
+        'D=$(cat /tmp/axiscal_current 2>/dev/null); [ -z "$D" ] && exit 1; '
+        'tail -1 "$D/truth.jsonl" 2>/dev/null'
+    )
+    ages: list[float] = []
+    for i in range(samples):
+        if i:
+            time.sleep(gap)
+        try:
+            proc = subprocess.run(
+                ["docker", "exec", "it", "bash", "-lc", script],
+                capture_output=True, text=True, check=False, timeout=25,
+            )
+            row = json.loads((proc.stdout or "").strip() or "{}")
+            age = (row.get("cmd_nav") or {}).get("age")
+        except (subprocess.TimeoutExpired, ValueError):
+            age = None
+        # Fails CLOSED. An unreadable answer is not a clean channel -- the
+        # whole point of this check is that a silent failure here costs a
+        # whole session, and "unreadable is not healthy" is the rule that
+        # already had to be learned once on the battery gate.
+        if age is None:
+            return False, ("could not read cmd_nav back — treat as NOT verified "
+                           "and check by hand before flying")
+        ages.append(float(age))
+    if len(ages) >= 2 and ages[-1] <= ages[0]:
+        return False, (f"something IS publishing cmd_nav (age {ages[0]:.2f}s → "
+                       f"{ages[-1]:.2f}s) — your commands will be overwritten")
+    return True, f"cmd_nav is quiet (age {ages[0]:.1f}s → {ages[-1]:.1f}s, growing)"
 
 
 def start_service(svc: Service) -> str | None:
@@ -1889,6 +2166,52 @@ with tab_rooster:
         "Object Approach, the YOLO detector and the Position Fly Controller "
         "are deliberately left out: the first two fight for /cmd_vel_raw, the "
         "third fights for the manual-control axes."
+    )
+
+    manual_col, manual_rec_col = st.columns([1, 2])
+    with manual_col:
+        manual_go = st.button("🎮 Manual / Calibration Bring-up",
+                              use_container_width=True)
+    with manual_rec_col:
+        manual_recorder = st.checkbox(
+            "Also start the telemetry recorder (6 streams, 20 Hz)",
+            value=True, key="manual_bringup_recorder")
+    if manual_go:
+        # This button stops the twist adapter, and stop_service SIGTERMs it.
+        # The adapter installs no SIGTERM handler, so it dies WITHOUT sending
+        # a final stop -- and RoosterUnit.set_axes latches the last commanded
+        # axes forever (only stop() clears x/y/r). Pressed during a FALCON
+        # flight it would therefore freeze the aircraft at its last commanded
+        # translation with the watchdog gone. It sits one click below the
+        # FALCON button, so it gets the same gate that button already has.
+        airborne = _r1_airborne()
+        if airborne:
+            st.error("R1 is AIRBORNE. This stops the twist adapter, which "
+                     "would leave the aircraft flying its last commanded "
+                     "velocity with nothing to stop it. Land first.")
+            st.stop()
+        if not st.session_state.get("manual_seq_confirm", False):
+            st.session_state.manual_seq_confirm = True
+            st.warning("Click **Manual / Calibration Bring-up** again to "
+                       "confirm — this stops the twist adapter and hands "
+                       "control to the Manual UI."
+                       + ("  \n⚠️ Could not read R1's state, so I cannot "
+                          "confirm it is on the ground." if airborne is None
+                          else ""))
+            st.stop()
+        st.session_state.manual_seq_confirm = False
+        _run_manual_sequence(with_recorder=manual_recorder)
+
+    st.caption(
+        "Everything a human needs to fly R1 by hand, and nothing else: no "
+        "FALCON container, no ros1_bridge, no frame capture, no depth, no "
+        "RViz. It stops the twist adapter and marks it user-stopped so the "
+        "auto-restart supervisor cannot revive it — that adapter publishes "
+        "`stop` at 20 Hz whenever /cmd_vel is quiet, which zeroes x/y/r about "
+        "50 ms after every button press and makes the Manual UI look dead. "
+        "It then checks cmd_nav really is quiet and that the recorder really "
+        "is receiving, because both have failed silently before. **It never "
+        "arms and never takes off** — you fly."
     )
 
     launch_all_col, stop_all_col, _ = st.columns([1, 1, 2])
