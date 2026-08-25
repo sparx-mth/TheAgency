@@ -381,6 +381,23 @@
     <param name="mode_topic"    value="/R1/demo_mode" />
   </node>
 
+  <!-- FALCON's own trajectory, republished as nav_msgs/Path so the BEV click
+       viewer can draw it. The viewer already knows how to draw routes, but
+       every path topic it subscribes to belongs to the A*/NavDP click-to-fly
+       pipeline, and none of them has a publisher while FALCON is exploring.
+       That is why the BEV shows the map and the drone dot but no route.
+       FALCON publishes the geometry as RViz markers rather than as a Path, so
+       this node is purely a message type adapter: markers in, Paths out. It
+       commands nothing and changes no planning behaviour. -->
+  <node pkg="falcon_adapter" type="falcon_traj_to_path_node.py"
+        name="falcon_traj_to_path" output="screen">
+    <param name="planned_in"   value="/planning_vis/trajectory" />
+    <param name="planned_out"  value="/falcon/planned_path" />
+    <param name="executed_in"  value="/planning/travel_traj" />
+    <param name="executed_out" value="/falcon/executed_path" />
+    <param name="frame_id"     value="world" />
+  </node>
+
   <!-- Pass-through args nav_stack.launch declares but this file didn't forward; needed for object_mission_sphera.launch's include of this file to work (roslaunch rejects any forwarded arg with no matching arg here). Defaults copied from nav_stack.launch itself. -->
   <arg name="debug" default="false" />
   <arg name="start_go" default="true" />

@@ -989,12 +989,22 @@ ROBOTICAN_SERVICES: list[Service] = [
         name="Rooster BEV Click Goal",
         key="rooster_planner_bev_goal",
         group="rooster_planner",
-        description="Bird's-eye-view click-to-goal UI inside the falcon container (host-side) for R1.",
+        description="Bird's-eye-view click-to-goal UI inside the falcon container (host-side) for R1. Draws FALCON's planned trajectory (green) and the route it has already flown (red), fed by falcon_traj_to_path in sphera_drone.launch.",
         # See the DISPLAY note on Rooster Falcon RViz above -- same reasoning.
+        #
+        # _path_topic / _raw_path_topic are repointed at FALCON's trajectory.
+        # Their defaults (/path/waypoints, /path/waypoints_raw) belong to the
+        # A*/NavDP click-to-fly pipeline, which has NO publisher during
+        # exploration -- so out of the box this viewer draws the map and the
+        # drone dot and no route at all, which reads as "the trajectory
+        # feature is missing". falcon_traj_to_path converts FALCON's RViz
+        # markers into these Paths; see sphera_drone.launch.
         cmd=(
             "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
             "source /catkin_ws/devel/setup.bash && "
-            "rosrun falcon_adapter bev_click_goal_node.py'"
+            "rosrun falcon_adapter bev_click_goal_node.py "
+            "_path_topic:=/falcon/planned_path "
+            "_raw_path_topic:=/falcon/executed_path'"
         ),
         env="none",
         machine="pc",
