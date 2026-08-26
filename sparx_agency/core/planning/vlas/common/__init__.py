@@ -14,6 +14,12 @@ What lives here is code that was, or would otherwise be, copy-pasted per policy:
   forward-looking policy answers "stop", turn until it can see somewhere to go.
   Holding position without also looking around is a deadlock: the view never
   changes, so neither does the answer.
+* :mod:`~sparx_agency.core.planning.vlas.common.turn_in_place` -- fly a
+  policy's discrete turn as a real rotation that ends *stopped*. Its sibling
+  above decides where to look; this gets there and says when the aircraft has
+  arrived, so the next observation is taken from a standstill -- which is the
+  regime a VLN policy was trained in, and not what a bent waypoint flown by a
+  holonomic tracker produces.
 * :mod:`~sparx_agency.core.planning.vlas.common.plan_commit` -- commit to one
   prediction and fly it as a route, instead of replacing it every frame. Not a
   policy concern and not a robot concern, which is why it is here: a policy

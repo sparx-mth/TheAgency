@@ -6,6 +6,12 @@
 #   ./record_campaign.sh 90 atrium south_hall  # 90 s each, two named areas
 #   REPEAT=4 ./record_campaign.sh              # four passes over the five areas
 #   REPEAT=0 ./record_campaign.sh              # keep cycling until stopped
+#   REPEAT=5 ./record_campaign.sh 180 office_door   # the SAME prompt, five times
+#
+# That last form is the repeatability experiment: one area, one instruction,
+# five runs. Each is hermetic -- the world is restarted and the aircraft
+# re-ferried -- so the only thing that differs between them is the policy's own
+# non-determinism, which is the thing being looked at.
 #
 # Each recording is HERMETIC: the world is restarted, the aircraft is ferried
 # above the walls to the area, and only then does the policy get the instruction.
@@ -35,12 +41,38 @@ fi
 
 CAMPAIGN_DIR="${CAMPAIGN_DIR:-${HOME}/sjtu_n1_recordings/$(date +%Y%m%d_%H%M%S)}"
 WORLD="${WORLD:-hospital}"
-INSTRUCTION="${INSTRUCTION:-explore the entire hospital, find every room, enter and exit every room}"
+# One room, one table -- an instruction with a state at which it is satisfied.
+# "Explore the entire hospital" has none, so no flight can be evidence about it.
+INSTRUCTION="${INSTRUCTION:-There is a room to your right. Enter it, go to the center of the room, find the table and stop near the table.}"
 export SJTU_PROJECT_DIR="${SJTU_PROJECT_DIR:-${HOME}/GIT/sjtu_project}"
 export DISPLAY="${DISPLAY:-:1}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-20}"
 ROS_DISTRO="${ROS_DISTRO:-jazzy}"
 SETUP_DIR="${REPO_ROOT}/sparx_agency/robots/SJTU/setup"
+
+# SOURCE ROS 2 HERE, not in the operator's shell. This script runs `ros2 topic
+# echo` to decide the world is really up and `goto_area.py` (which imports
+# rclpy) to ferry the aircraft, and `/opt/ros/<distro>/bin/ros2` is on the
+# default PATH *without* the environment that makes it work -- so from a plain
+# shell it fails on an importlib traceback, the odom wait silently burns its
+# sixty seconds, and every run is written off as "could not reach the area"
+# with nothing anywhere pointing at the cause. It only ever worked because the
+# person running it happened to have sourced ROS first.
+#
+# `set -u` and ament's shell hooks are incompatible: the hooks read unset
+# variables, and under -u an unbound reference EXITS the shell outright rather
+# than returning non-zero. Take -u off for the source and put it straight back.
+if [[ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "/opt/ros/${ROS_DISTRO}/setup.bash"
+    set -u
+else
+    echo "[campaign] ERROR: no /opt/ros/${ROS_DISTRO}/setup.bash" >&2
+    exit 2
+fi
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+export CUDA_VISIBLE_DEVICES=""   # the ferry and the verdicts stay off the card
 
 # The ferry runs BEFORE run_sjtu_n1.sh and therefore inherits none of its
 # environment. Without the shared-memory-free profile it sees an empty graph,
@@ -164,7 +196,16 @@ while :; do
     [[ "${commits}" -gt 0 ]] || verdict="NO ROUTE"
     [[ "${capsized}" -eq 0 ]] || verdict="CAPSIZED"
     grep -qa "CAPSIZED" "${run_dir}/run.log" 2>/dev/null && verdict="CAPSIZED"
-    say "run ${n} (${area}): ${verdict}  commitments=${commits}  ${frames:-no frame count}"
+    # The shape of what was flown, not just the count. Five runs of the same
+    # prompt are only comparable if the line says whether they were curves.
+    curves="$(count_in '\[curve\]')"; curves="${curves:-0}"
+    actions="$(count_in '\[action\]')"; actions="${actions:-0}"
+    turns="$(count_in 'turn #')"; turns="${turns:-0}"
+    escapes="$(count_in 'BLOCKED ESCAPE')"; escapes="${escapes:-0}"
+    stops="$(count_in 'N1 STOP')"; stops="${stops:-0}"
+    metres="$(grep -ao 'committed #[0-9]*: [0-9]* pts, [0-9.]* m' "${run_dir}/nodes.log" 2>/dev/null \
+        | awk '{s += $(NF-1)} END {printf "%.1f", s+0}')"
+    say "run ${n} (${area}): ${verdict}  routes=${commits} (${curves} curve/${actions} action, ${metres:-0} m)  turns=${turns}  escapes=${escapes}  stops=${stops}  ${frames:-no frame count}"
   done
 done
 

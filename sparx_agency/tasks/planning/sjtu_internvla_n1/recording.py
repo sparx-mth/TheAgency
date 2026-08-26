@@ -92,6 +92,21 @@ class OverlayInfo:
     decision_time: Optional[float] = None    # wall clock of the decision
     from_curve: bool = False        # this decision is System 1's continuous curve
     curve_share_pct: Optional[float] = None  # share of decisions that were curves
+    # WHAT THE AIRCRAFT IS DOING RIGHT NOW, republished several times a second
+    # rather than once per decision. A decision lasts seconds, so a motionless
+    # drone on screen is either thinking, turning, dipping for a look-down or
+    # wedged against something -- and a recording that cannot tell those apart
+    # is a recording nobody can diagnose from. That is the whole reason seventy
+    # seconds of the last hospital flight went unexplained.
+    phase: str = ""                 # flying | settling | thinking | turning | dipping | stopped
+    think_s: Optional[float] = None  # how long it has been standing still for this one
+    blocked: bool = False           # the depth reflex allows no forward speed at all
+    traj_m: Optional[float] = None   # length of the prediction this decision produced
+    traj_pts: Optional[int] = None   # ...and how many waypoints it has
+    turn_deg: Optional[float] = None  # the rotation this decision asked for, if any
+    commits: Optional[int] = None    # routes flown so far
+    turns: Optional[int] = None      # rotations flown so far
+    escapes: Optional[int] = None    # blocked-forward escapes so far
 
 
 def _put(img, text, org, scale=0.6, color=(255, 255, 255), thick=2):
@@ -152,23 +167,42 @@ def draw_camera_panel(frame_bgr, info, size):
             _label_beside(panel, "S2 goal (stale%s)" % age, gx, gy, 18, 0.42,
                           (90, 90, 170), 1)
 
-    # Top banner: status + action.
+    # Top banner: status + action + what the aircraft is doing this instant.
     cv2.rectangle(panel, (0, 0), (w, 66), (0, 0, 0), -1)
     _put(panel, "DRONE CAMERA", (10, 24), 0.6, (0, 255, 0), 2)
     _put(panel, "action: %s   status: %s" % (info.action or "-", info.status or "-"),
          (10, 52), 0.55, (255, 255, 255), 1)
+    _draw_phase(panel, info, w)
 
     # Where this decision came from. System 1's curve is the continuous output
     # the dual-system design exists to produce; a discrete action rendered as a
     # 0.25 m step is the fallback. Showing which, and how often, is the only way
     # to read a recording and know what you actually got.
+    # "of decisions", spelled out. The share counts every decision -- turns and
+    # STOPs included -- while the run log's [curve]/[action] tag counts
+    # COMMITTED ROUTES, and the two legitimately differ: a run whose every route
+    # was a curve can still report 38% here because most of its decisions were
+    # STOPs. Labelling this one "curves" invited the two to be read as the same
+    # number and one of them to look broken.
     source = "S1 CURVE" if info.from_curve else "action step"
     colour = (0, 255, 180) if info.from_curve else (0, 165, 255)
     label = source if info.curve_share_pct is None else (
-        "%s   (%.0f%% curves)" % (source, info.curve_share_pct))
+        "%s   (curve on %.0f%% of decisions)" % (source, info.curve_share_pct))
     (tw, _), _ = cv2.getTextSize(label, _FONT, 0.5, 2)
     cv2.rectangle(panel, (w - tw - 24, 70), (w, 96), (0, 0, 0), -1)
     _put(panel, label, (w - tw - 14, 89), 0.5, colour, 2)
+
+    # What this decision actually produced, under the source tag: a length and a
+    # point count. "S1 CURVE" says System 1 ran; only these say whether what it
+    # produced is a route or a twitch.
+    if info.traj_m is not None:
+        if info.turn_deg is not None:
+            shape = "rotate %+.0f deg" % info.turn_deg
+        else:
+            shape = "%.2f m / %d pts" % (info.traj_m, info.traj_pts or 0)
+        (tw2, _), _ = cv2.getTextSize(shape, _FONT, 0.45, 1)
+        cv2.rectangle(panel, (w - tw2 - 24, 98), (w, 120), (0, 0, 0), -1)
+        _put(panel, shape, (w - tw2 - 14, 114), 0.45, (200, 200, 200), 1)
 
     # FPS block, the headline the request asks for, bottom-left.
     def _fps(label, fps, ms):
@@ -181,7 +215,10 @@ def draw_camera_panel(frame_bgr, info, size):
     _put(panel, _fps("System 2:", info.s2_fps, info.s2_ms), (10, h - 10), 0.6, (0, 200, 255), 2)
 
     # Instruction, wrapped, bottom band.
-    lines = _wrap(info.instruction, 54)[:2]
+    # Three lines, not two. The instruction is the one thing on screen that a
+    # viewer has to read in full to judge anything else, and a room-and-table
+    # order does not fit in two.
+    lines = _wrap(info.instruction, 54)[:3]
     y = h - 58 - 8 - (len(lines) - 1) * 22
     for line in lines:
         (tw, _), _ = cv2.getTextSize(line, _FONT, 0.5, 1)
@@ -189,6 +226,41 @@ def draw_camera_panel(frame_bgr, info, size):
         _put(panel, line, (12, y), 0.5, (200, 220, 255), 1)
         y += 22
     return panel
+
+
+_PHASE_COLOURS = {
+    "flying": (0, 220, 0),
+    "settling": (0, 200, 255),
+    "thinking": (0, 200, 255),
+    "turning": (255, 180, 0),
+    "dipping": (255, 140, 60),
+    "stopped": (160, 160, 160),
+}
+
+
+def _draw_phase(panel, info, w):
+    """A pill saying what the aircraft is doing, and for how long.
+
+    Placed top-right and coloured, because it is the field a viewer checks
+    first: a stationary drone is fine when it is THINKING and a bug when it is
+    FLYING, and the picture is identical either way.
+    """
+    if not info.phase and not info.blocked:
+        return
+    text = (info.phase or "").upper()
+    if info.think_s and info.phase in ("thinking", "settling", "dipping"):
+        text = "%s %.1fs" % (text, info.think_s)
+    colour = _PHASE_COLOURS.get(info.phase, (200, 200, 200))
+    if info.blocked:
+        # BLOCKED outranks everything else on screen. It is the one state in
+        # which the policy's decisions cannot be flown at all, and it looks
+        # exactly like thinking from the outside.
+        text = "BLOCKED  " + text
+        colour = (0, 0, 255)
+    (tw, _), _ = cv2.getTextSize(text, _FONT, 0.55, 2)
+    cv2.rectangle(panel, (w - tw - 24, 4), (w - 4, 34), (0, 0, 0), -1)
+    cv2.rectangle(panel, (w - tw - 24, 4), (w - 4, 34), colour, 1)
+    _put(panel, text, (w - tw - 14, 26), 0.55, colour, 2)
 
 
 def compose(left, right):

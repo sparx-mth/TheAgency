@@ -16,6 +16,23 @@ A separate follower node pursues it and produces ``/cmd_vel`` -- the same split
 as FALCON's ``navdp_click_node`` -> ``waypoint_follower_node``, so the policy
 never touches the airframe and the follower never talks to a GPU.
 
+**The aircraft stands still while the model thinks, and turns when it says turn.**
+Those are the two things that make a dual-system VLA flyable rather than merely
+connected, and both were absent:
+
+* System 2 needs seconds. An aircraft that keeps flying through them shows the
+  model a frame from where it *was*, and then anchors the answering route there
+  too -- so a 3 m curve begins metres behind the drone and the pursuit's first
+  job is to fly backwards to the start of it. Holding costs flight time and buys
+  the only property the stack is judged on: the observation, the decision and
+  the anchor are one place. It is also the regime the policy was trained in --
+  VLN-CE takes every observation from a standstill.
+* A discrete TURN action is a **rotation**, and rendering it as a short bent
+  waypoint lets a holonomic tracker satisfy it by crabbing sideways. The model
+  asks to look somewhere and the aircraft shuffles 0.25 m instead, sees the same
+  wall, and asks again. Turns are handed to the follower as a heading
+  (``/n1/yaw_goal``) and flown as a slow rotation that ends stopped.
+
 The model runs on the GPU behind an HTTP server; **this node is CPU-only** and
 must be, so the network keeps the whole card. It imports no torch and sets
 ``CUDA_VISIBLE_DEVICES=""`` for its own process as a belt-and-braces guard.
@@ -39,16 +56,26 @@ from cv_bridge import CvBridge
 from rclpy._rclpy_pybind11 import RCLError
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
-from rclpy.executors import ExternalShutdownException
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 
 from sparx_agency.core.common.math.se3 import yaw_from_quaternion
+from sparx_agency.core.planning.safety.depth_proximity_brake import (
+    DepthProximityBrakeConfig,
+    freer_side,
+)
 from sparx_agency.core.planning.vlas.common.plan_commit.executor import (
     CommitSpec,
     PlanCommitExecutor,
+)
+from sparx_agency.core.planning.vlas.common.turn_in_place import (
+    TurnInPlace,
+    describe as describe_turn,
+    turn_spec_from_config,
 )
 from sparx_agency.core.planning.vlas.interfaces.goals import LanguageGoal
 from sparx_agency.core.planning.vlas.interfaces.policy import PolicyObservation
@@ -101,6 +128,9 @@ class N1PolicyNode(Node):
         self._instruction_topic = topics.get("instruction", "/simple_drone/navigation/instruction")
         self._path_topic = topics.get("trajectory", "/simple_drone/n1/trajectory")
         self._full_path_topic = topics.get("trajectory_full", "/simple_drone/n1/trajectory_full")
+        self._hold_topic = topics.get("hold", "/simple_drone/n1/hold")
+        self._yaw_goal_topic = topics.get("yaw_goal", "/simple_drone/n1/yaw_goal")
+        self._blocked_topic = topics.get("blocked", "/simple_drone/n1/blocked")
 
         self._instruction = pp.get("default_instruction", "explore the warehouse")
         self._inference_rate = float(pp.get("inference_rate_hz", 4.0))
@@ -111,6 +141,9 @@ class N1PolicyNode(Node):
         self._rgb = None
         self._depth = None
         self._pose = None  # (x, y, z, yaw)
+        self._speed = 0.0      # |horizontal velocity|, m/s, from odom
+        self._yaw_rate = 0.0   # rad/s, from odom
+        self._blocked = False  # the follower's depth reflex allows no forward speed
 
         # The policy: built through the registry so the string name is the only
         # coupling, exactly as an arbiter would build any VLA.
@@ -132,9 +165,76 @@ class N1PolicyNode(Node):
             arrive_radius_m=float(commit.get("arrive_radius_m", 0.15)),
             min_commit_m=float(commit.get("min_commit_m", 0.20)),
             max_commit_s=float(commit.get("max_commit_s", 8.0)),
+            # NOT OPTIONAL, AND THEY WERE MISSING. Without these two the spec
+            # falls back to a FLAT `max_commit_s`, so every commitment -- a 2 m
+            # curve and a 0.25 m step alike -- sits out the full ceiling before
+            # it can be replaced. The YAML has documented them, and the twelve
+            # second stalls they were meant to remove, since before the node
+            # read them: measured in the hospital, five separate twelve-second
+            # stalls in a ninety-second flight, which was most of the time the
+            # aircraft spent stationary. Found by scripts/dry_run.py.
+            expected_speed_mps=float(commit.get("expected_speed_mps", 0.0)),
+            commit_grace_s=float(commit.get("commit_grace_s", 2.0)),
             max_deviation_m=float(commit.get("max_deviation_m", 1.5)),
             min_period_s=float(commit.get("min_period_s", max(0.1, 1.0 / self._inference_rate))),
         ))
+        foll = cfg.get("follower", {})
+
+        # ── stop, look, think ────────────────────────────────────────
+        # The whole flight is a sequence of stationary observations, which is
+        # what the policy was trained on. `hold_to_think: false` restores the
+        # fly-while-thinking behaviour, for comparison and nothing else.
+        self._hold_to_think = bool(pp.get("hold_to_think", True))
+        self._settle_speed = float(pp.get("settle_speed_mps", 0.05))
+        self._settle_yaw_rate = float(pp.get("settle_yaw_rate_rad_s", 0.05))
+        self._settle_s = float(pp.get("settle_s", 0.3))
+        self._settle_timeout_s = float(pp.get("settle_timeout_s", 3.0))
+        self._held = False
+        self._hold_since = None
+        self._settle_since = None
+        self._deciding = False
+        self._think_since = 0.0
+        self._phase = "waiting"
+        # The last decision's status, republished every status tick with the
+        # live phase folded in. A decision now lasts seconds, so a status that
+        # is only published when one is taken leaves the overlay reporting
+        # "thinking" for the whole of the flight that follows it -- and a
+        # motionless aircraft that is thinking looks exactly like a motionless
+        # aircraft that is wedged.
+        self._info = {}
+        self._last_status_s = 0.0
+        self._status_period_s = float(pp.get("status_period_s", 0.2))
+
+        # ── a turn is a rotation ─────────────────────────────────────
+        # `rotate` flies a discrete turn as a rotation that ends stopped;
+        # `crab` restores the old behaviour of flying the bent step it is
+        # rendered as. The pair exists so the two can be compared on the same
+        # aircraft; `rotate` is what the model means.
+        self._turn_mode = str(pp.get("discrete_turn_mode", "rotate")).lower()
+        self._turn = TurnInPlace(turn_spec_from_config(foll.get("turn", {}) or {}))
+        self._min_commit_m = float(commit.get("min_commit_m", 0.20))
+        self._pivot_min_rad = float(np.deg2rad(float(pp.get("pivot_min_deg", 7.5))))
+        self._pivot_min_reach_m = float(pp.get("pivot_min_reach_m", 0.05))
+        self._turns = 0
+        self._turns_flown = 0
+
+        # ── the blocked-forward escape ───────────────────────────────
+        # Not a planner. The depth reflex in the follower can pin the aircraft
+        # at zero forward speed indefinitely, and a policy that cannot see that
+        # will keep asking to fly forward from an identical stationary frame --
+        # a loop that this stack has already lost most of a flight to.
+        brake_cfg = cfg.get("brake", {})
+        self._escape_after = int(pp.get("blocked_escape_after", 3))
+        self._escape_turn_rad = float(np.deg2rad(float(pp.get("blocked_escape_deg", 45.0))))
+        self._blocked_forward = 0
+        self._escapes = 0
+        self._brake_cfg = DepthProximityBrakeConfig(
+            fx=float(camera.get("fx", 390.642735)), fy=float(camera.get("fy", 390.642735)),
+            cx=float(camera.get("cx", 300.0)), cy=float(camera.get("cy", 300.0)),
+            corridor_halfheight_m=float(brake_cfg.get("corridor_halfheight_m", 0.35)),
+            min_valid_m=float(brake_cfg.get("min_valid_m", 0.15)),
+            stride=int(brake_cfg.get("stride", 4)))
+
         self._last_inference_s = 0.0
         self._commits = 0
         # Look-down state. System 2 asks for a lower view of the scene and then
@@ -155,6 +255,20 @@ class N1PolicyNode(Node):
         self._curve_decisions = 0
         self._min_inference_interval = 1.0 / max(1e-3, self._inference_rate)
 
+        # TWO CALLBACK GROUPS, AND THE REASON IS THE HTTP CALL. `_tick` blocks
+        # inside `policy.step()` for as long as System 2 takes -- seconds. On a
+        # single-threaded executor that stops EVERYTHING in this node for the
+        # duration: no odometry is fused, so the settle gate and the rotation
+        # tracker are reading a pose from before the aircraft stopped, and no
+        # status is published, so a recording shows the last phase before the
+        # think and a viewer cannot tell a five-second decision from a hang.
+        #
+        # `_tick` gets a mutually exclusive group so it can never re-enter
+        # itself mid-inference; everything else shares a reentrant one and keeps
+        # running while it waits.
+        self._tick_group = MutuallyExclusiveCallbackGroup()
+        self._live_group = ReentrantCallbackGroup()
+
         sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                 history=HistoryPolicy.KEEP_LAST, depth=1)
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -162,11 +276,17 @@ class N1PolicyNode(Node):
                              history=HistoryPolicy.KEEP_LAST, depth=1)
 
         rgb_type = CompressedImage if self._rgb_compressed else Image
-        self.create_subscription(rgb_type, self._rgb_topic, self._on_rgb, sensor_qos)
+        self.create_subscription(rgb_type, self._rgb_topic, self._on_rgb, sensor_qos,
+                                 callback_group=self._live_group)
         if self._depth_enabled:
-            self.create_subscription(Image, self._depth_topic, self._on_depth, sensor_qos)
-        self.create_subscription(Odometry, self._odom_topic, self._on_odom, sensor_qos)
-        self.create_subscription(String, self._instruction_topic, self._on_instruction, 1)
+            self.create_subscription(Image, self._depth_topic, self._on_depth, sensor_qos,
+                                     callback_group=self._live_group)
+        self.create_subscription(Odometry, self._odom_topic, self._on_odom, sensor_qos,
+                                 callback_group=self._live_group)
+        self.create_subscription(String, self._instruction_topic, self._on_instruction, 1,
+                                 callback_group=self._live_group)
+        self.create_subscription(Bool, self._blocked_topic, self._on_blocked, latched,
+                                 callback_group=self._live_group)
 
         self._path_pub = self.create_publisher(Path, self._path_topic, latched)
         self._full_path_pub = self.create_publisher(Path, self._full_path_topic, latched)
@@ -174,6 +294,8 @@ class N1PolicyNode(Node):
         self._info_pub = self.create_publisher(String, self._info_topic, latched)
         self._alt_offset_pub = self.create_publisher(
             Float32, topics.get("altitude_offset", "/simple_drone/n1/altitude_offset"), 1)
+        self._hold_pub = self.create_publisher(Bool, self._hold_topic, 1)
+        self._yaw_goal_pub = self.create_publisher(Float32, self._yaw_goal_topic, 1)
 
         # FPS meters: the model reports per-step System-1 / System-2 durations
         # (the trajectory-patched agent), which these turn into a smoothed rate.
@@ -183,8 +305,15 @@ class N1PolicyNode(Node):
         self._cam_w = int(camera.get("width", 600))
         self._cam_h = int(camera.get("height", 600))
 
-        self.create_timer(1.0 / max(1e-3, self._control_rate), self._tick)
-        self.create_timer(1.5, self._init_once)  # one-shot server init after startup
+        self.create_timer(1.0 / max(1e-3, self._control_rate), self._tick,
+                          callback_group=self._tick_group)
+        # The status publisher is its own timer on the live group, so the
+        # overlay keeps saying THINKING (and counting the seconds) while the
+        # tick above is blocked in the model server.
+        self.create_timer(max(0.05, self._status_period_s), self._status_tick,
+                          callback_group=self._live_group)
+        self.create_timer(1.5, self._init_once,  # one-shot server init after startup
+                          callback_group=self._live_group)
         self._initialised = False
 
         self.get_logger().info(
@@ -193,6 +322,12 @@ class N1PolicyNode(Node):
                                 self._odom_topic, self._path_topic,
                                 server.get("host", "127.0.0.1"), server.get("port", 8087),
                                 self._instruction))
+        self.get_logger().info(
+            "decisions are taken from a standstill: hold_to_think=%s (settle "
+            "<= %.2f m/s for %.1f s, %.1f s timeout); discrete turns flown as "
+            "%s -- %s"
+            % (self._hold_to_think, self._settle_speed, self._settle_s,
+               self._settle_timeout_s, self._turn_mode, describe_turn(self._turn.spec)))
 
     # ── setup ────────────────────────────────────────────────────────
     @staticmethod
@@ -203,7 +338,8 @@ class N1PolicyNode(Node):
         intrinsic; the server projects its pixel goal with these, so they are
         passed explicitly rather than left at the 640x480 default.
 
-        ``sys2_max_forward_step`` is the one knob that trades decision rate for
+        ``sys2_max_forward_step`` and ``sys1_continuous_only`` are the two knobs
+        that trade decision rate for
         *continuity*. Measured over 168 System-2 replies: 92.7% of look-downs
         are followed by pixel coordinates, and coordinates are the only branch
         that runs System 1 -- so every System-2 call is very nearly one chance
@@ -216,6 +352,14 @@ class N1PolicyNode(Node):
         settings = {}
         if policy_params and policy_params.get("sys2_max_forward_step") is not None:
             settings["sys2_max_forward_step"] = int(policy_params["sys2_max_forward_step"])
+        # THE CONTINUOUS SWITCH (server PATCH 7). With it on, the agent stops
+        # queueing the discretisation of a curve it has already handed over, so
+        # every System-1 step returns a fresh curve instead of three stale
+        # 0.25 m stubs. It also changes what `sys2_max_forward_step` counts --
+        # System-1 runs rather than executed action steps -- which is why the
+        # two are set together in the YAML.
+        if policy_params and policy_params.get("sys1_continuous_only") is not None:
+            settings["sys1_continuous_only"] = bool(policy_params["sys1_continuous_only"])
         if not camera:
             return settings
         fx = float(camera.get("fx", 390.642735))
@@ -265,9 +409,22 @@ class N1PolicyNode(Node):
 
     def _on_odom(self, msg):
         p = msg.pose.pose
+        t = msg.twist.twist
+        # The speed matters as much as the pose here: an observation is only
+        # worth taking once the aircraft has actually stopped, and this airframe
+        # translates by tilting, so it coasts well past the command going to
+        # zero. The horizontal magnitude is frame-independent, which is why this
+        # does not care whether the plugin reports twist in body or world axes.
+        speed = float(np.hypot(t.linear.x, t.linear.y))
         with self._lock:
             self._pose = (p.position.x, p.position.y, p.position.z,
                           _yaw_from_quat(p.orientation))
+            self._speed = speed
+            self._yaw_rate = float(t.angular.z)
+
+    def _on_blocked(self, msg):
+        with self._lock:
+            self._blocked = bool(msg.data)
 
     def _on_instruction(self, msg):
         text = msg.data.strip()
@@ -286,13 +443,31 @@ class N1PolicyNode(Node):
             return
         with self._lock:
             pose = self._pose
+            speed, yaw_rate = self._speed, self._yaw_rate
             rgb = None if self._rgb is None else self._rgb.copy()
             depth = None if self._depth is None else self._depth.copy()
             instruction = self._instruction
+            blocked = self._blocked
         if pose is None:
             return
 
         now = time.time()
+
+        # A ROTATION IS IN FLIGHT. Nothing else happens until the aircraft has
+        # turned and stopped, because the frame at the end of the turn is the
+        # entire reason the model asked for it. The same TurnInPlace the
+        # follower flies, fed the same odometry -- this copy reads only `done`,
+        # so the two can never disagree about whether the turn has happened.
+        if self._turn.active:
+            cmd = self._turn.update(pose[3], now, yaw_rate)
+            if not cmd.done:
+                self._phase = "turning"
+                return
+            self._turns_flown += 1
+            self.get_logger().info(
+                "turn %d finished at %.1f deg%s"
+                % (self._turns_flown, np.degrees(pose[3]),
+                   " (TIMED OUT -- the aircraft did not turn)" if cmd.timed_out else ""))
 
         # A look-down is in flight: hold off inference until the aircraft is
         # actually down at the dipped altitude, so the ONE frame the agent is
@@ -307,17 +482,26 @@ class N1PolicyNode(Node):
             reached = pose[2] <= (self._cruise_alt - self._dip_m) + 0.02
             if reached:
                 self._dip_state = "holding"
+                # Restart the settle window. The hold has been on since before
+                # the descent, and without this the timeout below fires the
+                # moment the aircraft arrives and reports "never settled" about
+                # an aircraft that has been stationary the whole time.
+                self._hold_since = None
+                self._settle_since = None
                 self.get_logger().info("look-down: at %.2f m, sending the low frame" % pose[2])
             elif now - self._dip_since > self._dip_timeout_s:
                 # It never got there -- blocked, or the follower is not tracking.
                 # Send the frame anyway rather than wedging the episode; the
                 # agent is blocked waiting for it.
                 self._dip_state = "holding"
+                self._hold_since = None
+                self._settle_since = None
                 self.get_logger().warn(
                     "look-down: never reached %.2f m (at %.2f m after %.1f s); "
                     "sending the frame from here"
                     % (self._cruise_alt - self._dip_m, pose[2], now - self._dip_since))
             else:
+                self._phase = "dipping"
                 return
 
         tick = self._executor.tick(pose[0], pose[1], now)
@@ -326,11 +510,36 @@ class N1PolicyNode(Node):
         # None` -- the tick object is read again further down and nulling it
         # simply moved the problem to a line that had no reason to expect it.
         forced = self._dip_state == "holding"
-        if not forced and tick.replan_reason is None:
+        # `_deciding` LATCHES the decision. Once a replan reason has been seen
+        # the aircraft is committed to stopping and asking, however many control
+        # steps that takes -- otherwise the settle below would release the hold
+        # on the first tick that the executor happened not to re-raise a reason,
+        # and the aircraft would creep forward through its own observation.
+        if not self._deciding and not forced and tick.replan_reason is None:
+            self._phase = "flying"
+            self._set_hold(False)
             return
+        self._deciding = True
         if rgb is None or now - self._last_inference_s < self._min_inference_interval:
             return
 
+        # STOP BEFORE LOOKING. System 2 takes seconds, and until this was here
+        # the aircraft flew through every one of them: the frame the model
+        # reasoned about was metres behind the aircraft by the time the answer
+        # arrived, and the route was anchored at the pose the frame was taken
+        # from -- so a 3 m curve started 2 m behind the drone and the pursuit
+        # spent its first second flying backwards to reach the start of it.
+        # Holding costs flight time and buys the one thing the whole stack is
+        # judged on: the observation, the answer and the anchor are the same
+        # place.
+        if self._hold_to_think:
+            self._set_hold(True)
+            if not self._settled(speed, yaw_rate, now):
+                self._phase = "settling"
+                return
+
+        self._phase = "thinking"
+        self._think_since = now
         if not forced:
             self._executor.mark_attempt(now)
         self._last_inference_s = now
@@ -344,13 +553,18 @@ class N1PolicyNode(Node):
             # sample, so the overlay keeps reporting healthy FPS while nothing
             # is reaching the model at all -- the exact symptom a wedged server
             # produces, and indistinguishable from a policy that is thinking.
+            #
+            # And RELEASE the aircraft. A held drone waiting on a server that is
+            # not answering is a hover with no end; the plan it already has is
+            # the best thing available, so fly it and ask again.
+            self._finish_decision()
             self.get_logger().warn(
                 "no usable answer from the model server (%s); keeping the "
                 "current commitment" % (result.metadata.get("error"),),
                 throttle_duration_sec=5.0)
             return
 
-        self._publish_info(result, instruction, now)
+        self._publish_info(result, instruction, now, pose)
 
         # The look-down frame reached the server, so the dip has done its job:
         # climb back. Cleared HERE and not before the transport check, because a
@@ -366,12 +580,21 @@ class N1PolicyNode(Node):
             self._set_altitude_offset(0.0)
             self.get_logger().info("look-down: frame delivered, returning to cruise")
         if result.metadata.get("look_down"):
+            # THE HOLD STAYS ON THROUGH THE DIP. System 2 asked for a lower view
+            # of *this* scene and will compute its pixel goal in the frame it
+            # gets back; an aircraft that flies two metres while descending
+            # answers with a lower view of somewhere else, which is a subtler
+            # version of the same lie performing the dip exists to stop telling.
+            # `_deciding` therefore stays latched -- the decision is not over,
+            # it is waiting for a frame.
             self._dip_state = "descending"
             self._dip_since = now
             self._set_altitude_offset(-self._dip_m)
+            self._phase = "dipping"
             self.get_logger().info(
                 "look-down requested: dipping %.2f m to %.2f m"
                 % (self._dip_m, self._cruise_alt - self._dip_m))
+            return
 
         if result.metadata.get("idle") and not result.ok:
             # No new decision this tick -- System 2 is looking down, or System 1
@@ -385,6 +608,7 @@ class N1PolicyNode(Node):
             # it decides the action list was empty, so a real System-1 curve can
             # arrive alongside index -1. A curve always wins over an idle flag:
             # it is the thing this whole stack exists to fly.
+            self._finish_decision()
             self.get_logger().info(
                 "N1 idle (%s): keeping the current commitment"
                 % (result.metadata.get("action"),), throttle_duration_sec=5.0)
@@ -396,12 +620,60 @@ class N1PolicyNode(Node):
             # hover".
             self._executor.reset()
             self._publish_path(self._path_pub, [], pose)
+            self._finish_decision()
+            self._phase = "stopped"
             self.get_logger().info("N1 STOP (%s): holding" % (result.metadata.get("action"),))
             return
 
-        self._executor.commit(result.trajectory[:, :2], (pose[0], pose[1], pose[3]), now)
+        self._act(result, pose, depth, blocked, now, forced, tick)
+
+    # ── acting on one decision ───────────────────────────────────────
+    def _act(self, result, pose, depth, blocked, now, forced, tick):
+        """Fly the decision: as a rotation where it is one, otherwise as a route.
+
+        The split is the whole difference between "the model turned" and "the
+        model shuffled sideways". A discrete TURN action carries no distance at
+        all upstream -- it rotates and nothing else -- and a System-1 curve too
+        short to be a route is the same message in continuous clothing: the
+        model is asking to pivot and look again, not to travel 0.25 m.
+        """
+        body = np.asarray(result.trajectory, dtype=float)[:, :2]
+        arc = _polyline_length(body)
+        delta = self._rotation_intent(result, body, arc)
+
+        if delta is None and blocked:
+            # BLOCKED, AND ASKING TO TRANSLATE ANYWAY. The depth reflex allows
+            # no forward speed, so this decision cannot be flown; committing it
+            # again produces the same stationary frame and the same answer, for
+            # ever. Measured before this existed: seventy of a ninety-second
+            # flight, pinned 0.43 m from a wall, re-committing a 0.25 m forward
+            # step every twelve seconds.
+            self._blocked_forward += 1
+            if self._blocked_forward >= self._escape_after:
+                side = (freer_side(depth, self._brake_cfg)
+                        if depth is not None else 1.0)
+                delta = side * self._escape_turn_rad
+                self._blocked_forward = 0
+                self._escapes += 1
+                self.get_logger().warn(
+                    "BLOCKED ESCAPE %d: %d decisions asking to fly forward into "
+                    "something the depth corridor says is impassable; turning "
+                    "%.0f deg %s to look somewhere else"
+                    % (self._escapes, self._escape_after,
+                       np.degrees(self._escape_turn_rad),
+                       "left" if side > 0 else "right"))
+        else:
+            self._blocked_forward = 0
+
+        if delta is not None:
+            self._begin_turn(pose, delta, now, result)
+            return
+
+        self._executor.commit(body, (pose[0], pose[1], pose[3]), now)
         self._publish_path(self._path_pub, self._executor.plan.committed_xy, pose)
         self._publish_path(self._full_path_pub, self._executor.plan.world_xy, pose)
+        self._finish_decision()
+        self._phase = "flying"
         # One line per commitment, because "the server answered 200" and "a route
         # was actually flown" are different claims and only this one is evidence
         # of the second. run_sjtu_n1.sh counts these to decide whether a
@@ -422,13 +694,121 @@ class N1PolicyNode(Node):
                "look-down frame" if forced else tick.replan_reason,
                "curve" if len(committed) > 2 else "action"))
 
+    def _rotation_intent(self, result, body, arc):
+        """How far this decision wants to rotate, radians CCW, or ``None``.
+
+        Two ways a decision is a rotation:
+
+        * the server answered with a discrete TURN action, which upstream moves
+          the heading and nothing else (``turn_delta_rad`` on the policy result);
+        * System 1 returned a curve too short to be a route. Its shape still
+          says where the model wants to be looking, and flying 0.2 m of it
+          throws that away -- the aircraft creeps forward and the view barely
+          changes, which is exactly the loop this whole node exists to break.
+
+        Returns ``None`` in ``crab`` mode, which restores the old behaviour of
+        flying every decision as a path. Kept so the two can be compared on the
+        same aircraft rather than argued about.
+        """
+        if self._turn_mode != "rotate":
+            return None
+        delta = result.metadata.get("turn_delta_rad")
+        if delta is not None:
+            return float(delta)
+        if arc >= self._min_commit_m or len(body) < 2:
+            return None
+        end = body[-1]
+        if float(np.hypot(end[0], end[1])) < self._pivot_min_reach_m:
+            # A curve with no reach at all has no bearing either -- atan2 of
+            # nearly (0, 0) is noise, and turning on noise is worse than
+            # standing still. Let it be committed and fail the executor's own
+            # TOO_SHORT test, which is the honest report.
+            return None
+        bearing = float(np.arctan2(end[1], end[0]))
+        if abs(bearing) < self._pivot_min_rad:
+            return None
+        return bearing
+
+    def _begin_turn(self, pose, delta, now, result=None):
+        """Ask the follower to rotate, and stand down until it has.
+
+        The committed route is cleared as well as replaced: a rotation is not a
+        path, and leaving the last one published would have the follower pursue
+        it the instant the turn ends, from a heading it was never planned for.
+        """
+        target = self._turn.start(pose[3], float(delta), now)
+        msg = Float32()
+        msg.data = float(target)
+        self._yaw_goal_pub.publish(msg)
+        self._executor.reset()
+        self._publish_path(self._path_pub, [], pose)
+        self._publish_path(self._full_path_pub, [], pose)
+        # Released, because the follower has to be free to fly the rotation --
+        # the hold is "do not move", and this manoeuvre is the exception it is
+        # allowed to make.
+        self._finish_decision()
+        self._phase = "turning"
+        self._turns += 1
+        action = (result.metadata.get("action") if result else None) or "curve"
+        self.get_logger().info(
+            "turn #%d: %+.1f deg to heading %.1f deg (%s)"
+            % (self._turns, np.degrees(delta), np.degrees(target), action))
+
+    # ── holding still while thinking ─────────────────────────────────
+    def _set_hold(self, held):
+        """Tell the follower to stop, or to fly again. Edge-triggered."""
+        if bool(held) == self._held:
+            return
+        self._held = bool(held)
+        msg = Bool()
+        msg.data = self._held
+        self._hold_pub.publish(msg)
+        if not self._held:
+            self._hold_since = None
+            self._settle_since = None
+
+    def _settled(self, speed, yaw_rate, now):
+        """Is the aircraft stopped enough to take the observation from?
+
+        Not "has the hold been published" -- this airframe translates by tilting
+        and coasts for the better part of a second after the command goes to
+        zero. A frame taken during that coast is motion-blurred and, worse,
+        taken from somewhere the aircraft is no longer going to be, which is the
+        stale anchor all over again in miniature.
+
+        Times out rather than waiting for ever: a drone being pushed by the
+        world, or one whose odometry is noisy, must still get to ask.
+        """
+        if self._hold_since is None:
+            self._hold_since = now
+            self._settle_since = None
+        if speed <= self._settle_speed and abs(yaw_rate) <= self._settle_yaw_rate:
+            if self._settle_since is None:
+                self._settle_since = now
+            if now - self._settle_since >= self._settle_s:
+                return True
+        else:
+            self._settle_since = None
+        if now - self._hold_since >= self._settle_timeout_s:
+            self.get_logger().warn(
+                "never settled (%.2f m/s, %.2f rad/s after %.1f s); observing "
+                "from a moving aircraft" % (speed, yaw_rate, self._settle_timeout_s),
+                throttle_duration_sec=10.0)
+            return True
+        return False
+
+    def _finish_decision(self):
+        """The decision is made: let the aircraft fly again."""
+        self._deciding = False
+        self._set_hold(False)
+
     def _set_altitude_offset(self, offset):
         """Ask the follower to fly this far off its cruise altitude."""
         msg = Float32()
         msg.data = float(offset)
         self._alt_offset_pub.publish(msg)
 
-    def _publish_info(self, result, instruction, now):
+    def _publish_info(self, result, instruction, now, pose):
         """Fold the step's timings into the FPS meters and publish a JSON status.
 
         One topic (`/simple_drone/n1/info`) carries everything the recorder
@@ -438,6 +818,9 @@ class N1PolicyNode(Node):
         md = result.metadata
         self._s1_fps.update(md.get("s1_ms"))
         self._s2_fps.update(md.get("s2_ms"))
+        traj = result.trajectory
+        traj_m = (_polyline_length(np.asarray(traj)[:, :2])
+                  if traj is not None and len(traj) else 0.0)
         wp = md.get("waypoint_px")
         # Whether THIS decision came from System 1's continuous curve or from a
         # discrete action rendered as a short step, plus the running share. It
@@ -472,10 +855,29 @@ class N1PolicyNode(Node):
             # aircraft flies away from the pose that produced it.
             "decision_time": now,
             "stop": bool(result.stop),
+            # What was actually decided, in metres and degrees, so a recording
+            # answers "is it flying curves?" without anyone reading a log. The
+            # prediction's own length -- before the commitment clips it -- is
+            # the number that says whether System 1 ran at all.
+            "traj_m": traj_m,
+            "traj_pts": 0 if traj is None else int(len(traj)),
+            "turn_deg": (None if md.get("turn_delta_rad") is None
+                         else float(np.degrees(md["turn_delta_rad"]))),
+            # How long the aircraft stood still for this decision, and whether
+            # it was standing still at all. A recording that shows a motionless
+            # drone is either thinking or wedged, and those are very different.
+            "think_s": (now - self._hold_since) if self._hold_since else 0.0,
+            "held": bool(self._held),
+            "blocked": bool(self._blocked),
+            "phase": self._phase,
+            "commits": self._commits,
+            "turns": self._turns,
+            "escapes": self._escapes,
+            "altitude_m": float(pose[2]),
+            "yaw_deg": float(np.degrees(pose[3])),
         }
-        msg = String()
-        msg.data = json.dumps(info)
-        self._info_pub.publish(msg)
+        self._info = info
+        self._emit_info()
 
         if now - self._last_fps_log_s > 5.0:
             self._last_fps_log_s = now
@@ -484,6 +886,43 @@ class N1PolicyNode(Node):
                 "N1 FPS  System1=%s  System2=%s  (action=%s)"
                 % (("%.1f Hz" % s1) if s1 else "--",
                    ("%.1f Hz" % s2) if s2 else "--", md.get("action")))
+
+    def _emit_info(self):
+        msg = String()
+        msg.data = json.dumps(self._info)
+        self._info_pub.publish(msg)
+
+    def _status_tick(self):
+        """Republish the live status. Runs while `_tick` is blocked on the model."""
+        if not rclpy.ok():
+            return
+        with self._lock:
+            pose = self._pose
+        if pose is None:
+            return
+        self._publish_status(time.time(), pose)
+
+    def _publish_status(self, now, pose):
+        """Republish the last decision with the live phase, a few times a second.
+
+        Everything here is what changed *since* the decision -- where the
+        aircraft is, what it is doing, how long it has been thinking. The
+        decision's own fields are left exactly as they were reported, because
+        rewriting them would make a stale answer look like a fresh one.
+        """
+        if not self._info:
+            return
+        self._last_status_s = now
+        self._info["phase"] = self._phase
+        self._info["held"] = bool(self._held)
+        self._info["blocked"] = bool(self._blocked)
+        self._info["think_s"] = (now - self._hold_since) if self._hold_since else 0.0
+        self._info["altitude_m"] = float(pose[2])
+        self._info["yaw_deg"] = float(np.degrees(pose[3]))
+        self._info["commits"] = self._commits
+        self._info["turns"] = self._turns
+        self._info["escapes"] = self._escapes
+        self._emit_info()
 
     def _publish_path(self, publisher, world_xy, pose):
         msg = Path()
@@ -516,8 +955,13 @@ def main(args=None):
 
     signal.signal(signal.SIGTERM, _finish)
     signal.signal(signal.SIGINT, _finish)
+    # Multi-threaded, because `_tick` spends seconds at a time inside one HTTP
+    # call and a single-threaded spin would freeze the odometry and the status
+    # for the whole of it. The callback groups above are what make that safe.
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         # An orderly stop, not a fault. Letting any of these escape exits 1,
         # which the launch file reads as "this node died" and turns into an

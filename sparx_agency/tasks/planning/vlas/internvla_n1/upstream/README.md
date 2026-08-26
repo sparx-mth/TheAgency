@@ -38,6 +38,9 @@ also does not surface the System-2 pixel goal. Two patch sets fix that:
 * **PATCH 5 (continuous trajectory).** Carry S1's **continuous body-frame
   trajectory** through to the HTTP response, so a trajectory follower can fly the
   curve directly instead of the coarse discrete action — the NavDP way.
+* **PATCH 7 (continuous only).** Stop queueing the discretisation of a curve
+  that has already been handed over. Opt-in, via a `sys1_continuous_only` model
+  setting; off restores upstream behaviour exactly.
 * **PATCH 6 (look-down).** Say when a look-down has been requested. The action
   index cannot carry it: the agent overwrites the look-down action with `-1`,
   and `-1` is also what an empty System-1 list reports, so on the wire the two
@@ -110,6 +113,51 @@ model genuinely emits no curve); the client falls back to the discrete action fo
 those and uses the curve everywhere else.
 
 
+
+### PATCH 7 — fly the curve, not a discretisation of the curve
+
+`internvla_n1_agent.py` (vendored here), in the System-1 branch of `step()`.
+
+One System-1 forward pass produces one set of `dp_actions`, and
+`traj_to_actions` renders it **twice**: as the continuous path (PATCH 5) and as
+the list of 0.25 m / 15 deg steps that approximates it. Stock, the agent returns
+`idx[0]` now and queues `idx[1:]` to be returned over the next three calls.
+
+That is correct for a client that only speaks the discrete alphabet. It is
+double-counting for a client flying the curve: it has already covered that
+ground by the time it asks again, so draining the queue makes it fly the first
+metre of the same prediction a second time in 0.25 m pieces — and, because a
+queued step carries no `trajectory`, three quarters of its decisions come back
+discrete even though System 1 ran for every one of them. Measured over a
+ninety-second hospital flight: **18 of 22 committed routes were 0.25 m stubs**,
+which is what "I can barely see a trajectory on the map" looks like from the
+outside.
+
+```python
+with self.s2_output_lock:
+    if self.sys1_continuous_only and self._current_trajectory is not None:
+        self.s2_output.output_action = None      # PATCH 7
+    elif len(self.s1_output.idx) > 1:
+        ...                                      # upstream, unchanged
+```
+
+Dropping the queue makes the next call re-run System 1 on the **current** frame
+against the same System-2 latent — a fresh curve, not a stale approximation of
+the last one.
+
+**It changes what `sys2_max_forward_step` counts**: System-1 runs, not executed
+action steps. Each of those runs is now a whole curve, 1–2.5 m, so a client
+turning this on should lower it (this stack went 8 → 4).
+
+Read off `model_settings` with a default of `False`, so this file still behaves
+like upstream unless a client asks for it on `/agent/init` — and `ModelCfg` is
+`extra='allow'`, so the flag travels without another patch.
+
+**A live agent ignores new settings.** `/agent/init` against an agent that
+already exists is a no-op server-side, so this flag (and the intrinsics, and
+`sys2_max_forward_step`) only take effect on the init that *creates* the agent.
+Restart the server after changing any of them; the client now logs a warning
+rather than letting a stale agent look like a configured one.
 
 ### 2. Keep System 1 out of the 4-bit quantiser
 

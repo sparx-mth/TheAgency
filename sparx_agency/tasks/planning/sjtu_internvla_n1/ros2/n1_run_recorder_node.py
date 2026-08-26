@@ -193,8 +193,14 @@ class N1RunRecorderNode(Node):
         self._topdown.add_pose(pose[0], pose[1])
 
     def _on_committed(self, msg):
+        xy = _path_xy(msg)
+        # Once per commitment, which is exactly what this callback is: the
+        # renderer keeps every route so a viewer can see what the policy has
+        # been producing over the flight rather than only what it is flying
+        # this instant.
+        self._topdown.note_route(xy)
         with self._lock:
-            self._committed = _path_xy(msg)
+            self._committed = xy
 
     def _on_full(self, msg):
         with self._lock:
@@ -218,6 +224,15 @@ class N1RunRecorderNode(Node):
                 pixel_goal_frame=(int(pgf[0]), int(pgf[1])) if pgf else None,
                 from_curve=bool(d.get("from_curve")),
                 curve_share_pct=d.get("curve_share_pct"),
+                phase=d.get("phase", ""),
+                think_s=d.get("think_s"),
+                blocked=bool(d.get("blocked")),
+                traj_m=d.get("traj_m"),
+                traj_pts=d.get("traj_pts"),
+                turn_deg=d.get("turn_deg"),
+                commits=d.get("commits"),
+                turns=d.get("turns"),
+                escapes=d.get("escapes"),
                 pixel_goal_fresh=bool(d.get("pixel_goal_fresh")),
                 pixel_goal_age=d.get("pixel_goal_age"),
                 decision_time=d.get("decision_time"))

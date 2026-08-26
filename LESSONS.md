@@ -922,3 +922,62 @@ the ceiling over 1-2 minutes. Lower values (550) sink to the floor instead; high
 
 **Don't:** Don't assume climb_duration_sec is the whole story — already tested and ruled out.
 -->
+
+---
+
+## 2026-08-26 — InternVLA-N1 on SJTU: three knobs that were read by nobody, and a wall that rotation could not escape
+
+**Symptom:** With everything documented and configured, the hospital flights produced
+almost no continuous trajectory: 18 of 22 committed routes were 0.25 m two-point stubs,
+the drone spent 43% of a flight stationary, five separate twelve-second stalls in ninety
+seconds, and one run sat 0.45–0.70 m from a wall for seventy seconds re-committing the same
+forward step. From the outside it looked like the model producing short plans.
+
+**Root cause:** Four independent things, none of which raised anything.
+
+1. **The agent hands the curve over and then queues its own discretisation.** One System-1
+   pass renders twice — the continuous path *and* the list of 0.25 m / 15° steps that
+   approximates it. Upstream returns `idx[0]` now and queues `idx[1:]` for the next three
+   calls, which is right for a discrete client and double-counting for one flying the curve:
+   it had already covered that ground, and three of every four decisions carried no curve at
+   all. Server-side, needs a patch (PATCH 7, `sys1_continuous_only`).
+2. **`commit.expected_speed_mps` and `commit.commit_grace_s` were in the YAML and never read
+   by the node.** Every commitment therefore fell back to the flat `max_commit_s: 12` — the
+   exact twelve-second stalls the YAML comment claims those two knobs removed. The config
+   file described a fix that did not exist. Found by an offline dry run, not by a flight.
+3. **A discrete TURN action was flown as a bent 0.25 m waypoint.** Upstream a turn is a pure
+   rotation (`trajectory_to_discrete_actions_close_to_goal` advances `pos` only on a forward
+   action), but everything downstream consumes polylines, so it was rendered as a step — and
+   a *holonomic* pursuit satisfies that by crabbing sideways. The model asked to look
+   somewhere and the aircraft shuffled 0.25 m without changing where it was pointing.
+4. **`/agent/init` against a live agent is a server-side no-op**, so changed intrinsics,
+   `sys2_max_forward_step` and the new flag all reached a server started before the change
+   and were silently ignored — the flight behaves like the old configuration while every
+   file on disk says otherwise.
+
+**Fix / workaround:** PATCH 7 in the vendored agent (opt-in, defaults to upstream behaviour);
+pass `expected_speed_mps`/`commit_grace_s` through to `CommitSpec`; fly a turn as a rotation
+via `core/planning/vlas/common/turn_in_place.py` on a `/n1/yaw_goal` topic; warn loudly when
+`init_agent` short-circuits with settings in hand, and restart the server after changing any.
+Also: hold the aircraft still while System 2 thinks (`hold_to_think`) — System 2 takes 2.6–10 s
+and the route is anchored at the pose the *frame* was taken from, so a moving aircraft
+anchors its next route metres behind itself.
+
+**Then the failure moved.** With turns flown as real rotations, an aircraft that got inside
+its own stopping distance of a wall could no longer escape: the wall stays inside the depth
+corridor across most of the arc, so every heading reads blocked. Measured: thirteen rotations,
+zero metres. **Rotating is only half an escape** — it has to break contact first
+(`core/planning/recovery/escape_maneuver.EscapeManeuver`: brake, 0.5 m of reverse, settle,
+*then* rotate). Holding still to think makes this worse, not better: a blocked aircraft asking
+from a stationary frame gets a byte-identical answer for ever.
+
+**Don't:**
+- Don't trust a config comment that describes a fix. Grep for the key in the code that reads
+  it. Two of the four above were knobs nobody had ever passed.
+- Don't debug this from flights. `tasks/planning/sjtu_internvla_n1/scripts/dry_run.py` flies
+  the real nodes against a fake drone and a scripted server in ninety seconds, with no Gazebo,
+  no GPU and no model, and it found (2) and the incomplete escape before a run was spent.
+- Don't run `record_campaign.sh` from a shell that has not sourced ROS — until this was fixed
+  it sourced nothing itself, so `ros2` failed on an importlib traceback, the odom wait burned
+  its full sixty seconds, and every run was written off as "could not reach the area" with
+  nothing anywhere naming the cause. It only ever worked by accident.

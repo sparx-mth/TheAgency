@@ -157,3 +157,65 @@ class DepthProximityBrake(object):
         a, t = cfg.brake_decel, cfg.react_s
         v = a * (-t + math.sqrt(t * t + 2.0 * avail / a))
         return max(0.0, v), d_min
+
+
+def freer_side(depth_m, config=None):
+    # type: (np.ndarray, object) -> float
+    """Which way to turn when the corridor ahead is shut: ``+1`` left, ``-1`` right.
+
+    The brake above says *stop*; it says nothing about where to go instead, and
+    a policy that cannot see it is blocked will happily ask to fly forward
+    again. This is the smallest honest answer to "which way is more open" --
+    compare the two halves of the frame inside the same vertical band the
+    corridor uses, and name the roomier one.
+
+    It is a **reflex, not a plan**. It has no memory, no goal and no map, and it
+    is only ever right about the first few metres. A caller should use it to
+    break a deadlock and then hand the decision straight back to the policy.
+
+    Sign convention: the image's ``u`` grows to the right, and the body frame is
+    FLU, so columns left of ``cx`` are the aircraft's **left** and a positive
+    return means "rotate counter-clockwise". Getting that backwards turns an
+    escape into a second attempt at the same wall.
+
+    Args:
+        depth_m: ``(H, W)`` metric depth, metres. Non-finite samples are treated
+            as "as far as this sensor can see", which is what a Gazebo depth
+            camera's misses (the sky, a window) actually mean.
+        config: a :class:`DepthProximityBrakeConfig` for the intrinsics and the
+            vertical band; the default is this platform's.
+
+    Returns:
+        ``+1.0`` to rotate left, ``-1.0`` to rotate right. Ties break left,
+        deterministically, because an escape that alternates on noise never
+        leaves.
+    """
+    cfg = config or DepthProximityBrakeConfig()
+    s = max(1, int(cfg.stride))
+    d = np.asarray(depth_m, dtype=np.float32)[::s, ::s]
+    if d.size == 0:
+        return 1.0
+    rows = np.arange(0, np.asarray(depth_m).shape[0], s, dtype=np.float32)
+    cols = np.arange(0, np.asarray(depth_m).shape[1], s, dtype=np.float32)
+    u, v = np.meshgrid(cols, rows)
+    with np.errstate(invalid="ignore"):
+        # An invalid or absent return is open space, not a wall. Scoring it as
+        # zero would make a doorway (which the depth camera sees straight
+        # through) read as the most blocked direction in the frame.
+        reach = np.where(np.isfinite(d) & (d > cfg.min_valid_m), d, 10.0)
+        band = np.abs(v - cfg.cy) * reach / cfg.fy <= cfg.corridor_halfheight_m
+    if not band.any():
+        band = np.ones_like(reach, dtype=bool)
+    left = band & (u < cfg.cx)
+    right = band & (u > cfg.cx)
+    left_reach = float(reach[left].mean()) if left.any() else 0.0
+    right_reach = float(reach[right].mean()) if right.any() else 0.0
+    # An explicit tie band, not `>=`. The two halves rarely hold the same NUMBER
+    # of samples (an odd width leaves the centre column in neither), so a
+    # genuinely symmetric scene -- a flat wall dead ahead, which is exactly when
+    # this is asked -- differs in the last float32 ulp and the "deterministic"
+    # tie-break lands wherever the rounding does. One millimetre of asymmetry is
+    # not a reason to prefer a side.
+    if abs(left_reach - right_reach) <= 1e-3:
+        return 1.0
+    return 1.0 if left_reach > right_reach else -1.0

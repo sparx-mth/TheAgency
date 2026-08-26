@@ -65,6 +65,10 @@ def _py_files():
     # import chain can grow a heavy dependency without anyone here touching a
     # file. navdp_click_node imports it inside the Noetic container.
     "sparx_agency.core.planning.vlas.common.plan_commit",
+    # Stdlib maths only, and it has to stay that way: the FALCON adapters would
+    # want the same stop-and-turn primitive, and that container has no scipy.
+    "sparx_agency.core.planning.vlas.common.turn_in_place",
+    "sparx_agency.core.planning.vlas.common.yaw_search",
 ])
 def test_import_pulls_no_heavy_dependency(module):
     # Run in a FRESH interpreter: an in-process check passes trivially once any

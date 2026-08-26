@@ -36,6 +36,15 @@ Four disciplines this node owns, all of which are silent killers when missing:
   :class:`~sparx_agency.core.planning.safety.depth_proximity_brake.DepthProximityBrake`
   -- the corridor minimum of the depth image against a stopping distance -- and
   it exists because the alternative is the next discipline.
+* **Thinking and turning are stationary.** The policy node holds this follower
+  (``/n1/hold``) while System 2 thinks, so the frame the model reasons about and
+  the pose its route is anchored at are the same place the aircraft is when the
+  answer arrives -- System 2 takes seconds, and an aircraft that keeps flying
+  through them anchors its next route metres behind itself. It also asks for
+  rotations outright (``/n1/yaw_goal``), because a discrete turn action *is* a
+  rotation and flying it as a bent waypoint lets a holonomic tracker satisfy it
+  by crabbing 0.25 m sideways without ever looking anywhere new. Both are flown
+  with the altitude hold still live -- a zero twist would drop the aircraft.
 * **A capsized airframe stops the flight.** The SJTU plugin thrusts along body
   z, so past ~35 deg of roll or pitch it cannot climb, translate or yaw -- while
   still reporting FLYING and a healthy 30 Hz of odometry. Every axis of every
@@ -67,22 +76,33 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float32, Int8
+from std_msgs.msg import Bool, Float32, Int8
 
 from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.core.common.types import (
+    normalize_angle,
     KinematicLimits,
     Pose3D,
     State3D,
     Twist3D,
 )
 from sparx_agency.core.planning.interfaces.tracker import TrackerRequest
+from sparx_agency.core.planning.recovery.escape_maneuver import (
+    EscapeManeuver,
+    EscapeParams,
+)
+from sparx_agency.core.planning.recovery.stuck_detector import StuckVerdict
 from sparx_agency.core.planning.safety.depth_proximity_brake import (
     DepthProximityBrake,
     DepthProximityBrakeConfig,
 )
 from sparx_agency.core.planning.trackers.pure_pursuit.params import PurePursuitParams3D
 from sparx_agency.core.planning.trackers.pure_pursuit.tracker import PurePursuitTracker3D
+from sparx_agency.core.planning.vlas.common.turn_in_place import (
+    TurnInPlace,
+    describe as describe_turn,
+    turn_spec_from_config,
+)
 from sparx_agency.robots.SJTU.adapters.velocity_command import (
     BodyVelocityLimits,
     BodyTwistCommand,
@@ -155,6 +175,9 @@ class TrajectoryFollowerNode(Node):
         self._state_topic = topics.get("state", "/simple_drone/state")
         self._alt_offset_topic = topics.get("altitude_offset",
                                             "/simple_drone/n1/altitude_offset")
+        self._hold_topic = topics.get("hold", "/simple_drone/n1/hold")
+        self._yaw_goal_topic = topics.get("yaw_goal", "/simple_drone/n1/yaw_goal")
+        self._blocked_topic = topics.get("blocked", "/simple_drone/n1/blocked")
 
         self._cruise = float(foll.get("cruise_speed", 0.4))
         self._target_alt = float(foll.get("target_altitude_m", 1.2))
@@ -224,6 +247,39 @@ class TrajectoryFollowerNode(Node):
         self._capsized = False
         self._depth = None
         self._depth_stamp = 0.0
+        # Held by the policy node while it thinks. Translation and yaw stop; the
+        # altitude hold does not, because this airframe sinks without it.
+        self._hold = False
+        # An absolute world heading the policy node has asked for, and the
+        # manoeuvre that flies it. The turn is deliberately slow: the frame at
+        # the end of it is the whole reason the model asked.
+        self._yaw_goal = None
+        self._turn = TurnInPlace(turn_spec_from_config(foll.get("turn", {}) or {}))
+        self._blocked = False
+        # BREAK CONTACT BEFORE LOOKING SOMEWHERE ELSE. Rotating on the spot does
+        # not help an aircraft that is already inside its own stopping distance
+        # of a wall: the wall stays inside the depth corridor across most of the
+        # arc, so every heading is blocked and the policy is asked to choose
+        # between them for ever. Measured in the hospital: pinned 0.45-0.70 m
+        # from the office wall for a whole run, thirteen rotations, zero metres.
+        # So a turn requested while hard-blocked backs off first.
+        esc = foll.get("escape", {}) or {}
+        self._escape_enabled = bool(esc.get("enabled", True))
+        self._escape = EscapeManeuver(EscapeParams(
+            brake_s=float(esc.get("brake_s", 0.4)),
+            back_s=float(esc.get("back_s", 2.0)),
+            back_speed=float(esc.get("back_speed", 0.25)),
+            probe_s=float(esc.get("probe_s", 0.8)),
+            probe_speed=float(esc.get("probe_speed", 0.15)),
+            settle_s=float(esc.get("settle_s", 0.5)),
+            # OFF, deliberately. The depth corridor only protects the aircraft
+            # FORWARD; a sideways probe next to a wall slides toward a jamb
+            # nothing is watching. The back-off retraces ground the aircraft was
+            # occupying seconds ago, which is the one direction that is known
+            # clear without a rear sensor.
+            allow_lateral=bool(esc.get("allow_lateral", False)),
+            max_attempts=int(esc.get("max_attempts", 3))))
+        self._escaping = False
 
         camera = cfg.get("camera", {})
         brake_cfg = cfg.get("brake", {})
@@ -251,18 +307,25 @@ class TrajectoryFollowerNode(Node):
         self.create_subscription(Odometry, self._odom_topic, self._on_odom, sensor_qos)
         self.create_subscription(Int8, self._state_topic, self._on_state, 1)
         self.create_subscription(Float32, self._alt_offset_topic, self._on_alt_offset, 1)
+        self.create_subscription(Bool, self._hold_topic, self._on_hold, 1)
+        self.create_subscription(Float32, self._yaw_goal_topic, self._on_yaw_goal, 1)
         if self._brake_enabled:
             self.create_subscription(Image, topics.get(
                 "depth", "/simple_drone/front_depth/depth/image_raw"),
                 self._on_depth, sensor_qos)
         self._cmd_pub = self.create_publisher(Twist, self._cmd_topic, 1)
+        # Hard-blocked, published rather than only logged: the policy node has no
+        # other way to learn that the route it keeps committing cannot be flown,
+        # and a recording that shows a motionless aircraft with no explanation is
+        # how seventy seconds of the last hospital run went unexplained.
+        self._blocked_pub = self.create_publisher(Bool, self._blocked_topic, latched)
 
         self.create_timer(1.0 / max(1e-3, self._control_rate), self._control)
         self.get_logger().info(
             "trajectory_follower_node up: path=%s odom=%s -> cmd_vel=%s "
-            "(cruise %.2f m/s, altitude %.2f m)"
+            "(cruise %.2f m/s, altitude %.2f m); %s"
             % (self._path_topic, self._odom_topic, self._cmd_topic,
-               self._cruise, self._target_alt))
+               self._cruise, self._target_alt, describe_turn(self._turn.spec)))
 
     def _on_path(self, msg):
         xy = [(ps.pose.position.x, ps.pose.position.y) for ps in msg.poses]
@@ -277,6 +340,23 @@ class TrajectoryFollowerNode(Node):
         offset = max(-self._alt_offset_limit, min(self._alt_offset_limit, offset))
         with self._lock:
             self._alt_offset_target = offset
+
+    def _on_hold(self, msg):
+        with self._lock:
+            self._hold = bool(msg.data)
+
+    def _on_yaw_goal(self, msg):
+        """Take an absolute world heading to rotate to.
+
+        Stored, not started: the manoeuvre begins on the control step, where the
+        measured yaw and the clock are already in hand. Republishing the heading
+        already being flown is a no-op rather than a restart -- restarting would
+        keep resetting the timeout and a genuinely blocked rotation would never
+        report that it failed.
+        """
+        goal = float(msg.data)
+        with self._lock:
+            self._yaw_goal = goal
 
     def _on_state(self, msg):
         # The SJTU plugin's flight state: 0 landed, 1 flying. Tracking a route
@@ -314,6 +394,9 @@ class TrajectoryFollowerNode(Node):
             attitude = self._attitude
             path_xy = list(self._path_xy)
             epoch = self._path_epoch
+            hold = self._hold
+            yaw_goal = self._yaw_goal
+            self._yaw_goal = None
 
         self._slew_offset()
         if self._check_capsized(attitude):
@@ -332,6 +415,20 @@ class TrajectoryFollowerNode(Node):
             return
 
         if not self._altitude_ready(state):
+            return
+
+        # A ROTATION BEFORE ANYTHING ELSE, including the hold. A rotation is
+        # already a stationary manoeuvre, so it does not violate what a hold is
+        # for -- whereas letting the hold win would silently swallow the turn
+        # the policy asked for and leave the aircraft looking the wrong way at
+        # the frame it is about to be shown.
+        if self._rotate(state, yaw_goal):
+            return
+
+        if hold:
+            # The policy node is thinking. Stop, but keep flying the altitude:
+            # a zero twist here is a descent, not a hover.
+            self._publish(self._hold_altitude(state))
             return
 
         if len(path_xy) < 2:
@@ -382,6 +479,67 @@ class TrajectoryFollowerNode(Node):
             BodyTwistCommand(vx=vx, vy=vy, vz=body[2], yaw_rate=cmd.yaw_rate),
             self._body_limits)
         self._publish(fields)
+
+    def _rotate(self, state, yaw_goal):
+        """Fly a requested rotation in place; return True while one is running.
+
+        The control law and the "is it finished" test are both
+        :class:`~sparx_agency.core.planning.vlas.common.turn_in_place.TurnInPlace`,
+        which the policy node also runs against the same odometry -- one
+        implementation, two readers, so the follower and the runner can never
+        disagree about whether the aircraft has turned.
+        """
+        now = time.monotonic()
+        if yaw_goal is not None:
+            same = (self._turn.active and self._turn.target is not None
+                    and abs(normalize_angle(yaw_goal - self._turn.target))
+                    <= self._turn.spec.tolerance_rad)
+            if not same:
+                if (self._escape_enabled and self._blocked
+                        and self._escape.trigger(
+                            StuckVerdict(axis="forward", sign=1), prefer_left=True)):
+                    self._escaping = True
+                    self.get_logger().warn(
+                        "hard blocked and asked to turn: backing off %.2f m to "
+                        "break contact first, then rotating"
+                        % (self._escape.params.back_s * self._escape.params.back_speed,))
+                self._turn.start_to(yaw_goal, now)
+                self.get_logger().info(
+                    "turning %.1f deg to heading %.1f deg"
+                    % (degrees(normalize_angle(self._turn.target - state.pose.yaw)),
+                       degrees(self._turn.target)))
+        # The back-off owns the aircraft until it is done; the rotation follows.
+        if self._escaping:
+            escape = self._escape.step(1.0 / max(1e-3, self._control_rate))
+            if escape.active:
+                fields = twist_fields(
+                    BodyTwistCommand(vx=escape.vx, vy=escape.vy,
+                                     vz=self._alt_kp * (self._commanded_altitude()
+                                                        - state.pose.z),
+                                     yaw_rate=0.0),
+                    self._body_limits)
+                self._publish(fields)
+                self.get_logger().info("escape: %s" % (escape.reason,),
+                                       throttle_duration_sec=1.0)
+                return True
+            self._escaping = False
+            self.get_logger().info("contact broken; rotating")
+
+        if not self._turn.active:
+            return False
+        cmd = self._turn.update(state.pose.yaw, now, state.twist.yaw_rate)
+        if cmd.done:
+            if cmd.timed_out:
+                self.get_logger().warn(
+                    "rotation timed out %.1f deg short of its heading -- the "
+                    "aircraft did not turn (blocked, or not flying)"
+                    % (degrees(cmd.remaining_rad),))
+            else:
+                self.get_logger().info("rotation complete at %.1f deg"
+                                       % (degrees(state.pose.yaw),))
+            return False
+        self._publish(self._hold_altitude(state, yaw_rate=cmd.yaw_rate))
+        return True
 
     # ── the two reflexes ─────────────────────────────────────────────
 
@@ -435,6 +593,7 @@ class TrajectoryFollowerNode(Node):
                                    throttle_duration_sec=5.0)
             return 0.5 * vx, 0.5 * vy
         allowed, d_min = self._brake.allowed_forward_speed(depth)
+        self._report_blocked(allowed <= 1e-3)
         if allowed >= vx:
             return vx, vy
         scale = max(0.0, allowed) / max(vx, 1e-6)
@@ -444,6 +603,26 @@ class TrajectoryFollowerNode(Node):
                "none" if d_min is None else "%.2f m" % d_min),
             throttle_duration_sec=2.0)
         return vx * scale, vy * scale
+
+    def _report_blocked(self, blocked):
+        """Publish a change in the hard-block state, edge-triggered."""
+        if bool(blocked) == self._blocked:
+            return
+        self._blocked = bool(blocked)
+        msg = Bool()
+        msg.data = self._blocked
+        self._blocked_pub.publish(msg)
+        if self._blocked:
+            self.get_logger().warn(
+                "HARD BLOCKED: the depth corridor allows no forward speed at "
+                "all. Nothing this node can do about it -- the policy has to "
+                "look somewhere else.")
+        else:
+            # Genuinely moving again, so the next blockage is a new episode and
+            # gets its own attempts. Without this the second wall of a flight
+            # would be met with a manoeuvre budget the first one had spent.
+            self._escape.episode_over()
+            self.get_logger().info("forward path clear again")
 
     def _commanded_altitude(self):
         """Cruise altitude plus the offset currently being flown."""
@@ -482,11 +661,17 @@ class TrajectoryFollowerNode(Node):
         self._publish(self._hold_altitude(state))
         return False
 
-    def _hold_altitude(self, state):
-        """A twist that only corrects altitude -- no translation, no yaw."""
+    def _hold_altitude(self, state, yaw_rate=0.0):
+        """A twist that corrects altitude and nothing else but the given yaw rate.
+
+        Args:
+            state: current :class:`State3D`.
+            yaw_rate: rad/s to rotate at while holding position, for the
+                stop-and-turn manoeuvre. Zero for a plain hover.
+        """
         vz = self._alt_kp * (self._commanded_altitude() - state.pose.z)
         return twist_fields(
-            BodyTwistCommand(vx=0.0, vy=0.0, vz=vz, yaw_rate=0.0),
+            BodyTwistCommand(vx=0.0, vy=0.0, vz=vz, yaw_rate=float(yaw_rate)),
             self._body_limits)
 
     @staticmethod

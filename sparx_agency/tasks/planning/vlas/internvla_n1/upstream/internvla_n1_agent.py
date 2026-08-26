@@ -35,6 +35,11 @@ class InternVLAN1Agent(Agent):
         self.device = torch.device(self._model_settings.device)
         self.mode = getattr(self._model_settings, 'infer_mode', 'sync')
         self.sys2_max_forward_step = getattr(self._model_settings, 'sys2_max_forward_step', 8)
+        # PATCH 7: fly the CURVE, not a discretisation of the curve you already
+        # gave away. See the branch at the end of step() for what it changes and
+        # why. Off by default so this file still behaves like upstream unless a
+        # client asks for it on /agent/init.
+        self.sys1_continuous_only = getattr(self._model_settings, 'sys1_continuous_only', False)
 
         policy = get_policy(self._model_settings.policy_name)
         policy_config = get_config(self._model_settings.policy_name)
@@ -395,7 +400,35 @@ class InternVLAN1Agent(Agent):
             else:
                 output['action'] = [self.s1_output.idx[0]]
             with self.s2_output_lock:
-                if len(self.s1_output.idx) > 1:
+                if self.sys1_continuous_only and self._current_trajectory is not None:
+                    # PATCH 7: DO NOT QUEUE THE DISCRETISATION OF A CURVE THAT
+                    # HAS ALREADY BEEN HANDED OUT.
+                    #
+                    # `self.s1_output.idx` and `self._current_trajectory` are the
+                    # same prediction twice: `traj_to_actions` turns one set of
+                    # `dp_actions` into a continuous path and into the list of
+                    # 0.25 m / 15 deg steps that approximates it. Upstream
+                    # returns idx[0] now and queues idx[1:] to be returned over
+                    # the next three calls, which is correct for a client that
+                    # only speaks the discrete alphabet.
+                    #
+                    # A client flying the CURVE has already covered that ground
+                    # by the time it asks again. Draining the queue then makes
+                    # it fly the first metre of the same prediction a second
+                    # time, in 0.25 m pieces -- and, because those queued steps
+                    # carry no trajectory, three quarters of its decisions are
+                    # discrete even though System 1 ran for every one of them.
+                    # Measured over a ninety-second hospital flight: 18 of 22
+                    # committed routes were 0.25 m stubs.
+                    #
+                    # Dropping the queue makes the next call re-run System 1 on
+                    # the CURRENT frame against the same System-2 latent, which
+                    # is a fresh curve rather than a stale approximation of the
+                    # last one. It also changes what `sys2_max_forward_step`
+                    # counts -- System 1 runs, not executed action steps -- so a
+                    # client turning this on should lower it.
+                    self.s2_output.output_action = None
+                elif len(self.s1_output.idx) > 1:
                     self.s2_output.output_action = self.s1_output.idx[1:]
                     if self.s2_output.output_action == []:
                         self.s2_output.output_action = None

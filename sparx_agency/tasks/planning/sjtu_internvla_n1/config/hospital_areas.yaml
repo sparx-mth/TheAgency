@@ -55,3 +55,29 @@ areas:
     yaw_deg: 90.0
     clearance_m: 1.85
     note: the south hall at the far end, facing the whole length of the hospital
+
+  # Added for the "enter the room on your right" experiment, and verified from
+  # the drone's own camera rather than from the map: standing here facing east,
+  # the nurses' station is on the left and there is a **door on the right**
+  # about three metres ahead, opening south into the office bay that holds the
+  # desk, the chair and the AdjTable. The instruction is therefore true of what
+  # the model can actually see, which is the only sense in which an instruction
+  # can be true.
+  office_door:
+    x: -2.80
+    y: 1.40
+    yaw_deg: 0.0
+    clearance_m: 1.40
+    note: the spine outside the nurses' station, facing east with the office door on the right
+    # GROUND TRUTH FOR JUDGING A RUN, measured off the occupancy map inflated by
+    # the airframe radius. The office bay is entered through ONE opening, at
+    # (2.70, -0.20) -- 5.7 m east of here and 16 deg off the right of the nose,
+    # which is the door visible in the camera. The shortest flyable route to the
+    # AdjTable at (1.22, -5.61) is 13.3 m: east along the spine, right through
+    # that opening, then south. A run that turns right immediately is aiming at
+    # the bay's north wall, not at its door.
+    door_x: 2.70
+    door_y: -0.20
+    table_x: 1.22
+    table_y: -5.61
+    route_m: 13.3

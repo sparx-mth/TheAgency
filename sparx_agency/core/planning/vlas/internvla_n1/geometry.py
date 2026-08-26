@@ -26,6 +26,14 @@ The continuous path is preferred wherever the server exposes it; the action step
 is the fallback that keeps the aircraft moving against a server that only speaks
 the discrete alphabet.
 
+A turn has a **second, truer rendering** that is not a path at all:
+:func:`turn_delta_rad` gives the rotation the action actually means, for a runner
+that can fly a rotation (see
+:mod:`~sparx_agency.core.planning.vlas.common.turn_in_place`). Prefer it. The
+bent step below exists only for a runner whose sole output is a polyline, and it
+is an approximation that a holonomic tracker can satisfy by crabbing -- which
+turns "look over there" into "shuffle 0.25 m sideways".
+
 Numpy-only and Python-3.8 clean: nothing here is heavier than numpy, so importing
 it is free and it survives the Noetic container the rest of ``core`` must.
 """
@@ -140,6 +148,36 @@ def trajectory_from_path(path):
     if array.shape[1] >= 3:
         return np.concatenate([array[:, :2], array[:, 2:3]], axis=1)
     return heading_column(array[:, :2])
+
+
+def turn_delta_rad(action_index, turn_deg=TURN_ANGLE_DEG):
+    # type: (int, float) -> Optional[float]
+    """The rotation a discrete action means, radians CCW, or ``None``.
+
+    This is what a turn action *is* upstream: ``trajectory_to_discrete_actions_
+    close_to_goal`` advances the position only on a forward action, and a turn
+    changes the heading alone, by a hard-coded 15 degrees. A runner that can
+    command a rotation should use this and
+    :class:`~sparx_agency.core.planning.vlas.common.turn_in_place.TurnInPlace`
+    rather than flying :func:`trajectory_from_action`'s bent step, because the
+    bent step is reachable by translating and the rotation is not.
+
+    Args:
+        action_index: ``0`` STOP, ``1`` FORWARD, ``2`` TURN_LEFT, ``3``
+            TURN_RIGHT.
+        turn_deg: Degrees a single turn action rotates by.
+
+    Returns:
+        ``+turn_deg`` in radians for TURN_LEFT, ``-turn_deg`` for TURN_RIGHT,
+        and ``None`` for every action that is not a rotation -- including
+        FORWARD, which is a translation and must not be answered with a turn.
+    """
+    index = int(action_index)
+    if index == TURN_LEFT:
+        return float(np.deg2rad(float(turn_deg)))
+    if index == TURN_RIGHT:
+        return float(-np.deg2rad(float(turn_deg)))
+    return None
 
 
 def trajectory_from_action(action_index, step_m=STEP_SIZE_M, turn_deg=TURN_ANGLE_DEG):

@@ -111,7 +111,23 @@ class ModelClient(HttpPolicyClient):
         # (the policy's `reset()`) is buried a hundred lines above the retries.
         self._init_args = (model_name, ckpt_path, model_settings)
         if self.check_agent_exists():
-            self._say("info", "Agent already initialized, skipping")
+            # SKIPPING INIT ALSO SKIPS THE SETTINGS. The agent is constructed
+            # once, from the `model_settings` of the `/agent/init` that created
+            # it, and every later init against a live agent is a no-op -- so a
+            # changed intrinsic, a changed `sys2_max_forward_step`, a changed
+            # `sys1_continuous_only` reach a server that was started before the
+            # change and are silently ignored. The flight then behaves like the
+            # old configuration while every file on disk says otherwise, which
+            # is the most expensive kind of quiet. Restart the server after
+            # changing anything here.
+            if model_settings:
+                self._say("warn",
+                          "agent '%s' already exists; its model settings are "
+                          "whatever created it and these %d are NOT applied. "
+                          "Restart the model server to change them."
+                          % (self.agent_name, len(model_settings)))
+            else:
+                self._say("info", "Agent already initialized, skipping")
             self.initialized = True
             return True
 

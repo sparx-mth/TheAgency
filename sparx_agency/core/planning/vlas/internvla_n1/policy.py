@@ -154,6 +154,17 @@ class InternVLAN1Policy(NavigationPolicy):
             trajectory = geometry.trajectory_from_action(
                 result.action_index, step_m=self.step_m, turn_deg=self.turn_deg)
 
+        # What a turn action actually MEANS, alongside the path it is rendered
+        # as. Both travel, because they are for different runners: one that can
+        # only fly a polyline uses `trajectory`, one that can command a rotation
+        # uses this and leaves the bent step alone. Reported only when the
+        # decision is a discrete turn -- a System-1 curve already carries its own
+        # heading in column 2, and answering it with a rotation as well would
+        # turn one decision into two manoeuvres.
+        turn_delta = (None if from_curve
+                      else geometry.turn_delta_rad(result.action_index,
+                                                   turn_deg=self.turn_deg))
+
         # An idle tick is NOT a stop, and the difference is the whole point of
         # the distinction. The agent reports -1 while a look-down is in progress
         # and when System 1 returns no actions; both mean "ask me again", not
@@ -188,6 +199,7 @@ class InternVLAN1Policy(NavigationPolicy):
                 "idle": idle,
                 "look_down": bool(result.look_down),
                 "from_curve": from_curve,
+                "turn_delta_rad": turn_delta,
                 "waypoint_px": result.waypoint,
                 "waypoint_step": result.waypoint_step,
                 "waypoint_fresh": fresh,

@@ -209,13 +209,149 @@ Measured on the same 90 s atrium leg, cumulatively:
 | full plan, route-sized deadline | 56% | 10.7 m | 17 flown / 4 expired |
 | + arrival actually firing | **77%** | **10.8 m** | **23 flown / 2 expired** |
 
+## Stop, look, think — and turn
+
+Four things changed together, and they are one idea: **the aircraft should be
+standing still whenever the model is deciding, and a decision to turn should
+turn the aircraft.** That is the regime InternVLA-N1 was trained in — VLN-CE
+takes every observation from a standstill, after the previous action has
+finished — and none of it was true here.
+
+### 1. The aircraft holds still while System 2 thinks
+
+`policy_params.hold_to_think` (default on). The policy node publishes
+`/simple_drone/n1/hold`; the follower stops translating and yawing, keeps its
+altitude hold live, and the node waits until odometry says the aircraft has
+actually **stopped** (`settle_speed_mps`, `settle_s`, with a timeout) before it
+captures the frame.
+
+Until this existed the aircraft flew through the whole of a 2.6–10 s System-2
+call, which broke two things at once:
+
+* the frame the model reasoned about was metres behind the aircraft by the time
+  the answer arrived;
+* the route was anchored at the pose that frame was taken from — that is what
+  `PlanCommitExecutor.commit(traj, pose, now)` means — so a 3 m curve *began*
+  behind the drone and the pursuit's first move was backwards along its own
+  route.
+
+It costs flight time and buys the only property the deployment is judged on: the
+observation, the decision and the anchor are the same place. The hold stays on
+through a look-down dip for the same reason — the model asked for a lower view
+of *this* scene.
+
+The node runs a `MultiThreadedExecutor` with `_tick` in its own mutually
+exclusive callback group, because `_tick` blocks for seconds inside one HTTP
+call and a single-threaded spin would freeze odometry and the status overlay for
+the whole of it.
+
+### 2. A discrete turn is flown as a rotation
+
+`policy_params.discrete_turn_mode: rotate` (default; `crab` restores the old
+behaviour for comparison). A TURN action carries no distance upstream —
+`trajectory_to_discrete_actions_close_to_goal` advances `pos` only on a forward
+action — so the node hands the follower an absolute heading on
+`/simple_drone/n1/yaw_goal` and both run
+`core/planning/vlas/common/turn_in_place.TurnInPlace` against the same
+odometry: the follower for the yaw rate, the node to know when it may ask again.
+
+Deliberately slow (`follower.turn.yaw_rate_deg_s: 20`), because the frame at the
+end of the rotation is the entire reason the model asked, and this airframe yaws
+by tilting — a fast turn arrives blurred and ringing, and the settle then has to
+wait the ringing out anyway.
+
+A System-1 curve **shorter than `commit.min_commit_m`** is treated the same way:
+that is the model asking to pivot and look again, and flying 0.2 m of it creeps
+the aircraft forward while the view barely changes.
+
+### 3. Every System-1 step is a fresh curve (server PATCH 7)
+
+`policy_params.sys1_continuous_only: true`. One System-1 pass produces one
+prediction, and the agent renders it twice — as the curve and as the list of
+0.25 m / 15 deg steps approximating it. Stock, it hands over the curve and then
+queues those steps for the next three calls. A client flying the curve has
+already covered that ground, so it flew the first metre of the same prediction
+twice, and three quarters of its decisions carried no curve at all.
+
+Measured before: **18 of 22 committed routes were 0.25 m stubs.** That is what
+"I can barely see a trajectory on the map" looks like from the outside — and it
+was never the model's fault.
+
+Because the flag changes what `sys2_max_forward_step` counts (System-1 runs, not
+executed action steps, each now a whole 1–2.5 m curve), it went 8 → 4.
+
+**The flag only applies on the `/agent/init` that CREATES the agent.** Restart
+the model server after changing it, or any intrinsic; the client now warns
+instead of letting a stale agent look like a configured one.
+
+### 4. A blocked aircraft looks somewhere else
+
+`policy_params.blocked_escape_after` / `blocked_escape_deg`. The follower
+publishes `/simple_drone/n1/blocked` when its depth reflex allows no forward
+speed at all. After that many consecutive decisions asking to translate while
+blocked, the node turns toward whichever half of the depth frame has more room
+(`core/planning/safety/depth_proximity_brake.freer_side`) and hands the decision
+straight back to the policy.
+
+**Turning is only half of it.** Rotating on the spot does not free an aircraft
+that is already inside its own stopping distance of a wall — the wall stays
+inside the depth corridor across most of the arc, so every heading reads blocked.
+Measured in the hospital with the rotation fix in and this half out: pinned
+0.45–0.70 m from the office wall for a whole run, **thirteen rotations, zero
+metres flown**. So a turn requested while hard-blocked **backs off first**
+(`follower.escape`, the shared
+`core/planning/recovery/escape_maneuver.EscapeManeuver`): brake, 0.5 m of
+reverse, settle, then rotate.
+
+The reverse is unguarded — there is no rear sensor on this airframe — and that
+is acceptable for exactly one reason: it retraces ground the aircraft was
+occupying seconds earlier, since the escape only fires after it has stopped
+there. The sideways probe the manoeuvre also offers is switched **off**: the
+depth corridor protects forward only, and a lateral probe next to a wall slides
+toward a jamb nothing is watching.
+
+This is a reflex, not a planner, and it exists because holding still to think
+*created* the failure mode it fixes: a blocked aircraft asking from a stationary
+frame gets the same answer for ever. Measured before any of this: seventy of a
+ninety-second flight pinned 0.43 m from a wall, re-committing a 0.25 m forward
+step every twelve seconds.
+
+### And one bug the dry run found
+
+`commit.expected_speed_mps` and `commit.commit_grace_s` were documented in the
+binding YAML and **never read by the node**, so every commitment fell back to a
+flat `max_commit_s` and sat out the full twelve seconds before it could be
+replaced — the exact stalls the YAML comment claims those two knobs removed.
+Found by `scripts/dry_run.py`, not by a flight.
+
+## Before you spend a flight: `scripts/dry_run.py`
+
+```bash
+.venv/bin/python -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.dry_run
+```
+
+The two ROS2 nodes under test are the **real** ones. What is faked is everything
+expensive: a kinematic drone that integrates `/cmd_vel` (with first-order lag,
+so it coasts like the real airframe) and an HTTP server that answers from a
+script with a deliberate multi-second delay. No Gazebo, no GPU, no model —
+about ninety seconds for four scenarios:
+
+| scenario | what it proves |
+|---|---|
+| `curve` | a 2 m curve is committed at the observed pose and flown to its end |
+| `turn` | a TURN action rotates the aircraft and translates it 0.00 m |
+| `blocked` | a wall it cannot pass produces a back-off **and** a rotation, not a stall |
+| `lookdown` | the dip happens, from a standstill, and a curve follows |
+
+Same discipline as `falcon_pegasus/stub/check.sh`. Use it before spending a
+hospital run.
+
 ### Getting more curve and less action
 
-`policy_params.sys2_max_forward_step` (default 8) is the knob. It is how many
-System-1 steps the agent plays out before calling System 2 again, and since a
-System-2 call is very nearly one chance at a curve, it is how many discrete
-steps separate two chances. Lower is more continuous and slower — System 2 is
-~98.5% of the per-decision budget.
+`policy_params.sys2_max_forward_step` is the knob, and with
+`sys1_continuous_only` on it counts System-1 *runs* rather than executed action
+steps (see above); it is set to 4 here. Lower is more continuous and slower —
+System 2 is ~98.5% of the per-decision budget.
 
 The instruction is **not** the knob, which is worth saying because it is the
 obvious guess. Counterbalanced A/B, same start pose every arm, order reversed
@@ -234,6 +370,12 @@ p ≈ 0.17). **An open-ended exploration order is not why the output is mostly
 discrete.**
 
 ### Why the route is short and the aircraft keeps waiting
+
+**Historical — this is the state of the stack BEFORE the four changes above, and
+it is kept because it is the measurement that motivated them.** With
+`sys1_continuous_only` and `hold_to_think` on, the 80% figure below goes to
+zero: every commitment is a 33-point curve, and the stationary time is thinking
+rather than waiting.
 
 Measured off two recorded runs' bags (54 decisions, 2962 `cmd_vel` samples):
 
@@ -514,6 +656,54 @@ odometry and no error anywhere. It is a ferry, not a planner, it confirms takeof
 and aborts rather than descending below wall height if it could not cross, and it
 must never run while the follower is up: both publish `cmd_vel`.
 
+## Measured: five runs, one instruction
+
+`REPEAT=5 record_campaign.sh 240 office_door`, hospital, 2026-08-26, with all of
+the above in. Instruction: *"There is a room to your right. Enter it, go to the
+center of the room, find the table and stop near the table."*
+
+| run | routes | curve% | route m | moved m | turns | escapes | closest to the table |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 21 | 100 | 25.5 | 13.2 | 17 | 3 | 5.90 m |
+| 2 | 16 | 100 | 17.8 | 12.1 | 4 | 1 | **1.68 m — stopped at the desk** |
+| 3 | 7 | 100 | 9.5 | 5.4 | 45 | 1 | 7.19 m |
+| 4 | 24 | 100 | 21.7 | 14.2 | 6 | 2 | 3.13 m |
+| 5 | 16 | 100 | 18.9 | 7.7 | 11 | 7 | 7.34 m |
+
+**84 decisions, 84 curves, zero action steps.** Against the same stack before
+these changes: 18 of 22 commitments were 0.25 m stubs and one run spent seventy
+of ninety seconds pinned against a wall.
+
+Run 2 flew the instruction: east along the spine, right through the bay's only
+doorway at (2.70, −0.20), south to 1.68 m from the AdjTable, then STOP. The
+other four did not, and they failed in four different ways — one spent the run
+rotating (45 turns), one hit the bay's north wall repeatedly (7 escapes), two
+wandered west. That spread across identical starts is the answer to "it is not
+deterministic": the **stack** is now repeatable and the **policy** is not.
+
+## Comparing the runs of a campaign
+
+```bash
+.venv/bin/python -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.campaign_report \
+    ~/sjtu_n1_recordings/<campaign> --target 1.22 -5.61
+```
+
+One row per run: verdict, routes committed, **what share of them were curves**,
+metres of route, ground actually covered, net displacement, rotations, escapes,
+hard blocks, the measured System-2 rate, and the closest the aircraft got to a
+world point the instruction names.
+
+Everything comes out of each run's `nodes.log` — no rosbag decoding, no ROS, no
+model — so it runs in the plain `.venv` and on a campaign copied off the machine
+that flew it. The positions are the aircraft's pose *at each decision*, so the
+distance columns are a lower bound on the real track, which is the right way
+round for judging whether a run went anywhere.
+
+`config/hospital_areas.yaml` records, per area, the ground truth to judge
+against: for `office_door`, that the bay has exactly one opening, at
+(2.70, −0.20), and that the shortest flyable route from the start to the table
+is 13.3 m.
+
 ## Configuration
 
 One file: `robots/SJTU/config/vla/internvla_n1.yaml`. The knobs that matter:
@@ -539,7 +729,11 @@ One file: `robots/SJTU/config/vla/internvla_n1.yaml`. The knobs that matter:
 | `/simple_drone/state` | `std_msgs/Int8` | in | 0 landed, 1 flying — the follower will not command a landed aircraft |
 | `/simple_drone/n1/trajectory` | `nav_msgs/Path` | out | the committed route (world), what the follower flies |
 | `/simple_drone/n1/trajectory_full` | `nav_msgs/Path` | out | the whole prediction, for RViz |
-| `/simple_drone/n1/info` | `std_msgs/String` | out | JSON: action, S1/S2 FPS, the S2 pixel goal — what the recorder overlays |
+| `/simple_drone/n1/info` | `std_msgs/String` | out | JSON: action, S1/S2 FPS, the S2 pixel goal, the live **phase** — what the recorder overlays. Republished several times a second, not once per decision, because a decision now lasts seconds |
+| `/simple_drone/n1/altitude_offset` | `std_msgs/Float32` | policy → follower | metres off cruise, for the look-down dip |
+| `/simple_drone/n1/hold` | `std_msgs/Bool` | policy → follower | stop translating and yawing; the model is thinking. Altitude hold stays live |
+| `/simple_drone/n1/yaw_goal` | `std_msgs/Float32` | policy → follower | absolute world heading to rotate to — how a discrete TURN is flown |
+| `/simple_drone/n1/blocked` | `std_msgs/Bool` | follower → policy | the depth reflex allows no forward speed at all. Latched, edge-triggered |
 | `/simple_drone/cmd_vel` | `geometry_msgs/Twist` | out | body FLU — the drone's only control input |
 
 ## Reading a run back
@@ -576,8 +770,22 @@ pytest sparx_agency/core/planning/vlas/internvla_n1 \
        sparx_agency/tasks/planning/sjtu_internvla_n1
 ```
 
-The policy translation, the trajectory shaping and the path→trajectory timing are
-all unit-tested without ROS or Gazebo; the ROS2 nodes are thin wiring over them.
+plus the shared pieces the flight now leans on:
+
+```bash
+pytest sparx_agency/core/planning/vlas/common/tests/test_turn_in_place.py \
+       sparx_agency/core/planning/safety/tests/test_freer_side.py
+```
+
+The policy translation, the trajectory shaping, the stop-and-turn manoeuvre and
+the path→trajectory timing are all unit-tested without ROS or Gazebo; the ROS2
+nodes are thin wiring over them.
+
+**The wiring itself is covered by `scripts/dry_run.py`**, which is where a unit
+test cannot reach: it runs the real nodes against a fake drone and a scripted
+server and asserts the four behaviours that matter in the air (see above). Run
+it before spending a hospital flight — it has already found a knob the node
+never read and an escape that could not escape.
 
 ## Middleware
 
@@ -630,5 +838,20 @@ export FASTDDS_DEFAULT_PROFILES_FILE=$FASTRTPS_DEFAULT_PROFILES_FILE
 * **The obstacle reflex is a brake, not a planner.** It caps forward speed on raw
   depth; it does not route around anything. Keep `cruise_speed` conservative --
   eighteen of the hospital's twenty-six doorways are 0.93 m clear against a
-  0.63 m airframe.
+  0.63 m airframe. The blocked-forward escape (back off, look elsewhere) is a
+  *reflex* on top of it, not a route: it breaks a deadlock and hands the
+  decision straight back to the policy, which may well walk into the same wall
+  again. Nothing in this stack remembers where an obstacle was.
+* **The reverse in that escape is unguarded.** This airframe has no rear sensor.
+  It is bounded at `follower.escape.back_s × back_speed` and justified only by
+  retracing ground the aircraft was occupying seconds earlier. Do not raise it
+  to something that would reach ground the aircraft has not been on.
+* **Model settings only apply to the `/agent/init` that creates the agent.**
+  Changing an intrinsic, `sys2_max_forward_step` or `sys1_continuous_only`
+  against a running server does nothing at all; the client warns, but the fix is
+  to restart the server.
+* **Holding still to think makes a deadlock deterministic.** It is worth it --
+  the observation, the decision and the anchor become one place -- but a blocked
+  aircraft now asks from a byte-identical frame and gets a byte-identical
+  answer. The escape above exists because of this, not in spite of it.
 

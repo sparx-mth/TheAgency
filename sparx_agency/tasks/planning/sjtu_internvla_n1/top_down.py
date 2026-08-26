@@ -10,6 +10,13 @@ of the same flight side by side, and the pair is the point:
   action step is actually several pixels wide and the committed route, the
   speculative tail and the heading are legible.
 
+Both draw **every route the policy has committed**, not only the current one.
+One route at a time answers "what is it flying now"; the accumulation answers
+"what has this policy been producing", which is the question a viewer is
+actually asking when they say they cannot see a trajectory. A run made of
+0.25 m stubs and a run made of 2 m curves look identical frame by frame and
+nothing alike once the routes pile up.
+
 A single view cannot do both. The hospital is 25.6 x 56 m; drawn whole into a
 640 x 480 panel it is about 8 px per metre, at which a step the policy actually
 commits to is two pixels long.
@@ -40,6 +47,8 @@ COMMITTED_BGR = (0, 255, 255)
 PLAN_BGR = (0, 140, 220)
 POSE_BGR = (255, 255, 255)
 START_BGR = (255, 160, 0)
+#: Routes already flown, drawn dim so the live one still reads as the live one.
+PAST_BGR = (90, 110, 110)
 
 
 class TopDownRenderer:
@@ -60,8 +69,9 @@ class TopDownRenderer:
     """
 
     def __init__(self, size=(640, 480), margin_m=1.5, trail_max=4000,
-                 backdrop=None, local_span_m=14.0, overview_fraction=0.42):
-        # type: (Tuple[int, int], float, int, Optional[OccupancyMapImage], float, float) -> None
+                 backdrop=None, local_span_m=14.0, overview_fraction=0.42,
+                 routes_max=200):
+        # type: (Tuple[int, int], float, int, Optional[OccupancyMapImage], float, float, int) -> None
         self.w, self.h = int(size[0]), int(size[1])
         self.margin_m = float(margin_m)
         self.trail = []  # type: List[Tuple[float, float]]
@@ -69,7 +79,27 @@ class TopDownRenderer:
         self.backdrop = backdrop
         self.local_span_m = float(local_span_m)
         self.overview_fraction = float(overview_fraction)
+        self.routes = []  # type: List[np.ndarray]
+        self.routes_max = int(routes_max)
         self._bounds = None  # (min_x, min_y, max_x, max_y)
+
+    def note_route(self, world_xy):
+        # type: (Optional[np.ndarray]) -> None
+        """Remember a committed route so it stays on the map after it is flown.
+
+        Called once per commitment, from wherever the route arrives. An empty
+        route -- which is how a STOP and a rotation are published -- records
+        nothing, because there is nothing to draw and keeping the previous one
+        alive would claim the aircraft was still flying it.
+        """
+        if world_xy is None or len(world_xy) < 2:
+            return
+        route = np.asarray(world_xy, dtype=float).reshape(-1, 2)
+        if not np.isfinite(route).all():
+            return
+        self.routes.append(route)
+        if len(self.routes) > self.routes_max:
+            self.routes = self.routes[-self.routes_max:]
 
     def add_pose(self, x, y):
         # type: (float, float) -> None
@@ -120,20 +150,26 @@ class TopDownRenderer:
         overview = self.backdrop.whole((overview_w, self.h))
         left = overview.image.copy()
         self._draw_trail(left, overview.extent)
+        self._draw_routes(left, overview.extent, 1)
         self._polyline(left, committed_xy, overview.extent, COMMITTED_BGR, 2)
         self._draw_pose(left, pose, overview.extent, arrow_px=10, dot_px=3)
-        _banner(left, "HOSPITAL (whole)")
+        _banner(left, "HOSPITAL  live=yellow flown=grey trail=green")
 
         centre = self._focus(pose)
         local = self.backdrop.window(centre[0], centre[1], self.local_span_m,
                                      (local_w, self.h))
         right = local.image.copy()
         self._range_rings(right, centre, local.extent)
-        self._draw_trail(right, local.extent, thickness=2)
+        self._draw_trail(right, local.extent, thickness=3)
+        self._draw_routes(right, local.extent, 1)
         self._polyline(right, full_xy, local.extent, PLAN_BGR, 1)
         self._polyline(right, committed_xy, local.extent, COMMITTED_BGR, 3)
         self._draw_pose(right, pose, local.extent, arrow_px=22, dot_px=5)
-        _banner(right, "N1 ROUTE  committed=yellow plan=orange trail=green")
+        # Kept short enough to FIT. The banner is drawn at a fixed scale into a
+        # panel whose width depends on `overview_fraction`, and cv2.putText
+        # clips silently -- so a legend that runs off the edge takes the route
+        # count with it, which is the one number on the panel worth reading.
+        _banner(right, "N1 ROUTES  %d routes, %.1f m" % (len(self.routes), self.routes_m))
 
         panel = np.hstack((left, right))
         cv2.line(panel, (overview_w, 0), (overview_w, self.h), (90, 90, 95), 1)
@@ -151,10 +187,12 @@ class TopDownRenderer:
         extent = self._fit(extra)
         _graph_paper(panel, extent)
         self._draw_trail(panel, extent)
+        self._draw_routes(panel, extent, 1)
         self._polyline(panel, full_xy, extent, PLAN_BGR, 1)
         self._polyline(panel, committed_xy, extent, COMMITTED_BGR, 3)
         self._draw_pose(panel, pose, extent, arrow_px=18, dot_px=4)
-        _banner(panel, "N1 ROUTE (top-down)  committed=yellow plan=orange trail=green")
+        _banner(panel, "N1 ROUTES  %d routes, %.1f m"
+                % (len(self.routes), self.routes_m))
         return panel
 
     # -- helpers ---------------------------------------------------------
@@ -187,6 +225,32 @@ class TopDownRenderer:
             lo_y, hi_y = c - 2.0, c + 2.0
         return (lo_x, lo_y, hi_x, hi_y)
 
+    @property
+    def routes_m(self):
+        # type: () -> float
+        """Total length of every route committed so far, metres.
+
+        The single number that separates "the policy is producing curves" from
+        "the policy is producing stubs" -- twenty routes and four metres is the
+        second, whatever the video looks like frame by frame.
+        """
+        total = 0.0
+        for route in self.routes:
+            if len(route) >= 2:
+                total += float(np.linalg.norm(np.diff(route, axis=0), axis=1).sum())
+        return total
+
+    def _draw_routes(self, panel, extent, thickness):
+        """Every route already committed, thin, OVER the trail.
+
+        Over, not under: the trail is what the aircraft flew and these are what
+        the policy asked for, and the interesting frames are the ones where they
+        differ. Drawn underneath, a route that was tracked perfectly is hidden
+        by the trail on top of it and a route that was not is hidden too.
+        """
+        for route in self.routes:
+            self._polyline(panel, route, extent, PAST_BGR, thickness, dot=False)
+
     def _draw_trail(self, panel, extent, thickness=2):
         if len(self.trail) >= 2:
             pts = np.array([_to_px(panel, extent, x, y) for x, y in self.trail],
@@ -197,14 +261,15 @@ class TopDownRenderer:
                        START_BGR, -1, cv2.LINE_AA)
 
     @staticmethod
-    def _polyline(panel, xy, extent, color, thick):
+    def _polyline(panel, xy, extent, color, thick, dot=True):
         if xy is None or not len(xy):
             return
         pts = np.array([_to_px(panel, extent, float(p[0]), float(p[1]))
                         for p in np.asarray(xy).reshape(-1, 2)], dtype=np.int32)
         if len(pts) >= 2:
             cv2.polylines(panel, [pts], False, color, thick, cv2.LINE_AA)
-        cv2.circle(panel, tuple(int(v) for v in pts[-1]), 4, color, -1, cv2.LINE_AA)
+        if dot:
+            cv2.circle(panel, tuple(int(v) for v in pts[-1]), 4, color, -1, cv2.LINE_AA)
 
     @staticmethod
     def _draw_pose(panel, pose, extent, arrow_px, dot_px):

@@ -46,6 +46,9 @@ topics:
   instruction: /simple_drone/navigation/instruction
   state: /simple_drone/state                        # Int8: 0 landed, 1 flying
   altitude_offset: /simple_drone/n1/altitude_offset  # Float32: look-down dip, metres
+  hold: /simple_drone/n1/hold                        # Bool: stop, the policy is thinking
+  yaw_goal: /simple_drone/n1/yaw_goal                # Float32: absolute world heading to rotate to
+  blocked: /simple_drone/n1/blocked                  # Bool: the depth reflex allows no forward speed
   trajectory: /simple_drone/n1/trajectory          # committed route (nav_msgs/Path, world)
   trajectory_full: /simple_drone/n1/trajectory_full  # whole prediction, for RViz
   info: /simple_drone/n1/info                        # JSON status: action, S1/S2 FPS, pixel goal
@@ -57,7 +60,13 @@ frames:
 # The N1 policy node: how often it asks the server, and the default instruction.
 policy_params:
   inference_rate_hz: 4.0
-  default_instruction: "explore the entire hospital, find every room, enter and exit every room"
+  # ONE ROOM, ONE TABLE. "Explore the entire hospital" is not a navigation
+  # instruction, it is a research programme: there is no state at which it is
+  # satisfied, so nothing in the episode is evidence for or against the policy
+  # having understood it, and a flight can only be judged on whether it looked
+  # busy. This one names a direction, a place and a stopping condition, all of
+  # which are checkable from the recording.
+  default_instruction: "There is a room to your right. Enter it, go to the center of the room, find the table and stop near the table."
   step_m: 0.25          # forward reach rendered from a discrete FORWARD action
   # 15 degrees, because that is what THIS producer means by a turn:
   # `vln_utils.trajectory_to_discrete_actions_close_to_goal` hard-codes
@@ -79,8 +88,84 @@ policy_params:
   #
   # Lower is more continuous and slower: System 2 is ~98.5% of the per-decision
   # budget, so halving this roughly halves the decision rate. 8 is the agent's
-  # own default; 4 buys noticeably more curve at about half the decisions.
-  sys2_max_forward_step: 8
+  # own default.
+  #
+  # WITH `sys1_continuous_only` BELOW THIS COUNTS SOMETHING ELSE: System-1 runs,
+  # not executed action steps, because the discretised steps that used to be
+  # returned between them no longer exist. Each of those runs is now a whole
+  # curve flown to its end -- 1 to 2.5 m -- so 8 would put ten metres and more
+  # between two chances for the language half to look at the scene again. 4 is
+  # roughly one System-2 call per leg of a room entry.
+  sys2_max_forward_step: 4
+
+  # FLY THE CURVE, NOT A DISCRETISATION OF THE CURVE YOU ALREADY HAVE.
+  # Server-side PATCH 7 (tasks/planning/vlas/internvla_n1/upstream/). System 1
+  # produces one prediction and the agent renders it twice: as the continuous
+  # path, and as the list of 0.25 m / 15 deg steps that approximates it. Stock,
+  # it hands over the curve and then queues those steps to be returned over the
+  # next three calls -- so a client flying the curve covers that ground and is
+  # then asked to fly the first metre of it again in pieces, and three quarters
+  # of its decisions carry no curve at all. Measured over a ninety-second
+  # hospital flight: 18 of 22 committed routes were 0.25 m stubs, which is
+  # exactly what "I can barely see a trajectory on the map" looks like from the
+  # outside. With this on, every System-1 step is a fresh curve computed from
+  # the frame in front of the aircraft now.
+  sys1_continuous_only: true
+
+  # ── STOP, LOOK, THINK ────────────────────────────────────────────────
+  # System 2 needs 2.6-10 s. Until this existed the aircraft flew through all of
+  # it, which broke the two things a dual-system policy depends on:
+  #
+  #   * the frame the model reasoned about was metres behind the aircraft by the
+  #     time the answer arrived;
+  #   * the route was anchored at the pose that frame was taken from, so a 3 m
+  #     curve began behind the drone and the pursuit's first move was backwards.
+  #
+  # Holding is slower and it is what the model was trained on: VLN-CE takes
+  # every observation from a standstill, after the previous action finished. The
+  # flight becomes stop -> look -> think -> fly the whole curve -> stop.
+  hold_to_think: true
+  settle_speed_mps: 0.05      # ...and "stopped" means measured, not commanded:
+  settle_yaw_rate_rad_s: 0.05 #    this airframe translates by TILTING and coasts
+  settle_s: 0.3               #    for most of a second after the command is zero
+  settle_timeout_s: 3.0       # never wedge on an aircraft the world is pushing
+  status_period_s: 0.2        # republish the live phase for the overlay
+
+  # ── A TURN IS A ROTATION ─────────────────────────────────────────────
+  # `rotate` hands a discrete TURN action to the follower as a heading and flies
+  # it as a slow rotation that ends stopped -- which is what the action means
+  # upstream, where `trajectory_to_discrete_actions_close_to_goal` moves the
+  # position only on a forward action. `crab` restores the old behaviour of
+  # flying the bent step the action is rendered as, which a holonomic pursuit
+  # can satisfy by translating 0.25 m sideways without looking anywhere new. The
+  # pair exists so the two can be compared on the same aircraft; `rotate` is the
+  # correct one and the reason `stop_turn_rad` below no longer has to be tuned
+  # against `turn_deg`.
+  discrete_turn_mode: rotate
+  # A System-1 curve too short to be a route is the same message in continuous
+  # clothing: the model is asking to pivot and look again, not to travel 20 cm.
+  # Flown as a path it creeps forward, the view barely changes, and the next
+  # prediction is the same one. Flown as a rotation to the curve's own end
+  # bearing, the aircraft actually looks where the curve points.
+  pivot_min_deg: 7.5          # ...but only when the short curve HAS a bearing
+  pivot_min_reach_m: 0.05     #    (atan2 of nearly (0,0) is noise, not intent)
+
+  # ── THE BLOCKED-FORWARD ESCAPE ───────────────────────────────────────
+  # Not a planner, a reflex, and it exists because of a measured deadlock. The
+  # follower's depth brake can pin the aircraft at zero forward speed; the
+  # policy cannot see that, so it asks to fly forward again -- and now that the
+  # aircraft holds still to think, the frame it asks from is IDENTICAL, so the
+  # answer is too. Measured before any of this: seventy seconds of a ninety
+  # second flight pinned 0.43 m from a wall, re-committing a 0.25 m forward step
+  # every twelve seconds. After this many consecutive decisions that ask to
+  # translate while hard-blocked, turn toward whichever half of the depth frame
+  # has more room and let the policy decide again from there.
+  # Two, not three. Each blocked decision costs a full System-2 think plus the
+  # commitment's own deadline before the next one -- ten seconds and more -- so
+  # a patient counter is thirty seconds of a three-minute flight spent proving
+  # something the first two decisions already showed.
+  blocked_escape_after: 2
+  blocked_escape_deg: 45.0
 
   # THE LOOK-DOWN, PERFORMED RATHER THAN IGNORED.
   #
@@ -131,7 +216,14 @@ commit:
   # registers sits out the whole ceiling. Measured: five twelve-second stalls
   # in a ninety-second flight, which was most of the time it spent stationary.
   expected_speed_mps: 0.4     # the follower's cruise
-  commit_grace_s: 2.0
+  # Generous, because the cruise speed is not the average speed. A route is
+  # accelerated into and braked out of at both ends, the depth reflex trims it
+  # wherever the corridor narrows, and the pursuit's own slow-down zone runs the
+  # last stretch below cruise. Measured on a 2 m curve here: 6.3 s of flight for
+  # a 5.0 s nominal. Too tight and a route expires with a metre still to fly,
+  # which under `hold_to_think` means stopping in the middle of a curve to
+  # re-ask -- the exact chopping-up this whole change removes.
+  commit_grace_s: 4.0
   # Matched to the follower's path_tolerance_m (0.8), not left above it. Between
   # the two thresholds is a dead band: the follower calls path_diverged and
   # zeroes the twist every cycle, so the aircraft cannot move, so the lateral
@@ -188,11 +280,60 @@ follower:
   # inside altitude_release_m (0.35) while the dip is in progress, so the
   # aircraft keeps tracking its route instead of stopping to change height.
   altitude_offset_rate_m_s: 0.35
-  # MUST stay below policy_params.turn_deg (15 deg = 0.262 rad), or a rendered
-  # turn never trips the stop-and-rotate branch and the aircraft crabs sideways
-  # through it without changing where it is looking.
+  # This is the pursuit's OWN stop-and-rotate, for a route that heads off the
+  # nose -- it no longer has to carry N1's discrete turns, which are now flown
+  # as real rotations (policy_params.discrete_turn_mode). It still has to stay
+  # below policy_params.turn_deg for the `crab` comparison mode to behave.
   stop_turn_rad: 0.18         # hold position and rotate past ~10 deg off route
   resume_turn_rad: 0.06       # ...and fly again below ~3.5 deg (hysteresis band)
+
+  # ── THE STOP-AND-TURN MANOEUVRE ──────────────────────────────────────
+  # How a discrete TURN action is actually flown: rotate, stop, and only then
+  # let the policy look again. Deliberately SLOW. The frame at the end of the
+  # rotation is the entire reason the model asked for it, and this airframe
+  # yaws by tilting its thrust vector -- a fast turn arrives blurred and
+  # ringing, and the settle then has to wait out the ringing anyway, so nothing
+  # is saved. 20 deg/s puts N1's 15 deg turn at about a second of rotation plus
+  # a 0.4 s standstill.
+  turn:
+    yaw_rate_deg_s: 20.0      # cruise rate of the rotation
+    min_yaw_rate_deg_s: 6.0   # floor under the taper: below this the plugin's
+                              # yaw PID does nothing and the last two degrees
+                              # never close, so every turn times out just short
+    slow_down_deg: 12.0       # taper to the floor inside this error
+    tolerance_deg: 2.5        # comfortably above the platform's yaw noise
+    settle_rate_deg_s: 3.0    # ...and "stopped" is measured, not commanded
+    settle_s: 0.4
+    timeout_s: 14.0           # a rotation that cannot happen (capsized, landed,
+                              # jammed) must never wedge the flight. Long enough
+                              # to cover the back-off below plus a 45 deg turn,
+                              # because the policy node runs the same manoeuvre
+                              # clock and starts it when it ASKS, not when the
+                              # follower begins.
+
+  # ── BREAKING CONTACT ─────────────────────────────────────────────────
+  # A turn requested while the depth reflex is hard-blocked backs off first.
+  # Rotating on the spot does not free an aircraft that is already inside its
+  # own stopping distance of a wall: the wall stays inside the depth corridor
+  # across most of the arc, so every heading reads blocked and the policy is
+  # asked to choose between them for ever. Measured in the hospital with the
+  # rotation fix in and this one out: pinned 0.45-0.70 m from the office wall
+  # for a whole run, thirteen rotations, zero metres flown.
+  #
+  # The reverse is UNGUARDED -- there is no rear sensor on this airframe -- and
+  # that is acceptable for exactly one reason: it retraces ground the aircraft
+  # was occupying seconds earlier, since the escape only fires after it has
+  # stopped there. It is bounded at back_s * back_speed and nothing else.
+  escape:
+    enabled: true
+    brake_s: 0.4              # it is still coasting into whatever it hit
+    back_s: 2.0               # 0.50 m of reverse -- enough to clear
+    back_speed: 0.25          #    hard_block_d_m (0.70) by a real margin
+    allow_lateral: false      # the corridor only protects FORWARD; a sideways
+                              # probe next to a wall slides toward a jamb
+                              # nothing is watching
+    settle_s: 0.5             # a stationary frame before the rotation
+    max_attempts: 3           # per blockage episode; reset when it flies again
   capsize_deg: 35.0           # past this the plugin cannot act; stop commanding
   depth_timeout_s: 3.0        # older than this is not depth, it is a memory
 

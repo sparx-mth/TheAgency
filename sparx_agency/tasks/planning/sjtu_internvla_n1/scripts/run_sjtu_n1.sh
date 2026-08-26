@@ -31,7 +31,10 @@ say() { echo "[sjtu_n1] $*"; }
 die() { echo "[sjtu_n1] ERROR: $*" >&2; exit 1; }
 
 WORLD="${1:-no_roof_small_warehouse}"
-INSTRUCTION="${2:-${INSTRUCTION:-explore the warehouse and avoid the shelves}}"
+# Falls through to the binding YAML's `default_instruction` when neither the
+# command line nor $INSTRUCTION names one, rather than inventing a warehouse
+# order for a hospital.
+INSTRUCTION="${2:-${INSTRUCTION:-}}"
 CONFIG_FILE="${CONFIG_FILE:-${REPO_ROOT}/sparx_agency/robots/SJTU/config/vla/internvla_n1.yaml}"
 
 # ── environment the sim and the nodes must share ──────────────────────────
@@ -361,6 +364,20 @@ report() {
         say "  for HTTP 500s (a System-1 step that fails still answers 200 on the"
         say "  queued discrete actions, so 'the server is up' proves nothing)."
     fi
+    # WHAT KIND of routes, not just how many. A run of 0.25 m stubs and a run
+    # of 2 m curves both report "22 commitments" and are not the same result;
+    # this is the line that separates them, and it is why `sys1_continuous_only`
+    # and the rotation mode exist at all.
+    local curves actions turns escapes blocked metres
+    curves="$(grep -ac '\[curve\]' "${LOG_DIR}/nodes.log" 2>/dev/null | head -n1)"; curves="${curves:-0}"
+    actions="$(grep -ac '\[action\]' "${LOG_DIR}/nodes.log" 2>/dev/null | head -n1)"; actions="${actions:-0}"
+    turns="$(grep -ac 'turn #' "${LOG_DIR}/nodes.log" 2>/dev/null | head -n1)"; turns="${turns:-0}"
+    escapes="$(grep -ac 'BLOCKED ESCAPE' "${LOG_DIR}/nodes.log" 2>/dev/null | head -n1)"; escapes="${escapes:-0}"
+    blocked="$(grep -ac 'HARD BLOCKED' "${LOG_DIR}/nodes.log" 2>/dev/null | head -n1)"; blocked="${blocked:-0}"
+    metres="$(grep -ao 'committed #[0-9]*: [0-9]* pts, [0-9.]* m' "${LOG_DIR}/nodes.log" 2>/dev/null \
+        | awk '{s += $(NF-1)} END {printf "%.1f", s+0}')"
+    say "  routes flown        ${curves} curves + ${actions} action steps, ${metres:-0} m of route"
+    say "  rotations flown     ${turns}  (blocked-forward escapes: ${escapes}, hard blocks: ${blocked})"
     local fps_line
     fps_line="$(grep -a 'N1 FPS' "${LOG_DIR}/nodes.log" 2>/dev/null | tail -n1)"
     if [[ -n "${fps_line}" ]]; then
@@ -431,12 +448,16 @@ fi
 # default -- a warehouse order, in a hospital. Publish it several times, and
 # never with the default `-w 1`, which in Jazzy waits for a matching subscriber
 # with NO timeout and hangs the whole script when the node has died.
+if [[ -z "${INSTRUCTION}" ]]; then
+    say "no instruction given; the nodes fly the config's default_instruction"
+else
 say "sending instruction: '${INSTRUCTION}'"
 for _ in 1 2 3; do
     timeout 10 ros2 topic pub --once -w 0 /simple_drone/navigation/instruction std_msgs/msg/String \
         "{data: '${INSTRUCTION}'}" >/dev/null 2>&1 || say "WARNING: could not publish the instruction"
     sleep 1
 done
+fi
 
 say "flying. N1 route -> /simple_drone/n1/trajectory ; cmd -> /simple_drone/cmd_vel"
 [[ "${RECORD}" == "1" ]] && say "camera+route video -> ${RECORD_OUTPUT}"
