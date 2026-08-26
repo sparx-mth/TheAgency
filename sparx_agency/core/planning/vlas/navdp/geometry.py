@@ -40,10 +40,12 @@ PEP 604 unions, no ``match``/``case``. numpy-only at import time.
 """
 from __future__ import annotations
 
-from math import cos, sin
-
 import numpy as np
 
+from sparx_agency.core.common.math.se2 import (
+    body_to_world_2d,
+    world_to_body_2d as _world_to_body_2d,
+)
 from sparx_agency.core.common.types import Intrinsics
 
 # NavDP input range: forward in ``[0, NAVDP_MAX_FWD_M]`` m, lateral in
@@ -157,13 +159,8 @@ def anchor_trajectory_to_world(traj_xy, ref_x, ref_y, ref_yaw):
     Returns:
         ``list[(world_x, world_y)]`` of length ``T``.
     """
-    c, s = cos(ref_yaw), sin(ref_yaw)
-    out = []
-    for wp in traj_xy:
-        fwd, left = float(wp[0]), float(wp[1])
-        out.append((ref_x + fwd * c - left * s,
-                    ref_y + fwd * s + left * c))
-    return out
+    return [body_to_world_2d(float(wp[0]), float(wp[1]), ref_x, ref_y, ref_yaw)
+            for wp in traj_xy]
 
 
 def world_to_body_2d(wx, wy, ref_x, ref_y, ref_yaw):
@@ -187,9 +184,7 @@ def world_to_body_2d(wx, wy, ref_x, ref_y, ref_yaw):
     Returns:
         ``(forward, left)`` body-frame coordinates (m).
     """
-    dx, dy = wx - ref_x, wy - ref_y
-    c, s = cos(ref_yaw), sin(ref_yaw)
-    return float(dx * c + dy * s), float(-dx * s + dy * c)
+    return _world_to_body_2d(wx, wy, ref_x, ref_y, ref_yaw)
 
 
 def body_point_to_pixel(x_fwd, y_left, intr, cam_height_m, min_fwd_m=0.05,

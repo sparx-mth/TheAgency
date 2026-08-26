@@ -327,6 +327,13 @@ preprocessing, which is imported from that repo on the first navigate request (t
 server still *starts* without it, then fails on the first reset). It is only the
 `torch` fallback that additionally needs `--ckpt`.
 
+Everything *offline* — the fine-tune datasets, the feature cache, the verify tool —
+cannot inherit that class, so it calls
+`core/planning/vlas/navdp/preprocess.py`, which mirrors `process_image` /
+`process_depth` step for step and defaults to the same BGR channel order this
+server feeds the encoder. One implementation, so the tooling and the aircraft
+cannot drift apart.
+
 The engine directory name is the device's hardware tag (`hardware/detect.py`), so
 the same checkout has a different `--engine-dir` per machine. Pick the one that
 matches where you're running — engines are **not** portable across devices.

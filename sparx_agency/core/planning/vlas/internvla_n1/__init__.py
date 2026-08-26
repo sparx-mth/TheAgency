@@ -7,18 +7,20 @@ instruction produce a discrete VLN-CE action (``STOP`` / ``MOVE_FORWARD`` /
 sub-goal in the input image.
 
 The model itself runs in an external InternNav checkout/conda env behind an HTTP
-server; this package owns only the two ROS-free pieces:
+server; this package owns only the ROS-free pieces:
 
 * :mod:`~sparx_agency.core.planning.vlas.internvla_n1.client` -- the HTTP wire
   contract (``/agent/init``, ``/agent/{name}/step``, ``/agent/{name}/reset``).
 * :mod:`~sparx_agency.core.planning.vlas.internvla_n1.types` -- the action
   vocabulary and the parsed step response.
+* :mod:`~sparx_agency.core.planning.vlas.internvla_n1.errors` -- ``InternVlaError``,
+  and the reasoning for how little this policy raises.
 
 The ROS2 node that drives them lives in
 ``tasks/planning/vlas/internvla_n1/ros2/``; the Rooster R1 / Sphera topic and
 actuation binding lives in ``robots/ROBOTICAN/``.
 
-Python 3.8 compatible; ``requests`` is imported at module scope here only
-because nothing in the FALCON Noetic path imports this package -- keep it that
-way, or move the import inside the methods as NavDP does.
+Python 3.8 compatible, and numpy-only at import: ``requests`` is imported inside
+the client's methods, so this package obeys the same contract NavDP and FlowNav
+do and ``common/tests/test_core_import_contract.py`` now covers it.
 """

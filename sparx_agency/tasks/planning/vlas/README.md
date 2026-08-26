@@ -28,9 +28,20 @@ Write this rule down once and stop re-litigating it per model.
 |---|---|---|---|---|---|---|
 | **navdp** | point | HTTP server (host) | ✅ built | ✅ | ROS1 (FALCON) | XTEND, Sphera |
 | **flownav** | image | HTTP server (host) | ✅ built | ✅ | ROS1 (FALCON) | XTEND |
-| **internvla_n1** | language | HTTP server (external repo) | — | — | ROS2 | Rooster R1 / Sphera |
+| **internvla_n1** | language | HTTP server (external repo) | ⚠️ S1 only | — | ROS2 | Rooster R1 / Sphera, SJTU sim |
 | **omnivla** | language / pose / image | **in-process torch** | — | — | ROS2 | Rooster R1 / Sphera |
 | **nomad** | (exploration) | **external process**, waypoints over a topic | — | — | ROS2 | Rooster R1 / Sphera |
+
+**What is actually flown:** navdp (XTEND, via FALCON) and internvla_n1 (SJTU sim,
+via `tasks/planning/sjtu_internvla_n1/`). flownav is built but unflown; omnivla
+and nomad are parked earlier work, kept deliberately and held to a lower
+standard — they have no `core/` layer, are not in the registry, and their ROS2
+bridges import a robot adapter directly, which the layering forbids. Do not copy
+them as a pattern, and do not treat their state as a to-do list.
+
+⚠️ internvla_n1's TensorRT path converts **System 1 only** and is not wired into
+any node: System 2 is 98.5% of a call, so it moves the pipeline ~4%. See
+`core/planning/vlas/internvla_n1/trt/README.md`.
 
 Three different integration styles is not an accident to be cleaned up — it is
 what the upstream projects actually are. The contract in
@@ -77,8 +88,11 @@ which one you are editing.
 ## Adding a new VLA
 
 1. `core/planning/vlas/<name>/` — `client.py` (the wire contract) and any pure
-   geometry/decoding. Subclass `common/http_client.HttpPolicyClient` and use
-   `common/image_codec.py`; define `<name>Error(VlaError)` in `errors.py`.
+   geometry/decoding, **including the preprocessing** (`preprocess.py`): the
+   fine-tune, the offline tools and the server must all resize and order channels
+   identically, and the only way to guarantee that is one implementation. Subclass
+   `common/http_client.HttpPolicyClient` and use `common/image_codec.py`; define
+   `<name>Error(VlaError)` in `errors.py`.
    **Numpy-only at import, Python 3.8 syntax** — `core/planning/vlas/common/tests/
    test_core_import_contract.py` will fail you otherwise.
 2. `core/planning/vlas/<name>/policy.py` — ~40 lines implementing

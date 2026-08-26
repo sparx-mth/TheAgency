@@ -20,7 +20,6 @@ import signal
 import threading
 import time
 from dataclasses import replace
-from math import atan2
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
@@ -60,6 +59,7 @@ def _imgmsg_to_bgr(msg):
         return cv2.cvtColor(buf.reshape(msg.height, msg.width), cv2.COLOR_GRAY2BGR)
     return np.ascontiguousarray(buf.reshape(msg.height, msg.width, -1)[:, :, :3])
 
+from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
     load_map_backdrop,
 )
@@ -75,8 +75,8 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *([os.pardi
 
 
 def _yaw_from_quat(q):
-    return atan2(2.0 * (q.w * q.z + q.x * q.y),
-                 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    """Yaw (radians, CCW from +x) from a geometry_msgs quaternion."""
+    return yaw_from_quaternion((q.x, q.y, q.z, q.w))
 
 
 def _load_config(path):

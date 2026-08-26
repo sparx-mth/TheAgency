@@ -195,8 +195,18 @@ elif [[ -n "${N1_SERVER_CMD:-}" ]]; then
 else
     say "InternVLA-N1 server is not up at ${N1_HOST}:${N1_PORT}."
     say "Start it on the GPU (conda env 'internnav'), e.g.:"
-    say "    conda activate internnav && python <InternNav>/scripts/eval/start_server.py \\"
-    say "        --config <...h1_internvla_n1_async_cfg.py> --host 0.0.0.0 --port ${N1_PORT}"
+    say "    cd <InternNav>/code   # start_server.py does sys.path.append('.')"
+    say "    INTERNVLA_N1_4BIT=1 CUDA_VISIBLE_DEVICES=0 conda run -n internnav \\"
+    say "        python scripts/eval/start_server.py --host 127.0.0.1 --port ${N1_PORT}"
+    # NO --config, and INTERNVLA_N1_4BIT is not optional on an 8 GB card. This
+    # hint used to say `--config h1_internvla_n1_async_cfg.py --port 8087`, which
+    # is wrong twice over and cost a whole flight: start_server.py OVERWRITES
+    # --port with eval_cfg.agent.server_port (8023), so the stack waits at 8087
+    # for a server that is listening elsewhere; and without the 4-bit env the
+    # loader takes the stock bf16 branch, which asks for flash_attn and wants
+    # 16.8 GB. Both fail as `/agent/init` 500s while GET /openapi.json answers
+    # happily -- "the server is up" proves nothing. See
+    # tasks/planning/vlas/internvla_n1/upstream/README.md.
     say "or export N1_SERVER_CMD='<that command>' and rerun. Waiting for it..."
 fi
 say "waiting for the InternVLA-N1 server to answer..."

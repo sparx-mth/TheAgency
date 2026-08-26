@@ -34,6 +34,7 @@ from sparx_agency.core.planning.vlas.interfaces.policy import (
     PolicyResult,
 )
 from sparx_agency.core.planning.vlas.internvla_n1 import geometry
+from sparx_agency.core.planning.vlas.internvla_n1.errors import InternVlaError
 from sparx_agency.core.planning.vlas.internvla_n1.types import (
     NON_TERMINAL_IDLE_INDICES,
 )
@@ -130,11 +131,12 @@ class InternVLAN1Policy(NavigationPolicy):
 
         Raises:
             TypeError: ``goal`` is not a :class:`LanguageGoal`.
-            ValueError: the observation has no ``rgb``.
+            InternVlaError: the observation has no ``rgb``. A caller error, not
+                a server one -- see :mod:`..errors` for what does *not* raise.
         """
         self.check_goal(goal)
         if observation.rgb is None:
-            raise ValueError("InternVLA-N1 needs an rgb frame to step.")
+            raise InternVlaError("InternVLA-N1 needs an rgb frame to step.")
 
         bgr = self._to_bgr(observation.rgb)
         depth = self._to_depth(observation.depth_m)

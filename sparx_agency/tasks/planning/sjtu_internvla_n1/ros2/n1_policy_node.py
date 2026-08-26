@@ -27,7 +27,6 @@ import os
 import signal
 import threading
 import time
-from math import atan2
 
 # Keep this process off the GPU: the policy runs on the server, everything here
 # is numpy on the CPU, and the card belongs to the network alone.
@@ -46,6 +45,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Float32, String
 
+from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.core.planning.vlas.common.plan_commit.executor import (
     CommitSpec,
     PlanCommitExecutor,
@@ -66,8 +66,7 @@ def _polyline_length(xy):
 
 def _yaw_from_quat(q):
     """Yaw (radians, CCW from +x) from a geometry_msgs quaternion."""
-    return atan2(2.0 * (q.w * q.z + q.x * q.y),
-                 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    return yaw_from_quaternion((q.x, q.y, q.z, q.w))
 
 
 def _load_config(path):

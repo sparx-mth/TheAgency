@@ -6,6 +6,7 @@ import pytest
 
 from sparx_agency.core.planning.vlas.interfaces.goals import LanguageGoal, PointGoal
 from sparx_agency.core.planning.vlas.interfaces.policy import PolicyObservation
+from sparx_agency.core.planning.vlas.internvla_n1.errors import InternVlaError
 from sparx_agency.core.planning.vlas.internvla_n1.policy import InternVLAN1Policy
 from sparx_agency.core.planning.vlas.internvla_n1.types import StepResponse
 
@@ -118,8 +119,10 @@ def test_step_rejects_a_non_language_goal():
 
 
 def test_step_requires_an_rgb_frame():
+    # InternVlaError, not ValueError: an arbiter driving several policies
+    # catches VlaError once and gets all of them.
     policy = _policy(StepResponse(action="STOP", action_index=0))
-    with pytest.raises(ValueError):
+    with pytest.raises(InternVlaError):
         policy.step(PolicyObservation(rgb=None), LanguageGoal(instruction="go"))
 
 

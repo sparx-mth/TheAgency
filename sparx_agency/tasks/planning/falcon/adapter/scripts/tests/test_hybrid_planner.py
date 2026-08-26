@@ -157,8 +157,18 @@ def _install_stubs():
 
     std = _mod("std_msgs")
     std.msg = _mod("std_msgs.msg", Bool=_Bool, String=_String)
-    _mod("cv2", cvtColor=lambda *a, **k: None, imread=lambda *a, **k: None,
-         COLOR_BGR2RGB=0, IMREAD_COLOR=1)
+    # Only stub cv2 when there is no real one. `_mod` writes into the sys.modules
+    # pytest shares for the WHOLE session and never takes it back, so an
+    # unconditional stub here silently breaks every later-collected test that
+    # actually resizes an image -- core/planning/vlas/navdp/preprocess.py and
+    # tasks/planning/vlas/common/finetune/datasets/sim_extract.py both pass alone
+    # and fail in a full run, purely on collection order. The node under test only
+    # needs the import to succeed, so the real module serves it just as well.
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        _mod("cv2", cvtColor=lambda *a, **k: None, imread=lambda *a, **k: None,
+             COLOR_BGR2RGB=0, IMREAD_COLOR=1)
     return _Path, _PoseStamped, _OccupancyGrid
 
 

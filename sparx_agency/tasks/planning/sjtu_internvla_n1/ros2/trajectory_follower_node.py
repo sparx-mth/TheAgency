@@ -69,6 +69,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32, Int8
 
+from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.core.common.types import (
     KinematicLimits,
     Pose3D,
@@ -95,9 +96,8 @@ from sparx_agency.tasks.planning.sjtu_internvla_n1.path_trajectory import (
 
 
 def _yaw_from_quat(q):
-    from math import atan2
-    return atan2(2.0 * (q.w * q.z + q.x * q.y),
-                 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    """Yaw (radians, CCW from +x) from a geometry_msgs quaternion."""
+    return yaw_from_quaternion((q.x, q.y, q.z, q.w))
 
 
 def _roll_pitch_from_quat(q):

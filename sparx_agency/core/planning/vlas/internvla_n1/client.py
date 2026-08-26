@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""HTTP Client for InternNav Agent Server."""
+"""HTTP Client for InternNav Agent Server.
+
+The transport -- URL, timeout, pooled session, lazy ``requests`` import, logging
+-- is :class:`~sparx_agency.core.planning.vlas.common.http_client.HttpPolicyClient`,
+shared with NavDP and FlowNav. What is N1's own, and stays here, is the wire
+contract: an agent that must be *created* before it can be stepped, an
+observation that travels as base64 pickle rather than PNG, and a response whose
+action index has to be read out of a nest of lists.
+
+The session routes exist because of that create step: 201, 409 and a timeout
+mean three different things to ``/agent/init``, so it uses the shared
+``_attempt`` and judges the status itself, while ``step`` is an ordinary
+policy call where anything but 200 is "no answer this frame".
+"""
 
 import base64
 import pickle
@@ -7,13 +20,20 @@ import time
 from typing import Dict, List, Optional
 
 import numpy as np
-import requests
 
-from .types import StepResponse, INDEX_TO_ACTION
+from sparx_agency.core.planning.vlas.common.http_client import HttpPolicyClient
+from sparx_agency.core.planning.vlas.internvla_n1.errors import InternVlaError
+from sparx_agency.core.planning.vlas.internvla_n1.types import (
+    INDEX_TO_ACTION,
+    StepResponse,
+)
 
 
-class ModelClient:
+class ModelClient(HttpPolicyClient):
     """HTTP client for InternNav Agent Server API."""
+
+    #: Malformed content raises this; transport failures do not raise at all.
+    error_cls = InternVlaError
 
     DEFAULT_MODEL_SETTINGS = {
         "policy_name": "InternVLAN1_Policy",
@@ -40,46 +60,61 @@ class ModelClient:
 
     def __init__(self, host: str = "localhost", port: int = 8000,
                  timeout: float = 30.0, protocol: str = "http", logger=None):
-        self.base_url = f"{protocol}://{host}:{port}"
-        self.timeout = timeout
-        self.logger = logger
-        self.session = requests.Session()
+        # Pooled: the observation is a base64 pickle of an RGB-D pair, several
+        # times a second, to the same host.
+        HttpPolicyClient.__init__(self, f"{protocol}://{host}:{port}",
+                                  timeout_s=timeout, logger=logger, pooled=True)
         self.agent_name = "internvla_n1"
         self.initialized = False
+        #: What the last :meth:`init_agent` asked for, replayed by :meth:`step`.
+        self._init_args = None
 
-    def _log(self, level: str, msg: str):
-        if self.logger:
-            getattr(self.logger, level, self.logger.info)(msg)
-        else:
-            print(f"[{level.upper()}] {msg}")
+    @property
+    def base_url(self) -> str:
+        """The server root. Spelled ``url`` on the shared client."""
+        return self.url
+
+    @property
+    def timeout(self) -> float:
+        """Per-request timeout. Spelled ``timeout_s`` on the shared client."""
+        return self.timeout_s
 
     def check_health(self) -> bool:
-        try:
-            response = self.session.get(f"{self.base_url}/openapi.json", timeout=5.0)
-            return response.status_code == 200
-        except Exception as e:
-            self._log("warn", f"Health check failed: {e}")
+        attempt = self._attempt("get", "/openapi.json", "health",
+                                timeout_s=5.0, quiet=True)
+        if not attempt.arrived:
+            self._say("warn", f"Health check failed: {attempt.error}")
             return False
+        return attempt.status == 200
 
     def check_agent_exists(self) -> bool:
-        try:
-            url = f"{self.base_url}/agent/{self.agent_name}/reset"
-            response = self.session.post(url, json={"reset_index": None}, timeout=5.0)
-            if response.status_code == 200:
-                self._log("info", f"Agent '{self.agent_name}' already exists")
-                return True
-            return False
-        except Exception:
-            return False
+        # Quiet: before the agent is created this is *expected* to fail, and
+        # once a flight is running it is asked on every step that finds the
+        # client uninitialised. Logging it would bury the one line that matters.
+        attempt = self._attempt("post", f"/agent/{self.agent_name}/reset",
+                                "agent probe", timeout_s=5.0, quiet=True,
+                                json={"reset_index": None})
+        if attempt.status == 200:
+            self._say("info", f"Agent '{self.agent_name}' already exists")
+            return True
+        return False
 
     def init_agent(self, model_name: str = "InternVLA-N1",
                    ckpt_path: str = "", model_settings: Optional[Dict] = None) -> bool:
+        # Remember what we were asked for, so a later re-init asks for the same
+        # thing. `step()` re-initialises when the agent is missing, and it has no
+        # arguments to pass -- so without this it falls back to the signature
+        # default above, which is NOT the name any caller uses. InternNav
+        # registers the agent as `internvla_n1`; `InternVLA-N1` is a 500 with
+        # `KeyError` server-side, forever, on every frame. The failure looks like
+        # a dead server rather than a wrong argument, and the one correct attempt
+        # (the policy's `reset()`) is buried a hundred lines above the retries.
+        self._init_args = (model_name, ckpt_path, model_settings)
         if self.check_agent_exists():
-            self._log("info", "Agent already initialized, skipping")
+            self._say("info", "Agent already initialized, skipping")
             self.initialized = True
             return True
 
-        url = f"{self.base_url}/agent/init"
         final_settings = self.DEFAULT_MODEL_SETTINGS.copy()
         if model_settings:
             final_settings.update(model_settings)
@@ -92,48 +127,63 @@ class ModelClient:
             }
         }
 
-        try:
-            self._log("info", f"Initializing agent '{model_name}'...")
-            response = self.session.post(url, json=payload, timeout=self.timeout * 3)
-
-            if response.status_code == 201:
+        self._say("info", f"Initializing agent '{model_name}'...")
+        # x3: the first init is where the checkpoint actually loads.
+        attempt = self._attempt("post", "/agent/init", "init", quiet=True,
+                                timeout_s=self.timeout_s * 3, json=payload)
+        if not attempt.arrived:
+            if attempt.timed_out():
+                # Treated as success on purpose: the server is loading the
+                # model and will have the agent by the next step. See the
+                # upstream README -- pre-warm rather than rely on this.
+                self._say("warn", "Init timeout (model loading)")
                 self.initialized = True
-                data = response.json()
-                self.agent_name = data.get("agent_name", self.agent_name)
-                self._log("info", f"Agent initialized: {self.agent_name}")
                 return True
-            else:
-                self._log("error", f"Init failed: HTTP {response.status_code}")
-                if "already" in response.text.lower() or response.status_code == 409:
-                    self.initialized = True
-                    return True
-                return False
-        except requests.exceptions.Timeout:
-            self._log("warn", "Init timeout (model loading)")
+            self._say("error", f"Init error: {attempt.error}")
+            return False
+
+        response = attempt.response
+        if response.status_code == 201:
+            self.initialized = True
+            data = response.json()
+            self.agent_name = data.get("agent_name", self.agent_name)
+            self._say("info", f"Agent initialized: {self.agent_name}")
+            return True
+        self._say("error", f"Init failed: HTTP {response.status_code}")
+        if "already" in response.text.lower() or response.status_code == 409:
             self.initialized = True
             return True
-        except Exception as e:
-            self._log("error", f"Init error: {e}")
-            return False
+        return False
+
+    def _reinit(self) -> bool:
+        """Re-run the last :meth:`init_agent`, or the default if there was none.
+
+        The server can lose its agent under a running client -- it restarted, or
+        it was never up when the policy first called ``reset()``. Recovering is
+        right; recovering with *different arguments* is not, and that is what a
+        bare ``init_agent()`` here did.
+        """
+        if self._init_args is None:
+            return self.init_agent()
+        model_name, ckpt_path, model_settings = self._init_args
+        return self.init_agent(model_name=model_name, ckpt_path=ckpt_path,
+                               model_settings=model_settings)
 
     def reset(self, reset_index: Optional[List[int]] = None) -> bool:
-        url = f"{self.base_url}/agent/{self.agent_name}/reset"
-        try:
-            response = self.session.post(url, json={"reset_index": reset_index}, timeout=self.timeout)
-            return response.status_code == 200
-        except Exception as e:
-            self._log("warn", f"Reset error: {e}")
+        attempt = self._attempt("post", f"/agent/{self.agent_name}/reset", "reset",
+                                quiet=True, json={"reset_index": reset_index})
+        if not attempt.arrived:
+            self._say("warn", f"Reset error: {attempt.error}")
             return False
+        return attempt.status == 200
 
     def step(self, rgb: np.ndarray, instruction: str,
              depth: Optional[np.ndarray] = None) -> StepResponse:
         if not self.initialized:
             if self.check_agent_exists():
                 self.initialized = True
-            elif not self.init_agent():
+            elif not self._reinit():
                 return StepResponse(success=False, error="Agent not initialized")
-
-        url = f"{self.base_url}/agent/{self.agent_name}/step"
 
         obs = [{
             'rgb': rgb,
@@ -142,23 +192,21 @@ class ModelClient:
         }]
         encoded_obs = base64.b64encode(pickle.dumps(obs)).decode('utf-8')
 
-        try:
-            start_time = time.time()
-            response = self.session.post(
-                url, json={"observation": encoded_obs},
-                timeout=self.timeout, headers={'Content-Type': 'application/json'}
-            )
-            inference_time = (time.time() - start_time) * 1000
+        start_time = time.time()
+        attempt = self._attempt("post", f"/agent/{self.agent_name}/step", "step",
+                                quiet=True, json={"observation": encoded_obs},
+                                headers={'Content-Type': 'application/json'})
+        inference_time = (time.time() - start_time) * 1000
 
-            if response.status_code == 200:
-                return self._parse_response(response.json(), inference_time)
-            else:
-                return StepResponse(success=False, error=f"HTTP {response.status_code}",
-                                   inference_time_ms=inference_time)
-        except requests.exceptions.Timeout:
-            return StepResponse(success=False, error=f"Timeout after {self.timeout}s")
-        except Exception as e:
-            return StepResponse(success=False, error=str(e))
+        if not attempt.arrived:
+            if attempt.timed_out():
+                return StepResponse(success=False,
+                                    error=f"Timeout after {self.timeout_s}s")
+            return StepResponse(success=False, error=str(attempt.error))
+        if attempt.status == 200:
+            return self._parse_response(attempt.response.json(), inference_time)
+        return StepResponse(success=False, error=f"HTTP {attempt.status}",
+                            inference_time_ms=inference_time)
 
     def _parse_response(self, data: Dict, inference_time: float) -> StepResponse:
         # `None`, NOT 0. Starting at 0 means every response this parser cannot
@@ -172,12 +220,12 @@ class ModelClient:
         waypoint = None
 
         # Debug: log response structure (use debug level to avoid flooding)
-        self._log("debug", f"Server response keys: {list(data.keys())}")
+        self._say("debug", f"Server response keys: {list(data.keys())}")
         for k, v in data.items():
             if k != "action":
-                self._log("debug", f"  response['{k}'] = {repr(v)[:200]}")
+                self._say("debug", f"  response['{k}'] = {repr(v)[:200]}")
             elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
-                self._log("debug", f"  response['action'][0] keys: {list(v[0].keys())}")
+                self._say("debug", f"  response['action'][0] keys: {list(v[0].keys())}")
 
         try:
             if "action" in data:
@@ -201,10 +249,10 @@ class ModelClient:
                     # A real index the map has never heard of. Say so rather
                     # than folding it into STOP; the caller can then treat it
                     # as "no usable decision" instead of "we have arrived".
-                    self._log("warn", f"unknown action index {action_index}")
+                    self._say("warn", f"unknown action index {action_index}")
                     action = "UNKNOWN"
         except Exception as e:
-            self._log("warn", f"Parse error: {e}")
+            self._say("warn", f"Parse error: {e}")
             action_index = None
 
         if action_index is None:
@@ -228,9 +276,9 @@ class ModelClient:
             if isinstance(action_data, list) and action_data and isinstance(action_data[0], dict):
                 look_down = bool(action_data[0].get("look_down"))
         if waypoint:
-            self._log("debug", f"S2 waypoint: ({waypoint[0]}, {waypoint[1]})")
+            self._say("debug", f"S2 waypoint: ({waypoint[0]}, {waypoint[1]})")
         else:
-            self._log("debug", "No S2 waypoint this step")
+            self._say("debug", "No S2 waypoint this step")
 
         return StepResponse(action=action, action_index=action_index, waypoint=waypoint,
                            waypoint_step=waypoint_step, look_down=look_down,

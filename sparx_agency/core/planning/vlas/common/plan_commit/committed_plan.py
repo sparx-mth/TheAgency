@@ -18,6 +18,7 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+from sparx_agency.core.common.math.se2 import body_to_world_xy
 from sparx_agency.core.planning.vlas.common.plan_commit.progress import (
     DEGENERATE_M,
     cumulative_arc,
@@ -285,11 +286,7 @@ def anchor_plan(trajectory: np.ndarray, pose: Sequence[float], issued_s: float,
     if not (np.isfinite(at_x) and np.isfinite(at_y) and np.isfinite(at_yaw)):
         raise ValueError("anchor pose must be finite; got (%r, %r, %r)"
                          % (at_x, at_y, at_yaw))
-    cos, sin = np.cos(at_yaw), np.sin(at_yaw)
-    world = np.stack([
-        at_x + body[:, 0] * cos - body[:, 1] * sin,
-        at_y + body[:, 0] * sin + body[:, 1] * cos,
-    ], axis=1)
+    world = body_to_world_xy(body, at_x, at_y, at_yaw)
     anchored = np.concatenate([np.array([[at_x, at_y]]), world], axis=0)
     return CommittedPlan(anchored, pose, issued_s,
                          commit_index_for(body.shape[0], fraction))

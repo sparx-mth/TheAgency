@@ -48,13 +48,15 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Empty, Int8
 
+from sparx_agency.core.common.math.se3 import yaw_from_quaternion
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _AREAS = os.path.join(_HERE, os.pardir, "config", "hospital_areas.yaml")
 
 
 def _yaw_from_quat(q):
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    """Yaw (radians, CCW from +x) from a geometry_msgs quaternion."""
+    return yaw_from_quaternion((q.x, q.y, q.z, q.w))
 
 
 class Ferry(Node):
