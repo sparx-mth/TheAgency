@@ -28,6 +28,13 @@ doing:
   aircraft at zero forward speed for ever, and a policy asking from a
   *stationary* frame gets the same answer every time -- a closed loop that ate
   seventy seconds of the last real flight.
+* **flies through a doorway its route goes through.** The depth corridor used
+  to follow the NOSE, so a holonomic tracker crossing an opening with its nose
+  off-axis swung the corridor onto the jamb and refused a path drawn straight
+  through the middle of the gap.
+* **puts the System-2 goal in the world.** A pixel goal redrawn at its original
+  coordinate is a sticker: the aircraft turns, the scene slides past, and on
+  screen the goal never moves however often the model changes it.
 
 Usage::
 
@@ -68,6 +75,25 @@ from std_msgs.msg import Bool, Float32, Int8, String
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *([os.pardir] * 5)))
 _CONFIG = os.path.join(_REPO_ROOT, "sparx_agency", "robots", "SJTU", "config",
                        "vla", "internvla_n1.yaml")
+
+
+def _dip_target():
+    """The altitude a look-down is configured to reach, and the slack allowed.
+
+    Read from the binding YAML rather than written here, because the dip is
+    deliberately floored (`look_down_min_altitude_m`) to keep the aircraft above
+    the furniture -- and a test that hard-codes the old 0.70 m fails the day
+    that floor does its job, which is exactly the wrong signal.
+    """
+    with open(_CONFIG) as handle:
+        cfg = yaml.safe_load(handle)
+    pp, foll = cfg.get("policy_params", {}), cfg.get("follower", {})
+    cruise = float(foll.get("target_altitude_m", 1.2))
+    dip = abs(float(pp.get("look_down_dip_m", 0.5)))
+    floor = float(pp.get("look_down_min_altitude_m", 0.0))
+    if floor > 0.0:
+        dip = min(dip, max(0.0, cruise - floor))
+    return cruise - dip, float(pp.get("look_down_tolerance_m", 0.15))
 
 
 # ── the scripted model server ────────────────────────────────────────────
@@ -168,7 +194,8 @@ class FakeDrone(Node):
     exists to wait out, so a fake that stops instantly would prove nothing.
     """
 
-    def __init__(self, x=0.0, y=0.0, z=1.2, yaw=0.0, wall_x=None, tau=0.35):
+    def __init__(self, x=0.0, y=0.0, z=1.2, yaw=0.0, wall_x=None, tau=0.35,
+                 door=None):
         super().__init__("fake_drone")
         self.x, self.y, self.z, self.yaw = float(x), float(y), float(z), float(yaw)
         self.vx = self.vy = self.vz = self.wz = 0.0
@@ -181,6 +208,10 @@ class FakeDrone(Node):
         # real wall does and the only way to tell a working reflex from a
         # rotating one.
         self.wall_x = wall_x
+        # A wall at world x with a gap: ``(x, half_width)``. The hospital's
+        # doorways are 0.93 m clear against a 0.70 m corridor, so the opening is
+        # passable with 0.115 m to spare -- if the corridor is pointed at it.
+        self.door = door
         self.travelled = 0.0
         self._last = time.monotonic()
         sensor = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -233,6 +264,20 @@ class FakeDrone(Node):
         msg.data = 1
         self._state.publish(msg)
 
+    def _door_depth(self, size=600, fx=390.642735, cx=300.0, room=6.0):
+        """Depth of a wall with a gap in it, as this pose sees it."""
+        x0, half = self.door
+        u = np.arange(size, dtype=np.float32)[None, :].repeat(size, 0)
+        right = np.arctan((u - cx) / fx)
+        world_right = right - self.yaw          # relative to the wall normal
+        gap = x0 - self.x
+        if gap <= 0.05:
+            return np.full((size, size), room, np.float32)
+        hit = self.y + gap * np.tan(-world_right)
+        d = np.where(np.abs(hit) < half, room,
+                     gap / np.maximum(0.05, np.cos(world_right)))
+        return d.astype(np.float32)
+
     def _camera(self):
         rgb = Image()
         rgb.height = rgb.width = 600
@@ -241,7 +286,9 @@ class FakeDrone(Node):
         rgb.data = bytes(600 * 1800)
         self._rgb.publish(rgb)
         depth = np.full((600, 600), 10.0, dtype=np.float32)
-        if self.wall_x is not None:
+        if self.door is not None:
+            depth = self._door_depth()
+        elif self.wall_x is not None:
             ahead = math.cos(self.yaw)
             gap = self.wall_x - self.x
             if ahead > 0.05 and gap > 0.0:
@@ -261,11 +308,12 @@ class Watcher(Node):
     def __init__(self, drone):
         super().__init__("dry_run_watcher")
         self.drone = drone
-        self.samples = []       # (t, phase, x, y, yaw, held, speed, z)
+        self.samples = []       # (t, phase, x, y, yaw, held, speed, z, blocked)
         self.routes = []        # (t, points, metres)
         self.holds = []         # (t, bool)
         self.yaw_goals = []     # (t, heading)
         self.info = {}
+        self.goal_worlds = []
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -283,7 +331,8 @@ class Watcher(Node):
     def _sample(self):
         d = self.drone
         self.samples.append((self._t(), self.info.get("phase", ""), d.x, d.y, d.yaw,
-                             bool(self.info.get("held")), math.hypot(d.vx, d.vy), d.z))
+                             bool(self.info.get("held")), math.hypot(d.vx, d.vy), d.z,
+                             bool(self.info.get("blocked"))))
 
     def _on_path(self, msg):
         pts = np.array([[p.pose.position.x, p.pose.position.y] for p in msg.poses])
@@ -295,7 +344,10 @@ class Watcher(Node):
         try:
             self.info = json.loads(msg.data)
         except ValueError:
-            pass
+            return
+        gw = self.info.get("goal_world")
+        if gw and (not self.goal_worlds or self.goal_worlds[-1] != gw):
+            self.goal_worlds.append(gw)
 
     def _on_hold(self, msg):
         self.holds.append((self._t(), bool(msg.data)))
@@ -324,20 +376,37 @@ def _config(server_port, overrides=None):
 SCENARIOS = {
     "curve": dict(
         script=[reply(1, trajectory=curve(2.0, 20.0))],
-        think_s=2.5, seconds=26.0, wall_x=None,
-        blurb="a 2 m curve, every decision. Watch it fly the whole thing."),
+        think_s=7.0, seconds=60.0, wall_x=None, door=None,
+        blurb="a 2 m curve every decision, 7 s of thinking. It must fly them."),
     "turn": dict(
         script=[reply(2), reply(1, trajectory=curve(1.5, 0.0)),
                 reply(3), reply(1, trajectory=curve(1.5, 0.0))],
-        think_s=2.0, seconds=34.0, wall_x=None,
+        think_s=2.0, seconds=34.0, wall_x=None, door=None,
         blurb="TURN_LEFT, curve, TURN_RIGHT, curve. The turns must be rotations."),
     "blocked": dict(
         script=[reply(1, trajectory=curve(2.0, 0.0))],
-        think_s=1.5, seconds=50.0, wall_x=0.5,
+        think_s=1.5, seconds=50.0, wall_x=0.5, door=None,
+        # Genuinely blocked immediately before most thinks, so the expiry window
+        # overlaps them. What is being checked here is that it expires at all.
+        stale_blocked_max=0.60,
         blurb="a wall 0.5 m ahead and a policy that will only say forward."),
+    "doorway": dict(
+        # OFF-AXIS ON PURPOSE. Started 0.7 m to the right of the opening with a
+        # curve that bends back toward it, so the aircraft crosses the gap while
+        # its nose is still catching up -- which is precisely the geometry a
+        # nose-aligned corridor refused.
+        script=[reply(1, trajectory=curve(2.5, 25.0), pixel_goal=(300, 300))],
+        think_s=1.5, seconds=45.0, wall_x=None, door=(2.0, 0.465),
+        # Started so the bent curve crosses the wall plane at the MIDDLE of the
+        # gap while the nose is still catching up. Off-centre by even 0.12 m and
+        # the jamb enters the corridor legitimately -- the airframe is 0.63 m
+        # wide in a 0.93 m door, so the route's own margin is +-0.115 m and no
+        # reflex can give it back.
+        start=(0.0, -0.36),
+        blurb="a 0.93 m doorway 2 m ahead, crossed off-axis through the middle."),
     "lookdown": dict(
         script=[reply(-1, look_down=True), reply(1, trajectory=curve(2.0, 10.0))],
-        think_s=1.5, seconds=30.0, wall_x=None,
+        think_s=1.5, seconds=30.0, wall_x=None, door=None,
         blurb="a look-down, then a curve. The dip must happen from a standstill."),
 }
 
@@ -363,7 +432,9 @@ def run(name, args):
     # on the node afterwards. The fake drone and the watcher simply never
     # declare it and are unaffected.
     rclpy.init(args=["--ros-args", "-p", "config_file:=%s" % config])
-    drone = FakeDrone(wall_x=spec["wall_x"])
+    start = spec.get("start", (0.0, 0.0))
+    drone = FakeDrone(x=start[0], y=start[1],
+                      wall_x=spec["wall_x"], door=spec.get("door"))
     watcher = Watcher(drone)
     policy = N1PolicyNode()
     follower = TrajectoryFollowerNode()
@@ -417,6 +488,10 @@ def verdict(name, drone, watcher, server, args):
         "%s=%.0f%%" % (k or "-", 100.0 * v / max(1, len(samples)))
         for k, v in sorted(phases.items(), key=lambda kv: -kv[1])))
     print("    moving while held %d of %d samples" % (len(moving_while_held), len(samples)))
+    print("    blocked            %.0f%% of samples, %.0f%% of stationary ones"
+          % (100.0 * sum(s[8] for s in samples) / max(1, len(samples)),
+             100.0 * sum(s[8] for s in samples if s[1] in ("thinking", "settling", "dipping"))
+             / max(1, sum(1 for s in samples if s[1] in ("thinking", "settling", "dipping")))))
     if args.verbose:
         for t, held in watcher.holds:
             print("      %6.2fs hold=%s" % (t, held))
@@ -432,6 +507,26 @@ def verdict(name, drone, watcher, server, args):
                                  ("  -- " + detail) if detail else ""))
 
     check("the model was asked at all", server.calls >= 2)
+    # BLOCKED MUST NOT OUTLIVE THE ATTEMPT. The depth reflex has an opinion only
+    # while the aircraft is translating; published as a state it used to survive
+    # every hold, rotation and dip that followed, so a recording said "BLOCKED
+    # settling" about a drone that had not tried to move for half a minute.
+    # Measured across five hospital runs before the fix: true for 4-18% of
+    # settling samples and up to 62% of turning samples.
+    stationary = [s for s in samples if s[1] in ("thinking", "settling", "dipping")]
+    stale = [s for s in stationary if s[8]]
+    # The bound is per scenario, because "blocked while stationary" is not
+    # always wrong: in the `blocked` scenario the aircraft is genuinely against
+    # a wall right up to the moment it stops to think, and the flag's expiry
+    # window then legitimately overlaps the first part of the think. What must
+    # never happen is the flag surviving the whole of it, which is what it used
+    # to do -- across the five hospital runs it reported blocked through 62% of
+    # *turning* samples, minutes after the last attempt.
+    limit = SCENARIOS[name].get("stale_blocked_max", 0.10)
+    check("blocked does not outlive the attempt",
+          len(stale) <= limit * max(1, len(stationary)),
+          "%d of %d stationary samples still reported blocked (limit %.0f%%)"
+          % (len(stale), len(stationary), 100 * limit))
     # The aircraft must be still while it thinks. A handful of samples above the
     # threshold is the coast at the start of a hold; a sustained count is the
     # bug this whole change exists to fix.
@@ -443,8 +538,14 @@ def verdict(name, drone, watcher, server, args):
         check("routes are curves, not stubs",
               bool(routes) and min(r[2] for r in routes) > 1.0,
               "shortest %.2f m" % (min(r[2] for r in routes) if routes else 0.0))
-        check("it actually flew them", drone.travelled > 2.0,
-              "%.2f m" % drone.travelled)
+        # FLOWN, not merely committed. A 7 s think is realistic for System 2,
+        # and a deadline stamped before the inference is already part-spent when
+        # the aircraft is handed the route: measured in the hospital, 19 m of
+        # route committed and 2.3 m of ground covered. The test is the ratio.
+        committed_m = sum(r[2] for r in routes)
+        check("and flew most of what it committed",
+              drone.travelled > 0.6 * committed_m,
+              "flew %.1f m of %.1f m committed" % (drone.travelled, committed_m))
     if name == "turn":
         check("turns were requested as rotations", len(watcher.yaw_goals) >= 2)
         # The EXCURSION, not the net change: this script turns left and then
@@ -475,10 +576,24 @@ def verdict(name, drone, watcher, server, args):
         check("and looked somewhere else", swing > 20.0, "%.1f deg swing" % swing)
         check("and got moving again", drone.travelled > 0.8,
               "%.2f m flown" % drone.travelled)
+    if name == "doorway":
+        x0, _ = drone.door
+        check("it went through the opening", drone.x > x0 + 0.3,
+              "reached x=%.2f, door at %.2f" % (drone.x, x0))
+        check("without a hard block", watcher.info.get("escapes", 0) == 0,
+              "escapes=%s" % watcher.info.get("escapes"))
+        check("and the goal was placed in the world", bool(watcher.goal_worlds),
+              "goal_world=%s" % (watcher.goal_worlds[:1] or "never published"))
     if name == "lookdown":
         low = min(s[7] for s in samples)
-        check("the aircraft dipped for the low frame", low <= 0.85,
-              "lowest %.2f m" % low)
+        target, tol = _dip_target()
+        # ARRIVAL is what is being tested, not depth. The dip used to stall
+        # around 0.82 m because the altitude ramp outran what a proportional
+        # hold could track (rate / kp = 0.29 m against a 0.35 m release band),
+        # and the run reported "never reached" three times in some flights.
+        check("the aircraft reached the dip altitude",
+              low <= target + tol,
+              "lowest %.2f m, asked for %.2f m (+%.2f tolerance)" % (low, target, tol))
         check("and then flew a curve", bool(routes))
     return ok
 

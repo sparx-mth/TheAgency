@@ -316,6 +316,125 @@ frame gets the same answer for ever. Measured before any of this: seventy of a
 ninety-second flight pinned 0.43 m from a wall, re-committing a 0.25 m forward
 step every twelve seconds.
 
+### 5. The goal is a place, not a pixel
+
+System 2 names a **pixel in the frame it saw**. Redrawn at that coordinate on
+every later frame it is a sticker: the aircraft turns, the scene slides past,
+and the ring sits still -- so on screen the goal "never updates", however often
+the model actually changes it. Measured over a 240 s run: the goal changed five
+times and the marker moved zero times.
+
+The policy node now back-projects it once, with the depth it was chosen against
+and the pose it was chosen from
+(`core/planning/vlas/common/pixel_geometry`), and publishes it as a **world
+point** (`goal_world` in `/n1/info`). The recorder re-projects that into every
+frame from the live pose, so the marker stays on the place the model chose,
+crosses the image as the aircraft turns, and becomes an edge arrow when it
+leaves the view. A goal with no usable depth is not placed at all -- an invented
+range puts the marker somewhere the model never meant -- and falls back to the
+old fixed coordinate, drawn dim and labelled.
+
+It is drawn on the map as well, because the two views answer different
+questions: the camera says whether the aircraft is *looking* at the goal, the
+map says whether the route is *going* there.
+
+### 6. The depth corridor follows the travel direction, not the nose
+
+This tracker is holonomic, so "where the nose points" and "where the aircraft is
+going" are different, and the brake was protecting the first. A drone crossing a
+0.93 m doorway with its nose 15-25 deg off swings a nose-aligned corridor onto
+the jamb and reads **blocked** while the path it is actually flying is clear --
+measured on synthetic geometry at exactly the hospital's dimensions: nearest
+0.72 m and a near-stop for the nose corridor, 4.0 m and full cruise for the
+travel corridor, same frame.
+
+`allowed_speed_along(depth, bearing)` sweeps the corridor along `atan2(vy, vx)`
+and measures range **along that ray**. At a bearing of zero it is exactly the
+old test. A bearing outside what the camera can see comes back `certified=False`
+and is answered with the nose's number *and* capped, because a corridor nobody
+has looked at holds no returns and "no returns" means "clear".
+
+Two smaller things fell out of it: a pure sideways command used to skip the
+brake entirely (`vx <= 0` is not "not moving" on a holonomic platform), and the
+scale factor divided by `vx` rather than the speed, which over-braked anything
+mostly lateral.
+
+**What this does not fix, and cannot:** the airframe is 0.63 m wide and eighteen
+of the hospital's twenty-six doorways are 0.93 m clear, so the route's own
+lateral margin through one is **+-0.115 m**. A route that grazes a jamb closer
+than that is refused correctly. What was a bug was the *approach angle* eating
+into that budget on top of it.
+
+### 7. "Blocked" no longer outlives the attempt
+
+The reflex has an opinion only while the aircraft is translating. The flag was
+set only there and never cleared, so once true it stayed true through every
+hold, rotation and look-down that followed: measured across the five hospital
+runs, `blocked` was reported for 4-18% of *settling* samples and up to 62% of
+*turning* samples, none of which the brake had any opinion about. That is the
+"BLOCKED settling" on screen -- a memory published as a state.
+
+There are now two flags with two lifetimes: `_blocked` is live, published, and
+expires (`follower.blocked_hold_s`); `_blocked_recent` is sticky and changes
+only on a real evaluation, so the break-contact escape can still ask "could it
+not fly the route it just gave up on?" after a hold. The policy node latches its
+own copy across a commitment, which is the question its escape counter wants.
+
+### 8. System 2 decides again after every curve
+
+`policy_params.sys2_max_forward_step: 1`. This is how many System-1 steps the
+agent plays out before asking System 2 again, and with `sys1_continuous_only`
+on **every one of those steps is a whole curve flown to its end**. At 4 the
+pixel goal was fixed across four of them.
+
+Measured in one flight: a single goal drove five consecutive decisions over
+which the aircraft flew 5.1 m and rotated **160°**, ending at a pose where that
+pixel pointed nowhere in the frame — and System 1 dutifully produced a
+trajectory from it. The route looked plausible on screen and went somewhere
+meaningless, which is the worst kind of wrong.
+
+At 1 the loop is: look, decide, fly the curve to its end, stop, **look again**.
+Every trajectory is computed from a goal chosen at the pose the aircraft is
+actually at. It costs a System-2 pass per curve — 3–8 s per 1–2 m.
+
+### 9. The hard block was sized for a different camera
+
+`brake.margin_m` and `brake.hard_block_d_m` came from the FALCON XTEND, whose
+depth camera cannot see inside ~0.95 m: the brake had to stop the aircraft
+before its own blind zone. **This camera's near clip is 0.10 m**
+(`camera_front_depth_600x600.yaml`, `range_min_m`), so there is no blind zone,
+and 0.70 m was simply an early stop.
+
+It was also why the aircraft could not get through a door. The hospital's
+openings are 0.96 m; passing one puts a jamb 0.40–0.50 m from the corridor
+centre, and at 0.70 m that is a dead stop with the aircraft still short of the
+threshold — measured stops at 0.56, 0.60, 0.65 and 0.70 m, none of them in
+contact with anything, each one ending an entry. That is the "BLOCKED flying"
+seen on screen with a perfectly good trajectory drawn on the map.
+
+Re-sized from the stopping distance instead: 0.30 m/s with `brake_decel: 0.8`
+and `react_s: 0.30` needs 0.15 m to stop, so `margin_m: 0.25` and
+`hard_block_d_m: 0.35` — which leaves 0.25 m of air in front of the nose and
+lets the aircraft creep past a jamb at 0.40 m instead of stopping dead at 0.70.
+
+### 10. The commitment's clock started before the inference
+
+`now` was read at the top of the tick, then the node blocked for **seconds**
+inside one HTTP call, then stamped the commitment with that stale `now`. Every
+deadline was therefore already part-spent at the moment the aircraft was handed
+the route: a 2 m curve is allowed `arc / speed + grace` = 10.6 s, and seven of
+those were gone before it started flying.
+
+It stayed hidden while System 2 was asked once every four curves. Asking it
+after **every** curve (fix 8 above) made it dominant: measured in the next
+campaign, **19 m of route committed and 2.3 m of ground covered** — the routes
+were right, the aircraft simply never got to fly them.
+
+The pose is still correct (the aircraft is held and has not moved); only the
+clock is wrong. `dry_run.py`'s `curve` scenario now thinks for 7 s like the real
+thing and asserts the ratio: **7.8 m flown of 8.0 m committed**, against ~12%
+before.
+
 ### And one bug the dry run found
 
 `commit.expected_speed_mps` and `commit.commit_grace_s` were documented in the
@@ -655,6 +774,78 @@ the aircraft flies confidently to y = 5.00 and hovers there for ever with health
 odometry and no error anywhere. It is a ferry, not a planner, it confirms takeoff
 and aborts rather than descending below wall height if it could not cross, and it
 must never run while the follower is up: both publish `cmd_vel`.
+
+## What ten flights into a room that was never in view taught
+
+Two campaigns of five runs each, same instruction, and the drone entered the
+room twice -- both times by accident. The investigation that followed found one
+siting error of mine and three real defects, in that order of importance.
+
+### The door the camera showed was a closed panel
+
+The first start pose was chosen *because* the drone's camera plainly showed a
+door on its right. It is a **closed door**: clearance 0.05 m on the flight-band
+map. The office block's north side has exactly two openings this airframe can
+pass -- x = −2.85 and x = +2.75, both 0.96 m -- and from that pose the nearer
+one lay at **92° to the right**, outside a 75° camera.
+
+So the instruction was true of the room and false of everything the model could
+see. It turned right, aimed at the door-shaped thing, and hit a wall; five runs
+in a row. **Verify a start pose against the occupancy map, not only against the
+picture** -- a rendered door is not an opening.
+
+`config/hospital_areas.yaml` now records, per area, the opening, the table, the
+stand-off and the route's bottleneck, all measured.
+
+### The map most of this was judged on was the wrong height band
+
+`robots/SJTU/maps/hospital.yaml` is built over **0.30–2.00 m** -- everything a
+drone at 1.2 m *could* hit. For deciding what it can fly *through*, that counts
+desks and chair seats it flies over as walls. Rebuild it for the band around the
+cruise altitude before drawing conclusions:
+
+```bash
+.venv/bin/python -m sparx_agency.tasks.mapping.gazebo_world_occupancy.build_map \
+    --world $SJTU_PROJECT_DIR/sjtu_drone/hospital.world --output-dir /tmp/band \
+    --name hospital_band --z-min 0.85 --z-max 1.55 \
+    --search-path $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/models \
+    --search-path $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/fuel_models
+```
+
+Over the two office bays: **71%** of the floor is flyable at 1.20 m, **45%** at
+0.70 m. Which leads directly to the next one.
+
+### The look-down was flying the aircraft into the furniture
+
+The dip was 0.5 m, 1.20 → 0.70 m. The desks are 0.75 m tall. So every look-down
+took the aircraft out of the band it can navigate in and down among the
+furniture, to take a frame it then climbed away from — and the model was not
+asking for a descent in the first place. Upstream's own prompt says it in as
+many words: *"you need to TILT DOWN (↓) by 30 degrees then output the next
+waypoint's coordinates"*. A translation is not a rotation, and this airframe's
+camera is fixed, so the dip is a proxy and a poor one. It is now 0.25 m with a
+hard floor at `look_down_min_altitude_m`, and can be set to 0 to send the cruise
+frame unchanged.
+
+### The dip never arrived, and the config said why it would
+
+`altitude_offset_rate_m_s: 0.35` against `altitude_kp: 1.2`. A proportional hold
+tracks a ramp with a steady-state error of `rate / kp` = **0.29 m**, which is
+83% of `altitude_release_m` (0.35) before the plant's 0.18 s delay and 0.5 s lag
+are counted. So the aircraft overshot the ramping command, the follower called
+`altitude lost`, climbed against its own ramp, and the descent stalled around
+0.82 m: **"look-down: never reached 0.70 m" appeared in all five runs, three
+times in some.** The comment beside that knob claimed the opposite. Now 0.20 /
+1.6 = 0.125 m of lag.
+
+### And the room is genuinely tight
+
+The widest flyable line from the spine to either AdjTable bottlenecks at
+**0.90 m** for a 0.63 m airframe: ±0.13 m of margin. `cruise_speed` went 0.40 →
+0.30 (the plant travels 0.2 m before it responds to a command at 0.40) and
+`lookahead_m` 0.8 → 0.5 (pure pursuit cuts the inside of a turn by about
+`lookahead² / 8r`, which is 0.08 m at 0.8 and 0.03 m at 0.5). No reflex can give
+back margin the building does not have.
 
 ## Measured: five runs, one instruction
 

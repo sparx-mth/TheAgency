@@ -41,6 +41,9 @@ also does not surface the System-2 pixel goal. Two patch sets fix that:
 * **PATCH 7 (continuous only).** Stop queueing the discretisation of a curve
   that has already been handed over. Opt-in, via a `sys1_continuous_only` model
   setting; off restores upstream behaviour exactly.
+* **PATCH 8 (one turn per look).** Drop the rest of a System-2 turn batch after
+  the first turn, so the next step looks again. Opt-in via
+  `sys2_one_turn_per_look`.
 * **PATCH 6 (look-down).** Say when a look-down has been requested. The action
   index cannot carry it: the agent overwrites the look-down action with `-1`,
   and `-1` is also what an empty System-1 list reports, so on the wire the two
@@ -158,6 +161,54 @@ already exists is a no-op server-side, so this flag (and the intrinsics, and
 `sys2_max_forward_step`) only take effect on the init that *creates* the agent.
 Restart the server after changing any of them; the client now logs a warning
 rather than letting a stale agent look like a configured one.
+
+### PATCH 8 — one turn per look
+
+`internvla_n1_agent.py` (vendored here), in the discrete branch of `step()`.
+
+Asked about a frame it cannot name a waypoint in, System 2 answers with a
+**batch** of turns -- `→→→→`, four right turns, 60 degrees -- and upstream
+returns them one per step without looking again. Measured against the live model
+on a real corridor frame with an open door 27 degrees to the right: *every*
+wording of the instruction that names a direction gets the same four arrows.
+
+Sixty degrees of open-loop rotation overshoots whatever it was turning toward,
+so the next batch is four LEFT turns and the aircraft hunts. Measured across two
+hospital campaigns: **69% and 71% of all rotations were decided from a look that
+had already been spent** — 124 of 177 — and the doorway was never entered.
+
+```python
+else:
+    self.look_down = False
+    if self.sys2_one_turn_per_look and output['action'][0] in (2, 3):
+        with self.s2_output_lock:                 # PATCH 8
+            self.s2_output.output_action = None
+            self.s2_output.output_latent = None
+            self.s2_output.output_pixel = None
+```
+
+Clearing all three is what makes `should_infer_s2` fire on the next step. Turns
+only, deliberately: a turn is the one action that invalidates its own
+observation — rotating changes what is in view, advancing barely changes the
+bearing to it — and applying this to a queued forward step would cost a
+System-2 pass per 0.25 m.
+
+It costs a System-2 pass per 15 degrees. That is the price of closing the loop
+on the axis that decides where the camera points.
+
+### The agent says which patches it is running
+
+`__init__` prints one line:
+
+```
+[PATCHES] sys1_continuous_only=True sys2_one_turn_per_look=True sys2_max_forward_step=4
+```
+
+**Read it after every server start.** `/agent/init` against an agent that
+already exists is a server-side no-op, so a settings change reaches a running
+server and is silently ignored, and the flight then behaves like a
+configuration no file on disk describes. Two separate misdiagnoses here were
+caused by exactly that; this line ends the question in one grep.
 
 ### 2. Keep System 1 out of the 4-bit quantiser
 

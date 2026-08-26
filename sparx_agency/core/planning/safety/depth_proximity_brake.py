@@ -8,10 +8,19 @@ braking only on the map flies through that gap in its knowledge. Measured
 in the hospital campaign: every remaining strike of run 009 was one thin
 human, approached four times, visible in raw depth at 2.8 m each time.
 
-This class answers one question per frame: how fast may the aircraft fly
-FORWARD (along the camera axis) given the closest depth return inside the
-flight corridor? Everything else -- lateral motion, mapped obstacles behind
-the aircraft -- belongs to the voxel gate; the two compose.
+This class answers one question per frame: how fast may the aircraft fly given
+the closest depth return inside the corridor it is about to sweep? Everything
+else -- mapped obstacles behind the aircraft -- belongs to the voxel gate; the
+two compose.
+
+**The corridor follows the direction of TRAVEL, not the nose.** On a holonomic
+platform those are different, and the difference is not academic: a drone
+crossing a 0.93 m doorway with its nose 20 deg off swings a nose-aligned
+corridor onto the jamb and reads "blocked" while the path it is actually flying
+is clear. Measured in the hospital: a route drawn straight through the middle of
+an opening, refused at 0.40 m, repeatedly. :meth:`allowed_speed_along` takes the
+travel bearing; :meth:`allowed_forward_speed` is that with a bearing of zero and
+is kept because a one-axis platform only ever has one.
 
 Pure numpy 1.17 / Python 3.8; imported inside the Noetic FALCON container.
 """
@@ -84,27 +93,42 @@ class DepthProximityBrake(object):
             self._shape = shape
         return self._u, self._v
 
-    def corridor_min_depth(self, depth_m):
-        # type: (np.ndarray) -> object
-        """Closest valid return inside the flight corridor, or None.
+    def corridor_min_depth(self, depth_m, bearing_rad=0.0):
+        # type: (np.ndarray, float) -> object
+        """Closest valid return inside the swept corridor, or None.
 
-        A pixel is in the corridor when its back-projected lateral offset is
-        within ``corridor_halfwidth_m`` and its vertical offset within
-        ``corridor_halfheight_m`` -- i.e. the cross-section the airframe
-        sweeps if it flies straight ahead.
+        A pixel is in the corridor when the point it back-projects to lies
+        within ``corridor_halfwidth_m`` of the **travel ray** and within
+        ``corridor_halfheight_m`` of the camera plane vertically -- i.e. inside
+        the cross-section the airframe sweeps flying along ``bearing_rad``. The
+        distance returned is measured ALONG that ray, not along the optical
+        axis, so it is the range the aircraft actually has to stop in.
+
+        At ``bearing_rad = 0`` this is exactly the old optical-axis test: the
+        along-track distance is the depth and the cross-track offset is the
+        lateral offset.
+
+        Args:
+            depth_m: ``(H, W)`` metric depth.
+            bearing_rad: direction of travel, radians CCW from the nose (body
+                FLU, so positive is left).
         """
         cfg = self._cfg
         s = cfg.stride
         d = depth_m[::s, ::s]
         u, v = self._grids(depth_m.shape)
+        cos_b, sin_b = math.cos(float(bearing_rad)), math.sin(float(bearing_rad))
         with np.errstate(invalid="ignore"):
             valid = np.isfinite(d) & (d > cfg.min_valid_m)
-            lat = np.abs(u - cfg.cx) * d / cfg.fx
+            # Body FLU: forward is the depth, left is the negated lateral offset.
+            left = -(u - cfg.cx) * d / cfg.fx
             vert = np.abs(v - cfg.cy) * d / cfg.fy
-            mask = (valid & (lat <= cfg.corridor_halfwidth_m)
+            along = d * cos_b + left * sin_b
+            cross = np.abs(-d * sin_b + left * cos_b)
+            mask = (valid & (along > 0.0) & (cross <= cfg.corridor_halfwidth_m)
                     & (vert <= cfg.corridor_halfheight_m))
         if mask.any():
-            return float(d[mask].min())
+            return float(along[mask].min())
         # Nothing valid in the corridor. Two very different situations share
         # that symptom, and returning None for both is what turns this brake
         # OFF at exactly the range it exists for:
@@ -131,6 +155,52 @@ class DepthProximityBrake(object):
             return float(cfg.min_valid_m)
         return None
 
+    def horizontal_half_fov(self):
+        # type: () -> float
+        """Half the horizontal field of view, radians, from the intrinsics.
+
+        Assumes a centred principal point, which is what every camera in this
+        stack has; a strongly off-centre one would make this optimistic on one
+        side, so it is the smaller of the two half-angles that matters and
+        callers should keep a guard band.
+        """
+        return math.atan2(self._cfg.cx, self._cfg.fx)
+
+    def sees_bearing(self, bearing_rad, guard_rad=0.17):
+        # type: (float, float) -> bool
+        """Can this frame say anything about travel along ``bearing_rad``?
+
+        The corridor around a travel direction near the edge of the image is
+        half outside it, and a corridor with nothing in it reports "clear" --
+        so an uncertified bearing must never be answered with a speed. The
+        guard band (10 deg by default) covers the corridor's own angular width.
+        """
+        return abs(float(bearing_rad)) <= self.horizontal_half_fov() - float(guard_rad)
+
+    def allowed_speed_along(self, depth_m, bearing_rad=0.0):
+        # type: (np.ndarray, float) -> tuple
+        """``(v_allow, d_min, certified)``: max safe speed along a travel bearing.
+
+        The general form of :meth:`allowed_forward_speed`. ``certified`` is
+        False when ``bearing_rad`` falls outside what the camera can see, in
+        which case ``v_allow`` is the answer for the **nose** instead -- a
+        conservative stand-in, since a corridor the camera cannot observe must
+        not come back "clear". A caller that gets ``certified=False`` should cap
+        the command on its own account as well.
+
+        Args:
+            depth_m: ``(H, W)`` metric depth.
+            bearing_rad: direction of travel, radians CCW from the nose.
+
+        Returns:
+            ``(v_allow, d_min, certified)``.
+        """
+        if not self.sees_bearing(bearing_rad):
+            v, d = self._speed_for(self.corridor_min_depth(depth_m, 0.0))
+            return v, d, False
+        v, d = self._speed_for(self.corridor_min_depth(depth_m, bearing_rad))
+        return v, d, True
+
     def allowed_forward_speed(self, depth_m):
         # type: (np.ndarray) -> tuple
         """``(v_allow, d_min)``: max safe forward speed given this frame.
@@ -138,8 +208,12 @@ class DepthProximityBrake(object):
         ``v_allow`` is inf when the corridor is clear (nothing to brake for);
         0.0 when something already sits at the nose.
         """
+        return self._speed_for(self.corridor_min_depth(depth_m, 0.0))
+
+    def _speed_for(self, d_min):
+        # type: (object) -> tuple
+        """Turn a corridor range into an allowed speed. The braking arithmetic."""
         cfg = self._cfg
-        d_min = self.corridor_min_depth(depth_m)
         if d_min is None:
             return float("inf"), None
         # The camera cannot see inside its ~0.95 m near clip, and inside it

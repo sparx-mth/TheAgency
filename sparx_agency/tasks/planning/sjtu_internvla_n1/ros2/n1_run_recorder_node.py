@@ -60,6 +60,11 @@ def _imgmsg_to_bgr(msg):
     return np.ascontiguousarray(buf.reshape(msg.height, msg.width, -1)[:, :, :3])
 
 from sparx_agency.core.common.math.se3 import yaw_from_quaternion
+from sparx_agency.core.common.types import Intrinsics
+from sparx_agency.core.planning.vlas.common.pixel_geometry import (
+    body_to_pixel,
+    world_to_body,
+)
 from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
     load_map_backdrop,
 )
@@ -116,6 +121,16 @@ class N1RunRecorderNode(Node):
         traj_topic = topics.get("trajectory", "/simple_drone/n1/trajectory")
         full_topic = topics.get("trajectory_full", "/simple_drone/n1/trajectory_full")
         info_topic = topics.get("info", "/simple_drone/n1/info")
+
+        camera = cfg.get("camera", {})
+        # The camera model the pixel goal was computed with. The recorder needs
+        # it to put that goal back on a LATER frame: the goal is a place, and a
+        # place has to be re-projected from where the aircraft is now.
+        self._intrinsics = Intrinsics(
+            fx=float(camera.get("fx", 390.642735)), fy=float(camera.get("fy", 390.642735)),
+            cx=float(camera.get("cx", 300.0)), cy=float(camera.get("cy", 300.0)),
+            width=int(camera.get("width", 600)), height=int(camera.get("height", 600)))
+        self._goal_world = None
 
         self._panel_w = int(rec.get("panel_width", 640))
         self._panel_h = int(rec.get("panel_height", 480))
@@ -187,7 +202,9 @@ class N1RunRecorderNode(Node):
 
     def _on_odom(self, msg):
         p = msg.pose.pose
-        pose = (p.position.x, p.position.y, _yaw_from_quat(p.orientation))
+        # z as well as x, y, yaw: re-projecting the goal needs the height the
+        # aircraft is at now, and a goal on a table is not a goal on the floor.
+        pose = (p.position.x, p.position.y, p.position.z, _yaw_from_quat(p.orientation))
         with self._lock:
             self._pose = pose
         self._topdown.add_pose(pose[0], pose[1])
@@ -213,7 +230,9 @@ class N1RunRecorderNode(Node):
             return
         pg = d.get("pixel_goal")
         pgf = d.get("pixel_goal_frame")
+        gw = d.get("goal_world")
         with self._lock:
+            self._goal_world = tuple(float(c) for c in gw) if gw else None
             self._info = OverlayInfo(
                 instruction=d.get("instruction", ""),
                 action=d.get("action") or "",
@@ -250,8 +269,10 @@ class N1RunRecorderNode(Node):
             committed = None if self._committed is None else self._committed.copy()
             full = None if self._full is None else self._full.copy()
             info = self._info
+            goal_world = self._goal_world
         if frame is None:
             return
+        info = self._reproject_goal(info, goal_world, pose)
         # A goal is only "fresh" for about as long as the aircraft has not yet
         # moved away from the pose it was computed at. Beyond that it is drawn
         # stale even though the decision that produced it is still the current
@@ -261,9 +282,43 @@ class N1RunRecorderNode(Node):
             if (time.time() - float(info.decision_time)) > self._goal_fresh_s:
                 info = replace(info, pixel_goal_fresh=False)
         left = draw_camera_panel(frame, info, (self._panel_w, self._panel_h))
-        right = self._topdown.render(pose, committed, full)
+        # The renderer's pose is (x, y, yaw) and always has been; z is this
+        # node's own business, for re-projecting the goal.
+        flat = None if pose is None else (pose[0], pose[1], pose[3])
+        right = self._topdown.render(flat, committed, full, goal_world)
         self._writer.write(compose(left, right))
         self._frames_written += 1
+
+    def _reproject_goal(self, info, goal_world, pose):
+        """Put the System-2 goal where it is NOW, in the frame about to be drawn.
+
+        This is the whole difference between a marker that tracks the scene and
+        one pinned to a screen coordinate. The goal was a pixel in a frame the
+        aircraft has since flown away from; re-projected from the live pose it
+        stays on the place the model chose, moves across the image as the
+        aircraft turns, and leaves the frame when the aircraft looks elsewhere.
+
+        Falls back to the reported pixel when there is no world point -- the
+        goal had no usable depth -- so the marker degrades to the old
+        fixed-coordinate behaviour rather than disappearing.
+        """
+        if goal_world is None or pose is None:
+            return info
+        forward, left, up = world_to_body(goal_world, pose)
+        pixel = body_to_pixel(forward, left, up, self._intrinsics)
+        if pixel is None:
+            # Behind the aircraft. Say so rather than drawing it on the far side
+            # of the image, which is where an unguarded projection puts it.
+            return replace(info, pixel_goal=None, goal_behind=True,
+                           goal_range_m=float(np.hypot(forward, left)))
+        w, h = self._intrinsics.width, self._intrinsics.height
+        offscreen = not (0 <= pixel[0] < w and 0 <= pixel[1] < h)
+        return replace(info,
+                       pixel_goal=(int(round(pixel[0])), int(round(pixel[1]))),
+                       pixel_goal_frame=(w, h),
+                       goal_projected=True, goal_offscreen=offscreen,
+                       goal_behind=False,
+                       goal_range_m=float(np.hypot(forward, left)))
 
     def close_video(self):
         """Release the writer, once, and say what was written.

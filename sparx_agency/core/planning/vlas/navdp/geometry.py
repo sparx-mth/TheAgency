@@ -5,7 +5,10 @@ networking nor ROS:
 
 * :func:`pixel_to_pointgoal` -- a clicked image pixel + its depth -> the
   body-frame point-goal NavDP consumes, scaled into NavDP's input range while
-  preserving the click bearing.
+  preserving the click bearing. The back-projection under it, and
+  :func:`patch_median_depth` (re-exported here, where callers already import it),
+  are shared with every other policy in
+  :mod:`~sparx_agency.core.planning.vlas.common.pixel_geometry`.
 * :func:`point_to_pointgoal` -- the bearing-preserving scale on its own, for a
   goal already given in the body frame (e.g. a global A* waypoint, not a click).
 * :func:`world_to_body_2d` -- a world point expressed in the drone body frame
@@ -47,34 +50,16 @@ from sparx_agency.core.common.math.se2 import (
     world_to_body_2d as _world_to_body_2d,
 )
 from sparx_agency.core.common.types import Intrinsics
+from sparx_agency.core.planning.vlas.common.pixel_geometry import (
+    patch_median_depth,   # noqa: F401 - re-exported; this was its original home
+    pixel_to_body,
+)
 
 # NavDP input range: forward in ``[0, NAVDP_MAX_FWD_M]`` m, lateral in
 # ``[-NAVDP_MAX_LAT_M, NAVDP_MAX_LAT_M]`` m. Goals beyond this are scaled as a
 # whole (not clipped per-axis) so the bearing to the click is preserved.
 NAVDP_MAX_FWD_M = 10.0
 NAVDP_MAX_LAT_M = 10.0
-
-
-def patch_median_depth(depth, px, py, half=10, min_valid=0.1, max_valid=50.0):
-    """Median of the valid depth in a ``2*half`` box around ``(px, py)``.
-
-    Args:
-        depth: HxW array of metric depth (optical Z), NaN/0 allowed.
-        px, py: pixel column/row at the box centre.
-        half: half box size in pixels.
-        min_valid, max_valid: a reading counts only if ``min_valid < d < max_valid``.
-
-    Returns:
-        The median valid depth (float), or ``None`` if the patch holds no valid
-        reading -- the caller decides the fallback.
-    """
-    h, w = depth.shape
-    patch = depth[max(0, int(py) - half):min(h, int(py) + half),
-                  max(0, int(px) - half):min(w, int(px) + half)]
-    valid = patch[np.isfinite(patch) & (patch > min_valid) & (patch < max_valid)]
-    if valid.size == 0:
-        return None
-    return float(np.median(valid))
 
 
 def point_to_pointgoal(fwd, left, max_fwd_m=NAVDP_MAX_FWD_M,
@@ -130,9 +115,11 @@ def pixel_to_pointgoal(px, py, depth, intr, fallback_depth_m=3.0,
     if d is None:
         d = float(fallback_depth_m)
 
-    bx_raw = d
-    by_raw = -(px - intr.cx) * d / intr.fx
-    bz = -(py - intr.cy) * d / intr.fy
+    # The back-projection itself now lives in
+    # `core/planning/vlas/common/pixel_geometry`, because InternVLA-N1's overlay
+    # needs the same one and needs its inverse -- and two copies of a sign
+    # convention is how an overlay ends up mirrored.
+    bx_raw, by_raw, bz = pixel_to_body(px, py, d, intr)
 
     gx, gy = point_to_pointgoal(bx_raw, by_raw, max_fwd_m, max_lat_m)
     return gx, gy, d, bz

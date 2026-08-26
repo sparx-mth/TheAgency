@@ -68,6 +68,12 @@ from sparx_agency.core.planning.safety.depth_proximity_brake import (
     DepthProximityBrakeConfig,
     freer_side,
 )
+from sparx_agency.core.common.types import Intrinsics
+from sparx_agency.core.planning.vlas.common.pixel_geometry import (
+    body_to_world,
+    patch_median_depth,
+    pixel_to_body,
+)
 from sparx_agency.core.planning.vlas.common.plan_commit.executor import (
     CommitSpec,
     PlanCommitExecutor,
@@ -118,6 +124,7 @@ class N1PolicyNode(Node):
         camera = cfg.get("camera", {})
         pp = cfg.get("policy_params", {})
         commit = cfg.get("commit", {})
+        foll = cfg.get("follower", {})
 
         self._world_frame = frames.get("world", "world")
         self._rgb_topic = topics.get("rgb", "/simple_drone/front/image_raw")
@@ -134,7 +141,7 @@ class N1PolicyNode(Node):
 
         self._instruction = pp.get("default_instruction", "explore the warehouse")
         self._inference_rate = float(pp.get("inference_rate_hz", 4.0))
-        self._control_rate = float(cfg.get("follower", {}).get("control_rate_hz", 20.0))
+        self._control_rate = float(foll.get("control_rate_hz", 20.0))
 
         self._bridge = CvBridge()
         self._lock = threading.Lock()
@@ -178,8 +185,6 @@ class N1PolicyNode(Node):
             max_deviation_m=float(commit.get("max_deviation_m", 1.5)),
             min_period_s=float(commit.get("min_period_s", max(0.1, 1.0 / self._inference_rate))),
         ))
-        foll = cfg.get("follower", {})
-
         # ── stop, look, think ────────────────────────────────────────
         # The whole flight is a sequence of stationary observations, which is
         # what the policy was trained on. `hold_to_think: false` restores the
@@ -228,6 +233,13 @@ class N1PolicyNode(Node):
         self._escape_turn_rad = float(np.deg2rad(float(pp.get("blocked_escape_deg", 45.0))))
         self._blocked_forward = 0
         self._escapes = 0
+        # Was the aircraft ever refused forward speed while flying the
+        # commitment now being replaced? The follower's flag is LIVE -- it
+        # expires when the aircraft stops translating -- so reading it at
+        # decision time, after a hold and a settle, would always read False.
+        # This latches it across the commitment instead, which is the question
+        # the escape actually wants answered.
+        self._blocked_seen = False
         self._brake_cfg = DepthProximityBrakeConfig(
             fx=float(camera.get("fx", 390.642735)), fy=float(camera.get("fy", 390.642735)),
             cx=float(camera.get("cx", 300.0)), cy=float(camera.get("cy", 300.0)),
@@ -246,11 +258,19 @@ class N1PolicyNode(Node):
         self._dip_state = "none"   # none | descending | holding
         self._dip_since = 0.0
         self._dip_m = abs(float(pp.get("look_down_dip_m", 0.5)))
+        # A FLOOR ON THE DIP, because the dip is a descent into a room the
+        # aircraft has to keep flying in. Measured over the hospital's office
+        # bays: 71% of the floor area is flyable at the 1.20 m cruise and only
+        # 45% at 0.70 m -- the desks are 0.75 m tall. Whatever dip is asked for,
+        # the aircraft never goes below this.
+        self._dip_floor_m = float(pp.get("look_down_min_altitude_m", 0.0))
         self._dip_tol_m = float(pp.get("look_down_tolerance_m", 0.15))
         self._dip_timeout_s = float(pp.get("look_down_timeout_s", 6.0))
         # The follower owns the cruise altitude; the dip is expressed relative
         # to it, so this node has to read the same number out of the same file.
-        self._cruise_alt = float(cfg.get("follower", {}).get("target_altitude_m", 1.2))
+        self._cruise_alt = float(foll.get("target_altitude_m", 1.2))
+        if self._dip_floor_m > 0.0:
+            self._dip_m = min(self._dip_m, max(0.0, self._cruise_alt - self._dip_floor_m))
         self._decisions = 0
         self._curve_decisions = 0
         self._min_inference_interval = 1.0 / max(1e-3, self._inference_rate)
@@ -304,6 +324,19 @@ class N1PolicyNode(Node):
         self._last_fps_log_s = 0.0
         self._cam_w = int(camera.get("width", 600))
         self._cam_h = int(camera.get("height", 600))
+        self._intrinsics = Intrinsics(
+            fx=float(camera.get("fx", 390.642735)), fy=float(camera.get("fy", 390.642735)),
+            cx=float(camera.get("cx", 300.0)), cy=float(camera.get("cy", 300.0)),
+            width=self._cam_w, height=self._cam_h)
+        # THE PIXEL GOAL AS A PLACE, NOT A PIXEL. System 2 names a pixel in the
+        # frame it saw; redrawn at that coordinate on every later frame it is a
+        # sticker, and on screen the goal "never updates" however often the
+        # model changes it -- the aircraft turns, the scene slides past, the
+        # ring sits still. Back-projected once with the depth it was chosen
+        # against and the pose it was chosen from, it becomes a world point that
+        # any later frame can be asked about.
+        self._goal_world = None       # (x, y, z), world
+        self._goal_set_s = 0.0
 
         self.create_timer(1.0 / max(1e-3, self._control_rate), self._tick,
                           callback_group=self._tick_group)
@@ -360,6 +393,13 @@ class N1PolicyNode(Node):
         # two are set together in the YAML.
         if policy_params and policy_params.get("sys1_continuous_only") is not None:
             settings["sys1_continuous_only"] = bool(policy_params["sys1_continuous_only"])
+        # ONE TURN PER LOOK (server PATCH 8). System 2 answers with a batch of
+        # four turns and upstream plays them out without looking again; sixty
+        # degrees of open-loop rotation overshoots anything it was turning
+        # toward, and the next batch turns back. This makes the aircraft ask
+        # again after every 15 degrees.
+        if policy_params and policy_params.get("sys2_one_turn_per_look") is not None:
+            settings["sys2_one_turn_per_look"] = bool(policy_params["sys2_one_turn_per_look"])
         if not camera:
             return settings
         fx = float(camera.get("fx", 390.642735))
@@ -452,6 +492,8 @@ class N1PolicyNode(Node):
             return
 
         now = time.time()
+        if blocked:
+            self._blocked_seen = True
 
         # A ROTATION IS IN FLIGHT. Nothing else happens until the aircraft has
         # turned and stopped, because the frame at the end of the turn is the
@@ -546,6 +588,16 @@ class N1PolicyNode(Node):
         result = self._policy.step(
             PolicyObservation(rgb=rgb, depth_m=depth, altitude_m=pose[2]),
             LanguageGoal(instruction=instruction))
+        # THE CLOCK MOVED. `now` was read at the top of this tick, before an
+        # inference that takes SECONDS -- System 2 alone is 3 to 8 of them. Every
+        # deadline stamped with it is therefore already part-spent before the
+        # aircraft has been given anything to fly: a 2 m curve is allowed
+        # `arc / speed + grace` = 10.6 s, and seven of those are gone at the
+        # moment it is issued. Measured before this: 19 m of route committed and
+        # 2.3 m of ground covered, because every commitment expired a second or
+        # two after the hold was released. The pose is still right -- the
+        # aircraft was held and has not moved -- but the clock is not.
+        now = time.time()
 
         if result.metadata.get("transport_failed"):
             # Keep the current commitment; the server dropped a frame. Say so,
@@ -641,7 +693,7 @@ class N1PolicyNode(Node):
         arc = _polyline_length(body)
         delta = self._rotation_intent(result, body, arc)
 
-        if delta is None and blocked:
+        if delta is None and self._blocked_seen:
             # BLOCKED, AND ASKING TO TRANSLATE ANYWAY. The depth reflex allows
             # no forward speed, so this decision cannot be flown; committing it
             # again produces the same stationary frame and the same answer, for
@@ -669,6 +721,9 @@ class N1PolicyNode(Node):
             self._begin_turn(pose, delta, now, result)
             return
 
+        # A fresh commitment is a fresh question: whether the aircraft could fly
+        # the LAST one says nothing about this one.
+        self._blocked_seen = False
         self._executor.commit(body, (pose[0], pose[1], pose[3]), now)
         self._publish_path(self._path_pub, self._executor.plan.committed_xy, pose)
         self._publish_path(self._full_path_pub, self._executor.plan.world_xy, pose)
@@ -736,6 +791,7 @@ class N1PolicyNode(Node):
         path, and leaving the last one published would have the follower pursue
         it the instant the turn ends, from a heading it was never planned for.
         """
+        self._blocked_seen = False
         target = self._turn.start(pose[3], float(delta), now)
         msg = Float32()
         msg.data = float(target)
@@ -822,6 +878,8 @@ class N1PolicyNode(Node):
         traj_m = (_polyline_length(np.asarray(traj)[:, :2])
                   if traj is not None and len(traj) else 0.0)
         wp = md.get("waypoint_px")
+        if md.get("waypoint_fresh") and wp:
+            self._locate_goal(wp, now, pose)
         # Whether THIS decision came from System 1's continuous curve or from a
         # discrete action rendered as a short step, plus the running share. It
         # is the number the whole dual-system deployment is judged on, and
@@ -843,6 +901,11 @@ class N1PolicyNode(Node):
             "s2_fps": self._s2_fps.fps,
             "pixel_goal": list(wp) if wp else None,
             "pixel_goal_frame": [self._cam_w, self._cam_h],
+            # Where that pixel actually IS. A consumer with a live pose can
+            # re-project this into the frame in front of it, which is the only
+            # way the marker can track the thing it was pointing at.
+            "goal_world": list(self._goal_world) if self._goal_world else None,
+            "goal_age_s": (now - self._goal_set_s) if self._goal_world else None,
             # How many decisions ago System 2 chose it, and whether this is the
             # decision that chose it. The goal is a pixel in the frame System 2
             # saw; a consumer drawing it on the live frame has to know that.
@@ -887,6 +950,38 @@ class N1PolicyNode(Node):
                 % (("%.1f Hz" % s1) if s1 else "--",
                    ("%.1f Hz" % s2) if s2 else "--", md.get("action")))
 
+    def _locate_goal(self, waypoint_px, now, pose):
+        """Turn a fresh System-2 pixel goal into a world point.
+
+        The depth used is the frame that was just sent -- the same one System 2
+        answered about -- taken as a small median around the pixel, because a
+        single sample at a navigation target is very often the miss at a door
+        edge or the sky above a corridor.
+
+        A goal with no usable depth is dropped rather than guessed: an invented
+        range puts the marker somewhere the model never meant, which is worse
+        than not drawing it.
+        """
+        with self._lock:
+            depth = None if self._depth is None else self._depth
+            depth = None if depth is None else np.asarray(depth)
+        if depth is None or depth.ndim != 2:
+            return
+        u, v = int(waypoint_px[0]), int(waypoint_px[1])
+        if not (0 <= u < depth.shape[1] and 0 <= v < depth.shape[0]):
+            return
+        d = patch_median_depth(depth, u, v, half=8, min_valid=0.15, max_valid=20.0)
+        if d is None:
+            self.get_logger().info(
+                "S2 goal at (%d, %d) has no usable depth; not placing it in the world"
+                % (u, v), throttle_duration_sec=10.0)
+            return
+        self._goal_world = body_to_world(*pixel_to_body(u, v, d, self._intrinsics), pose)
+        self._goal_set_s = now
+        self.get_logger().info(
+            "S2 goal (%d, %d) at %.2f m -> world (%.2f, %.2f, %.2f)"
+            % (u, v, d, self._goal_world[0], self._goal_world[1], self._goal_world[2]))
+
     def _emit_info(self):
         msg = String()
         msg.data = json.dumps(self._info)
@@ -921,6 +1016,8 @@ class N1PolicyNode(Node):
         self._info["yaw_deg"] = float(np.degrees(pose[3]))
         self._info["commits"] = self._commits
         self._info["turns"] = self._turns
+        if self._goal_world:
+            self._info["goal_age_s"] = now - self._goal_set_s
         self._info["escapes"] = self._escapes
         self._emit_info()
 

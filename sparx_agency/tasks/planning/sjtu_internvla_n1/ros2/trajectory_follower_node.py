@@ -31,11 +31,16 @@ Four disciplines this node owns, all of which are silent killers when missing:
   never climb into tolerance, which reads as a dead follower rather than a
   deadlock. Until the aircraft is inside the band this node flies pure vertical
   and does not track at all.
-* **Forward speed is braked on raw depth.** N1 plans where to go, not whether
-  the way is clear, and this stack has no map. The reflex is
+* **Speed is braked on raw depth, along the direction of TRAVEL.** N1 plans
+  where to go, not whether the way is clear, and this stack has no map. The
+  reflex is
   :class:`~sparx_agency.core.planning.safety.depth_proximity_brake.DepthProximityBrake`
-  -- the corridor minimum of the depth image against a stopping distance -- and
-  it exists because the alternative is the next discipline.
+  -- the minimum range inside the corridor the airframe is about to sweep,
+  against a stopping distance. The corridor follows the commanded velocity, not
+  the nose, because this tracker is holonomic and the two differ: a nose-aligned
+  corridor swings onto the jamb of a doorway the route goes straight through and
+  refuses a clear path. Measured in the hospital before this: a route drawn
+  through the middle of an opening, stopped at 0.40 m, run after run.
 * **Thinking and turning are stationary.** The policy node holds this follower
   (``/n1/hold``) while System 2 thinks, so the frame the model reasons about and
   the pose its route is anchored at are the same place the aircraft is when the
@@ -62,7 +67,7 @@ import os
 import signal
 import threading
 import time
-from math import asin, atan2, cos, degrees, radians, sin
+from math import asin, atan2, cos, degrees, hypot, radians, sin
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
@@ -255,7 +260,22 @@ class TrajectoryFollowerNode(Node):
         # the end of it is the whole reason the model asked.
         self._yaw_goal = None
         self._turn = TurnInPlace(turn_spec_from_config(foll.get("turn", {}) or {}))
+        # TWO FLAGS, TWO MEANINGS, and conflating them is what put BLOCKED on
+        # screen beside a drone that was only thinking.
+        #   `_blocked`        -- live. What is published, and it EXPIRES: the
+        #                        reflex has an opinion only while the aircraft
+        #                        is translating, and a stale opinion published
+        #                        as a state is a lie.
+        #   `_blocked_recent` -- sticky. Changes only on a real evaluation, so
+        #                        the escape can still ask "could it not fly the
+        #                        route it just gave up on?" after a hold.
         self._blocked = False
+        self._blocked_recent = False
+        self._blocked_stamp = 0.0
+        # How long a hard-block report stays live without being refreshed. Just
+        # over the control period times a few, so it survives a momentary gap in
+        # the depth stream and expires the moment the aircraft stops trying.
+        self._blocked_hold_s = float(foll.get("blocked_hold_s", 1.0))
         # BREAK CONTACT BEFORE LOOKING SOMEWHERE ELSE. Rotating on the spot does
         # not help an aircraft that is already inside its own stopping distance
         # of a wall: the wall stays inside the depth corridor across most of the
@@ -399,6 +419,7 @@ class TrajectoryFollowerNode(Node):
             self._yaw_goal = None
 
         self._slew_offset()
+        self._expire_blocked()
         if self._check_capsized(attitude):
             return
         if state is None or (time.monotonic() - stamp) > self._odom_timeout_s:
@@ -495,7 +516,7 @@ class TrajectoryFollowerNode(Node):
                     and abs(normalize_angle(yaw_goal - self._turn.target))
                     <= self._turn.spec.tolerance_rad)
             if not same:
-                if (self._escape_enabled and self._blocked
+                if (self._escape_enabled and self._blocked_recent
                         and self._escape.trigger(
                             StuckVerdict(axis="forward", sign=1), prefer_left=True)):
                     self._escaping = True
@@ -581,7 +602,16 @@ class TrajectoryFollowerNode(Node):
         Returns:
             The braked ``(vx, vy)`` body-frame pair.
         """
-        if not self._brake_enabled or vx <= 0.0:
+        # `vx <= 0` is not "not moving" on a holonomic platform -- it can be a
+        # pure sideways translation, which sweeps just as much airframe through
+        # just as much doorway, and the old guard let every one of those past
+        # unbraked. Only a genuine REVERSE is exempt, and only because the
+        # camera cannot see behind the aircraft to have an opinion; a lateral
+        # command falls through to the uncertified-bearing path below and is
+        # capped rather than trusted.
+        if not self._brake_enabled or vx < 0.0:
+            return vx, vy
+        if hypot(vx, vy) < 1e-3:
             return vx, vy
         with self._lock:
             depth = self._depth
@@ -592,20 +622,49 @@ class TrajectoryFollowerNode(Node):
             self.get_logger().warn("no fresh depth; horizontal speed halved",
                                    throttle_duration_sec=5.0)
             return 0.5 * vx, 0.5 * vy
-        allowed, d_min = self._brake.allowed_forward_speed(depth)
+        # THE BEARING IS THE POINT. `atan2(vy, vx)` is where the aircraft is
+        # about to go; the nose is somewhere else whenever the pursuit is
+        # crabbing, and the corridor has to follow the first.
+        speed = hypot(vx, vy)
+        bearing = atan2(vy, vx)
+        allowed, d_min, certified = self._brake.allowed_speed_along(depth, bearing)
+        if not certified:
+            # The camera cannot see where this command points. The answer above
+            # is the nose's, which is a stand-in and not a certificate, so cap
+            # the command as well rather than fly on an unobserved corridor.
+            allowed = min(allowed, 0.5 * self._cruise)
+            self.get_logger().warn(
+                "commanded %.0f deg off the nose, outside what the camera sees; "
+                "capping at half cruise" % (degrees(bearing),),
+                throttle_duration_sec=5.0)
         self._report_blocked(allowed <= 1e-3)
-        if allowed >= vx:
+        if allowed >= speed:
             return vx, vy
-        scale = max(0.0, allowed) / max(vx, 1e-6)
+        # Scaled against the SPEED, not vx: the pair is what is limited, and
+        # dividing by vx alone over-brakes a command that is mostly lateral.
+        scale = max(0.0, allowed) / max(speed, 1e-6)
         self.get_logger().info(
-            "brake: %.2f -> %.2f m/s (nearest %s)"
-            % (vx, max(0.0, allowed),
+            "brake: %.2f -> %.2f m/s at %+.0f deg (nearest %s)"
+            % (speed, max(0.0, allowed), degrees(bearing),
                "none" if d_min is None else "%.2f m" % d_min),
             throttle_duration_sec=2.0)
         return vx * scale, vy * scale
 
     def _report_blocked(self, blocked):
-        """Publish a change in the hard-block state, edge-triggered."""
+        """Publish a change in the hard-block state, edge-triggered.
+
+        `_blocked_stamp` is what makes this honest. The flag used to be set only
+        here, which is only reached while the aircraft is actually trying to
+        translate -- so once it went true it STAYED true through every hold,
+        every rotation and every look-down dip that followed, and the overlay
+        reported "BLOCKED thinking" and "BLOCKED settling" about an aircraft
+        that had not tried to move for half a minute. Measured across the five
+        hospital runs: the flag was true for 4-18% of settling samples and up to
+        62% of turning samples, none of which the brake had any opinion about.
+        See :meth:`_expire_blocked`.
+        """
+        self._blocked_stamp = time.monotonic()
+        self._blocked_recent = bool(blocked)
         if bool(blocked) == self._blocked:
             return
         self._blocked = bool(blocked)
@@ -623,6 +682,22 @@ class TrajectoryFollowerNode(Node):
             # would be met with a manoeuvre budget the first one had spent.
             self._escape.episode_over()
             self.get_logger().info("forward path clear again")
+
+    def _expire_blocked(self):
+        """Clear a hard-block report that nothing has refreshed.
+
+        The reflex has an opinion only while the aircraft is translating. When
+        it stops -- to think, to turn, to dip -- the last opinion becomes a
+        memory, and a memory published as a live state is what put BLOCKED on
+        screen next to a drone that was merely waiting for the model.
+        """
+        if not self._blocked:
+            return
+        if time.monotonic() - self._blocked_stamp > self._blocked_hold_s:
+            self._blocked = False
+            msg = Bool()
+            msg.data = False
+            self._blocked_pub.publish(msg)
 
     def _commanded_altitude(self):
         """Cruise altitude plus the offset currently being flown."""

@@ -107,6 +107,15 @@ class OverlayInfo:
     commits: Optional[int] = None    # routes flown so far
     turns: Optional[int] = None      # rotations flown so far
     escapes: Optional[int] = None    # blocked-forward escapes so far
+    # THE GOAL AS A PLACE. `pixel_goal` above is where System 2 pointed in the
+    # frame it saw; these say the marker has been re-projected into the frame
+    # being drawn, so it tracks the scene instead of sitting at a fixed screen
+    # coordinate while the world slides past it.
+    goal_projected: bool = False     # re-projected from a world point, not stale
+    goal_offscreen: bool = False     # ...and it now falls outside the frame
+    goal_behind: bool = False        # ...or behind the aircraft entirely
+    goal_range_m: Optional[float] = None   # how far away it is, metres
+    goal_age_s: Optional[float] = None     # how long ago System 2 chose it
 
 
 def _put(img, text, org, scale=0.6, color=(255, 255, 255), thick=2):
@@ -149,23 +158,7 @@ def draw_camera_panel(frame_bgr, info, size):
     # which is exactly what it is not. Fresh is a solid red ring; stale is a
     # thin dim one carrying its age, so the eye can tell a decision from a
     # memory.
-    if info.pixel_goal is not None:
-        gx, gy = info.pixel_goal
-        if info.pixel_goal_frame:
-            fw, fh = info.pixel_goal_frame
-            gx = int(gx * w / max(1, fw))
-            gy = int(gy * h / max(1, fh))
-        gx = max(0, min(int(gx), w - 1))
-        gy = max(0, min(int(gy), h - 1))
-        if info.pixel_goal_fresh:
-            cv2.circle(panel, (gx, gy), 16, (0, 0, 255), 3, cv2.LINE_AA)
-            cv2.circle(panel, (gx, gy), 3, (0, 0, 255), -1, cv2.LINE_AA)
-            _label_beside(panel, "S2 goal", gx, gy, 20, 0.5, (0, 0, 255), 2)
-        else:
-            cv2.circle(panel, (gx, gy), 13, (70, 70, 150), 1, cv2.LINE_AA)
-            age = "" if info.pixel_goal_age is None else " +%d" % info.pixel_goal_age
-            _label_beside(panel, "S2 goal (stale%s)" % age, gx, gy, 18, 0.42,
-                          (90, 90, 170), 1)
+    _draw_goal(panel, info, w, h)
 
     # Top banner: status + action + what the aircraft is doing this instant.
     cv2.rectangle(panel, (0, 0), (w, 66), (0, 0, 0), -1)
@@ -226,6 +219,64 @@ def draw_camera_panel(frame_bgr, info, size):
         _put(panel, line, (12, y), 0.5, (200, 220, 255), 1)
         y += 22
     return panel
+
+
+def _draw_goal(panel, info, w, h):
+    """Draw where System 2 said to go, on the frame in front of the aircraft.
+
+    Three cases, and the difference between them is the point:
+
+    * **projected** -- the goal has been turned into a world point and put back
+      on this frame from the live pose. It moves with the scene, so a viewer can
+      see the aircraft closing on it or losing it. Labelled with its range and
+      how long ago the model chose it.
+    * **off-screen or behind** -- an arrow at the edge, because "the goal is no
+      longer in view" is a fact worth showing and an unguarded projection would
+      instead draw it confidently on the wrong side of the image.
+    * **not projected** -- no usable depth at the goal pixel, so all that is
+      known is a coordinate in a frame that has gone. Drawn dim and marked
+      stale, which is the old behaviour and the honest one for that case.
+    """
+    if info.goal_behind:
+        _edge_marker(panel, "S2 goal behind", w, h, left=False)
+        return
+    if info.pixel_goal is None:
+        return
+    gx, gy = info.pixel_goal
+    if info.pixel_goal_frame:
+        fw, fh = info.pixel_goal_frame
+        gx = int(gx * w / max(1, fw))
+        gy = int(gy * h / max(1, fh))
+    if info.goal_offscreen:
+        _edge_marker(panel, "S2 goal", w, h, left=gx < 0)
+        return
+    gx = max(0, min(int(gx), w - 1))
+    gy = max(0, min(int(gy), h - 1))
+    if not info.goal_projected:
+        cv2.circle(panel, (gx, gy), 13, (70, 70, 150), 1, cv2.LINE_AA)
+        age = "" if info.pixel_goal_age is None else " +%d" % info.pixel_goal_age
+        _label_beside(panel, "S2 goal (no depth%s)" % age, gx, gy, 18, 0.42,
+                      (90, 90, 170), 1)
+        return
+    fresh = bool(info.pixel_goal_fresh)
+    colour = (0, 0, 255) if fresh else (60, 120, 255)
+    cv2.circle(panel, (gx, gy), 16, colour, 3 if fresh else 2, cv2.LINE_AA)
+    cv2.circle(panel, (gx, gy), 3, colour, -1, cv2.LINE_AA)
+    bits = ["S2 goal"]
+    if info.goal_range_m is not None:
+        bits.append("%.1f m" % info.goal_range_m)
+    if info.goal_age_s is not None:
+        bits.append("%.0fs ago" % info.goal_age_s)
+    _label_beside(panel, "  ".join(bits), gx, gy, 20, 0.45, colour, 2)
+
+
+def _edge_marker(panel, text, w, h, left):
+    """An arrow at the frame edge for a goal that is no longer in view."""
+    y = h // 2
+    x = 22 if left else w - 22
+    tip = (6, y) if left else (w - 6, y)
+    cv2.arrowedLine(panel, (x, y), tip, (60, 120, 255), 3, cv2.LINE_AA, tipLength=0.5)
+    _label_beside(panel, text, x, y - 22, 10, 0.45, (60, 120, 255), 1)
 
 
 _PHASE_COLOURS = {

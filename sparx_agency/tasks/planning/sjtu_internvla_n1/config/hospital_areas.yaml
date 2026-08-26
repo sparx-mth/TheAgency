@@ -56,28 +56,37 @@ areas:
     clearance_m: 1.85
     note: the south hall at the far end, facing the whole length of the hospital
 
-  # Added for the "enter the room on your right" experiment, and verified from
-  # the drone's own camera rather than from the map: standing here facing east,
-  # the nurses' station is on the left and there is a **door on the right**
-  # about three metres ahead, opening south into the office bay that holds the
-  # desk, the chair and the AdjTable. The instruction is therefore true of what
-  # the model can actually see, which is the only sense in which an instruction
-  # can be true.
+  # THE "ENTER THE ROOM ON YOUR RIGHT" EXPERIMENT, and the second attempt at
+  # siting it. The first start, at (-2.80, 1.40) facing east, was chosen from
+  # the drone's camera because a door was plainly visible on the right -- and
+  # that door is a CLOSED PANEL. Measured on the flight-band occupancy map:
+  # clearance at the point it faces is 0.05 m. The office block's north side has
+  # exactly two openings this airframe can pass, at x = -2.85 and x = +2.75, and
+  # from that pose the nearer one lies at **92 degrees to the right**, outside a
+  # 75-degree camera. The instruction was therefore true of the room and false
+  # of anything the model could see, and ten flights across two campaigns
+  # entered the room twice, both times by accident.
+  #
+  # From here the real opening is 4.4 m away and 26 degrees to the RIGHT --
+  # inside the frame, standing open, floor visible through it. Verified from the
+  # aircraft's own camera, not from the map.
   office_door:
-    x: -2.80
-    y: 1.40
-    yaw_deg: 0.0
-    clearance_m: 1.40
-    note: the spine outside the nurses' station, facing east with the office door on the right
-    # GROUND TRUTH FOR JUDGING A RUN, measured off the occupancy map inflated by
-    # the airframe radius. The office bay is entered through ONE opening, at
-    # (2.70, -0.20) -- 5.7 m east of here and 16 deg off the right of the nose,
-    # which is the door visible in the camera. The shortest flyable route to the
-    # AdjTable at (1.22, -5.61) is 13.3 m: east along the spine, right through
-    # that opening, then south. A run that turns right immediately is aiming at
-    # the bay's north wall, not at its door.
-    door_x: 2.70
-    door_y: -0.20
-    table_x: 1.22
-    table_y: -5.61
-    route_m: 13.3
+    x: -5.00
+    y: 3.60
+    yaw_deg: -30.0
+    clearance_m: 1.45
+    note: the spine by the nurses' station, facing the open ward door on the right
+    # GROUND TRUTH, measured off the world's collision meshes over the band a
+    # drone at 1.20 m can hit (0.85-1.55 m), not the 0.30-2.00 m map: furniture
+    # the aircraft flies over must not count as a wall.
+    door_x: -2.85          # the opening, 0.96 m clear
+    door_y: -0.22
+    table_x: -1.27         # AdjTable, with an office chair and two pictures
+    table_y: -5.69
+    stand_off_x: -1.27     # where the aircraft can sit and see it
+    stand_off_y: -5.09
+    # The widest flyable line from here to that stand-off. 0.90 m for a 0.63 m
+    # airframe: 0.13 m of margin, and the reason cruise_speed and lookahead_m
+    # were lowered. It is tight on purpose -- it is the room the hospital has.
+    route_m: 12.0
+    bottleneck_m: 0.90

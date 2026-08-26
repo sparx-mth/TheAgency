@@ -40,6 +40,18 @@ class InternVLAN1Agent(Agent):
         # why. Off by default so this file still behaves like upstream unless a
         # client asks for it on /agent/init.
         self.sys1_continuous_only = getattr(self._model_settings, 'sys1_continuous_only', False)
+        # PATCH 8: one turn per look. See the discrete branch in step().
+        self.sys2_one_turn_per_look = getattr(self._model_settings, 'sys2_one_turn_per_look', False)
+        # SAY WHICH PATCHES ARE LIVE. `/agent/init` against an agent that
+        # already exists is a server-side no-op, so a settings change reaches a
+        # running server and is silently ignored -- and the flight then behaves
+        # like a configuration no file on disk describes. This line is the only
+        # place that says what the agent was actually built with. It cost two
+        # rounds of misdiagnosis to learn that; one print is cheap.
+        print('[PATCHES] sys1_continuous_only=%r sys2_one_turn_per_look=%r '
+              'sys2_max_forward_step=%r' % (self.sys1_continuous_only,
+                                            self.sys2_one_turn_per_look,
+                                            self.sys2_max_forward_step), flush=True)
 
         policy = get_policy(self._model_settings.policy_name)
         policy_config = get_config(self._model_settings.policy_name)
@@ -346,6 +358,33 @@ class InternVLAN1Agent(Agent):
                 self.sys1_infer_times = 0
             else:
                 self.look_down = False
+                # PATCH 8: ONE TURN PER LOOK.
+                #
+                # System 2 answers a frame it cannot name a waypoint in with a
+                # BATCH of turns -- `→→→→`, four right turns, 60 degrees -- and
+                # upstream returns them one per step without looking again. That
+                # is open-loop rotation on a single observation: by the third
+                # arrow the thing it was turning toward has swung past the
+                # centre of the frame, so the next batch is `←←←←` and the
+                # aircraft hunts. Measured in the hospital: 12 right turns and
+                # 11 left turns in one flight, and a doorway 27 degrees off the
+                # nose never entered in ten runs.
+                #
+                # Dropping the rest of the batch after the first turn forces
+                # `should_infer_s2` to re-run System 2 on the frame the aircraft
+                # can actually see now. A turn is the one action that invalidates
+                # its own observation, which is why this applies to turns and not
+                # to a queued forward step: rotating changes what is in view,
+                # advancing barely changes the bearing to it.
+                #
+                # It costs a System-2 pass per 15 degrees. That is the price of
+                # closing the loop on the axis that decides where the camera
+                # points.
+                if self.sys2_one_turn_per_look and output['action'][0] in (2, 3):
+                    with self.s2_output_lock:
+                        self.s2_output.output_action = None
+                        self.s2_output.output_latent = None
+                        self.s2_output.output_pixel = None
                 if self.sys1_infer_times > 0:
                     self.dual_forward_step += 1
 

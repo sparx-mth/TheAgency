@@ -49,6 +49,9 @@ POSE_BGR = (255, 255, 255)
 START_BGR = (255, 160, 0)
 #: Routes already flown, drawn dim so the live one still reads as the live one.
 PAST_BGR = (90, 110, 110)
+#: Where System 2 said to go. The same red as the ring on the camera panel, so
+#: the two views are obviously the same thing seen twice.
+GOAL_BGR = (0, 0, 255)
 
 
 class TopDownRenderer:
@@ -121,23 +124,27 @@ class TopDownRenderer:
 
     # -- rendering -------------------------------------------------------
 
-    def render(self, pose, committed_xy, full_xy):
-        # type: (Optional[Tuple[float, float, float]], Optional[np.ndarray], Optional[np.ndarray]) -> np.ndarray
+    def render(self, pose, committed_xy, full_xy, goal_world=None):
+        # type: (Optional[Tuple[float, float, float]], Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float, float]]) -> np.ndarray
         """Draw the top-down panel.
 
         Args:
             pose: ``(x, y, yaw)`` current world pose, or None.
             committed_xy: ``(N, 2)`` world polyline N1 is committed to, or None.
             full_xy: ``(M, 2)`` world polyline of the whole prediction, or None.
+            goal_world: ``(x, y, z)`` where System 2 said to go, or None. Drawn
+                here as well as on the camera, because the two answer different
+                questions -- the camera says whether the aircraft is looking at
+                it, the map says whether the route is going there.
 
         Returns:
             A ``(h, w, 3)`` BGR panel.
         """
         if self.backdrop is None:
-            return self._render_fitted(pose, committed_xy, full_xy)
-        return self._render_on_map(pose, committed_xy, full_xy)
+            return self._render_fitted(pose, committed_xy, full_xy, goal_world)
+        return self._render_on_map(pose, committed_xy, full_xy, goal_world)
 
-    def _render_on_map(self, pose, committed_xy, full_xy):
+    def _render_on_map(self, pose, committed_xy, full_xy, goal_world=None):
         # The two widths must SUM to self.w. Clamping each independently lets
         # the composed frame come out wider than the panel the VideoWriter was
         # opened for -- and cv2 drops a wrong-sized frame silently, with no
@@ -152,6 +159,7 @@ class TopDownRenderer:
         self._draw_trail(left, overview.extent)
         self._draw_routes(left, overview.extent, 1)
         self._polyline(left, committed_xy, overview.extent, COMMITTED_BGR, 2)
+        self._draw_goal(left, goal_world, overview.extent, 4)
         self._draw_pose(left, pose, overview.extent, arrow_px=10, dot_px=3)
         _banner(left, "HOSPITAL  live=yellow flown=grey trail=green")
 
@@ -164,6 +172,7 @@ class TopDownRenderer:
         self._draw_routes(right, local.extent, 1)
         self._polyline(right, full_xy, local.extent, PLAN_BGR, 1)
         self._polyline(right, committed_xy, local.extent, COMMITTED_BGR, 3)
+        self._draw_goal(right, goal_world, local.extent, 7)
         self._draw_pose(right, pose, local.extent, arrow_px=22, dot_px=5)
         # Kept short enough to FIT. The banner is drawn at a fixed scale into a
         # panel whose width depends on `overview_fraction`, and cv2.putText
@@ -175,7 +184,7 @@ class TopDownRenderer:
         cv2.line(panel, (overview_w, 0), (overview_w, self.h), (90, 90, 95), 1)
         return panel
 
-    def _render_fitted(self, pose, committed_xy, full_xy):
+    def _render_fitted(self, pose, committed_xy, full_xy, goal_world=None):
         """The no-map fallback: graph paper with axes fitted to the flight."""
         panel = np.full((self.h, self.w, 3), 24, dtype=np.uint8)
         extra = []  # type: List[Tuple[float, float]]
@@ -190,6 +199,7 @@ class TopDownRenderer:
         self._draw_routes(panel, extent, 1)
         self._polyline(panel, full_xy, extent, PLAN_BGR, 1)
         self._polyline(panel, committed_xy, extent, COMMITTED_BGR, 3)
+        self._draw_goal(panel, goal_world, extent, 6)
         self._draw_pose(panel, pose, extent, arrow_px=18, dot_px=4)
         _banner(panel, "N1 ROUTES  %d routes, %.1f m"
                 % (len(self.routes), self.routes_m))
@@ -270,6 +280,18 @@ class TopDownRenderer:
             cv2.polylines(panel, [pts], False, color, thick, cv2.LINE_AA)
         if dot:
             cv2.circle(panel, tuple(int(v) for v in pts[-1]), 4, color, -1, cv2.LINE_AA)
+
+    @staticmethod
+    def _draw_goal(panel, goal_world, extent, size_px):
+        """A cross where System 2 pointed, once it is a place and not a pixel."""
+        if goal_world is None:
+            return
+        x, y = float(goal_world[0]), float(goal_world[1])
+        if not (np.isfinite(x) and np.isfinite(y)):
+            return
+        px, py = _to_px(panel, extent, x, y)
+        cv2.drawMarker(panel, (px, py), GOAL_BGR, cv2.MARKER_TILTED_CROSS,
+                       size_px * 2, 2, cv2.LINE_AA)
 
     @staticmethod
     def _draw_pose(panel, pose, extent, arrow_px, dot_px):
