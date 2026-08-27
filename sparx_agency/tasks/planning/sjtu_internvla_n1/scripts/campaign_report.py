@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Compare the runs of a campaign: what each one flew, and where it got to.
+"""Compare the runs of a campaign: what each one flew, and how much it saw.
 
 Five runs of the same instruction are only worth recording if they can be read
 side by side, and the per-run verdict line in ``record_campaign.sh`` answers
 "did this produce a result" rather than "what did the policy do". This answers
 the second: how much route, of what kind, how many deliberate rotations, how far
-the aircraft actually travelled, and how close it came to the thing it was told
-to stop at.
+the aircraft actually travelled, **what share of the building it looked at**, and
+how close it came to the thing it was told to stop at.
+
+The ``seen%`` column is the one that makes an exploration order comparable
+across runs at all -- there is no state at which "explore the entire hospital" is
+satisfied, so the only honest scoreboard is how much floor each run covered. It
+is computed live by the recorder and read back out of the log here.
 
 **Everything here comes out of each run's ``nodes.log``**, which the policy node
 already writes one line per decision into -- no rosbag decoding, no ROS, no
@@ -37,6 +42,16 @@ _TURN = re.compile(r"turn #(\d+): ([-+][\d.]+) deg")
 _ESCAPE = re.compile(r"BLOCKED ESCAPE (\d+)")
 _STOP = re.compile(r"N1 STOP")
 _FPS = re.compile(r"System1=([\d.]+) Hz\s+System2=([\d.]+) Hz")
+# The recorder's coverage line, running and final. FINAL is preferred: it is
+# written when the video is closed, so it is the whole flight even when the last
+# periodic line landed seconds earlier.
+# `\s+` after the label, not a single space: the recorder writes TWO spaces
+# ("N1 COVERAGE  12.4% seen ..."), so a literal " " matched the FINAL line -- whose
+# own `\s+` swallowed the pair -- and silently never matched the periodic one. The
+# fallback for a run whose recorder was killed before it could write FINAL was
+# therefore dead, and dead in a way no fixture with a FINAL line in it can show.
+_COVERAGE = re.compile(
+    r"N1 COVERAGE\s+(FINAL\s+)?([\d.]+)% seen \(([\d.]+) of ([\d.]+) m2\)")
 
 
 class Run(object):
@@ -53,6 +68,10 @@ class Run(object):
         self.s1_fps = None
         self.s2_fps = None
         self.capsized = False
+        self.seen_pct = None
+        self.seen_m2 = None
+        self.floor_m2 = None
+        self._seen_final = False
         self._read()
 
     def _read(self):
@@ -79,6 +98,13 @@ class Run(object):
                 match = _FPS.search(line)
                 if match:
                     self.s1_fps, self.s2_fps = float(match.group(1)), float(match.group(2))
+                    continue
+                match = _COVERAGE.search(line)
+                if match and not self._seen_final:
+                    self._seen_final = bool(match.group(1))
+                    self.seen_pct = float(match.group(2))
+                    self.seen_m2 = float(match.group(3))
+                    self.floor_m2 = float(match.group(4))
 
     # ── what it flew ────────────────────────────────────────────────
     @property
@@ -151,10 +177,10 @@ def find_runs(root):
 def report(runs, target=None):
     """Print the comparison table and a one-line summary of the campaign."""
     head = ("run", "verdict", "routes", "curve%", "route m", "moved m", "net m",
-            "turns", "esc", "blk", "S2 Hz")
+            "turns", "esc", "blk", "S2 Hz", "seen%")
     if target is not None:
         head = head + ("to target",)
-    widths = [12, 9, 6, 6, 7, 7, 6, 5, 4, 4, 6] + ([9] if target is not None else [])
+    widths = [12, 9, 6, 6, 7, 7, 6, 5, 4, 4, 6, 6] + ([9] if target is not None else [])
     print("  ".join(h.rjust(w) for h, w in zip(head, widths)))
     print("  ".join("-" * w for w in widths))
     for run in runs:
@@ -163,7 +189,8 @@ def report(runs, target=None):
                "%.1f" % run.route_m, "%.1f" % run.travelled_m,
                "%.1f" % run.displacement_m, str(len(run.turns)),
                str(run.escapes), str(run.blocks),
-               "--" if run.s2_fps is None else "%.2f" % run.s2_fps]
+               "--" if run.s2_fps is None else "%.2f" % run.s2_fps,
+               "--" if run.seen_pct is None else "%.1f" % run.seen_pct]
         if target is not None:
             near = run.closest_to(target)
             row.append("--" if near is None else "%.2f" % near)
@@ -185,6 +212,29 @@ def report(runs, target=None):
         moved = [r.travelled_m for r in flown]
         print("ground covered per run: min %.1f m, median %.1f m, max %.1f m"
               % (min(moved), sorted(moved)[len(moved) // 2], max(moved)))
+        _report_coverage(runs)
+
+
+def _report_coverage(runs):
+    """The exploration scoreboard: per-run spread, and what the campaign saw.
+
+    The union across runs is deliberately NOT reported. Each run restarts the
+    world and re-ferries the aircraft, so the runs are independent samples of
+    the same question rather than one long exploration, and adding their masks
+    together would describe a flight nobody flew.
+    """
+    seen = [r.seen_pct for r in runs if r.seen_pct is not None]
+    if not seen:
+        print("coverage: not measured (no `N1 COVERAGE` line -- older run, or "
+              "the recorder had no map)")
+        return
+    floors = set(r.floor_m2 for r in runs if r.floor_m2 is not None)
+    floor = ("%.0f m2" % floors.pop()) if len(floors) == 1 else "a differing floor"
+    ordered = sorted(seen)
+    print("building seen per run, of %s: min %.1f%%, median %.1f%%, max %.1f%% "
+          "(%d of %d runs measured)"
+          % (floor, ordered[0], ordered[len(ordered) // 2], ordered[-1],
+             len(seen), len(runs)))
 
 
 def main(argv=None):

@@ -15,6 +15,13 @@ what ``free_space_sampler`` draws goals from; free space outside it is space no
 flight can ever visit, and counting it would put a ceiling below 100 % that
 looks like a plateau.
 
+Note what this is *not*. ``core.planning.exploration.visibility_coverage`` asks a
+neighbouring question and answers it differently: what the **camera has looked
+at** in one flight, at map resolution, through a field-of-view raycast that walls
+occlude. Here a cell counts because the aircraft was in it. That is the right
+model for "is this campaign still collecting new data" and the wrong one for
+"has this flight explored the building"; keep the two apart.
+
 **Heading coverage** — the mean number of distinct 45° heading bins each visited
 cell has been seen from, out of eight. This is the one people forget. The policy
 is goal-conditioned, so it has to fly *any* direction from *any* place; a
@@ -73,22 +80,26 @@ class SceneCoverage:
 def reachable_mask(map_path: Path):
     """The largest connected free component of a surveyed map, plus its geometry.
 
+    The component labelling is ``core.planning.environment.grid_regions``, which
+    is the one implementation the tree has: the mission sampler draws its
+    start/goal pairs from the same notion of "one connected block", and the
+    per-flight coverage tracker divides by an enclosed one. Three copies of a
+    flood fill is how the denominators drift apart.
+
     Returns:
         ``(mask, resolution_m, origin_xy)``. The mask is what a flight *could*
         reach; everything else is unreachable and must not count against
         coverage.
     """
-    from scipy import ndimage
+    from sparx_agency.core.planning.environment.grid_regions import connected_regions
 
     data = np.load(map_path)
     grid = data["grid"]
     free = grid == 0
-    labels, count = ndimage.label(free)
-    if count == 0:
+    regions = connected_regions(free, connectivity=4)
+    if not regions:
         return np.zeros_like(free), float(data["resolution"]), data["origin"]
-    sizes = ndimage.sum(free, labels, range(1, count + 1))
-    biggest = int(np.argmax(sizes)) + 1
-    return labels == biggest, float(data["resolution"]), data["origin"]
+    return regions[0], float(data["resolution"]), data["origin"]
 
 
 def measure(recordings_root: Path, scenes: Dict[str, Path],

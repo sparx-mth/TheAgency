@@ -11,6 +11,9 @@ every warning to info.
 The call-site caching itself needs a real ``rclpy`` logger to observe and is not
 reproducible here; what this file pins is the dispatch, which is what fixes it.
 """
+import threading
+import time
+
 import pytest
 
 from sparx_agency.core.planning.vlas.internvla_n1.client import ModelClient
@@ -112,8 +115,109 @@ def test_step_reinitialises_with_the_name_it_was_given_not_the_default():
     assert session.init_names == ["internvla_n1", "internvla_n1"]
 
 
-def test_reinit_without_a_prior_init_still_tries():
-    session = _Session(good_name="InternVLA-N1")
+def test_reinit_without_a_prior_init_asks_for_the_name_that_exists():
+    # There is nothing to replay before the first successful init, so this falls
+    # through to the signature default -- which therefore has to be the name
+    # InternNav registers. `InternVLA-N1` is a server-side KeyError, so the old
+    # default made every cold-start step a 500 until reset() happened to win.
+    session = _Session(good_name="internvla_n1")
     client = _client_with(session)
     assert client._reinit() is True
-    assert session.init_names == ["InternVLA-N1"]
+    assert session.init_names == ["internvla_n1"]
+
+
+# ── one checkpoint load at a time ────────────────────────────────────────
+class _SlowLoadingSession:
+    """A server whose first /agent/init takes a while, like a real one.
+
+    It also refuses to hold two agents at once -- which is what an 8 GB card
+    does when a 7B checkpoint is asked for twice: the second load OOMs and the
+    server stops answering anything at all.
+    """
+
+    def __init__(self, load_s=0.2):
+        self.load_s = load_s
+        self.init_calls = 0
+        self.concurrent = 0
+        self.max_concurrent = 0
+        self.agent_exists = False
+
+    def post(self, url, json=None, timeout=None, headers=None):
+        if url.endswith("/agent/init"):
+            self.init_calls += 1
+            self.concurrent += 1
+            self.max_concurrent = max(self.max_concurrent, self.concurrent)
+            try:
+                time.sleep(self.load_s)
+                if self.agent_exists:
+                    return _Resp(500, "torch.OutOfMemoryError")
+                self.agent_exists = True
+                return _Resp(201)
+            finally:
+                self.concurrent -= 1
+        if url.endswith("/reset"):
+            return _Resp(200 if self.agent_exists else 404)
+        return _Resp(404)
+
+    def get(self, url, timeout=None):
+        return _Resp(200)
+
+
+def test_two_threads_asking_to_init_load_the_checkpoint_once():
+    """The failure this prevents cost a whole five-minute recording.
+
+    The policy node initialises the agent at start-up AND re-initialises from
+    any step that finds the client uninitialised, on a different thread. Both
+    reaching a cold server means the second one asks for a second copy of the
+    checkpoint while the first is still loading; on an 8 GB card that is a CUDA
+    OOM twenty-seven seconds in, after which the server answers nothing and the
+    aircraft sits still for the rest of the flight.
+    """
+    session = _SlowLoadingSession()
+    client = _client_with(session)
+    results = []
+
+    def go():
+        results.append(client.init_agent(model_name="internvla_n1",
+                                         model_settings={"width": 600}))
+
+    threads = [threading.Thread(target=go) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(results), "every caller should end up initialised"
+    assert session.max_concurrent == 1, "two inits overlapped"
+    assert session.init_calls == 1, "the checkpoint was asked for more than once"
+
+
+def test_the_client_does_not_warn_about_settings_it_applied_itself():
+    """The "NOT applied" warning is for a stale server, not for our own wait.
+
+    A second caller of a serialised init finds the agent the FIRST caller just
+    created with these very settings; telling the operator they were ignored
+    would send them off restarting a correctly configured server.
+    """
+    logger = _Logger()
+    client = ModelClient(logger=logger)
+    client._session = _SlowLoadingSession(load_s=0.0)
+
+    assert client.init_agent(model_name="internvla_n1", model_settings={"width": 600})
+    assert client.init_agent(model_name="internvla_n1", model_settings={"width": 600})
+    assert not [c for c in logger.calls if c[0] == "warning"], logger.calls
+    # ...and the logger really is wired, or the line above proves nothing.
+    assert any("already initialized" in c[1] for c in logger.calls), logger.calls
+
+
+def test_it_DOES_warn_when_someone_else_created_the_agent():
+    """The stale-server case the warning exists for: settings silently ignored."""
+    logger = _Logger()
+    client = ModelClient(logger=logger)
+    session = _SlowLoadingSession(load_s=0.0)
+    session.agent_exists = True          # a server that was up before we started
+    client._session = session
+
+    assert client.init_agent(model_name="internvla_n1", model_settings={"width": 600})
+    assert session.init_calls == 0, "an existing agent must not be re-created"
+    assert [c for c in logger.calls if c[0] == "warning"], logger.calls

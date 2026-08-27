@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - cv2 is present in the venv and ROS env
 # the building's occupancy map as well as fitting axes to the trail; it is
 # re-exported here because this is the name every caller already imports.
 from sparx_agency.tasks.planning.sjtu_internvla_n1.top_down import (  # noqa: F401
+    CoverageOverlay,
     TopDownRenderer,
 )
 
@@ -208,10 +209,13 @@ def draw_camera_panel(frame_bgr, info, size):
     _put(panel, _fps("System 2:", info.s2_fps, info.s2_ms), (10, h - 10), 0.6, (0, 200, 255), 2)
 
     # Instruction, wrapped, bottom band.
-    # Three lines, not two. The instruction is the one thing on screen that a
-    # viewer has to read in full to judge anything else, and a room-and-table
-    # order does not fit in two.
-    lines = _wrap(info.instruction, 54)[:3]
+    # Four lines, not three, and not two. The instruction is the one thing on
+    # screen that a viewer has to read in full to judge anything else, and it
+    # keeps growing: a room-and-table order does not fit in two, and the
+    # exploration order -- go in, look, come back out, go on to the next --
+    # does not fit in three. A clipped instruction is a video that cannot be
+    # used as evidence about the instruction.
+    lines = _wrap(info.instruction, 54)[:4]
     y = h - 58 - 8 - (len(lines) - 1) * 22
     for line in lines:
         (tw, _), _ = cv2.getTextSize(line, _FONT, 0.5, 1)

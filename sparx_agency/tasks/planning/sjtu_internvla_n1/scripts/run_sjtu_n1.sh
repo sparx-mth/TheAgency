@@ -95,8 +95,15 @@ BAG_DIR="${BAG_DIR:-${LOG_DIR}/bag_$(date +%H%M%S)}"
 # The trailing ".0" is load-bearing: the recorder declares `record_seconds` as a
 # DOUBLE, and `record_seconds:=90` is parsed as an INTEGER, which rclpy refuses
 # with InvalidParameterTypeException before the node has done anything at all.
+# SIXTY, not thirty. The recorder's clock starts when the NODE is constructed;
+# the flight clock only starts after `sleep 4`, the bag, ensure_flying (up to 21 s
+# by default) and 3 s of instruction publishing -- about 28 s of bring-up against
+# a 30 s lead. A slow takeoff then closes the video BEFORE the flight ends, and
+# the launch file's `on_exit=Shutdown()` on the recorder takes the policy and the
+# follower down with it. Overshooting costs nothing: cleanup's SIGINT closes the
+# file first on every normal teardown.
 if [[ "${RECORD_SECONDS}" -gt 0 ]]; then
-    RECORDER_SECONDS="$(( RECORD_SECONDS + ${RECORDER_LEAD_S:-30} )).0"
+    RECORDER_SECONDS="$(( RECORD_SECONDS + ${RECORDER_LEAD_S:-60} )).0"
 else
     RECORDER_SECONDS="0.0"
 fi
@@ -378,6 +385,19 @@ report() {
         | awk '{s += $(NF-1)} END {printf "%.1f", s+0}')"
     say "  routes flown        ${curves} curves + ${actions} action steps, ${metres:-0} m of route"
     say "  rotations flown     ${turns}  (blocked-forward escapes: ${escapes}, hard blocks: ${blocked})"
+    # HOW MUCH OF THE BUILDING THE FLIGHT LOOKED AT. Under an exploration order
+    # this is the only line here that answers the instruction: the others say
+    # what the aircraft did, this says what it achieved. The recorder writes
+    # FINAL when it closes the video, which is the whole flight; the periodic
+    # line is the fallback for a run whose recorder was killed outright.
+    local seen
+    seen="$(grep -ao 'N1 COVERAGE FINAL .*' "${LOG_DIR}/nodes.log" 2>/dev/null | tail -n1)"
+    [[ -n "${seen}" ]] || seen="$(grep -ao 'N1 COVERAGE .*' "${LOG_DIR}/nodes.log" 2>/dev/null | tail -n1)"
+    if [[ -n "${seen}" ]]; then
+        say "  hospital seen       ${seen#N1 COVERAGE }"
+    else
+        say "  hospital seen       not measured (no map backdrop, or recorder.coverage off)"
+    fi
     local fps_line
     fps_line="$(grep -a 'N1 FPS' "${LOG_DIR}/nodes.log" 2>/dev/null | tail -n1)"
     if [[ -n "${fps_line}" ]]; then

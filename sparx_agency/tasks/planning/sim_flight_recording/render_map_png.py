@@ -61,15 +61,18 @@ def largest_free_component(grid: np.ndarray) -> np.ndarray:
 
     Free space outside it is unreachable, and counting it as flyable is what
     makes a coverage figure plateau below 100 % for no visible reason.
+
+    The labelling is ``core.planning.environment.grid_regions`` -- the same one
+    ``free_space_sampler`` draws missions from and the coverage trackers divide
+    by. It used to be a private ``scipy.ndimage.label`` here, which is how a
+    picture of "where flights can go" and the number measuring how much of it
+    they went to end up disagreeing about the map.
     """
-    from scipy import ndimage
+    from sparx_agency.core.planning.environment.grid_regions import connected_regions
 
     free = grid == 0
-    labels, count = ndimage.label(free)
-    if count == 0:
-        return np.zeros_like(free)
-    sizes = ndimage.sum(free, labels, range(1, count + 1))
-    return labels == (int(np.argmax(sizes)) + 1)
+    regions = connected_regions(free, connectivity=4)
+    return regions[0] if regions else np.zeros_like(free)
 
 
 def render(scene: str, out_path: Path, altitude_m: float = 1.5,

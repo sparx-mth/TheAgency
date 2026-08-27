@@ -3,8 +3,13 @@
 
 No ROS, no Gazebo, no model. It fakes a drone exploring a floor plan: a moving
 camera panel on the left, N1's committed route and a growing trail on the right,
-and the System-1 / System-2 FPS drawn on -- the exact layout a live run records,
-so the output format can be seen before wiring the whole stack up.
+the floor the camera has looked at washed in blue with its percentage, and the
+System-1 / System-2 FPS drawn on -- the exact layout a live run records, so the
+output format can be seen before wiring the whole stack up.
+
+The coverage here is computed the same way a real run computes it, off the same
+map, from the fake poses -- so the demo exercises the measurement, not only the
+drawing.
 
     python -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.demo_recording \
         --output /tmp/sjtu_n1/demo.mp4 --seconds 12
@@ -20,17 +25,25 @@ import os
 import cv2
 import numpy as np
 
+from sparx_agency.core.planning.environment.occupancy_io import occupancy_from_mask
+from sparx_agency.core.planning.exploration.visibility_coverage import (
+    VisibilityCoverage,
+    cone_from_intrinsics,
+)
 from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
     load_map_backdrop,
 )
 from sparx_agency.tasks.planning.sjtu_internvla_n1.recording import (
+    CoverageOverlay,
     OverlayInfo,
     TopDownRenderer,
     compose,
     draw_camera_panel,
 )
 
-INSTRUCTION = "Explore the entire hospital, enter all the rooms, reach every area at least once"
+INSTRUCTION = ("Explore the entire hospital. Enter every room you pass, look around "
+               "inside to see what is in it, then come back out into the corridor and "
+               "go on to the next room.")
 
 
 def _fake_camera(w, h, t, action):
@@ -84,7 +97,16 @@ def main(argv=None):
 
     # Draw on the real hospital map when it is there, so the demo shows the
     # format a recording actually has rather than a simplified one.
-    topdown = TopDownRenderer(size=(w, h), backdrop=load_map_backdrop(args.map))
+    backdrop = load_map_backdrop(args.map)
+    topdown = TopDownRenderer(size=(w, h), backdrop=backdrop)
+    coverage = None
+    if backdrop is not None:
+        coverage = VisibilityCoverage(
+            occupancy_from_mask(backdrop.occupied_mask, backdrop.resolution,
+                                backdrop.origin_x, backdrop.origin_y,
+                                known=backdrop.known_mask),
+            cone_from_intrinsics(600, 390.642735, max_range_m=10.0,
+                                 forward_offset_m=0.2))
     n_frames = int(args.seconds * args.fps)
     x, y, yaw = 1.0, 1.0, 0.0
     actions = ["MOVE_FORWARD", "MOVE_FORWARD", "TURN_LEFT", "MOVE_FORWARD", "TURN_RIGHT"]
@@ -96,6 +118,8 @@ def main(argv=None):
         x += 0.08 * np.cos(yaw)
         y += 0.08 * np.sin(yaw)
         topdown.add_pose(x, y)
+        if coverage is not None:
+            coverage.observe(x, y, yaw)
         action = actions[(i // 8) % len(actions)]
 
         committed = _route(x, y, yaw, n=8)
@@ -107,12 +131,18 @@ def main(argv=None):
             pixel_goal=(int(w / 2 + 120 * np.sin(t * 0.6)), int(h * 0.42)),
             pixel_goal_frame=(w, h))
 
+        overlay = None if coverage is None else CoverageOverlay(
+            seen=coverage.seen_mask, fraction=coverage.fraction_seen,
+            area_seen_m2=coverage.area_seen_m2,
+            area_total_m2=coverage.area_total_m2)
         left = draw_camera_panel(_fake_camera(w, h, t, action), info, (w, h))
-        right = topdown.render((x, y, yaw), committed, full)
+        right = topdown.render((x, y, yaw), committed, full, None, overlay)
         writer.write(compose(left, right))
 
     writer.release()
     print("wrote %d frames (%.1fs) to %s" % (n_frames, args.seconds, args.output))
+    if coverage is not None:
+        print("coverage: %s" % (coverage.summary(),))
 
 
 if __name__ == "__main__":

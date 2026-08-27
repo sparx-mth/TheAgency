@@ -60,13 +60,28 @@ frames:
 # The N1 policy node: how often it asks the server, and the default instruction.
 policy_params:
   inference_rate_hz: 4.0
-  # ONE ROOM, ONE TABLE. "Explore the entire hospital" is not a navigation
-  # instruction, it is a research programme: there is no state at which it is
-  # satisfied, so nothing in the episode is evidence for or against the policy
-  # having understood it, and a flight can only be judged on whether it looked
-  # busy. This one names a direction, a place and a stopping condition, all of
-  # which are checkable from the recording.
-  default_instruction: "There is a room to your right. Enter it, go to the center of the room, find the table and stop near the table."
+  # THE EXPLORATION ORDER, and it is only usable because the run is now
+  # MEASURED. The objection to it was always sound and has not gone away: there
+  # is no state at which "explore the entire hospital" is satisfied, so a flight
+  # under it cannot be scored pass or fail the way the room-and-table order
+  # could. What changed is that the recorder computes the share of the
+  # building's floor the camera has had a clear line to
+  # (`recorder.coverage` below), so the episode produces a number that rises
+  # with the thing the instruction is actually asking for. Judge a run on that
+  # curve and on which rooms the overview panel leaves unwashed, not on whether
+  # it looked busy.
+  #
+  # It also asks for the loop the order names -- go in, look, come back out, go
+  # on -- rather than only for the goal, because System 2 answers with
+  # coordinates when it can name something concrete to fly to and with an arrow
+  # when it cannot, and "the next room you pass" is a concrete thing at every
+  # step of a corridor. Counterbalanced A/B over four instructions found no
+  # significant difference in that ratio (see the package README), so this is
+  # phrasing for the reader as much as for the model.
+  #
+  # No apostrophes. run_sjtu_n1.sh publishes it as
+  # `ros2 topic pub ... "{data: '<instruction>'}"`, and one would end the string.
+  default_instruction: "Explore the entire hospital. Enter every room you pass, look around inside to see what is in it, then come back out into the corridor and go on to the next room."
   step_m: 0.25          # forward reach rendered from a discrete FORWARD action
   # 15 degrees, because that is what THIS producer means by a turn:
   # `vln_utils.trajectory_to_discrete_actions_close_to_goal` hard-codes
@@ -452,4 +467,34 @@ recorder:
   map: sparx_agency/robots/SJTU/maps/hospital.yaml
   local_span_m: 14.0        # side of the world square the following view shows
   overview_fraction: 0.42   # share of the panel given to the whole-building view
+
+  # HOW MUCH OF THE BUILDING HAS BEEN SEEN. The measurement that makes the
+  # exploration instruction above judgeable at all: the camera's field of view
+  # is swept across the same map the route is drawn on, the free cells it
+  # reaches before a wall stops it are marked, and the share of the building's
+  # floor is drawn on the overview panel and logged as `N1 COVERAGE`.
+  #
+  # The denominator is the map's largest ENCLOSED free region -- the hospital's
+  # own floor, 1140 m2. Not all free space: this map was computed from collision
+  # meshes, so it has free cells outside the outer wall and inside every closed
+  # cupboard, and counting either would put a ceiling on the percentage that
+  # looks like a plateau.
+  #
+  # Read it as "the share of the floor that has passed through the camera's
+  # bearing and range window with nothing in between". It is a plan-view proxy:
+  # the vertical field of view and the aircraft's altitude are not modelled, and
+  # the map's 0.30-2.00 m band means a desk occludes. It is not a claim that the
+  # room was understood.
+  coverage:
+    enabled: true
+    # The DEPTH sensor's far clip (camera_front_depth_600x600.yaml), not a
+    # preference. Past it the pixels carry no measurement, and a ray that keeps
+    # going marks floor straight through the far wall.
+    max_range_m: 10.0
+    # The front camera sits 0.2 m ahead of the body origin -- see
+    # robots/SJTU/adapters/topics.py, FRONT_CAMERA_OFFSET_FLU. It carves space
+    # outward from itself, so the body origin is the one place it never sees.
+    camera_forward_m: 0.2
+    rate_hz: 5.0            # poses folded in per second; ~2 ms each
+    log_every_s: 10.0       # how often the running number reaches nodes.log
 

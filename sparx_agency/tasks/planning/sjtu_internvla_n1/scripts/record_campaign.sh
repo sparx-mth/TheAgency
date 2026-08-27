@@ -41,9 +41,20 @@ fi
 
 CAMPAIGN_DIR="${CAMPAIGN_DIR:-${HOME}/sjtu_n1_recordings/$(date +%Y%m%d_%H%M%S)}"
 WORLD="${WORLD:-hospital}"
-# One room, one table -- an instruction with a state at which it is satisfied.
-# "Explore the entire hospital" has none, so no flight can be evidence about it.
-INSTRUCTION="${INSTRUCTION:-There is a room to your right. Enter it, go to the center of the room, find the table and stop near the table.}"
+# THE EXPLORATION ORDER. It has no state at which it is satisfied -- that
+# objection stands -- so it is only worth flying because the run is now
+# MEASURED: the recorder reports what share of the hospital's floor the camera
+# had a clear line to, and that is what a campaign of these is compared on.
+#
+# It also puts the default AREAS list back in the right relationship with the
+# default instruction. The room-and-table order was sited and measured for
+# `office_door` and was false of the other five areas, so a bare
+# `record_campaign.sh` flew five runs of an order that named a room none of them
+# could see. "Explore the entire hospital" is true from anywhere in it.
+#
+# Keep it apostrophe-free: run_sjtu_n1.sh publishes it inside
+# `ros2 topic pub ... "{data: '<instruction>'}"`.
+INSTRUCTION="${INSTRUCTION:-Explore the entire hospital. Enter every room you pass, look around inside to see what is in it, then come back out into the corridor and go on to the next room.}"
 export SJTU_PROJECT_DIR="${SJTU_PROJECT_DIR:-${HOME}/GIT/sjtu_project}"
 export DISPLAY="${DISPLAY:-:1}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-20}"
@@ -205,7 +216,16 @@ while :; do
     stops="$(count_in 'N1 STOP')"; stops="${stops:-0}"
     metres="$(grep -ao 'committed #[0-9]*: [0-9]* pts, [0-9.]* m' "${run_dir}/nodes.log" 2>/dev/null \
         | awk '{s += $(NF-1)} END {printf "%.1f", s+0}')"
-    say "run ${n} (${area}): ${verdict}  routes=${commits} (${curves} curve/${actions} action, ${metres:-0} m)  turns=${turns}  escapes=${escapes}  stops=${stops}  ${frames:-no frame count}"
+    # THE NUMBER THE INSTRUCTION IS ABOUT. Everything else on this line says
+    # what the aircraft did; this says how much of the building it saw, which
+    # is the only thing an exploration order can be scored on. FINAL first --
+    # the recorder writes it when it closes the video, so it covers the whole
+    # flight -- with the last periodic line as the fallback.
+    pct_in() { grep -ao "$1"'  [0-9.]*%' "${run_dir}/nodes.log" 2>/dev/null \
+        | tail -n1 | grep -ao '[0-9.]*%'; }
+    seen="$(pct_in 'N1 COVERAGE FINAL')"
+    [[ -n "${seen}" ]] || seen="$(pct_in 'N1 COVERAGE')"
+    say "run ${n} (${area}): ${verdict}  seen=${seen:-n/a}  routes=${commits} (${curves} curve/${actions} action, ${metres:-0} m)  turns=${turns}  escapes=${escapes}  stops=${stops}  ${frames:-no frame count}"
   done
 done
 

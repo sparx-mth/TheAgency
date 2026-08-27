@@ -48,8 +48,11 @@ Gazebo — SJTU no_roof_small_warehouse (Docker, ROS2 Humble, domain 20, CPU)
 
 The route is drawn on the hospital's **own occupancy map** — ground truth built
 from the world's collision meshes, not a flight — so a recording shows which
-corridor the drone went down and which rooms it never entered. See
-"The map the route is drawn on" below.
+corridor the drone went down and which rooms it never entered. The same map is
+also the yardstick: the recorder sweeps the camera's field of view across it and
+reports **what share of the building's floor the flight has looked at**, which is
+the only thing an exploration order can be scored on. See "The map the route is
+drawn on" and "How much of the hospital did it see" below.
 
 This is FALCON's `navdp_click_node → path → waypoint_follower_node` split, in
 ROS2, with no ROS1 bridge because N1 is already ROS2.
@@ -446,8 +449,17 @@ Found by `scripts/dry_run.py`, not by a flight.
 ## Before you spend a flight: `scripts/dry_run.py`
 
 ```bash
-.venv/bin/python -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.dry_run
+python3 -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.dry_run
 ```
+
+**`python3`, the system interpreter — not `.venv/bin/python`, whatever the habit
+is elsewhere in this tree.** The nodes decode camera frames through `cv_bridge`,
+an OS package compiled against numpy 1.x, and `.venv` pip-installs numpy 2 over
+the top of it: the run dies inside `_on_rgb` with *"A module that was compiled
+using NumPy 1.x cannot be run in NumPy 2.4.1"* and then aborts. `ros2 launch`
+uses `python3` as well, so this is the interpreter a real flight runs on anyway.
+Source ROS 2 first and put the repo root **in front of** what ROS put on
+`PYTHONPATH`, not instead of it.
 
 The two ROS2 nodes under test are the **real** ones. What is faked is everything
 expensive: a kinematic drone that integrates `/cmd_vel` (with first-order lag,
@@ -530,6 +542,14 @@ follow the model better.
 
 ## -1 is not STOP
 
+**Under the exploration order System 2 does emit real STOPs, often** — see
+"Measured: five runs of the exploration order". The zero-STOP measurement below
+was taken under the room-and-table instruction and is still true of it. Which
+makes decoding the index correctly matter more, not less: with genuine index-0
+STOPs now arriving, an idle -1 mistaken for one would abandon a route for the
+same reason a real STOP ends a flight, and the two would be indistinguishable in
+the log.
+
 `INDEX_TO_ACTION.get(index, "STOP")` is the obvious way to decode an action, and
 it is wrong here: it turns every index the map does not know — including the -1
 the agent emits seventeen times in five flights — into a request to stop. This
@@ -595,6 +615,31 @@ python3 sparx_agency/tasks/planning/sjtu_internvla_n1/scripts/check_gpu_free.py 
 nvidia-smi                                    # everything else is CPU
 ```
 
+### Pre-warm the agent before a campaign
+
+```bash
+python3 -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.prewarm_server
+```
+
+The server loads its checkpoint lazily, on the first `/agent/init` — 27 s here.
+Doing it inside a recording spends the flight clock on it, and it used to do
+worse: the policy node asks for the agent at start-up *and* again from any
+`step()` that finds itself uninitialised, on another thread, so a **cold** server
+got two init requests and built two agents. On an 8 GB card the second checkpoint
+load is a `torch.OutOfMemoryError` twenty-seven seconds in, after which the
+server answers nothing and the recording is five minutes of a motionless
+aircraft. The race is fixed — `init_agent` is serialised in
+`core/planning/vlas/internvla_n1/client.py`, and its default model name is now
+the one InternNav actually registers — but paying the load before the clock
+starts is still the right way round.
+
+**Pre-warm with the flight's own settings or not at all**, which is the whole
+reason this is a script rather than a `curl`. The agent is built once, from the
+`model_settings` of the init that created it; an agent created with the server's
+640x480 / fx 585 defaults will fly a 600x600 / fx 390.6 aircraft perfectly
+happily, projecting every pixel goal through the wrong camera. The script reads
+the same binding YAML through the same node method the flight uses.
+
 Redirect the drone mid-flight:
 
 ```bash
@@ -617,19 +662,24 @@ ros2 launch sparx_agency/tasks/planning/sjtu_internvla_n1/launch/sjtu_internvla_
 # hospital world, the exploration order, recording on. Ctrl-C to stop, or set a duration.
 sparx_agency/tasks/planning/sjtu_internvla_n1/scripts/record_run.sh
 RECORD_SECONDS=180 sparx_agency/tasks/planning/sjtu_internvla_n1/scripts/record_run.sh \
-    hospital "Explore the entire hospital, enter all the rooms, reach every area at least once"
+    hospital "Go to the nurses station and stop in front of the desk."
 ```
 
-It produces two artifacts and prints the measured S1/S2 FPS at the end:
+With no second argument it flies the binding YAML's `default_instruction`, which
+is now the exploration order (see "How much of the hospital did it see").
+
+It produces two artifacts and prints the measured S1/S2 FPS and coverage at the
+end:
 
 * **an MP4** — a two-panel video: the **drone camera on the left** (with the
   instruction, the action, the System-2 pixel goal and the System-1/System-2 FPS
   drawn on) and **N1's route top-down on the right** (the committed route in
-  yellow, the speculative tail in orange, the trail it has flown in green). The
-  top-down view is the honest way to show a *drone's* route — an aircraft flies
-  at camera height, so a ground path projects to the horizon in first person and
-  only reads clearly from above. Written with OpenCV's `mp4v` encoder, so no
-  system `ffmpeg` is needed.
+  yellow, the speculative tail in orange, the trail it has flown in green, and
+  **the floor the camera has looked at washed in blue** under all of it, with
+  the percentage in the banner). The top-down view is the honest way to show a
+  *drone's* route — an aircraft flies at camera height, so a ground path
+  projects to the horizon in first person and only reads clearly from above.
+  Written with OpenCV's `mp4v` encoder, so no system `ffmpeg` is needed.
 * **a rosbag** — every relevant topic, for replay and offline analysis.
 
 The rendering is ROS-free (`recording.py` for the camera panel, `top_down.py`
@@ -702,6 +752,75 @@ land within one cell of an occupied cell, median distance 0.000 m, and it is not
 mirrored, shifted, rotated or scaled. Rebuild it with the command in
 `robots/SJTU/maps/README.md`.
 
+## How much of the hospital did it see
+
+The instruction this deployment now flies by default is an **exploration order**:
+
+> *"Explore the entire hospital. Enter every room you pass, look around inside to
+> see what is in it, then come back out into the corridor and go on to the next
+> room."*
+
+The objection that kept it out before is still true and worth restating: there is
+no state at which that order is satisfied, so a run under it cannot be scored
+pass or fail the way *"enter the room, find the table, stop"* could. What changed
+is that the run is now **measured**. The recorder reports
+
+```
+[n1_run_recorder_node] N1 COVERAGE  23.4% seen (267 of 1140 m2)
+```
+
+every ten seconds, and once more as `N1 COVERAGE FINAL` when it closes the video.
+That number is the run summary's last line, the campaign's `seen=` field, and
+`campaign_report.py`'s `seen%` column.
+
+### What the number is
+
+`core/planning/exploration/visibility_coverage.VisibilityCoverage`. From every
+pose the aircraft holds, the camera's horizontal field of view is swept across
+**the same ground-truth map the route is drawn on** — 525 rays over 75.046°,
+sampled every half cell out to the depth camera's 10 m far clip — and every free
+cell a ray reaches before a wall stops it is marked. The mark is permanent: the
+number only goes up.
+
+The denominator is the map's **largest enclosed free region**: 1139.9 m² of
+hospital floor. Not all free space, and this is the part that decides whether the
+percentage means anything. The map was computed from collision meshes, so it has
+free cells *outside* the outer wall (197 m² of open world, which runs off the
+edge of the grid) and inside every closed cupboard, wardrobe and elevator car
+(seventy small sealed voids). Counting the outside would deflate every run by a
+sixth; counting the voids would cap the best possible run below 100 % and read as
+a plateau. Excluding the components that touch the grid border drops the first;
+taking the largest of what remains drops the second.
+
+Cost, measured here: 0.23 s to build the denominator at start-up, **1.8 ms per
+pose** folded in at 5 Hz, and 4 ms of extra rendering per frame at 10 Hz. It runs
+in the **recorder**, not the policy node — the flight loop is synchronous and
+timing-critical, and nothing that merely watches a flight belongs inside it.
+
+### What the number is not
+
+* **Seen, not visited.** A room looked into from its doorway counts; a corridor
+  flown down blind would not. That is deliberate and it is the opposite of
+  `tools/campaign_monitor/coverage.py`, which marks the one-metre cell the
+  aircraft *was in* and aggregates over a whole campaign. The two answer
+  different questions; they now at least share one flood fill
+  (`core/planning/environment/grid_regions`) so their denominators cannot drift.
+* **A plan-view proxy.** The wedge is horizontal. The vertical field of view, the
+  aircraft's altitude and the height of what it is looking over are not modelled,
+  and because the map is built over the 0.30–2.00 m band a desk occludes like a
+  wall. Read it as *"the share of the floor that has passed through the camera's
+  bearing and range window with nothing in between"*.
+* **Not a claim that the room was understood.** Nothing here inspects the frame.
+  The percentage says the camera had a clear line to the floor, not that
+  InternVLA-N1 made anything of it.
+* **Not comparable across campaigns with a different map.** The denominator is
+  the map's; rebuild the map over a different height band and every number moves.
+  The floor area is printed beside the percentage for exactly this reason.
+
+Turn it off, or retune it, under `recorder.coverage` in the binding YAML. With no
+map configured there is no building to divide by, and the recorder says so once
+and carries on.
+
 ## The two reflexes, and why they exist
 
 Neither is optional in this world, and both were added after a recording proved
@@ -736,7 +855,13 @@ SCRIPTS=sparx_agency/tasks/planning/sjtu_internvla_n1/scripts
 $SCRIPTS/record_campaign.sh 90 atrium south_hall   # 90 s each, two named areas
 REPEAT=4 $SCRIPTS/record_campaign.sh               # four passes over the five areas
 REPEAT=0 $SCRIPTS/record_campaign.sh               # keep cycling until stopped
+REPEAT=5 $SCRIPTS/record_campaign.sh 300 atrium    # FIVE runs of one prompt, 5 min each
 ```
+
+**`REPEAT` multiplies by the number of areas, not by one.** `REPEAT=5` with no
+area named is five passes over the five default areas — twenty-five runs. Name
+one area for the five-recordings-of-one-prompt shape, which is the last line
+above and the one the exploration order is flown as.
 
 `REPEAT=0` is the unattended mode: as one recording ends the next begins, world
 restart and ferry included, until the script is killed.
@@ -758,6 +883,12 @@ guessed:
 | `reception` | (1.07, 2.08) | 1.54 m |
 | `east_wards` | (8.47, -7.28) | 1.75 m |
 | `south_hall` | (-1.61, -27.96) | 1.85 m |
+
+The campaign's default instruction is the exploration order, which is true from
+any of them — so a bare `record_campaign.sh` is now a coherent thing to run. It
+was not before: the default was the room-and-table order, which had been sited
+and measured for `office_door` alone and was false of every area in the default
+list.
 
 ```bash
 $SCRIPTS/goto_area.py --list                          # what is available
@@ -872,6 +1003,57 @@ rotating (45 turns), one hit the bay's north wall repeatedly (7 escapes), two
 wandered west. That spread across identical starts is the answer to "it is not
 deterministic": the **stack** is now repeatable and the **policy** is not.
 
+## Measured: five runs of the exploration order
+
+`REPEAT=5 record_campaign.sh 300 atrium`, hospital, 2026-08-27, five minutes
+each, every run starting from the same atrium pose with the world restarted
+between them. Instruction: the exploration order above.
+
+| run | verdict | routes | curve% | route m | moved m | turns | **seen** |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1 | FLEW | 9 | 100 | 20.1 | 18.6 | 21 | **15.7%** |
+| 2 | STOPPED | 9 | 100 | 17.5 | 13.6 | 5 | 10.8% |
+| 3 | STOPPED | 8 | 100 | 16.7 | 15.9 | 6 | 10.0% |
+| 4 | STOPPED | 10 | 100 | 19.3 | 13.7 | 14 | 10.9% |
+| 5 | STOPPED | 7 | 100 | 15.1 | 13.7 | 7 | 9.1% |
+
+**43 decisions, 43 curves, zero action steps.** No capsize, no blocked-forward
+escape, five playable videos and five readable bags. The stack did what it is
+supposed to do in all five.
+
+### The model declares the hospital explored after about a tenth of it
+
+Four of the five ended `STOPPED`, and this is the number the whole measurement
+was added to be able to see:
+
+| run | first `STOP` | seen at that moment | seen at the end |
+|---|---:|---:|---:|
+| 2 | 209 s | 10.8% | 10.8% |
+| 3 | 199 s | 10.0% | 10.0% |
+| 4 | 292 s | 10.9% | 10.9% |
+| 5 | 141 s | 9.1% | 9.1% |
+
+**Coverage froze at the first STOP in every case, to the cell.** System 2 says
+the task is finished somewhere between a tenth and a ninth of the building, the
+policy node correctly honours it — index 0 is the one index that resets the plan
+executor — and the remaining one to three minutes of each recording add nothing.
+Run 1 is the outlier that never stopped, and it is also the only one past 15%.
+
+This is worth putting beside the earlier measurement under the room-and-table
+order, which found **zero** real STOPs in 168 System-2 replies. Both are true.
+An instruction with a stopping condition the model cannot yet satisfy never
+produces one; an instruction with no stopping condition at all produces one
+early and often. That is a property of the policy, not of this stack, and it is
+the first thing to attack if these runs are to get past 15%: the ceiling is not
+the aircraft, the depth brake or the commitment discipline — none of them fired.
+
+The obvious levers, none of them tried yet: an instruction that makes stopping
+expensive ("do not stop until you have been in every room"), suppressing STOP
+client-side under an exploration order, or driving the model with a frontier —
+`core/planning/exploration/frontier.py` and the coverage mask are both right
+there, and "the nearest unwashed room" is a concrete referent, which is the one
+thing System 2 reliably answers with coordinates about.
+
 ## Comparing the runs of a campaign
 
 ```bash
@@ -881,8 +1063,17 @@ deterministic": the **stack** is now repeatable and the **policy** is not.
 
 One row per run: verdict, routes committed, **what share of them were curves**,
 metres of route, ground actually covered, net displacement, rotations, escapes,
-hard blocks, the measured System-2 rate, and the closest the aircraft got to a
-world point the instruction names.
+hard blocks, the measured System-2 rate, **the share of the hospital it saw**,
+and the closest the aircraft got to a world point the instruction names.
+
+Under an exploration order `seen%` is the column that matters and the others are
+diagnosis. It prefers each run's `N1 COVERAGE FINAL` line — written when the
+video is closed, so it covers the whole flight — and falls back to the last
+periodic one for a run whose recorder was killed outright. The campaign summary
+gives the min/median/max across runs and **deliberately does not union them**:
+each run restarts the world and re-ferries the aircraft, so they are five
+independent samples of the same question, and adding their masks together would
+describe a flight nobody flew.
 
 Everything comes out of each run's `nodes.log` — no rosbag decoding, no ROS, no
 model — so it runs in the plain `.venv` and on a campaign copied off the machine
@@ -1045,4 +1236,15 @@ export FASTDDS_DEFAULT_PROFILES_FILE=$FASTRTPS_DEFAULT_PROFILES_FILE
   the observation, the decision and the anchor become one place -- but a blocked
   aircraft now asks from a byte-identical frame and gets a byte-identical
   answer. The escape above exists because of this, not in spite of it.
+* **The coverage percentage is geometry, not comprehension.** It says the camera
+  had a clear line, in plan view, to that share of the building's floor. It does
+  not say the model looked at the frame, understood the room, or would recognise
+  it again — nothing in the measurement reads a pixel. Treat a rising curve as
+  evidence the aircraft went somewhere new, and the overview panel's unwashed
+  rooms as the list of what it never reached. See "How much of the hospital did
+  it see".
+* **The instruction has no completion condition, and that is not a bug that the
+  measurement fixes.** A run under the exploration order ends when the clock
+  does. `N1 STOP` from System 2 is still honoured, and in the hospital it has
+  never once been emitted.
 

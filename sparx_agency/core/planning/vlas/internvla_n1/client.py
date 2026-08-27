@@ -16,6 +16,7 @@ policy call where anything but 200 is "no answer this frame".
 
 import base64
 import pickle
+import threading
 import time
 from typing import Dict, List, Optional
 
@@ -68,6 +69,20 @@ class ModelClient(HttpPolicyClient):
         self.initialized = False
         #: What the last :meth:`init_agent` asked for, replayed by :meth:`step`.
         self._init_args = None
+        #: ONE LOAD AT A TIME. `/agent/init` is the request that pulls a 7B
+        #: checkpoint onto the card, and the policy node calls it from two
+        #: threads: once at start-up, and again from any `step()` that finds the
+        #: client uninitialised. Both arriving while the first is still loading
+        #: makes the server construct a SECOND agent and load the weights again
+        #: -- measured on this 8 GB card as `torch.OutOfMemoryError: Tried to
+        #: allocate 34.00 MiB` twenty-seven seconds into a cold start, after
+        #: which the server answers nothing and the whole recording is a
+        #: motionless aircraft. Holding this across the load makes the second
+        #: caller wait and then find the agent already there.
+        self._init_lock = threading.Lock()
+        #: True once THIS client's init created the agent, so the "your settings
+        #: were not applied" warning can tell a stale server from its own wait.
+        self._created_agent = False
 
     @property
     def base_url(self) -> str:
@@ -99,8 +114,27 @@ class ModelClient(HttpPolicyClient):
             return True
         return False
 
-    def init_agent(self, model_name: str = "InternVLA-N1",
+    def init_agent(self, model_name: str = "internvla_n1",
                    ckpt_path: str = "", model_settings: Optional[Dict] = None) -> bool:
+        """Create the server-side agent, loading its checkpoint if need be.
+
+        Serialised: see :attr:`_init_lock`. A caller that arrives while another
+        is loading blocks until that load finishes and then takes the
+        "already exists" path, rather than asking for a second copy of a
+        checkpoint that does not fit beside the first.
+
+        The default ``model_name`` is the name InternNav actually registers.
+        It used to be ``"InternVLA-N1"``, which is a server-side ``KeyError``
+        and therefore an HTTP 500 on every call -- harmless where a caller
+        passes the name (every caller here does) and not harmless in
+        :meth:`_reinit`, which has no arguments to replay until the first
+        successful init has recorded some.
+        """
+        with self._init_lock:
+            return self._init_agent(model_name, ckpt_path, model_settings)
+
+    def _init_agent(self, model_name: str, ckpt_path: str,
+                    model_settings: Optional[Dict]) -> bool:
         # Remember what we were asked for, so a later re-init asks for the same
         # thing. `step()` re-initialises when the agent is missing, and it has no
         # arguments to pass -- so without this it falls back to the signature
@@ -120,13 +154,16 @@ class ModelClient(HttpPolicyClient):
             # old configuration while every file on disk says otherwise, which
             # is the most expensive kind of quiet. Restart the server after
             # changing anything here.
-            if model_settings:
+            if model_settings and not self._created_agent:
                 self._say("warn",
                           "agent '%s' already exists; its model settings are "
                           "whatever created it and these %d are NOT applied. "
                           "Restart the model server to change them."
                           % (self.agent_name, len(model_settings)))
             else:
+                # No warning when this client created the agent itself: that is
+                # the second caller of a serialised init finding the first
+                # caller's work, and its settings ARE the ones in force.
                 self._say("info", "Agent already initialized, skipping")
             self.initialized = True
             return True
@@ -161,6 +198,7 @@ class ModelClient(HttpPolicyClient):
         response = attempt.response
         if response.status_code == 201:
             self.initialized = True
+            self._created_agent = True
             data = response.json()
             self.agent_name = data.get("agent_name", self.agent_name)
             self._say("info", f"Agent initialized: {self.agent_name}")

@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Record a run: drone camera + N1's top-down route + System-1/2 FPS, to MP4.
+"""Record a run: drone camera + N1's top-down route + how much has been seen.
 
 Subscribes only to topics -- the camera, the odometry, the committed and full N1
 routes, and the `/simple_drone/n1/info` status the policy node publishes (action,
 System-1/System-2 FPS, the S2 pixel goal). Every pixel is drawn by the ROS-free
 :mod:`~sparx_agency.tasks.planning.sjtu_internvla_n1.recording` helpers, so this
 node is thin: pull the latest of each, compose, write a frame at a fixed rate.
+
+It also **measures the flight**, because an exploration order has no state at
+which it is satisfied and a recording of one is only evidence if it carries a
+number. :class:`~sparx_agency.core.planning.exploration.visibility_coverage.
+VisibilityCoverage` sweeps the camera's field of view across the same
+ground-truth map the route is drawn on and reports the share of the building's
+floor that has been looked at. It lives here rather than in the policy node on
+purpose: the flight loop is synchronous and timing-critical, and nothing that
+merely watches a flight belongs inside it.
 
 Writes with OpenCV's own `mp4v` encoder (no system ffmpeg needed). Pair it with
 `ros2 bag record` in `scripts/record_run.sh` for a lossless copy of every topic.
@@ -61,6 +70,11 @@ def _imgmsg_to_bgr(msg):
 
 from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.core.common.types import Intrinsics
+from sparx_agency.core.planning.environment.occupancy_io import occupancy_from_mask
+from sparx_agency.core.planning.exploration.visibility_coverage import (
+    VisibilityCoverage,
+    cone_from_intrinsics,
+)
 from sparx_agency.core.planning.vlas.common.pixel_geometry import (
     body_to_pixel,
     world_to_body,
@@ -69,6 +83,7 @@ from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
     load_map_backdrop,
 )
 from sparx_agency.tasks.planning.sjtu_internvla_n1.recording import (
+    CoverageOverlay,
     OverlayInfo,
     TopDownRenderer,
     compose,
@@ -159,6 +174,13 @@ class N1RunRecorderNode(Node):
             backdrop=backdrop,
             local_span_m=float(rec.get("local_span_m", 14.0)),
             overview_fraction=float(rec.get("overview_fraction", 0.42)))
+        self._coverage = self._build_coverage(backdrop, rec.get("coverage", {}))
+        self._coverage_period_s = 1.0 / max(1e-3, float(
+            rec.get("coverage", {}).get("rate_hz", 5.0)))
+        self._coverage_log_s = float(rec.get("coverage", {}).get("log_every_s", 10.0))
+        self._last_observe_s = 0.0
+        self._last_coverage_log_s = 0.0
+        self._coverage_checked = False
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         self._writer = cv2.VideoWriter(output, fourcc, self._record_fps,
@@ -187,6 +209,75 @@ class N1RunRecorderNode(Node):
         self.get_logger().info(
             "recording drone camera + N1 route to %s (%dx%d @ %.0f fps)"
             % (output, self._panel_w * 2, self._panel_h, self._record_fps))
+
+    # ── coverage ─────────────────────────────────────────────────────
+    def _build_coverage(self, backdrop, cfg):
+        """The seen-floor tracker, or None when it cannot be built.
+
+        Never fatal. This node's contract is a playable MP4; a measurement that
+        cannot be set up is a line in the log, not a lost recording.
+        """
+        if backdrop is None:
+            self.get_logger().warn(
+                "no map backdrop, so no coverage measurement -- there is no "
+                "building to divide by")
+            return None
+        if not bool(cfg.get("enabled", True)):
+            return None
+        try:
+            grid = occupancy_from_mask(
+                backdrop.occupied_mask, backdrop.resolution,
+                backdrop.origin_x, backdrop.origin_y,
+                known=backdrop.known_mask)
+            cone = cone_from_intrinsics(
+                width=self._intrinsics.width, fx=self._intrinsics.fx,
+                # The depth sensor's far clip, not the camera's: past it the
+                # pixels carry no measurement, and a ray that keeps going marks
+                # free space straight through a wall.
+                max_range_m=float(cfg.get("max_range_m", 10.0)),
+                # The SJTU front camera sits 0.2 m ahead of the body origin
+                # (robots/SJTU/adapters/topics.py, FRONT_CAMERA_OFFSET_FLU).
+                forward_offset_m=float(cfg.get("camera_forward_m", 0.2)))
+            coverage = VisibilityCoverage(grid, cone)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn("coverage disabled: %s" % (exc,))
+            return None
+        self.get_logger().info(
+            "coverage: %.0f m2 of building floor to see, %.0f deg cone to %.1f m"
+            % (coverage.area_total_m2,
+               np.degrees(2.0 * cone.half_fov_rad), cone.max_range_m))
+        return coverage
+
+    def _observe(self, pose, now_s):
+        """Fold one pose into the seen mask, and say so periodically."""
+        if self._coverage is None or pose is None:
+            return
+        if (now_s - self._last_observe_s) < self._coverage_period_s:
+            return
+        self._last_observe_s = now_s
+        if not self._coverage_checked:
+            self._coverage_checked = True
+            if not self._coverage.contains(pose[0], pose[1]):
+                # Loudly, because the alternative is a whole recording that
+                # reports 0% and looks exactly like a broken tracker.
+                self.get_logger().warn(
+                    "the aircraft is at (%.2f, %.2f), which is NOT inside the "
+                    "building the coverage is measured against -- the number "
+                    "will not move" % (pose[0], pose[1]))
+        self._coverage.observe(pose[0], pose[1], pose[3])
+        if (now_s - self._last_coverage_log_s) >= self._coverage_log_s:
+            self._last_coverage_log_s = now_s
+            self.get_logger().info("N1 COVERAGE  %s" % (self._coverage.summary(),))
+
+    def _coverage_overlay(self):
+        """What the renderer needs to draw the wash and the banner."""
+        if self._coverage is None:
+            return None
+        return CoverageOverlay(
+            seen=self._coverage.seen_mask,
+            fraction=self._coverage.fraction_seen,
+            area_seen_m2=self._coverage.area_seen_m2,
+            area_total_m2=self._coverage.area_total_m2)
 
     # ── subscriptions ────────────────────────────────────────────────
     def _on_rgb(self, msg):
@@ -272,6 +363,24 @@ class N1RunRecorderNode(Node):
             goal_world = self._goal_world
         if frame is None:
             return
+        # AFTER the frame test, deliberately, though be clear about what that
+        # buys: it catches the failure this world actually has -- Gazebo
+        # Classic disables its camera sensors outright when it cannot open a
+        # display, so not one frame is ever published while odometry runs at
+        # 30 Hz, and a run like that reports `seen=n/a` instead of crediting
+        # itself with a whole building it never looked at. It does NOT detect a
+        # camera that stops mid-flight: `_frame` holds the last one, and the
+        # video would be frozen too.
+        #
+        # Wrapped, because coverage is a WATCHER. This node's contract is a
+        # playable MP4, and no measurement bug -- this one or a later one -- may
+        # be able to raise out of the frame timer, kill the node, and take the
+        # flight down with it through the launch file's `on_exit=Shutdown()`.
+        try:
+            self._observe(pose, time.monotonic())
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn("coverage stopped after an error: %s" % (exc,))
+            self._coverage = None
         info = self._reproject_goal(info, goal_world, pose)
         # A goal is only "fresh" for about as long as the aircraft has not yet
         # moved away from the pose it was computed at. Beyond that it is drawn
@@ -285,7 +394,8 @@ class N1RunRecorderNode(Node):
         # The renderer's pose is (x, y, yaw) and always has been; z is this
         # node's own business, for re-projecting the goal.
         flat = None if pose is None else (pose[0], pose[1], pose[3])
-        right = self._topdown.render(flat, committed, full, goal_world)
+        right = self._topdown.render(flat, committed, full, goal_world,
+                                     self._coverage_overlay())
         self._writer.write(compose(left, right))
         self._frames_written += 1
 
@@ -335,6 +445,12 @@ class N1RunRecorderNode(Node):
         writer.release()
         self.get_logger().info(
             "wrote %d frames to %s" % (self._frames_written, self._output))
+        # The run's headline, on every exit path the video takes -- the shell's
+        # summary and campaign_report both read it back out of nodes.log, and a
+        # run that is torn down by a signal has to carry it too.
+        coverage = getattr(self, "_coverage", None)
+        if coverage is not None:
+            self.get_logger().info("N1 COVERAGE FINAL  %s" % (coverage.summary(),))
 
     def destroy_node(self):
         try:

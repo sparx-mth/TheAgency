@@ -58,6 +58,16 @@ watertight hollow ring rather than a solid blob. Its interior is enclosed and
 unreachable, but it does read as free — so do not sample a goal uniformly from
 free space and assume every draw is reachable.
 
+Both traps have one answer, and it is written down:
+`core.planning.environment.grid_regions.largest_enclosed_region` returns the
+largest free component that does not touch the edge of the grid — the hospital's
+own floor, **1139.9 m² of the map's 1414.8 m² of free space**. The 197 m² outside
+the wall runs off the border and is dropped; the seventy sealed voids inside
+cupboards, wardrobes and the elevator cars are dropped with it.
+`core.planning.exploration.visibility_coverage` divides by exactly that, and
+maintains its own seen-mask on top of this grid rather than mistaking `free` for
+`observed`.
+
 ### Cross-check
 
 Against the independently produced SLAM map at

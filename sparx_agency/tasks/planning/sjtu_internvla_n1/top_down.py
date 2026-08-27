@@ -3,9 +3,11 @@
 Split out of :mod:`recording` because it grew a second job. It draws two views
 of the same flight side by side, and the pair is the point:
 
-* **overview** -- the whole hospital at once, with the trail on it. This is what
-  answers "did it enter every room": a route is only coverage if you can see the
-  rooms it did not reach.
+* **overview** -- the whole hospital at once, with the trail on it and the floor
+  the camera has looked at washed in blue. This is what answers "did it enter
+  every room": a route is only coverage if you can see the rooms it did not
+  reach, and the wash turns that from an impression into the percentage in the
+  banner.
 * **local** -- a fixed-span window that follows the aircraft, where a 0.25 m
   action step is actually several pixels wide and the committed route, the
   speculative tail and the heading are legible.
@@ -27,6 +29,7 @@ world whose map has not been built.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -37,10 +40,34 @@ except ImportError:  # pragma: no cover - cv2 is present in the venv and ROS env
     cv2 = None
 
 from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
+    FREE_BGR,
     OccupancyMapImage,
 )
 
 _FONT = 0  # cv2.FONT_HERSHEY_SIMPLEX; kept as a literal so this imports without cv2.
+
+
+@dataclass(frozen=True)
+class CoverageOverlay:
+    """What the camera has looked at, ready to be drawn on the building.
+
+    The renderer is deliberately given a plain array and three numbers rather
+    than the tracker itself: it draws, it does not measure, and the layout stays
+    testable with a hand-made mask.
+
+    Attributes:
+        seen: ``(H, W)`` boolean over the backdrop's own grid, row 0 at minimum
+            y, True where the camera has had a clear line to the cell.
+        fraction: Share of the building's floor seen, 0..1.
+        area_seen_m2: Floor seen, square metres.
+        area_total_m2: The building's floor, square metres.
+    """
+
+    seen: np.ndarray
+    fraction: float
+    area_seen_m2: float
+    area_total_m2: float
+
 
 TRAIL_BGR = (0, 200, 0)
 COMMITTED_BGR = (0, 255, 255)
@@ -52,6 +79,10 @@ PAST_BGR = (90, 110, 110)
 #: Where System 2 said to go. The same red as the ring on the camera panel, so
 #: the two views are obviously the same thing seen twice.
 GOAL_BGR = (0, 0, 255)
+#: Floor the camera has had a clear line to. A muted steel blue: it has to be
+#: obvious against the near-black free space and impossible to mistake for the
+#: green trail, the yellow route or the red goal, all of which are drawn over it.
+SEEN_BGR = (110, 78, 50)
 
 
 class TopDownRenderer:
@@ -124,8 +155,8 @@ class TopDownRenderer:
 
     # -- rendering -------------------------------------------------------
 
-    def render(self, pose, committed_xy, full_xy, goal_world=None):
-        # type: (Optional[Tuple[float, float, float]], Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float, float]]) -> np.ndarray
+    def render(self, pose, committed_xy, full_xy, goal_world=None, coverage=None):
+        # type: (Optional[Tuple[float, float, float]], Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float, float]], Optional[CoverageOverlay]) -> np.ndarray
         """Draw the top-down panel.
 
         Args:
@@ -136,15 +167,19 @@ class TopDownRenderer:
                 here as well as on the camera, because the two answer different
                 questions -- the camera says whether the aircraft is looking at
                 it, the map says whether the route is going there.
+            coverage: What the camera has seen of the building, or None. Only
+                the map-backed panel can draw it -- graph paper has no building
+                to measure against.
 
         Returns:
             A ``(h, w, 3)`` BGR panel.
         """
         if self.backdrop is None:
             return self._render_fitted(pose, committed_xy, full_xy, goal_world)
-        return self._render_on_map(pose, committed_xy, full_xy, goal_world)
+        return self._render_on_map(pose, committed_xy, full_xy, goal_world, coverage)
 
-    def _render_on_map(self, pose, committed_xy, full_xy, goal_world=None):
+    def _render_on_map(self, pose, committed_xy, full_xy, goal_world=None,
+                       coverage=None):
         # The two widths must SUM to self.w. Clamping each independently lets
         # the composed frame come out wider than the panel the VideoWriter was
         # opened for -- and cv2 drops a wrong-sized frame silently, with no
@@ -156,17 +191,23 @@ class TopDownRenderer:
 
         overview = self.backdrop.whole((overview_w, self.h))
         left = overview.image.copy()
+        # UNDER everything the aircraft did. The wash answers "which rooms has
+        # this flight looked into"; the trail and the routes answer "where did
+        # it go", and the interesting frames are the ones where a room is
+        # washed and the trail never entered it.
+        _shade_seen(left, overview, coverage)
         self._draw_trail(left, overview.extent)
         self._draw_routes(left, overview.extent, 1)
         self._polyline(left, committed_xy, overview.extent, COMMITTED_BGR, 2)
         self._draw_goal(left, goal_world, overview.extent, 4)
         self._draw_pose(left, pose, overview.extent, arrow_px=10, dot_px=3)
-        _banner(left, "HOSPITAL  live=yellow flown=grey trail=green")
+        _banner(left, _coverage_banner(coverage))
 
         centre = self._focus(pose)
         local = self.backdrop.window(centre[0], centre[1], self.local_span_m,
                                      (local_w, self.h))
         right = local.image.copy()
+        _shade_seen(right, local, coverage)
         self._range_rings(right, centre, local.extent)
         self._draw_trail(right, local.extent, thickness=3)
         self._draw_routes(right, local.extent, 1)
@@ -178,7 +219,8 @@ class TopDownRenderer:
         # panel whose width depends on `overview_fraction`, and cv2.putText
         # clips silently -- so a legend that runs off the edge takes the route
         # count with it, which is the one number on the panel worth reading.
-        _banner(right, "N1 ROUTES  %d routes, %.1f m" % (len(self.routes), self.routes_m))
+        _banner(right, "N1 %d routes %.1f m   trail=green live=yellow seen=blue"
+                % (len(self.routes), self.routes_m))
 
         panel = np.hstack((left, right))
         cv2.line(panel, (overview_w, 0), (overview_w, self.h), (90, 90, 95), 1)
@@ -342,7 +384,53 @@ def _graph_paper(panel, extent):
                  _to_px(panel, extent, max_x, gy), (40, 40, 40), 1)
 
 
-def _banner(panel, text):
+def _banner(panel, text, scale=0.42):
+    """A one-line caption that SHRINKS to fit instead of being cut off.
+
+    ``cv2.putText`` clips silently at the edge of the image, and these two
+    banners are drawn into panels whose width depends on ``overview_fraction``
+    -- so a legend that fits at one setting loses its last word at another, and
+    the number worth reading is at whichever end the panel ran out. Measuring
+    first and stepping the scale down costs nothing and removes the whole class.
+    """
     w = panel.shape[1]
     cv2.rectangle(panel, (0, 0), (w, 24), (0, 0, 0), -1)
-    cv2.putText(panel, text, (8, 17), _FONT, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+    while scale > 0.28:
+        (tw, _), _ = cv2.getTextSize(text, _FONT, scale, 1)
+        if tw <= w - 12:
+            break
+        scale -= 0.02
+    cv2.putText(panel, text, (8, 17), _FONT, scale, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def _coverage_banner(coverage):
+    # type: (Optional[CoverageOverlay]) -> str
+    """The overview's headline: how much of the building has been seen.
+
+    It replaces the colour legend that used to live here, which at this panel's
+    width was being clipped by cv2.putText anyway. The legend moved to the local
+    panel, which has the room for it.
+    """
+    if coverage is None:
+        return "HOSPITAL"
+    return "SEEN %.1f%%   %.0f of %.0f m2" % (
+        100.0 * coverage.fraction, coverage.area_seen_m2, coverage.area_total_m2)
+
+
+def _shade_seen(panel, window, coverage):
+    # type: (np.ndarray, object, Optional[CoverageOverlay]) -> None
+    """Wash the floor the camera has looked at, and only the floor.
+
+    Painted only where the panel is still bare free space, so the walls survive.
+    They have to: the backdrop dilates them so a one-cell partition is not lost
+    to a 2.5x downscale, while the seen layer is point-sampled at its true
+    width, and without this test a seen cell would erase the dilated wall next
+    to it -- opening doorways in the drawing that do not exist in the building.
+    """
+    if coverage is None or coverage.seen is None:
+        return
+    layer = window.resample(np.asarray(coverage.seen, dtype=np.uint8))
+    if layer is None:
+        return
+    bare = np.all(panel == np.array(FREE_BGR, dtype=np.uint8), axis=-1)
+    panel[(layer > 0) & bare] = SEEN_BGR

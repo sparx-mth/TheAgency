@@ -36,6 +36,15 @@ FREE_BGR = (46, 46, 48)
 OCCUPIED_BGR = (168, 178, 188)
 UNKNOWN_BGR = (26, 26, 28)
 
+#: nav2 trinary greyscale thresholds. A pixel at or below OCCUPIED_MAX is an
+#: obstacle, at or above FREE_MIN is free, and anything between is unsurveyed.
+#: Named because two things now read them -- the palette below and the coverage
+#: tracker's occluder mask -- and a map whose walls stop a ray at a different
+#: threshold from the walls it draws is a picture that disagrees with its own
+#: percentage.
+OCCUPIED_MAX = 60
+FREE_MIN = 250
+
 
 @dataclass(frozen=True)
 class MapWindow:
@@ -47,6 +56,12 @@ class MapWindow:
         min_y: World y of the image's *bottom* edge, metres.
         max_x: World x of the image's right edge, metres.
         max_y: World y of the image's top edge, metres.
+        transform: The 2x3 affine that produced ``image`` from the map's own
+            grid, or None for a window built by hand. Kept so a caller can
+            bring a *second* per-cell layer -- the cells the camera has
+            seen, say -- into exactly the same pixels; recomputing it from
+            ``extent`` would be a half-pixel off and the overlay would creep
+            against the walls it is drawn on.
     """
 
     image: np.ndarray
@@ -54,12 +69,34 @@ class MapWindow:
     min_y: float
     max_x: float
     max_y: float
+    transform: Optional[np.ndarray] = None
 
     @property
     def extent(self):
         # type: () -> Tuple[float, float, float, float]
         """``(min_x, min_y, max_x, max_y)``."""
         return (self.min_x, self.min_y, self.max_x, self.max_y)
+
+    def resample(self, layer):
+        # type: (np.ndarray) -> Optional[np.ndarray]
+        """Bring a co-registered per-cell layer into this window's pixels.
+
+        Args:
+            layer: ``(H, W)`` array over the same grid as the map, row 0 at
+                minimum y.
+
+        Returns:
+            The layer sampled at this window's resolution and extent, same
+            ``(h, w)`` as :attr:`image`, or None when the window carries no
+            transform.
+        """
+        if self.transform is None:
+            return None
+        height, width = self.image.shape[:2]
+        return cv2.warpAffine(
+            np.asarray(layer), self.transform, (width, height),
+            flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
 class OccupancyMapImage:
@@ -135,6 +172,23 @@ class OccupancyMapImage:
                    float(origin[0]), float(origin[1]))
 
     # -- geometry --------------------------------------------------------
+
+    @property
+    def occupied_mask(self):
+        # type: () -> np.ndarray
+        """``(H, W)`` boolean, True where geometry blocks the cell. Row 0 = min y."""
+        return self.grid <= OCCUPIED_MAX
+
+    @property
+    def known_mask(self):
+        # type: () -> np.ndarray
+        """``(H, W)`` boolean, True where the cell was surveyed at all.
+
+        A ground-truth map computed from world geometry has none of these unset;
+        a map recorded from a flight does, and treating its unsurveyed cells as
+        free would let a coverage ray run straight through an unmapped wall.
+        """
+        return (self.grid <= OCCUPIED_MAX) | (self.grid >= FREE_MIN)
 
     @property
     def max_x(self):
@@ -234,7 +288,8 @@ class OccupancyMapImage:
             source, transform, (w, h),
             flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
             borderMode=cv2.BORDER_CONSTANT, borderValue=UNKNOWN_BGR)
-        return MapWindow(image=image, min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y)
+        return MapWindow(image=image, min_x=min_x, min_y=min_y, max_x=max_x,
+                         max_y=max_y, transform=transform)
 
     def _thickened(self, scale):
         # type: (float) -> np.ndarray
@@ -267,8 +322,8 @@ def _colourise(grid):
     """Turn nav2 trinary greyscale into the panel palette."""
     out = np.empty(grid.shape + (3,), dtype=np.uint8)
     out[:] = FREE_BGR
-    out[grid <= 60] = OCCUPIED_BGR
-    out[(grid > 60) & (grid < 250)] = UNKNOWN_BGR
+    out[grid <= OCCUPIED_MAX] = OCCUPIED_BGR
+    out[(grid > OCCUPIED_MAX) & (grid < FREE_MIN)] = UNKNOWN_BGR
     return out
 
 

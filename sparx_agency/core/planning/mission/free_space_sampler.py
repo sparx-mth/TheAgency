@@ -30,6 +30,7 @@ import numpy as np
 
 from sparx_agency.core.common.types import Pose2D, normalize_angle
 from sparx_agency.core.planning.environment import OccupancyGrid2D
+from sparx_agency.core.planning.environment.grid_regions import connected_regions
 from sparx_agency.core.planning.planners.common.clearance_2d import clearance_field
 
 
@@ -71,53 +72,6 @@ def traversable_mask(grid: OccupancyGrid2D, clearance_m: float) -> np.ndarray:
         blocked, grid.resolution, max_clearance_m=clearance_m + grid.resolution,
     )
     return free & (clearance >= clearance_m)
-
-
-def _flood(mask: np.ndarray, seed_gy: int, seed_gx: int) -> np.ndarray:
-    """The 8-connected component of ``mask`` containing one seed cell.
-
-    Grown by repeated dilation intersected with the mask -- a handful of
-    vectorised shifts per ring, which beats a Python-level BFS on maps of the
-    size a building produces, and keeps this module numpy-only (so it imports
-    under the Python 3.8 / no-scipy environments ``core`` has to survive).
-    """
-    region = np.zeros_like(mask, dtype=bool)
-    region[seed_gy, seed_gx] = mask[seed_gy, seed_gx]
-    while True:
-        grown = region.copy()
-        grown[1:, :] |= region[:-1, :]
-        grown[:-1, :] |= region[1:, :]
-        grown[:, 1:] |= region[:, :-1]
-        grown[:, :-1] |= region[:, 1:]
-        grown[1:, 1:] |= region[:-1, :-1]
-        grown[1:, :-1] |= region[:-1, 1:]
-        grown[:-1, 1:] |= region[1:, :-1]
-        grown[:-1, :-1] |= region[1:, 1:]
-        grown &= mask
-        if grown.sum() == region.sum():
-            return region
-        region = grown
-
-
-def connected_regions(mask: np.ndarray) -> List[np.ndarray]:
-    """Split ``mask`` into its 8-connected components, largest first.
-
-    Args:
-        mask: ``(H, W)`` boolean array of traversable cells.
-
-    Returns:
-        A list of boolean masks, one per component, sorted by descending cell
-        count. Empty if nothing is traversable.
-    """
-    remaining = np.asarray(mask, dtype=bool).copy()
-    regions = []
-    while remaining.any():
-        gy, gx = np.argwhere(remaining)[0]
-        region = _flood(remaining, int(gy), int(gx))
-        regions.append(region)
-        remaining &= ~region
-    regions.sort(key=lambda r: int(r.sum()), reverse=True)
-    return regions
 
 
 def largest_region(grid: OccupancyGrid2D, clearance_m: float) -> np.ndarray:
