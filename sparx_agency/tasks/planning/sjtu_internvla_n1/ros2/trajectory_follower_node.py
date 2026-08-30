@@ -81,7 +81,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32, Int8
+from std_msgs.msg import Bool, Empty, Float32, Int8
 
 from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.core.common.types import (
@@ -283,6 +283,10 @@ class TrajectoryFollowerNode(Node):
         # between them for ever. Measured in the hospital: pinned 0.45-0.70 m
         # from the office wall for a whole run, thirteen rotations, zero metres.
         # So a turn requested while hard-blocked backs off first.
+        # A request to break contact, from whoever is watching the flight from
+        # above. It runs the SAME manoeuvre the depth reflex runs -- this is a
+        # second trigger, not a second escape.
+        self._nudge_topic = topics.get("nudge", "/simple_drone/n1/nudge_back")
         esc = foll.get("escape", {}) or {}
         self._escape_enabled = bool(esc.get("enabled", True))
         self._escape = EscapeManeuver(EscapeParams(
@@ -329,6 +333,7 @@ class TrajectoryFollowerNode(Node):
         self.create_subscription(Float32, self._alt_offset_topic, self._on_alt_offset, 1)
         self.create_subscription(Bool, self._hold_topic, self._on_hold, 1)
         self.create_subscription(Float32, self._yaw_goal_topic, self._on_yaw_goal, 1)
+        self.create_subscription(Empty, self._nudge_topic, self._on_nudge, 1)
         if self._brake_enabled:
             self.create_subscription(Image, topics.get(
                 "depth", "/simple_drone/front_depth/depth/image_raw"),
@@ -364,6 +369,24 @@ class TrajectoryFollowerNode(Node):
     def _on_hold(self, msg):
         with self._lock:
             self._hold = bool(msg.data)
+
+    def _on_nudge(self, msg):
+        """Back off a little, because something above has decided we are stuck.
+
+        The depth reflex answers "is the way ahead blocked right now"; this
+        answers "has anything changed in the last half minute", which is a
+        question no reflex can ask and the only one that catches an aircraft
+        wedged against a jamb its corridor reads as clear. Same manoeuvre either
+        way: brake, a bounded reverse over ground it was just occupying, settle.
+        """
+        if not self._escape_enabled or self._escaping:
+            return
+        if self._escape.trigger(StuckVerdict(axis="forward", sign=1),
+                                prefer_left=True):
+            self._escaping = True
+            self.get_logger().warn(
+                "nudge requested: backing off %.2f m to break contact"
+                % (self._escape.params.back_s * self._escape.params.back_speed,))
 
     def _on_yaw_goal(self, msg):
         """Take an absolute world heading to rotate to.

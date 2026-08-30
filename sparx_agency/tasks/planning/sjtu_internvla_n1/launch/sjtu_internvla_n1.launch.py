@@ -29,6 +29,8 @@ _DEFAULT_CONFIG = (_REPO_ROOT / "sparx_agency" / "robots" / "SJTU" / "config"
 _POLICY_MODULE = "sparx_agency.tasks.planning.sjtu_internvla_n1.ros2.n1_policy_node"
 _FOLLOWER_MODULE = "sparx_agency.tasks.planning.sjtu_internvla_n1.ros2.trajectory_follower_node"
 _RECORDER_MODULE = "sparx_agency.tasks.planning.sjtu_internvla_n1.ros2.n1_run_recorder_node"
+_SUPERVISOR_MODULE = ("sparx_agency.tasks.planning.sjtu_internvla_n1.ros2"
+                      ".exploration_supervisor_node")
 
 
 def _node_env():
@@ -46,6 +48,9 @@ def generate_launch_description():
     record = LaunchConfiguration("record")
     record_output = LaunchConfiguration("record_output")
     record_seconds = LaunchConfiguration("record_seconds")
+    supervise = LaunchConfiguration("supervise")
+    include_location = LaunchConfiguration("include_location")
+    goal_only = LaunchConfiguration("goal_only")
     env = _node_env()
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -57,6 +62,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "record_output", default_value="/tmp/sjtu_n1/run.mp4",
             description="MP4 path the recorder writes when record:=true."),
+        DeclareLaunchArgument(
+            "supervise", default_value="false",
+            description="Start the exploration supervisor, which rewrites the "
+                        "instruction as each sub-mission completes."),
+        DeclareLaunchArgument(
+            "include_location", default_value="true",
+            description="Supervisor briefing part two: which area you are in."),
+        DeclareLaunchArgument(
+            "goal_only", default_value="false",
+            description="Drop both narrative parts; the control arm of the "
+                        "with/without-narrative experiment."),
         DeclareLaunchArgument(
             "record_seconds", default_value="0.0",
             description="Seconds to record before the recorder closes its own "
@@ -84,5 +100,13 @@ def generate_launch_description():
                  "-p", ["record_seconds:=", record_seconds]],
             name="n1_run_recorder_node", output="screen", additional_env=env,
             on_exit=Shutdown()),
+        ExecuteProcess(
+            condition=IfCondition(supervise),
+            cmd=["python3", "-m", _SUPERVISOR_MODULE,
+                 "--ros-args", "-p", ["config_file:=", config],
+                 "-p", ["include_location:=", include_location],
+                 "-p", ["goal_only:=", goal_only]],
+            name="exploration_supervisor_node", output="screen",
+            additional_env=env, on_exit=Shutdown()),
     ])
 

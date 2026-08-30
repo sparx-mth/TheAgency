@@ -83,6 +83,7 @@ from sparx_agency.core.planning.vlas.common.turn_in_place import (
     describe as describe_turn,
     turn_spec_from_config,
 )
+from sparx_agency.core.planning.vlas.internvla_n1.stop_latch import StopLatch
 from sparx_agency.core.planning.vlas.interfaces.goals import LanguageGoal
 from sparx_agency.core.planning.vlas.interfaces.policy import PolicyObservation
 from sparx_agency.core.planning.vlas.registry import default_vla_registry
@@ -258,6 +259,14 @@ class N1PolicyNode(Node):
         self._dip_state = "none"   # none | descending | holding
         self._dip_since = 0.0
         self._dip_m = abs(float(pp.get("look_down_dip_m", 0.5)))
+        # WHEN THE POLICY STOPS LISTENING. See stop_latch.py: STOP comes
+        # in runs, and the runs are either short (up to six, recovered
+        # unaided) or terminal (thirty-four and up, never recovered). A
+        # threshold of five sits in the empty space between them. Zero
+        # switches the whole mechanism off.
+        self._stop_restart_after = int(pp.get("stop_restart_after", 5))
+        self._stop_latch = (StopLatch(self._stop_restart_after)
+                            if self._stop_restart_after > 0 else None)
         # A FLOOR ON THE DIP, because the dip is a descent into a room the
         # aircraft has to keep flying in. Measured over the hospital's office
         # bays: 71% of the floor area is flyable at the 1.20 m cruise and only
@@ -675,9 +684,59 @@ class N1PolicyNode(Node):
             self._finish_decision()
             self._phase = "stopped"
             self.get_logger().info("N1 STOP (%s): holding" % (result.metadata.get("action"),))
+            if self._stop_latch is not None and self._stop_latch.record(True):
+                self._restart_agent()
             return
 
+        if self._stop_latch is not None:
+            self._stop_latch.record(False)
         self._act(result, pose, depth, blocked, now, forced, tick)
+
+    def _restart_agent(self):
+        """Drop the model agent and raise it again with the current instruction.
+
+        The recovery for a policy that has decided the task is over. Measured
+        over six flights: STOP came in runs, and a run that reached five never
+        ended by itself -- the worst was 406 consecutive STOPs across 50.1
+        minutes, 56% of a 90-minute flight, with coverage moving 0.0 points and
+        the aircraft motionless the whole time. Every one of those frames
+        carried a freshly written instruction, so it was not being starved of
+        the prompt; it had simply stopped answering it.
+
+        What it accumulates instead is episode state -- a frame history inside
+        the policy, a cached pixel goal, a step counter -- and fifty minutes of
+        an unchanging view is a history that reads as "you have been here,
+        doing nothing, forever". ``reset()`` clears all of it, and reloads no
+        checkpoint, so this costs a fraction of one decision.
+
+        Failure is logged and swallowed on purpose. This is a recovery path: an
+        aircraft flying under a latched policy is no worse off if the restart
+        does not land, and raising here would take down a node that is
+        otherwise healthy.
+        """
+        self.get_logger().warn(
+            "N1 LATCHED: %d STOPs in a row -- dropping the agent and raising it "
+            "again on the current instruction (restart #%d)"
+            % (self._stop_restart_after, self._stop_latch.latches))
+        try:
+            # `restart_episode`, NOT `reset`. See its docstring: `reset` routes
+            # through `init_agent`, whose existence probe is itself a /reset
+            # POST on a five-second timeout, and one slow probe turns this
+            # recovery into a second 7B checkpoint load beside the first --
+            # which does not fit on this card.
+            ok = self._policy.restart_episode()
+        except Exception as exc:                      # noqa: BLE001 - see above
+            self.get_logger().error("N1 restart failed: %s" % (exc,))
+            return
+        if not ok:
+            # SAY SO. The server did not acknowledge, so the frame history and
+            # the cached pixel goal are exactly as they were and nothing has
+            # been recovered. Logging the success line here would put "N1
+            # restarted" in the record of a flight that never was.
+            self.get_logger().error(
+                "N1 restart did not land; the episode state is unchanged")
+            return
+        self.get_logger().info("N1 restarted; the next frame is a fresh episode")
 
     # ── acting on one decision ───────────────────────────────────────
     def _act(self, result, pose, depth, blocked, now, forced, tick):

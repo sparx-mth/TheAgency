@@ -84,6 +84,15 @@ mkdir -p "${LOG_DIR}"
 # Recording: RECORD=1 also writes an MP4 (drone camera + N1 route + S1/S2 FPS)
 # and a rosbag. RECORD_SECONDS>0 flies for that long then tears down and reports;
 # 0 flies until Ctrl-C.
+# SUPERVISE=1 starts the exploration supervisor, which holds the abstract goal
+# ("map this building") and rewrites the instruction as each bounded sub-mission
+# completes. The flight loop is unchanged either way -- the supervisor's whole
+# interface is the instruction topic the policy node already re-reads.
+# NARRATIVE=full|no_location|goal_only runs the experiment arms. The prompt is
+# two parts -- where you are and where to go -- and there is no third part
+# recounting the survey: the supervisor already knows it and enforces it.
+SUPERVISE="${SUPERVISE:-0}"
+NARRATIVE="${NARRATIVE:-full}"
 RECORD="${RECORD:-0}"
 RECORD_SECONDS="${RECORD_SECONDS:-0}"
 RECORD_OUTPUT="${RECORD_OUTPUT:-${LOG_DIR}/run.mp4}"
@@ -265,7 +274,11 @@ setsid bash -c 'trap - INT; echo $$ > "$1"; shift; exec "$@"' _ "${NODES_PIDFILE
     config_file:="${CONFIG_FILE}" \
     record:="$([[ "${RECORD}" == "1" ]] && echo true || echo false)" \
     record_output:="${RECORD_OUTPUT}" \
-    record_seconds:="${RECORDER_SECONDS}" > "${LOG_DIR}/nodes.log" 2>&1 &
+    record_seconds:="${RECORDER_SECONDS}" \
+    supervise:="$([[ "${SUPERVISE}" == "1" ]] && echo true || echo false)" \
+    include_location:="$([[ "${NARRATIVE}" == "no_location" ]] && echo false || echo true)" \
+    goal_only:="$([[ "${NARRATIVE}" == "goal_only" ]] && echo true || echo false)" \
+    > "${LOG_DIR}/nodes.log" 2>&1 &
 for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "${NODES_PIDFILE}" ]] && break; sleep 0.3; done
 NODES_PID="$(cat "${NODES_PIDFILE}" 2>/dev/null || echo "$!")"
 NODES_PGID="${NODES_PID}"   # setsid made it a session and group leader
@@ -390,6 +403,15 @@ report() {
     # what the aircraft did, this says what it achieved. The recorder writes
     # FINAL when it closes the video, which is the whole flight; the periodic
     # line is the fallback for a run whose recorder was killed outright.
+    if [[ "${SUPERVISE}" == "1" ]]; then
+        local missions rooms
+        missions="$(grep -ac 'MISSION .* -> ' "${LOG_DIR}/nodes.log" 2>/dev/null | head -n1)"
+        rooms="$(grep -ao '[0-9]*/[0-9]* rooms' "${LOG_DIR}/nodes.log" 2>/dev/null | tail -n1)"
+        say "  missions issued     ${missions:-0}  (rooms cleared: ${rooms:-unknown})"
+        grep -qa 'SURVEY COMPLETE' "${LOG_DIR}/nodes.log" 2>/dev/null \
+            && say "  survey              COMPLETE" \
+            || say "  survey              still running when the clock ran out"
+    fi
     local seen
     seen="$(grep -ao 'N1 COVERAGE FINAL .*' "${LOG_DIR}/nodes.log" 2>/dev/null | tail -n1)"
     [[ -n "${seen}" ]] || seen="$(grep -ao 'N1 COVERAGE .*' "${LOG_DIR}/nodes.log" 2>/dev/null | tail -n1)"
@@ -468,7 +490,12 @@ fi
 # default -- a warehouse order, in a hospital. Publish it several times, and
 # never with the default `-w 1`, which in Jazzy waits for a matching subscriber
 # with NO timeout and hangs the whole script when the node has died.
-if [[ -z "${INSTRUCTION}" ]]; then
+if [[ "${SUPERVISE}" == "1" ]]; then
+    # The supervisor owns the instruction from here on and publishes its first
+    # order within a second. Sending a static one now would only be overwritten,
+    # and would sit in the log looking like the order the run was flown under.
+    say "supervised run (narrative: ${NARRATIVE}); the supervisor sets the instruction"
+elif [[ -z "${INSTRUCTION}" ]]; then
     say "no instruction given; the nodes fly the config's default_instruction"
 else
 say "sending instruction: '${INSTRUCTION}'"

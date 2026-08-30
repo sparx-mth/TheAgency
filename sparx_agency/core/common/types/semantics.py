@@ -11,6 +11,14 @@ Types:
 Note:
     These are external features provided by perception or semantic mapping.
     Behaviors do NOT detect these features directly.
+
+    One producer of them lives at
+    ``core.planning.exploration.region_decomposition``, which finds a building's
+    doorways from two height bands of its occupancy map and returns
+    ``Portal2D``s (as ``exploration.region_map.Portal``, which adds the pair of
+    regions each one joins). ``Region2D`` has no producer and no consumer;
+    ``exploration.region_map.Region`` is the concrete shape that grew instead,
+    and says at its own docstring why it is not this one.
 """
 
 from __future__ import annotations

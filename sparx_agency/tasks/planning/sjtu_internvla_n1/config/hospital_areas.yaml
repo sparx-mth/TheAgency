@@ -90,3 +90,254 @@ areas:
     # were lowered. It is tight on purpose -- it is the room the hospital has.
     route_m: 12.0
     bottleneck_m: 0.90
+
+  # ── PROPOSED FROM THE REGION MAP ──────────────────────────────────────
+  # One per corridor stretch the five hand-sited areas do not reach, each the
+  # most open cell of its region:
+  #
+  #   area_clearance.py --from-regions robots/SJTU/maps/hospital_regions.yaml
+  #
+  # They exist because the survey now carries across segments, which turns the
+  # ferry into transport. At ~22 s a decision and ~1 m of route per decision the
+  # aircraft covers about a metre of corridor per decision, so flying it 40 m
+  # down the spine costs most of a segment; dropping it there costs nothing.
+  # Headings face ALONG the corridor rather than at the wall two metres away.
+  middle_spine:
+    x: 4.65
+    y: -8.60
+    yaw_deg: -90.0
+    clearance_m: 1.76
+    note: the middle spine at its east gallery, facing south down the spine
+
+  southern_spine:
+    x: -4.75
+    y: -24.55
+    yaw_deg: 90.0
+    clearance_m: 1.76
+    note: the southern spine, facing north back up the building
+
+  south_corridor:
+    x: -5.05
+    y: -32.20
+    yaw_deg: 90.0
+    clearance_m: 1.41
+    note: the narrow south corridor stub, facing north
+
+  north_corridor:
+    x: -0.05
+    y: 14.80
+    yaw_deg: 90.0
+    clearance_m: 2.91
+    note: the north corridor, facing the elevators at the far end
+
+  # ── DROPPED STRAIGHT IN ───────────────────────────────────────────────
+  # One per room the survey could not see into, each the most open cell of that
+  # room:
+  #
+  #   area_clearance.py --from-regions robots/SJTU/maps/hospital_regions.yaml \
+  #                     --kinds room
+  #
+  # These exist because the ferry climbs to 4.5 m -- above this building's 3 m
+  # interior walls -- and descends, so it can put the aircraft INSIDE a room
+  # without going through its doorway. That matters because crossing a 0.90 m
+  # doorway is the one thing this policy has never once managed, while scanning
+  # a room it is standing in is something it does reliably.
+  #
+  # Measured after three accumulating surveys reached 68.5%: corridors were
+  # down to 35 m2 unseen, and 325 of the remaining 359 m2 was room interior.
+  # These twelve drops are 263 m2 of it -- 23% of the whole building.
+  #
+  # Clearances run 0.99 to 1.94 m against a 0.63 m airframe. The tight ones are
+  # the small side rooms; they are hover-safe, and the descent is vertical into
+  # a cell measured clear over the whole 0.30-2.00 m band.
+
+  west_room:
+    x: -8.40
+    y: -4.30
+    yaw_deg: 0.0
+    clearance_m: 1.77
+    note: inside the west room, its most open cell (65 m2 unseen at the time)
+
+  south_east_room_1:
+    x: -1.60
+    y: -28.00
+    yaw_deg: 0.0
+    clearance_m: 1.90
+    note: inside the south-east room (1), its most open cell (56 m2 unseen at the time)
+
+  north_east_room_1:
+    x: 4.60
+    y: 18.00
+    yaw_deg: 0.0
+    clearance_m: 1.60
+    note: inside the north-east room (1), its most open cell (29 m2 unseen at the time)
+
+  north_west_room_1:
+    x: -4.70
+    y: 18.00
+    yaw_deg: 0.0
+    clearance_m: 1.60
+    note: inside the north-west room (1), its most open cell (29 m2 unseen at the time)
+
+  north_west_room_2:
+    x: -7.90
+    y: 15.10
+    yaw_deg: 0.0
+    clearance_m: 1.80
+    note: inside the north-west room (2), its most open cell (23 m2 unseen at the time)
+
+  central_room_2:
+    x: -1.30
+    y: -2.25
+    yaw_deg: 0.0
+    clearance_m: 1.20
+    note: inside the central room (2), its most open cell (15 m2 unseen at the time)
+
+  north_west_room_3:
+    x: -10.15
+    y: 5.45
+    yaw_deg: 0.0
+    clearance_m: 1.05
+    note: inside the north-west room (3), its most open cell (9 m2 unseen at the time)
+
+  north_east_room_4:
+    x: 10.05
+    y: 5.30
+    yaw_deg: 0.0
+    clearance_m: 1.00
+    note: inside the north-east room (4), its most open cell (9 m2 unseen at the time)
+
+  north_east_room_2:
+    x: 7.95
+    y: 13.95
+    yaw_deg: 0.0
+    clearance_m: 1.94
+    note: inside the north-east room (2), its most open cell (8 m2 unseen at the time)
+
+  south_room_3:
+    x: -1.75
+    y: -11.20
+    yaw_deg: 0.0
+    clearance_m: 0.99
+    note: inside the south room (3), its most open cell (8 m2 unseen at the time)
+
+  south_room_1:
+    x: 2.10
+    y: -17.40
+    yaw_deg: 0.0
+    clearance_m: 1.28
+    note: inside the south room (1), its most open cell (6 m2 unseen at the time)
+
+  south_room_4:
+    x: 1.65
+    y: -11.20
+    yaw_deg: 0.0
+    clearance_m: 0.99
+    note: inside the south room (4), its most open cell (5 m2 unseen at the time)
+
+  # ── THE MEDIUM-HORIZON SUITE ──────────────────────────────────────────
+  # Four starts for the six graded tasks in scripts/record_medium_horizon.sh,
+  # which asks what the network alone can hold on to between "enter the room
+  # and stop by the table" (concrete, ~12 m, one door) and "explore the entire
+  # hospital" (unbounded, never achieved). Each was chosen the way
+  # `office_door` had to be re-chosen after ten wasted flights: by MEASURING
+  # what lies in the frame from the pose, on the flight-band map, before any
+  # aircraft was put there. The bearings below are signed off the boresight,
+  # positive to the left, and the camera is 75 degrees so anything past
+  # +-37.5 is not in the picture at all.
+  #
+  # All four sit on 1.40-1.50 m doors and 2.5-2.9 m corridors. That is
+  # deliberate: the 0.90 m small-room doors are the one thing this policy has
+  # never crossed, and a suite that breaks on door width says nothing about
+  # horizon.
+
+  west_leg_north:
+    x: -5.00
+    y: -6.00
+    yaw_deg: -90.0
+    clearance_m: 1.35
+    note: the west corridor at its north end, facing 16.6 m of straight corridor
+    # Task 1. The longest doorless straight line in the building that ends in
+    # something: walls at x -6.5 and -3.5 the whole way, one crossroads at
+    # y -8.6 to fly straight through, and the corridor simply stops at y -23.
+    # The end of it is visible from here, dead ahead, 16.6 m away.
+    end_x: -5.00
+    end_y: -22.60
+    route_m: 16.6
+    bottleneck_m: 2.70
+
+  east_leg:
+    x: 5.00
+    y: -16.50
+    yaw_deg: -90.0
+    clearance_m: 1.35
+    note: the east corridor, facing 6.7 m of tunnel with one wide door at the end
+    # Tasks 2 and 3, and the reason the EAST leg was picked over its mirror:
+    # the east wall carries exactly ONE opening, a 1.40 m door at y -22.4 to
+    # -23.8, and then runs solid to y -26.1. The west leg's two doors are 0.40 m
+    # apart and read as one aperture, which is a fine test of choosing (task 4)
+    # and a poor test of turning. From here the door is 6.8 m away and 12.8
+    # degrees to the LEFT; the corridor's own end is dead ahead at 6.7 m.
+    door_x: 6.53
+    door_y: -23.08
+    door_width_m: 1.40
+    inside_x: 8.00            # first hover cell inside, clearance 1.7 m
+    inside_y: -22.60
+    far_end_x: 8.65           # task 3: the far end of the ward, 11.4 m deeper
+    far_end_y: -11.50
+    route_m: 8.5
+    bottleneck_m: 1.50
+
+  south_gallery:
+    x: -1.00
+    y: -24.50
+    yaw_deg: 180.0
+    clearance_m: 1.35
+    note: the southern gallery, facing two wide doors whose rooms look nothing alike
+    # Tasks 4 and 5, and the only place in this bilaterally symmetric building
+    # where two doorways in one frame lead somewhere genuinely different.
+    # Measured from this pose: the ward door at -14.3 deg and the lounge door
+    # at +5.2 deg, and THROUGH THEM, in frame and in line of sight, a
+    # refrigerator at 8.3 m dead ahead, a kitchen cabinet at +6.7 deg, and a
+    # hospital curtain at -15.3 deg. The choice the instruction asks for is
+    # therefore visible before the aircraft moves, which is what makes it a
+    # search rather than a coin toss.
+    #
+    # THE 0.40 m PIER. The two 1.40 m doors are separated by 0.40 m of wall at
+    # y -23.85 to -24.25. A route aimed at the midpoint is a strike, not a
+    # doorway. Treat a contact there as a task result, not an infrastructure
+    # failure -- it is the aircraft answering "both" to a question with two
+    # answers.
+    ward_door_x: -6.47
+    ward_door_y: -23.08
+    lounge_door_x: -6.47
+    lounge_door_y: -24.98
+    lounge_inside_x: -8.45    # beside the refrigerator, clearance 1.83 m
+    lounge_inside_y: -26.65
+    ward_inside_x: -8.65      # the ward aisle, clearance 1.80 m
+    ward_inside_y: -19.60
+    route_m: 8.3
+    bottleneck_m: 1.50
+
+  mid_gallery_east:
+    x: 5.30
+    y: -9.10
+    yaw_deg: 180.0
+    clearance_m: 1.29
+    note: the east end of the middle gallery, facing 11.8 m of hall with a door at each end
+    # Task 6, the top of the ladder and the direct precursor of the exploration
+    # order: two rooms, 26 m of flying apart, and a 180 degree reversal between
+    # them. The west room door is dead ahead at 11.8 m and in line of sight
+    # over the mop cart that stands mid-corridor at (1.08, -8.59); the east
+    # room door is 1.2 m behind the aircraft, which is why the second half of
+    # the order has to be remembered rather than seen.
+    west_door_x: -6.47
+    west_door_y: -9.07
+    east_door_x: 6.53
+    east_door_y: -9.07
+    west_inside_x: -7.80
+    west_inside_y: -9.07
+    east_inside_x: 7.80
+    east_inside_y: -9.07
+    route_m: 29.1             # 13.3 m out, 15.8 m back
+    bottleneck_m: 1.50

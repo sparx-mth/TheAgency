@@ -52,6 +52,8 @@ topics:
   trajectory: /simple_drone/n1/trajectory          # committed route (nav_msgs/Path, world)
   trajectory_full: /simple_drone/n1/trajectory_full  # whole prediction, for RViz
   info: /simple_drone/n1/info                        # JSON status: action, S1/S2 FPS, pixel goal
+  mission: /simple_drone/n1/mission                  # JSON: the supervisor's current order and survey progress
+  nudge: /simple_drone/n1/nudge_back                 # Empty: supervisor -> follower, break contact and back off
   cmd_vel: /simple_drone/cmd_vel                    # the drone's only control input
 
 frames:
@@ -235,6 +237,20 @@ policy_params:
   # either way. What the dip can honestly buy is a slightly lower viewpoint from
   # a height the aircraft can still fly at. Set look_down_dip_m to 0 to send the
   # cruise frame unchanged.
+  # WHEN THE POLICY HAS STOPPED LISTENING, AND WHAT TO DO ABOUT IT.
+  # Measured over six hospital flights: STOP was 45-73% of every answer, and it
+  # came in runs whose lengths were bimodal with nothing in between --
+  # 1, 4, 6 ... then 34, 40, 49, 51, 66, 66, 69, 82, 406. Short runs recover
+  # unaided; long ones never did. The worst was 406 consecutive STOPs over
+  # 50.1 minutes -- 56% of a 90-minute flight, 0.0 coverage points, the
+  # aircraft motionless, every frame carrying a freshly written instruction it
+  # ignored. Five is deliberately BELOW the longest run that recovered on its
+  # own: interrupting one of those costs a single POST and an episode of
+  # history that was about to be thrown away, while missing a latch costs half
+  # a flight. On reaching it the agent is dropped and
+  # raised again: the frame history, the cached pixel goal and both systems'
+  # state are cleared, with no checkpoint reload. Set to 0 to switch it off.
+  stop_restart_after: 5
   look_down_dip_m: 0.25       # 1.20 m cruise -> 0.95 m
   look_down_min_altitude_m: 0.95   # ...and never below this, whatever the dip
   look_down_tolerance_m: 0.15 # close enough to call it arrived
@@ -498,3 +514,152 @@ recorder:
     rate_hz: 5.0            # poses folded in per second; ~2 ms each
     log_every_s: 10.0       # how often the running number reaches nodes.log
 
+# THE EXPLORATION SUPERVISOR -- the layer above System 1 and System 2.
+#
+# It holds the abstract goal ("map this hospital") that the policy cannot, and
+# hands down one bounded, concrete order at a time: look around this area, go
+# through that doorway, come back out, carry on down the corridor. Its whole
+# interface to the flight is the instruction topic above, which the policy node
+# already re-reads on every decision -- nothing in the flight loop changes.
+#
+# Started only with supervise:=true. Without it the policy flies
+# `policy_params.default_instruction` for the whole run, which is the arm this
+# is measured against: five runs of that order saw 9-16% of the building and
+# four of them stopped themselves part-way through.
+supervisor:
+  # The building, decomposed into rooms, corridors and doorways. Built offline
+  # by tasks/mapping/gazebo_world_occupancy/build_regions.py from two height
+  # bands of the same world -- the flight band, where every door stands open,
+  # and a band at lintel height, where they are closed and the rooms fall apart
+  # into connected components on their own. Empty disables the supervisor.
+  region_map: sparx_agency/robots/SJTU/maps/hospital_regions.yaml
+
+  # THE SURVEY, CARRIED BETWEEN FLIGHTS. A hospital is bigger than one flight:
+  # at ~22 s a decision and ~1 m of route per decision, twenty rooms is hours of
+  # flying, and a capsize ends a flight outright because the SJTU plugin cannot
+  # right itself. With a state file the campaign's world restart and re-ferry
+  # become a *continuation* -- run n+1 picks up run n's seen-mask and its list
+  # of rooms already finished or given up on. Empty starts fresh every run.
+  #
+  # It is refused rather than silently reset if it was built against a map of a
+  # different shape, resolution or origin. Delete the file to start a new survey.
+  # NOT under /tmp. That is where it lived first, and the directory was cleaned
+  # between sessions, taking a survey that was 68.5% of the way through the
+  # building with it. Relative paths here resolve against the repo root.
+  state_file: run_state/hospital_survey.npz
+  save_every_s: 20.0
+
+  rate_hz: 2.0            # how often it re-decides; System 2 answers at 0.2-0.4 Hz
+  observe_rate_hz: 5.0    # poses folded into its own coverage tracker, ~2 ms each
+  # The policy subscribes to the instruction VOLATILE with depth 1, so one that
+  # arrives while it is not listening is gone. Re-send this often even unchanged.
+  republish_s: 20.0
+
+  # WHEN A ROOM COUNTS AS DONE. Well under 1.0 on purpose: the corner behind a
+  # bed is occluded from every pose the aircraft can reach, and a supervisor
+  # holding out for all of it would never leave the first room.
+  scanned_fraction: 0.60
+
+  doorway_radius_m: 1.2   # how close to an opening counts as standing in it
+  # An opening narrower than this is never offered. The airframe is 0.63 m and
+  # this building's doors are 0.90 and 1.45 m, so the margin is real and small.
+  min_portal_m: 0.80
+
+  # GIVING UP, AND GIVING UP FOR GOOD. A policy that cannot get through a door
+  # will not start being able to, so a mission is abandoned after
+  # mission_timeout_s, left alone for defer_s, and retired for the rest of the
+  # flight after max_attempts. Without that ceiling the deferral only paces the
+  # loop instead of ending it, and the survey can never report itself finished.
+  # PATIENCE, SIZED FROM THE DECISION RATE RATHER THAN GUESSED.
+  #
+  # Measured over the 211 System-2 decisions of five supervised flights, one
+  # decision costs about **22 s** end to end -- the model's own 3-8 s, plus the
+  # hold that keeps the aircraft still while it thinks, plus the look-down dip
+  # that precedes most coordinate replies -- and buys roughly **one metre** of
+  # committed route. A doorway is typically 5-7 m from where its mission is
+  # issued.
+  #
+  # So a 150 s budget was seven decisions and seven metres: enough to reach a
+  # door only if every single answer was perfect, and every entry timed out.
+  # 400 s is about eighteen decisions, which is a real attempt rather than an
+  # arithmetically unwinnable one.
+  mission_timeout_s: 400.0
+  defer_s: 120.0
+  max_attempts: 4
+
+  # WHEN NOTHING HAS CHANGED, BACK OFF. An aircraft wedged against a jamb gets
+  # the same frame and returns the same answer for ever; the cheapest thing
+  # that changes anything is to break contact. The supervisor watches for a
+  # mission that has run this long without the aircraft moving and asks the
+  # follower to run the reverse it already owns for the depth reflex -- a
+  # second trigger, not a second manoeuvre.
+  # SEVENTY, not thirty-five, and never while the aircraft is busy. At ~22 s a
+  # decision, 35 s of stillness is barely one decision -- and the aircraft is
+  # legitimately motionless for most of one, thinking or rotating or dipping.
+  # Measured: three nudges in a single run at a drone that was rotating freely
+  # with nothing in front of it. The supervisor now also refuses to nudge while
+  # `/n1/info` reports a thinking, settling, turning or dipping phase.
+  nudge_after_s: 45.0
+  nudge_min_move_m: 0.6
+  nudge_cooldown_s: 45.0
+
+  # A CORRIDOR IS FINISHED WHERE IT WAS LOOKED AT, NOT AS A WHOLE. The middle
+  # spine is forty metres long; "60% of it seen from one end" written off as
+  # done leaves its far third unsurveyed for the rest of the campaign. A scan
+  # clears the vicinity it was flown from, and the aircraft has to move this far
+  # before that area is worth looking at again. Larger than the biggest room, so
+  # one look still finishes a room.
+  rescan_radius_m: 9.0
+
+  # EVERY ROOM GETS ONE TRY BEFORE ANY GETS A SECOND. Measured on this building,
+  # flying the corridors and spinning would see 79.6% of the floor and thirteen
+  # of its twenty rooms clear the scanned threshold without ever being entered.
+  # So a corridor the aircraft can reach is worth more than a doorway it has
+  # already failed to cross -- while the instruction still gets its one honest
+  # attempt at every room.
+  first_try_rooms_first: true
+
+  # HOW FAR ONE "GO AND LOOK OVER THERE" ORDER REACHES. Sized to the decision
+  # rate: at ~22 s a decision and ~1 m of route per decision, ten metres is
+  # about ten decisions, which fits one mission budget. It is also a rescan
+  # radius, so arriving somewhere new is immediately worth a fresh look around.
+  travel_step_m: 10.0
+  travel_arrive_m: 2.0
+  # A hop's own clock, well under mission_timeout_s. A hop ends the moment its
+  # target patch of floor is seen, which normally happens from several metres
+  # short of it, so one still running after this is one the aircraft is not
+  # making progress on -- and the cheapest answer is a different patch. The
+  # long clock is for crossing a doorway, which is the thing this policy is
+  # genuinely slow at.
+  travel_timeout_s: 150.0
+  # STOP on a hop is the policy declining the order, not pausing over it. It
+  # does not change its mind: over one 33-minute flight STOP was 46% of every
+  # answer it gave, and four hops in a row expired with the aircraft standing
+  # still. Write the target off after a few seconds and aim somewhere else.
+  # Long enough only to outlast the single STOP that follows a real arrival.
+  refuse_after_s: 15.0
+  refuse_radius_m: 5.0
+
+  # HOW LONG A DIRECTION WORD STANDS.
+  bearing_hold_s: 20.0
+
+  # WHAT THE CAMERA CAN SEE, and what it costs to point it somewhere else.
+  # in_frame_deg is half the 75-degree field of view: inside it a target can be
+  # shown to the policy, outside it the aircraft must turn first, and every
+  # out-of-frame order is one the policy is measurably worse at. The turn cost
+  # converts degrees into the metres of flying they are worth -- ~2.1 deg/s of
+  # yaw against ~1 m per decision -- so a target ninety degrees round costs
+  # about twenty metres of travel, and surveys nothing on the way.
+  in_frame_deg: 35.0
+  turn_cost_m_per_deg: 0.4
+  # How far back from a doorway the approach stops. Far enough to see the whole
+  # opening, close enough that crossing is then one short straight move.
+  approach_offset_m: 1.6
+  # While scanning, how long coverage may fail to rise before the area counts as
+  # done for want of anything more to see.
+  scan_stall_s: 25.0
+  # A STOP during a scan is accepted as completion only above this coverage.
+  # Below it the model is stopping for its own reasons -- which it demonstrably
+  # does -- and accepting it would walk the whole checklist without the aircraft
+  # moving.
+  stop_hint_min_fraction: 0.35

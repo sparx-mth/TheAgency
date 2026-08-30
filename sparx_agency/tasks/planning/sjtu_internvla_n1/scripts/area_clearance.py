@@ -92,13 +92,102 @@ class ClearanceMap(object):
                 float(self.distance[row, col]))
 
 
+    def roomiest_in_mask(self, mask):
+        # type: (np.ndarray) -> tuple
+        """``(x, y, clearance)`` of the most open cell of a region.
+
+        The mask arrives in the region map's convention -- row 0 at MINIMUM y,
+        as everywhere in ``core`` -- and this class holds the raw nav2 PGM, whose
+        row 0 is maximum y. Flipping here rather than at the caller keeps the
+        one place that knows about the difference the one place that has to.
+        """
+        flipped = np.flipud(np.asarray(mask, dtype=bool))
+        if flipped.shape != self.distance.shape:
+            raise ValueError("mask %r does not match the map %r"
+                             % (flipped.shape, self.distance.shape))
+        if not flipped.any():
+            raise ValueError("the region is empty")
+        inside = np.where(flipped, self.distance, -1.0)
+        row, col = np.unravel_index(int(np.argmax(inside)), inside.shape)
+        return (self.origin_x + col * self.resolution,
+                self.origin_y + (self.height - 1 - row) * self.resolution,
+                float(self.distance[row, col]))
+
+
+def propose_from_regions(clearance, region_path, kinds=("corridor",),
+                         min_clearance_m=0.9, min_area_m2=8.0):
+    """A start pose per region: the most open cell in each, as YAML.
+
+    The five hand-sited areas were chosen so a campaign covered the building
+    rather than five variations on the lobby, and they did their job -- but a
+    survey that carries across segments turns the ferry into transport, and then
+    the useful number of start poses is however many distinct parts the building
+    has. The region map already knows: one per corridor stretch puts the
+    aircraft somewhere new every segment without it having to fly there at a
+    metre per decision.
+
+    Args:
+        clearance: A :class:`ClearanceMap` over the flight-band map.
+        region_path: The region map YAML.
+        kinds: Which region kinds to propose for.
+        min_clearance_m: Reject a proposal with less room than this. The
+            airframe is 0.63 m wide and a start pose 0.2 m from a wall is the
+            difference between a recording and a collision.
+        min_area_m2: Skip regions too small to be worth ferrying to.
+
+    Returns:
+        A list of ``(name, x, y, clearance_m)``, largest region first.
+    """
+    from sparx_agency.core.planning.exploration.region_map import RegionMap
+
+    region_map = RegionMap.load(region_path)
+    out = []
+    for region in sorted(region_map.regions.values(), key=lambda r: -r.area_m2):
+        if region.kind not in kinds or region.area_m2 < min_area_m2:
+            continue
+        try:
+            x, y, room = clearance.roomiest_in_mask(region_map.mask_of(region.id))
+        except ValueError:
+            continue
+        if room < min_clearance_m:
+            continue
+        out.append((region.name, x, y, room))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--from-regions", default=None, metavar="REGION_YAML",
+                    help="propose one start pose per corridor stretch of a "
+                         "region map, as YAML ready to paste into "
+                         "config/hospital_areas.yaml")
+    ap.add_argument("--kinds", default="corridor",
+                    help="comma-separated region kinds to propose for")
     ap.add_argument("--map", default=_MAP)
     ap.add_argument("--areas", default=_AREAS)
     ap.add_argument("--propose", action="store_true",
                     help="print the roomiest spot per band, as YAML")
     args = ap.parse_args(argv)
+
+    if args.from_regions:
+        maps = ClearanceMap(args.map)
+        kinds = tuple(k.strip() for k in args.kinds.split(",") if k.strip())
+        print("  # Proposed from %s: the most open cell of each %s region."
+              % (os.path.basename(args.from_regions), "/".join(kinds)))
+        for name, x, y, room in propose_from_regions(maps, args.from_regions,
+                                                     kinds=kinds):
+            # A campaign passes these as shell arguments, so the slug has to be
+            # a bare word: no spaces, no hyphens, no parentheses.
+            slug = "".join(ch if (ch.isalnum() or ch == "_") else
+                           ("_" if ch in " -" else "")
+                           for ch in name.replace("the ", "")).strip("_")
+            print("  %s:" % slug)
+            print("    x: %.2f" % x)
+            print("    y: %.2f" % y)
+            print("    yaw_deg: 0.0")
+            print("    clearance_m: %.2f" % room)
+            print("    note: %s, the most open cell in it" % name)
+        return 0
 
     cmap = ClearanceMap(args.map)
     if args.propose:

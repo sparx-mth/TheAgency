@@ -147,6 +147,24 @@ class VisibilityCoverage:
         """``(H, W)`` boolean: the countable cells looked at so far."""
         return self._seen
 
+    def restore_seen(self, seen):
+        # type: (np.ndarray) -> None
+        """Adopt a seen-mask from an earlier flight over the same building.
+
+        Intersected with the denominator on the way in, so a mask saved against
+        a slightly different countable region cannot inflate the percentage --
+        the number is always cells of THIS building's floor.
+
+        Raises:
+            ValueError: The mask is not this grid's shape.
+        """
+        seen = np.asarray(seen, dtype=bool)
+        if seen.shape != self._seen.shape:
+            raise ValueError("seen mask %r does not match the grid %r"
+                             % (seen.shape, self._seen.shape))
+        self._seen = seen & self._countable
+        self._cells_seen = int(self._seen.sum())
+
     def contains(self, x, y):
         # type: (float, float) -> bool
         """Is a world point inside the region being measured?
@@ -160,6 +178,17 @@ class VisibilityCoverage:
             return False
         gx, gy = cell
         return bool(self._countable[gy, gx])
+
+    def cell_of(self, x, y):
+        # type: (float, float) -> Optional[Tuple[int, int]]
+        """``(col, row)`` for a world point, or None off the grid.
+
+        The public face of :meth:`_cell`, for a caller that has a world point
+        and wants to ask the seen mask about it -- "has the camera reached this
+        object yet?". Returning None rather than clamping is deliberate: a
+        point outside the building is not a point on its edge.
+        """
+        return self._cell(x, y)
 
     def _cell(self, x, y):
         # type: (float, float) -> Optional[Tuple[int, int]]

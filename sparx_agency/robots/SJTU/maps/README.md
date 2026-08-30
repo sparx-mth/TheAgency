@@ -88,6 +88,61 @@ y ≈ 19.2 to 22.0 m. A map recorded from inside the corridor cannot see them.
 Ignore everything above the wall line at y = 20.95 m and the y max delta falls
 to −0.06 m, i.e. all four edges agree within 0.14 m.
 
+## `hospital_regions`
+
+The same building as **20 rooms, 7 corridor stretches and 33 portals**, for the
+exploration supervisor to plan over. `hospital_regions.yaml` is the part a person
+reads and may correct — names, kinds, centres, areas, the portal list — and
+`hospital_regions.npz` carries the exact `(H, W)` int32 label grid, co-registered
+with `hospital.pgm` cell for cell.
+
+It is derived, not drawn. Sliced through the band a drone flies in, every doorway
+in this building stands open and the floor is one connected blob; sliced at
+**2.10–2.40 m**, each opening is closed by its own lintel and the rooms fall
+apart into components by themselves. The doorways are where the two bands
+disagree, and they come out at 0.90 m and 1.45 m — the widths the world has. No
+room is sealed, and every one has at least one opening the 0.63 m airframe could
+pass.
+
+The **names are generated from position and are meant to be edited**: they read
+unambiguously and know nothing about what a room is for, and they are handed to
+the policy verbatim inside "you are in ...". Re-running the builder overwrites
+them, so rebuild first and rename after.
+
+### Regenerate the regions
+
+```bash
+cd /path/to/TheAgency
+# 1. the wall band. An input only -- it is not committed.
+.venv/bin/python -m sparx_agency.tasks.mapping.gazebo_world_occupancy.build_map \
+    --world  $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/worlds/hospital.world \
+    --search-path $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/models \
+    --search-path $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/fuel_models \
+    --output-dir /tmp/walls --name hospital_walls \
+    --resolution 0.05 --z-min 2.10 --z-max 2.40
+
+# 2. the decomposition. The seven bands are where the corridors are judged to
+#    change character, read off the circulation region's own width profile:
+#    24.75 m across the south hall, 2.75 m up the south corridor, 5.5 m along
+#    the spine between 12.75 m cross galleries, 17.8 m at the atrium.
+.venv/bin/python -m sparx_agency.tasks.mapping.gazebo_world_occupancy.build_regions \
+    --flight-map sparx_agency/robots/SJTU/maps/hospital.yaml \
+    --wall-map   /tmp/walls/hospital_walls.yaml \
+    --output     sparx_agency/robots/SJTU/maps/hospital_regions.yaml \
+    --corridor-seed -0.09 11.84 \
+    --corridor-band "the south hall:-40:-32.2" \
+    --corridor-band "the south corridor:-32.2:-26.2" \
+    --corridor-band "the southern spine:-26.2:-16.2" \
+    --corridor-band "the middle spine:-16.2:-4.9" \
+    --corridor-band "the reception:-4.9:3.9" \
+    --corridor-band "the atrium:3.9:14.8" \
+    --corridor-band "the north corridor:14.8:40" \
+    --preview /tmp/hospital_regions.png
+```
+
+**Look at the preview.** A decomposition that is wrong is wrong in a way that
+reads as a plausible building.
+
 ### Regenerate
 
 ```bash

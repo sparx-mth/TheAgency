@@ -35,6 +35,11 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_HERE, *([os.pardir] * 5)))
+_REGIONS = os.path.join(_REPO_ROOT, "sparx_agency", "robots", "SJTU", "maps",
+                        "hospital_regions.yaml")
+
 _COMMIT = re.compile(
     r"committed #(\d+): (\d+) pts, ([\d.]+) m, from \(([-\d.]+), ([-\d.]+)\) "
     r"after (.+?) \[(curve|action)\]")
@@ -143,6 +148,41 @@ class Run(object):
             return 0.0
         return math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
 
+    def places(self, region_map):
+        """The rooms and corridors the decisions happened in, in order.
+
+        The scoreboard a medium-horizon order needs and the distance columns
+        cannot give: "enter the room with the refrigerator" is answered by
+        WHICH region the aircraft ended up in, not by how far it flew. Repeats
+        are collapsed, so a run that crosses a gallery, enters a ward, comes
+        out and enters a lounge reads as three moves rather than forty.
+
+        The decision positions are a sparse sample of the track (one per
+        committed route), so a region crossed entirely between two decisions
+        does not appear. That is the right way round: a room the aircraft never
+        stopped to think in is not a room it visited.
+        """
+        out = []
+        for (x, y) in self.positions:
+            region = region_map.region_at(x, y)
+            name = region.name if region is not None else "outside"
+            if not out or out[-1] != name:
+                out.append(name)
+        return out
+
+    def entered(self, region_map, name):
+        """Index of the first decision taken inside ``name``, or None.
+
+        Matched case-insensitively on a substring so a task can name "lounge"
+        without repeating the region map's generated wording verbatim.
+        """
+        needle = name.lower()
+        for i, (x, y) in enumerate(self.positions):
+            region = region_map.region_at(x, y)
+            if region is not None and needle in region.name.lower():
+                return i
+        return None
+
     def closest_to(self, target):
         """Nearest the aircraft got to ``target``, over the decisions."""
         if target is None or not self.positions:
@@ -174,13 +214,17 @@ def find_runs(root):
     return out
 
 
-def report(runs, target=None):
+def report(runs, target=None, region_map=None, enter=None):
     """Print the comparison table and a one-line summary of the campaign."""
     head = ("run", "verdict", "routes", "curve%", "route m", "moved m", "net m",
             "turns", "esc", "blk", "S2 Hz", "seen%")
     if target is not None:
         head = head + ("to target",)
-    widths = [12, 9, 6, 6, 7, 7, 6, 5, 4, 4, 6, 6] + ([9] if target is not None else [])
+    if region_map is not None and enter:
+        head = head + ("entered@",)
+    widths = ([12, 9, 6, 6, 7, 7, 6, 5, 4, 4, 6, 6]
+              + ([9] if target is not None else [])
+              + ([9] if (region_map is not None and enter) else []))
     print("  ".join(h.rjust(w) for h, w in zip(head, widths)))
     print("  ".join("-" * w for w in widths))
     for run in runs:
@@ -194,7 +238,15 @@ def report(runs, target=None):
         if target is not None:
             near = run.closest_to(target)
             row.append("--" if near is None else "%.2f" % near)
+        if region_map is not None and enter:
+            at = run.entered(region_map, enter)
+            row.append("--" if at is None else "#%d" % at)
         print("  ".join(c.rjust(w) for c, w in zip(row, widths)))
+        if region_map is not None:
+            places = run.places(region_map)
+            if places:
+                print("  ".join("".rjust(w) for w in widths[:1])
+                      + "  " + " -> ".join(places))
 
     if not runs:
         print("\nno runs found")
@@ -243,9 +295,25 @@ def main(argv=None):
     parser.add_argument("--target", nargs=2, type=float, metavar=("X", "Y"),
                         help="world point the instruction names, to measure "
                              "closest approach against")
+    parser.add_argument("--regions", nargs="?", const=_REGIONS, default=None,
+                        metavar="REGION_YAML",
+                        help="print the rooms each run passed through, from a "
+                             "region map (default: the SJTU hospital one)")
+    parser.add_argument("--enter", default=None, metavar="NAME",
+                        help="the region the instruction told it to end up in; "
+                             "adds a column with the decision it first got "
+                             "there on. Implies --regions.")
     args = parser.parse_args(argv)
+    region_map = None
+    if args.regions or args.enter:
+        # Imported here, not at module scope: this script is meant to run on a
+        # campaign copied off the machine that flew it, where the repo may not
+        # be importable, and everything above works without a region map.
+        from sparx_agency.core.planning.exploration.region_map import RegionMap
+        region_map = RegionMap.load(args.regions or _REGIONS)
     runs = find_runs(args.campaign)
-    report(runs, tuple(args.target) if args.target else None)
+    report(runs, tuple(args.target) if args.target else None,
+           region_map=region_map, enter=args.enter)
     return 0
 
 

@@ -71,6 +71,7 @@ def _imgmsg_to_bgr(msg):
 from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.core.common.types import Intrinsics
 from sparx_agency.core.planning.environment.occupancy_io import occupancy_from_mask
+from sparx_agency.core.planning.exploration.survey_state import load_survey
 from sparx_agency.core.planning.exploration.visibility_coverage import (
     VisibilityCoverage,
     cone_from_intrinsics,
@@ -111,6 +112,18 @@ def _path_xy(msg):
                     dtype=float) if msg.poses else None
 
 
+class _NoBookkeeping(object):
+    """Somewhere for ``load_survey`` to put the half of a survey this node has
+    no use for. The recorder draws what has been seen; which rooms are finished
+    and which orders are retired are the supervisor's business."""
+
+    def __init__(self):
+        self._accepted = set()
+        self._exhausted = set()
+        self._attempts = {}
+        self._issues = {}
+
+
 class N1RunRecorderNode(Node):
     """Compose the drone camera and N1's route into a recorded MP4."""
 
@@ -127,6 +140,7 @@ class N1RunRecorderNode(Node):
         self.declare_parameter("record_seconds", 0.0)
         self.declare_parameter("output", "")
         cfg = _load_config(self.get_parameter("config_file").value)
+        self._cfg = cfg
         topics = cfg.get("topics", {})
         rec = cfg.get("recorder", {})
 
@@ -242,6 +256,21 @@ class N1RunRecorderNode(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn("coverage disabled: %s" % (exc,))
             return None
+        # RESUME WHAT THE SURVEY ALREADY KNOWS. When a supervisor is carrying a
+        # survey across segments, a recorder that started from zero every run
+        # would draw 5% on the video while the building was 26% surveyed -- two
+        # numbers for one question, and the one on screen the wrong one. Read
+        # only: the supervisor owns the file, this just starts where it is.
+        state_file = self._cfg.get("supervisor", {}).get("state_file", "")
+        if state_file:
+            if not os.path.isabs(state_file):
+                state_file = os.path.join(_REPO_ROOT, state_file)
+            try:
+                load_survey(state_file, coverage, _NoBookkeeping(),
+                            logger=self.get_logger())
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(
+                    "not resuming coverage from %s: %s" % (state_file, exc))
         self.get_logger().info(
             "coverage: %.0f m2 of building floor to see, %.0f deg cone to %.1f m"
             % (coverage.area_total_m2,

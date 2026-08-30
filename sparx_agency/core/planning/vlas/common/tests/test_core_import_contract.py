@@ -58,6 +58,7 @@ def _py_files():
     "sparx_agency.core.planning.vlas.internvla_n1",
     "sparx_agency.core.planning.vlas.internvla_n1.client",
     "sparx_agency.core.planning.vlas.internvla_n1.policy",
+    "sparx_agency.core.planning.vlas.internvla_n1.stop_latch",
     "sparx_agency.core.planning.vlas.internvla_n1.trt",
     "sparx_agency.core.planning.vlas.common.trt",
     # The only module under vlas/ that imports from another core/planning

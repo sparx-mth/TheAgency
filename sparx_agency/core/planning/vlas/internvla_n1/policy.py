@@ -112,6 +112,33 @@ class InternVLAN1Policy(NavigationPolicy):
                                model_settings=self._model_settings)
         return self.client.reset()
 
+    def restart_episode(self):
+        """Clear the agent's episode state. Never creates one.
+
+        Deliberately NOT :meth:`reset`, and the difference is a burnt card.
+        ``reset`` calls ``init_agent`` first, whose gate is
+        ``check_agent_exists`` -- and that probe is itself a ``/reset`` POST
+        with a five-second timeout. One slow or dropped probe reads as "no
+        agent", so ``init_agent`` posts ``/agent/init``, and the server treats
+        a repeat init as a REPLACE: it builds a second agent and reloads the 7B
+        checkpoint without freeing the first, whose System-2 daemon thread
+        holds it alive. On an 8 GB card that is an out-of-memory error, and the
+        flight is over. It has happened here once already.
+
+        This is the whole teardown that a latched policy needs -- the frame
+        history, the cached pixel goal, the queued actions and both systems'
+        state -- as a single POST that cannot reach ``/agent/init`` by any
+        path.
+
+        Returns:
+            True if the server acknowledged. False on any transport failure,
+            in which case the episode state is unchanged and the caller has
+            not recovered anything.
+        """
+        self._last_waypoint_step = None
+        self._waypoint_age = 0
+        return self.client.reset()
+
     def step(self, observation, goal):
         """Run one language-goal inference and return a body-frame trajectory.
 

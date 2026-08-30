@@ -319,3 +319,41 @@ def test_an_unpatched_server_simply_reports_no_look_down():
     parsed = ModelClient()._parse_response({"action": [{"action": [1]}]}, 0.0)
     assert parsed.look_down is False
     assert parsed.waypoint_step is None
+
+
+def test_restarting_an_episode_never_asks_the_server_to_build_an_agent():
+    """The load-bearing property of `restart_episode`, and a burnt card if lost.
+
+    `reset` routes through `init_agent`, whose existence gate is itself a
+    /reset POST on a five-second timeout. One slow probe reads as "no agent",
+    `init_agent` posts /agent/init, and the server treats a repeat init as a
+    REPLACE -- a second 7B checkpoint loaded beside the first, which its
+    System-2 daemon thread keeps alive. On an 8 GB card that is an OOM and the
+    flight is over. It has happened here once.
+    """
+    policy = _policy(StepResponse(action="STOP", action_index=0, raw_response={}))
+    assert policy.restart_episode() is True
+    assert policy.client.reset_called is True
+    assert policy.client.init_called is False, \
+        "restart_episode must never be able to reach /agent/init"
+
+
+def test_a_restart_the_server_did_not_acknowledge_reports_failure():
+    """False means the episode state is unchanged and nothing was recovered."""
+    class _Refusing(_FakeClient):
+        def reset(self, reset_index=None):
+            self.reset_called = True
+            return False
+
+    policy = InternVLAN1Policy(url="http://127.0.0.1:8087")
+    policy.client = _Refusing(StepResponse(action="STOP", action_index=0,
+                                           raw_response={}))
+    assert policy.restart_episode() is False
+    assert policy.client.init_called is False
+
+
+def test_reset_still_creates_the_agent_because_that_is_its_job():
+    """The two are deliberately different; this pins the difference."""
+    policy = _policy(StepResponse(action="STOP", action_index=0, raw_response={}))
+    policy.reset()
+    assert policy.client.init_called is True

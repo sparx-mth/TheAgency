@@ -1054,6 +1054,325 @@ client-side under an exploration order, or driving the model with a frontier —
 there, and "the nearest unwashed room" is a concrete referent, which is the one
 thing System 2 reliably answers with coordinates about.
 
+## The medium-horizon suite: six graded tasks, network only
+
+The two measurements above are the two ends of a gap nothing has been flown in.
+The room-and-table order — concrete, ~12 m, one door, one named object — worked
+five times out of five as an experiment and once out of five as a task. The
+exploration order — unbounded, no stopping state — reached about a tenth of the
+building and declared itself finished. **Neither says where the policy stops
+coping.** `scripts/record_medium_horizon.sh` is six tasks between them, each one
+step further along a single axis, flown with the supervisor off and with
+`stop_restart_after: 0`, so what is being measured is the network.
+
+```bash
+./sparx_agency/tasks/planning/sjtu_internvla_n1/scripts/record_medium_horizon.sh      # all six, 3 passes
+./sparx_agency/tasks/planning/sjtu_internvla_n1/scripts/record_medium_horizon.sh t4   # one task
+```
+
+| # | task | start | route | the step up | scored by |
+|---|---|---|---:|---|---|
+| 1 | `t1_leg` | `west_leg_north` | 16.6 m | distance alone: no door, no turn, one crossroads to ignore | reaches y ≤ −22.0 in the corridor |
+| 2 | `t2_turn` | `east_leg` | 8.5 m | a turn at a landmark, then one 1.40 m door | enters *the south-east room (2)* |
+| 3 | `t3_deep` | `east_leg` | 19.9 m | a sub-goal that does not exist until past the door | reaches y ≥ −13.0 inside that room |
+| 4 | `t4_choice` | `south_gallery` | 8.3 m | choosing between two doorways on what is behind them | enters *the south-west room (2)*, not *(1)* |
+| 5 | `t5_both` | `south_gallery` | 17.4 m | leaving a room and going into a second | enters both, in that order, with a corridor decision between |
+| 6 | `t6_far` | `mid_gallery_east` | 29.1 m | two rooms 26 m apart, with a 180° reversal | enters *the west room* then *the east room* |
+
+Every task runs on 1.40–1.50 m ward doors and 2.5–2.9 m corridors. That is
+deliberate: the 0.90 m small-room doors are the one thing this policy has never
+crossed in two campaigns, and a suite that breaks on door width measures door
+width, not horizon.
+
+### The four start poses were measured before anything flew there
+
+`office_door` cost ten flights because it was chosen from a camera image and the
+door in that image was a closed panel. The four areas this suite adds are in
+`config/hospital_areas.yaml` with the same ground truth `office_door` now
+carries, plus the bearings — signed off the boresight, the camera being 75°, so
+anything past ±37.5° is not in the picture:
+
+* **`west_leg_north`** (−5.00, −6.00, −90°) — the longest doorless straight line
+  in the building, walls at x = −6.5 and −3.5 the whole way, one crossroads at
+  y = −8.6, and the end of it visible dead ahead at 16.6 m.
+* **`east_leg`** (5.00, −16.50, −90°) — 6.7 m of tunnel with the door 12.8° to
+  the **left** at 6.8 m. The east wall carries exactly one opening and then runs
+  solid; the mirrored west leg carries two, 0.40 m apart, which is why the turn
+  is tested here and the choice is tested there.
+* **`south_gallery`** (−1.00, −24.50, 180°) — the only frame in this bilaterally
+  symmetric building holding two doorways whose rooms differ. Measured from the
+  pose: ward door at −14.3°, lounge door at +5.2°, and *through them*, in line of
+  sight, a refrigerator 8.3 m dead ahead, a kitchen cabinet at +6.7°, a hospital
+  curtain at −15.3°. The choice the instruction asks for is visible before the
+  aircraft moves — otherwise task 4 would be a coin toss.
+* **`mid_gallery_east`** (5.30, −9.10, 180°) — the west room door 11.8 m dead
+  ahead and in line of sight over the mop cart that stands mid-corridor; the east
+  room door 1.2 m *behind*, which is why the second half of task 6 has to be
+  remembered rather than seen.
+
+**The 0.40 m pier.** The two doors at `south_gallery` are separated by 0.40 m of
+wall at y = −23.85…−24.25. A route aimed at the midpoint is a strike, not a
+doorway. Count a contact there as a task result — the aircraft answering "both"
+— not as an infrastructure failure.
+
+### Why `stop_restart_after` must be 0 for this
+
+The STOP-latch recovery is the right behaviour for a long survey and the wrong
+one here. The room-and-table baseline these six are compared against was flown
+before it existed, and a latched episode the node silently restarts is a horizon
+result quietly erased. The runner refuses to start until it is 0 and says how to
+put it back. Everything else in the policy node is unchanged from that baseline,
+so the comparison is clean.
+
+## The exploration supervisor: one small order at a time
+
+`supervise:=true`, or `SUPERVISE=1` on any of the run scripts. It is the layer
+above System 1 and System 2, and **the flight loop does not know it exists** —
+its entire interface is the instruction topic the policy node already re-reads
+on every decision.
+
+### Why
+
+The measurement above. Under one open-ended order the policy saw 9–16 % of the
+building and four runs in five stopped themselves part-way through, because it
+is not built to hold a goal with no state at which it is satisfied. It is built
+to fly to a thing it can see. So the supervisor holds the goal and hands down
+only what the policy is good at, one at a time:
+
+| mission | order it produces |
+|---|---|
+| `scan_area` | *turn on the spot and look all around this room* |
+| `enter_room` | *go through the open doorway on your right and stop inside the room beyond it* |
+| `exit_room` | *leave this room through the open doorway and stop in the corridor outside* |
+| `traverse` | *keep flying along the corridor ahead of you to the next open area* |
+
+`STOP` then changes meaning, and that is the point. It stops being the end of
+the flight and becomes the policy saying *this* one is done — a claim it is far
+better placed to make. It is still only a **hint**: geometry decides. The
+aircraft is inside the room or it is not.
+
+### What this reuses, and what it does not
+
+Worth stating plainly, because the tree already holds a topology package and the
+question "did you write a second one" is the right one to ask.
+
+**Reused.** `core/common/types/semantics.Portal2D` **is** the portal type here —
+`exploration.region_map.Portal` subclasses it and adds one field, `between`,
+which is the pair of regions the opening joins and the one thing that type has
+no room for. Everything else (the centre pose, the outward `normal_yaw`, the
+clear width) is inherited, so a doorway found by this decomposition is directly
+usable by `EnterPortalBehavior`, `ExploreRoomBehavior` and
+`behaviors/interfaces/context.py`, all of which already speak that vocabulary.
+The `normal_yaw` is computed for exactly that reason. The connected-component
+labelling is `core/planning/environment/grid_regions`, shared with the mission
+sampler and both coverage tools.
+
+**Not reused, with reasons.**
+
+* `core/mapping/topology/room_separation.separate_rooms` takes **doors as an
+  input** (`DoorInfo`: position, size, orientation, from a detector) and cuts a
+  Voronoi *graph* with them. We have no door detector — finding the doors is the
+  hard half, and the two-band trick is what does it. It also returns a cut graph,
+  where a supervisor needs per-cell area labels to answer "which room am I in"
+  from a pose. So this **produces** what that function **consumes**; if a door
+  detector ever lands, feeding it is the natural next step.
+* `core/mapping/topology/voronoi.extract_voronoi_graph` builds a sparse
+  navigation skeleton. A useful thing, and not this thing: the supervisor plans
+  over areas and openings, not over a graph of free-space centrelines. It also
+  needs scipy and networkx, which the runtime path here deliberately avoids.
+* `core/common/types/semantics.Region2D` is the abstract shape of `Region` —
+  string ids, `boundary: Any`, everything else in `tags`. Nothing consumes it.
+  Adopting it would mean stringly-typed ids indexing an integer label grid on
+  every pose lookup, with the name, kind and area a supervisor reads every tick
+  buried in a dict. The divergence is documented at the class.
+* `EnterPortalBehavior` / `ExploreRoomBehavior` are the closest prior art to two
+  of the four missions and emit **waypoints for a planner**. There is no planner
+  in this loop — the planner is a 7B VLM and the interface is an English
+  sentence. Their approach-then-cross geometry is still the right idea and is
+  the reason portals carry a normal.
+
+### The building, from two height bands
+
+The supervisor plans over `robots/SJTU/maps/hospital_regions.{yaml,npz}` —
+**20 rooms, 7 corridor stretches, 33 portals**, none of it hand-drawn.
+
+The trick is to ask the building where its doors are by looking above them. At
+flight height every doorway stands open, so the floor is one blob and no amount
+of eroding separates the rooms — measured here, shrinking it by 0.70 m still
+left a single 532 m² component, because these wards open onto the spine through
+metre-wide gaps rather than through doors. Sliced at **2.10–2.40 m** instead,
+every opening is closed by its own lintel and the rooms fall apart into
+connected components on their own. The doorways are exactly where the two bands
+disagree, and they come out at 0.90 m and 1.45 m — the widths this building
+actually has.
+
+Corridors are the exception and always will be: they have no doors between them,
+so no slice separates them. Where one stretch ends and the next begins is a
+judgement, and it is recorded as seven named `--corridor-band` arguments in the
+rebuild command in `robots/SJTU/maps/README.md`.
+
+**The names are meant to be edited.** They are generated from where each region
+sits, which is honest and unambiguous and knows nothing about what a room is
+for. They are handed to the policy verbatim inside "you are in ...", so
+improving them improves the flight; the YAML is the place, and re-running the
+builder overwrites it.
+
+### The three-part instruction
+
+```
+explore this hospital floor and look inside every room.
+You have looked inside 3 of its 20 rooms.
+You are in the middle spine.
+Go through the open doorway on your right and stop inside the room beyond it.
+```
+
+It is a **fragment**, and has to be. The server substitutes with
+`value.replace('<instruction>.', instruction)`, so it continues "Your task is to
+…" and the full stop it replaces is consumed — a briefing starting "We started
+at the corridor" becomes "Your task is to We started at the corridor". It also
+stays short: eight history images already dominate that context, System 2
+measured 0.2–0.4 Hz here, and part one is a count that gets rewritten rather
+than a list that grows.
+
+**Parts one and two are switches, because they are the experiment.** The
+decomposition is what is certainly worth having; the narrative may well be inert,
+since the policy is fine-tuned on brief imperatives and may simply ignore it.
+`NARRATIVE=full | no_progress | no_location | goal_only` runs the arms against
+the same supervisor rather than a second implementation of it.
+
+### Giving up, and giving up for good
+
+A policy that cannot get through a door will not start being able to, and the
+first live run proved both halves of this: two `enter_room` missions were given
+up on after 75 s, correctly, and the aircraft moved on. Every mission has a
+timeout, a deferral, and a ceiling of attempts after which the target is retired
+for the rest of the flight — without the ceiling the deferral only paces a loop
+instead of ending it, and the survey can never report itself finished.
+
+Three loops were found and closed this way, each of which looks exactly like
+working from outside:
+
+* **in and out of the same doorway**, because a room whose far corner is
+  occluded never reaches the scanned threshold, so every entry succeeds and is
+  re-chosen — found in simulation at a mission every four seconds;
+* **the same area re-scanned for ever**, because a scan that ended for want of
+  anything more to see was immediately eligible again — found in simulation;
+* **the same scan completed over and over by the policy's own `STOP`** — found
+  in the first live flight, eight identical completions on one room in ninety
+  seconds with the aircraft parked in its doorway. A scan is now *accepted*
+  however it ended, which is not the same as reaching the threshold.
+
+### When nothing is changing, back off
+
+An aircraft wedged against a jamb gets the same frame and returns the same
+answer for ever — holding still to think makes that deadlock *deterministic*,
+which is a property this stack already knew about. The depth reflex answers "is
+the way ahead blocked right now"; it cannot answer "has anything changed in the
+last half minute", and that is the one that catches a drone stuck in a corridor
+its own depth reads as clear.
+
+So the supervisor watches for a mission that has run `nudge_after_s` without the
+aircraft moving `nudge_min_move_m`, and publishes on
+`/simple_drone/n1/nudge_back`. The follower runs **the manoeuvre it already
+owns** for the depth reflex — `core/planning/recovery/escape_maneuver`: brake, a
+bounded reverse over ground the aircraft was occupying seconds ago, settle. A
+second trigger, not a second escape. The whole change to the follower is a
+subscriber and eight lines.
+
+The stall test measures a *window*, not the gap since the last anchor: an
+aircraft travelling steadily only re-anchors every `nudge_min_move_m`, so between
+anchors it looks motionless and the first version nudged it mid-flight.
+
+### Reading a supervised run
+
+`nodes.log` carries one line per decision and one per outcome:
+
+```
+MISSION scan_area -> look around the atrium | in_corridor | 0/20 rooms, 2.8% seen
+INSTRUCTION explore this hospital floor and look inside every room. ...
+MISSION enter_room: given up (enter the north-west room (2))
+```
+
+and the run summary adds the mission count, the rooms cleared and whether the
+survey finished. `/simple_drone/n1/mission` carries the same as JSON.
+
+### Rebuilding the decomposition
+
+Two commands, both in `robots/SJTU/maps/README.md`: build the 2.10–2.40 m band
+with `build_map`, then `build_regions` with the corridor bands. It writes a
+preview PNG; **look at it**. A decomposition that is wrong is wrong in a way
+that reads as a plausible building.
+
+## Measured: five supervised runs, five different starts
+
+`SUPERVISE=1 record_campaign.sh 420 atrium north_wing reception east_wards south_hall`,
+hospital, 2026-08-27, seven minutes each, `mission_timeout_s: 150`,
+`max_attempts: 5`, nudges on.
+
+| run | start | missions | rooms cleared | routes | turns | **seen** |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | atrium | 2 | 0/20 | 6 | 13 | **12.9%** |
+| 2 | north wing | 4 | 1/20 | 7 | 19 | 12.7% |
+| 3 | reception | 3 | 0/20 | 14 | 15 | 9.8% |
+| 4 | east wards | 5 | 1/20 | 1 | 56 | 7.3% |
+| 5 | south hall | 4 | 1/20 | 12 | 21 | 5.8% |
+
+Every tape is playable, every coverage figure was recomputed offline from its own
+rosbag and agrees with the live one, and the supervisor behaved exactly as
+designed throughout: it scanned where it stood, chose a door, timed out, nudged,
+gave up, deferred and moved on.
+
+**And not one `enter_room` completed. In any run. From any start.** Three rooms
+were cleared, all of them scanned from a doorway or from the pose the aircraft
+started in. Doubling the budget to 150 s, allowing five attempts and firing up to
+eight back-off nudges changed nothing.
+
+So the supervisor did what it was built to do -- it removed the failure that
+capped the unsupervised runs (System 2 declaring victory at ~10%) and replaced it
+with a single, named, counted one. That is progress of a kind, and it is not yet
+more coverage.
+
+### Why the doorway is impassable, from the logs
+
+Measured across the 211 System-2 decisions in these five flights:
+
+* **It is not the depth brake.** It never once commanded zero forward speed in
+  any of the five flights. In the worst run it was never consulted at all.
+* **It is the branch.** During an `enter_room` the model answers with an arrow --
+  a turn, a look-down, a `STOP` -- rather than pixel coordinates, and only the
+  coordinate branch runs System 1 and produces a flyable curve. No coordinates,
+  no motion, whatever the door is like.
+* **And the budget cannot contain a search.** At 15 deg per discrete turn and
+  ~7.2 s per decision the aircraft yaws at about **2.1 deg/s**, so sweeping a
+  full circle costs ~172 s -- longer than the whole mission. An `enter_room`
+  issued when its doorway is not *already in frame* is arithmetically unwinnable
+  before it starts.
+* When the coordinate branch does fire, its modal answer is the floor ~2.5 m
+  straight ahead, not the doorway. Raising the coordinate rate alone would not
+  have entered the rooms.
+
+Two of those are defects in this layer rather than in the policy, and both are
+now fixed:
+
+* **The order renamed its own target.** The direction word is derived from live
+  yaw and the instruction is republished whenever its text changes, so a model
+  answering a 15 degree turn every seven seconds had "on your right" become
+  "ahead of you" become "on your left" faster than it could act on any of them --
+  a feedback loop between the model's turns and the words it was given. The
+  bearing is now **latched** when the mission is issued and re-derived at most
+  every `bearing_hold_s`.
+* **`"behind you"` is not a referent.** It names something the camera cannot
+  see, and this policy answers that with `STOP` or an arbitrary turn -- never a
+  turn-around, never coordinates. Out-of-frame targets are now asked for as an
+  explicit turn first (*"turn to your right until you can see an open doorway,
+  then go through it"*), and the mission generator **prefers a door already in
+  frame**: a nearer one over the aircraft's shoulder now loses to a further one
+  it can see, because at 2.1 deg/s bringing it into view costs more than the
+  whole mission.
+
+Neither had fired in the five runs above -- they are why some of those missions
+were unwinnable. The next campaign is the one that tests them.
+
 ## Comparing the runs of a campaign
 
 ```bash
@@ -1085,6 +1404,29 @@ round for judging whether a run went anywhere.
 against: for `office_door`, that the bay has exactly one opening, at
 (2.70, −0.20), and that the shortest flyable route from the start to the table
 is 13.3 m.
+
+### Which rooms it actually got into
+
+`--regions` adds, under each run, the sequence of rooms and corridor stretches
+its decisions happened in, and `--enter "<name>"` adds a column with the
+decision it first reached a named one on:
+
+```bash
+.venv/bin/python -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.campaign_report \
+    ~/sjtu_n1_recordings/<campaign> --regions --enter "south-west room (2)"
+```
+
+This is the only column that answers a medium-horizon order, which names a room
+rather than a point: "go into the one with the refrigerator" is scored by *which
+region* the aircraft ended up in, not by how far it flew. It reuses
+`core/planning/exploration/region_map.py` — the same ground-truth labels the
+supervisor navigates by — and imports it lazily, so a campaign copied off this
+machine still reports everything else without the repo on the path.
+
+Run against the room-and-table campaign it immediately says something the
+metres never did: three of those five runs left the reception heading *west*
+and ended inside **the north-west room (3)** — through a 0.90 m door, into a
+9 m² side room — while two reached **the central room (2)** the order named.
 
 ## Configuration
 
