@@ -91,7 +91,7 @@ def test_it_is_two_parts_and_only_two(region_map, coverage, nothing_seen):
     seen = see(region_map, nothing_seen, room.id, 1.0)
     _, state = _state(region_map, coverage, ROOM_C, seen)
     text = brief(state, region_map)
-    assert "turn to your" in text, "the order"
+    assert "doorway" in text, "the order"
     assert "You are in" in text, "the location"
     for history in ("looked inside", "so far", "rooms.", "already"):
         assert history not in text, "no survey history belongs in the prompt"
@@ -135,7 +135,7 @@ def test_each_part_can_be_switched_off_for_the_experiment(region_map, coverage,
 
     bare = brief(state, region_map, BriefingStyle(goal_only=True))
     assert "You are in" not in bare
-    assert "turn to your" in bare, "the order itself always survives"
+    assert "doorway" in bare, "the order itself always survives"
 
 
 def test_standing_in_a_doorway_names_the_room_it_belongs_to(region_map, coverage,
@@ -165,37 +165,32 @@ def test_the_order_for_a_room_scan_asks_what_is_in_it(region_map, coverage,
     assert "look all around this room" in order
 
 
-@pytest.mark.parametrize("yaw_deg, side", [(90, "right"), (-90, "left")])
-def test_a_doorway_out_of_frame_is_asked_for_as_a_turn(region_map, coverage,
-                                                       nothing_seen, yaw_deg,
-                                                       side):
-    """Out of frame, the order is the turn -- never the thing.
+@pytest.mark.parametrize("yaw_deg", [90, -90, 152, -152])
+def test_no_order_ever_names_a_direction_to_turn(region_map, coverage,
+                                                 nothing_seen, yaw_deg):
+    """A side is not a hint about where something is. It is a command.
 
-    The camera sees 75 degrees, so a door ninety off the nose is not in the
-    picture, and naming it as though it were is what an earlier version did:
-    over a 33-minute flight the policy answered STOP to 46% of everything it
-    was asked, and four hops in a row expired with the aircraft stationary.
-    Asking for the turn alone gives it something it can actually do, and the
-    door becomes the order on the tick it comes into view.
+    Measured over a ladder of orders, three passes each: told "do A, then turn
+    right", this policy turns right on the current frame -- 7 runs out of 7,
+    about fifty seconds of spinning, after which it is facing the wrong way and
+    flies off confidently in it. A supervised flight running an order of that
+    shape spent 78% of its answers turning left on the spot, 231 of 298, frozen
+    inside one room for thirty-one minutes.
+
+    The one order that worked, 3 of 3 and faster than any other, contained no
+    direction word at all. So none of these may either, from any heading.
     """
     target = region_map.region_at(*ROOM_C)
     seen = see(region_map, nothing_seen, region_map.corridors()[0].id, 1.0)
-    for room in region_map.rooms():                 # leave exactly one to do
+    for room in region_map.rooms():
         if room.id != target.id:
             seen = see(region_map, seen, room.id, 1.0)
     _, state = _state(region_map, coverage, (6.0, 1.0), seen,
                       yaw=math.radians(yaw_deg))
-    assert state.mission.kind == APPROACH_DOOR
-    assert state.mission.target_id == target.id
     order = brief(state, region_map, BriefingStyle(goal_only=True)).lower()
-    assert "turn to your %s" % side in order
-    # It does not name the door -- see the module docstring: naming a landmark
-    # that is not in the picture drew STOP 42 times in 47.
-    assert "doorway" not in order
-    # But it does give somewhere to fly once the turn is done. A turn with no
-    # destination is the worse failure of the two: "look around you" drew STOP
-    # every single time it was given, 59 for 59.
-    assert "fly towards it" in order
+    for word in ("turn to your", "on your left", "on your right", "behind you",
+                 "to your left", "to your right"):
+        assert word not in order, "%r appeared in %r" % (word, order)
 
 
 def test_a_doorway_in_frame_is_named_and_given_a_stopping_place(region_map,
@@ -248,34 +243,6 @@ def test_an_exit_says_where_to_end_up(region_map, coverage, nothing_seen):
     order = brief(state, region_map, BriefingStyle(goal_only=True))
     assert "leave this room" in order.lower()
     assert "stop in the corridor outside" in order
-
-
-def test_a_target_out_of_frame_is_asked_for_as_a_turn(region_map, coverage,
-                                                      nothing_seen):
-    """"behind you" names nothing the camera can see.
-
-    Measured over five flights: given it, the policy answers STOP or an
-    arbitrary turn, never a turn-around and never coordinates -- and only the
-    coordinate branch produces motion. So ask for the turn, and only then for
-    the thing.
-    """
-    target = region_map.region_at(*ROOM_C)
-    seen = see(region_map, nothing_seen, region_map.corridors()[0].id, 1.0)
-    for room in region_map.rooms():
-        if room.id != target.id:
-            seen = see(region_map, seen, room.id, 1.0)
-    # Facing away from the only door left.
-    _, state = _state(region_map, coverage, (6.0, 1.0), seen,
-                      yaw=math.radians(-152))
-    assert state.bearing == "behind you"
-    order = brief(state, region_map, BriefingStyle(goal_only=True)).lower()
-    assert "turn to your" in order
-    assert "behind you" not in order
-    # AND IT DOES NOT ASK FOR THE DOOR. Measured in flight: an order to turn
-    # "until you can see an open doorway" drew STOP 42 times in 47, while the
-    # plain look-around drew a turn every time. A search for something not in
-    # the picture is a question this policy answers with STOP.
-    assert "doorway" not in order
 
 
 def test_the_finished_survey_says_to_stop(region_map, coverage, nothing_seen):

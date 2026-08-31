@@ -398,6 +398,28 @@ class ExplorationSupervisor:
             self._mission = self._choose(working, progress, now, x, y,
                                          standing_in=region, yaw=yaw,
                                          portal=portal, seen=seen_mask)
+            # LOOK BEFORE BEING SENT SOMEWHERE YOU CANNOT SEE. If the errand
+            # that was chosen aims outside the camera's cone, the instruction
+            # for it cannot name anything in the picture -- and every attempt
+            # to write one anyway has failed the same way, because an order to
+            # turn is obeyed on the current frame and the part after "then" is
+            # never reached. One supervised flight spent 78% of its answers
+            # (231 of 298) turning left on the spot inside a single room.
+            #
+            # A scan is the honest alternative and the only turn this policy
+            # reliably performs: it is bounded, it ends by itself when nothing
+            # new appears, and it brings the target into frame so the next tick
+            # can name it. It happens at most once per place per neighbourhood,
+            # so this cannot alternate with the errand it is deferring.
+            if (self._mission is not None
+                    and self._out_of_frame(self._mission, x, y, yaw)
+                    and working is not None
+                    and self._scannable(working, progress, now, x, y)):
+                self._mission = Mission(
+                    kind=SCAN_AREA, target_id=working.id, issued_s=now,
+                    seen_at_issue=(progress[working.id].fraction
+                                   if working.id in progress else 0.0),
+                    note="look around %s before setting off" % working.name)
             if self._mission is not None and self._count_issue(self._mission):
                 # Issued too many times to be making progress. Retire it, record
                 # why, and take whatever the next tick chooses instead.
@@ -654,6 +676,23 @@ class ExplorationSupervisor:
         if age >= limit:
             return "given up"
         return None
+
+    def _out_of_frame(self, mission, x, y, yaw):
+        # type: (Mission, Optional[float], Optional[float], Optional[float]) -> bool
+        """Does this errand aim outside what the camera can currently see?
+
+        A scan aims at nothing and is never out of frame; neither is a finished
+        survey.
+        """
+        if mission.kind in (SCAN_AREA, SURVEY_COMPLETE):
+            return False
+        target = self.aim_point(mission)
+        if target is None or x is None or y is None or yaw is None:
+            return False
+        if not all(np.isfinite(v) for v in (x, y, yaw)):
+            return False
+        off = abs(math.degrees(_relative_angle(x, y, yaw, target)))
+        return off > self.params.in_frame_deg
 
     def _turn_cost(self, off_deg):
         # type: (Any) -> Any

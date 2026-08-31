@@ -141,9 +141,9 @@ def _order(state, region_map):
     target = region_map.regions.get(mission.target_id)
     where = _at(state.bearing)
 
-    # OUT OF FRAME, THERE IS ONE ORDER, AND IT IS THIS ONE. Three flights
-    # measured what the policy does with each phrasing, and the result was not
-    # close:
+    # OUT OF FRAME, THERE IS NO ORDER AT ALL -- and that is the conclusion of
+    # every measurement this package has. Three phrasings were tried against a
+    # target the camera could not see:
     #
     #   "turn to your X until you can see open floor
     #    in front of you, then fly towards it"        16 turns,  6 STOP
@@ -151,22 +151,26 @@ def _order(state, region_map):
     #    doorway, then fly over to it"                 5 turns, 42 STOP
     #   "turn to your X and look around you"           0 turns, 59 STOP
     #
-    # Two things separate them. Naming a landmark the camera cannot see is a
-    # question the policy answers with STOP and does not reconsider. And a
-    # turn with nowhere to fly afterwards is not an order it will take at all
-    # -- "look around you" drew STOP every single time it was given.
+    # The first looked like the winner and it is the one that shipped. It was
+    # wrong. A later ladder of orders, three passes each, found what the STOP
+    # counts had hidden: THIS POLICY CANNOT DEFER A STEP. Given "do A, then
+    # turn right" it turns right on the current frame -- 7 runs out of 7, about
+    # fifty seconds of spinning, after which it is facing the wrong way and
+    # flies off confidently in it. "Turn until you can see floor, THEN fly
+    # towards it" is that same sentence: the turn is executed and the second
+    # half never is. A supervised flight running this order spent 78% of its
+    # answers on TURN_LEFT -- 231 of 298 -- frozen inside one room for
+    # thirty-one minutes with the coverage number unchanged.
     #
-    # So out of frame the order says only: turn that way until there is floor
-    # in front of you, then fly. The mission is unchanged underneath and its
-    # bearing is recomputed as the aircraft comes round; the moment the real
-    # target is in the picture, the orders below name it, and those work.
-    side = (_turn_side(state.bearing)
-            if mission.kind in (APPROACH_DOOR, ENTER_ROOM, EXIT_ROOM, TRAVERSE)
-            else None)     # a scan is already a turn, and faces nothing
-    if side is not None:
-        return ("turn to your %s until you can see open floor in front of you, "
-                "then fly towards it" % side)
-
+    # The order that worked, 3 passes out of 3 and faster than any other, had
+    # no direction word in it anywhere and named a place to end up:
+    # "go through the one with a refrigerator behind it and stop inside it."
+    #
+    # So the answer to "the target is out of frame" is not a better sentence.
+    # It is to NOT ISSUE THAT MISSION -- the chooser prefers what the camera can
+    # already see, and when nothing at all is in frame it issues a scan, which
+    # is a turn the policy does take and which ends on its own. Nothing below
+    # ever names a direction to turn in.
     if mission.kind == SCAN_AREA:
         if target is not None and target.is_room:
             return "turn on the spot and look all around this room"
@@ -204,24 +208,18 @@ def _order(state, region_map):
     return ""
 
 
-def _turn_side(bearing):
-    # type: (Optional[str]) -> Optional[str]
-    """Which way to turn to bring the target into frame, or None if it is in it.
-
-    "behind you" has no side of its own, so it gets one: always the same one,
-    because an aircraft told left on one tick and right on the next just
-    wobbles on the spot.
-    """
-    if not bearing or bearing in ("ahead of you", "right here"):
-        return None
-    if "left" in bearing:
-        return "left"
-    return "right"
-
-
 def _at(bearing):
     # type: (Optional[str]) -> str
-    """" on your right", or nothing when there is no direction to give."""
-    if not bearing or bearing == "right here":
-        return ""
-    return " " + bearing
+    """" ahead of you", or nothing. NEVER a side.
+
+    The only direction this phrase book is allowed to utter is the one that
+    means "straight in front of the camera", because that is the only one the
+    policy acts on correctly. A side -- "on your left", "on your right" --
+    is read as an instruction to turn, immediately, whatever the rest of the
+    sentence says; see the note above `_order`. Naming a side is therefore not
+    a hint about where something is, it is a command, and it is one this layer
+    never means to give.
+    """
+    if bearing == "ahead of you":
+        return " ahead of you"
+    return ""
