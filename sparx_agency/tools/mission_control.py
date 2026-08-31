@@ -1407,6 +1407,18 @@ def _run_falcon_sequence(follow_altitude: bool = False) -> None:
     say("🚁 FALCON has control — exploration drives itself from here.")
 
 
+#: Two views of ONE directory: the vendor container's ``workspace`` bind mount.
+#: The recorder has to run inside ``it`` (only that container has the vendor
+#: message definitions), but writing to the container's own /tmp means the
+#: recording exists nowhere else until someone remembers to ``docker cp`` it,
+#: and it is destroyed outright if ``it`` is recreated -- which happens on some
+#: Sphera restarts. Writing through the mount puts every byte on the host as it
+#: is recorded. Verified 2026-08-31: ``/home/rooster/workspace`` is a rw bind of
+#: ``/home/user1/rqs_iai_ws``. It is deliberately NOT under the repo, so 10 MB
+#: recordings cannot be swept into a commit.
+AXISCAL_DIR_IN_IT = "/home/rooster/workspace/axiscal_logs"
+AXISCAL_DIR_ON_HOST = Path("/home/user1/rqs_iai_ws/axiscal_logs")
+
 #: Every exec into the vendor container needs this: ROS 2 Foxy on domain 9
 #: with the vendor's own CycloneDDS config. Without CYCLONEDDS_URI the node
 #: binds the wrong interface and receives nothing while looking healthy.
@@ -1429,7 +1441,9 @@ def start_calibration_recorder(drone_id: str = "R1", seconds: int = 3600) -> str
 
     Writes to a fresh timestamped directory rather than a fixed one, so
     starting it twice can never overwrite a session, and leaves the path in
-    ``/tmp/axiscal_current`` for the readback below.
+    ``<AXISCAL_DIR>/current`` for the readback below. Both the recording and
+    that pointer land on the HOST through the container's bind mount, so a
+    session is never trapped inside ``it`` waiting to be copied out.
 
     Args:
         drone_id: Rooster id whose topics to record.
@@ -1455,11 +1469,12 @@ def start_calibration_recorder(drone_id: str = "R1", seconds: int = 3600) -> str
         "source /opt/ros/foxy/setup.bash; "
         "source /home/rooster/workspace/install/setup.bash; "
         "export PYTHONPATH=$PYTHONPATH:/home/rooster; "
-        "D=/tmp/axiscal_$(date +%Y%m%d_%H%M%S); mkdir -p $D; "
-        "echo $D > /tmp/axiscal_current; "
+        f"B={AXISCAL_DIR_IN_IT}; mkdir -p $B; "
+        "D=$B/axiscal_$(date +%Y%m%d_%H%M%S); mkdir -p $D; "
+        "echo $D > $B/current; "
         f"python3 -m sparx_agency.tools.falcon_campaign.recorder --run-dir $D "
         f"--rooster-id {drone_id} --hz 20 --duration-sec {int(seconds)} "
-        "> /tmp/axiscal_recorder.log 2>&1"
+        "> $D/recorder.log 2>&1"
     )
     try:
         proc = subprocess.run(
@@ -1483,29 +1498,18 @@ def recorder_reception() -> tuple[bool, str]:
         tuple: ``(live, detail)`` -- ``live`` is True only when all six
         streams carry a real age.
     """
-    script = (
-        'D=$(cat /tmp/axiscal_current 2>/dev/null); '
-        '[ -z "$D" ] && { echo "NODIR"; exit 0; }; '
-        'echo "$D"; tail -1 "$D/truth.jsonl" 2>/dev/null | grep -o \'"age": null\' | wc -l'
-    )
-    try:
-        proc = subprocess.run(
-            ["docker", "exec", "it", "bash", "-lc", script],
-            capture_output=True, text=True, check=False, timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "timed out reading the recording back"
-    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
-    if not lines or lines[0] == "NODIR":
+    run_dir = current_recording()
+    if run_dir is None:
         return False, "no recorder directory -- did it start?"
-    run_dir = lines[0]
-    try:
-        dead = int(lines[-1])
-    except (ValueError, IndexError):
-        return False, f"{run_dir}: no telemetry rows written yet"
+    row = _last_telemetry_row()
+    if row is None:
+        return False, f"{run_dir.name}: no telemetry rows written yet"
+    dead = [k for k in ("truth", "velocity", "localization", "attitude",
+                        "cmd_nav", "state") if (row.get(k) or {}).get("age") is None]
     if dead:
-        return False, f"{run_dir}: {dead}/6 streams receiving NOTHING -- do not fly"
-    return True, f"{run_dir}: all six streams live"
+        return False, (f"{run_dir.name}: {len(dead)}/6 streams receiving NOTHING "
+                       f"({', '.join(dead)}) -- do not fly")
+    return True, f"{run_dir.name}: all six streams live (on the host, as recorded)"
 
 
 def _run_manual_sequence(with_recorder: bool = True) -> None:
@@ -1594,24 +1598,52 @@ def _run_manual_sequence(with_recorder: bool = True) -> None:
         "Nothing here armed anything.")
 
 
+def current_recording() -> Path | None:
+    """Host path of the recording currently being written, or None.
+
+    Read straight off the host through the container's bind mount -- no
+    ``docker exec``, so this cannot time out, cannot be swallowed by a busy
+    container, and keeps working after ``it`` is gone.
+    """
+    pointer = AXISCAL_DIR_ON_HOST / "current"
+    try:
+        raw = pointer.read_text().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    # The pointer holds the CONTAINER path; map it back to the host view.
+    host = AXISCAL_DIR_ON_HOST / Path(raw).name
+    return host if host.is_dir() else None
+
+
 def _last_telemetry_row() -> dict | None:
     """Newest row of the recording currently being written, or None.
 
     Cheap: reads a file the recorder is already writing, rather than spending
     ~10 s on a ``ros2 topic echo`` that is block-buffered and unreliable here.
     """
-    script = (
-        'D=$(cat /tmp/axiscal_current 2>/dev/null); [ -z "$D" ] && exit 1; '
-        'tail -1 "$D/truth.jsonl" 2>/dev/null'
-    )
-    try:
-        proc = subprocess.run(
-            ["docker", "exec", "it", "bash", "-lc", script],
-            capture_output=True, text=True, check=False, timeout=25,
-        )
-        return json.loads((proc.stdout or "").strip() or "{}") or None
-    except (subprocess.TimeoutExpired, ValueError):
+    run_dir = current_recording()
+    if run_dir is None:
         return None
+    path = run_dir / "truth.jsonl"
+    try:
+        with open(path, "rb") as fh:
+            # Seek near the end rather than reading a 13 MB file to get one row.
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 65536))
+            tail = fh.read().decode("utf8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(tail):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue  # a half-written final line is expected, not an error
+    return None
 
 
 def _r1_airborne() -> bool | None:
@@ -1647,23 +1679,12 @@ def _cmd_nav_is_quiet(samples: int = 2, gap: float = 4.0) -> tuple[bool, str]:
     Returns:
         tuple: ``(quiet, detail)``.
     """
-    script = (
-        'D=$(cat /tmp/axiscal_current 2>/dev/null); [ -z "$D" ] && exit 1; '
-        'tail -1 "$D/truth.jsonl" 2>/dev/null'
-    )
     ages: list[float] = []
     for i in range(samples):
         if i:
             time.sleep(gap)
-        try:
-            proc = subprocess.run(
-                ["docker", "exec", "it", "bash", "-lc", script],
-                capture_output=True, text=True, check=False, timeout=25,
-            )
-            row = json.loads((proc.stdout or "").strip() or "{}")
-            age = (row.get("cmd_nav") or {}).get("age")
-        except (subprocess.TimeoutExpired, ValueError):
-            age = None
+        row = _last_telemetry_row() or {}
+        age = (row.get("cmd_nav") or {}).get("age")
         # Fails CLOSED. An unreadable answer is not a clean channel -- the
         # whole point of this check is that a silent failure here costs a
         # whole session, and "unreadable is not healthy" is the rule that
