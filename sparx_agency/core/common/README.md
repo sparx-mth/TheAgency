@@ -43,6 +43,16 @@ consumer depend on a concept it does not use.
   files import one or the other, but there is only one copy of the arithmetic.
   `robots/common/spatial_math.py` is a re-export shim for older import paths.
 
+### The vocabulary module
+
+- **`label_match.py`** — `label_matches(target, label)` is **the** offline rule
+  for deciding whether a detector class counts as the requested target (exact,
+  substring, or shared whitespace/underscore token). It is here rather than in
+  either caller because two subsystems mean it identically: the visual-servo
+  acquisition gate (`core/planning/visual_servo/confirmation_gate.py`, which
+  re-exports it under its published name) and the scene-graph match ladder's
+  offline rung (`core/mapping/topology/target_matcher.py::fallback_match`).
+
 ## Usage Examples
 
 The common package can be imported and used in other modules:

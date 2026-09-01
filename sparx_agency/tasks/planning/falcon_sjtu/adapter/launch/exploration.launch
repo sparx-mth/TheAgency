@@ -3,10 +3,12 @@
     exploration.launch — the full FALCON exploration, flown on the SJTU drone.
 
     A lean port of sjtu_project's gazebo_exploration.launch. What was dropped
-    is not lost: the noise-injection adapter, recorder, BEV publisher and
-    completion watcher belonged to that stack's experiment harness, and
-    cmd_to_vel is replaced by our bspline_follower (which reads the CURVE, not
-    the 100 Hz samples — see bspline_follower.launch for why that matters).
+    is not lost: the noise-injection adapter, recorder and completion watcher
+    belonged to that stack's experiment harness — and the BEV publisher is
+    back, behind enable_bev below, feeding the scene-graph task over the
+    bridge. cmd_to_vel is replaced by our bspline_follower (which reads the
+    CURVE, not the 100 Hz samples — see bspline_follower.launch for why that
+    matters).
 
     Topology, three nodes plus FALCON's two:
 
@@ -795,6 +797,34 @@
         output="screen">
     <param name="odom_topic" value="$(arg drone_ns)/odom"/>
   </node>
+
+  <!-- ── BEV publisher, behind enable_bev (default off) ──────────────────
+       Projects FALCON's voxel clouds (/voxel_mapping/occupancy_grid_occupied
+       and _free) onto a latched /falcon/bev_2d OccupancyGrid, which
+       config/bridge.yaml carries to ROS2 for the scene-graph task
+       (tasks/mapping/scene_graph). Nothing in the flight loop reads it. The
+       node is the XTEND deployment's bev_publisher_node.py, shared and
+       mounted per file by run_falcon_sjtu.sh: enabling this without those
+       mounts silently runs whatever the image baked in, i.e. nothing.
+
+       No bbox is set here on purpose. The node's documented bounds order is
+       launch bbox_* over /map_config/map_size/* (plus its 1.0 m margin) over
+       a fallback, and the rosparam load above already put THIS map's
+       map_size on the server via map_name — so the grid tracks the map yaml
+       by construction. Hospital resolves to x [-15, 15], y [-38, 24],
+       covering its x [-14, 14], y [-37, 23] box; warehouse and small_house
+       likewise. Resolution stays at the node's 0.15 m default (the old
+       stack's value). The z-slab is pinned to the old stack's 0.30..1.80 m
+       because the node's own floor default (0.40) is the XTEND flight band,
+       not this one. -->
+  <arg name="enable_bev" default="false"/>
+  <group if="$(arg enable_bev)">
+    <node pkg="falcon_adapter" type="bev_publisher_node.py" name="bev_publisher"
+          output="screen">
+      <param name="z_floor" value="0.30"/>
+      <param name="z_ceil"  value="1.80"/>
+    </node>
+  </group>
 
   <!-- ── FALCON, unmodified ────────────────────────────────────────────── -->
   <!-- respawn rather than required: FALCON's in-process LKH TSP solver

@@ -88,6 +88,22 @@ y ≈ 19.2 to 22.0 m. A map recorded from inside the corridor cannot see them.
 Ignore everything above the wall line at y = 20.95 m and the y max delta falls
 to −0.06 m, i.e. all four edges agree within 0.14 m.
 
+## `hospital_doors`
+
+`hospital_doors.yaml` is **35 doorway positions** (world-frame ENU metres) for the
+hospital world, and it has two sources, merged: the **24 hand-tuned doors the
+sjtu_project stack flew**, ported verbatim from `DEFAULT_DOOR_XY_FLAT` in its
+`semantic_mapper_node.py` (branch `detect_navigate_nadav`), plus **11 of the 33
+lintel-band portals** from `hospital_regions.yaml` — the rest were dropped as
+duplicates, being within 0.75 m of a flown door. Each entry carries its
+provenance in a trailing comment. The scene-graph `semantic_mapper_node` cuts the
+Voronoi skeleton at these to segment rooms.
+
+The merge is not cosmetic, and the file's own header records the measurement
+against `hospital.npz`: the flown 24 alone leave 41 % of the floor as a single
+room, the 33 portals alone give 27 rooms, and the merged 35 give 29 with no
+component larger than 13 %. Neither source is sufficient on its own.
+
 ## `hospital_regions`
 
 The same building as **20 rooms, 7 corridor stretches and 33 portals**, for the

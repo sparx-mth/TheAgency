@@ -689,6 +689,34 @@ class BsplineFollowerNode(object):
         self._stopped = False
         self._finished = False
 
+        # ── The mute: handing the aircraft to another node ────────────────
+        #
+        # This follower publishes a twist on EVERY tick in EVERY state --
+        # following, holding, surveying, retreating, unsticking, and the
+        # position hold it settles into when the mission is over. Two writers
+        # on one cmd_vel topic is last-writer-wins at 50 Hz, which is not a
+        # hand-off, it is a fight. So a node that wants to fly the aircraft
+        # itself (the scene-graph task's final approach onto a found target)
+        # asks for it on this topic, and while it holds the flag this node puts
+        # NOTHING on the wire -- not a command, not a zero, not a hold.
+        #
+        # Default off in every sense: nobody publishes this topic in the
+        # exploration stack, and a follower that has never received a message
+        # behaves exactly as it did before the flag existed.
+        self._external_ctrl_topic = str(rospy.get_param(
+            "~external_ctrl_topic", "/scene_graph/external_ctrl"))
+        # ...and the reason it is not a plain latch. The flag arrives from a
+        # ROS2 node across ros1_bridge. If that node segfaults, or its
+        # container dies, or the bridge drops, the last latched True is all
+        # that survives -- and the aircraft would then hang in the air, muted,
+        # for the rest of the run with nothing left alive to unmute it. So the
+        # mute is a LEASE, not a switch: it expires unless the owner keeps
+        # renewing it. 0 disables the watchdog and restores a plain latch.
+        self._external_ctrl_timeout_s = float(rospy.get_param(
+            "~external_ctrl_timeout_s", 5.0))
+        self._external_ctrl = False
+        self._external_ctrl_at = None   # type: object  # stamp of the last True
+
         self._cmd = rospy.Publisher(
             rospy.get_param("~cmd_topic", "/simple_drone/cmd_vel"), Twist, queue_size=1)
         self._takeoff = rospy.Publisher("/simple_drone/takeoff", Empty, queue_size=1)
@@ -718,6 +746,10 @@ class BsplineFollowerNode(object):
         rospy.Subscriber("/mission/abort", String, self._on_abort, queue_size=1)
         rospy.Subscriber(rospy.get_param("~contact_topic", "/simple_drone/bumper_states"),
                          ContactsState, self._on_bumper, queue_size=4)
+        # queue_size=1 because only the newest verdict means anything: a
+        # backlog of stale Trues must never keep the aircraft muted.
+        rospy.Subscriber(self._external_ctrl_topic, Bool,
+                         self._on_external_ctrl, queue_size=1)
         if self._gate_enabled:
             # At 0.1 m resolution FALCON's publisher emits complete occupied
             # sweeps on this topic (its local-box variant only runs at
@@ -931,6 +963,55 @@ class BsplineFollowerNode(object):
         self._hold_point = None
         rospy.logwarn("[follower] mission aborted by the watchdog (%s); "
                       "holding station", msg.data)
+
+    def _on_external_ctrl(self, msg):
+        # type: (Bool) -> None
+        """Another node claims or releases ``cmd_vel``.
+
+        ``True`` renews the lease as well as taking it: every True restamps the
+        watchdog, so the owner proves it is still alive by repeating itself.
+        ``False`` releases it immediately. Logged only on the transitions --
+        the owner republishes at a heartbeat rate and a per-message log would
+        bury the flight.
+        """
+        if bool(msg.data):
+            self._external_ctrl_at = rospy.Time.now()
+            if not self._external_ctrl:
+                self._external_ctrl = True
+                rospy.loginfo("[follower] muted: another node owns cmd_vel")
+            return
+        if self._external_ctrl:
+            rospy.loginfo("[follower] unmuted: resuming")
+        self._external_ctrl = False
+        self._external_ctrl_at = None
+
+    def _externally_muted(self, now):
+        # type: (object) -> bool
+        """Whether the lease on ``cmd_vel`` is still held, expiring it if not.
+
+        Called only when the flag is already set, so the un-muted flight costs
+        one boolean test and no clock read. An expired lease unmutes here
+        rather than in a timer, because here is the only place the answer
+        changes anything.
+        """
+        if self._external_ctrl_timeout_s <= 0.0:
+            return True                 # watchdog disabled: a plain latch
+        # A held flag always carries the stamp of the True that set it; if it
+        # somehow does not, the lease cannot be shown to be alive, and an
+        # unprovable lease is treated as expired. Never fail toward muted.
+        stale_s = (self._external_ctrl_timeout_s + 1.0
+                   if self._external_ctrl_at is None
+                   else (now - self._external_ctrl_at).to_sec())
+        if stale_s <= self._external_ctrl_timeout_s:
+            return True
+        self._external_ctrl = False
+        self._external_ctrl_at = None
+        rospy.logwarn(
+            "[follower] external control has not renewed its claim on %s for "
+            "%.1fs (~external_ctrl_timeout_s=%.1f); unmuting and taking the "
+            "aircraft back", self._external_ctrl_topic, stale_s,
+            self._external_ctrl_timeout_s)
+        return False
 
     # ── the loop ─────────────────────────────────────────────────────────
 
@@ -2631,7 +2712,23 @@ class BsplineFollowerNode(object):
         the hold became permanent. Every publish, in every state, therefore
         passes through this band clamp: above the ceiling forces descent,
         below the floor forces climb, inside the band the command is its own.
+
+        It is also where the aircraft is handed over. Every state in this node
+        reaches the wire through here and nowhere else, so one test here mutes
+        all of them at once -- and a state added later is muted by
+        construction, which a check per caller would not be.
         """
+        # Another node owns cmd_vel: publish NOTHING. Not the command, not a
+        # zero, not a hold -- a zero twist is itself an instruction, and one
+        # arriving at 50 Hz would fight whatever the other node is flying.
+        if self._external_ctrl and self._externally_muted(rospy.Time.now()):
+            # Honest bookkeeping rather than a stale number. _is_wedged and
+            # _jammed both ask "commanded to move, going nowhere?" against
+            # _last_cmd_speed; leaving the pre-mute speed there would let this
+            # node latch a retreat while it is not driving at all, and then
+            # start executing it the moment the mute lifts.
+            self._last_cmd_speed = 0.0
+            return
         # Bound speed by the age of the evidence about where we are going. This
         # sits at the choke point on purpose: the manoeuvres it exists for --
         # retreat, back-out, unstick -- do not go through the servo, so a cap

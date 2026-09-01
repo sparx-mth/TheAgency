@@ -1,0 +1,101 @@
+# Fly the room-search route with the follower that already exists.
+#
+# There is NO follower in tasks/mapping/scene_graph, and there must not be one:
+# tasks/planning/sjtu_internvla_n1/ros2/trajectory_follower_node.py is already a
+# policy-agnostic world-Path -> SJTU body-Twist tracker ("it would fly a NavDP
+# path, an A* path or a hand-drawn one identically", its own docstring), and it
+# carries the altitude capture, the odom timeout, the capsize guard, the depth
+# brake and the airframe clamp that a second, fresher follower would not. This
+# file is the whole of the reuse: it points that node at the room-search route
+# and at the ARBITER's input rather than at the drone.
+#
+#   ros2 run ... trajectory_follower_node --ros-args \
+#     -p use_sim_time:=true \
+#     -p config_file:=<repo>/sparx_agency/tasks/mapping/scene_graph/config/room_search_follower.yaml
+#
+# Every key not set here keeps the node's own default; see its __init__.
+
+topics:
+  # room_search_node's ARMED output. It publishes here only with fly:=true, so
+  # an unarmed search starves this follower by construction and the aircraft
+  # stays FALCON's however this node was launched.
+  trajectory: /scene_graph/follow_path
+
+  odom: /simple_drone/odom
+  state: /simple_drone/state          # Int8; the follower fails closed without it
+  depth: /simple_drone/front_depth/depth/image_raw
+
+  # NOT /simple_drone/cmd_vel. FALCON's bspline_follower publishes a Twist every
+  # tick at 50 Hz in EVERY state and this node publishes one at 20 Hz in every
+  # state, so two writers on cmd_vel is last-writer-wins chaos rather than a
+  # handover. This goes to the gate; the gate publishes cmd_vel. See the task
+  # README for the two-gate arbiter driven by /room_search/active and
+  # /room_search/falcon_active.
+  cmd_vel: /simple_drone/cmd_vel_raw
+
+  # Inputs this stack does not drive. Named so they cannot collide with N1's if
+  # both ever run: nothing publishes them here, and the follower's defaults for
+  # them all mean "do nothing".
+  hold: /room_search/follower/hold
+  yaw_goal: /room_search/follower/yaw_goal
+  altitude_offset: /room_search/follower/altitude_offset
+  nudge: /room_search/follower/nudge_back
+  blocked: /room_search/follower/blocked
+
+follower:
+  control_rate_hz: 20.0
+
+  # 1.75 m, and this is the one number that must NOT be copied from the N1
+  # config. It is the altitude FALCON actually flies this hospital at
+  # (measured across runs: p10 1.73, p50 1.74 -- see
+  # falcon_sjtu/adapter/launch/exploration.launch), and a follower that takes
+  # over at a different one spends the first seconds of every handover climbing
+  # or sinking through a map built from a different slice.
+  target_altitude_m: 1.75
+
+  # The airframe is 0.63 m across and this world's doors are 0.90 m; the plant
+  # takes ~0.18 s to notice a command. Slow is not timid here, it is the only
+  # speed at which the margin survives the lag.
+  cruise_speed: 0.30
+  max_speed_xy: 0.6
+  max_speed_z: 0.5
+  max_yaw_rate: 1.2
+
+  # A* emits ~1 m legs (room_search_node's waypoint_spacing_m), so the pursuit
+  # geometry is closer to a normal route than to N1's 0.25 m action steps: a
+  # lookahead of 0.5 m and a braking zone that does not cover the whole route.
+  lookahead_m: 0.5
+  yaw_lookahead_m: 1.5
+  slow_down_distance_m: 0.6
+  goal_tolerance_m: 0.20
+  path_tolerance_m: 0.8
+  min_speed: 0.1
+
+  altitude_capture_m: 0.25
+  altitude_release_m: 0.35
+  altitude_kp: 1.6
+  odom_timeout_s: 1.0
+
+  # Stop and yaw rather than crab around a corner: an A* route through a 0.90 m
+  # doorway wants the nose pointing through it.
+  stop_turn_rad: 0.35
+  resume_turn_rad: 0.12
+
+  # OFF. The escape backs the aircraft up on its own initiative, and while the
+  # arbiter can hand control back to FALCON at any moment, two things reversing
+  # the same aircraft for different reasons is not something this loop has ever
+  # been flown with. The depth brake below still stops it.
+  escape:
+    enabled: false
+
+brake:
+  enabled: true
+
+# The corrected SJTU front pair, NOT the 640x480 defaults. Derived from the SDF
+# (fx = (width/2) / tan(hfov/2)) and verified live off the depth camera_info;
+# the same numbers bspline_follower.launch feeds FALCON.
+camera:
+  fx: 390.642735
+  fy: 390.642735
+  cx: 300.5
+  cy: 300.5

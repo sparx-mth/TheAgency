@@ -72,6 +72,15 @@ notice that it did not — gate on `/simple_drone/state`. And `posctrl` is a mod
 switch, not a scaling: a stack that leaves it latched and then publishes
 velocities flies to the coordinate whose numbers happen to equal its speeds.
 
+**`cmd_vel` is applied ONLY in the FLYING state.** Read from the plugin, not
+inferred: `sjtu_drone_description/src/plugin_drone_private.cpp` gates both the
+position branch (:494) and the velocity branch (:523) on
+`navi_state == FLYING_MODEL`. A LANDED aircraft therefore ignores every Twist
+sent to it, and TAKINGOFF/LANDING ignore them too. This is the fact that makes
+handing a landed aircraft back to another controller safe -- the scene-graph
+approach node relies on it when it releases its follower mute after touching
+down (tasks/mapping/scene_graph/ros2/target_approach_node.py).
+
 There is also no disarm and no failsafe reachable from outside. "Stop" is a zero
 twist that must keep being published — the plugin holds the last command it was
 given, so publishing *nothing* does not stop the aircraft.

@@ -1,0 +1,156 @@
+# scene_graph.rviz — the scene-graph view: rooms, open space, doors, edges.
+#
+#   rviz2 -d sparx_agency/tasks/mapping/scene_graph/config/scene_graph.rviz
+#
+# Fixed frame is `world`, which is what falcon_sjtu's bev_publisher stamps on
+# /falcon/bev_2d and therefore what semantic_mapper_node copies onto both the
+# room-label grid and every marker.
+#
+# Ported from sjtu_project's semantic_mapper.rviz with two gaps closed:
+#
+#   * every latched topic here is subscribed TRANSIENT_LOCAL. The old file
+#     asked for Volatile on the map, so a late-joining RViz saw an empty
+#     screen until the next republish — and both the BEV publisher and the
+#     mapper skip unchanged republishes, which can be minutes.
+#   * the classifier and oracle text (room type, target probability) now
+#     arrive inside /scene_graph/markers, so they are here. The old file
+#     listed neither node's marker topic and the labels were invisible
+#     unless you added the display by hand.
+#
+# The old "Objects" display on /perception/object_markers is gone: nothing
+# publishes that topic in this stack. Objects are drawn by the mapper into
+# per-class `objects:<class>` namespaces of the same MarkerArray, which RViz
+# enables on sight — so a new detector class appears without editing this.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    SplitterRatio: 0.5
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: rviz_common/Selection
+    Name: Selection
+
+Visualization Manager:
+  Class: ""
+  Name: root
+  Global Options:
+    Background Color: 28; 30; 38
+    Fixed Frame: world
+    Frame Rate: 20
+
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+
+  Displays:
+
+    # ── Reference grid ──
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 60
+      Cell Size: 1
+      Color: 55; 58; 68
+      Alpha: 0.5
+      Reference Frame: world
+
+    # ── FALCON's BEV occupancy, under everything else ──
+    - Class: rviz_default_plugins/Map
+      Name: BEV
+      Enabled: true
+      Topic:
+        Value: /falcon/bev_2d
+        Depth: 1
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Color Scheme: map
+      Alpha: 0.35
+      Draw Behind: true
+
+    # ── Per-cell room labels; off by default because room_fill below shows
+    #    the same rooms in the same palette and reads better in 3D. Turn it
+    #    on to check the grid the viz dashboard tints from. ──
+    - Class: rviz_default_plugins/Map
+      Name: RoomLabelsGrid
+      Enabled: false
+      Topic:
+        Value: /scene_graph/room_labels_grid
+        Depth: 1
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Color Scheme: costmap
+      Alpha: 0.6
+      Draw Behind: false
+
+    # ── The scene graph itself ──
+    #  room_fill          translucent room-coloured cells        z 0.05
+    #  room_polygons      the room's own outline, opaque         z 0.08
+    #  room_object_edges  green object -> its room's centroid    z 0.10 -> 2.00
+    #  skeleton           Voronoi "open space" spine             z 0.25
+    #  rooms              centroid sphere                        z 2.00
+    #  room_room_edges    gold centroid -> door -> centroid      z 2.50
+    #  room_labels        "R7  t=42s  F=3"                       z 3.00
+    #  room_type_labels   "office (0.82)"                        z 3.70
+    #  room_probabilities "P=0.41", blue -> red by probability   z 4.50
+    #  doors_*            orange pillar if discovered, else grey ghost
+    #  cut_disks          red disk = where the skeleton was cut open
+    #  objects:<class>    one namespace per detector class
+    - Class: rviz_default_plugins/MarkerArray
+      Name: SceneGraph
+      Enabled: true
+      Topic:
+        Value: /scene_graph/markers
+        Depth: 1
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Namespaces:
+        room_fill:            true
+        room_polygons:        true
+        skeleton:             true
+        rooms:                true
+        room_labels:          true
+        room_type_labels:     true
+        room_probabilities:   true
+        doors_discovered:     true
+        doors_pending:        true
+        door_labels:          true
+        door_labels_pending:  true
+        cut_disks:            true
+        room_room_edges:      true
+        room_object_edges:    true
+        object_labels:        true
+
+  # ── Top-down orthographic, framed on the SJTU hospital ──
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: TopDown
+      Target Frame: world
+      X: 0
+      Y: -8.5
+      Angle: 0
+      Scale: 18
+      Invert Z Axis: false
+      Near Clip Distance: 0.01
+    Saved:
+      - Class: rviz_default_plugins/Orbit
+        Name: Orbit3D
+        Target Frame: world
+        Distance: 70
+        Pitch: 0.95
+        Yaw: 0.79
+        Focal Point: { X: 0, Y: -8.5, Z: 0 }
+
+Window Geometry:
+  Width: 1600
+  Height: 1000
+  Displays:
+    collapsed: false
+  Views:
+    collapsed: false
+  Hide Left Dock: false
+  Hide Right Dock: true

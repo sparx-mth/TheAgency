@@ -1,10 +1,11 @@
 # ros1_bridge parameter_bridge topics for the FALCON <-> SJTU Gazebo loop.
 #
-# Four topics, and the direction of each is set by who publishes, not by this
-# file -- parameter_bridge bridges every entry both ways.
+# One entry per topic, and the direction of each is set by who publishes, not
+# by this file -- parameter_bridge bridges every entry both ways.
 #
-#   ROS2 -> ROS1: depth image and odometry (the sensors)
-#   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+#   ROS2 -> ROS1: depth image, odometry, bumper (the sensors), /clock, and the
+#                 scene-graph task's claim on cmd_vel
+#   ROS1 -> ROS2: cmd_vel and takeoff (the actuation), and the BEV grid
 #
 # QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
 # and the drone plugin publish RELIABLE / VOLATILE (checked with
@@ -82,4 +83,52 @@ topics:
       depth: 1
       reliability: reliable
       durability: volatile
+
+  # The BEV grid from bev_publisher_node (enable_bev:=true in
+  # exploration.launch; off by default). ROS1 -> ROS2, consumed by the
+  # scene-graph task at tasks/mapping/scene_graph. The ROS1 publisher is
+  # LATCHED, and transient_local is the ROS2 spelling of that: the scene-graph
+  # node starts whenever it starts, and a late joiner still receives the last
+  # grid instead of nothing until the map next changes (the node skips
+  # unchanged republishes, so "next change" can be a long wait). Depth 1
+  # because only the latest grid means anything. The companion
+  # /falcon/bev_2d_conf stays unbridged until something on the ROS2 side
+  # reads it -- bridge only what has a consumer.
+  - topic: /falcon/bev_2d
+    type: nav_msgs/msg/OccupancyGrid
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: reliable
+      durability: transient_local
+
+  # Who is allowed to fly the aircraft. ROS2 -> ROS1, published by the
+  # scene-graph task (tasks/mapping/scene_graph) and read by our
+  # bspline_follower, which publishes NOTHING on cmd_vel while this reads true
+  # -- the hand-off for a visual final approach onto a found target. Two
+  # writers on one cmd_vel topic at 50 Hz is not a hand-off, it is a fight, so
+  # the mute is the whole mechanism.
+  #
+  # LATCHED on the ROS2 side, and transient_local is that spelling: FALCON's
+  # container is restarted independently of the ROS2 stack, and a VOLATILE
+  # reader of a transient_local writer receives nothing at all until the
+  # writer's next change -- which, for a flag that only moves twice a mission,
+  # can be the whole flight. Depth 1 because only the newest verdict means
+  # anything; a backlog of stale claims must never keep the aircraft muted.
+  #
+  # The claim is a LEASE: the publisher must republish true at ~1 Hz, or the
+  # follower's ~external_ctrl_timeout_s -- 5 s, whose default lives in
+  # falcon_sjtu/adapter/launch/bspline_follower.launch -- expires it and
+  # takes the aircraft back. That watchdog exists for exactly this bridge:
+  # if the ROS2 claimant dies, its last latched true is all that survives
+  # here.
+  - topic: /scene_graph/external_ctrl
+    type: std_msgs/msg/Bool
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: reliable
+      durability: transient_local
 

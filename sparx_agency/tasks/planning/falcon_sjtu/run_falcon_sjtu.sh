@@ -181,6 +181,25 @@ cleanup
 # ── FALCON container: roscore + planner + our nodes ────────────────────────
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 LAUNCH_TARGET="/catkin_ws/src/falcon_adapter/launch"
+
+# The BEV publisher (enable_bev:=true in FALCON_LAUNCH_ARGS) is mounted FROM
+# THE XTEND DEPLOYMENT (tasks/planning/falcon), not copied here: the node is
+# thin ROS glue over core.mapping.bev shared by both stacks, and a copy would
+# drift from the flying one the first time either got a fix -- exactly the
+# accidental-second-copy failure this repo keeps re-learning. cloud_utils.py
+# rides along because the node imports it as a sibling. Both are checked
+# before the run: docker turns a MISSING bind source into a fresh DIRECTORY,
+# which shadows the script and kills the node with an unfindable error.
+XTEND_SCRIPTS_DIR="$(cd "${SCRIPT_DIR}/../falcon/adapter/scripts" && pwd)"
+for f in bev_publisher_node.py cloud_utils.py; do
+    if [[ ! -f "${XTEND_SCRIPTS_DIR}/${f}" ]]; then
+        echo "[ERROR] shared BEV script missing: ${XTEND_SCRIPTS_DIR}/${f}" >&2
+        exit 2
+    fi
+done
+chmod +x "${XTEND_SCRIPTS_DIR}"/bev_publisher_node.py \
+         "${XTEND_SCRIPTS_DIR}"/cloud_utils.py 2>/dev/null || true
+
 docker run -d --name falcon-sjtu \
     --network host \
     --cap-add=SYS_PTRACE \
@@ -190,6 +209,8 @@ docker run -d --name falcon-sjtu \
     --volume "${SCRIPT_DIR}/adapter/scripts/bspline_follower_node.py:${SCRIPTS_TARGET}/bspline_follower_node.py" \
     --volume "${SCRIPT_DIR}/adapter/scripts/sensor_pose_node.py:${SCRIPTS_TARGET}/sensor_pose_node.py" \
     --volume "${SCRIPT_DIR}/adapter/scripts/mission_watchdog_node.py:${SCRIPTS_TARGET}/mission_watchdog_node.py" \
+    --volume "${XTEND_SCRIPTS_DIR}/bev_publisher_node.py:${SCRIPTS_TARGET}/bev_publisher_node.py" \
+    --volume "${XTEND_SCRIPTS_DIR}/cloud_utils.py:${SCRIPTS_TARGET}/cloud_utils.py" \
     --volume "${SCRIPT_DIR}/adapter/launch/exploration.launch:${LAUNCH_TARGET}/exploration.launch" \
     --volume "${SCRIPT_DIR}/adapter/launch/bspline_follower.launch:${LAUNCH_TARGET}/bspline_follower.launch" \
     --volume "${SCRIPT_DIR}/config/${MAP_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${MAP_NAME}.yaml" \

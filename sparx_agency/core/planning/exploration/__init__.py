@@ -7,6 +7,8 @@ Provides:
 - RegionMap: the building as rooms, corridors and the openings between them
 - ExplorationSupervisor: one bounded, concrete mission at a time, plus the
   briefing that says it in the policy's own grammar
+- RoomSearchPolicy: its sibling for a *ranked* search -- draw a room from a
+  probability distribution over rooms, fly to it, dwell, repeat
 - survey_state: carry a survey across flights, so one capsize costs a
   segment rather than the whole building
 - Simple exploration policies (e.g., random-walk goal selection)
@@ -22,6 +24,10 @@ from .mission import (
     ExplorationSupervisor, Mission, SupervisorParams, SupervisorState,
     AT_DOORWAY, ENTER_ROOM, EXIT_ROOM, IN_CORRIDOR, INSIDE_ROOM, OFF_MAP,
     SCAN_AREA, SURVEY_COMPLETE, TRAVERSE,
+)
+from .room_search_policy import (
+    RoomSearchParams, RoomSearchPolicy, RoomSearchState, RoomCandidate,
+    RoomOption, PublishGoal, Hold, ReSample, DWELL, IDLE, PURSUING,
 )
 from .briefing import BriefingStyle, brief
 from .survey_state import load_survey, save_survey
@@ -41,6 +47,9 @@ __all__ = [
     "ExplorationSupervisor", "Mission", "SupervisorParams", "SupervisorState",
     "AT_DOORWAY", "ENTER_ROOM", "EXIT_ROOM", "IN_CORRIDOR", "INSIDE_ROOM",
     "OFF_MAP", "SCAN_AREA", "SURVEY_COMPLETE", "TRAVERSE",
+    "RoomSearchParams", "RoomSearchPolicy", "RoomSearchState",
+    "RoomCandidate", "RoomOption", "PublishGoal", "Hold", "ReSample",
+    "DWELL", "IDLE", "PURSUING",
     "BriefingStyle", "brief",
     "load_survey", "save_survey",
     "RandomWalkParams",
