@@ -127,7 +127,7 @@ environment and will crash with either a SIGSEGV in `gi`/GStreamer or an
 `rmw_cyclonedds_cpp` load error):
 ```bash
 source /opt/ros/jazzy/setup.bash
-export ROS_DOMAIN_ID=9
+export ROS_DOMAIN_ID=6
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///etc/cyclonedds.xml
 ```

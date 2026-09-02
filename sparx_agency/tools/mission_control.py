@@ -109,7 +109,7 @@ _CONTAINER_ENV = """\
 export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.8/site-packages:/home/rooster
 source /opt/ros/foxy/setup.bash
 source /home/rooster/workspace/install/setup.bash
-export ROS_DOMAIN_ID=9
+export ROS_DOMAIN_ID=6
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml
 export PYTHONUNBUFFERED=1"""
@@ -120,7 +120,7 @@ export PYTHONUNBUFFERED=1"""
 # which is for the Jetson/XTEND stack, not ROBOTICAN).
 _ROOSTER_PC_ENV = """
 source /opt/ros/jazzy/setup.bash
-export ROS_DOMAIN_ID=9
+export ROS_DOMAIN_ID=6
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export PYTHONUNBUFFERED=1
 """
@@ -575,7 +575,7 @@ ROBOTICAN_SERVICES: list[Service] = [
     # Unlike XTEND (Jetson-hosted), ROBOTICAN's whole vision stack runs on
     # this PC — frame capture needs the container's network_mode: host UDP
     # port, and this PC also has its own DA3-TRT engine, so depth doesn't
-    # need the Jetson either. Both scripts already set ROS_DOMAIN_ID=9 +
+    # need the Jetson either. Both scripts already set ROS_DOMAIN_ID=6 +
     # CycloneDDS + CYCLONEDDS_URI themselves (see the scripts) — don't
     # replicate that here via `env=`, just call them directly.
     Service(
@@ -667,7 +667,7 @@ ROBOTICAN_SERVICES: list[Service] = [
     # rsync/SSH -> Jetson watch dir -> published on the Jetson's OWN ROS2
     # topic. That topic is on ROS_DOMAIN_ID=5 (the Jetson's domain, see
     # _ROS_ENV) — a self-contained Jetson-local graph, NOT bridged back to
-    # Rooster's ROS_DOMAIN_ID=9. Jetson-side dir deliberately mirrors the PC
+    # Rooster's ROS_DOMAIN_ID=6. Jetson-side dir deliberately mirrors the PC
     # path (/tmp/rooster_frames on both ends) rather than living under
     # JETSON_DATA -- same relative path on both machines, no translation to
     # remember. See docs/progress/entries/006-rooster-frame-jetson-relay.md
@@ -878,7 +878,7 @@ ROBOTICAN_SERVICES: list[Service] = [
         description="ROS1<->ROS2 bridge container for R1 — CycloneDDS/domain 9 (Rooster is Jazzy, not XTEND's Foxy/FastRTPS). Forwards /R1/localization, /R1/rgb_frame_path, /R1/depth_frame_path, cmd_vel, /object_approach/detections+goal.",
         cmd=(
             "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/bridge && "
-            "ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+            "ROS_DOMAIN_ID=6 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
             "CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh"
         ),
         env="docker",
@@ -900,7 +900,7 @@ ROBOTICAN_SERVICES: list[Service] = [
         ),
         cmd=(
             "docker exec detector_dev bash -lc \"source /opt/ros/humble/setup.bash && "
-            "export ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && "
+            "export ROS_DOMAIN_ID=6 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && "
             "export CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml && "
             "export PYTHONPATH=/home/user1/GIT/TheAgency:\\$PYTHONPATH && "
             "python3 /home/user1/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py "
@@ -1388,7 +1388,7 @@ def force_arm_rooster(drone_id: str, arm: bool) -> str | None:
     srv_cmd = (
         "source /opt/ros/foxy/setup.bash && "
         "source /home/rooster/workspace/install/setup.bash && "
-        "export ROS_DOMAIN_ID=9 && "
+        "export ROS_DOMAIN_ID=6 && "
         "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && "
         "export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml && "
         f"ros2 service call /{drone_id}/fcu/command/force_arm "

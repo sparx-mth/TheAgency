@@ -105,7 +105,7 @@ All host-side (`machine="pc"`, `env="rooster_pc"`) commands assume this
 preamble (already what `_ROOSTER_PC_ENV` provides):
 ```bash
 source /opt/ros/jazzy/setup.bash
-export ROS_DOMAIN_ID=9
+export ROS_DOMAIN_ID=6
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml
 ```

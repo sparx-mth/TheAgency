@@ -6,7 +6,7 @@
 #
 # Usage: ./run_rooster_offline_replay.sh --session-dir ~/rooster_dome_capture/latest [--loop]
 source /opt/ros/jazzy/setup.bash
-export ROS_DOMAIN_ID=9
+export ROS_DOMAIN_ID=6
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml
 exec /home/$USER/GIT/TheAgency/venv/bin/python \

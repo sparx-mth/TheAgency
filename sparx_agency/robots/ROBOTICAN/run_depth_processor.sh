@@ -31,7 +31,7 @@
 # mission_control.py runs this (fixed 2026-07-29, see
 # docs/progress/entries/002-rooster-full-containerize.md).
 docker exec \
-  -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-9}" \
+  -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-6}" \
   -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e CYCLONEDDS_URI="file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml" \
   robotican_dev bash -lc "

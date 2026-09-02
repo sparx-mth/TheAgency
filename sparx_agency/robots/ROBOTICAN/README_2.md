@@ -10,7 +10,7 @@ Each system component operates on a different **ROS_DOMAIN_ID**:
 
 | Component | ROS_DOMAIN_ID |
 |----------|----------------|
-| Sphera – Remote Control | **9** |
+| Sphera – Remote Control | **6** |
 | Sphera – Backend Docker | **5** |
 | Drone – Backend Docker | **2** |
 

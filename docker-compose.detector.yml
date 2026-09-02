@@ -23,7 +23,7 @@ services:
       - PYTHONUNBUFFERED=1
       # Same Sphera/ROBOTICAN domain as robotican_dev/it -- NOT 5 (XTEND/
       # Jetson) or 2 (Rooster Jetson).
-      - ROS_DOMAIN_ID=9
+      - ROS_DOMAIN_ID=6
       - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
       - CYCLONEDDS_URI=file://${HOME}/rqs_iai_ws/src/cyclonedds.xml
     deploy:

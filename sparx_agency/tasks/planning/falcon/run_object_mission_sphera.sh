@@ -357,7 +357,7 @@ if [[ $WANT_DETECTOR -eq 1 ]]; then
   # so this host-side script can still read/tail it directly.
   docker exec detector_dev bash -lc "
     source /opt/ros/humble/setup.bash
-    export ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export ROS_DOMAIN_ID=6 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export CYCLONEDDS_URI='file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml'
     export PYTHONPATH=\"$REPO_ROOT\${PYTHONPATH:+:\$PYTHONPATH}\"
     python3 '$REPO_ROOT/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py' \
@@ -404,7 +404,7 @@ echo "[mission] starting the ros1<->ros2 bridge ..."
 # bridge comes up on the wrong domain/RMW and silently sees nothing -- no
 # crash, just zero pose/depth forever. See run_bridge.sh's own header
 # comment and LESSONS.md for the fuller derivation.
-ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+ROS_DOMAIN_ID=6 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   CYCLONEDDS_URI="file://$HOME/rqs_iai_ws/src/cyclonedds.xml" \
   "$HERE/bridge/run_bridge.sh" >"$LOG_DIR/bridge.log" 2>&1 &
 sleep 3

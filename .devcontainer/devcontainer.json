@@ -56,7 +56,7 @@
     "PYTHONUNBUFFERED": "1",
     // Sphera's domain (see ~/rqs_iai_ws/src/docker-compose.yml). NOT 5
     // (XTEND/Jetson) or 2 (Rooster Jetson) -- those are different stacks.
-    "ROS_DOMAIN_ID": "9",
+    "ROS_DOMAIN_ID": "6",
     "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
     "CYCLONEDDS_URI": "file://${localEnv:HOME}/rqs_iai_ws/src/cyclonedds.xml"
   },

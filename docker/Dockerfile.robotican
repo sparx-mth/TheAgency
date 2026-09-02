@@ -2,13 +2,16 @@
 # Layer 4/4: robotican -- the ONLY ROBOTICAN/Rooster-specific layer.
 #
 # Everything needed to run the ROBOTICAN/Sphera session already lives in
-# perception/ros2_humble/base_cuda below. This layer adds exactly one thing
-# robot-specific: the vendor Sphera message packages, built for Humble from
-# .msg/.srv sources staged by stage_vendor_msgs.sh (run that first, or the
-# COPY below fails on purpose). sphera_common_interfaces is NOT included --
-# it has no .msg source anywhere, only a prebuilt Foxy binary inside
-# Sphera's own image; code needing it stays running inside Sphera's `it`
-# container via docker exec.
+# perception/ros2_humble/base_cuda below. This layer adds the vendor Sphera
+# message packages, built for Humble from .msg/.srv sources staged by
+# stage_vendor_msgs.sh (run that first, or the COPY below fails on
+# purpose): rooster_interfaces (the old rqs7/`it`-container FCU backend's
+# messages) and sphera_common_interfaces (the new Sphera engine-level
+# messages -- SpheraPawnState and friends, what /R1/sphera/state and
+# /R1/sphera/set_state carry). Earlier versions of this file left
+# sphera_common_interfaces out on the assumption it had no .msg source
+# anywhere, only a prebuilt Foxy binary inside Sphera's own image -- as of
+# the new Sphera build that's no longer true, it ships real source.
 #
 # When the XTEND stack is built, it gets its own sibling
 # Dockerfile.xtend FROM theagency:perception -- same base, different (and
@@ -17,6 +20,7 @@
 FROM theagency:perception
 
 COPY vendor/rooster_interfaces /opt/rooster_ws/src/rooster_interfaces
+COPY vendor/sphera_common_interfaces /opt/rooster_ws/src/sphera_common_interfaces
 RUN bash -c ". /opt/ros/${ROS_DISTRO}/setup.bash \
     && cd /opt/rooster_ws \
     && rosdep update \

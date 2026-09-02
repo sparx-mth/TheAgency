@@ -34,7 +34,7 @@ frame-path transport as XTEND, just a different topic namespace. Launch FALCON
 with `real_depth_path_topic:=/R1/depth_frame_path
 real_rgb_path_topic:=/R1/rgb_frame_path real_pose_topic:=/R1/localization` to
 match. Rooster is Jazzy/CycloneDDS (not Foxy/FastRTPS like XTEND), so the
-bridge itself must also be started with `ROS_DOMAIN_ID=9
+bridge itself must also be started with `ROS_DOMAIN_ID=6
 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml`
 — see the Environment variables table below.
 
@@ -98,7 +98,7 @@ The bridge tolerates ordering (it waits for roscore and restarts
 
 | Variable | Default (in `run_bridge.sh`) | Notes |
 |---|---|---|
-| `ROS_DOMAIN_ID` | `5` | **Must match** the ROS2 sim/drone. Rooster/Sphera uses `9` |
+| `ROS_DOMAIN_ID` | `5` | **Must match** the ROS2 sim/drone. Rooster/Sphera uses `6` |
 | `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` | **Must match** the ROS2 side (XTEND/Foxy default fastrtps; Rooster/Sphera is Jazzy, uses `rmw_cyclonedds_cpp`) |
 | `CYCLONEDDS_URI` | _(unset)_ | Only needed with `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`. Must be a `file://` URI; `run_bridge.sh` bind-mounts that exact path into the container. Rooster/Sphera: `file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml` — pins the same network interface R1 lands on (see the CycloneDDS interface-selection notes for this host) |
 | `ROS_MASTER_URI` | `http://localhost:11311` | ROS1 master |

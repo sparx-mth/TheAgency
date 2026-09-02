@@ -55,7 +55,7 @@ topics:
   # /xtend/*. Launch FALCON's real_drone.launch with real_depth_path_topic:=
   # /R1/depth_frame_path real_rgb_path_topic:=/R1/rgb_frame_path
   # real_pose_topic:=/R1/localization to match. Requires the bridge run with
-  # ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp (Rooster is Jazzy/
+  # ROS_DOMAIN_ID=6 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp (Rooster is Jazzy/
   # CycloneDDS, not Foxy/FastRTPS like XTEND) — see run_bridge.sh.
   - topic: /R1/depth_frame_path
     type: std_msgs/msg/String

@@ -47,7 +47,7 @@
     "QT_X11_NO_MITSHM": "1",
     "PYTHONUNBUFFERED": "1",
     // Sphera's domain. NOT 5 (XTEND/Jetson) or 2 (Rooster Jetson).
-    "ROS_DOMAIN_ID": "9",
+    "ROS_DOMAIN_ID": "6",
     "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
     "CYCLONEDDS_URI": "file://${localEnv:HOME}/rqs_iai_ws/src/cyclonedds.xml"
   },

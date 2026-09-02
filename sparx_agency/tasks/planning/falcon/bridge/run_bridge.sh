@@ -46,7 +46,7 @@ fi
 # fastrtps profile). A file:// URI only resolves if the file exists at that
 # same path INSIDE the container, so bind-mount it there read-only. Example
 # for Sphera (matches run_depth_processor.sh / run_rooster_frame_dir_publisher.sh):
-#   ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+#   ROS_DOMAIN_ID=6 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
 #   CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh
 # CYCLONEDDS_ENV stays empty (no -e flag added at all) when CYCLONEDDS_URI is
 # unset, so a plain XTEND run's container environment is byte-identical to

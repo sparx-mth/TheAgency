@@ -9,7 +9,7 @@
 # rooster_command_unit.py (inside `it`) already running. Requires
 # `robotican_dev` already running (see docker-compose.robotican.yml).
 docker exec \
-  -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-9}" \
+  -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-6}" \
   -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e CYCLONEDDS_URI="file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml" \
   robotican_dev bash -lc "

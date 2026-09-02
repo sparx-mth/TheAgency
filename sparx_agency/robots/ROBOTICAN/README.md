@@ -21,7 +21,7 @@ mkdir $HOME/rqs7-private-parameters
 Set environment variables
 ```bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ROS_DOMAIN_ID=9
+ROS_DOMAIN_ID=6
 
 ```
 ## Step 4: Build ROS2 workspace in docker container

@@ -94,7 +94,7 @@ def ensure_loggers_running():
     if not running:
         run(f"docker cp {MANUAL_FLIGHT_LOGGER_HOST} it:/tmp/manual_flight_logger.py")
         run(
-            "docker exec -d -e ROS_DOMAIN_ID=9 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+            "docker exec -d -e ROS_DOMAIN_ID=6 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
             "-e CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml it bash -lc \""
             "source /opt/ros/foxy/setup.bash && source /home/rooster/workspace/install/setup.bash && "
             f"python3 /tmp/manual_flight_logger.py --rooster-id R1 --out-dir {POSE_DIR} "
@@ -195,7 +195,7 @@ def restart_falcon(status):
     steps.append((
         "Restarting ros1_bridge",
         "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/bridge && "
-        "script -qc 'ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+        "script -qc 'ROS_DOMAIN_ID=6 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
         "CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh' "
         "/dev/null > /tmp/bridge.log 2>&1 &",
         lambda: wait_until(lambda: container_up("ros1_bridge"), timeout=20),
