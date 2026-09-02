@@ -93,7 +93,11 @@ class RoosterControlUI(Node):
         self.root.geometry(f"{window_width}x{1200 + max(0, self.video_height - 240)}")
 
         self.forward_value_var = tk.StringVar(value="400")  # forward/back/lateral
-        self.vertical_value_var = tk.StringVar(value="400")  # up/down
+        # METRES, not axis counts: cmd_nav up/down nudge the altitude-hold
+        # setpoint by this distance (rooster_command_unit reads value as m).
+        # The old "400" here was read as 400 m and clamped -- altitude could
+        # never be swept from the UI. Fixed 2026-08-31.
+        self.vertical_value_var = tk.StringVar(value="0.25")  # up/down, metres
         self.turn_value_var = tk.StringVar(value="150")      # yaw
         self.timer_text = tk.StringVar(value="Current action: none")
         self.status_text = tk.StringVar(value="armed: ?   airborne: ?")
@@ -166,7 +170,7 @@ class RoosterControlUI(Node):
         tf.pack(pady=4)
         ttk.Label(tf, text="Fwd/Back/Lateral:").grid(row=0, column=0, padx=4, pady=3, sticky="e")
         ttk.Entry(tf, textvariable=self.forward_value_var, width=7).grid(row=0, column=1, padx=4)
-        ttk.Label(tf, text="Vertical:").grid(row=1, column=0, padx=4, pady=3, sticky="e")
+        ttk.Label(tf, text="Vertical (m):").grid(row=1, column=0, padx=4, pady=3, sticky="e")
         ttk.Entry(tf, textvariable=self.vertical_value_var, width=7).grid(row=1, column=1, padx=4)
         ttk.Label(tf, text="Turn rate:").grid(row=2, column=0, padx=4, pady=3, sticky="e")
         ttk.Entry(tf, textvariable=self.turn_value_var, width=7).grid(row=2, column=1, padx=4)
@@ -208,6 +212,13 @@ class RoosterControlUI(Node):
             bg=color, width=10, height=2,
         ).grid(row=row, column=col, padx=3, pady=3)
 
+    def _metres_value(self, var: tk.StringVar, default: float) -> float:
+        """An altitude-nudge distance in metres, clamped to a sane band."""
+        try:
+            return max(0.05, min(1.0, float(var.get())))
+        except ValueError:
+            return default
+
     def _axis_value(self, var: tk.StringVar, default: float) -> float:
         try:
             return float(max(0, min(1000, int(var.get()))))
@@ -224,7 +235,7 @@ class RoosterControlUI(Node):
 
         elif action in ("up", "down"):
             self.clear_arm_idle_guard(action)
-            self.send_cmd(action, self._axis_value(self.vertical_value_var, 400))
+            self.send_cmd(action, self._metres_value(self.vertical_value_var, 0.25))
             self.start_timer(action)
 
         elif action in ("turn_left", "turn_right"):

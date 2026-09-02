@@ -86,6 +86,9 @@ class RoosterCommandUnitNode(Node):
         # may change in ONE tick, tighter than altitude_hold_max_correction.
         self.declare_parameter("altitude_hold_max_step", 15.0)
         self.declare_parameter("altitude_hold_velocity_filter_tau_s", 0.5)
+        # Reject ranger steps implying impossible vertical motion -- see
+        # RoosterUnit.__init__. 0 disables.
+        self.declare_parameter("altitude_hold_max_ranger_rate", 3.0)
         # See RoosterUnit.__init__ -- 2026-08-17, "position" | "altitude"
         # (case-insensitive), selects FLIGHT_MODE_POSITION (3, default,
         # unchanged) or FLIGHT_MODE_ALTITUDE (4, drops horizontal position-
@@ -119,6 +122,8 @@ class RoosterCommandUnitNode(Node):
         altitude_hold_max_step = float(self.get_parameter("altitude_hold_max_step").value)
         altitude_hold_velocity_filter_tau_s = float(
             self.get_parameter("altitude_hold_velocity_filter_tau_s").value)
+        altitude_hold_max_ranger_rate = float(
+            self.get_parameter("altitude_hold_max_ranger_rate").value)
         flight_mode_name = str(self.get_parameter("requested_flight_mode").value).strip().lower()
         requested_flight_mode = {
             "position": FLIGHT_MODE_POSITION,
@@ -152,6 +157,7 @@ class RoosterCommandUnitNode(Node):
             altitude_hold_max_correction=altitude_hold_max_correction,
             altitude_hold_max_step=altitude_hold_max_step,
             altitude_hold_velocity_filter_tau_s=altitude_hold_velocity_filter_tau_s,
+            altitude_hold_max_ranger_rate=altitude_hold_max_ranger_rate,
             altitude_hold_interval_sec=altitude_hold_interval_sec,
             max_ranger_m=max_ranger_m,
             target_ranger_m=target_ranger_m,

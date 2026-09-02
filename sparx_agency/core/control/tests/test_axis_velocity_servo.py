@@ -183,3 +183,74 @@ def test_the_output_limit_does_not_rescale_the_measured_curve():
     servo = AxisVelocityServo(DEADZONE, V_FULL, output_limit=900.0)
     half = servo.update(V_FULL / 2.0, 0.0, 0.05)
     assert abs(half - feedforward_axis(V_FULL / 2.0, DEADZONE, V_FULL)) < 1e-9
+
+
+# ── Measured-curve mode (2026-08-31: expo curve, no dead band) ──────────
+
+from sparx_agency.core.control.axis_response_curve import AxisResponseCurve
+
+CURVE = AxisResponseCurve(
+    [(0, 0.0), (250, 0.026), (400, 0.099), (500, 0.22), (600, 0.428),
+     (700, 0.792), (800, 1.188), (900, 1.566)])
+
+
+def curve_servo(**kw):
+    kw.setdefault("kp", 90.0)
+    kw.setdefault("ki", 220.0)
+    kw.setdefault("max_correction", 350.0)
+    kw.setdefault("output_limit", CURVE.max_counts)
+    return AxisVelocityServo(0.0, 0.0, curve=CURVE, **kw)
+
+
+def test_curve_feedforward_matches_the_curve_exactly():
+    servo = curve_servo(kp=0.0, ki=0.0)
+    assert servo.update(0.428, 0.428, 0.05) == 600.0
+    assert servo.update(-0.428, -0.428, 0.05) == -600.0
+
+
+def test_curve_mode_has_no_dead_band_floor():
+    """A small demand must yield a small stick, not a dead-band edge."""
+    servo = curve_servo(kp=0.0, ki=0.0)
+    assert 0.0 < servo.update(0.026, 0.026, 0.05) <= 250.0
+
+
+def test_curve_mode_uses_one_law_in_every_regime():
+    """Standing vs moving must not change the feedforward -- no regime pair."""
+    servo = curve_servo(kp=0.0, ki=0.0)
+    standing = servo.update(0.3, 0.0, 0.05)
+    servo.reset()
+    moving = servo.update(0.3, 0.3, 0.05)
+    assert standing == moving
+
+
+def test_curve_mode_never_commands_past_the_last_measured_point():
+    """Anti-windup must engage at 900 even when the feedforward is below it.
+
+    1.0 m/s asks ~753 counts open loop, so the correction has ~147 counts of
+    real room before the ceiling -- the integral must freeze there rather
+    than wind on toward its own 350-count cap.
+    """
+    servo = curve_servo()
+    for _ in range(200):                      # aircraft never moves: max windup
+        axis = servo.update(1.0, 0.0, 0.05)
+    assert axis <= CURVE.max_counts
+    assert abs(servo.integral) < 100.0        # frozen at saturation, not at 350
+
+
+def test_curve_mode_closes_the_loop_on_a_simulated_expo_plant():
+    """Converges near the demand on a first-order plant flying the true curve.
+
+    The plant is the phase-0 measurement: speed relaxes toward
+    ``CURVE.speed_at(axis)`` with tau ~1.15 s. The servo's feedforward is that
+    same curve, so the PI only has to cover plant noise -- here, a 10% gain
+    error to give it something real to do.
+    """
+    servo = curve_servo()
+    tau, dt = 1.15, 0.05
+    v = 0.0
+    for _ in range(200):                      # 10 s
+        axis = servo.update(0.4, v, dt)
+        v_ss = 0.9 * CURVE.speed_at(axis)     # plant runs 10% weak
+        v += (v_ss - v) * (dt / tau)
+    assert abs(v - 0.4) < 0.03                # settled within ~8%
+    assert abs(servo.last_error) < 0.05

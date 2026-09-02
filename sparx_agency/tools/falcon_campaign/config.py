@@ -78,6 +78,13 @@ FALCON_ENV = (
 
 # ── Geometry (Rooster spawns at ~(54.75, -14.66) after the X/Y sign fix) ──
 GOAL_X, GOAL_Y = 57.25, -10.16
+#: The real prison extents are x [-75, 116], y [-58, 20] (operator-provided
+#: 2026-08-31), but the box deliberately stays at the small placeholder: the
+#: full-extent enlargement was deployed and reverted the same day after the
+#: global coverage tour went from ~0.2 ms to ~10.5 s per solve (Hgrid cost
+#: matrix ~7.7 s + LKH SOP ~2.8 s). Re-enlarge only after the planner scales.
+#: Must match maps/sphera_jail.yaml `building` and the hand-synced copies in
+#: mission_control.py / rooster_turn_debug.py / mission_sphera.yaml.
 BEV_XMIN, BEV_YMIN, BEV_XMAX, BEV_YMAX = 38.75, -30.66, 70.75, 1.34
 
 # ── Camera intrinsics (hfov 135deg, confirmed against Sphera's own config) ─
@@ -105,9 +112,41 @@ CAM = dict(fx=111.837662, fy=180.0, cx=269.5, cy=179.5,
 TARGET_RANGER_M = 0.90
 MAX_RANGER_M = 1.00
 
+#: Vertical speed a ranger STEP may imply before the altitude hold rejects the
+#: sample as terrain rather than aircraft motion, m/s. The hold is
+#: terrain-relative and accepted any finite reading, so a step in the floor
+#: produced a huge apparent error and a huge correction: measured 2026-08-31,
+#: two flights ran away to ~3.6 m (against a 3.8 m flight_band beyond which
+#: exploration_node segfaults) with the rangefinder reading 11.6 m -- ~83 m/s
+#: of implied motion. Replayed over recorded flights, 3.0 rejects 1.7% of
+#: samples on the runaway flight and 0.0-0.3% on normal ones, so it filters
+#: the impossible without binding in ordinary flight.
+ALTITUDE_MAX_RANGER_RATE = 3.0
+
 #: The z axis response is a ~10-count step gate near 700, not a thrust curve.
 CLIMB_Z = 700.0
 HOVER_Z = 700.0
+
+#: Which controller generation flies, end to end. One switch so an A/B arm
+#: cannot be half-assembled:
+#:
+#:   "powerlaw_lateral" (default) -- the 2026-08-31 rebuild: both horizontal
+#:       axes fly the measured expo curve (robots/ROBOTICAN/rooster_axis_curve)
+#:       through per-axis velocity servos, lateral is live (ceiling 900), and
+#:       the follower commands the tracker's full velocity vector.
+#:   "legacy" -- the pre-2026-08-31 baseline, verbatim: dead-band/two-regime
+#:       feedforward on x, lateral hard-zeroed, course-projected forward only.
+#:
+#: Overridable per run via the environment so the A/B operator never edits
+#: code: SPARX_CONTROLLER_VARIANT=legacy python3 -m ...campaign
+CONTROLLER_VARIANT = os.environ.get(
+    "SPARX_CONTROLLER_VARIANT", "powerlaw_lateral").strip().lower()
+if CONTROLLER_VARIANT not in ("powerlaw_lateral", "legacy"):
+    raise ValueError("SPARX_CONTROLLER_VARIANT must be powerlaw_lateral or "
+                     "legacy, got %r" % CONTROLLER_VARIANT)
+
+#: The follower half of the variant (twist-adapter half: TWIST_ADAPTER_CMD).
+USE_LATERAL = CONTROLLER_VARIANT == "powerlaw_lateral"
 
 #: Which follower consumes FALCON's plan.
 #:
@@ -115,8 +154,12 @@ HOVER_Z = 700.0
 #: campaign's baseline: it is the proven one, it carries the measured-speed
 #: taper and the pinned-escape reflex, and every smoothness fix so far (turn
 #: creep, the dropped duplicate dead-band quantiser, the yaw-rate cap) lives in
-#: it. Its weakness is that traj_server EXITS when FALCON reaches FINISH, which
-#: leaves /planning/pos_cmd publisher-less and the follower holding forever.
+#: it. Note (verified in traj_server.cpp 2026-08-31): since the finish_reopen
+#: patch, traj_server does NOT exit at FINISH by default (exit_on_finish=false)
+#: -- past each trajectory's end it publishes the frozen endpoint with ZERO
+#: velocity, fresh stamps, at 100 Hz. So the follower's staleness timeout never
+#: fires between trajectories or at FINISH; "parked on a fresh zero-velocity
+#: reference" is what planner starvation looks like from the follower's side.
 #:
 #: "bspline" reads /planning/bspline directly, so it needs no traj_server at
 #: all, and its control law measured 2.8-3.8x tighter on SJTU's airframe -- but
@@ -126,6 +169,18 @@ EXPLORATION_FOLLOWER = "reference"
 
 #: Clearance FALCON's planner and optimiser keep from occupied voxels, metres.
 #: See adapter_launch_cmd for why this is 0.40 rather than the inherited 0.85.
+# 0.30 was TRIED AND REVERTED on 2026-08-31 (v3.0, three flights). It cut A*
+# "no path to viewpoint" failures ~10x but bought NOTHING in coverage (0.98x
+# against a pre-registered 1.15x bar) and halved the clearance margin: the
+# aircraft sat within 0.3 m of geometry 40% of the flight (vs 27%), and the
+# PLAN itself rode 0.33 m from mapped walls (vs 0.83 m) -- inside the
+# aircraft's own p90 tracking error, on a platform that already makes contact.
+# Why: inflation gates what A* considers reachable, and the A* route seeds the
+# B-spline, so a lower value lets the seed hug walls while the optimiser's
+# SOFT clearance only partly pulls it back. Deeper reason not to retry it:
+# reachability was never the binding constraint on coverage (see
+# runs/AUTOLOOP_JOURNAL.md Finding C -- coverage tracks distance r=0.95 and
+# the aircraft stops because nothing commands it, not because it is stuck).
 OBSTACLES_INFLATION = 0.40
 #: The B-spline optimiser's own clearance, which is a SOFT cost (weight 50
 #: against smoothness 20), not a constraint — so it gets traded away. Measured
@@ -154,11 +209,12 @@ BSPLINE_DISTANCE_WEIGHT = 150.0
 #: silent no-op for any of them (LESSONS.md). ``assert_launch_params`` reads
 #: every one of these back from the live parameter server.
 #:
-#: 0.6 rather than the inherited 0.4: coverage is speed x sensor swath, the
-#: swath cannot be raised (DA3 returns nothing beyond 3.5 m in this map), and
-#: the plan -- not the follower -- was the binding constraint. A 0.6 m/s demand
-#: asks 802 axis counts standing and 603 moving, both under the 900 ceiling;
-#: 1.0 m/s would ask 924 and clip.
+#: Raised from the inherited 0.4: coverage is speed x sensor swath, the swath
+#: cannot be raised (DA3 returns nothing beyond 3.5 m in this map), and the
+#: plan -- not the follower -- was the binding constraint. On the measured
+#: curve (rooster_axis_curve), 0.8 m/s asks ~702 counts and even the
+#: follower's 1.0 m/s ceiling asks ~745 -- both comfortably under the
+#: 900-count / 1.566 m/s platform ceiling.
 PLAN_MAX_VEL = 0.8
 #: Must exceed PLAN_MAX_VEL with headroom; full stick measures ~1.25 m/s.
 EXPLORE_MAX_SPEED_XY = 1.0
@@ -218,6 +274,74 @@ BRIDGE_CMD = (
 #: it measured p50 0.20 m against a reference clearance of ~0.5 m.
 TRACKER_POS_KP = 1.0
 
+#: Seconds of reference-acceleration lead in the follower's tracker.
+#: Measured over five v2.1 flights: 74% of the remaining tracking error is
+#: ALONG-TRACK (timing), p90 0.45 m ~ 0.9 s at cruise -- which is the plant's
+#: own lag (tau ~1.15 s + 0.14 s dead time) going uncompensated. 0.25 is the
+#: historical default and keeps present behaviour; raising it is a
+#: pre-registered A/B, not a free tweak.
+# 0.60 was TRIED AND REVERTED 2026-08-31 (v5.0, two flights): along-track p90
+# 0.565 / 0.525 against a 0.463 baseline median -- worse, not better. An
+# offline sweep of the real tracker+servo+measured plant says more lead SHOULD
+# help monotonically, so the dominant real effect is absent from a
+# smooth-reference model. Finding F says why: the along-track error is made
+# almost entirely while the aircraft is STATIONARY (when moving it is on
+# schedule), and no amount of transient anticipation fixes an error
+# accumulated while the loop commands zero. Do not retune this knob; reduce
+# stationary time instead. See runs/AUTOLOOP_JOURNAL.md.
+ACCEL_LEAD_S = 0.25
+
+#: How the nose is aimed. "course" points it along travel -- a workaround from
+#: the era when lateral was disabled, so sideways demand had to become forward
+#: demand. "reference" follows FALCON's own yaw plan, which exists to point the
+#: depth camera at the frontiers it wants to map; with lateral working the
+#: workaround is no longer needed. Measured in course mode: heading error p50
+#: 18-28 deg, p90 46-50, i.e. the camera is aimed well off the travel
+#: direction much of the time, by a heuristic rather than by the planner.
+YAW_MODE = "course"
+
+#: Weight on traj_server's own yaw_dot (the B-spline's analytic yaw rate),
+#: which the follower discarded -- driving yaw on proportional error alone
+#: necessarily lags a moving yaw reference. Only acts in YAW_MODE="reference";
+#: the two are one change and move together.
+YAW_DOT_FF = 0.0
+
+#: Slow yaw sweep while the plan is parked, rad/s (0 disables).
+#:
+#: Findings C/F: both the coverage shortfall and the tracking error are made
+#: during the time the aircraft is stationary. While parked the camera never
+#: sweeps -- course yaw only aims the nose when there is travel to aim it
+#: along -- so nothing enters the map, no frontier resolves, and the planner
+#: re-picks the same spot. v4.0 proved the converse by accident: removing the
+#: sweep deadlocked exploration outright. Yaw only, so it cannot fly the
+#: aircraft into anything, and it yields as soon as the plan asks for travel.
+#: Overridable per run so an interleaved A/B never needs a file edit between
+#: flights: SPARX_PARK_SCAN=0 python3 -m ...campaign
+#:
+#: 0.5 rad/s was flown (v7.0, 3 runs) and is NOT adopted: the mechanism worked
+#: (moving-reference fraction 0.803 vs 0.594) but coverage did not follow
+#: (1.02x, which at n=3 is indistinguishable from anything under ~40% -- see
+#: Finding G), the aircraft turned 118 deg/m on one flight against 42-53 at
+#: baseline, and altitude destabilised (ranger sd 0.345 vs 0.085: the spinning
+#: rangefinder sweeps varied floor and the hold loop chases it). 0.25 rad/s
+#: with a longer trigger is the gentler retry.
+#: DEFAULT 0 -- the parked yaw scan was flown at 0.5 (v7.0, 3 runs) and 0.25
+#: (v7.1, 5 interleaved runs) and is NOT adopted. At n=2-3 its mechanism metric
+#: looked strong (moving-reference 0.84 vs 0.53); at n=5 interleaved against a
+#: contemporaneous control it was 0.536 vs 0.527 -- i.e. nothing. That is
+#: regression to the mean, exactly what Finding G predicts for this platform.
+#: It also carries a TAIL HAZARD absent from the control arm: 2 of 8
+#: scan-enabled flights ran away in altitude to ~3.6 m (17% of one flight above
+#: 2 m, rangefinder reading up to 11.6 m) against 0 of 4 controls, which never
+#: exceeded 1.93 m. Spinning sweeps the downward rangefinder across varied
+#: floor, the altitude hold chases the jump, and the aircraft climbs toward the
+#: 3.8 m flight_band ceiling where exploration_node segfaults.
+PARK_SCAN_RATE = float(os.environ.get("SPARX_PARK_SCAN", "0"))
+
+#: Seconds parked before the scan starts. 2.0 also fired on brief pauses; 4.0
+#: restricts it to genuinely stalled stretches.
+PARK_SCAN_AFTER_S = 4.0
+
 #: Seconds the follower may hold translation at zero after giving up on escapes,
 #: before re-arming and driving again. The hold was previously unbounded and its
 #: release condition unreachable, which parked one flight for 250 s.
@@ -235,6 +359,29 @@ TILT_RESUME_DEG = 27.0
 #: — hence the readback below.
 FRONTIER_CLUSTER_MIN = 50.0
 
+#: Base radius of a blacklist shadow around an unreachable viewpoint, metres.
+#: Env-overridable so an interleaved A/B needs no file edit between flights:
+#: SPARX_BLOCKED_RADIUS=1.5 python3 -m ...campaign
+#:
+#: 1.5 is the C++ default and was never set. Measured over 41 flights
+#: (runs/AUTOLOOP_JOURNAL.md, Finding I): 91.9% of no-moving-reference time is
+#: A*-plan-fail flooding; 86% of that is ONE terminal lock on a single
+#: unreachable viewpoint -- worst case 254 s emitting the identical "Next pos"
+#: 17,551 times with 17,925 plan fails and the reference never moving once --
+#: and sweepBlockedFrontiers retired ZERO clusters in those runs while 10-11
+#: shadows were re-struck. A 1.5 m first strike cannot retire a frontier whose
+#: viewpoints are sampled to candidate_rmax 5.5 m. 2.75 makes strike 1 cover
+#: 2.75 m and strike >=2 escalate to exactly 5.5 m.
+# 2.75 was TRIED AND REVERTED 2026-09-01 (v8.0, 5 interleaved flights). It did
+# what it was designed to do -- re-strikes fell (candidate 5,0,11,3,7 vs control
+# 11,9,2,9) -- but it STERILISED THE MAP, which is the documented failure mode
+# of a wider shadow: 4 of 5 candidate flights emptied their frontier set at
+# least once and one emptied it twice (guard G3), against 1 of 4 controls.
+# Coverage did not improve either (median 1340 vs 1255). The lock in Finding I
+# is real, but blacklisting a bigger disc trades one starvation mode for
+# another -- the aircraft runs out of places it is ALLOWED to go.
+BLOCKED_REGION_RADIUS = float(os.environ.get("SPARX_BLOCKED_RADIUS", "1.5"))
+
 #: Seconds the coverage tour may hold its chosen cell before re-picking. The
 #: bound is the safety property, not the feature: a commitment to an unreachable
 #: cell is the lock P16 fixed, and the timeout is what keeps one cheap.
@@ -246,11 +393,21 @@ VOXEL_RAYCAST_MAX = 8.0
 
 EXPECTED_ROSPARAMS = {
     "/voxel_mapping/tsdf/raycast_max": VOXEL_RAYCAST_MAX,
+    # A*'s hard reachability gate. Added to the readback 2026-08-31 because a
+    # campaign now turns on its value: without this, "the change did nothing"
+    # and "the change never reached the planner" look identical.
+    "/voxel_mapping/obstacles_inflation": OBSTACLES_INFLATION,
     "/bspline_opt/safe_distance": SAFE_DISTANCE,
     "/bspline_opt/pos/distance": BSPLINE_DISTANCE_WEIGHT,
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
+    "/frontier_finder/blocked_region_radius": BLOCKED_REGION_RADIUS,
     "/exploration/tour_commit_max_s": TOUR_COMMIT_MAX_S,
     "/falcon_exploration_follower/tracker_pos_kp": TRACKER_POS_KP,
+    "/falcon_exploration_follower/accel_lead_s": ACCEL_LEAD_S,
+    "/falcon_exploration_follower/yaw_mode": YAW_MODE,
+    "/falcon_exploration_follower/yaw_dot_ff_gain": YAW_DOT_FF,
+    "/falcon_exploration_follower/park_scan_rate": PARK_SCAN_RATE,
+    "/falcon_exploration_follower/park_scan_after_s": PARK_SCAN_AFTER_S,
     "/falcon_exploration_follower/pinned_hold_sec": PINNED_HOLD_SEC,
     "/falcon_exploration_follower/escape_cooldown_sec": ESCAPE_COOLDOWN_SEC,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
@@ -258,7 +415,14 @@ EXPECTED_ROSPARAMS = {
     "/uav_model/dynamics_parameters/max_linear_velocity": PLAN_MAX_VEL,
     "/fsm/slow_traj_target_vel": FSM_SLOW_TRAJ_TARGET_VEL,
     "/falcon_exploration_follower/max_speed_xy": EXPLORE_MAX_SPEED_XY,
+    "/falcon_exploration_follower/use_lateral": USE_LATERAL,
     "/bev_publisher/z_ceil": BEV_Z_CEIL,
+    # Map-epoch guard: the map yaml is mounted when the falcon CONTAINER is
+    # created, so a stale container silently keeps flying an old map through
+    # any number of roslaunch restarts (run 10 flew the reverted-away big map
+    # this way). If these disagree, recreate the container: docker rm -f falcon.
+    "/bev_publisher/bbox_xmin": BEV_XMIN,
+    "/bev_publisher/bbox_xmax": BEV_XMAX,
 }
 
 
@@ -298,6 +462,11 @@ def adapter_launch_cmd(follower=None, extra=""):
         # Shadowed by sphera_drone.launch if left to nav_stack's defaults.
         "max_vel:={maxvel} fsm_slow_traj_target_vel:={slowvel} "
         "explore_max_speed_xy:={expspeed} bev_z_ceil:={zceil} "
+        "explore_accel_lead_s:={lead} explore_yaw_mode:={yawmode} "
+        "explore_yaw_dot_ff:={yawff} explore_park_scan:={parkscan} "
+        "explore_park_scan_after:={parkafter} "
+        "frontier_blocked_radius:={blockrad} "
+        "explore_use_lateral:={usel} "
     ).format(map=MAP_NAME, follower=follower, drone=DRONE_ID,
              fx=CAM["fx"], fy=CAM["fy"], cx=CAM["cx"], cy=CAM["cy"],
              w=CAM["width"], h=CAM["height"], mind=CAM["min_depth"],
@@ -305,7 +474,8 @@ def adapter_launch_cmd(follower=None, extra=""):
              bxmin=BEV_XMIN, bymin=BEV_YMIN, bxmax=BEV_XMAX, bymax=BEV_YMAX,
              infl=OBSTACLES_INFLATION, safe=SAFE_DISTANCE,
              maxvel=PLAN_MAX_VEL, slowvel=FSM_SLOW_TRAJ_TARGET_VEL,
-             expspeed=EXPLORE_MAX_SPEED_XY, zceil=BEV_Z_CEIL)
+             expspeed=EXPLORE_MAX_SPEED_XY, zceil=BEV_Z_CEIL,
+             usel=str(USE_LATERAL).lower(), lead=ACCEL_LEAD_S, yawmode=YAW_MODE, yawff=YAW_DOT_FF, parkscan=PARK_SCAN_RATE, parkafter=PARK_SCAN_AFTER_S, blockrad=BLOCKED_REGION_RADIUS)
     return ("docker exec {c} bash -lc '{env} roslaunch falcon_adapter "
             "sphera_drone.launch {args}{extra}'").format(
         c=FALCON_CONTAINER, env=FALCON_ENV, args=args, extra=extra)
@@ -316,9 +486,11 @@ COMMAND_UNIT_CMD = (
     "rooster_command_unit.py --ros-args "
     "-p rooster_id:={drone} -p climb_z:={climb} -p hover_z:={hover} "
     "-p max_ranger_m:={maxr} -p target_ranger_m:={tgtr} "
-    "-p altitude_hold_max_correction:=380.0 -p altitude_hold_interval_sec:=0.1"
+    "-p altitude_hold_max_correction:=380.0 -p altitude_hold_interval_sec:=0.1 "
+    "-p altitude_hold_max_ranger_rate:={rangerrate}"
 ).format(drone=DRONE_ID, climb=CLIMB_Z, hover=HOVER_Z,
-         maxr=MAX_RANGER_M, tgtr=TARGET_RANGER_M)
+         maxr=MAX_RANGER_M, tgtr=TARGET_RANGER_M,
+         rangerrate=ALTITUDE_MAX_RANGER_RATE)
 
 GTL_CMD = (
     "python3 -m sparx_agency.robots.ROBOTICAN."
@@ -338,10 +510,59 @@ DEPTH_CMD = (
     "bash {repo}/sparx_agency/robots/ROBOTICAN/run_depth_processor.sh"
 ).format(repo=REPO_ROOT)
 
+#: Ceiling on the lateral axis for the candidate arm, counts.
+#:
+#: 600 (~0.43 m/s), not the 900 curve ceiling, since 2026-08-31 round 2. The
+#: round-1 A/B measured lateral swinging to p50 ~600 / p90 ~900 counts, 9-16
+#: sign flips a minute, 9-18 % of flight above 600 -- not cross-track work
+#: (cross-track sat at p50 0.15 m, needing under 0.3 m/s) but the turn-crab
+#: feedforward banking the airframe hard enough that the operator flagged the
+#: roll as too aggressive. 600 keeps every correction the tracker ever needs
+#: and bounds the bank; the curve itself is untouched.
+LATERAL_AXIS_CAP = 600.0
+
+#: How far the twist adapter's altitude nudges may move the hold height from
+#: where it was when tracking began, metres. 0.3 -> 0.60 for v6.0.
+#:
+#: Finding E: FALCON's reference sits ABOVE the aircraft in every flight
+#: (mean dz +0.06..+0.38 m, p90 up to 1.13), because it plans inside a
+#: flight_band the aircraft cannot use -- the aircraft is pinned near 1.2 m
+#: and could previously bias that by only +/-0.3 m total. Viewpoints beyond
+#: that are unreachable by construction and FALCON cannot know.
+#:
+#: Care: band 1.0 WITH a coarse 0.3 m nudge was flown before and railed the
+#: live target, driving the hold loop hard (z sd 42 -> 114) and costing
+#: horizontal speed. The nudge is now 0.15 m, so this doubles the range at
+#: half the step size; 0.60 is deliberately short of the old 1.0.
+# 0.60 was TRIED AND REVERTED 2026-08-31 (v6.0, two flights). Coverage 1538 /
+# 1451 against a 1516 baseline (no gain), and stationary time got WORSE:
+# 0.41 / 0.52 against 0.32. Chasing altitude appears to COST horizontal time —
+# the aircraft spends the extra vertical authority climbing/descending instead
+# of travelling — which is the same shape as the historical band=1.0
+# regression, just milder. Finding E is real (the reference does sit above the
+# aircraft) but widening the band is not the way to collect it.
+ALTITUDE_BAND_M = 0.30
+
+
+
+#: Bump this string on ANY controller-affecting change (adapter constants,
+#: follower params, slew rates, caps) so every run's summary.json says exactly
+#: which controller revision flew. Round 2's sample silently mixed two slew
+#: configurations and two maps because nothing recorded the revision; this is
+#: the guard. "v2.1" = cap 600 + gentle lateral slew (400/s attack, 600/s
+#: release) + small map. "v7.0" = v2.1 + parked yaw scan 0.5 rad/s.
+CONTROLLER_REV = "v8.0" if BLOCKED_REGION_RADIUS > 1.5 else "v2.1d"
+
+#: Lateral is opt-in at the adapter (its default keeps the axis disabled for
+#: every non-campaign /cmd_vel producer); the candidate arm enables it at
+#: LATERAL_AXIS_CAP, the baseline arm flies the verbatim pre-2026-08-31 stack.
 TWIST_ADAPTER_CMD = (
     "bash {repo}/sparx_agency/robots/ROBOTICAN/adapters/"
-    "run_twist_control_adapter.sh --rooster-id {drone}"
-).format(repo=REPO_ROOT, drone=DRONE_ID)
+    "run_twist_control_adapter.sh --rooster-id {drone}{variant}"
+).format(repo=REPO_ROOT, drone=DRONE_ID,
+         variant=((" --max-lateral-axis %.0f --altitude-band-m %.2f"
+                   % (LATERAL_AXIS_CAP, ALTITUDE_BAND_M)) if USE_LATERAL
+                  else " --legacy-feedforward"))
 
 SPHERA_RESTART_CMD = (
     "cd {repo} && python3 -m sparx_agency.tools.sphera_battery_watchdog --once"

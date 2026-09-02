@@ -5,9 +5,11 @@ FALCON's native ``exploration_node`` (the paper's own algorithm: space
 decomposition, HGrid coverage planning, frontier selection) has been running on
 every Sphera mission all along, already fed real pose/depth -- see LESSONS.md.
 Nothing has ever consumed its output. ``fast_planner``'s ``traj_server`` turns
-that into a continuous, dynamically-optimal 50 Hz setpoint stream
+that into a continuous, dynamically-optimal 100 Hz setpoint stream
 (``quadrotor_msgs/PositionCommand`` on ``/planning/pos_cmd``: position, velocity,
-acceleration, yaw). This node is the missing last stage: it tracks that setpoint
+acceleration, yaw, and a yaw_dot this node currently ignores). Past each
+trajectory's end it keeps publishing the frozen endpoint with zero velocity and
+fresh stamps, so ``reference_age`` stays fresh while the aircraft is parked. This node is the missing last stage: it tracks that setpoint
 and drives Rooster's actual velocity-command interface, the same job
 waypoint_follower_node.py does for A*/NavDP paths and object_approach_node.py does
 for the visual servo -- just for a continuous reference instead of a discrete path.
@@ -128,7 +130,30 @@ class FalconExplorationFollowerNode:
         # sideways mid-turn. "reference" restores the old behaviour of tracking
         # FALCON's own yaw curve -- keep it for comparison, not as the default.
         self.yaw_mode = str(G("~yaw_mode", "course")).strip().lower()
+        # 2026-08-31: lateral re-enabled downstream (the 2026-08-18 "worst
+        # axis" finding was wall contact; the manual calibration measured
+        # lateral IDENTICAL to forward at every level). With it, the tracker's
+        # full velocity vector is commanded as-is and the align-gate/cos-fade/
+        # turn-creep shaping below -- all of it compensation for a missing
+        # axis -- is bypassed. Course yaw still points the nose along travel.
+        # Default False so ad hoc launches behave as before; the campaign sets
+        # it per controller variant and asserts it on the parameter server.
+        self.use_lateral = _param_bool("~use_lateral", False)
         self.course_min_speed = float(G("~course_min_speed", 0.05))
+        #: Slow yaw scan while the plan is parked, rad/s. 0 disables.
+        #:
+        #: Measured: both the coverage shortfall and the tracking error are
+        #: produced by time spent stationary, and while parked the camera
+        #: never sweeps -- course yaw only aims the nose when there is
+        #: travel to aim it along. Nothing then enters the map, so no
+        #: frontier resolves and the planner re-picks the same spot. (The
+        #: v4.0 experiment proved the converse: removing the sweep
+        #: deadlocked exploration outright.) Yaw-only, so it cannot fly the
+        #: aircraft into anything.
+        self.park_scan_rate = float(G("~park_scan_rate", 0.0))
+        #: Seconds parked before the scan starts.
+        self.park_scan_after_s = float(G("~park_scan_after_s", 2.0))
+        self._parked_since = None
         # Near 90, not 40: cos(err) fades forward speed out on its own, so this
         # only needs to catch the sign change past 90 deg. See the shaping block
         # in the command path for the measurement behind that.
@@ -174,12 +199,22 @@ class FalconExplorationFollowerNode:
         # against a 0.5 m/s feedforward. 1.0 restores the previous behaviour.
         pos_kp = float(G("~tracker_pos_kp", 1.0))
         horizontal = replace(ReferenceTrackerParams().horizontal_pid, kp=pos_kp)
+        # How far ahead the reference ACCELERATION is projected onto the
+        # velocity command. Exposed 2026-08-31: measured over five flights,
+        # 74% of the remaining tracking error is along-track (timing), p90
+        # 0.45 m ~ 0.9 s at cruise -- essentially the plant's own lag
+        # (tau ~1.15 s + ~0.14 s dead time) going uncompensated. The default
+        # keeps the previous behaviour; raising it is a pre-registered A/B.
         self.tracker = ReferenceTracker3D(ReferenceTrackerParams(
             limits=limits,
             horizontal_pid=horizontal,
+            accel_lead_s=float(G("~accel_lead_s", 0.25)),
             reference_timeout_s=float(G("~reference_timeout_s", 1.0)),
         ))
         self.yaw_kp = float(G("~yaw_kp", 1.0))
+        #: Weight on traj_server's own yaw_dot when following its yaw
+        #: curve. 0.0 keeps the previous behaviour (P-only, lagging).
+        self.yaw_dot_ff_gain = float(G("~yaw_dot_ff_gain", 0.0))
 
         # <=0.0 disables. This checks MEASURED speed (from odometry), not the
         # commanded reference -- max_speed_xy above only clamps what the
@@ -212,9 +247,9 @@ class FalconExplorationFollowerNode:
         #
         # This detector deliberately depends on nothing but its own two
         # measurements -- "I am asking for motion" and "the aircraft is not
-        # moving". It cannot be fooled by a wrong map or a confident planner,
-        # and reverse is the only direction that gets this airframe off a wall
-        # (there is no lateral authority worth using).
+        # moving". It cannot be fooled by a wrong map or a confident planner.
+        # Reverse remains the escape direction: it is the one heading a nose-in
+        # contact guarantees is clear, whether or not lateral is enabled.
         self.stall_cmd_mps = float(G("~stall_cmd_mps", 0.15))
         self.stall_speed_mps = float(G("~stall_speed_mps", 0.06))
         self.stall_detect_sec = float(G("~stall_detect_sec", 3.0))
@@ -291,6 +326,7 @@ class FalconExplorationFollowerNode:
         self._velocity = None      # (vx, vy, vz), world frame
 
         self._reference = None         # TrajectoryPoint, last received
+        self._reference_yaw_dot = 0.0  # planner's own yaw rate, rad/s
         self._reference_stamp = None   # rospy.Time of that reference
         self._reference_ready = False  # trajectory_flag == READY
 
@@ -353,6 +389,7 @@ class FalconExplorationFollowerNode:
             yaw=msg.yaw)
         # traj_server is expected to stamp every command; fall back to "now" rather
         # than let an unset (zero) stamp read as infinitely old and always stale.
+        self._reference_yaw_dot = float(getattr(msg, "yaw_dot", 0.0) or 0.0)
         self._reference_stamp = (msg.header.stamp if msg.header.stamp.to_sec() > 0
                                  else rospy.Time.now())
         self._reference_ready = (msg.trajectory_flag
@@ -496,7 +533,7 @@ class FalconExplorationFollowerNode:
         body_vx = setpoint.vx * cos_y + setpoint.vy * sin_y
         body_vy = -setpoint.vx * sin_y + setpoint.vy * cos_y
 
-        if heading_err is not None:
+        if heading_err is not None and not self.use_lateral:
             # Turn while going, and only stop turning-in-place when the nose is
             # so far off that forward thrust would take the aircraft away from
             # the reference. Lateral is dropped either way -- it is what causes
@@ -562,10 +599,21 @@ class FalconExplorationFollowerNode:
         # already computed (reference heading vs. measured), capped at the
         # platform's own ceiling.
         yaw_error = heading_err if heading_err is not None else setpoint.yaw_error_rad
-        yaw_rate = saturate(self.yaw_kp * yaw_error,
+        # Feedforward the planner's OWN yaw rate when following its yaw curve.
+        # traj_server fills yaw_dot with the B-spline's analytic derivative and
+        # this node discarded it, driving yaw on proportional error alone --
+        # which necessarily lags a moving yaw reference (measured heading error
+        # p50 18-28 deg, p90 46-50). Only meaningful in "reference" mode: in
+        # course mode the target is the course, not the planner's yaw.
+        yaw_ff = (self._reference_yaw_dot
+                  if (self.yaw_mode != "course" and heading_err is None)
+                  else 0.0)
+        yaw_rate = saturate(self.yaw_dot_ff_gain * yaw_ff + self.yaw_kp * yaw_error,
                             self.tracker.params.limits.max_yaw_rate)
         if escape_yaw_rate is not None:
             yaw_rate = escape_yaw_rate
+        else:
+            yaw_rate = self._park_scan(world_speed, yaw_rate, now_s)
 
         # Altitude was deliberately dropped here for a long time, because
         # rooster_command_unit owns the throttle axis and a second publisher
@@ -578,6 +626,40 @@ class FalconExplorationFollowerNode:
 
         self._last_heading_err = heading_err
         self._publish_cmd(body_vx, body_vy, yaw_rate, body_vz)
+
+    def _park_scan(self, world_speed, yaw_rate, now_s):
+        """Sweep the camera slowly while the plan is parked.
+
+        The plan going quiet is not a reason to stop looking: nothing entering
+        the map means no frontier resolves, so the planner re-picks the same
+        spot and the aircraft stays parked. Yaw only -- it cannot fly the
+        aircraft into anything -- and it yields the moment the plan asks for
+        travel again.
+
+        Args:
+            world_speed: Speed the tracker is asking for, m/s.
+            yaw_rate: Yaw rate the normal path computed, rad/s.
+            now_s: Current time, seconds.
+
+        Returns:
+            The yaw rate to command.
+        """
+        if self.park_scan_rate <= 0.0:
+            return yaw_rate
+        measured = (0.0 if self._velocity is None
+                    else math.hypot(self._velocity[0], self._velocity[1]))
+        parked = (world_speed <= self.course_min_speed
+                  and measured <= self.stall_speed_mps)
+        if not parked:
+            self._parked_since = None
+            return yaw_rate
+        if self._parked_since is None:
+            self._parked_since = now_s
+            return yaw_rate
+        if now_s - self._parked_since < self.park_scan_after_s:
+            return yaw_rate
+        return saturate(self.park_scan_rate,
+                        self.tracker.params.limits.max_yaw_rate)
 
     def _update_escape(self, body_vx, body_vy):
         """Detect being pinned, and drive the escape while one is running.

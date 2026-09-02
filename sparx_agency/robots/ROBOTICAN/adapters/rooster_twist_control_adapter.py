@@ -17,13 +17,17 @@ action (which only ever touches x/y/r, never z) is what keeps that guarantee.
 
 Twist mapping:
   linear.x   forward/backward -> axis x
-  linear.y   lateral          -> axis y
+  linear.y   lateral          -> axis y, NEGATED (see below)
   angular.z  yaw rate         -> axis r, NEGATED (see below)
   linear.z is ignored - altitude is rooster_command_unit.py's job alone.
 
-angular.z is negated: REP103 has positive angular.z = left, but this drone's
-FCU axis convention has positive r = right (same convention as
-rooster_command_unit.py's turn_left/turn_right). See LESSONS.md.
+angular.z AND linear.y are negated: REP103 has positive angular.z = turn left
+and positive linear.y = move left, but this drone's FCU axis convention has
+positive r = right and positive y = right (rooster_command_unit.py's
+live-validated turn_left/turn_right and left/right sign maps). The y negation
+was latent until 2026-08-31 -- lateral was introduced disabled and the unproven
+un-negated mapping never flew; with it, every lateral correction would push the
+wrong way. See LESSONS.md.
 
 max_linear_x/max_linear_y/max_yaw_rate are "real-world rate produced at full
 axis deflection (1000)" - the scale factor a planner's Twist is normalized
@@ -63,6 +67,9 @@ from std_msgs.msg import String
 
 from sparx_agency.core.control.axis_velocity_servo import (
     AxisVelocityServo, feedforward_axis,
+)
+from sparx_agency.robots.ROBOTICAN.rooster_axis_curve import (
+    ROOSTER_HORIZONTAL_CURVE,
 )
 from sparx_agency.robots.common.math_utils import clamp_axis, slew
 
@@ -132,6 +139,13 @@ class RoosterTwistControlNode(Node):
         max_yaw_axis_step_per_sec: float = 2500.0,
         command_hz: float = 20.0,
         cmd_timeout_sec: float = 0.4,
+        # The horizontal feedforward generation. False (default): both axes fly
+        # the measured expo curve (rooster_axis_curve.ROOSTER_HORIZONTAL_CURVE,
+        # 2026-08-25..31 manual calibration -- no dead band, one law for every
+        # regime) through their own velocity servos, and lateral is live. True:
+        # the pre-2026-08-31 behaviour, kept verbatim as the A/B baseline --
+        # dead-band+linear standing/moving pair on x, lateral hard-zeroed.
+        legacy_feedforward: bool = False,
         # Ground-truth-measured axis response (2026-08-17). See
         # velocity_to_axis() above and LESSONS.md; these replace the
         # never-validated linear max_linear_x/y scaling, which is now only
@@ -181,14 +195,22 @@ class RoosterTwistControlNode(Node):
         # from the same standing-start regime the forward revert above distrusts.
         y_deadzone: float = 700.0,
         y_v_full: float = 1.02,
-        min_command_mps: float = 0.15,
-        # The lateral axis is the worst-behaved one: measured dead until
-        # ~axis 1000, so ANY sideways demand slams the stick and produces
-        # 27-36 deg of roll plus a speed overshoot past the measured cap.
-        # There is no gentle middle on this axis. Capping it keeps the
-        # airframe flat, which also matters for map quality -- depth comes
-        # from monocular DA3, and steep roll skews the geometry it infers.
-        # 0.0 disables lateral entirely (turn-and-go via yaw instead).
+        # None resolves by mode: 0.05 on the curve (no dead band, so slow
+        # commands are genuinely executable), 0.15 legacy (the old first-step
+        # floor). Explicit values win. Crossing the curve-mode floor is still a
+        # 0 -> ~320-count step in the servo's TARGET, but the slew spreads it
+        # over ~0.25 s and 320 counts is only 0.05 m/s of plant response --
+        # nothing like the old 620-count dead-band lurch. Kept nonzero so
+        # near-zero demands read as "stop" instead of dithering the stick.
+        min_command_mps: float | None = None,
+        # Ceiling on the lateral axis, counts; <=0 disables lateral (the
+        # default). The axis WORKS -- the 2026-08-31 calibration measured it
+        # identical to forward at every level; the old "dead until ~1000, then
+        # 27-36 deg roll" finding was wall contact -- but it stays opt-in
+        # because this adapter serves every /cmd_vel producer (click-to-fly,
+        # waypoint followers, demos), and only the exploration follower's
+        # lateral use has been validated against the calibration. Enable with
+        # 900 (the curve ceiling); the campaign does so per controller variant.
         max_lateral_axis: float = 0.0,
         # Close the forward axis on truth-derived velocity instead of trusting
         # the measured curve open loop. Measured 2026-08-18 over a full FALCON
@@ -229,6 +251,16 @@ class RoosterTwistControlNode(Node):
         # ceiling on the total holds the axis inside the benign band.
         max_forward_axis: float = 900.0,
         forward_axis_step_per_sec: float = 1200.0,
+        # The lateral axis gets its own, much slower ramp (2026-08-31). With
+        # the shared 1200/s a full 600-count crab swing developed in 0.5 s at
+        # 9-16 sign flips a minute -- measured roll rate p90 ~11 deg/s, and
+        # the operator read it as aggressive rolling. 400/s spreads a swing
+        # over 1.5 s (steady crab roll is only ~2 deg, so rate was the whole
+        # problem) and doubles as a low-pass: a sub-second flip never develops
+        # amplitude. Release is faster so escapes shed lateral within ~1 s,
+        # and stop_motion stays instant.
+        lateral_axis_step_per_sec: float = 400.0,
+        lateral_axis_release_per_sec: float = 600.0,
         # Releases were instantaneous, which on this platform is not a coast:
         # PX4 flies Position mode, so a dropped stick is an active brake. That
         # is what made every cutoff feel like a hard stop. Ramp them too, just
@@ -275,6 +307,7 @@ class RoosterTwistControlNode(Node):
         self.max_yaw_rate = float(max_yaw_rate)
         self.r_deadzone = float(r_deadzone)
         self.r_v_full = float(r_v_full)
+        self.legacy_feedforward = bool(legacy_feedforward)
         self.use_measured_axis_curve = bool(use_measured_axis_curve)
         self.x_deadzone = float(x_deadzone)
         self.x_v_full = float(x_v_full)
@@ -283,7 +316,9 @@ class RoosterTwistControlNode(Node):
         self.move_eps_mps = float(move_eps_mps)
         self.y_deadzone = float(y_deadzone)
         self.y_v_full = float(y_v_full)
-        self.min_command_mps = float(min_command_mps)
+        self.min_command_mps = float(
+            (0.15 if self.legacy_feedforward else 0.05)
+            if min_command_mps is None else min_command_mps)
         self.max_lateral_axis = float(max_lateral_axis)
         self.max_yaw_axis_step_per_sec = float(max_yaw_axis_step_per_sec)
         self.command_hz = float(command_hz)
@@ -308,9 +343,19 @@ class RoosterTwistControlNode(Node):
 
         self.use_velocity_servo = bool(use_velocity_servo)
         self.max_forward_axis = float(max_forward_axis)
+        if not self.legacy_feedforward:
+            # Never command past the last measured point of the curve.
+            self.max_forward_axis = min(self.max_forward_axis,
+                                        ROOSTER_HORIZONTAL_CURVE.max_counts)
+            self.max_lateral_axis = min(self.max_lateral_axis,
+                                        ROOSTER_HORIZONTAL_CURVE.max_counts)
         self.forward_axis_step_per_sec = float(forward_axis_step_per_sec)
         self.forward_axis_release_per_sec = float(forward_axis_release_per_sec)
-        self._x_axis = 0.0
+        self.lateral_axis_step_per_sec = float(lateral_axis_step_per_sec)
+        self.lateral_axis_release_per_sec = float(lateral_axis_release_per_sec)
+        # Slew-limited output state per horizontal axis ("y" is REP103 body
+        # lateral, leftward positive -- negated only at the cmd_nav boundary).
+        self._axis_out = {"x": 0.0, "y": 0.0}
         self.follow_altitude = bool(follow_altitude)
         self.altitude_nudge_m = float(altitude_nudge_m)
         self.altitude_nudge_interval = Duration(
@@ -325,17 +370,30 @@ class RoosterTwistControlNode(Node):
         self._velocity_time = None
         self._yaw = 0.0
         self._servo_tick = None
-        self._forward_servo = AxisVelocityServo(
-            deadzone=self.x_deadzone, v_full=self.x_v_full,
-            kp=float(servo_kp), ki=float(servo_ki),
-            max_correction=float(servo_max_correction),
-            min_command_mps=self.min_command_mps,
-            v_full_moving=self.x_v_full_moving,
-            deadzone_moving=self.x_deadzone_moving,
-            move_eps_mps=self.move_eps_mps,
-            # The servo must know the ceiling this node clamps to, or its
-            # anti-windup guards a limit that does not exist.
-            output_limit=self.max_forward_axis)
+        if self.legacy_feedforward:
+            self._servos = {"x": AxisVelocityServo(
+                deadzone=self.x_deadzone, v_full=self.x_v_full,
+                kp=float(servo_kp), ki=float(servo_ki),
+                max_correction=float(servo_max_correction),
+                min_command_mps=self.min_command_mps,
+                v_full_moving=self.x_v_full_moving,
+                deadzone_moving=self.x_deadzone_moving,
+                move_eps_mps=self.move_eps_mps,
+                # The servo must know the ceiling this node clamps to, or its
+                # anti-windup guards a limit that does not exist.
+                output_limit=self.max_forward_axis)}
+        else:
+            # One measured curve, two identical axes, one servo each.
+            self._servos = {
+                axis: AxisVelocityServo(
+                    0.0, 0.0, curve=ROOSTER_HORIZONTAL_CURVE,
+                    kp=float(servo_kp), ki=float(servo_ki),
+                    max_correction=float(servo_max_correction),
+                    min_command_mps=self.min_command_mps,
+                    output_limit=limit)
+                for axis, limit in (("x", self.max_forward_axis),
+                                    ("y", self.max_lateral_axis))
+                if limit > 0.0}
         if self.use_velocity_servo:
             velocity_topic = (velocity_topic
                               or f"/{self.rooster_id}/velocity_truth")
@@ -366,20 +424,22 @@ class RoosterTwistControlNode(Node):
         # Planar contract: orientation is z=sin(yaw/2), w=cos(yaw/2).
         self._yaw = 2.0 * math.atan2(msg.pose.orientation.z, msg.pose.orientation.w)
 
-    def measured_forward_velocity(self) -> float | None:
-        """Body-frame forward velocity from truth, or None if it is not fresh.
+    def measured_body_velocity(self) -> tuple | None:
+        """Body-frame (forward, lateral) velocity from truth, or None if stale.
 
         Returns:
-            Forward component in m/s, or ``None`` when no velocity has arrived
-            within ``velocity_timeout_sec`` -- in which case the caller must
-            fall back to feed-forward only.
+            ``(forward, lateral)`` in m/s, REP103 body frame (lateral positive
+            = left), or ``None`` when no velocity has arrived within
+            ``velocity_timeout_sec`` -- in which case the caller must fall
+            back to feed-forward only.
         """
         if self._velocity_time is None:
             return None
         if (self.get_clock().now() - self._velocity_time) > self.velocity_timeout:
             return None
         vx, vy = self._world_velocity
-        return vx * math.cos(self._yaw) + vy * math.sin(self._yaw)
+        cos_y, sin_y = math.cos(self._yaw), math.sin(self._yaw)
+        return (vx * cos_y + vy * sin_y, -vx * sin_y + vy * cos_y)
 
     def command_timer_callback(self) -> None:
         now = self.get_clock().now()
@@ -391,8 +451,10 @@ class RoosterTwistControlNode(Node):
     def stop_motion(self) -> None:
         self.current_twist = Twist()
         self._r_axis = 0.0  # stop is immediate, never slew-limited
-        self._x_axis = 0.0
-        self._forward_servo.reset()
+        for axis in self._axis_out:
+            self._axis_out[axis] = 0.0
+        for servo in self._servos.values():
+            servo.reset()
         self._publish_cmd_nav("stop")
 
     def publish_move(self, twist: Twist) -> None:
@@ -406,21 +468,43 @@ class RoosterTwistControlNode(Node):
                         if self.max_yaw_rate else 0.0)
         max_step = self.max_yaw_axis_step_per_sec / self.command_hz
         self._r_axis = slew(target_r, self._r_axis, max_step)
-        if self.use_velocity_servo:
-            ax_x = self._servo_forward_axis(twist.linear.x)
-            ax_y = velocity_to_axis(twist.linear.y, self.y_deadzone,
-                                    self.y_v_full, self.min_command_mps)
-        elif self.use_measured_axis_curve:
-            ax_x = velocity_to_axis(twist.linear.x, self.x_deadzone,
-                                    self.x_v_full, self.min_command_mps)
-            ax_y = velocity_to_axis(twist.linear.y, self.y_deadzone,
-                                    self.y_v_full, self.min_command_mps)
+
+        now = self.get_clock().now()
+        dt = 0.0 if self._servo_tick is None else (
+            (now - self._servo_tick).nanoseconds * 1e-9)
+        self._servo_tick = now
+        v_meas = self.measured_body_velocity()
+
+        if not self.legacy_feedforward:
+            # Measured-curve path: each horizontal axis gets its own servo and
+            # slew state, all in REP103 body frame (lateral positive = left).
+            ax_x = self._servo_axis("x", twist.linear.x,
+                                    None if v_meas is None else v_meas[0], dt)
+            ax_y_left = (self._servo_axis(
+                "y", twist.linear.y,
+                None if v_meas is None else v_meas[1], dt)
+                if "y" in self._servos else 0.0)
+            # Negated at the boundary -- FCU y positive is RIGHT (see module
+            # docstring); everything upstream of this line is REP103.
+            ax_y = -ax_y_left
         else:
-            ax_x = clamp_axis(twist.linear.x / self.max_linear_x * 1000.0
-                              if self.max_linear_x else 0.0)
-            ax_y = clamp_axis(twist.linear.y / self.max_linear_y * 1000.0
-                              if self.max_linear_y else 0.0)
-        # Clamp lateral to keep the airframe flat -- see max_lateral_axis.
+            if self.use_velocity_servo:
+                ax_x = self._servo_axis(
+                    "x", twist.linear.x,
+                    None if v_meas is None else v_meas[0], dt)
+                ax_y = velocity_to_axis(twist.linear.y, self.y_deadzone,
+                                        self.y_v_full, self.min_command_mps)
+            elif self.use_measured_axis_curve:
+                ax_x = velocity_to_axis(twist.linear.x, self.x_deadzone,
+                                        self.x_v_full, self.min_command_mps)
+                ax_y = velocity_to_axis(twist.linear.y, self.y_deadzone,
+                                        self.y_v_full, self.min_command_mps)
+            else:
+                ax_x = clamp_axis(twist.linear.x / self.max_linear_x * 1000.0
+                                  if self.max_linear_x else 0.0)
+                ax_y = clamp_axis(twist.linear.y / self.max_linear_y * 1000.0
+                                  if self.max_linear_y else 0.0)
+        # Lateral ceiling; <=0 disables the axis (the legacy baseline).
         if self.max_lateral_axis <= 0.0:
             ax_y = 0.0
         else:
@@ -481,50 +565,63 @@ class RoosterTwistControlNode(Node):
             f"altitude nudge {step:+.2f}m (now {self._alt_offset_m:+.2f}m from "
             f"the initial hold)")
 
-    def _servo_forward_axis(self, v_cmd: float) -> float:
-        """Forward axis from the velocity servo, degrading to feed-forward alone.
+    def _servo_axis(self, axis: str, v_cmd: float, v_meas: float | None,
+                    dt: float) -> float:
+        """One horizontal axis through its servo, degrading to feed-forward alone.
 
         Args:
-            v_cmd: Requested forward velocity, m/s (signed).
+            axis: ``"x"`` (forward) or ``"y"`` (REP103 lateral, left positive).
+            v_cmd: Requested body velocity along the axis, m/s (signed).
+            v_meas: Measured body velocity along the axis, m/s, or ``None``
+                when the feedback is stale.
+            dt: Seconds since the previous control tick (shared by both axes).
 
         Returns:
-            Axis value in [-1000, 1000].
+            Axis value, slew-limited and clamped to this axis's ceiling.
         """
-        now = self.get_clock().now()
-        dt = 0.0 if self._servo_tick is None else (
-            (now - self._servo_tick).nanoseconds * 1e-9)
-        self._servo_tick = now
-        v_meas = self.measured_forward_velocity()
-        if v_meas is None:
-            # No trustworthy feedback: run open loop and drop the integrator, so
-            # nothing accumulated against a dead estimate survives its return.
-            self._forward_servo.reset()
-            self.get_logger().warn(
-                "velocity feedback stale -- forward axis is feed-forward only",
-                throttle_duration_sec=5.0)
-            target = velocity_to_axis(v_cmd, self.x_deadzone, self.x_v_full,
-                                      self.min_command_mps)
+        servo = self._servos[axis]
+        limit = (self.max_forward_axis if axis == "x"
+                 else self.max_lateral_axis)
+        if v_meas is None or not self.use_velocity_servo:
+            # No trustworthy feedback (or servo disabled): run open loop and
+            # drop the integrator, so nothing accumulated against a dead
+            # estimate survives its return.
+            servo.reset()
+            if self.use_velocity_servo:
+                self.get_logger().warn(
+                    "velocity feedback stale -- %s axis is feed-forward only"
+                    % axis, throttle_duration_sec=5.0)
+            if self.legacy_feedforward:
+                target = velocity_to_axis(v_cmd, self.x_deadzone, self.x_v_full,
+                                          self.min_command_mps)
+            else:
+                target = (0.0 if abs(v_cmd) < self.min_command_mps
+                          else ROOSTER_HORIZONTAL_CURVE.axis_for(v_cmd))
         else:
-            target = self._forward_servo.update(v_cmd, v_meas, dt)
-        target = max(-self.max_forward_axis, min(self.max_forward_axis, target))
-        if self.forward_axis_step_per_sec <= 0.0:
-            self._x_axis = target
+            target = servo.update(v_cmd, v_meas, dt)
+        target = max(-limit, min(limit, target))
+        if axis == "y":
+            step_rate = self.lateral_axis_step_per_sec
+            release_rate = self.lateral_axis_release_per_sec
         else:
-            # Warm-start across the dead band. Ramping up from zero at
-            # forward_axis_step_per_sec spends 620/60 = ~10 ticks (~0.5 s) below
-            # the dead band on EVERY restart of motion, where the platform does
-            # not move at all -- measured 2026-08-18, 25% of a flight's ticks sat
-            # inside the dead band for exactly this reason. Jumping straight to
-            # the edge is not a real step change, because nothing below the edge
-            # reaches the actuator; the ramp then does its job over the part of
-            # the range that actually does something.
-            if self._x_axis == 0.0 and target != 0.0:
+            step_rate = self.forward_axis_step_per_sec
+            release_rate = self.forward_axis_release_per_sec
+        if step_rate <= 0.0:
+            self._axis_out[axis] = target
+        else:
+            # Warm-start across the dead band, legacy curve only. Ramping up
+            # from zero spends ~0.5 s below the old 620-count dead band on
+            # every restart of motion (measured 2026-08-18: 25% of a flight's
+            # ticks). The measured curve has no dead band, so there is no
+            # edge to jump to and the plain ramp is correct.
+            if (self.legacy_feedforward
+                    and self._axis_out[axis] == 0.0 and target != 0.0):
                 edge = min(abs(target), self.x_deadzone)
-                self._x_axis = edge if target > 0.0 else -edge
-            rate = (self.forward_axis_release_per_sec if target == 0.0
-                    else self.forward_axis_step_per_sec)
-            self._x_axis = slew(target, self._x_axis, rate / self.command_hz)
-        return clamp_axis(self._x_axis)
+                self._axis_out[axis] = edge if target > 0.0 else -edge
+            rate = release_rate if target == 0.0 else step_rate
+            self._axis_out[axis] = slew(target, self._axis_out[axis],
+                                        rate / self.command_hz)
+        return clamp_axis(self._axis_out[axis])
 
     def _publish_cmd_nav(self, action: str, **payload) -> None:
         msg = String()
@@ -535,50 +632,45 @@ class RoosterTwistControlNode(Node):
 def main(args=None):
     import argparse
 
+    # Every value argument defaults to None and is passed through ONLY when the
+    # operator actually set it, so the class defaults are the single source of
+    # truth. The old pattern (argparse defaults mirroring the class defaults by
+    # hand) silently overrode two tuned values for days when the copies drifted
+    # -- same failure class as the roslaunch re-declaration lesson in
+    # LESSONS.md, one layer down.
     parser = argparse.ArgumentParser(description="Rooster Twist -> cmd_nav control adapter")
     parser.add_argument("--rooster-id", default="R1")
     parser.add_argument("--cmd-vel-topic", default=None)
-    parser.add_argument("--max-linear-x", type=float, default=0.25)
-    parser.add_argument("--max-linear-y", type=float, default=0.25)
-    parser.add_argument("--max-yaw-rate", type=float, default=1.8)
-    parser.add_argument("--max-yaw-axis-step-per-sec", type=float, default=2500.0)
-    parser.add_argument("--command-hz", type=float, default=20.0)
-    parser.add_argument("--cmd-timeout-sec", type=float, default=0.4)
-    parser.add_argument("--max-lateral-axis", type=float, default=0.0)
+    for name in ("--max-linear-x", "--max-linear-y", "--max-yaw-rate",
+                 "--max-yaw-axis-step-per-sec", "--command-hz",
+                 "--cmd-timeout-sec", "--max-lateral-axis", "--servo-kp",
+                 "--servo-ki", "--servo-max-correction",
+                 "--forward-axis-step-per-sec", "--lateral-axis-step-per-sec",
+                 "--lateral-axis-release-per-sec", "--altitude-nudge-m",
+                 "--altitude-band-m", "--min-command-mps"):
+        parser.add_argument(name, type=float, default=None)
+    parser.add_argument("--legacy-feedforward", action="store_true",
+                        help="fly the pre-2026-08-31 dead-band/two-regime "
+                             "curve with lateral disabled (the A/B baseline)")
     parser.add_argument("--no-velocity-servo", action="store_true",
-                        help="run the forward axis open loop off the measured "
+                        help="run the horizontal axes open loop off the "
                              "curve only (pre-2026-08-18 behaviour)")
-    parser.add_argument("--servo-kp", type=float, default=90.0)
-    parser.add_argument("--servo-ki", type=float, default=220.0)
-    parser.add_argument("--servo-max-correction", type=float, default=350.0)
-    parser.add_argument("--forward-axis-step-per-sec", type=float, default=1200.0)
     parser.add_argument("--no-follow-altitude", action="store_true",
                         help="discard linear.z instead of nudging the hold "
                              "setpoint (pre-2026-08-18 behaviour)")
-    parser.add_argument("--altitude-nudge-m", type=float, default=0.3)
-    parser.add_argument("--altitude-band-m", type=float, default=1.0)
     parsed, _ = parser.parse_known_args()
 
+    kwargs = {name: value for name, value in vars(parsed).items()
+              if value is not None and not name.startswith("no_")
+              and name != "legacy_feedforward"}
+    kwargs["legacy_feedforward"] = parsed.legacy_feedforward
+    if parsed.no_velocity_servo:
+        kwargs["use_velocity_servo"] = False
+    if parsed.no_follow_altitude:
+        kwargs["follow_altitude"] = False
+
     rclpy.init(args=args)
-    node = RoosterTwistControlNode(
-        rooster_id=parsed.rooster_id,
-        cmd_vel_topic=parsed.cmd_vel_topic,
-        max_linear_x=parsed.max_linear_x,
-        max_linear_y=parsed.max_linear_y,
-        max_yaw_rate=parsed.max_yaw_rate,
-        max_yaw_axis_step_per_sec=parsed.max_yaw_axis_step_per_sec,
-        command_hz=parsed.command_hz,
-        cmd_timeout_sec=parsed.cmd_timeout_sec,
-        max_lateral_axis=parsed.max_lateral_axis,
-        use_velocity_servo=not parsed.no_velocity_servo,
-        servo_kp=parsed.servo_kp,
-        servo_ki=parsed.servo_ki,
-        servo_max_correction=parsed.servo_max_correction,
-        forward_axis_step_per_sec=parsed.forward_axis_step_per_sec,
-        follow_altitude=not parsed.no_follow_altitude,
-        altitude_nudge_m=parsed.altitude_nudge_m,
-        altitude_band_m=parsed.altitude_band_m,
-    )
+    node = RoosterTwistControlNode(**kwargs)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

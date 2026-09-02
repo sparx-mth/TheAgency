@@ -106,8 +106,17 @@ class AxisVelocityServo(object):
                  axis_limit=1000.0, min_command_mps=0.0,
                  v_full_moving=0.0, deadzone_moving=0.0, move_eps_mps=0.10,
                  brake_release_margin_mps=0.15, integral_hold_s=0.6,
-                 output_limit=0.0):
-        # type: (float, float, float, float, float, float, float, float, float, float, float, float) -> None
+                 output_limit=0.0, curve=None):
+        # type: (float, float, float, float, float, float, float, float, float, float, float, float, float, object) -> None
+        #: Measured response curve (an ``AxisResponseCurve``). When given, the
+        #: feedforward is its inverse and the dead-band machinery below --
+        #: ``deadzone``/``v_full``, the standing/moving regime pair, and the
+        #: never-mute floor -- is bypassed entirely: the 2026-08-31 manual
+        #: calibration measured the horizontal axes as an expo curve with NO
+        #: dead band, so there is no edge to hold the stick at. Callers should
+        #: also pass ``output_limit=curve.max_counts`` so the anti-windup and
+        #: the ceiling agree with the curve's own last measured point.
+        self.curve = curve
         self.deadzone = float(deadzone)
         self.v_full = float(v_full)
         #: Velocity at full deflection once the aircraft is ALREADY MOVING.
@@ -197,15 +206,21 @@ class AxisVelocityServo(object):
             return 0.0
         self._idle_s = 0.0
 
-        moving = abs(v_meas) >= self.move_eps_mps
-        v_full = self.v_full
-        deadzone = self.deadzone
-        if moving and self.v_full_moving > 0.0:
-            v_full = self.v_full_moving
-            # Both halves of the curve move together, or neither does.
-            if self.deadzone_moving > 0.0:
-                deadzone = self.deadzone_moving
-        ff = feedforward_axis(v_cmd, deadzone, v_full, self.axis_limit)
+        if self.curve is not None:
+            # Measured expo curve: one law for every speed and regime, no dead
+            # band -- so the floor below never engages (deadzone 0).
+            ff = self.curve.axis_for(v_cmd)
+            deadzone = 0.0
+        else:
+            moving = abs(v_meas) >= self.move_eps_mps
+            v_full = self.v_full
+            deadzone = self.deadzone
+            if moving and self.v_full_moving > 0.0:
+                v_full = self.v_full_moving
+                # Both halves of the curve move together, or neither does.
+                if self.deadzone_moving > 0.0:
+                    deadzone = self.deadzone_moving
+            ff = feedforward_axis(v_cmd, deadzone, v_full, self.axis_limit)
         error = v_cmd - v_meas
         self.last_error = error
 

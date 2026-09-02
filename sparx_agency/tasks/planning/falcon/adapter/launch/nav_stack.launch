@@ -1227,6 +1227,11 @@
        code path is wrong. -->
   <arg name="explore_force_mode"  default="none" />          <!-- fixed | snap | none -->
   <arg name="explore_max_speed_xy" default="0.8" />           <!-- must exceed max_vel with headroom; full-scale measured ~1.25 m/s -->
+  <!-- 2026-08-31: command the tracker's full velocity vector (lateral included,
+       now that the axis is measured identical to forward and re-enabled in the
+       twist adapter) instead of course-projected forward only. Default false =
+       pre-change behaviour; the campaign sets it per controller variant. -->
+  <arg name="explore_use_lateral"  default="false" />
   <!-- Snap-up floor: below ~0.26 m/s the platform cannot move continuously
        (measured deadzone), so a smaller request is not worth emitting. -->
   <arg name="explore_min_vxy"      default="0.0" />
@@ -1249,6 +1254,21 @@
        the metric it was aimed at — while stops rose to 3.3-8.2/min from 0.5-5.
        Kept as a parameter because the wiring is the useful part. -->
   <arg name="explore_tracker_pos_kp" default="1.0" />
+  <!-- Seconds of reference-acceleration lead in the tracker. 74% of the
+       remaining tracking error is along-track timing (~0.9 s at cruise),
+       i.e. the plant lag; this is the knob that anticipates it. -->
+  <arg name="explore_accel_lead_s" default="0.25" />
+  <!-- "course" points the nose along travel (needed when lateral was dead);
+       "reference" follows FALCON's own yaw plan, which aims the depth camera
+       at the frontiers it wants to see. yaw_dot_ff_gain feeds traj_server's
+       analytic yaw rate forward so reference mode does not lag. -->
+  <arg name="explore_yaw_mode"     default="course" />
+  <arg name="explore_yaw_dot_ff"   default="0.0" />
+  <!-- Slow yaw sweep while the plan is parked (rad/s). Parked time is what
+       limits both coverage and tracking, and while parked nothing enters
+       the map, so no frontier resolves. Yaw only. 0 disables. -->
+  <arg name="explore_park_scan"    default="0.0" />
+  <arg name="explore_park_scan_after" default="2.0" />
   <!-- How long the pinned hold may keep translation at zero before re-arming.
        It used to be released only by the aircraft moving for 5 s, which the hold
        itself made impossible: one run flew normally for 180 s then covered
@@ -1510,10 +1530,23 @@
        TTL doubling is capped so a shadow lasts at most 180 s instead of 720 s,
        and the amnesty that un-retires frontiers is no longer limited to two
        uses per process. -->
+  <!-- 2026-09-01: the BASE radius was never set either, so it ran at its C++
+       default of 1.5 m. Measured over 41 flights: 91.9% of the time with no
+       moving reference is A*-plan-fail flooding, 86% of that is ONE terminal
+       lock on a single unreachable viewpoint (worst case 254 s, 17,925 plan
+       fails, the same "Next pos" line 17,551 times), and sweepBlockedFrontiers
+       retired ZERO clusters in the locked runs while 10-11 shadows were
+       re-struck. A first strike that only shadows 1.5 m cannot retire a
+       frontier whose viewpoints are sampled out to candidate_rmax 5.5 m, so
+       the tour re-offers the same target forever. 2.75 makes strike 1 cover
+       2.75 m and strike >=2 escalate to min(5.5, radius_max) = 5.5 m exactly,
+       which is the geometric requirement stated above. TTL is untouched. -->
+  <arg name="frontier_blocked_radius"        default="1.5" />
   <arg name="frontier_blocked_radius_max"    default="6.0" />
   <arg name="frontier_blocked_escalate"      default="6.0" />
   <arg name="frontier_blocked_ttl_doubling"  default="1" />
   <arg name="frontier_finish_amnesty_max"    default="20" />
+  <param name="/frontier_finder/blocked_region_radius"            value="$(arg frontier_blocked_radius)" />
   <param name="/frontier_finder/blocked_region_radius_max"        value="$(arg frontier_blocked_radius_max)" />
   <param name="/frontier_finder/blocked_region_escalate_radius"   value="$(arg frontier_blocked_escalate)" />
   <param name="/frontier_finder/blocked_region_ttl_max_doubling"  value="$(arg frontier_blocked_ttl_doubling)" />
@@ -1700,10 +1733,16 @@
     <param name="tilt_limit_deg"  value="$(arg tilt_limit_deg)" />
     <param name="tilt_resume_deg" value="$(arg tilt_resume_deg)" />
     <param name="min_vxy"         value="$(arg explore_min_vxy)" />
+    <param name="use_lateral"     value="$(arg explore_use_lateral)" />
     <param name="course_slew_deg_s" value="$(arg explore_course_slew_deg)" />
     <param name="pinned_hold_sec" value="$(arg explore_pinned_hold_sec)" />
     <param name="escape_cooldown_sec" value="$(arg explore_escape_cooldown_sec)" />
     <param name="tracker_pos_kp" value="$(arg explore_tracker_pos_kp)" />
+    <param name="accel_lead_s" value="$(arg explore_accel_lead_s)" />
+    <param name="yaw_mode"        value="$(arg explore_yaw_mode)" />
+    <param name="yaw_dot_ff_gain" value="$(arg explore_yaw_dot_ff)" />
+    <param name="park_scan_rate"  value="$(arg explore_park_scan)" />
+    <param name="park_scan_after_s" value="$(arg explore_park_scan_after)" />
   </node>
 
   <node pkg="falcon_adapter" type="rooster_bspline_follower_node.py"

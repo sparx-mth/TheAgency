@@ -445,8 +445,9 @@ def assert_launch_params():
         want = C.EXPECTED_ROSPARAMS[name]
         try:
             ok = abs(float(raw) - float(want)) <= 1e-6
-        except ValueError:
-            ok = False
+        except (TypeError, ValueError):
+            # Booleans and strings: rosparam prints "true"/"false".
+            ok = str(raw).strip().lower() == str(want).strip().lower()
         if not ok:
             wrong.append("%s = %s (want %s)" % (name, raw, want))
     if wrong:

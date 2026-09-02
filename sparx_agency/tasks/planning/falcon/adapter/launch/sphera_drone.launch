@@ -210,6 +210,13 @@
   <arg name="max_vel"                 default="0.6" />          <!-- planner speed; coverage = speed x swath and the swath is DA3-limited to ~3.5 m -->
   <arg name="fsm_slow_traj_target_vel" default="0.6" />         <!-- tracks max_vel: a lower target undoes the raise on the segments it fires on -->
   <arg name="explore_max_speed_xy"    default="0.8" />          <!-- must stay above max_vel with headroom -->
+  <arg name="explore_use_lateral"     default="false" />        <!-- 2026-08-31: full-vector tracking incl. lateral; campaign-set -->
+  <arg name="explore_accel_lead_s"    default="0.25" />         <!-- reference-accel lead, s; anticipates the ~1.3 s plant lag -->
+  <arg name="explore_yaw_mode"        default="course" />       <!-- course | reference (FALCON aims the camera) -->
+  <arg name="explore_yaw_dot_ff"      default="0.0" />           <!-- feedforward gain on traj_server yaw_dot -->
+  <arg name="explore_park_scan"       default="0.0" />           <!-- yaw sweep while parked, rad/s -->
+  <arg name="explore_park_scan_after" default="2.0" />           <!-- seconds parked before it starts -->
+  <arg name="frontier_blocked_radius"  default="1.5" />           <!-- base blacklist shadow radius, m -->
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
        and start the FlowNav TRT server (tasks/planning/vlas/flownav/serve/...). -->
@@ -721,6 +728,13 @@
     <arg name="max_vel"                  value="$(arg max_vel)" />
     <arg name="fsm_slow_traj_target_vel"  value="$(arg fsm_slow_traj_target_vel)" />
     <arg name="explore_max_speed_xy"     value="$(arg explore_max_speed_xy)" />
+    <arg name="explore_use_lateral"      value="$(arg explore_use_lateral)" />
+    <arg name="explore_accel_lead_s"     value="$(arg explore_accel_lead_s)" />
+    <arg name="explore_yaw_mode"         value="$(arg explore_yaw_mode)" />
+    <arg name="explore_yaw_dot_ff"       value="$(arg explore_yaw_dot_ff)" />
+    <arg name="explore_park_scan"        value="$(arg explore_park_scan)" />
+    <arg name="explore_park_scan_after"  value="$(arg explore_park_scan_after)" />
+    <arg name="frontier_blocked_radius"  value="$(arg frontier_blocked_radius)" />
     <arg name="vla"                      value="$(arg vla)" />
     <arg name="flownav_goal_image"       value="$(arg flownav_goal_image)" />
     <arg name="flownav_goal_image_topic" value="$(arg flownav_goal_image_topic)" />

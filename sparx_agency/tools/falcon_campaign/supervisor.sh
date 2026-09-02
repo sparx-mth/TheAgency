@@ -48,6 +48,8 @@ GUARDED_MODULES=(
   "sparx_agency/robots/ROBOTICAN/helpers/rooster_unit.py"
   "sparx_agency/robots/ROBOTICAN/rooster_ground_truth_localization.py"
   "sparx_agency/core/control/axis_velocity_servo.py"
+  "sparx_agency/core/control/axis_response_curve.py"
+  "sparx_agency/robots/ROBOTICAN/rooster_axis_curve.py"
 )
 
 say() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }

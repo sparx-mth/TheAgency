@@ -175,6 +175,17 @@ class RoosterUnit:
         # before it multiplies kd. <=0.0 disables filtering (raw velocity,
         # the previous behavior).
         altitude_hold_velocity_filter_tau_s: float = 0.5,
+        # Largest vertical speed a ranger STEP may imply before the sample is
+        # rejected as terrain rather than aircraft motion, m/s. The hold loop
+        # is terrain-relative and previously accepted any finite reading, so
+        # flying over a step change in the floor produced an enormous apparent
+        # error and an enormous correction. Measured 2026-08-31: two flights
+        # ran away to ~3.6 m -- against a 3.8 m flight_band beyond which
+        # exploration_node segfaults -- with the rangefinder reading up to
+        # 11.6 m, which implies ~100 m/s of vertical motion. This airframe's
+        # real vertical speed is well under 1 m/s, so 3.0 rejects only the
+        # physically impossible and cannot bind in normal flight. <=0 disables.
+        altitude_hold_max_ranger_rate: float = 3.0,
         # Was 1.0s -- confirmed live (2026-08-13) that /R1/state (ranger's
         # source) actually updates at ~10Hz, so a 1Hz loop was reacting to
         # only 1 in 10 fresh readings and holding a stale throttle for up to
@@ -232,6 +243,7 @@ class RoosterUnit:
         self.altitude_hold_max_correction = float(altitude_hold_max_correction)
         self.altitude_hold_max_step = float(altitude_hold_max_step)
         self.altitude_hold_velocity_filter_tau_s = float(altitude_hold_velocity_filter_tau_s)
+        self.altitude_hold_max_ranger_rate = float(altitude_hold_max_ranger_rate)
         self.altitude_hold_interval_sec = float(altitude_hold_interval_sec)
         self.max_ranger_m = float(max_ranger_m)
         self.target_ranger_m = float(target_ranger_m)
@@ -354,6 +366,20 @@ class RoosterUnit:
         if self._hold_prev_ranger is not None and self.ranger == self._hold_prev_ranger:
             return
         now = time.monotonic()
+        # Reject a reading that implies impossible vertical motion: the loop is
+        # terrain-relative, so a step in the FLOOR (an opening, a bunk) is not
+        # the aircraft moving, and correcting for it drives a real excursion.
+        # Re-seed on the new terrain instead, so the next tick measures from it.
+        if (self.altitude_hold_max_ranger_rate > 0.0
+                and self._hold_prev_ranger is not None
+                and self._hold_prev_ranger_time is not None):
+            step_dt = now - self._hold_prev_ranger_time
+            if step_dt > 0.0:
+                implied = abs(self.ranger - self._hold_prev_ranger) / step_dt
+                if implied > self.altitude_hold_max_ranger_rate:
+                    self._hold_prev_ranger = self.ranger
+                    self._hold_prev_ranger_time = now
+                    return
         error = self._hold_ranger_target - self.ranger  # +: sunk low, -: drifted high
         raw_velocity = 0.0
         dt = 0.0

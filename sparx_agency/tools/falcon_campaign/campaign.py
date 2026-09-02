@@ -361,6 +361,13 @@ def run_cycle(duration_s=None, follower=None):
     run_dir = new_run_dir()
     summary = {"run_dir": str(run_dir), "started": time.time(),
                "follower": follower or C.EXPLORATION_FOLLOWER,
+               # Which A/B arm flew -- recorded here so no operator has to
+               # remember to label run folders by hand. The lateral cap
+               # distinguishes candidate revisions (round-1 runs, which lack
+               # the key, flew 900).
+               "controller_variant": C.CONTROLLER_VARIANT,
+               "controller_rev": C.CONTROLLER_REV,
+               "lateral_axis_cap": C.LATERAL_AXIS_CAP if C.USE_LATERAL else 0.0,
                "duration_requested_s": duration_s}
     log(run_dir, "=== cycle start: %s ===" % run_dir.name)
 

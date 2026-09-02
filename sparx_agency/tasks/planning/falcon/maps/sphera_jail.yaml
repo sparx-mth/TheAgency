@@ -47,12 +47,18 @@ map_config:
   # bookstore, which also omit these fields).
 
   # ── Bounds ───────────────────────────────────────────────────────
-  # Centered on the drone's actual spawn position above, NOT the origin.
-  # Room scale (±16 m box / ±20 m map) is a doubled placeholder -- still a
-  # guess, adjust once the real jail dimensions are known. `box` is the
-  # hard boundary FALCON maps and explores; `vbox` (virtual boundary) and
-  # `map` (global grid allocation) are the larger extents around it.
-  # Required ordering on every axis: map ⊇ vbox ⊇ box.
+  # 2026-08-31: the REAL prison extents are known (operator-provided from the
+  # Sphera viewport): x [-75, 116], y [-58, 20], 191 x 78 m -- the box below
+  # is bounded by walls on NO side (every exploration run spills past every
+  # edge). An enlargement to the real extents was DEPLOYED AND REVERTED the
+  # same day: FALCON's global coverage tour went from ~0.2 ms to ~10.5 s per
+  # solve (Hgrid cost matrix ~7.7 s + LKH SOP/TSP ~2.8 s -- measured live),
+  # stalling planning. Deliberate decision: perfect tracking on this small
+  # box first, re-enlarge after the planner scales (bigger hgrid cells,
+  # bounded cost-matrix work -- see exploration_preprocessing hgrid.yaml).
+  # `box` is the hard boundary FALCON maps and explores; `vbox` (virtual
+  # boundary) and `map` (global grid allocation) are the larger extents
+  # around it. Required ordering on every axis: map ⊇ vbox ⊇ box.
   #
   # Z bounds raised from 1.7 to comfortably clear the room's real ceiling.
   # Confirmed live: with map_max_z=1.7, the drone hovering pinned against
