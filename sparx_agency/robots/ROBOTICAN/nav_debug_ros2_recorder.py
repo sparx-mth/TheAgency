@@ -231,16 +231,26 @@ class NavDebugRos2Recorder(Node):
         try:
             now, wall, t = time.monotonic(), time.time(), self._ros_time()
             ages = dict((name, self._age(name, now)) for name in self._stamp)
-            self.writer.write(schema.ACTUATOR_FILE,
-                              streams.actuator_row(t, wall, self._latest, ages))
-            self.writer.write(schema.TRUTH_FILE,
-                              streams.truth_row(t, wall, self._latest, ages))
+            # Until a file's streams have produced anything, its row would be
+            # all-null: ~24 MB/hour/file of nothing while the drone is not up.
+            # Once any of them has spoken, write every tick -- a null inside a
+            # live recording means "this stream dropped out", which is a finding.
+            if self._any_received(streams.ACTUATOR_AGE_STREAMS):
+                self.writer.write(schema.ACTUATOR_FILE,
+                                  streams.actuator_row(t, wall, self._latest, ages))
+            if self._any_received(streams.TRUTH_AGE_STREAMS):
+                self.writer.write(schema.TRUTH_FILE,
+                                  streams.truth_row(t, wall, self._latest, ages))
             self.samples += 1
         except Exception as exc:                # a diagnostic never raises
             self._warn("sample", "sample failed: {}".format(exc))
             return
         if self.duration_sec > 0.0 and now - self._start_mono >= self.duration_sec:
             self.finished = True
+
+    def _any_received(self, names):
+        """True once any of ``names`` has ever delivered a message."""
+        return any(self._counts.get(name, 0) > 0 for name in names)
 
     def _age(self, name, now):
         """Seconds since ``name`` last arrived, or ``None`` if it never did."""

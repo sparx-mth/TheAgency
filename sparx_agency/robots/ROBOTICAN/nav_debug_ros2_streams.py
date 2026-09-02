@@ -19,6 +19,9 @@ import math
 
 from sparx_agency.robots.ROBOTICAN.nav_debug_ros2_imports import schema
 
+#: Streams whose arrival makes an ``actuator.jsonl`` row worth writing.
+ACTUATOR_AGE_STREAMS = ("cmd_nav", "manual")
+
 #: Streams whose age is reported alongside the ``truth.jsonl`` values.
 TRUTH_AGE_STREAMS = ("velocity", "attitude", "sphera", "state", "status")
 

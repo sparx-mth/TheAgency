@@ -1055,6 +1055,39 @@ ROBOTICAN_SERVICES: list[Service] = [
         container_name=ROOSTER_CONTAINER,
         proc_pattern="topic hz /R1/manual_control",
     ),
+    # ── Flight recording ──────────────────────────────────────────────────────
+    # The ROS2 half of a nav_debug recording. The ROS1 half (plan, reference,
+    # tracker trace, BEV map) is already automatic -- nav_debug_record defaults
+    # true on sphera_drone.launch -- but the bridge carries none of the actuator
+    # or ground-truth topics, so without this the recording cannot say what the
+    # drone was actually told or what it actually did.
+    Service(
+        name="Nav Debug Recorder (R1)",
+        key="rooster_nav_debug_recorder",
+        group="rooster_debug",
+        description=(
+            "Records the half of the flight loop the ROS1 recorder cannot see: "
+            "/R1/cmd_nav and /R1/manual_control (what the drone was told), "
+            "/R1/velocity_truth + /R1/sphera/state (what it actually did), and the "
+            "axis + altitude traces. Subscribe-only -- publishes nothing, commands "
+            "nothing, and stopping it only ends the recording.\n\n"
+            "Writes to ~/rqs_iai_ws/nav_debug_logs/nav_debug_<stamp>/ros2/ on the "
+            "host. Replay it alongside the FALCON-side run folder with:\n"
+            "  python -m sparx_agency.tasks.planning.nav_debug.run_folder_nav_debug "
+            "--run <falcon run> --ros2 <this ros2 dir>\n\n"
+            "Check manifest_ros2.json's ever_received after a flight: a QoS "
+            "mismatch on the vendor topics shows up as silence, not an error."
+        ),
+        cmd=(
+            "PYTHONPATH=/home/rooster:$PYTHONPATH python3 -m "
+            "sparx_agency.robots.ROBOTICAN.nav_debug_ros2_recorder "
+            "--ros-args -p rooster_id:=R1"
+        ),
+        env="container",
+        machine="container",
+        container_name=ROOSTER_CONTAINER,
+        proc_pattern="nav_debug_ros2_recorder",
+    ),
     # ── Watchdogs ─────────────────────────────────────────────────────────────
     # Unlike the monitors above (read-only, just stream a topic), this one
     # acts: it restarts Sphera itself on dead battery. Deliberately scoped to
@@ -2325,6 +2358,9 @@ with tab_rooster:
 
     st.markdown("#### Planner (Falcon)")
     _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_planner"], states)
+
+    st.markdown("#### Debug recording")
+    _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_debug"], states)
 
     st.markdown("#### Watchdog")
     _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_watchdog"], states)
