@@ -28,15 +28,33 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from typing import Optional
+
 from sparx_agency.tasks.planning.nav_debug.frame import GaugeScales
-from sparx_agency.tasks.planning.nav_debug.render import render
+from sparx_agency.tasks.planning.nav_debug.render import ROOSTER_SCALES, render
 from sparx_agency.tasks.planning.nav_debug.session import NavSession
 
 _WINDOW = "FALCON nav debug (offline replay)"
 
 
-def build_scales() -> GaugeScales:
-    """Gauge full-scales from the live XTEND calibration, or the defaults."""
+def build_scales(which: str = "auto") -> Optional[GaugeScales]:
+    """Gauge full-scales for the run being replayed.
+
+    ``auto`` (the default) returns ``None`` and lets :func:`render.render` pick
+    per frame: a Sphera run carries per-axis actuator traces and gets the Rooster
+    envelope, an XTEND run gets the XTEND one. The envelopes differ by 3-4x, so
+    forcing the wrong one silently mis-scales every command gauge.
+
+    Args:
+        which: ``auto``, ``xtend`` or ``rooster``.
+
+    Returns:
+        The chosen scales, or ``None`` to let the renderer decide.
+    """
+    if which == "auto":
+        return None      # resolved once per run by :func:`resolve_scales`
+    if which == "rooster":
+        return ROOSTER_SCALES
     try:
         from sparx_agency.robots.XTEND.adapters.axis_calibration import XTEND_CALIBRATION as C
         return GaugeScales(
@@ -61,20 +79,17 @@ def _footer(img, i: int, n: int, t: float, playing: bool, map_px: int):
     return np.vstack([img, strip])
 
 
-def export(session: NavSession, scales: GaugeScales, out_dir: str, stride: int,
+def export(session: NavSession, scales: Optional[GaugeScales], out_dir: str, stride: int,
            map_px: int, video: bool, fps: float) -> None:
     """Write an annotated PNG per (strided) frame, and optionally an mp4."""
     frames_dir = Path(out_dir) / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     writer = None
-    size = None
     n = len(session)
-    for i in range(0, n, stride):
-        img = render(session.build(i), scales, map_px)
-        if size is None:
-            size = (img.shape[1], img.shape[0])
-        if (img.shape[1], img.shape[0]) != size:
-            img = cv2.resize(img, size)
+    indices = list(range(0, n, stride))
+    size = _canvas_size(session, scales, map_px, indices)
+    for i in indices:
+        img = _fit(render(session.build(i), scales, map_px), size)
         cv2.imwrite(str(frames_dir / ("%06d.png" % i)), img)
         if video:
             if writer is None:
@@ -87,7 +102,50 @@ def export(session: NavSession, scales: GaugeScales, out_dir: str, stride: int,
                                           " (+ replay.mp4)" if video else ""))
 
 
-def play(session: NavSession, scales: GaugeScales, map_px: int, start: int) -> None:
+def _canvas_size(session: NavSession, scales, map_px: int, indices) -> tuple:
+    """The widest/tallest frame layout in the run, as ``(w, h)``.
+
+    The screen grows a lane column only on frames that have Sphera lane data, so
+    sizing the export from frame 0 alone would squash every later frame. Sample
+    across the run instead: a handful of renders is cheap next to the export.
+    """
+    probes = indices[:: max(1, len(indices) // 12)][:12] or [0]
+    shapes = [render(session.build(i), scales, map_px).shape for i in probes]
+    return (max(sh[1] for sh in shapes), max(sh[0] for sh in shapes))
+
+
+def _fit(img: np.ndarray, size: tuple) -> np.ndarray:
+    """Place ``img`` on a ``size`` canvas -- padded, not rescaled, when smaller.
+
+    Rescaling a narrower frame up to the canvas would silently change the pixel
+    scale of the map and every gauge from frame to frame.
+    """
+    width, height = size
+    if (img.shape[1], img.shape[0]) == size:
+        return img
+    if img.shape[1] > width or img.shape[0] > height:
+        img = cv2.resize(img, (min(img.shape[1], width), min(img.shape[0], height)))
+    canvas = np.zeros((height, width, 3), np.uint8)
+    canvas[: img.shape[0], : img.shape[1]] = img
+    return canvas
+
+
+def resolve_scales(session: NavSession) -> GaugeScales:
+    """Pick one envelope for the whole run, from whichever lanes it recorded.
+
+    Which airframe flew is a property of the run; deciding per frame would flip
+    between envelopes that differ by 3.5x whenever a lane momentarily blanks.
+    """
+    step = max(1, len(session) // 40)
+    for i in range(0, len(session), step):
+        frame = session.build(i)
+        if frame.axes or frame.actuator is not None or frame.altitude is not None:
+            return ROOSTER_SCALES
+    return GaugeScales()
+
+
+def play(session: NavSession, scales: Optional[GaugeScales], map_px: int,
+         start: int) -> None:
     """Interactive window: step or play through the run."""
     n = len(session)
     i = max(0, min(start, n - 1))
@@ -148,14 +206,20 @@ def main() -> None:
     ap.add_argument("--map-px", type=int, default=900,
                     help="BEV display size, longest edge (bigger = larger window; z/x adjust live)")
     ap.add_argument("--start", type=int, default=0, help="first frame index (interactive)")
+    ap.add_argument("--ros2", default=None, metavar="DIR",
+                    help="the ROS2 recorder's lane directory, when it was not "
+                         "collected into the run folder (default: <run>/ros2)")
+    ap.add_argument("--scales", choices=("auto", "xtend", "rooster"), default="auto",
+                    help="gauge full-scales (default: auto -- Rooster for a run with "
+                         "actuator traces, XTEND otherwise)")
     args = ap.parse_args()
 
-    session = NavSession(args.run, args.csv)
+    session = NavSession(args.run, args.csv, args.ros2)
     dur = session.rows[-1]["t"] - session.rows[0]["t"]
     print("[nav_debug] %d frames over %.1fs | csv=%s" % (
         len(session), dur, os.path.basename(session.csv_path or "-- (telemetry only)")))
 
-    scales = build_scales()
+    scales = build_scales(args.scales) or resolve_scales(session)
     if args.export:
         export(session, scales, args.export, max(1, args.stride), args.map_px,
                not args.no_video, args.fps)

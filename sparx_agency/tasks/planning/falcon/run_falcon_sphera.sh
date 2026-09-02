@@ -211,21 +211,40 @@ fi
 # destroyed it (confirmed live 2026-07-28: the whole last flight's log was
 # gone after a routine restart, with no warning). Mount it to a host dir so
 # it survives container recreation; nav_debug_recorder_node.py's own
-# fallback path (no FALCON_RUN_DIR set) is exactly /root/.ros/falcon, so no
-# other env var needs setting for this to take effect.
+# fallback path is exactly /root/.ros/falcon, and the FALCON_RUN_DIR set
+# below names a per-run folder inside it, so every writer lands on the host.
 FALCON_LOG_HOST="${HOME}/.cache/sparx_agency/falcon_nav_logs/sphera"
 mkdir -p "${FALCON_LOG_HOST}"
 FALCON_LOG_MOUNT=( --volume "${FALCON_LOG_HOST}:/root/.ros/falcon" )
 
-# thinking_log_path/certainty_log_path (mission.yaml/mission_sphera.yaml) name
-# /tmp/falcon on the HOST as their intended landing spot, but nothing actually
-# mounted that path -- FALCON_THOUGHT_LOG/FALCON_CERTAINTY_LOG were unset, so
-# nav_stack.launch's own fallback ('' -> ~/.ros/falcon/, i.e. FALCON_LOG_MOUNT
-# above) silently took over instead. Mount /tmp/falcon for real and point
-# both env vars at it explicitly so these logs land where the comments say.
+# /tmp/falcon stays mounted: it is still the fallback landing spot for anything
+# else in the container that writes a log (apriltag_quality_log, the commented
+# log paths in mission*.yaml), and nothing else bind-mounts it.
 mkdir -p /tmp/falcon
-FALCON_THOUGHT_LOG_MOUNT=( --volume /tmp/falcon:/tmp/falcon )
+FALCON_TMP_LOG_MOUNT=( --volume /tmp/falcon:/tmp/falcon )
+
+# ── One run folder per flight, one stamp ──────────────────────────────────
+# FALCON_RUN_DIR was never exported here, so the recorder, the thought journal
+# and the certainty CSV each got their own stamp and the manifest named a CSV
+# that was not in the run folder. One folder, one stamp, per nav_debug/README.
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
+RUN_NAME="nav_debug_${RUN_STAMP}"
+# Two names for ONE directory, through FALCON_LOG_MOUNT above: the host side for
+# anything outside the container, the falcon side for the ROS1 writers.
+RUN_DIR_HOST="${FALCON_LOG_HOST}/${RUN_NAME}"
+RUN_DIR_IN_FALCON="/root/.ros/falcon/${RUN_NAME}"
+mkdir -p "${RUN_DIR_HOST}"
+# Relative, so "the run in progress" resolves on both sides of that mount.
+ln -sfn "${RUN_NAME}" "${FALCON_LOG_HOST}/current_run"
+
+# The ROS2 half of the recording runs in ANOTHER container, so this has to be a
+# path valid THERE: robotican_dev bind-mounts ${HOME}/.cache/sparx_agency at the
+# identical host path (docker-compose.robotican.yml). The vendor 'it' container
+# mounts neither this folder nor /tmp/falcon, so a recorder running there must
+# write a dir of its own and be copied out, the way falcon_campaign does it.
+export NAV_DEBUG_RUN_DIR="${RUN_DIR_HOST}"
+echo "[INFO] nav_debug run folder: ${RUN_DIR_HOST}"
+echo "[INFO] ROS2 recorder: pass -e NAV_DEBUG_RUN_DIR=${RUN_DIR_HOST} where it runs"
 
 # ── Run ───────────────────────────────────────────────────────
 # NOTE: the map YAML below is intentionally still a single-file mount, NOT
@@ -256,14 +275,15 @@ docker run -it --rm \
     --volume /tmp/.X11-unix:/tmp/.X11-unix:rw \
     --volume "${SPARX_PARENT}/sparx_agency:/opt/sparx_agency:ro" \
     --env PYTHONPATH=/opt:/catkin_ws/src/falcon_adapter/scripts \
-    --env FALCON_THOUGHT_LOG="/tmp/falcon/thinking_${RUN_STAMP}.log" \
-    --env FALCON_CERTAINTY_LOG="/tmp/falcon/certainty_${RUN_STAMP}.csv" \
+    --env FALCON_RUN_DIR="${RUN_DIR_IN_FALCON}" \
+    --env FALCON_THOUGHT_LOG="${RUN_DIR_IN_FALCON}/thinking_${RUN_STAMP}.log" \
+    --env FALCON_CERTAINTY_LOG="${RUN_DIR_IN_FALCON}/certainty_${RUN_STAMP}.csv" \
     "${SCRIPT_MOUNTS[@]}" \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
     "${FALCON_LOG_MOUNT[@]}" \
-    "${FALCON_THOUGHT_LOG_MOUNT[@]}" \
+    "${FALCON_TMP_LOG_MOUNT[@]}" \
     --volume "${MAP_EXPANDED}:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     "${RVIZ_MOUNT[@]}" \
     --network host \

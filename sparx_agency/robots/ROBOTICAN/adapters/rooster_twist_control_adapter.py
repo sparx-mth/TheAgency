@@ -51,12 +51,22 @@ an instantaneous step change in commanded rate excites it into oscillation.
 Ramping the output here smooths that without touching the PX4 param.
 max_yaw_axis_step_per_sec=2500 is a first, conservative guess -- live-test
 and retune. See LESSONS.md.
+
+**2026-09-02 addition**: a per-tick diagnostic trace on
+``schema.AXIS_TRACE_TOPIC`` (see :meth:`RoosterTwistControlNode._publish_trace`).
+Four stages -- the measured curve's feed-forward, the PI servo, the rate limiter
+and the per-axis ceiling -- can each be the reason the drone is not moving as
+asked, and none of them was observable from outside this process. The trace is
+additive: it is built from state the control path already computed, published
+after the command, guarded against every failure, and removed entirely by
+``nav_debug_trace:=false``.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -72,6 +82,87 @@ from sparx_agency.robots.ROBOTICAN.rooster_axis_curve import (
     ROOSTER_HORIZONTAL_CURVE,
 )
 from sparx_agency.robots.common.math_utils import clamp_axis, slew
+
+try:
+    from sparx_agency.tasks.planning.nav_debug import schema as nav_debug_schema
+except Exception:      # noqa: BLE001 -- a missing diagnostic must not stop flight
+    nav_debug_schema = None
+
+#: The nav-debug contract's topic, with a literal fallback for an environment
+#: where ``sparx_agency.tasks.planning.nav_debug`` is not importable. The "/R1/"
+#: prefix is re-namespaced per drone by :func:`_trace_topic`.
+AXIS_TRACE_TOPIC = getattr(nav_debug_schema, "AXIS_TRACE_TOPIC",
+                           "/R1/nav_debug/axis_trace")
+
+
+def _trace_topic(template: str, rooster_id: str) -> str:
+    """The contract topic, re-namespaced when this drone is not ``R1``."""
+    return template.replace("/R1/", "/%s/" % rooster_id, 1)
+
+
+def _node_flag(node: Node, name: str, default: bool) -> bool:
+    """Read a boolean node parameter, declaring it if it is not declared yet.
+
+    Never raises: a diagnostic switch that could take the node down at start-up
+    would be worse than the diagnostic being missing.
+    """
+    try:
+        node.declare_parameter(name, bool(default))
+    except Exception:      # noqa: BLE001 -- already declared, or no parameters
+        pass
+    try:
+        return bool(node.get_parameter(name).value)
+    except Exception:      # noqa: BLE001
+        return bool(default)
+
+
+def _row(t: float, wall: float, **fields) -> dict:
+    """One trace row, via the shared schema when it is importable.
+
+    Args:
+        t: ROS time of the tick, seconds.
+        wall: Host wall clock, seconds -- the cross-recorder join key.
+        **fields: The row's payload.
+
+    Returns:
+        A dict ready for ``json.dumps``, carrying both clocks.
+    """
+    if nav_debug_schema is not None:
+        return nav_debug_schema.row(t, wall, **fields)
+    out = {"t": round(float(t), 3), "wall": round(float(wall), 3)}
+    out.update(fields)
+    return out
+
+
+def servo_feedforward(servo: AxisVelocityServo, v_cmd: float,
+                      v_meas: float | None) -> float:
+    """Recompute one servo's feed-forward term for the diagnostic trace.
+
+    Read-only and side-effect free: it reads the servo's OWN configuration
+    (its curve, or its standing/moving dead-band pair) rather than the node's
+    copies, so it cannot drift from what the servo actually used. The servo
+    does not expose the term itself, and deriving it as ``output - correction``
+    would be wrong exactly where it matters -- at saturation.
+
+    Args:
+        servo: The axis servo that produced this tick's command.
+        v_cmd: Requested velocity along the axis, m/s (signed).
+        v_meas: Measured velocity along the axis, m/s, or None if stale.
+
+    Returns:
+        The feed-forward axis value, in counts.
+    """
+    if abs(v_cmd) < servo.min_command_mps:
+        return 0.0
+    if servo.curve is not None:
+        return servo.curve.axis_for(v_cmd)
+    v_full, deadzone = servo.v_full, servo.deadzone
+    moving = v_meas is not None and abs(v_meas) >= servo.move_eps_mps
+    if moving and servo.v_full_moving > 0.0:
+        v_full = servo.v_full_moving
+        if servo.deadzone_moving > 0.0:
+            deadzone = servo.deadzone_moving
+    return feedforward_axis(v_cmd, deadzone, v_full, servo.axis_limit)
 
 
 def velocity_to_axis(v_mps: float, deadzone: float, v_full: float,
@@ -298,6 +389,11 @@ class RoosterTwistControlNode(Node):
         # it was holding when tracking began, metres. A runaway vz demand can
         # then bias the cruise height but never fly it into the ceiling or floor.
         altitude_band_m: float = 0.3,
+        # Publish the per-tick per-axis internals for nav_debug. Default on: it
+        # is one String at the command rate, and without it the four stages
+        # between a requested m/s and the counts actually sent are invisible.
+        # Overridable at runtime by the ROS parameter of the same name.
+        nav_debug_trace: bool = True,
     ):
         super().__init__(f"{rooster_id.lower()}_twist_control")
 
@@ -403,13 +499,21 @@ class RoosterTwistControlNode(Node):
             self.create_subscription(
                 PoseStamped, pose_topic, self._pose_callback, 10)
 
+        # ── Diagnostic trace (additive; never touches a command) ───────────
+        self.nav_debug_trace = _node_flag(self, "nav_debug_trace", nav_debug_trace)
+        self.axis_trace_topic = _trace_topic(AXIS_TRACE_TOPIC, self.rooster_id)
+        self.trace_pub = (self.create_publisher(String, self.axis_trace_topic, 10)
+                          if self.nav_debug_trace else None)
+        self._axis_trace = []           # per-tick AxisTrace records
+
         self.command_timer = self.create_timer(
             1.0 / float(command_hz), self.command_timer_callback)
 
         self.get_logger().info(
             f"RoosterTwistControlNode ready\n"
             f"  cmd_vel: {self.cmd_vel_topic}\n"
-            f"  cmd_nav: {self.cmd_nav_topic} (action=move, x/y/r only)"
+            f"  cmd_nav: {self.cmd_nav_topic} (action=move, x/y/r only)\n"
+            f"  trace:   {self.axis_trace_topic if self.trace_pub else 'disabled'}"
         )
 
     def cmd_vel_callback(self, msg: Twist) -> None:
@@ -443,8 +547,10 @@ class RoosterTwistControlNode(Node):
 
     def command_timer_callback(self) -> None:
         now = self.get_clock().now()
+        self._axis_trace = []
         if (now - self.last_cmd_time) > self.cmd_timeout:
             self.stop_motion()
+            self._publish_trace(Twist(), None, stopped=True)
             return
         self.publish_move(self.current_twist)
 
@@ -517,6 +623,9 @@ class RoosterTwistControlNode(Node):
             "r": clamp_axis(self._r_axis),
         }
         self._publish_cmd_nav("move", axes=axes)
+        # Traced last, so the axis list reads forward, lateral, yaw.
+        self._trace_yaw(twist.angular.z, target_r)
+        self._publish_trace(twist, axes)
 
     def _follow_altitude(self, vz: float) -> None:
         """Spend a vertical velocity demand as nudges of the hold setpoint.
@@ -621,12 +730,112 @@ class RoosterTwistControlNode(Node):
             rate = release_rate if target == 0.0 else step_rate
             self._axis_out[axis] = slew(target, self._axis_out[axis],
                                         rate / self.command_hz)
-        return clamp_axis(self._axis_out[axis])
+        counts = clamp_axis(self._axis_out[axis])
+        self._trace_axis(axis, v_cmd, v_meas, target, counts, limit)
+        return counts
 
     def _publish_cmd_nav(self, action: str, **payload) -> None:
         msg = String()
         msg.data = json.dumps({"action": action, **payload})
         self.cmd_nav_pub.publish(msg)
+
+    # ── Diagnostic trace ──────────────────────────────────────────────────
+    # Every value below is REP103 body frame (lateral positive = left, yaw
+    # positive = CCW). The cmd_nav boundary negates lateral and yaw, so for
+    # those two axes the counts here are the NEGATION of what appears on
+    # /<id>/cmd_nav -- see the module docstring.
+
+    def _trace_axis(self, axis: str, v_cmd: float, v_meas: float | None,
+                    target: float, counts: float, limit: float) -> None:
+        """Record one horizontal axis, from requested m/s to the counts sent.
+
+        Args:
+            axis: ``"x"`` (forward) or ``"y"`` (lateral).
+            v_cmd: Requested body velocity, m/s.
+            v_meas: Measured body velocity, m/s, or None when feedback is stale.
+            target: Axis value before the rate limiter, in counts.
+            counts: Axis value actually sent, in counts.
+            limit: This axis's count ceiling.
+        """
+        if self.trace_pub is None:
+            return
+        try:
+            servo = self._servos[axis]
+            stale = v_meas is None or not self.use_velocity_servo
+            self._axis_trace.append({
+                "name": "forward" if axis == "x" else "lateral",
+                "requested": float(v_cmd),
+                "measured": 0.0 if v_meas is None else float(v_meas),
+                "error": 0.0 if stale else float(servo.last_error),
+                "feed_forward": servo_feedforward(servo, v_cmd, v_meas),
+                "integral": float(servo.integral),
+                "correction": 0.0 if stale else float(servo.last_correction),
+                "pre_slew": float(target),
+                "counts": float(counts),
+                "saturated": bool(not stale and abs(servo.last_correction)
+                                  >= servo.max_correction - 1e-6),
+                "slew_limited": bool(abs(self._axis_out[axis] - target) > 1e-9),
+                "capped": bool(limit > 0.0 and abs(counts) >= limit - 1e-6),
+                "feedback_stale": bool(stale),
+            })
+        except Exception as exc:      # noqa: BLE001 -- drop the trace, not the flight
+            self.get_logger().warn(f"nav_debug axis trace dropped: {exc!r}",
+                                   throttle_duration_sec=10.0)
+
+    def _trace_yaw(self, wz: float, target_r: float) -> None:
+        """Record the yaw axis, which runs open loop off the measured r curve.
+
+        Args:
+            wz: Requested yaw rate, rad/s (REP103, positive CCW).
+            target_r: Axis value before the rate limiter, FCU sign.
+        """
+        if self.trace_pub is None:
+            return
+        try:
+            counts = clamp_axis(self._r_axis)
+            self._axis_trace.append({
+                "name": "yaw",
+                "requested": float(wz),
+                "measured": 0.0, "error": 0.0,   # no yaw-rate feedback exists
+                "feed_forward": -float(target_r),
+                "integral": 0.0, "correction": 0.0,
+                "pre_slew": -float(target_r),
+                "counts": -float(counts),
+                "saturated": False,
+                "slew_limited": bool(abs(self._r_axis - target_r) > 1e-9),
+                "capped": bool(abs(counts) >= 1000.0 - 1e-6),
+                "feedback_stale": False,
+            })
+        except Exception as exc:      # noqa: BLE001 -- drop the trace, not the flight
+            self.get_logger().warn(f"nav_debug yaw trace dropped: {exc!r}",
+                                   throttle_duration_sec=10.0)
+
+    def _publish_trace(self, twist: Twist, axes: dict | None,
+                       stopped: bool = False) -> None:
+        """Publish this tick's per-axis internals. Never raises, never commands.
+
+        Args:
+            twist: The Twist this tick acted on.
+            axes: The cmd_nav axes actually sent, or None on a stop.
+            stopped: True when the command timeout fired instead of a move.
+        """
+        if self.trace_pub is None:
+            return
+        try:
+            now = self.get_clock().now().nanoseconds * 1e-9
+            row = _row(now, time.time(),
+                       axes=self._axis_trace,
+                       twist={"vx": twist.linear.x, "vy": twist.linear.y,
+                              "vz": twist.linear.z, "wz": twist.angular.z},
+                       cmd_nav=axes,
+                       stopped=bool(stopped),
+                       feedback_stale=self.measured_body_velocity() is None,
+                       altitude_offset_m=self._alt_offset_m,
+                       altitude_pending_m=self._pending_alt_m)
+            self.trace_pub.publish(String(data=json.dumps(row)))
+        except Exception as exc:      # noqa: BLE001 -- drop the trace, not the flight
+            self.get_logger().warn(f"nav_debug trace dropped: {exc!r}",
+                                   throttle_duration_sec=10.0)
 
 
 def main(args=None):
@@ -658,6 +867,8 @@ def main(args=None):
     parser.add_argument("--no-follow-altitude", action="store_true",
                         help="discard linear.z instead of nudging the hold "
                              "setpoint (pre-2026-08-18 behaviour)")
+    parser.add_argument("--no-nav-debug-trace", action="store_true",
+                        help="do not publish the per-axis nav_debug trace")
     parsed, _ = parser.parse_known_args()
 
     kwargs = {name: value for name, value in vars(parsed).items()
@@ -668,6 +879,8 @@ def main(args=None):
         kwargs["use_velocity_servo"] = False
     if parsed.no_follow_altitude:
         kwargs["follow_altitude"] = False
+    if parsed.no_nav_debug_trace:
+        kwargs["nav_debug_trace"] = False
 
     rclpy.init(args=args)
     node = RoosterTwistControlNode(**kwargs)

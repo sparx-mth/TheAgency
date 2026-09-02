@@ -577,6 +577,20 @@
   <arg name="max_predicted_replans" default="3" />
   <arg name="min_free_cells_to_plan" default="80" />
   <arg name="nav_debug_record" default="true" />
+  <!-- Sphera flies nav_mode:=exploration, where every A*-chain topic the
+       recorder defaults to is gated off, which is why recorded runs were
+       near-empty. These name the exploration chain instead; override to
+       retarget. nav_debug_trace also gates the follower's trace publisher. -->
+  <arg name="nav_debug_control_trace_topic" default="/nav_debug/control_trace" />
+  <arg name="nav_debug_executed_path_topic" default="/falcon/executed_path" />
+  <arg name="nav_debug_go_status_topic" default="/mission/go_status" />
+  <arg name="nav_debug_map_pose_topic" default="/map_ros/pose" />
+  <arg name="nav_debug_planned_path_topic" default="/falcon/planned_path" />
+  <arg name="nav_debug_recovery_topic" default="/recovery/status" />
+  <arg name="nav_debug_reference_topic" default="/planning/pos_cmd" />
+  <arg name="nav_debug_replan_topic" default="/planning/replan" />
+  <arg name="nav_debug_thinking_topic" default="/nav/thinking" />
+  <arg name="nav_debug_trace" default="$(arg nav_debug_record)" />
   <arg name="plan_period_s" default="10.0" />
   <arg name="pp_cruise_speed" default="0.2" />
   <arg name="pp_holonomic" default="false" />
@@ -947,6 +961,16 @@
     <arg name="max_predicted_replans" value="$(arg max_predicted_replans)" />
     <arg name="min_free_cells_to_plan" value="$(arg min_free_cells_to_plan)" />
     <arg name="nav_debug_record" value="$(arg nav_debug_record)" />
+    <arg name="nav_debug_control_trace_topic" value="$(arg nav_debug_control_trace_topic)" />
+    <arg name="nav_debug_executed_path_topic" value="$(arg nav_debug_executed_path_topic)" />
+    <arg name="nav_debug_go_status_topic" value="$(arg nav_debug_go_status_topic)" />
+    <arg name="nav_debug_map_pose_topic" value="$(arg nav_debug_map_pose_topic)" />
+    <arg name="nav_debug_planned_path_topic" value="$(arg nav_debug_planned_path_topic)" />
+    <arg name="nav_debug_recovery_topic" value="$(arg nav_debug_recovery_topic)" />
+    <arg name="nav_debug_reference_topic" value="$(arg nav_debug_reference_topic)" />
+    <arg name="nav_debug_replan_topic" value="$(arg nav_debug_replan_topic)" />
+    <arg name="nav_debug_thinking_topic" value="$(arg nav_debug_thinking_topic)" />
+    <arg name="nav_debug_trace" value="$(arg nav_debug_trace)" />
     <arg name="plan_period_s" value="$(arg plan_period_s)" />
     <arg name="pp_cruise_speed" value="$(arg pp_cruise_speed)" />
     <arg name="pp_holonomic" value="$(arg pp_holonomic)" />

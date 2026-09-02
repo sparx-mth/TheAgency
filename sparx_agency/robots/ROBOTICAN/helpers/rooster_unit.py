@@ -7,21 +7,44 @@ adapters/rooster_command_unit.py, whose job is to accept commands from
 any source - the manual Tkinter UI today, a planner node in the future -
 over a single ROS topic and call into this same RoosterUnit instance. That
 way there is exactly one place per drone that can arm/disarm/move it.
+
+2026-09-02: the altitude-hold loop also publishes a per-tick diagnostic trace
+(see _publish_altitude_trace). The vertical lane is owned by three processes
+across two ROS versions and its only record was a printf, while the
+rangefinder plausibility gate rejected samples and returned SILENTLY - a gate
+firing every tick was indistinguishable from a healthy hold, which is exactly
+the blind spot behind the open "flights climb past 2 m" defect. The trace is
+additive: it publishes after the axis is written, every failure inside it is
+swallowed, and the node parameter nav_debug_trace:=false removes it.
 """
 
 from __future__ import annotations
 
+import json
+import math
 import threading
 import time
 from typing import Callable, Optional
 
 from rclpy.node import Node
+from std_msgs.msg import String
 from std_srvs.srv import SetBool
 from fcu_driver_interfaces.msg import ManualControl
 from rooster_handler_interfaces.msg import KeepAlive
 from rooster_manager_interfaces.msg import RoosterState
 
 from sparx_agency.robots.common.math_utils import clamp_symmetric
+
+try:
+    from sparx_agency.tasks.planning.nav_debug import schema as nav_debug_schema
+except Exception:      # noqa: BLE001 -- a missing diagnostic must not stop flight
+    nav_debug_schema = None
+
+# The nav-debug contract's topic, with a literal fallback for an environment
+# where sparx_agency.tasks.planning.nav_debug is not importable. The "/R1/"
+# prefix is re-namespaced per drone by _trace_topic().
+ALTITUDE_TRACE_TOPIC = getattr(nav_debug_schema, "ALTITUDE_TRACE_TOPIC",
+                               "/R1/nav_debug/altitude_trace")
 
 # From RoosterState.msg / KeepAlive.msg (rooster_manager_interfaces,
 # rooster_handler_interfaces). Only POSITION and ALTITUDE are currently
@@ -57,6 +80,53 @@ GROUND_RANGER_M = 0.3
 # rangefinder is reading floor clutter as often as floor, and the hold loop
 # starts chasing furniture. See nudge_altitude_target().
 MIN_ALTITUDE_TARGET_M = 0.6
+
+
+def _trace_topic(template: str, rooster_id: str) -> str:
+    """The contract topic, re-namespaced when this drone is not ``R1``."""
+    return template.replace("/R1/", "/%s/" % rooster_id, 1)
+
+
+def _finite(value) -> Optional[float]:
+    """``value`` as a float, or None if it is not finite (JSON has no inf)."""
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _row(t: float, wall: float, **fields) -> dict:
+    """One trace row, via the shared schema when it is importable.
+
+    Args:
+        t: ROS time of the tick, seconds.
+        wall: Host wall clock, seconds -- the cross-recorder join key.
+        **fields: The row's payload.
+
+    Returns:
+        A dict ready for ``json.dumps``, carrying both clocks.
+    """
+    if nav_debug_schema is not None:
+        return nav_debug_schema.row(t, wall, **fields)
+    out = {"t": round(float(t), 3), "wall": round(float(wall), 3)}
+    out.update(fields)
+    return out
+
+
+def _node_flag(node: Node, name: str, default: bool) -> bool:
+    """Read a boolean node parameter, declaring it if the owner has not.
+
+    Never raises: a diagnostic switch that could take the node down at start-up
+    would be worse than the diagnostic being missing.
+    """
+    try:
+        node.declare_parameter(name, bool(default))
+    except Exception:      # noqa: BLE001 -- already declared by the owning node
+        pass
+    try:
+        return bool(node.get_parameter(name).value)
+    except Exception:      # noqa: BLE001
+        return bool(default)
 
 
 class AxisModel:
@@ -225,6 +295,11 @@ class RoosterUnit:
         # manual_control that cannot be removed, so 1 "other" is normal here.
         # Anything above this is a real second altitude authority.
         expected_other_manual_publishers: int = 1,
+        # Publish the per-tick altitude-lane trace for nav_debug. Default on:
+        # it is one String at the hold rate, and it is the only record of a
+        # lane no single process owns. The node parameter of the same name
+        # wins over this default.
+        nav_debug_trace: bool = True,
     ):
         self.id = rooster_id
         self.node = node
@@ -290,6 +365,19 @@ class RoosterUnit:
         self._hold_prev_ranger_time: Optional[float] = None
         self._hold_filtered_velocity: Optional[float] = None
 
+        # ── Altitude diagnostic trace (additive; never touches an axis) ────
+        self.nav_debug_trace = _node_flag(node, "nav_debug_trace", nav_debug_trace)
+        #: Rangefinder samples the plausibility gate has rejected. The gate used
+        #: to return with no counter and no log, so a gate firing every tick was
+        #: indistinguishable from a healthy hold.
+        self.guard_rejects_total = 0
+        self._trace_nudge_m = 0.0      # last requested setpoint change, reported once
+        self._trace_reason = "starting"
+        self._trace_wanted_z: Optional[float] = None
+        self._trace_sent_z: Optional[float] = None
+        self._trace_error_m: Optional[float] = None
+        self._trace_at_ceiling = False
+
         self.manual_pub = node.create_publisher(
             ManualControl, f"/{rooster_id}/manual_control", 10)
         self.keep_alive_pub = node.create_publisher(
@@ -298,7 +386,11 @@ class RoosterUnit:
             RoosterState, f"/{rooster_id}/state", self._state_cb, 10)
         self.force_arm_client = node.create_client(
             SetBool, f"/{rooster_id}/fcu/command/force_arm")
-        node.create_timer(float(altitude_hold_interval_sec), self._altitude_hold_tick)
+        self.altitude_trace_pub = (
+            node.create_publisher(
+                String, _trace_topic(ALTITUDE_TRACE_TOPIC, rooster_id), 10)
+            if self.nav_debug_trace else None)
+        node.create_timer(float(altitude_hold_interval_sec), self._altitude_tick)
         # Altitude authority must be EXCLUSIVE. This class is documented as the
         # single owner of manual_control, but nothing enforced it -- and on
         # 2026-08-17 a stray examples/position_fly_controller.py silently
@@ -348,14 +440,32 @@ class RoosterUnit:
         msg.command_reboot = False
         self.keep_alive_pub.publish(msg)
 
+    def _altitude_tick(self):
+        """Timer entry: run the hold loop, then publish its trace.
+
+        The trace is published in a ``finally`` so a tick that raises is still
+        recorded, and after the loop so it can never delay or change the axis.
+        """
+        self._trace_reason = "held"
+        self._trace_wanted_z = None
+        self._trace_sent_z = None
+        self._trace_error_m = None
+        self._trace_at_ceiling = False
+        try:
+            self._altitude_hold_tick()
+        finally:
+            self._publish_altitude_trace()
+
     def _altitude_hold_tick(self):
         """PD correction toward the ranger reading captured when hover
         began. A no-op unless a takeoff has actually engaged hold (see
         _enable_altitude_hold) -- land() disables it immediately so it
         never fights a commanded descent."""
         if not self._holding_altitude or self._hold_ranger_target is None:
+            self._trace_reason = "not_holding"
             return
         if self.ranger == float("inf"):
+            self._trace_reason = "no_ranger"
             return
         # Loop runs at ~10Hz, about the same as /R1/state's own update rate,
         # so about half the ticks see no new ranger sample at all. Treating
@@ -364,6 +474,7 @@ class RoosterUnit:
         # oscillation this caused. Skip entirely until a genuinely new
         # sample arrives instead of guessing a false zero velocity.
         if self._hold_prev_ranger is not None and self.ranger == self._hold_prev_ranger:
+            self._trace_reason = "no_new_sample"
             return
         now = time.monotonic()
         # Reject a reading that implies impossible vertical motion: the loop is
@@ -379,6 +490,15 @@ class RoosterUnit:
                 if implied > self.altitude_hold_max_ranger_rate:
                     self._hold_prev_ranger = self.ranger
                     self._hold_prev_ranger_time = now
+                    # Counted and logged: this used to return silently, so a
+                    # gate firing every tick looked like a healthy hold.
+                    self.guard_rejects_total += 1
+                    self._trace_reason = "guard_rejected"
+                    self.node.get_logger().warn(
+                        f"[{self.id}] ranger {self.ranger:.3f}m implies "
+                        f"{implied:.1f} m/s of vertical motion -- rejected "
+                        f"(#{self.guard_rejects_total}); re-seeding on it.",
+                        throttle_duration_sec=5.0)
                     return
         error = self._hold_ranger_target - self.ranger  # +: sunk low, -: drifted high
         raw_velocity = 0.0
@@ -433,11 +553,51 @@ class RoosterUnit:
         step = clamp_symmetric(wanted_z - self.axes.z, self.altitude_hold_max_step)
         new_z = self.axes.z + step
         self.axes.set(x=self.axes.x, y=self.axes.y, z=new_z, r=self.axes.r)
+        self._trace_error_m = error
+        self._trace_wanted_z = wanted_z
+        self._trace_sent_z = new_z
+        self._trace_at_ceiling = bool(at_ceiling)
         self.node.get_logger().info(
             f"[{self.id}] altitude hold: ranger={self.ranger:.3f}m "
             f"target={self._hold_ranger_target:.3f}m error={error:+.3f}m "
             f"vel={velocity:+.4f}m/s wanted_z={wanted_z:.0f} z={new_z:.0f}"
             + (" [AT CEILING]" if at_ceiling else ""))
+
+    def _publish_altitude_trace(self):
+        """Publish the vertical lane for this tick. Never raises, never commands.
+
+        Matches ``nav_debug.frame.Altitude`` field for field, plus the reason
+        the tick ended where it did -- ``held`` (the loop ran), ``not_holding``,
+        ``no_ranger``, ``no_new_sample`` or ``guard_rejected``. A hold that is
+        being starved of usable samples looks identical to a healthy one in the
+        axis value alone, so the reason is the point of the row.
+        """
+        if self.altitude_trace_pub is None:
+            return
+        try:
+            rejected = self._trace_reason == "guard_rejected"
+            altitude = {
+                "target_m": _finite(self._hold_ranger_target),
+                "ranger_m": _finite(self.ranger),
+                "error_m": _finite(self._trace_error_m),
+                "wanted_z": _finite(self._trace_wanted_z),
+                "sent_z": _finite(self._trace_sent_z),
+                "nudge_m": self._trace_nudge_m,
+                "at_ceiling": self._trace_at_ceiling,
+                "guard_rejected": rejected,
+                "guard_rejects_total": self.guard_rejects_total,
+            }
+            row = _row(self.node.get_clock().now().nanoseconds * 1e-9, time.time(),
+                       altitude=altitude, reason=self._trace_reason,
+                       holding=bool(self._holding_altitude),
+                       axis_z=self.axes.z, airborne=bool(self.airborne),
+                       busy_action=self.busy_action)
+            self._trace_nudge_m = 0.0   # reported once, on the tick after it
+            self.altitude_trace_pub.publish(String(data=json.dumps(row)))
+        except Exception as exc:      # noqa: BLE001 -- drop the trace, not the flight
+            self.node.get_logger().warn(
+                f"[{self.id}] nav_debug altitude trace dropped: {exc!r}",
+                throttle_duration_sec=10.0)
 
     def _enable_altitude_hold(self):
         if self.ranger == float("inf"):
@@ -494,6 +654,7 @@ class RoosterUnit:
                 f"{wanted:.2f}m is outside "
                 f"[{MIN_ALTITUDE_TARGET_M:.2f}, {ceiling:.2f}]m")
         self._hold_ranger_target = clamped
+        self._trace_nudge_m = float(delta_m)   # reported on the next trace row
         self.node.get_logger().info(
             f"[{self.id}] altitude target nudged by {delta_m:+.2f}m -> "
             f"{self._hold_ranger_target:.2f}m")

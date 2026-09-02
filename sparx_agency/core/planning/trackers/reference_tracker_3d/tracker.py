@@ -74,6 +74,14 @@ class ReferenceTracker3D:
         self._hold = None           # type: Optional[tuple]
         self._last_command = None   # type: Optional[tuple]
         self._last_reference_age = 0.0
+        #: Read-only breakdown of the last command, for diagnostics only.
+        #:
+        #: ``None`` before the first update, then a dict of world ``(x, y, z)``
+        #: triples: ``feed_forward``, ``damping``, ``correction``, ``commanded``
+        #: (their raw sum), ``clamped`` and ``smoothed`` (what was returned).
+        #: Recording only the sum makes an over-aggressive gain indistinguishable
+        #: from a large reference velocity. Nothing in the control law reads it.
+        self.last_terms = None      # type: Optional[dict]
 
     def reset(self, yaw=None, hold_position=None):
         # type: (Optional[float], Optional[tuple]) -> None
@@ -97,6 +105,7 @@ class ReferenceTracker3D:
         self._hold = None if hold_position is None else tuple(float(v) for v in hold_position)
         self._last_command = None
         self._last_reference_age = 0.0
+        self.last_terms = None
 
     @property
     def commanded_yaw(self):
@@ -159,8 +168,10 @@ class ReferenceTracker3D:
         damping = self._damping(reference, velocity)
 
         correction = tuple(self._correct(i, error[i], dt) for i in range(3))
-        command = tuple(feed_forward[i] + damping[i] + correction[i] for i in range(3))
-        command = self._smooth(self._clamp_velocity(command))
+        commanded = tuple(feed_forward[i] + damping[i] + correction[i] for i in range(3))
+        clamped = self._clamp_velocity(commanded)
+        command = self._smooth(clamped)
+        self._record_terms(feed_forward, damping, correction, commanded, clamped, command)
 
         reference_yaw = yaw if reference.yaw is None else float(reference.yaw)
         self._yaw_cmd = self._slew_yaw(reference_yaw, dt)
@@ -175,6 +186,19 @@ class ReferenceTracker3D:
             yaw_error_rad=normalize_angle(reference_yaw - yaw),
             diverged=distance > self.params.max_position_error_m,
         )
+
+    def _record_terms(self, feed_forward, damping, correction, commanded,
+                      clamped, smoothed):
+        # type: (tuple, tuple, tuple, tuple, tuple, tuple) -> None
+        """Store the terms this tick already computed, for :attr:`last_terms`."""
+        self.last_terms = {
+            "feed_forward": feed_forward,
+            "damping": damping,
+            "correction": correction,
+            "commanded": commanded,
+            "clamped": clamped,
+            "smoothed": smoothed,
+        }
 
     def _correct(self, axis, error, dt):
         # type: (int, float, float) -> float
@@ -252,8 +276,11 @@ class ReferenceTracker3D:
         if self._hold is None:
             self._hold = measured
         error = tuple(self._hold[i] - measured[i] for i in range(3))
-        command = self._smooth(self._clamp_velocity(tuple(
-            self._correct(i, error[i], dt) for i in range(3))))
+        correction = tuple(self._correct(i, error[i], dt) for i in range(3))
+        clamped = self._clamp_velocity(correction)
+        command = self._smooth(clamped)
+        zero = (0.0, 0.0, 0.0)
+        self._record_terms(zero, zero, correction, correction, clamped, command)
         distance = math.sqrt(sum(component * component for component in error))
         return TrackedSetpoint(
             vx=command[0], vy=command[1], vz=command[2],

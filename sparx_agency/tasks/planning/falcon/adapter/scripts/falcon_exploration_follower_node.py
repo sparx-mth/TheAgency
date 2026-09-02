@@ -38,6 +38,15 @@ deliberate, shared contract with other consumers
 (``rooster_ground_truth_localization.py``) -- reading roll/pitch off it would
 silently never see a real tilt. See LESSONS.md's 2026-08-17 entry.
 
+**2026-09-02 addition**: a per-tick diagnostic trace on
+``schema.CONTROL_TRACE_TOPIC`` (see :func:`_publish_trace`). The tracker
+computes the whole "why" of every command -- the reference it was given, the
+error split into lag and cross-track, and the feed-forward/damping/correction
+breakdown -- and until now all of it was discarded except one number in a
+0.5 Hz log line. The trace is additive: it changes no command, no gain and no
+timing, it is published after the command rather than before it, every failure
+inside it is swallowed, and ``~nav_debug_trace:=false`` removes it entirely.
+
 ROS I/O:
   in   ~pos_cmd_topic          quadrotor_msgs/PositionCommand (traj_server)
   in   ~odom_topic             nav_msgs/Odometry (falcon_adapter_node's /odom_world)
@@ -45,12 +54,15 @@ ROS I/O:
   in   ~demo_mode_topic        std_msgs/String   (granted mode, from the arbiter)
   out  ~demo_mode_request_topic std_msgs/String  (this node's mode request)
   out  ~cmd_vel_topic          geometry_msgs/Twist (gated cmd_vel_raw)
+  out  /nav_debug/control_trace std_msgs/String  (JSON, diagnostic only)
 
 Usage: roslaunch falcon_adapter sphera_exploration.launch
 """
 from __future__ import annotations
 
+import json
 import math
+import time
 from dataclasses import replace
 
 import rospy
@@ -67,9 +79,19 @@ from sparx_agency.core.planning.trackers.reference_tracker_3d import (
 )
 from sparx_agency.core.planning.visual_servo import AxisForceProfile, PulseShaper
 
+try:
+    from sparx_agency.tasks.planning.nav_debug import schema as nav_debug_schema
+except Exception:      # noqa: BLE001 -- a missing diagnostic must not stop flight
+    nav_debug_schema = None
+
 #: The mode this node requests/holds while it owns /cmd_vel -- an arbiter-generic
 #: string like every other follower's, see rooster_demo_mode_manager.py.
 MODE_EXPLORING = "exploring"
+
+#: The nav-debug contract's topic, with a literal fallback for an environment
+#: where ``sparx_agency.tasks.planning.nav_debug`` is not importable.
+CONTROL_TRACE_TOPIC = getattr(nav_debug_schema, "CONTROL_TRACE_TOPIC",
+                              "/nav_debug/control_trace")
 
 
 def _param_bool(name, default):
@@ -77,6 +99,74 @@ def _param_bool(name, default):
     if isinstance(val, str):
         return val.strip().lower() in ("1", "true", "yes", "on")
     return bool(val)
+
+
+def _row(t, wall, **fields):
+    """One trace row, via the shared schema when it is importable.
+
+    Args:
+        t: ROS time of the tick, seconds.
+        wall: Host wall clock, seconds -- the cross-recorder join key.
+        **fields: The row's payload.
+
+    Returns:
+        A dict ready for ``json.dumps``, carrying both clocks.
+    """
+    if nav_debug_schema is not None:
+        return nav_debug_schema.row(t, wall, **fields)
+    out = {"t": round(float(t), 3), "wall": round(float(wall), 3)}
+    out.update(fields)
+    return out
+
+
+def _xyz(triple):
+    """A term triple as a plain JSON list, or None."""
+    return None if triple is None else [float(v) for v in triple]
+
+
+def _finite(value):
+    """``value`` as a float, or None if it is not finite (JSON has no inf)."""
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _cmd_dict(cmd):
+    """A ``(vx, vy, wz, vz)`` body command as a dict, or None if not published."""
+    if cmd is None:
+        return None
+    return {"vx": cmd[0], "vy": cmd[1], "wz": cmd[2], "vz": cmd[3]}
+
+
+#: Velocity difference below which a stage is not called a binding limit, m/s.
+#: The smoother moves the command a little on essentially every tick; naming it
+#: every time would drown the ticks where an envelope really chose the command.
+_LIMIT_EPS = 1e-3
+
+
+def _tracker_limits(terms):
+    """Which of the tracker's own limits bound this tick.
+
+    Args:
+        terms: The tracker's ``last_terms`` breakdown.
+
+    Returns:
+        A list of limit names, empty when the controller -- not an envelope --
+        chose the command.
+    """
+    commanded, clamped, smoothed = (terms.get("commanded"), terms.get("clamped"),
+                                    terms.get("smoothed"))
+    if commanded is None or clamped is None or smoothed is None:
+        return []
+    names = []
+    if any(abs(commanded[i] - clamped[i]) > _LIMIT_EPS for i in (0, 1)):
+        names.append("max_speed_xy")
+    if abs(commanded[2] - clamped[2]) > _LIMIT_EPS:
+        names.append("max_speed_z")
+    if any(abs(clamped[i] - smoothed[i]) > _LIMIT_EPS for i in range(3)):
+        names.append("command_smoothing")
+    return names
 
 
 class FalconExplorationFollowerNode:
@@ -329,6 +419,8 @@ class FalconExplorationFollowerNode:
         self._reference_yaw_dot = 0.0  # planner's own yaw rate, rad/s
         self._reference_stamp = None   # rospy.Time of that reference
         self._reference_ready = False  # trajectory_flag == READY
+        self._reference_traj_id = None
+        self._reference_age_s = None   # age the tracker was actually given
 
         self.current_demo_mode = None
         self._requested_mode = None
@@ -337,10 +429,20 @@ class FalconExplorationFollowerNode:
         self._last_heading_err = None
         self._prev_tick_t = None
 
+        # ── Diagnostic trace (additive; never touches a command) ───────────
+        #: Publish the per-tick internals. Default on: it is one String at the
+        #: control rate, and without it the "why" of every command is lost.
+        self.nav_debug_trace = _param_bool("~nav_debug_trace", True)
+        self._gate_reason = "starting"   # why this tick ended where it did
+        self._published_cmd = None       # (vx, vy, wz, vz) actually published
+        self._requested_cmd = None       # the same, before the pulse shaper
+
         # ── ROS I/O (publishers before subscribers) ──────────────────
         self.cmd_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
         self.demo_req_pub = rospy.Publisher(self.demo_mode_request_topic, String,
                                             queue_size=1, latch=True)
+        self.trace_pub = (rospy.Publisher(CONTROL_TRACE_TOPIC, String, queue_size=2)
+                          if self.nav_debug_trace else None)
 
         rospy.Subscriber(self.odom_topic, Odometry, self._odom_cb, queue_size=10)
         rospy.Subscriber(self.attitude_topic, Vector3, self._attitude_cb, queue_size=5)
@@ -394,6 +496,8 @@ class FalconExplorationFollowerNode:
                                  else rospy.Time.now())
         self._reference_ready = (msg.trajectory_flag
                                  == PositionCommand.TRAJECTORY_STATUS_READY)
+        # Diagnostic only: a change here is FALCON committing a new trajectory.
+        self._reference_traj_id = getattr(msg, "trajectory_id", None)
 
     def _demo_mode_cb(self, msg):
         mode = str(msg.data).strip().lower()
@@ -423,11 +527,17 @@ class FalconExplorationFollowerNode:
 
     # ── Control loop ─────────────────────────────────────────────────
     def _tick(self, _evt):
+        self._published_cmd = None
+        self._requested_cmd = None
+        self._reference_age_s = None   # set only where the tracker really ran
+        self._gate_reason = "driving"
         try:
             self._step()
         except Exception as e:   # noqa: BLE001 -- resilience is the point
+            self._gate_reason = "error"
             rospy.logwarn_throttle(2.0, "falcon_exploration_follower: tick error (%s: %s)",
                                    type(e).__name__, e)
+        self._publish_trace()
 
     def _slew_course(self, desired_yaw, dt):
         """Rate-limit the commanded course so the aircraft can actually catch it.
@@ -463,6 +573,7 @@ class FalconExplorationFollowerNode:
         self._prev_tick_t = now_s
 
         if self._pose is None or self._yaw is None:
+            self._gate_reason = "no_odometry"
             return   # no odometry yet -- nothing to track from
 
         # No real attitude yet, or it went stale: assume the worst rather
@@ -475,6 +586,7 @@ class FalconExplorationFollowerNode:
             rospy.logwarn_throttle(
                 1.0, "falcon_exploration_follower: no fresh attitude on %s; "
                 "cutting drive rather than fly blind on tilt", self.attitude_topic)
+            self._gate_reason = "attitude_stale"
             return
 
         # Attitude reflex, ahead of everything else: a contact the depth
@@ -499,16 +611,19 @@ class FalconExplorationFollowerNode:
                     "cutting drive until it is back under %.0f deg",
                     self._roll_deg, self._pitch_deg, self.tilt_resume_deg)
         if self._tilt_cut:
+            self._gate_reason = "tilt_cut"
             self._publish_cmd(0.0, 0.0, 0.0)
             return
 
         self._request_mode(MODE_EXPLORING)
         if not self._driving():
+            self._gate_reason = "mode_not_granted"
             return   # not granted the channel -- stay silent, don't fight anyone
 
         reference = self._reference if self._reference_ready else None
         reference_age = ((now - self._reference_stamp).to_sec()
                          if self._reference_stamp is not None else float("inf"))
+        self._reference_age_s = reference_age
 
         setpoint = self.tracker.update(
             reference, self._pose, self._yaw, dt,
@@ -806,6 +921,89 @@ class FalconExplorationFollowerNode:
         m.linear.z = float(vz)
         m.angular.z = float(shaped.yaw_rate)
         self.cmd_pub.publish(m)
+        # Diagnostic bookkeeping only -- both sides of the pulse shaper, so a
+        # tick the shaper (not the controller) decided is visible as a gap.
+        self._requested_cmd = (float(vx), float(vy), float(wz), float(vz))
+        self._published_cmd = (float(shaped.x), float(shaped.y),
+                               float(shaped.yaw_rate), float(vz))
+
+    # ── Diagnostic trace ─────────────────────────────────────────────
+    def _publish_trace(self):
+        """Publish this tick's tracker internals. Never raises, never commands.
+
+        Called once per control tick from :meth:`_tick`, after the command has
+        already gone out, so nothing here can delay or change it.
+        """
+        if self.trace_pub is None:
+            return
+        try:
+            row = _row(rospy.Time.now().to_sec(), time.time(),
+                       reference=self._trace_reference(),
+                       tracking=self._trace_tracking(),
+                       terms=self._trace_terms(),
+                       command=_cmd_dict(self._published_cmd),
+                       command_requested=_cmd_dict(self._requested_cmd),
+                       gate=self._trace_gate())
+            self.trace_pub.publish(String(data=json.dumps(row)))
+        except Exception as e:   # noqa: BLE001 -- drop the diagnostic, not the flight
+            rospy.logwarn_throttle(10.0, "falcon_exploration_follower: nav_debug "
+                                   "trace dropped (%s: %s)", type(e).__name__, e)
+
+    def _trace_reference(self):
+        """The last pos_cmd, in :class:`nav_debug.frame.Reference`'s fields."""
+        ref = self._reference
+        if ref is None:
+            return None
+        age = (None if self._reference_stamp is None
+               else (rospy.Time.now() - self._reference_stamp).to_sec())
+        return {"x": ref.x, "y": ref.y, "z": ref.z, "yaw": ref.yaw,
+                "vx": ref.vx, "vy": ref.vy, "vz": ref.vz,
+                "yaw_dot": self._reference_yaw_dot, "age_s": age,
+                "traj_id": self._reference_traj_id,
+                # traj_server republishes the frozen endpoint at a trajectory's
+                # end with fresh stamps, so "fresh" does not imply "moving".
+                "moving": math.sqrt(ref.vx ** 2 + ref.vy ** 2 + ref.vz ** 2) > 1e-3}
+
+    def _trace_tracking(self):
+        """The tracker's verdict, or None on a tick where it did not run."""
+        sp = self._last_setpoint
+        if sp is None or self._reference_age_s is None:
+            return None
+        return {"position_error_m": sp.position_error_m,
+                "along_track_lag_m": sp.along_track_lag_m,
+                "cross_track_error_m": sp.cross_track_error_m,
+                "yaw_error_rad": sp.yaw_error_rad,
+                "diverged": bool(sp.diverged), "holding": bool(sp.holding),
+                "reference_age_s": _finite(self._reference_age_s)}
+
+    def _trace_terms(self):
+        """The tracker's own command breakdown, read back off the tracker."""
+        terms = getattr(self.tracker, "last_terms", None)
+        if not terms or self._reference_age_s is None:
+            return None
+        out = {name: _xyz(terms.get(name))
+               for name in ("feed_forward", "damping", "correction",
+                            "commanded", "clamped", "smoothed")}
+        out["limits"] = _tracker_limits(terms)
+        return out
+
+    def _trace_gate(self):
+        """Why the tick ended where it did -- including a silently muted chain."""
+        return {
+            "reason": self._gate_reason,
+            "published": self._published_cmd is not None,
+            "demo_mode": self.current_demo_mode,
+            "driving": self._driving(),
+            "reference_ready": bool(self._reference_ready),
+            "tilt_cut": bool(self._tilt_cut),
+            "tilt_deg": max(abs(self._roll_deg), abs(self._pitch_deg)),
+            "escaping": self._escape_until is not None,
+            "pinned_hold": bool(self._pinned_hold),
+            "escapes": int(self._escapes),
+            "heading_err_rad": self._last_heading_err,
+            "yaw_mode": self.yaw_mode,
+            "use_lateral": bool(self.use_lateral),
+        }
 
     def _hb(self, _evt):
         sp = self._last_setpoint

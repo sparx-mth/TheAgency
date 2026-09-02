@@ -1,116 +1,105 @@
-"""Load a recorded run into a timeline of :class:`NavFrame` for replay.
+"""Assemble a recorded run into a timeline of :class:`NavFrame` for replay.
 
-A run folder (written by ``nav_debug_recorder_node``) holds the BEV maps, the
-three route layers and the replan events; the per-tick **certainty CSV** (written
-by the flight node, unchanged) holds pose, both command sets, drift and
-localization quality. This module joins them: the CSV rows (or, if it is absent,
-the recorder's own ``telemetry.jsonl``) define the frame timeline, and each
-frame's map / routes / active replan event are resolved by an *as-of* join (the
-most recent one at or before the frame's timestamp) -- exactly how the drone saw
-them at that instant, latched topics and all.
+A run folder holds several independent lanes (see :mod:`.schema`): the BEV maps
+(:mod:`.bev_source`), the route layers (:mod:`.route_source`), the planner's
+events (:mod:`.event_source`) and -- on the Sphera exploration stack -- the
+reference being chased, the tracker's verdict, the map-quality counters and,
+under ``ros2/``, what the drone was actually told and what it actually did.
+This module joins them onto one spine and builds frames from it.
 
-Frames are built lazily (:meth:`NavSession.build`) so a long flight's hundreds of
-BEV snapshots are never all in memory at once; the last few grids are cached so
-stepping back and forth is cheap.
+**The spine** is the certainty CSV when the flight wrote one (XTEND), otherwise
+the recorder's own ``telemetry.jsonl`` -- which on Sphera, where no CSV exists
+at all, is the timeline in its own right (:mod:`.timeline`). Every other lane is
+resolved by an *as-of* join: the newest row at or before the frame, exactly as
+the drone saw it, latched topics and all.
+
+**The join across recorders.** The ``ros2/`` lanes are written by a different
+process, in a different container, on a different ROS clock; only the host
+``wall`` clock is shared. Those lanes are therefore joined by wall time and the
+ROS1 lanes by ROS time, with the frame's own wall stamp taken from the ROS1
+recorder's median ``wall - t`` offset (:attr:`NavSession.clock`) whenever the
+spine does not carry one. That offset, its spread and any join warning are
+exposed on the session, so a bad join is reportable instead of a silently
+shifted panel.
+
+Frames are built lazily (:meth:`NavSession.build`) so a long flight's hundreds
+of BEV snapshots are never all in memory at once.
 """
 from __future__ import annotations
 
-import bisect
-import csv
 import glob
+import itertools
 import json
 import math
 import os
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
-
-from sparx_agency.tasks.planning.nav_debug.frame import (
-    BevMap, Drift, NavFrame, Quality, ReplanEvent, Routes,
+from sparx_agency.tasks.planning.nav_debug import records, schema, timeline
+from sparx_agency.tasks.planning.nav_debug.bev_source import BevSource
+from sparx_agency.tasks.planning.nav_debug.event_source import (
+    EventSource, classify_event,
 )
+from sparx_agency.tasks.planning.nav_debug.frame import NavFrame
+from sparx_agency.tasks.planning.nav_debug.route_source import RouteSource
+from sparx_agency.tasks.planning.nav_debug.sources import (
+    ClockOffset, Stream, as_of_index, read_jsonl, to_float,
+)
+from sparx_agency.tasks.planning.nav_debug.why import why
+
+__all__ = ["NavSession", "classify_event"]
 
 _TRAIL_LEN = 48        # localization-trail length (frames)
-_HIST_LEN = 64         # command/confidence strip length (frames)
-_EVENT_WINDOW_S = 6.0  # a replan banner lingers this long after the event fired
-_DEG = math.pi / 180.0
+_HIST_LEN = 64         # history-strip length (frames)
+_LANE_MAX_AGE_S = 1.0  # a per-tick lane older than this is stale, not latched
+_MAP_MAX_AGE_S = 5.0   # the map lane updates slowly; latch it for longer
 
-
-def _f(value) -> Optional[float]:
-    """Parse a CSV/JSON scalar to float, or None for '' / None / bad values."""
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def classify_event(text: str) -> str:
-    """Bucket a raw planner event string into a coarse replan ``kind``."""
-    t = (text or "").lower()
-    if "boxed in" in t:
-        return "boxed_in"
-    if "blockage" in t or "unseen obstacle" in t:
-        return "blockage"
-    if "obstacle on route" in t or "collision" in t:
-        return "obstacle"
-    if "rotat" in t:
-        return "rotation"
-    if "periodic" in t:
-        return "time"
-    if "reopened" in t or "resuming" in t:
-        return "info"
-    return "info"
-
-
-def _read_jsonl(path: str) -> List[dict]:
-    rows = []
-    if not os.path.isfile(path):
-        return rows
-    with open(path, "r") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            try:
-                rows.append(json.loads(line))
-            except ValueError:
-                continue    # a half-written trailing line must not abort a replay
-    return rows
+# ROS1 lanes join on ROS time, ROS2 lanes on the host wall clock.
+_ROS1_LANES = ("reference", "control", "mapping")
+_ROS2_LANES = ("actuator", "truth", "altitude", "axis_trace")
 
 
 class NavSession:
-    """A loaded run: a list of frame records + as-of indexes for map/routes/events."""
+    """A loaded run: the frame spine plus an as-of index per recorded lane."""
 
-    def __init__(self, run_dir: str, csv_path: Optional[str] = None) -> None:
+    def __init__(self, run_dir: str, csv_path: Optional[str] = None,
+                 ros2_dir: Optional[str] = None) -> None:
+        """Load a run.
+
+        Args:
+            run_dir: The ROS1 recorder's run folder.
+            csv_path: Certainty CSV to use as the spine. Defaults to the
+                manifest's, then to one found beside the run; ``None`` on Sphera,
+                where no CSV is written and telemetry.jsonl is the spine.
+            ros2_dir: Where the ROS2 recorder's lanes live, if not
+                ``<run_dir>/ros2``. The two recorders run in containers with no
+                shared mount -- ``it`` cannot see the FALCON log directory -- so
+                on Sphera the ROS2 half usually lands under its own workspace
+                bind and is either collected into the run folder afterwards or
+                pointed at here.
+        """
         self.run_dir = run_dir
+        self.ros2_dir = ros2_dir or os.path.join(run_dir, schema.ROS2_DIR)
         self.manifest = self._load_manifest(run_dir)
-        self._bev_cache = OrderedDict()      # npy_path -> BevMap
+        self.warnings = []                   # type: List[str]
 
-        # Rich per-frame telemetry: the certainty CSV if we can find one, else the
-        # recorder's own telemetry.jsonl (pose + our command only).
         self.csv_path = self._resolve_csv(run_dir, csv_path)
-        self.rows = self._load_rows(self.csv_path, run_dir)
+        self.rows, self.timeline_source = timeline.load(run_dir, self.csv_path)
         if not self.rows:
             raise ValueError(
                 "no frames to replay in %r (need a certainty CSV or telemetry.jsonl)"
                 % run_dir)
         self._stamps = [r["t"] for r in self.rows]
-        # The certainty CSV logs the drone's vertical axis count but not our own
-        # cmd_vel.linear.z, so backfill OURS vz from the recorder's telemetry.jsonl
-        # (an as-of join) -- else the OURS vertical gauge would read 0 in a climb.
-        self._fill_missing_cmd_vz(run_dir)
+        if self.timeline_source == timeline.CERTAINTY_CSV:
+            timeline.backfill_cmd_vz(self.rows, timeline.telemetry_rows(run_dir))
 
-        # As-of sources.
-        self._bev_index = self._index_bev(run_dir)               # [(t, npy, meta)]
-        self._bev_stamps = [t for t, _, _ in self._bev_index]
-        self._routes = sorted(_read_jsonl(os.path.join(run_dir, "routes.jsonl"))
-                              + self._index_routes_dir(run_dir), key=lambda d: d.get("t", 0.0))
-        self._route_stamps = [d.get("t", 0.0) for d in self._routes]
-        self._events = sorted(_read_jsonl(os.path.join(run_dir, "events.jsonl")),
-                              key=lambda d: d.get("t", 0.0))
-        self._event_stamps = [d.get("t", 0.0) for d in self._events]
+        self.bev_source = BevSource(run_dir, self.manifest)
+        self.route_source = RouteSource(run_dir)
+        self.event_source = EventSource(run_dir)
+        self.lanes = self._open_lanes(run_dir, self.ros2_dir)
+        self.clock, self.ros2_clock = self._estimate_clocks()
+        self._check_join()
+        self._err_series, self._speed_series = self._build_series()
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -118,223 +107,139 @@ class NavSession:
     # ── loading ──────────────────────────────────────────────────────────────
     @staticmethod
     def _load_manifest(run_dir: str) -> dict:
-        p = os.path.join(run_dir, "manifest.json")
-        if os.path.isfile(p):
+        """The run manifest, or ``{}`` when it is absent or unreadable."""
+        path = os.path.join(run_dir, schema.MANIFEST_FILE)
+        if os.path.isfile(path):
             try:
-                with open(p) as fh:
-                    return json.load(fh)
-            except ValueError:
+                with open(path) as fh:
+                    manifest = json.load(fh)
+                return manifest if isinstance(manifest, dict) else {}
+            except (OSError, IOError, ValueError):
                 pass
         return {}
 
     def _resolve_csv(self, run_dir: str, csv_path: Optional[str]) -> Optional[str]:
+        """The certainty CSV to use as the spine, or None (the Sphera case).
+
+        The manifest's path was written inside the FALCON container, so it is
+        checked and then ignored if that mount is not visible from here.
+        """
         if csv_path:
             return csv_path
-        m = self.manifest.get("certainty_csv")
-        if m and os.path.isfile(m):
-            return m
-        # Auto-find the newest certainty_*.csv beside the run (in it or its parent).
+        recorded = self.manifest.get("certainty_csv")
+        if recorded and os.path.isfile(recorded):
+            return recorded
         cands = (glob.glob(os.path.join(run_dir, "certainty_*.csv"))
                  + glob.glob(os.path.join(os.path.dirname(run_dir.rstrip("/")),
                                           "certainty_*.csv")))
         return max(cands, key=os.path.getmtime) if cands else None
 
-    def _load_rows(self, csv_path: Optional[str], run_dir: str) -> List[dict]:
-        if csv_path and os.path.isfile(csv_path):
-            return self._rows_from_csv(csv_path)
-        return self._rows_from_telemetry(os.path.join(run_dir, "telemetry.jsonl"))
-
     @staticmethod
-    def _rows_from_csv(path: str) -> List[dict]:
-        out = []
-        with open(path, "r") as fh:
-            for r in csv.DictReader(fh):
-                t = _f(r.get("ros_stamp"))
-                x, y = _f(r.get("pos_x")), _f(r.get("pos_y"))
-                if t is None or x is None or y is None:
-                    continue
-                yaw_deg = _f(r.get("yaw_deg"))
-                fwd, lat = _f(r.get("axis_forward")), _f(r.get("axis_lateral"))
-                vert, ayaw = _f(r.get("axis_vertical")), _f(r.get("axis_yaw"))
-                out.append({
-                    "t": t, "x": x, "y": y, "z": _f(r.get("pos_z")),
-                    "yaw": (yaw_deg or 0.0) * _DEG,
-                    "vx": _f(r.get("cmd_vx")), "vy": _f(r.get("cmd_vy")),
-                    "vz": None, "wz": _f(r.get("cmd_wz")),
-                    "drone": None if fwd is None else (int(fwd), int(lat or 0),
-                                                       int(vert or 0), int(ayaw or 0)),
-                    "conf": _f(r.get("confidence")),
-                    "quality": Quality(
-                        confidence=_f(r.get("confidence")) or 0.0,
-                        pos_std_m=_f(r.get("pos_std_m")) or 0.0,
-                        cmd_effectiveness=_f(r.get("cmd_effectiveness")) or 0.0,
-                        coasting=str(r.get("coasting", "")).lower() in ("true", "1"),
-                        age_s=_f(r.get("age_s")) or 0.0,
-                        source=str(r.get("state", ""))),
-                    "drift": Drift(
-                        drift_vx=_f(r.get("drift_vx")) or 0.0,
-                        drift_vy=_f(r.get("drift_vy")) or 0.0,
-                        drift_wz=_f(r.get("drift_wz")) or 0.0,
-                        cross_track_m=_f(r.get("cross_track_m")) or 0.0,
-                        along_track_m=_f(r.get("along_track_m")) or 0.0,
-                        heading_err_deg=_f(r.get("heading_err_deg")) or 0.0,
-                        effort=_f(r.get("effort")) or 0.0,
-                        speed_scale=_f(r.get("speed_scale")) or 0.0,
-                        authority=str(r.get("authority", "")),
-                        state=str(r.get("state", "")),
-                        escape_state=str(r.get("escape_state", "")),
-                        blocked_axis=str(r.get("blocked_axis", ""))),
-                    "wp_idx": _f(r.get("target_wp_idx")),
-                    "num_wp": _f(r.get("num_waypoints")),
-                    "tx": _f(r.get("target_x")), "ty": _f(r.get("target_y")),
-                })
-        return out
+    def _open_lanes(run_dir: str, ros2: str) -> Dict[str, Stream]:
+        """Open every optional jsonl lane; a lane never recorded is empty."""
+        paths = (
+            ("reference", os.path.join(run_dir, schema.REFERENCE_FILE)),
+            ("control", os.path.join(run_dir, schema.CONTROL_FILE)),
+            ("mapping", os.path.join(run_dir, schema.MAPPING_FILE)),
+            ("actuator", os.path.join(ros2, schema.ACTUATOR_FILE)),
+            ("truth", os.path.join(ros2, schema.TRUTH_FILE)),
+            ("altitude", os.path.join(ros2, schema.ALTITUDE_FILE)),
+        )
+        lanes = OrderedDict((name, Stream.from_file(path, name))
+                            for name, path in paths)
+        lanes["axis_trace"] = Stream(
+            records.group_axis_rows(
+                read_jsonl(os.path.join(ros2, schema.AXIS_TRACE_FILE))),
+            "axis_trace")
+        return lanes
 
-    @staticmethod
-    def _rows_from_telemetry(path: str) -> List[dict]:
-        out = []
-        for r in _read_jsonl(path):
-            t, x, y = _f(r.get("t")), _f(r.get("x")), _f(r.get("y"))
-            if t is None or x is None or y is None:
-                continue
-            out.append({
-                "t": t, "x": x, "y": y, "z": _f(r.get("z")), "yaw": _f(r.get("yaw")) or 0.0,
-                "vx": _f(r.get("vx")), "vy": _f(r.get("vy")),
-                "vz": _f(r.get("vz")), "wz": _f(r.get("wz")),
-                "drone": None, "conf": None, "quality": None, "drift": None,
-                "wp_idx": None, "num_wp": None, "tx": None, "ty": None,
-            })
-        return out
+    def _estimate_clocks(self) -> Tuple[ClockOffset, ClockOffset]:
+        """Median ``wall - t`` per recorder, over every row it wrote."""
+        ros1 = itertools.chain(self.rows, self.event_source.rows,
+                               *[self.lanes[n].rows for n in _ROS1_LANES])
+        ros2 = itertools.chain(*[self.lanes[n].rows for n in _ROS2_LANES])
+        return ClockOffset.estimate(ros1), ClockOffset.estimate(ros2)
 
-    @staticmethod
-    def _index_bev(run_dir: str) -> List[Tuple[float, str, dict]]:
-        bev_dir = os.path.join(run_dir, "bev")
-        index = []
-        for npy in sorted(glob.glob(os.path.join(bev_dir, "*.npy"))):
-            meta = {}
-            side = npy[:-4] + ".json"
-            if os.path.isfile(side):
-                try:
-                    with open(side) as fh:
-                        meta = json.load(fh)
-                except ValueError:
-                    meta = {}
-            t = meta.get("t")
-            if t is None:
-                try:
-                    t = float(os.path.splitext(os.path.basename(npy))[0]) / 1000.0
-                except ValueError:
-                    continue
-            index.append((float(t), npy, meta))
-        index.sort(key=lambda e: e[0])
-        return index
+    def _check_join(self) -> None:
+        """Record why the cross-recorder join might be wrong, if it might be."""
+        if not any(len(self.lanes[n]) for n in _ROS2_LANES):
+            return          # nothing to join: a single-recorder run
+        if not self.clock.known:
+            self.warnings.append(
+                "the ROS1 recording carries no wall clock; ros2/ lanes are joined "
+                "as if ROS time were wall time")
+        if not self.ros2_clock.known:
+            self.warnings.append("ros2/ lanes carry no wall clock; join unreliable")
+        for label, clock in (("ROS1", self.clock), ("ROS2", self.ros2_clock)):
+            if clock.suspect:
+                self.warnings.append("%s %s" % (label, clock.describe()))
 
-    @staticmethod
-    def _index_routes_dir(run_dir: str) -> List[dict]:
-        out = []
-        for jp in glob.glob(os.path.join(run_dir, "routes", "*.json")):
-            try:
-                with open(jp) as fh:
-                    d = json.load(fh)
-            except ValueError:
-                continue
-            if "t" not in d:
-                try:
-                    d["t"] = float(os.path.splitext(os.path.basename(jp))[0]) / 1000.0
-                except ValueError:
-                    continue
-            out.append(d)
-        return out
+    def join_report(self) -> str:
+        """A short account of the timeline, both clocks and every lane's size."""
+        lines = ["timeline: %s (%d frames)" % (self.timeline_source, len(self.rows)),
+                 "ROS1 %s" % self.clock.describe(),
+                 "ROS2 %s" % self.ros2_clock.describe(),
+                 "lanes: bev=%d routes=%d events=%d " % (
+                     len(self.bev_source), len(self.route_source),
+                     len(self.event_source))
+                 + " ".join("%s=%d" % (n, len(s)) for n, s in self.lanes.items())]
+        return "\n".join(lines + ["warning: " + w for w in self.warnings])
 
-    def _fill_missing_cmd_vz(self, run_dir: str) -> None:
-        telem = self._rows_from_telemetry(os.path.join(run_dir, "telemetry.jsonl"))
-        if not telem:
-            return
-        ts = [d["t"] for d in telem]
-        for r in self.rows:
-            if r.get("vz") is None:
-                j = self._as_of(ts, r["t"])
-                if j is not None:
-                    r["vz"] = telem[j].get("vz")
+    def _build_series(self) -> Tuple[List[Optional[float]], List[float]]:
+        """Per-frame tracking error and achieved speed, for the history strips.
+
+        Read straight off the raw lane rows rather than through the dataclasses:
+        these two run over the whole timeline, not just the visible frame.
+        """
+        control, truth = self.lanes["control"], self.lanes["truth"]
+        err, speed = [], []
+        for i, row in enumerate(self.rows):
+            tracked = records.section(control.at(row["t"], _LANE_MAX_AGE_S),
+                                      "tracking")
+            err.append(to_float(tracked.get("position_error_m")) if tracked else None)
+            flown = records.section(
+                truth.at_wall(self._wall_of(i), _LANE_MAX_AGE_S), "truth")
+            vx = to_float(flown.get("vx")) if flown else None
+            vy = to_float(flown.get("vy")) if flown else None
+            if vx is None or vy is None:            # no truth -> what we commanded
+                vx, vy = row.get("vx") or 0.0, row.get("vy") or 0.0
+            speed.append(math.hypot(vx, vy))
+        return err, speed
 
     # ── as-of joins ────────────────────────────────────────────────────────────
     @staticmethod
     def _as_of(stamps: List[float], t: float) -> Optional[int]:
         """Index of the latest stamp <= ``t`` (None if all are later)."""
-        if not stamps:
-            return None
-        j = bisect.bisect_right(stamps, t) - 1
-        return j if j >= 0 else None
+        return as_of_index(stamps, t)
 
-    def _load_bev(self, npy: str, meta: dict) -> Optional[BevMap]:
-        if npy in self._bev_cache:
-            self._bev_cache.move_to_end(npy)
-            return self._bev_cache[npy]
-        try:
-            grid = np.load(npy)
-        except (OSError, ValueError):
-            return None
-        geo = meta or self.manifest.get("bev", {})
-        bev = BevMap(grid=grid,
-                     resolution=float(geo.get("resolution", 0.15)),
-                     origin_x=float(geo.get("origin_x", 0.0)),
-                     origin_y=float(geo.get("origin_y", 0.0)),
-                     frame_id=str(geo.get("frame_id", "world")),
-                     stamp=float(geo.get("t", 0.0)))
-        self._bev_cache[npy] = bev
-        if len(self._bev_cache) > 4:
-            self._bev_cache.popitem(last=False)
-        return bev
+    def index_at(self, t: float) -> Optional[int]:
+        """The frame that was current at time ``t``, for seeking by timestamp."""
+        return as_of_index(self._stamps, t)
 
-    def _bev_at(self, t: float) -> Tuple[Optional[BevMap], Optional[np.ndarray]]:
-        j = self._as_of(self._bev_stamps, t)
-        if j is None:
-            return None, None
-        _, npy, meta = self._bev_index[j]
-        bev = self._load_bev(npy, meta)
-        conf_path = os.path.join(self.run_dir, "bev_conf", os.path.basename(npy))
-        conf = None
-        if os.path.isfile(conf_path):
-            try:
-                conf = np.load(conf_path)
-            except (OSError, ValueError):
-                conf = None
-        return bev, conf
+    def _wall_of(self, i: int) -> float:
+        """Host wall clock of frame ``i``: recorded if present, else estimated."""
+        wall = self.rows[i].get("wall")
+        return wall if wall is not None else self.clock.to_wall(self.rows[i]["t"])
 
-    def _routes_at(self, t: float) -> Routes:
-        j = self._as_of(self._route_stamps, t)
-        if j is None:
-            return Routes()
-        d = self._routes[j]
-
-        def _pts(key):
-            v = d.get(key)
-            return [(float(p[0]), float(p[1])) for p in v] if v else None
-
-        def _pt(key):
-            v = d.get(key)
-            return (float(v[0]), float(v[1])) if v else None
-
-        return Routes(astar=_pts("astar"), safe=_pts("safe"), final=_pts("final"),
-                      goal=_pt("goal"), lookahead=_pt("lookahead"))
-
-    def _replan_at(self, t: float) -> Optional[ReplanEvent]:
-        j = self._as_of(self._event_stamps, t)
-        while j is not None and j >= 0:
-            d = self._events[j]
-            et = float(d.get("t", 0.0))
-            if t - et > _EVENT_WINDOW_S:
-                return None
-            text = str(d.get("text", ""))
-            kind = str(d.get("kind") or classify_event(text))
-            if kind == "info":       # skip pure info; surface the last real replan
-                j -= 1
-                continue
-            xy = None
-            if _f(d.get("x")) is not None and _f(d.get("y")) is not None:
-                xy = (float(d["x"]), float(d["y"]))
-            return ReplanEvent(stamp=et, kind=kind, text=text, age_s=t - et, xy=xy)
-        return None
+    def _lanes_at(self, t: float, wall: float) -> dict:
+        """Every jsonl lane at this instant: ROS1 by ``t``, ROS2 by ``wall``."""
+        control = self.lanes["control"].at(t, _LANE_MAX_AGE_S)
+        return {
+            "reference": records.reference(
+                self.lanes["reference"].at(t, _LANE_MAX_AGE_S)),
+            "tracking": records.tracking(control),
+            "terms": records.control_terms(control),
+            "map_stats": records.map_stats(
+                self.lanes["mapping"].at(t, _MAP_MAX_AGE_S)),
+            "actuator": records.actuator(
+                self.lanes["actuator"].at_wall(wall, _LANE_MAX_AGE_S)),
+            "altitude": records.altitude(
+                self.lanes["altitude"].at_wall(wall, _LANE_MAX_AGE_S)),
+            "truth": records.truth(
+                self.lanes["truth"].at_wall(wall, _LANE_MAX_AGE_S)),
+            "axes": records.axes(
+                self.lanes["axis_trace"].at_wall(wall, _LANE_MAX_AGE_S)),
+        }
 
     # ── frame assembly ─────────────────────────────────────────────────────────
     def build(self, i: int) -> NavFrame:
@@ -344,51 +249,49 @@ class NavSession:
             raise IndexError("frame %d out of range [0, %d)" % (i, n))
         r = self.rows[i]
         t = r["t"]
-        vz = r.get("vz")
         our = None
         if r.get("vx") is not None or r.get("wz") is not None:
-            our = (r.get("vx") or 0.0, r.get("vy") or 0.0, vz or 0.0, r.get("wz") or 0.0)
+            our = (r.get("vx") or 0.0, r.get("vy") or 0.0,
+                   r.get("vz") or 0.0, r.get("wz") or 0.0)
 
-        target = None
-        if r.get("wp_idx") is not None and r.get("tx") is not None:
-            target = (int(r["wp_idx"]), int(r.get("num_wp") or 0), r["tx"], r["ty"])
-        advanced = bool(i > 0 and r.get("wp_idx") is not None
-                        and self.rows[i - 1].get("wp_idx") is not None
-                        and r["wp_idx"] > self.rows[i - 1]["wp_idx"])
-
-        lo = max(0, i - _TRAIL_LEN)
-        trail = [(self.rows[k]["x"], self.rows[k]["y"]) for k in range(lo, i)]
-        hlo = max(0, i - _HIST_LEN)
-        cmd_hist = [self.rows[k].get("vx") or 0.0 for k in range(hlo, i + 1)]
-        conf_hist = [self.rows[k].get("conf") or 0.0 for k in range(hlo, i + 1)
-                     if self.rows[k].get("conf") is not None]
-
-        bev, conf = self._bev_at(t)
-        replan = self._replan_at(t)
-
+        lanes = self._lanes_at(t, self._wall_of(i))
+        bev, conf = self.bev_source.at(t)
         return NavFrame(
-            stamp=t, x=r["x"], y=r["y"], yaw=r["yaw"], z=r.get("z"), trail=trail,
-            our_cmd=our, drone_cmd=r.get("drone"),
+            stamp=t, x=r["x"], y=r["y"], yaw=r["yaw"], z=r.get("z"),
+            trail=self._trail(i), our_cmd=our, drone_cmd=r.get("drone"),
             quality=r.get("quality"), drift=r.get("drift"),
-            target=target, advanced=advanced,
-            bev=bev, bev_conf=conf, routes=self._routes_at(t), replan=replan,
-            cmd_history=cmd_hist, conf_history=conf_hist,
-            why=self._why(r, our, replan))
+            target=self._target(r), advanced=self._advanced(i),
+            bev=bev, bev_conf=conf, routes=self.route_source.at(t),
+            replan=self.event_source.at(t),
+            why=why(r, our, lanes), **self._history(i), **lanes)
 
     @staticmethod
-    def _why(r: dict, our, replan: Optional[ReplanEvent]) -> str:
-        """One-line 'why' for the panel: the drift authority + a climb note."""
-        drift = r.get("drift")
-        parts = []
-        if drift is not None:
-            if drift.escape_state and drift.escape_state != "IDLE":
-                parts.append("escaping (%s)" % drift.escape_state)
-            elif drift.authority:
-                parts.append(drift.authority)
-            if abs(drift.drift_vy) * 100.0 >= 1.0:
-                parts.append("holding %.0fcm/s %s roll vs drift"
-                             % (abs(drift.drift_vy) * 100.0,
-                                "left" if drift.drift_vy > 0 else "right"))
-        if our is not None and our[2] > 0.02:
-            parts.append("climbing")
-        return "; ".join(parts)
+    def _target(r: dict):
+        """The active waypoint as ``(index, count, x, y)``; None if not recorded."""
+        if r.get("wp_idx") is None or r.get("tx") is None:
+            return None
+        return (int(r["wp_idx"]), int(r.get("num_wp") or 0), r["tx"], r["ty"])
+
+    def _advanced(self, i: int) -> bool:
+        """True on the tick the active waypoint index grew."""
+        if i <= 0:
+            return False
+        now, before = self.rows[i].get("wp_idx"), self.rows[i - 1].get("wp_idx")
+        return bool(now is not None and before is not None and now > before)
+
+    def _trail(self, i: int) -> List[Tuple[float, float]]:
+        """The recent pose trail ending just before frame ``i``."""
+        lo = max(0, i - _TRAIL_LEN)
+        return [(self.rows[k]["x"], self.rows[k]["y"]) for k in range(lo, i)]
+
+    def _history(self, i: int) -> Dict[str, List[float]]:
+        """The four trailing strips ending at frame ``i`` (oldest first)."""
+        window = range(max(0, i - _HIST_LEN), i + 1)
+        return {
+            "cmd_history": [self.rows[k].get("vx") or 0.0 for k in window],
+            "conf_history": [self.rows[k]["conf"] for k in window
+                             if self.rows[k].get("conf") is not None],
+            "err_history": [self._err_series[k] for k in window
+                            if self._err_series[k] is not None],
+            "speed_history": [self._speed_series[k] for k in window],
+        }

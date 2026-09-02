@@ -104,6 +104,24 @@
        be replayed frame by frame (tasks/planning/nav_debug/run_folder_nav_debug.py).
        Diagnostic-only sink; subscribes only, touches no flight code. -->
   <arg name="nav_debug_record"      default="true" />
+
+  <!-- The recorder's exploration lane. Its A*-chain topic defaults are gated
+       off in nav_mode:=exploration (the reason Sphera runs recorded almost
+       nothing), so these name the topics that chain actually publishes.
+       Values match the node's own defaults, so the XTEND path is unchanged. -->
+  <arg name="nav_debug_reference_topic"     default="/planning/pos_cmd" />
+  <arg name="nav_debug_control_trace_topic" default="/nav_debug/control_trace" />
+  <arg name="nav_debug_planned_path_topic"  default="/falcon/planned_path" />
+  <arg name="nav_debug_executed_path_topic" default="/falcon/executed_path" />
+  <arg name="nav_debug_replan_topic"        default="/planning/replan" />
+  <arg name="nav_debug_go_status_topic"     default="/mission/go_status" />
+  <arg name="nav_debug_recovery_topic"      default="/recovery/status" />
+  <arg name="nav_debug_thinking_topic"      default="/nav/thinking" />
+  <arg name="nav_debug_map_pose_topic"      default="/map_ros/pose" />
+  <!-- The follower's own trace publisher, the only source of the tracker's
+       terms. Follows nav_debug_record so ONE switch turns the diagnostic off;
+       set it alone to keep either half. -->
+  <arg name="nav_debug_trace"               default="$(arg nav_debug_record)" />
   <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
 
   <!-- ── Lost-localization recovery (lost_localization_node) ──────────
@@ -1593,7 +1611,7 @@
        Records the BEV map, the raw/corrected/final routes and the replan events
        into a timestamped run folder next to the certainty CSV, for offline visual
        replay. Purely a diagnostic sink (subscribes only, publishes nothing), so
-       it cannot affect flight. nav_debug_record:=false (default) leaves it out.
+       it cannot affect flight. nav_debug_record:=false leaves it out.
        cmd_topic is the POST-gate command (what actually feeds the converter). -->
   <node pkg="falcon_adapter" type="nav_debug_recorder_node.py"
         name="nav_debug_recorder" output="screen"
@@ -1601,6 +1619,17 @@
     <param name="pose_topic"         value="$(arg drone_ns)/gt_pose" />
     <param name="cmd_topic"          value="$(arg drone_ns)/cmd_vel" />
     <param name="certainty_log_path" value="$(arg certainty_log_path)" />
+    <!-- The exploration lane. Without these the recorder only ever heard the
+         A*-chain topics, which nav_mode:=exploration gates off. -->
+    <param name="reference_topic"     value="$(arg nav_debug_reference_topic)" />
+    <param name="control_trace_topic" value="$(arg nav_debug_control_trace_topic)" />
+    <param name="planned_path_topic"  value="$(arg nav_debug_planned_path_topic)" />
+    <param name="executed_path_topic" value="$(arg nav_debug_executed_path_topic)" />
+    <param name="replan_topic"        value="$(arg nav_debug_replan_topic)" />
+    <param name="go_status_topic"     value="$(arg nav_debug_go_status_topic)" />
+    <param name="recovery_topic"      value="$(arg nav_debug_recovery_topic)" />
+    <param name="thinking_topic"      value="$(arg nav_debug_thinking_topic)" />
+    <param name="map_pose_topic"      value="$(arg nav_debug_map_pose_topic)" />
   </node>
 
   <!-- ══ LOST-LOCALIZATION RECOVERY ═══════════════════════════════════════════
@@ -1750,6 +1779,9 @@
     <param name="yaw_dot_ff_gain" value="$(arg explore_yaw_dot_ff)" />
     <param name="park_scan_rate"  value="$(arg explore_park_scan)" />
     <param name="park_scan_after_s" value="$(arg explore_park_scan_after)" />
+    <!-- Publishes the tracker's terms on /nav_debug/control_trace. Additive
+         and default-safe: it changes no command, and false silences it. -->
+    <param name="nav_debug_trace" value="$(arg nav_debug_trace)" />
   </node>
 
   <node pkg="falcon_adapter" type="rooster_bspline_follower_node.py"
