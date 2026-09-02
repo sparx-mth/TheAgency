@@ -56,6 +56,10 @@ FALCON_PREFLIGHT_ORDER: list[tuple[str, float]] = [
     ("rooster_gtl_R1", 8),
     ("rooster_video_trigger_R1", 8),
     ("rooster_command_unit_R1", 8),
+    # Subscribe-only; started here so the actuator lane catches the command
+    # unit's very first /R1/manual_control. The ROS1 half of the recording is
+    # already automatic via nav_debug_record on sphera_drone.launch.
+    ("rooster_nav_debug_recorder", 8),
     ("rooster_frame_capture_R1", 10),  # needs the video trigger
     ("rooster_depth_R1", 10),          # needs frame capture
     ("rooster_planner_adapter", 15),   # roslaunch sphera_drone.launch

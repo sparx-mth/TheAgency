@@ -14,6 +14,12 @@ exploration grid is far larger than the display, so it is first reduced by
 :func:`block_max`, which keeps the most-occupied cell of each block -- plain
 resampling drops one-cell-thick walls, which is exactly what a navigation debug
 view must never do.
+
+The Sphera map is also far larger than the thing being debugged: the jail is
+~105 m across, so on a 900 px pane a 30 cm cross-track error is two pixels.
+:func:`render_bev` therefore takes an optional ``center``/``radius_m`` window
+and crops to it, padding with unknown where the window runs off the map so the
+aircraft stays centred even at an edge.
 """
 from __future__ import annotations
 
@@ -79,8 +85,49 @@ def block_max(grid: np.ndarray, k: int) -> np.ndarray:
     return blocks.max(axis=(1, 3))
 
 
+def window(bev: BevMap, conf: Optional[np.ndarray], center: Tuple[float, float],
+           radius_m: float):
+    """Crop ``bev`` to a square of ``radius_m`` about ``center``.
+
+    The window is padded with unknown wherever it runs off the map, so the
+    centre of the returned grid is always ``center`` -- an aircraft flying near
+    a map edge stays put in the pane instead of sliding into a corner.
+
+    Args:
+        bev: The occupancy snapshot to crop.
+        conf: Optional confidence grid, co-registered with ``bev.grid``.
+        center: World ``(x, y)`` to centre on.
+        radius_m: Half-width of the window, metres.
+
+    Returns:
+        ``(grid, conf, origin_x, origin_y)`` for the cropped view.
+    """
+    grid = np.asarray(bev.grid)
+    half = max(1, int(round(radius_m / float(bev.resolution))))
+    col, row = bev.world_to_cell(center[0], center[1])
+    c0, r0 = int(round(col)) - half, int(round(row)) - half
+    size = 2 * half + 1
+
+    out = np.full((size, size), -1, grid.dtype)
+    out_c = None if conf is None else np.zeros((size, size), np.asarray(conf).dtype)
+    # Overlap between the requested window and the real grid.
+    sr0, sc0 = max(0, r0), max(0, c0)
+    sr1, sc1 = min(grid.shape[0], r0 + size), min(grid.shape[1], c0 + size)
+    if sr1 > sr0 and sc1 > sc0:
+        out[sr0 - r0:sr1 - r0, sc0 - c0:sc1 - c0] = grid[sr0:sr1, sc0:sc1]
+        if out_c is not None:
+            src = np.asarray(conf)
+            if src.shape[:2] == grid.shape[:2]:
+                out_c[sr0 - r0:sr1 - r0, sc0 - c0:sc1 - c0] = src[sr0:sr1, sc0:sc1]
+    return (out, out_c,
+            bev.origin_x + c0 * bev.resolution,
+            bev.origin_y + r0 * bev.resolution)
+
+
 def render_bev(bev: BevMap, conf: Optional[np.ndarray] = None,
-               target_px: int = 720) -> Tuple[np.ndarray, Callable[[float, float], Tuple[int, int]]]:
+               target_px: int = 720, center: Optional[Tuple[float, float]] = None,
+               radius_m: float = 0.0
+               ) -> Tuple[np.ndarray, Callable[[float, float], Tuple[int, int]]]:
     """Display image (``+y`` up) plus a world->pixel mapper onto it.
 
     Args:
@@ -89,13 +136,21 @@ def render_bev(bev: BevMap, conf: Optional[np.ndarray] = None,
         target_px: Roughly the longest display edge. A grid smaller than that is
             upscaled by an integer factor so cells stay crisp (nearest); a grid
             larger than it is reduced by an integer factor of :func:`block_max`.
+        center: World ``(x, y)`` to centre the view on. Ignored unless
+            ``radius_m`` is positive.
+        radius_m: Half-width of the view, metres. ``0`` draws the whole map --
+            on which, for a 105 m Sphera map, a 30 cm tracking error is about
+            two pixels. A few metres is what makes the error legible.
 
     Returns:
         ``(image, to_px)`` where ``to_px(x, y)`` returns integer ``(px, py)`` on
         ``image`` for a world point in the BEV frame.
     """
     target_px = max(16, int(target_px))
-    grid = np.asarray(bev.grid)
+    if radius_m > 0.0 and center is not None:
+        grid, conf, origin_x, origin_y = window(bev, conf, center, radius_m)
+    else:
+        grid, origin_x, origin_y = np.asarray(bev.grid), bev.origin_x, bev.origin_y
     k = max(1, int(math.ceil(max(grid.shape[:2]) / float(target_px))))
     color = occupancy_to_bgr(block_max(grid, k), _reduce_conf(conf, k))
     h, w = color.shape[:2]
@@ -104,9 +159,10 @@ def render_bev(bev: BevMap, conf: Optional[np.ndarray] = None,
     disp = cv2.flip(disp, 0)      # world +y up (grid row 0 is min-y -> image bottom)
     rows = disp.shape[0]
     scale = up / float(k)         # original grid cell -> display pixels
+    res = float(bev.resolution)
 
     def to_px(x: float, y: float) -> Tuple[int, int]:
-        col, row = bev.world_to_cell(x, y)
+        col, row = (x - origin_x) / res, (y - origin_y) / res
         return (int(round(col * scale)), int(round((rows - 1) - row * scale)))
 
     return disp, to_px

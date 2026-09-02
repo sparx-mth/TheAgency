@@ -68,28 +68,31 @@ def build_scales(which: str = "auto") -> Optional[GaugeScales]:
         return GaugeScales()
 
 
-def _footer(img, i: int, n: int, t: float, playing: bool, map_px: int):
+def _footer(img, i: int, n: int, t: float, playing: bool, map_px: int,
+            radius_m: float = 0.0):
     """Append a thin status/help strip BELOW the image (never over the caption)."""
     strip = np.full((26, img.shape[1], 3), (12, 12, 12), np.uint8)
     tag = "PLAY" if playing else "PAUSE"
-    cv2.putText(strip, "frame %d/%d  t=%.2fs  [%s]  zoom %dpx    |    "
-                "n/p step   space play   z/x zoom   +/- speed   s save   q quit"
-                % (i + 1, n, t, tag, map_px), (12, 17),
+    view = "view %.0fm" % radius_m if radius_m else "view FULL MAP"
+    cv2.putText(strip, "frame %d/%d  t=%.2fs  [%s]  zoom %dpx  %s    |    "
+                "n/p step  space play  z/x zoom  [/] window  f full  +/- speed  "
+                "s save  q quit"
+                % (i + 1, n, t, tag, map_px, view), (12, 17),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.44, (220, 220, 220), 1, cv2.LINE_AA)
     return np.vstack([img, strip])
 
 
 def export(session: NavSession, scales: Optional[GaugeScales], out_dir: str, stride: int,
-           map_px: int, video: bool, fps: float) -> None:
+           map_px: int, video: bool, fps: float, radius_m: float = 0.0) -> None:
     """Write an annotated PNG per (strided) frame, and optionally an mp4."""
     frames_dir = Path(out_dir) / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     writer = None
     n = len(session)
     indices = list(range(0, n, stride))
-    size = _canvas_size(session, scales, map_px, indices)
+    size = _canvas_size(session, scales, map_px, indices, radius_m)
     for i in indices:
-        img = _fit(render(session.build(i), scales, map_px), size)
+        img = _fit(render(session.build(i), scales, map_px, radius_m), size)
         cv2.imwrite(str(frames_dir / ("%06d.png" % i)), img)
         if video:
             if writer is None:
@@ -102,7 +105,8 @@ def export(session: NavSession, scales: Optional[GaugeScales], out_dir: str, str
                                           " (+ replay.mp4)" if video else ""))
 
 
-def _canvas_size(session: NavSession, scales, map_px: int, indices) -> tuple:
+def _canvas_size(session: NavSession, scales, map_px: int, indices,
+                 radius_m: float = 0.0) -> tuple:
     """The widest/tallest frame layout in the run, as ``(w, h)``.
 
     The screen grows a lane column only on frames that have Sphera lane data, so
@@ -110,7 +114,8 @@ def _canvas_size(session: NavSession, scales, map_px: int, indices) -> tuple:
     across the run instead: a handful of renders is cheap next to the export.
     """
     probes = indices[:: max(1, len(indices) // 12)][:12] or [0]
-    shapes = [render(session.build(i), scales, map_px).shape for i in probes]
+    shapes = [render(session.build(i), scales, map_px, radius_m).shape
+              for i in probes]
     return (max(sh[1] for sh in shapes), max(sh[0] for sh in shapes))
 
 
@@ -145,8 +150,13 @@ def resolve_scales(session: NavSession) -> GaugeScales:
 
 
 def play(session: NavSession, scales: Optional[GaugeScales], map_px: int,
-         start: int) -> None:
-    """Interactive window: step or play through the run."""
+         start: int, radius_m: float = 0.0) -> None:
+    """Interactive window: step or play through the run.
+
+    ``radius_m`` is the follow-view half-width about the aircraft; ``[``/``]``
+    tighten/widen it live and ``f`` toggles the whole map, because the error you
+    are usually chasing is sub-metre on a map a hundred metres across.
+    """
     n = len(session)
     i = max(0, min(start, n - 1))
     playing = False
@@ -158,8 +168,8 @@ def play(session: NavSession, scales: Optional[GaugeScales], map_px: int,
     last = time.time()
     while True:
         fr = session.build(i)
-        cv2.imshow(_WINDOW, _footer(render(fr, scales, map_px), i, n, fr.stamp,
-                                    playing, map_px))
+        cv2.imshow(_WINDOW, _footer(render(fr, scales, map_px, radius_m), i, n,
+                                    fr.stamp, playing, map_px, radius_m))
         key = cv2.waitKey(15) & 0xFF
         if key in (ord("q"), 27):
             break
@@ -178,9 +188,15 @@ def play(session: NavSession, scales: Optional[GaugeScales], map_px: int,
             speed = min(8.0, speed * 2.0)
         elif key == ord("-"):
             speed = max(0.125, speed / 2.0)
+        elif key == ord("["):                   # tighter follow window
+            radius_m = max(1.0, (radius_m or 20.0) - 1.0)
+        elif key == ord("]"):                   # wider follow window
+            radius_m = min(60.0, (radius_m or 0.0) + 1.0)
+        elif key == ord("f"):                   # follow <-> whole map
+            radius_m = 0.0 if radius_m else 5.0
         elif key == ord("s"):
             path = "nav_debug_frame_%06d.png" % i
-            cv2.imwrite(path, render(fr, scales, map_px))
+            cv2.imwrite(path, render(fr, scales, map_px, radius_m))
             print("[saved]", path)
         if playing and i < n - 1:
             dt_frames = session.rows[i + 1]["t"] - fr.stamp
@@ -209,6 +225,10 @@ def main() -> None:
     ap.add_argument("--ros2", default=None, metavar="DIR",
                     help="the ROS2 recorder's lane directory, when it was not "
                          "collected into the run folder (default: <run>/ros2)")
+    ap.add_argument("--radius", type=float, default=5.0, metavar="M",
+                    help="follow-view half-width in metres about the aircraft "
+                         "(default 5; 0 = the whole map). The Sphera map is "
+                         "~105 m across, where a 30 cm error is two pixels.")
     ap.add_argument("--scales", choices=("auto", "xtend", "rooster"), default="auto",
                     help="gauge full-scales (default: auto -- Rooster for a run with "
                          "actuator traces, XTEND otherwise)")
@@ -222,9 +242,9 @@ def main() -> None:
     scales = build_scales(args.scales) or resolve_scales(session)
     if args.export:
         export(session, scales, args.export, max(1, args.stride), args.map_px,
-               not args.no_video, args.fps)
+               not args.no_video, args.fps, max(0.0, args.radius))
     else:
-        play(session, scales, args.map_px, args.start)
+        play(session, scales, args.map_px, args.start, max(0.0, args.radius))
 
 
 if __name__ == "__main__":

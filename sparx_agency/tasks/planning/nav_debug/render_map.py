@@ -49,14 +49,24 @@ _VEL_ARROW_S = 0.7           # seconds of reference velocity drawn as the arrow
 _DRIFT_ARROW_M_PER_MS = 2.0  # metres drawn per m/s of learned drift, for visibility
 
 
-def build_map_pane(frame: NavFrame, map_px: int = MAP_TARGET_PX) -> np.ndarray:
-    """Draw the map pane for ``frame``; every layer is skipped when absent."""
+def build_map_pane(frame: NavFrame, map_px: int = MAP_TARGET_PX,
+                   radius_m: float = 0.0) -> np.ndarray:
+    """Draw the map pane for ``frame``; every layer is skipped when absent.
+
+    Args:
+        frame: The moment to draw.
+        map_px: Roughly the longest edge of the pane.
+        radius_m: Follow-view half-width in metres, centred on the aircraft.
+            ``0`` draws the whole map, on which a sub-metre tracking error is
+            only a pixel or two.
+    """
     if frame.bev is None:
         img = np.full((map_px, map_px, 3), _EMPTY_BG, np.uint8)
         put_line(img, "no BEV map recorded yet", 20, map_px // 2, palette.MUTED, 0.7)
         to_px = None
     else:
-        img, to_px = render_bev(frame.bev, frame.bev_conf, map_px)
+        img, to_px = render_bev(frame.bev, frame.bev_conf, map_px,
+                                center=(frame.x, frame.y), radius_m=radius_m)
     if to_px is not None:
         for layer in _LAYERS:
             _guarded(layer, img, to_px, frame)

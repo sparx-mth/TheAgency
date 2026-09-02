@@ -99,9 +99,17 @@ the ROS2 directory has been collected into the run folder. Gauge full-scales are
 picked automatically (`--scales auto`) — Rooster's envelope is 3–4× XTEND's, so
 forcing the wrong one mis-scales every command gauge.
 
-Keys: **n/→** next · **p/←** prev · **SPACE** play/pause · **z/x** zoom ·
-**+/−** speed · **s** save PNG · **q** quit. Headless? `--export out/` writes
-frames plus an mp4.
+**The map follows the aircraft.** The jail is ~105 m across, so on a 900 px pane
+a 30 cm cross-track error is about two pixels — the error you are chasing is
+invisible at full extent. `--radius` (default **5 m**) crops to a window about
+the aircraft; `--radius 0` draws the whole map. The window pads with unknown at a
+map edge so the aircraft stays centred rather than sliding into a corner, and the
+reduction still uses `block_max`, so a one-cell-thick wall cannot vanish.
+
+Keys: **n/→** next · **p/←** prev · **SPACE** play/pause · **z/x** render size ·
+**[** / **]** tighten/widen the follow window · **f** follow ↔ whole map ·
+**+/−** speed · **s** save PNG · **q** quit. The footer names the current view.
+Headless? `--export out/` writes frames plus an mp4.
 
 ## What the screen tells you
 

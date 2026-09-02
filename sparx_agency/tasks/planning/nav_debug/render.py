@@ -55,7 +55,7 @@ __all__ = ["render", "default_scales", "ROOSTER_SCALES", "MAP_TARGET_PX",
 
 
 def render(frame: NavFrame, scales: Optional[GaugeScales] = None,
-           map_px: int = MAP_TARGET_PX) -> np.ndarray:
+           map_px: int = MAP_TARGET_PX, radius_m: float = 0.0) -> np.ndarray:
     """The full debug screen for ``frame``: map pane beside the telemetry columns.
 
     Args:
@@ -63,12 +63,14 @@ def render(frame: NavFrame, scales: Optional[GaugeScales] = None,
         scales: Gauge full-scales. ``None`` picks :data:`ROOSTER_SCALES` for a
             run with axis traces and the XTEND defaults otherwise.
         map_px: Roughly the longest edge of the map pane.
+        radius_m: Follow-view half-width in metres about the aircraft; ``0``
+            draws the whole map.
 
     Returns:
         An HxWx3 uint8 BGR image.
     """
     scales = scales if scales is not None else default_scales(frame)
-    pane = build_map_pane(frame, map_px)
+    pane = build_map_pane(frame, map_px, radius_m)
     columns = [build_panel(frame, scales)]
     if has_lane_data(frame):
         columns.append(build_lane_column(frame, scales))
