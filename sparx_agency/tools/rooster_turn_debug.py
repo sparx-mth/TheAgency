@@ -62,7 +62,7 @@ FALCON_LAUNCH_CMD = (
     "cam_width:=540 cam_height:=360 cam_min_depth:=0.45 "
     "sync_tolerance:=0.05 max_interp_gap:=0.12 "
     f"goal_x:={_SPHERA_GOAL_X} goal_y:={_SPHERA_GOAL_Y} "
-    "bev_xmin:=38.75 bev_ymin:=-30.66 bev_xmax:=70.75 bev_ymax:=1.34 "
+    "bev_xmin:=-14.6 bev_ymin:=-42.4 bev_xmax:=91.0 bev_ymax:=20.4 "
     "apf_max_total_shift_m:=0.3 vel_x:=0.15 mx_lateral_speed_max:=0.15 mx_yaw_rate:=0.4 "
     "bev_t_on:=3.0 bev_occ_conf_full:=4.0 bev_min_wall_run:=4 yaw_rate:=1.8"
 )

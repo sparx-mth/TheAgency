@@ -155,12 +155,15 @@ superseded by that decision.
 The exploration box was then enlarged to the prison's real extents
 (x [-75, 116], y [-58, 20]) and **reverted the same day**: the global
 coverage tour went from ~0.2 ms to ~10.5 s per solve (Hgrid cost matrix
-~7.7 s + LKH SOP ~2.8 s, measured live) and route planning stalled. The box
-is back at 38.75/-30.66/70.75/1.34; runs flown during the enlargement window
-(including 20260831_110050Z and any ~14:00 manual session) are not
-comparable with anything. Plan of record: perfect tracking on the small box,
-then re-enlarge only after the planner scales (bigger hgrid cells, bounded
-cost-matrix work).
+~7.7 s + LKH SOP ~2.8 s, measured live) and route planning stalled. Runs flown during that
+enlargement window (including 20260831_110050Z and any ~14:00 manual session)
+are not comparable with anything.
+
+**2026-09-02: re-enlarged**, to the measured extents x [-13.5, 89.9],
+y [-41.4, 19.3] -> box [-14.6, -42.4, 91.0, 20.4]. This time the solver
+bound travels with it: `hgrid/cell_size_max` is overridden to 8.0 m in
+nav_stack.launch, giving 112 tour cells against the 624 that produced the
+10.5 s solve. Coverage `final_m3` before this date used the old 4915 m3 box.
 
 The current flying configuration also carries the gentle-lateral slew
 (lateral 400/s attack, 600/s release) on top of cap 600.

@@ -664,7 +664,7 @@ ROBOTICAN_SERVICES: list[Service] = [
             "— see LESSONS.md's 'stop-watchdog cancels any in-progress takeoff/land' "
             "entry before running this during a manual arm/takeoff/land test."
         ),
-        cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/adapters/run_twist_control_adapter.sh --rooster-id R1",
+        cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/adapters/run_twist_control_adapter.sh --rooster-id R1 --max-lateral-axis 600",
         env="none",
         machine="pc",
         proc_container="robotican_dev",
@@ -857,10 +857,18 @@ ROBOTICAN_SERVICES: list[Service] = [
             # adapter launches sphera_drone.launch (a Sphera-only fork of
             # real_drone.launch) instead: only that file forwards bev_* to
             # nav_stack.launch.
-            "bev_xmin:=38.75 bev_ymin:=-30.66 bev_xmax:=70.75 bev_ymax:=1.34 "
+            "bev_xmin:=-14.6 bev_ymin:=-42.4 bev_xmax:=91.0 bev_ymax:=20.4 "
             "apf_max_total_shift_m:=0.3 vel_x:=0.15 mx_lateral_speed_max:=0.15 "
             "mx_yaw_rate:=0.4 bev_t_on:=3.0 bev_occ_conf_full:=4.0 "
-            "bev_min_wall_run:=4 yaw_rate:=1.8'"
+            "bev_min_wall_run:=4 yaw_rate:=1.8 "
+            # 2026-09-02: these were left at sphera_drone.launch's
+            # defaults, so the buttons flew an untuned stack: at
+            # inflation 0.85 a B-spline needs a 1.7 m corridor and 95% of
+            # planned trajectories were rejected as colliding (1984 of
+            # 2084, only 111 ever reached EXEC_TRAJ). The campaign has
+            # flown 0.40/0.55 with lateral since 2026-08-31.
+            "obstacles_inflation:=0.40 safe_distance:=0.55 "
+            "explore_use_lateral:=true'"
         ),
         env="none",
         machine="pc",

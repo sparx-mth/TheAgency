@@ -1318,6 +1318,10 @@
   <rosparam command="load" file="$(find fast_planner)/config/fast_planner.yaml"/>
   <rosparam command="load" file="$(find exploration_preprocessing)/config/frontier_finder.yaml"/>
   <rosparam command="load" file="$(find exploration_preprocessing)/config/hgrid.yaml"/>
+  <!-- 2026-09-02: override hgrid.yaml's 5.0 m. The coverage tour is an
+       all-pairs A* over tour cells, so its cost grows with the SQUARE of the
+       cell count: the enlarged box gives 286 cells at 5 m but 112 at 8 m. -->
+  <param name="hgrid/cell_size_max" value="8.0"/>
   <rosparam command="load" file="$(find exploration_utils)/config/perception_utils.yaml"/>
   <rosparam command="load" file="$(find exploration_manager)/config/exploration_manager.yaml"/>
 
@@ -1453,7 +1457,10 @@
        be. Measured 2026-08-18: the follower's tracking error sawtoothed between
        ~0.1m and 2.07m, snapping back at each replan, and this guard never fired
        once in 700s. 0.6m keeps each replan anchored near the real aircraft. -->
-  <arg name="fsm_replan_from_pose_drift" default="0.6"/>
+  <!-- 2026-09-02: 0.6 was BELOW normal tracking error, so this recovery
+       path fired 93x in one flight and forgave the deviation every time
+       instead of making the aircraft catch up. Back to the patch default. -->
+  <arg name="fsm_replan_from_pose_drift" default="1.5"/>
   <param name="/fsm/replan_from_pose_drift" value="$(arg fsm_replan_from_pose_drift)"/>
 
   <arg name="fsm_slow_traj_target_vel"  default="0.40"/>

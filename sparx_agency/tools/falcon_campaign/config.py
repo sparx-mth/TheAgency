@@ -78,14 +78,15 @@ FALCON_ENV = (
 
 # ── Geometry (Rooster spawns at ~(54.75, -14.66) after the X/Y sign fix) ──
 GOAL_X, GOAL_Y = 57.25, -10.16
-#: The real prison extents are x [-75, 116], y [-58, 20] (operator-provided
-#: 2026-08-31), but the box deliberately stays at the small placeholder: the
-#: full-extent enlargement was deployed and reverted the same day after the
-#: global coverage tour went from ~0.2 ms to ~10.5 s per solve (Hgrid cost
-#: matrix ~7.7 s + LKH SOP ~2.8 s). Re-enlarge only after the planner scales.
+#: The measured prison extents are x [-13.5, 89.9], y [-41.4, 19.3]; the box
+#: is that envelope +1 m, snapped to 0.2 m. A 2026-08-31 enlargement to a
+#: padded x [-75, 116] was reverted the same day when the coverage tour went
+#: from ~0.2 ms to ~10.5 s per solve; this one holds because hgrid/
+#: cell_size_max is pinned to 8.0 m in nav_stack.launch (112 tour cells, not
+#: 624), measured back at 0.55 ms.
 #: Must match maps/sphera_jail.yaml `building` and the hand-synced copies in
 #: mission_control.py / rooster_turn_debug.py / mission_sphera.yaml.
-BEV_XMIN, BEV_YMIN, BEV_XMAX, BEV_YMAX = 38.75, -30.66, 70.75, 1.34
+BEV_XMIN, BEV_YMIN, BEV_XMAX, BEV_YMAX = -14.6, -42.4, 91.0, 20.4
 
 # ── Camera intrinsics (hfov 135deg, confirmed against Sphera's own config) ─
 CAM = dict(fx=111.837662, fy=180.0, cx=269.5, cy=179.5,
