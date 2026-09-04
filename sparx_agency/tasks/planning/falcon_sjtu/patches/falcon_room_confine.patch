@@ -1,0 +1,404 @@
+--- a/falcon_planner/pathfinding/include/pathfinding/astar.h
++++ b/falcon_planner/pathfinding/include/pathfinding/astar.h
+@@ -190,6 +190,22 @@
+   double no_go_last_read_;
+   void refreshNoGoRegions();
+ 
++  // ROOM CONFINEMENT, leased. keep_in_ is an INCLUSION list: when it is
++  // non-empty a position is valid only inside one of its boxes, which is what
++  // confines the aircraft to one room. keep_out_runtime_ seals the doorways,
++  // because a room's axis-aligned bounding box leaks through its own doors
++  // into the neighbours. Both are cleared the moment the host's deadline
++  // lapses, so a dead host cannot leave the aircraft fenced in. Flat, six
++  // doubles per box, for the same GCC 9 reason as keep_out_.
++  std::vector<double> keep_in_;
++  std::vector<double> keep_out_runtime_;
++  double confine_deadline_;
++  double confine_refresh_s_;
++  double confine_last_read_;
++  double confine_start_exempt_;
++  void refreshConfinement();
++  bool confineBlocks(const Eigen::Vector3d &pos, const Eigen::Vector3d &start);
++
+   Config config_;
+ 
+   // main data structure
+--- a/falcon_planner/pathfinding/src/astar.cpp
++++ b/falcon_planner/pathfinding/src/astar.cpp
+@@ -9,14 +9,14 @@
+ // Keep-out volumes, flat: six doubles per box, xmin ymin zmin xmax ymax zmax.
+ // Kept as a flat vector rather than a vector of Eigen pairs because the pair
+ // form makes GCC 9 ICE in every TU that includes the owning header.
+-std::vector<double> loadKeepOutBoxes() {
++std::vector<double> loadBoxes(const char *param_name) {
+   std::vector<double> flat;
+-  if (!ros::param::get("/map_config/keep_out_boxes", flat))
++  if (!ros::param::get(param_name, flat))
+     return std::vector<double>();
+   if (flat.size() % 6 != 0) {
+-    ROS_ERROR("[keep_out] /map_config/keep_out_boxes has %lu values, which is "
++    ROS_ERROR("[keep_out] %s has %lu values, which is "
+               "not a multiple of 6 (xmin ymin zmin xmax ymax zmax); ignoring "
+-              "the remainder", (unsigned long)flat.size());
++              "the remainder", param_name, (unsigned long)flat.size());
+   }
+   // Normalise each box so min <= max on every axis, and a transposed pair in
+   // the config still forbids the volume the author meant.
+@@ -27,8 +27,12 @@
+   return flat;
+ }
+ 
+-bool insideKeepOut(const std::vector<double> &boxes, const double x,
+-                   const double y, const double z) {
++std::vector<double> loadKeepOutBoxes() {
++  return loadBoxes("/map_config/keep_out_boxes");
++}
++
++bool insideAnyBox(const std::vector<double> &boxes, const double x,
++                  const double y, const double z) {
+   for (size_t i = 0; i + 5 < boxes.size(); i += 6) {
+     if (x >= boxes[i] && x <= boxes[i + 3] && y >= boxes[i + 1] &&
+         y <= boxes[i + 4] && z >= boxes[i + 2] && z <= boxes[i + 5])
+@@ -37,6 +41,11 @@
+   return false;
+ }
+ 
++bool insideKeepOut(const std::vector<double> &boxes, const double x,
++                   const double y, const double z) {
++  return insideAnyBox(boxes, x, y, z);
++}
++
+ }  // namespace
+ 
+ 
+@@ -82,6 +91,15 @@
+   nh.param("/astar/no_go_refresh_s", no_go_refresh_s_, 2.0);
+   no_go_last_read_ = 0.0;
+ 
++  // ROOM CONFINEMENT. A LEASE, not a switch: the host publishes a deadline on
++  // the ROS clock and must keep pushing it forward. If the host dies, the
++  // lease lapses and the confinement disappears -- an aircraft must never be
++  // permanently fenced into a room by a process that is no longer running.
++  nh.param("/map_config/confine_refresh_s", confine_refresh_s_, 1.0);
++  nh.param("/astar/confine_start_exempt", confine_start_exempt_, 1.0);
++  confine_deadline_ = 0.0;
++  confine_last_read_ = 0.0;
++
+   keep_out_ = loadKeepOutBoxes();
+   if (!keep_out_.empty())
+     ROS_WARN("[Astar] %lu keep-out volume(s) loaded; no route will be planned "
+@@ -380,6 +398,7 @@
+ 
+ int Astar::searchOnce(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt) {
+   refreshNoGoRegions();
++  refreshConfinement();
+   AstarNode::Ptr cur_node = path_node_pool_[0];
+   cur_node->parent = NULL;
+   cur_node->position = start_pt;
+@@ -521,6 +540,7 @@
+ int Astar::searchBBoxOnce(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt,
+                           const Eigen::Vector3d &bbox_min, const Eigen::Vector3d &bbox_max) {
+   refreshNoGoRegions();
++  refreshConfinement();
+   AstarNode::Ptr cur_node = path_node_pool_[0];
+   cur_node->parent = NULL;
+   cur_node->position = start_pt;
+@@ -667,6 +687,7 @@
+ 
+ // TODO: modify this function to search in unknown space with penalty
+ int Astar::searchUnknown(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt) {
++  refreshConfinement();
+   AstarNode::Ptr cur_node = path_node_pool_[0];
+   cur_node->parent = NULL;
+   cur_node->position = start_pt;
+@@ -814,6 +835,7 @@
+ 
+ int Astar::searchUnknownBBox(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt,
+                              const Eigen::Vector3d &bbox_min, const Eigen::Vector3d &bbox_max) {
++  refreshConfinement();
+   AstarNode::Ptr cur_node = path_node_pool_[0];
+   cur_node->parent = NULL;
+   cur_node->position = start_pt;
+@@ -962,6 +984,7 @@
+ 
+ int Astar::searchUnknownOnlyBBox(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt,
+                                  const Eigen::Vector3d &bbox_min, const Eigen::Vector3d &bbox_max) {
++  refreshConfinement();
+   AstarNode::Ptr cur_node = path_node_pool_[0];
+   cur_node->parent = NULL;
+   cur_node->position = start_pt;
+@@ -1171,6 +1194,43 @@
+   no_go_.swap(flat);
+ }
+ 
++void Astar::refreshConfinement() {
++  const double now = ros::Time::now().toSec();
++  if (now - confine_last_read_ < confine_refresh_s_)
++    return;
++  confine_last_read_ = now;
++  // The DEADLINE is read first, and the geometry is not read at all when the
++  // lease is dead. That ordering is the fail-open: no host, no block, and the
++  // planner does not even pay for the parameter reads.
++  double deadline = 0.0;
++  ros::param::param("/map_config/confine_deadline", deadline, 0.0);
++  confine_deadline_ = deadline;
++  if (!(confine_deadline_ > now)) {   // absent, expired, or NaN
++    keep_in_.clear();
++    keep_out_runtime_.clear();
++    return;
++  }
++  keep_in_ = loadBoxes("/map_config/keep_in_runtime");
++  keep_out_runtime_ = loadBoxes("/map_config/keep_out_runtime");
++}
++
++bool Astar::confineBlocks(const Eigen::Vector3d &pos,
++                          const Eigen::Vector3d &start) {
++  if (keep_in_.empty() && keep_out_runtime_.empty())
++    return false;
++  // The aircraft's own neighbourhood is never confined. A drone that has
++  // drifted into a blocked doorway -- or that is handed a room whose box it
++  // is standing just outside of -- must still be able to plan its way out.
++  // Same asymmetry start_clearance_ already grants the inflation skirt, and
++  // for the same reason: a fence the aircraft is inside of is a trap.
++  if (confine_start_exempt_ > 0.0 &&
++      (pos - start).head<2>().norm() < confine_start_exempt_)
++    return false;
++  if (!keep_in_.empty() && !insideAnyBox(keep_in_, pos.x(), pos.y(), pos.z()))
++    return true;
++  return insideAnyBox(keep_out_runtime_, pos.x(), pos.y(), pos.z());
++}
++
+ void Astar::buildInflateOffsetsIfNeeded() {
+   if (inflate_offsets_built_)
+     return;
+@@ -1186,6 +1246,16 @@
+ bool Astar::isBlockedInflated(const Eigen::Vector3d &pos, const Eigen::Vector3d &start) {
+   buildInflateOffsetsIfNeeded();
+ 
++  // ROOM CONFINEMENT, and deliberately NOT gated on inflate_enabled_. That
++  // single property is the whole difference from /astar/no_go_runtime, whose
++  // test sits inside `if (inflate_enabled_)` while search() retries with that
++  // false on NO_PATH -- so a no-go is suppressed at exactly the moment it is
++  // the only thing between the aircraft and the door. An ungated test here
++  // survives the relaxed retry, which is what makes this a fence rather than
++  // a preference.
++  if (confineBlocks(pos, start))
++    return true;
++
+   const voxel_mapping::OccupancyType here =
+       map_server_->getOccupancyGrid()->getVoxel(pos).value;
+   if (here == voxel_mapping::OccupancyType::OCCUPIED ||
+--- a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
++++ b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+@@ -164,6 +164,19 @@
+   // from /map_config/keep_out_boxes. Flat: six doubles per box.
+   std::vector<double> keep_out_;
+ 
++  // ROOM CONFINEMENT, leased, mirroring Astar's. confine_keep_in_ is an
++  // INCLUSION list: with it set, every cluster and viewpoint outside it
++  // retires, so the coverage tour stops offering the rest of the building.
++  // confine_keep_out_ seals the doorways the room's bounding box leaks
++  // through. Both clear the moment the host's deadline lapses.
++  std::vector<double> confine_keep_in_;
++  std::vector<double> confine_keep_out_;
++  double confine_deadline_;
++  double confine_refresh_s_;
++  double confine_last_read_;
++  void refreshConfinement();
++  bool confineRetires(const Eigen::Vector3d &p) const;
++
+   double blocked_region_radius_;
+   // The width a shadow reaches once the place behind it has proved itself.
+   // blocked_region_radius_ is deliberately UNDER candidate_rmax so that one
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -13,14 +13,14 @@
+ // Keep-out volumes, flat: six doubles per box, xmin ymin zmin xmax ymax zmax.
+ // Kept as a flat vector rather than a vector of Eigen pairs because the pair
+ // form makes GCC 9 ICE in every TU that includes the owning header.
+-std::vector<double> loadKeepOutBoxes() {
++std::vector<double> loadBoxes(const char *param_name) {
+   std::vector<double> flat;
+-  if (!ros::param::get("/map_config/keep_out_boxes", flat))
++  if (!ros::param::get(param_name, flat))
+     return std::vector<double>();
+   if (flat.size() % 6 != 0) {
+-    ROS_ERROR("[keep_out] /map_config/keep_out_boxes has %lu values, which is "
++    ROS_ERROR("[keep_out] %s has %lu values, which is "
+               "not a multiple of 6 (xmin ymin zmin xmax ymax zmax); ignoring "
+-              "the remainder", (unsigned long)flat.size());
++              "the remainder", param_name, (unsigned long)flat.size());
+   }
+   // Normalise each box so min <= max on every axis, and a transposed pair in
+   // the config still forbids the volume the author meant.
+@@ -31,6 +31,10 @@
+   return flat;
+ }
+ 
++std::vector<double> loadKeepOutBoxes() {
++  return loadBoxes("/map_config/keep_out_boxes");
++}
++
+ bool insideKeepOut(const std::vector<double> &boxes, const double x,
+                    const double y, const double z) {
+   for (size_t i = 0; i + 5 < boxes.size(); i += 6) {
+@@ -218,6 +222,10 @@
+   // being allowed to call the world finished. 0 restores the old behaviour.
+   nh.param("/frontier_finder/finish_amnesty_max", finish_amnesty_max_, 2);
+ 
++  ros::param::param("/map_config/confine_refresh_s", confine_refresh_s_, 1.0);
++  confine_deadline_ = 0.0;
++  confine_last_read_ = 0.0;
++
+   keep_out_ = loadKeepOutBoxes();
+   if (!keep_out_.empty())
+     ROS_WARN("[FrontierFinder] %lu keep-out volume(s) loaded; no viewpoint will "
+@@ -284,6 +292,42 @@
+   return r < blocked_region_radius_max_ ? r : blocked_region_radius_max_;
+ }
+ 
++void FrontierFinder::refreshConfinement() {
++  const double now = ros::Time::now().toSec();
++  if (now - confine_last_read_ < confine_refresh_s_)
++    return;
++  confine_last_read_ = now;
++  // Deadline first; geometry not read at all when the lease is dead. A host
++  // that dies must not leave the aircraft fenced into a room for ever.
++  double deadline = 0.0;
++  ros::param::param("/map_config/confine_deadline", deadline, 0.0);
++  confine_deadline_ = deadline;
++  if (!(confine_deadline_ > now)) {
++    confine_keep_in_.clear();
++    confine_keep_out_.clear();
++    return;
++  }
++  confine_keep_in_ = loadBoxes("/map_config/keep_in_runtime");
++  confine_keep_out_ = loadBoxes("/map_config/keep_out_runtime");
++}
++
++bool FrontierFinder::confineRetires(const Eigen::Vector3d &p) const {
++  // NO start exemption here, deliberately, and it is the difference between
++  // this and the A* test. A* must let the aircraft plan its way OUT of a
++  // blocked doorway it is sitting in; the frontier finder must never OFFER a
++  // cluster outside the room, however close the aircraft happens to be to it.
++  // Retiring the out-of-room clusters is what stops FALCON WANTING to leave --
++  // sealing the doors alone would leave the coverage tour targeting the rest
++  // of the building, A* returning NO_PATH at the seal, and the publish-fail
++  // blacklist casting shadows over the very doorway we must fly back out of.
++  if (confine_keep_in_.empty() && confine_keep_out_.empty())
++    return false;
++  if (!confine_keep_in_.empty() &&
++      !insideKeepOut(confine_keep_in_, p.x(), p.y(), p.z()))
++    return true;
++  return insideKeepOut(confine_keep_out_, p.x(), p.y(), p.z());
++}
++
+ void FrontierFinder::expireBlockedRegions() {
+   if (blocked_region_ttl_s_ <= 0.0 || blocked_regions_.empty())
+     return;
+@@ -953,11 +997,14 @@
+ }
+ 
+ void FrontierFinder::sweepBlockedFrontiers() {
+-  if ((blocked_regions_.empty() && keep_out_.empty()) || frontiers_.empty())
++  if ((blocked_regions_.empty() && keep_out_.empty() &&
++       confine_keep_in_.empty() && confine_keep_out_.empty()) ||
++      frontiers_.empty())
+     return;
+   int retired = 0;
+   for (list<Frontier>::iterator it = frontiers_.begin(); it != frontiers_.end();) {
+-    bool in_blocked = insideKeepOut(keep_out_, it->average_.x(),
++    bool in_blocked = confineRetires(it->average_) ||
++                      insideKeepOut(keep_out_, it->average_.x(),
+                                     it->average_.y(), it->average_.z());
+     for (size_t i = 0; !in_blocked && i < blocked_regions_.size(); ++i)
+       if ((blocked_regions_[i] - it->average_).norm() <
+@@ -992,6 +1039,7 @@
+ void FrontierFinder::computeFrontiersToVisit() {
+   // Retire stale shadows before they are used, so an expired region is
+   // reconsidered on this tour rather than the next one.
++  refreshConfinement();
+   expireBlockedRegions();
+ 
+   // Retire frontiers that were ALREADY on the list when a shadow was cast.
+@@ -1032,7 +1080,8 @@
+       // second strike the width exceeds candidate_rmax and the frontier retires,
+       // which is what stops the tour re-offering a place the aircraft has now
+       // failed to reach twice.
+-      bool in_blocked = insideKeepOut(keep_out_, tmp_ftr.average_.x(),
++      bool in_blocked = confineRetires(tmp_ftr.average_) ||
++                        insideKeepOut(keep_out_, tmp_ftr.average_.x(),
+                                       tmp_ftr.average_.y(), tmp_ftr.average_.z());
+       for (size_t i = 0; !in_blocked && i < blocked_regions_.size(); ++i)
+         if ((blocked_regions_[i] - tmp_ftr.average_).norm() <
+@@ -1281,7 +1330,8 @@
+       // trades margin for coverage in places worth covering, and a
+       // keep-out is the declaration that this one is not.
+       ++g_vp_audit.candidates;
+-      if (insideKeepOut(keep_out_, sample_pos.x(), sample_pos.y(),
++      if (confineRetires(sample_pos) ||
++          insideKeepOut(keep_out_, sample_pos.x(), sample_pos.y(),
+                         sample_pos.z())) {
+         ++g_vp_audit.keep_out;
+         continue;
+@@ -1493,7 +1543,8 @@
+         // trades margin for coverage in places worth covering, and a
+         // keep-out is the declaration that this one is not.
+         ++g_vp_audit.candidates;
+-        if (insideKeepOut(keep_out_, sample_pos.x(), sample_pos.y(),
++        if (confineRetires(sample_pos) ||
++          insideKeepOut(keep_out_, sample_pos.x(), sample_pos.y(),
+                           sample_pos.z())) {
+           ++g_vp_audit.keep_out;
+           continue;
+--- a/falcon_planner/exploration_manager/src/exploration_fsm.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_fsm.cpp
+@@ -391,8 +391,17 @@
+       fd_->static_state_ = true;
+       ROS_WARN("[FSM] Finish exploration: No grid");
+ 
+-      CHECK_EQ(expl_manager_->ed_->frontiers_.size(), 0)
+-          << "Frontier size: " << expl_manager_->ed_->frontiers_.size() << ", but no grid";
++      // Demoted from CHECK_EQ, which SIGABRTs the whole exploration node.
++      // "No grid but frontiers remain" is not a broken invariant, it is the
++      // NORMAL state under room confinement: the hierarchical grid collapses
++      // to nothing inside a single room while the frontier list still holds
++      // every cluster in the rest of the building. Aborting there kills the
++      // planner -- and the voxel map with it -- on the first confined room.
++      if (!expl_manager_->ed_->frontiers_.empty()) {
++        ROS_WARN("[FSM] No grid with %lu frontier(s) still standing; this is "
++                 "expected while confined to a room",
++                 (unsigned long)expl_manager_->ed_->frontiers_.size());
++      }
+ 
+       transitState(FINISH, "FSM");
+     }
+@@ -976,6 +985,28 @@
+     if (ed->frontiers_.size() > 0) {
+       frontier_ready_ = true;
+     }
++
++    // RESUME FROM FINISH. Upstream, FINISH is terminal: no transitState
++    // leaves it, the RTB exit is commented out, and triggerCallback ignores
++    // everything unless state_ == WAIT_TRIGGER. That is correct for a
++    // one-shot survey and fatal for a repeated room-by-room search, where
++    // exhausting ONE confined room drives the planner into FINISH and ends
++    // the mission for the whole building.
++    //
++    // So: if frontiers exist again -- because the confinement was lifted, or
++    // because the aircraft was flown somewhere new -- go back to planning.
++    // Behind a parameter, defaulting to the upstream behaviour, so a plain
++    // survey run is bit-identical to before.
++    if (state_ == FINISH && !ed->frontiers_.empty()) {
++      bool resume = false;
++      ros::param::param("/fsm/resume_from_finish", resume, false);
++      if (resume) {
++        fd_->static_state_ = true;
++        transitState(PLAN_TRAJ, "frontierCallback/resume");
++        ROS_WARN("[FSM] resuming from FINISH: %lu frontier(s) are reachable "
++                 "again", (unsigned long)ed->frontiers_.size());
++      }
++    }
+   }
+ 
+   if (expl_manager_->ep_->auto_start_ && frontier_ready_ && state_ == WAIT_TRIGGER) {

@@ -209,6 +209,7 @@ docker run -d --name falcon-sjtu \
     --volume "${SCRIPT_DIR}/adapter/scripts/bspline_follower_node.py:${SCRIPTS_TARGET}/bspline_follower_node.py" \
     --volume "${SCRIPT_DIR}/adapter/scripts/sensor_pose_node.py:${SCRIPTS_TARGET}/sensor_pose_node.py" \
     --volume "${SCRIPT_DIR}/adapter/scripts/mission_watchdog_node.py:${SCRIPTS_TARGET}/mission_watchdog_node.py" \
+    --volume "${SCRIPT_DIR}/adapter/scripts/room_confine_node.py:${SCRIPTS_TARGET}/room_confine_node.py" \
     --volume "${XTEND_SCRIPTS_DIR}/bev_publisher_node.py:${SCRIPTS_TARGET}/bev_publisher_node.py" \
     --volume "${XTEND_SCRIPTS_DIR}/cloud_utils.py:${SCRIPTS_TARGET}/cloud_utils.py" \
     --volume "${SCRIPT_DIR}/adapter/launch/exploration.launch:${LAUNCH_TARGET}/exploration.launch" \

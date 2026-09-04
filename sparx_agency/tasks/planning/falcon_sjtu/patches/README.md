@@ -862,3 +862,83 @@ frontier clearances, `blocked_region_radius`), `adapter/launch/bspline_follower.
 (speed cap 0.6, recovery params), and `adapter/scripts/bspline_follower_node.py`
 (re-survey, hold-on-silence, 22° attitude reflex).
 
+
+## falcon_room_confine.patch — a leased fence FALCON actually respects
+
+Touches `pathfinding/astar.{h,cpp}`,
+`exploration_preprocessing/{include/…/frontier_finder.h,src/frontier_finder.cpp}`
+and `exploration_manager/src/exploration_fsm.cpp`. Built into
+**`falcon-ros-custom:v2-confine`**; `v1` is untouched and still the default.
+
+**Why.** An object search wants FALCON to map ONE room and stop there, so the
+host can pick the next room by its own ranking. Nothing in the shipped image can
+express that. Verified against the image rather than the launch files, which
+document intent instead of the binary:
+
+* `/map_config/keep_out_boxes` and `/astar/no_go_runtime` are dereferenced ONLY
+  inside the `isValidVoxel` lambda of the five-argument
+  `Astar::search(start, end, MODE, bbox_min, bbox_max)` — and **no caller
+  anywhere in the workspace uses that overload.** Every live search goes through
+  `search(p1,p2)` / `searchBBox` / `searchUnknown*`, which validate via
+  `Astar::isBlockedInflated` or a raw `getVoxel == OCCUPIED`. Both lists are
+  dead code at runtime.
+* Even reached, `no_go_` sits behind `if (inflate_enabled_)`, and
+  `search()`/`searchBBox()` deliberately retry with that false on `NO_PATH` — so
+  it is suppressed at exactly the moment it is the only thing between the
+  aircraft and the door. A preference, never a fence.
+* `/frontier_finder/blocked_regions_runtime` is read only in the FrontierFinder
+  constructor, rewritten wholesale from memory on every replan, emptied by
+  `grantFinishAmnesty`, and deleted every second by `mission_watchdog_node`.
+* **Injecting voxels cannot work either**, which is the intuitive approach and
+  the one worth writing down. `ESDF::updateLocalESDF` writes only a SMALLER
+  distance (`if (dist < value) value = dist`) and no runtime path ever raises
+  one, so any voxel ever marked occupied leaves the ESDF dented at 0.0 for the
+  rest of the mission — and the bspline optimiser, the `searchUnknown*` family
+  and `isFreeInflated` all keep reading that dent long after the block is
+  lifted. Blocking a doorway once would degrade it permanently.
+
+**What it does.** A keep-**in** list (`/map_config/keep_in_runtime`) plus door
+seals (`/map_config/keep_out_runtime`), armed by a deadline
+(`/map_config/confine_deadline`) re-read once a second.
+
+*Why a keep-in and not just door blocks.* Sealing the doors alone does not
+confine: `FrontierFinder` retires only clusters whose `average_` is inside a
+box, so every frontier in the rest of the building survives, the coverage tour
+keeps choosing them, A\* returns `NO_PATH` at the seal, `PLAN_TRAJ` loops on
+`FAIL`, and the publish-fail blacklist starts casting shadows over the very
+doorway the aircraft must fly back out through. The inclusion list retires the
+out-of-room clusters, which stops FALCON *wanting* to leave. The seals are still
+needed because a room's axis-aligned bbox leaks through its own doorways.
+
+*Where the test goes.* `confineBlocks` is the first statement of
+`Astar::isBlockedInflated` and is **not** gated on `inflate_enabled_` — the one
+property `no_go_` lacks, and the whole difference between a fence and a bias.
+`FrontierFinder::confineRetires` is ORed into the four existing `insideKeepOut`
+tests and has **no** start exemption, because the finder must never offer a
+cluster outside the room however close the aircraft is to it.
+
+*Fail-open, always.* The deadline is read FIRST and the geometry is not read at
+all when the lease is dead, so a dead host, a dropped bridge or a killed shim
+all end in NO confinement rather than an aircraft fenced in for ever. Measured
+in flight: the aircraft held station for the whole lease and resumed flying on
+the exact second the deadline passed. A\* keeps a `confine_start_exempt` radius
+around the aircraft so a drone that drifts into a sealed doorway can still plan
+its way out.
+
+**Two things that would each have killed the first flight.** `CHECK_EQ(frontiers_
+.size(), 0)` in `exploration_fsm.cpp` SIGABRTs the exploration node — and the
+whole voxel map with it — whenever the hgrid collapses while frontiers stand,
+which is the NORMAL state inside a confined room; it is demoted to a warning.
+And `FINISH` is terminal upstream, which is right for a one-shot survey and
+fatal for a room-by-room search, where the FIRST room exhausted ends the mission
+for the building; `frontierCallback` now returns to `PLAN_TRAJ` when frontiers
+are reachable again, behind `/fsm/resume_from_finish` (default false, so a plain
+survey is bit-identical).
+
+**Companion changes outside this patch**, all required together: the follower's
+`_finished` latch is cleared by a new trajectory (and the watchdog abort split
+onto its own `_aborted` flag, which stays terminal); the watchdog's own
+`_finished` stands back up when FALCON plans again; and
+`adapter/scripts/room_confine_node.py` turns the bridged
+`/scene_graph/confine` topic into the three rosparams, because rosparams do not
+bridge.

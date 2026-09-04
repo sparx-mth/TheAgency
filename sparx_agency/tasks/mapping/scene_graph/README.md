@@ -454,6 +454,78 @@ probabilities, skeleton and door links in the same reset, and the search node
 drops the latched ranking and the policy's visit cooldowns the moment it sees
 the BEV reshape.
 
+## Finding one object: `object_search_node`
+
+`room_search_node` above turns the ranking into a goal. This turns the whole
+thing into a **search for one named object**, and it is the loop the method
+describes:
+
+```
+SELECT ──► TRANSIT ──► SEARCH ──► SELECT ...          (preempted by /target_seen)
+  │           │           │
+  │           │           └─ FALCON maps the room, FENCED INTO IT.
+  │           │              Ends on: no frontier left / the count stops
+  │           │              falling / the per-room budget expires.
+  │           └─ we fly, with the shared weighted A* over the live BEV and the
+  │              trajectory follower. FALCON is muted by cmd_vel_arbiter_node.
+  └─ arc weights + the oracle's ranking go to a solver, which returns a visit
+     order. Until RPT* exists the built-in stub commits to ONE room.
+```
+
+**Arc weights.** Every `cost_period_s` the live BEV, the room centres and the
+ranking are assembled into an `HppPtInstance` — a complete, symmetric, metric
+cost matrix plus a probability per room — and published on
+`/object_search/costs`, so the graph an "optimal" order was computed from is
+visible in a recording. One multi-source `scipy` Dijkstra sweep over the
+planner's own passable cells, **not** N² A\*: measured on the captured hospital
+BEV, 111 ms for the whole 29×29 matrix against 6.6 s for pairwise A\*. The
+weight is binary rather than the planner's shaped cost because RPT\*'s
+dominance pruning consumes the triangle inequality — worst violation measured
+0.000000000 m. A room centre that lands in a wall (5 of 29 on that fixture)
+snaps to the nearest passable cell; a room with none is withheld from the
+solver rather than given a fabricated weight.
+
+**The solver seam** is `solver(candidates, instance) -> [room_ids]`, injected
+like the RNG. RPT\* drops in without this node changing.
+
+**Confining FALCON to the room** needs `falcon-ros-custom:v2-confine` (see
+`tasks/planning/falcon_sjtu/patches/falcon_room_confine.patch`) and
+`room_confine:=true`, which `--object-search` sets for you. The host publishes a
+leased keep-in box plus door seals on `/scene_graph/confine`; the ROS 1 shim
+turns them into rosparams. **It is a lease**: every failure on that path — this
+node dying, the bridge dropping, the shim killed — ends in NO confinement, never
+in an aircraft fenced in for ever. `search_backend:=host_sweep` is the fallback
+for a stack without the patch; it sweeps the room itself, confined by
+construction and worse at coverage.
+
+Run it:
+
+```bash
+FALCON_IMAGE=falcon-ros-custom:v2-confine \
+  bash sparx_agency/tasks/mapping/scene_graph/scripts/run_scene_graph.sh \
+    --target "x-ray machine" --object-search --fly
+```
+
+## Measuring it: `rig/search_campaign.sh`
+
+Time-to-find across targets and start poses, which is the only number the
+method's claim is about. Every trial is a cold stack — reusing a world carries
+the previous trial's map into the next one, which is a different experiment —
+and the start pose varies via `SJTU_DRONE_SPAWN` (`x,y,z[,yaw]`, wired through
+`bringup_world.sh` into the patched `spawn_drone.py`; unset spawns exactly where
+it always did).
+
+```bash
+bash sparx_agency/tasks/mapping/scene_graph/rig/search_campaign.sh \
+  --targets "wheelchair,x-ray machine" --cap-s 420
+```
+
+**A timeout is recorded at the cap, not dropped.** `analyze_campaign.py` leads
+with the find rate and a censored median over ALL trials; the mean over
+successes only is printed beside them, labelled as what it is. A method that
+finds the object in 60 s half the time and never otherwise is not a 60 s
+method.
+
 ## Environment variables
 
 | var | default | meaning |

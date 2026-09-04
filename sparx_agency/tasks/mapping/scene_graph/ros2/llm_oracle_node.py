@@ -158,6 +158,7 @@ class LLMOracleNode(Node):
                 searched_s=r["time_in_room_s"],
                 frontier_clusters=r["frontier_clusters"],
                 observed_classes=tuple(r["observed_classes"]),
+                area_m2=r["area_m2"],
             )
             for r in rooms
         ]
@@ -173,14 +174,23 @@ class LLMOracleNode(Node):
             "target": self._target,
             "model": self._llm.cfg.model,
             "source": result.source,
+            # P(target is in ANY mapped room), below 1 while unscanned space
+            # remains, and the spread of the distribution. A tick with
+            # spread ~0 is a tick where the oracle said nothing useful, and
+            # a whole run of them is greppable in the flight log rather than
+            # inferred from behaviour afterwards.
+            "p_present": result.p_present,
+            "spread": result.spread,
             "rooms": [
                 {
                     "id": r["id"],
                     "label": r["label"],
                     "prob": result.probs[r["id"]],
                     "reason": result.reasons.get(r["id"], ""),
+                    "score": result.scores.get(r["id"]),
                     "time_in_room_s": r["time_in_room_s"],
                     "frontier_clusters": r["frontier_clusters"],
+                    "area_m2": r["area_m2"],
                 }
                 for r in rooms
             ],
@@ -206,11 +216,19 @@ class LLMOracleNode(Node):
                 continue
             label_entry = self._latest_labels.get(str(pid), {})
             objs = room.get("objects", []) or []
+            # Area, in square metres, from the room's cell count and the
+            # grid resolution. It was on the wire all along and never read:
+            # without it "searched=60s" is uninterpretable (thorough in a
+            # broom cupboard, nothing in a ward), and the oracle's effort
+            # discount has no scale to work against.
+            res = float(self._latest_sg.get("resolution", 0.0) or 0.0)
+            cells = int(room.get("cells", 0) or 0)
             merged.append({
                 "id": int(pid),
                 "label": str(label_entry.get("label", "unknown")),
                 "time_in_room_s": float(room.get("time_in_room_s", 0.0)),
                 "frontier_clusters": int(room.get("frontier_clusters", 0)),
+                "area_m2": float(cells) * res * res,
                 "observed_classes": [str(o.get("class", "")) for o in objs
                                      if o.get("class")],
             })

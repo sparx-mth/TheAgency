@@ -288,6 +288,7 @@ docker run "${TTY_ARGS[@]}" --rm \
   -e CONTAINER_WORLD="${CONTAINER_WORLD}" \
   -e USE_GUI="${USE_GUI}" \
   -e SKIP_BUILD="${SKIP_BUILD}" \
+  -e SJTU_DRONE_SPAWN="${SJTU_DRONE_SPAWN:-}" \
   "${IMAGE}" \
   bash -c '
     set -eo pipefail

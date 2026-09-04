@@ -925,6 +925,31 @@
     <param name="no_move_cap_s"      value="$(arg watchdog_no_move_cap_s)"/>
   </node>
 
+  <!-- ── Room confinement: the ROS 2 host's lease on where FALCON may fly ──
+       Off by default, so a plain survey run is completely unchanged. Turned on
+       for a room-by-room object search, where the host fences FALCON into one
+       room at a time and lifts the fence when that room is done.
+
+       The node is the seam between a bridged topic and three rosparams the
+       patched planner re-reads once a second, because rosparams do not bridge.
+       It also sets /fsm/resume_from_finish, without which the FIRST room the
+       aircraft exhausts drives the FSM into its terminal FINISH state and ends
+       the mission for the whole building.
+
+       max_lease_s bounds what the host can ask for. The keep-in box is the
+       only thing stopping the aircraft leaving a room, so the lease is the
+       safety property the whole mechanism rests on: every failure on this
+       path (a dead host, a dropped bridge, this node killed) must end in NO
+       confinement, never in confinement that outlives its owner. -->
+  <arg name="room_confine"          default="false"/>
+  <arg name="room_confine_topic"    default="/scene_graph/confine"/>
+  <arg name="room_confine_max_lease_s" default="30.0"/>
+  <node if="$(arg room_confine)" pkg="falcon_adapter" type="room_confine_node.py"
+        name="room_confine" output="screen">
+    <param name="in_topic"     value="$(arg room_confine_topic)"/>
+    <param name="max_lease_s"  value="$(arg room_confine_max_lease_s)"/>
+  </node>
+
   <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
   <!-- Tracking authority, forwarded so a run can be tuned without editing a
        file. Defaults match bspline_follower.launch exactly, so forwarding

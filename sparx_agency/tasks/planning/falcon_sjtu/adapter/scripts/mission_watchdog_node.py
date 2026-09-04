@@ -220,6 +220,18 @@ class MissionWatchdogNode(object):
                     rospy.logwarn("[watchdog] FALCON reports the mission over; "
                                   "standing down the progress rules")
                 self._finished = True
+            elif self._finished:
+                # ...and stand them back UP when it starts planning again.
+                # This used to be a one-way latch, which was right when
+                # exploration finished exactly once. Under room-by-room
+                # confinement the planner finishes EVERY room and resumes
+                # after each one, so a one-way latch disables every progress
+                # rule for the rest of the flight after the first room --
+                # exactly the run where a stall most needs catching, because
+                # the aircraft is being fenced into small spaces repeatedly.
+                self._finished = False
+                rospy.logwarn("[watchdog] FALCON is planning again; the "
+                              "progress rules are back in force")
         except Exception:                       # noqa: BLE001 - never kill the sub
             return
 
