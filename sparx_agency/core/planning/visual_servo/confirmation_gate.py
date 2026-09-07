@@ -18,19 +18,20 @@ from typing import List, Optional, Sequence
 
 from sparx_agency.core.common.types.perception import Detection2D
 from sparx_agency.core.common.math.bbox import iou
+# The rule itself lives in the widest ring: the scene-graph target ladder
+# (core/mapping/topology/target_matcher.py) needs the same one, and mapping
+# must not import planning to get it. Re-exported here because this module's
+# name is the published import path for it.
+from sparx_agency.core.common.label_match import label_matches
 
-
-def label_matches(target: str, label: str) -> bool:
-    """Fuzzy-lite class match: exact, substring, or shared whitespace/underscore token."""
-    t = str(target).strip().lower()
-    c = str(label).strip().lower()
-    if not t or not c:
-        return False
-    if t == c or t in c or c in t:
-        return True
-    t_tokens = set(t.replace("_", " ").split())
-    c_tokens = set(c.replace("_", " ").split())
-    return bool(t_tokens & c_tokens)
+__all__ = [
+    "label_matches",
+    "select_target_detection",
+    "select_overlapping_target_detection",
+    "ConfirmationGateConfig",
+    "ConfirmationState",
+    "TargetConfirmationGate",
+]
 
 
 def select_target_detection(detections: Sequence[Detection2D], target: str,
