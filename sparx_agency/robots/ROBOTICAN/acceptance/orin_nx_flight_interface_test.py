@@ -4,8 +4,18 @@ with an optional REAL FLIGHT sequence (takeoff, hover, 360 turn, land).
 
 Default mode is bench-only, props off: confirms cmd_nav/state/rooster_status
 still behave the same after the architecture change (backend + all models
-now co-located on the drone's own Orin NX), and that IMU/image topics
-deliver at a sane rate. It never expects the airframe to leave the ground.
+now co-located on the drone's own Orin NX), and that the image topic
+delivers at a sane rate. It never expects the airframe to leave the ground.
+
+No IMU subscriber here on purpose: /{id}/imu/data (sensor_msgs/Imu) turned
+out to be unconfirmed against anything findable -- not real hardware, not
+even the Sphera simulator it was lifted from (checked the whole local
+Sphera workspace directly: no message there carries gyro/accel/
+angular_velocity fields, and nothing in its source publishes
+sensor_msgs/Imu). None of Robotican's vendored ROS2 interfaces carry IMU
+fields either. IMU is orin_nx_mavlink_direct_test.py's job instead: real
+IMU data lives in the raw MAVLink stream (RAW_IMU/SCALED_IMU*/HIGHRES_IMU),
+and that script reads it straight from there, with no topic name to guess.
 
 --real-flight mode is a genuinely different thing: it arms, takes off,
 expects to reach a stable hover in [--hover-min-m, --hover-max-m], turns
@@ -35,6 +45,25 @@ rather than silently treated as equivalent.
 A continuous ceiling guard (--ceiling-abort-m) commands an immediate land
 if the ranger ever exceeds it during takeoff/hover/turn.
 
+Error/status reporting from the controller: subscribes to StatusText
+(rooster_handler_interfaces, severity + text -- the MAVLink-STATUSTEXT-
+style channel for controller-reported faults/warnings) and reports
+fcu_mode (UAVState, a string -- e.g. failsafe mode names show up here).
+NOTE: StatusText's topic name is NOT confirmed anywhere in this repo --
+it has never actually been subscribed to in our code before now. The
+default (--status-text-topic, /{id}/status_text) is inferred from this
+repo's own naming convention for sibling rooster_handler_interfaces
+messages (KeepAlive -> /{id}/keep_alive), not something we've verified
+against the real system. Confirm/correct it with Robotican.
+Since StatusText is event-driven (only published when something happens),
+seeing zero messages during a clean run is the EXPECTED good outcome, not
+a failure -- the check here is informational (does the channel exist,
+what severities were seen), not pass/fail on message count. For an actual
+error-condition test, use --check-link-dropout: an interactive step that
+asks you to physically disconnect/reconnect the FCU link and checks that
+is_fcu_connected (and, if the topic is real, StatusText) correctly report
+the fault and its recovery.
+
 Usage (bench, props off, default):
     python3 orin_nx_flight_interface_test.py --rooster-id R1
 
@@ -56,9 +85,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import String
-from sensor_msgs.msg import Imu, Image
+from sensor_msgs.msg import Image
 from rooster_manager_interfaces.msg import RoosterState
 from fcu_driver_interfaces.msg import UAVState
+from rooster_handler_interfaces.msg import StatusText
 
 TWO_PI = 2 * math.pi
 
@@ -123,7 +153,7 @@ class AzimuthTracker:
 
 
 class FlightInterfaceTestNode(Node):
-    def __init__(self, rooster_id: str, imu_topic: str, image_topic: str):
+    def __init__(self, rooster_id: str, image_topic: str, status_text_topic: str):
         super().__init__("orin_nx_flight_interface_test")
         self.rooster_id = rooster_id
 
@@ -131,6 +161,9 @@ class FlightInterfaceTestNode(Node):
         self.last_status: dict | None = None
         self.status_rate = RateCounter()
         self.azimuth = AzimuthTracker()
+
+        self.last_fcu_mode: str | None = None
+        self.status_texts: list[tuple[int, str]] = []  # (severity, text), in arrival order
 
         self.cmd_pub = self.create_publisher(String, f"/{rooster_id}/cmd_nav", 10)
         self.state_sub = self.create_subscription(
@@ -140,15 +173,13 @@ class FlightInterfaceTestNode(Node):
             String, f"/{rooster_id}/rooster_status", self._on_status, 10
         )
         self.uav_state_sub = self.create_subscription(
-            UAVState, f"/{rooster_id}/fcu/state", self.azimuth.on_uav_state, 10
+            UAVState, f"/{rooster_id}/fcu/state", self._on_uav_state, 10
+        )
+        self.status_text_sub = self.create_subscription(
+            StatusText, status_text_topic, self._on_status_text, 10
         )
 
-        self.imu_rate = RateCounter()
         self.image_rate = RateCounter()
-        self.imu_sub = self.create_subscription(
-            Imu, imu_topic, lambda _msg: self.imu_rate.on_message(),
-            qos_profile_sensor_data,
-        )
         self.image_sub = self.create_subscription(
             Image, image_topic, lambda _msg: self.image_rate.on_message(),
             qos_profile_sensor_data,
@@ -164,6 +195,15 @@ class FlightInterfaceTestNode(Node):
             self.get_logger().warn(f"Malformed rooster_status payload: {msg.data!r}")
             return
         self.status_rate.on_message()
+
+    def _on_uav_state(self, msg: UAVState):
+        self.azimuth.on_uav_state(msg)
+        self.last_fcu_mode = getattr(msg, "fcu_mode", None)
+
+    def _on_status_text(self, msg: StatusText):
+        self.status_texts.append((int(msg.severity), str(msg.text)))
+        label = {0: "INFO", 1: "WARNING", 2: "ERROR"}.get(int(msg.severity), str(msg.severity))
+        self.get_logger().info(f"StatusText [{label}] {msg.text}")
 
     def ranger_m(self) -> float | None:
         return getattr(self.last_state, "ranger", None) if self.last_state else None
@@ -234,18 +274,21 @@ def run_connectivity_checks(node: FlightInterfaceTestNode) -> tuple[list[Check],
         ) if got_status else f"no /{node.rooster_id}/rooster_status message within 5s",
     ))
 
+    got_mode = spin_until(node, lambda: node.last_fcu_mode is not None, timeout_sec=5.0)
+    checks.append(Check(
+        "fcu_mode_reported",
+        got_mode and bool(node.last_fcu_mode),
+        f"fcu_mode={node.last_fcu_mode!r}" if got_mode
+        else f"no UAVState message on /{node.rooster_id}/fcu/state within 5s "
+             f"(this also feeds the --real-flight closed-loop turn check)",
+    ))
+
     return checks, True
 
 
 def run_topic_rate_checks(node: FlightInterfaceTestNode, args: argparse.Namespace) -> list[Check]:
     checks: list[Check] = []
     spin_until(node, lambda: False, timeout_sec=args.observe_sec)
-
-    imu_ok = node.imu_rate.count > 0 and node.imu_rate.rate_hz() >= args.min_imu_hz
-    checks.append(Check(
-        "imu_topic_rate", imu_ok,
-        f"count={node.imu_rate.count} rate={node.imu_rate.rate_hz():.1f}Hz (min {args.min_imu_hz}Hz)",
-    ))
 
     image_ok = node.image_rate.count > 0 and node.image_rate.rate_hz() >= args.min_image_hz
     checks.append(Check(
@@ -258,7 +301,55 @@ def run_topic_rate_checks(node: FlightInterfaceTestNode, args: argparse.Namespac
         "rooster_status_rate", status_ok,
         f"count={node.status_rate.count} rate={node.status_rate.rate_hz():.1f}Hz (min {args.min_status_hz}Hz)",
     ))
+
+    # Informational, not pass/fail -- StatusText is event-driven, so zero
+    # messages during a clean run is the expected good outcome, not a
+    # failure. See module docstring's note on the topic name being an
+    # unconfirmed guess.
+    by_severity = {0: 0, 1: 0, 2: 0}
+    for sev, _text in node.status_texts:
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+    errors_seen = [t for sev, t in node.status_texts if sev == 2]
+    detail = (
+        f"{len(node.status_texts)} message(s) over the run "
+        f"(info={by_severity.get(0, 0)}, warning={by_severity.get(1, 0)}, error={by_severity.get(2, 0)})"
+    )
+    if errors_seen:
+        detail += f" -- ERRORS: {'; '.join(errors_seen[:5])}"
+    checks.append(Check("status_text_channel", True, detail))
+
     return checks
+
+
+def run_link_dropout_check(node: FlightInterfaceTestNode, args: argparse.Namespace) -> Check:
+    """Interactive: operator physically disconnects/reconnects the FCU link.
+    Confirms is_fcu_connected correctly reports both the fault and the
+    recovery -- this is the closest thing to an actual error-condition test,
+    since nothing here can synthesize a real controller fault on its own."""
+    print("\n[flight-iface-test] --check-link-dropout: physically disconnect the "
+          "FCU link now (cable / power), then press Enter.")
+    input()
+    dropped = spin_until(
+        node, lambda: bool(node.last_state and not node.last_state.is_fcu_connected),
+        timeout_sec=args.link_dropout_timeout_sec,
+    )
+    n_status_before = len(node.status_texts)
+
+    print("[flight-iface-test] Now reconnect the FCU link, then press Enter.")
+    input()
+    recovered = spin_until(
+        node, lambda: bool(node.last_state and node.last_state.is_fcu_connected),
+        timeout_sec=args.link_dropout_timeout_sec,
+    )
+    n_status_after = len(node.status_texts)
+
+    passed = dropped and recovered
+    detail = (
+        f"is_fcu_connected: dropped={dropped}, recovered={recovered} "
+        f"(within {args.link_dropout_timeout_sec}s each); "
+        f"StatusText messages during dropout/recovery: {n_status_after - n_status_before}"
+    )
+    return Check("link_dropout_and_recovery", passed, detail)
 
 
 def run_bench_checks(node: FlightInterfaceTestNode, args: argparse.Namespace) -> list[Check]:
@@ -428,14 +519,20 @@ def parse_args() -> argparse.Namespace:
         "takeoff/hover/360-turn/land sequence."
     )
     p.add_argument("--rooster-id", default="R1")
-    p.add_argument("--imu-topic", default=None, help="Defaults to /{rooster-id}/imu/data")
     p.add_argument("--image-topic", default=None, help="Defaults to /{rooster-id}/camera/image_raw")
+    p.add_argument("--status-text-topic", default=None,
+                    help="Defaults to /{rooster-id}/status_text -- an INFERRED name, never "
+                         "confirmed against the real system, see module docstring.")
     p.add_argument("--observe-sec", type=float, default=8.0,
-                    help="How long to listen for IMU/image/status messages.")
-    p.add_argument("--min-imu-hz", type=float, default=10.0)
+                    help="How long to listen for image/status messages.")
     p.add_argument("--min-image-hz", type=float, default=5.0)
     p.add_argument("--min-status-hz", type=float, default=2.0)
     p.add_argument("--arm-timeout-sec", type=float, default=8.0)
+    p.add_argument("--check-link-dropout", action="store_true",
+                    help="Interactive: prompts you to physically disconnect/reconnect the FCU "
+                         "link, and confirms is_fcu_connected reports both the fault and the "
+                         "recovery. Runs after the bench or real-flight sequence, whichever mode.")
+    p.add_argument("--link-dropout-timeout-sec", type=float, default=30.0)
 
     # Bench-only mode
     p.add_argument("--skip-arm", action="store_true",
@@ -472,8 +569,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    imu_topic = args.imu_topic or f"/{args.rooster_id}/imu/data"
     image_topic = args.image_topic or f"/{args.rooster_id}/camera/image_raw"
+    status_text_topic = args.status_text_topic or f"/{args.rooster_id}/status_text"
 
     if args.real_flight:
         if not confirm_real_flight(args):
@@ -482,12 +579,12 @@ def main() -> int:
     else:
         print("[flight-iface-test] BENCH TEST ONLY -- confirm props are removed before continuing.")
 
-    print(f"[flight-iface-test] rooster_id  : {args.rooster_id}")
-    print(f"[flight-iface-test] imu_topic   : {imu_topic}")
-    print(f"[flight-iface-test] image_topic : {image_topic}")
+    print(f"[flight-iface-test] rooster_id       : {args.rooster_id}")
+    print(f"[flight-iface-test] image_topic      : {image_topic}")
+    print(f"[flight-iface-test] status_text_topic: {status_text_topic} (inferred, unconfirmed)")
 
     rclpy.init()
-    node = FlightInterfaceTestNode(args.rooster_id, imu_topic, image_topic)
+    node = FlightInterfaceTestNode(args.rooster_id, image_topic, status_text_topic)
     try:
         checks, ok = run_connectivity_checks(node)
         if ok:
@@ -496,6 +593,8 @@ def main() -> int:
             else:
                 checks += run_bench_checks(node, args)
             checks += run_topic_rate_checks(node, args)
+            if args.check_link_dropout:
+                checks.append(run_link_dropout_check(node, args))
     finally:
         node.destroy_node()
         rclpy.shutdown()
