@@ -18,7 +18,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORLD="${1:-hospital}"
-INSTRUCTION="${2:-Explore the entire hospital, enter all the rooms, reach every area at least once}"
+INSTRUCTION="${2:-${INSTRUCTION:-}}"   # empty -> the binding YAML's default
 
 exec env \
     RECORD=1 \

@@ -47,7 +47,9 @@ class PixelGoalDataset(Dataset):
         if frame not in self._cache:
             bgr = cv2.imread(str(self.rec_dir / "rgb" / f"{frame:06d}.png"))
             depth = np.load(self.rec_dir / "depth" / f"{frame:06d}.npy").astype(np.float32)
-            rgb01 = preprocess_rgb(bgr, self.image_size)                 # (S,S,3) RGB [0,1]
+            # Encoder order (BGR), the deployed server's -- see
+            # core/planning/vlas/navdp/preprocess.py.
+            rgb01 = preprocess_rgb(bgr, self.image_size)                 # (S,S,3) [0,1]
             img = np.transpose(rgb01, (2, 0, 1))                         # (3,S,S)
             images = np.repeat(img[None], self.memory_size, axis=0)      # (8,3,S,S)
             dep = preprocess_depth(depth, self.image_size,

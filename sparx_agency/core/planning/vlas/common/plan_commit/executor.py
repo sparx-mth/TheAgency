@@ -69,6 +69,9 @@ class CommitSpec:
             policy has predicted a near-stop -- so ask again instead of crawling
             to a halt. Do not set it to zero: a degenerate prediction would then
             be "flown" instantly and every tick would re-infer.
+        expected_speed_mps: Speed used to size the expiry deadline per
+            commitment; zero for a flat ``max_commit_s``.
+        commit_grace_s: Slack added to that estimate.
         max_commit_s: Give up on a commitment that has taken this long. The
             aircraft may be yawing in place, blocked, or fighting wind; whatever
             the reason, a stale observation is no longer worth flying.
@@ -85,6 +88,14 @@ class CommitSpec:
     arrive_radius_m: float = 0.30
     min_commit_m: float = 0.40
     max_commit_s: float = 8.0
+    #: Speed the commitment is expected to be flown at, m/s. Above zero, the
+    #: expiry deadline becomes ``arc / speed + commit_grace_s``, capped by
+    #: ``max_commit_s`` -- so a long route gets the time it needs and a short
+    #: one is not held for the length of time a long one would take. Zero keeps
+    #: the flat ``max_commit_s`` ceiling.
+    expected_speed_mps: float = 0.0
+    #: Slack added to the flight-time estimate above.
+    commit_grace_s: float = 2.0
     max_deviation_m: float = 2.0
     min_period_s: float = 0.33
 
@@ -316,9 +327,33 @@ class PlanCommitExecutor(object):
             return FLOWN
         if lateral > self.spec.max_deviation_m:
             return OFF_ROUTE
-        if float(now_s) - plan.issued_s > self.spec.max_commit_s:
+        if float(now_s) - plan.issued_s > self._deadline_s(commit_arc):
             return EXPIRED
         return None
+
+    def _deadline_s(self, commit_arc: float) -> float:
+        """How long this particular commitment is allowed to take.
+
+        Scaled by how far it actually is, not a flat clock. ``max_commit_s`` has
+        to be long enough for the longest route the policy emits, and on a
+        policy that mixes a 2.5 m curve with a 0.25 m step rendered from a
+        discrete action that makes it ten times too long for most commitments:
+        a short step whose arrival never registers -- because the aircraft was
+        blocked, or braking, or changing altitude -- then sits out the whole
+        ceiling doing nothing. Measured in the hospital at ``max_commit_s: 12``:
+        five separate twelve-second stalls in a ninety-second flight, which is
+        most of the time the aircraft spent stationary.
+
+        With ``expected_speed_mps`` set, a commitment expires once it has had
+        the time it would take to fly plus ``commit_grace_s`` -- still capped by
+        ``max_commit_s``, which stays the backstop for a route that is somehow
+        longer than either. Zero disables the scaling and restores the flat
+        ceiling.
+        """
+        if self.spec.expected_speed_mps <= 0.0:
+            return float(self.spec.max_commit_s)
+        flight = float(commit_arc) / float(self.spec.expected_speed_mps)
+        return min(float(self.spec.max_commit_s), flight + self.spec.commit_grace_s)
 
     def _gate(self, reason: Optional[str], now_s: float) -> Optional[str]:
         """Hold back a reason that would ask the policy faster than the ceiling.

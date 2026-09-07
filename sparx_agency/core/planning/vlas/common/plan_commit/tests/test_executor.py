@@ -359,3 +359,47 @@ def test_a_fold_is_not_finished_before_the_ground_has_been_covered():
             travelled += step
     assert flown_after is not None, "the commitment was never finished"
     assert flown_after >= plan.commit_arc_m - engine.spec.arrive_radius_m
+
+
+# ── a commitment's deadline is sized by how far it actually is ───────────
+#
+# `max_commit_s` has to be long enough for the longest route the policy emits.
+# On a policy that mixes a 2.5 m curve with a 0.25 m step rendered from a
+# discrete action, that makes it ten times too long for most commitments: a
+# short step whose arrival never registers -- blocked, braking, changing
+# altitude -- then sits out the whole ceiling doing nothing. Measured in the
+# hospital at max_commit_s 12: five twelve-second stalls in ninety seconds.
+
+
+def _scaled_spec(**kw):
+    base = dict(fraction=1.0, lookahead_m=1.0, arrive_radius_m=0.15,
+                min_commit_m=0.20, max_commit_s=12.0, max_deviation_m=1.5,
+                min_period_s=0.5, expected_speed_mps=0.4, commit_grace_s=2.0)
+    base.update(kw)
+    return CommitSpec(**base)
+
+
+def test_a_short_commitment_expires_long_before_a_long_one():
+    ex = PlanCommitExecutor(_scaled_spec())
+    assert ex._deadline_s(0.25) == pytest.approx(0.25 / 0.4 + 2.0)
+    assert ex._deadline_s(2.50) == pytest.approx(2.50 / 0.4 + 2.0)
+    assert ex._deadline_s(0.25) < ex._deadline_s(2.50)
+
+
+def test_the_flat_ceiling_is_still_the_backstop():
+    ex = PlanCommitExecutor(_scaled_spec())
+    assert ex._deadline_s(100.0) == pytest.approx(12.0)
+
+
+def test_zero_speed_restores_the_flat_ceiling():
+    ex = PlanCommitExecutor(_scaled_spec(expected_speed_mps=0.0))
+    for arc in (0.25, 2.5, 100.0):
+        assert ex._deadline_s(arc) == pytest.approx(12.0)
+
+
+def test_a_stalled_short_commitment_is_released_on_its_own_deadline():
+    """The aircraft never moves, so only the deadline can free it."""
+    ex = PlanCommitExecutor(_scaled_spec())
+    ex.commit(np.array([[0.25, 0.0]]), (0.0, 0.0, 0.0), 0.0)
+    assert ex.tick(0.0, 0.0, 1.0).replan_reason is None, "freed too early"
+    assert ex.tick(0.0, 0.0, 3.0).replan_reason == EXPIRED

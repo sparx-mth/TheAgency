@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Compare the runs of a campaign: what each one flew, and how much it saw.
+
+Five runs of the same instruction are only worth recording if they can be read
+side by side, and the per-run verdict line in ``record_campaign.sh`` answers
+"did this produce a result" rather than "what did the policy do". This answers
+the second: how much route, of what kind, how many deliberate rotations, how far
+the aircraft actually travelled, **what share of the building it looked at**, and
+how close it came to the thing it was told to stop at.
+
+The ``seen%`` column is the one that makes an exploration order comparable
+across runs at all -- there is no state at which "explore the entire hospital" is
+satisfied, so the only honest scoreboard is how much floor each run covered. It
+is computed live by the recorder and read back out of the log here.
+
+**Everything here comes out of each run's ``nodes.log``**, which the policy node
+already writes one line per decision into -- no rosbag decoding, no ROS, no
+model. That keeps it runnable in the plain ``.venv`` and, more usefully, keeps it
+runnable on a campaign copied off the machine that flew it.
+
+The positions are the aircraft's pose **at each decision**, not a continuous
+track: the distance columns are therefore a lower bound on the ground covered,
+which is the right way round for judging whether a run went anywhere.
+
+Usage::
+
+    .venv/bin/python -m sparx_agency.tasks.planning.sjtu_internvla_n1.scripts.campaign_report \\
+        ~/sjtu_n1_recordings/room_right_20260826_183931 --target 1.22 -5.61
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import re
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_HERE, *([os.pardir] * 5)))
+_REGIONS = os.path.join(_REPO_ROOT, "sparx_agency", "robots", "SJTU", "maps",
+                        "hospital_regions.yaml")
+
+_COMMIT = re.compile(
+    r"committed #(\d+): (\d+) pts, ([\d.]+) m, from \(([-\d.]+), ([-\d.]+)\) "
+    r"after (.+?) \[(curve|action)\]")
+_TURN = re.compile(r"turn #(\d+): ([-+][\d.]+) deg")
+_ESCAPE = re.compile(r"BLOCKED ESCAPE (\d+)")
+_STOP = re.compile(r"N1 STOP")
+_FPS = re.compile(r"System1=([\d.]+) Hz\s+System2=([\d.]+) Hz")
+# The recorder's coverage line, running and final. FINAL is preferred: it is
+# written when the video is closed, so it is the whole flight even when the last
+# periodic line landed seconds earlier.
+# `\s+` after the label, not a single space: the recorder writes TWO spaces
+# ("N1 COVERAGE  12.4% seen ..."), so a literal " " matched the FINAL line -- whose
+# own `\s+` swallowed the pair -- and silently never matched the periodic one. The
+# fallback for a run whose recorder was killed before it could write FINAL was
+# therefore dead, and dead in a way no fixture with a FINAL line in it can show.
+_COVERAGE = re.compile(
+    r"N1 COVERAGE\s+(FINAL\s+)?([\d.]+)% seen \(([\d.]+) of ([\d.]+) m2\)")
+
+
+class Run(object):
+    """One recording, read back out of its log."""
+
+    def __init__(self, path):
+        self.path = path
+        self.name = os.path.basename(os.path.dirname(path))
+        self.commits = []       # (points, metres, x, y, reason, kind)
+        self.turns = []         # degrees
+        self.escapes = 0
+        self.stops = 0
+        self.blocks = 0
+        self.s1_fps = None
+        self.s2_fps = None
+        self.capsized = False
+        self.seen_pct = None
+        self.seen_m2 = None
+        self.floor_m2 = None
+        self._seen_final = False
+        self._read()
+
+    def _read(self):
+        with open(self.path, "r", errors="replace") as handle:
+            for line in handle:
+                match = _COMMIT.search(line)
+                if match:
+                    self.commits.append((int(match.group(2)), float(match.group(3)),
+                                         float(match.group(4)), float(match.group(5)),
+                                         match.group(6), match.group(7)))
+                    continue
+                match = _TURN.search(line)
+                if match:
+                    self.turns.append(float(match.group(2)))
+                    continue
+                if _ESCAPE.search(line):
+                    self.escapes += 1
+                if _STOP.search(line):
+                    self.stops += 1
+                if "HARD BLOCKED" in line:
+                    self.blocks += 1
+                if "CAPSIZED" in line:
+                    self.capsized = True
+                match = _FPS.search(line)
+                if match:
+                    self.s1_fps, self.s2_fps = float(match.group(1)), float(match.group(2))
+                    continue
+                match = _COVERAGE.search(line)
+                if match and not self._seen_final:
+                    self._seen_final = bool(match.group(1))
+                    self.seen_pct = float(match.group(2))
+                    self.seen_m2 = float(match.group(3))
+                    self.floor_m2 = float(match.group(4))
+
+    # ── what it flew ────────────────────────────────────────────────
+    @property
+    def curves(self):
+        return [c for c in self.commits if c[5] == "curve"]
+
+    @property
+    def actions(self):
+        return [c for c in self.commits if c[5] == "action"]
+
+    @property
+    def route_m(self):
+        """Total length of every route committed, metres."""
+        return sum(c[1] for c in self.commits)
+
+    @property
+    def curve_share(self):
+        return (100.0 * len(self.curves) / len(self.commits)) if self.commits else None
+
+    # ── where it went ───────────────────────────────────────────────
+    @property
+    def positions(self):
+        return [(c[2], c[3]) for c in self.commits]
+
+    @property
+    def travelled_m(self):
+        """Ground covered between decisions -- a LOWER BOUND on the real track."""
+        pts = self.positions
+        return sum(math.hypot(b[0] - a[0], b[1] - a[1])
+                   for a, b in zip(pts, pts[1:]))
+
+    @property
+    def displacement_m(self):
+        pts = self.positions
+        if len(pts) < 2:
+            return 0.0
+        return math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+
+    def places(self, region_map):
+        """The rooms and corridors the decisions happened in, in order.
+
+        The scoreboard a medium-horizon order needs and the distance columns
+        cannot give: "enter the room with the refrigerator" is answered by
+        WHICH region the aircraft ended up in, not by how far it flew. Repeats
+        are collapsed, so a run that crosses a gallery, enters a ward, comes
+        out and enters a lounge reads as three moves rather than forty.
+
+        The decision positions are a sparse sample of the track (one per
+        committed route), so a region crossed entirely between two decisions
+        does not appear. That is the right way round: a room the aircraft never
+        stopped to think in is not a room it visited.
+        """
+        out = []
+        for (x, y) in self.positions:
+            region = region_map.region_at(x, y)
+            name = region.name if region is not None else "outside"
+            if not out or out[-1] != name:
+                out.append(name)
+        return out
+
+    def entered(self, region_map, name):
+        """Index of the first decision taken inside ``name``, or None.
+
+        Matched case-insensitively on a substring so a task can name "lounge"
+        without repeating the region map's generated wording verbatim.
+        """
+        needle = name.lower()
+        for i, (x, y) in enumerate(self.positions):
+            region = region_map.region_at(x, y)
+            if region is not None and needle in region.name.lower():
+                return i
+        return None
+
+    def closest_to(self, target):
+        """Nearest the aircraft got to ``target``, over the decisions."""
+        if target is None or not self.positions:
+            return None
+        return min(math.hypot(x - target[0], y - target[1])
+                   for (x, y) in self.positions)
+
+    @property
+    def verdict(self):
+        """One word for what happened, in the order that matters."""
+        if self.capsized:
+            return "CAPSIZED"
+        if not self.commits:
+            return "NO ROUTE"
+        if self.travelled_m < 0.5:
+            return "WEDGED"
+        if self.stops:
+            return "STOPPED"
+        return "FLEW"
+
+
+def find_runs(root):
+    """Every ``<run>/nodes.log`` under a campaign directory, in run order."""
+    out = []
+    for name in sorted(os.listdir(root)):
+        log = os.path.join(root, name, "nodes.log")
+        if os.path.isfile(log):
+            out.append(Run(log))
+    return out
+
+
+def report(runs, target=None, region_map=None, enter=None):
+    """Print the comparison table and a one-line summary of the campaign."""
+    head = ("run", "verdict", "routes", "curve%", "route m", "moved m", "net m",
+            "turns", "esc", "blk", "S2 Hz", "seen%")
+    if target is not None:
+        head = head + ("to target",)
+    if region_map is not None and enter:
+        head = head + ("entered@",)
+    widths = ([12, 9, 6, 6, 7, 7, 6, 5, 4, 4, 6, 6]
+              + ([9] if target is not None else [])
+              + ([9] if (region_map is not None and enter) else []))
+    print("  ".join(h.rjust(w) for h, w in zip(head, widths)))
+    print("  ".join("-" * w for w in widths))
+    for run in runs:
+        row = [run.name, run.verdict, str(len(run.commits)),
+               "--" if run.curve_share is None else "%.0f" % run.curve_share,
+               "%.1f" % run.route_m, "%.1f" % run.travelled_m,
+               "%.1f" % run.displacement_m, str(len(run.turns)),
+               str(run.escapes), str(run.blocks),
+               "--" if run.s2_fps is None else "%.2f" % run.s2_fps,
+               "--" if run.seen_pct is None else "%.1f" % run.seen_pct]
+        if target is not None:
+            near = run.closest_to(target)
+            row.append("--" if near is None else "%.2f" % near)
+        if region_map is not None and enter:
+            at = run.entered(region_map, enter)
+            row.append("--" if at is None else "#%d" % at)
+        print("  ".join(c.rjust(w) for c, w in zip(row, widths)))
+        if region_map is not None:
+            places = run.places(region_map)
+            if places:
+                print("  ".join("".rjust(w) for w in widths[:1])
+                      + "  " + " -> ".join(places))
+
+    if not runs:
+        print("\nno runs found")
+        return
+    flown = [r for r in runs if r.commits]
+    print("\n%d runs, %d with a committed route." % (len(runs), len(flown)))
+    if flown:
+        curve = sum(len(r.curves) for r in flown)
+        action = sum(len(r.actions) for r in flown)
+        print("decisions: %d curves, %d action steps (%.0f%% continuous)"
+              % (curve, action, 100.0 * curve / max(1, curve + action)))
+        print("rotations: %d, blocked-forward escapes: %d, hard blocks: %d"
+              % (sum(len(r.turns) for r in flown), sum(r.escapes for r in flown),
+                 sum(r.blocks for r in flown)))
+        moved = [r.travelled_m for r in flown]
+        print("ground covered per run: min %.1f m, median %.1f m, max %.1f m"
+              % (min(moved), sorted(moved)[len(moved) // 2], max(moved)))
+        _report_coverage(runs)
+
+
+def _report_coverage(runs):
+    """The exploration scoreboard: per-run spread, and what the campaign saw.
+
+    The union across runs is deliberately NOT reported. Each run restarts the
+    world and re-ferries the aircraft, so the runs are independent samples of
+    the same question rather than one long exploration, and adding their masks
+    together would describe a flight nobody flew.
+    """
+    seen = [r.seen_pct for r in runs if r.seen_pct is not None]
+    if not seen:
+        print("coverage: not measured (no `N1 COVERAGE` line -- older run, or "
+              "the recorder had no map)")
+        return
+    floors = set(r.floor_m2 for r in runs if r.floor_m2 is not None)
+    floor = ("%.0f m2" % floors.pop()) if len(floors) == 1 else "a differing floor"
+    ordered = sorted(seen)
+    print("building seen per run, of %s: min %.1f%%, median %.1f%%, max %.1f%% "
+          "(%d of %d runs measured)"
+          % (floor, ordered[0], ordered[len(ordered) // 2], ordered[-1],
+             len(seen), len(runs)))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("campaign", help="the campaign directory")
+    parser.add_argument("--target", nargs=2, type=float, metavar=("X", "Y"),
+                        help="world point the instruction names, to measure "
+                             "closest approach against")
+    parser.add_argument("--regions", nargs="?", const=_REGIONS, default=None,
+                        metavar="REGION_YAML",
+                        help="print the rooms each run passed through, from a "
+                             "region map (default: the SJTU hospital one)")
+    parser.add_argument("--enter", default=None, metavar="NAME",
+                        help="the region the instruction told it to end up in; "
+                             "adds a column with the decision it first got "
+                             "there on. Implies --regions.")
+    args = parser.parse_args(argv)
+    region_map = None
+    if args.regions or args.enter:
+        # Imported here, not at module scope: this script is meant to run on a
+        # campaign copied off the machine that flew it, where the repo may not
+        # be importable, and everything above works without a region map.
+        from sparx_agency.core.planning.exploration.region_map import RegionMap
+        region_map = RegionMap.load(args.regions or _REGIONS)
+    runs = find_runs(args.campaign)
+    report(runs, tuple(args.target) if args.target else None,
+           region_map=region_map, enter=args.enter)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

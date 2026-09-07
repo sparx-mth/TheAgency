@@ -19,6 +19,30 @@ different modules.
 - Basic data type conversions
 - Core interfaces for system components
 
+## What belongs here, and what only looks like it does
+
+This is the **widest** ring of shared code: something lands here when it is
+unambiguous and universal — arithmetic and vocabulary that mapping, localization,
+planning and control all mean identically. A thing shared by only one subsystem
+belongs in *that* subsystem's own `common` (e.g. `core/planning/vlas/common/`
+holds the policy-server HTTP client, which nothing outside the VLAs speaks).
+Widening a domain-specific contract to here is not generosity; it makes every
+consumer depend on a concept it does not use.
+
+### The geometry modules, and which to reach for
+
+- **`math/se2.py`** — the planar body↔world pair (`body_to_world_2d`,
+  `world_to_body_2d`, `body_to_world_xy`, `rotate_2d`). Reach for this instead of
+  spelling out `cos`/`sin`: it existed as three separate copies before it lived
+  here.
+- **`math/se3.py`** — quaternions and 4×4 transforms.
+  `yaw_from_quaternion(q)` is **the** implementation of quaternion→yaw.
+- **`spatial_math.py`** — the older, broader module (Euler, intrinsics, YAML,
+  pose conversions). Its `quat_to_yaw(qx, qy, qz, qw)` is a scalar-argument
+  spelling that delegates to `se3.yaw_from_quaternion`; both are kept because 25
+  files import one or the other, but there is only one copy of the arithmetic.
+  `robots/common/spatial_math.py` is a re-export shim for older import paths.
+
 ## Usage Examples
 
 The common package can be imported and used in other modules:

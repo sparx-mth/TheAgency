@@ -632,8 +632,10 @@ expert arm exist to make that visible rather than convenient.
 - **Colour order.** The deployed server converts RGB→BGR before the encoder, so
   the ImageNet statistics are applied positionally to BGR channels. That is an
   upstream quirk, but it is what the pretrained weights learned, so training
-  matches it (`color_order: bgr`). Note `../verify/navdp_infer.py` does the
-  opposite and is therefore one channel swap away from the deployed stack.
+  matches it (`color_order: bgr`). `../verify/navdp_infer.py` used to do the
+  opposite; both now call the same implementation in
+  `core/planning/vlas/navdp/preprocess.py` and default to the deployed order, so
+  the swap can no longer happen by accident.
 - **The feature cache is invalid once the depth trunk is unfrozen.** The trainer
   detects that and refuses, rather than training on stale tokens.
 
@@ -650,7 +652,7 @@ expert arm exist to make that visible rather than convenient.
 | `polyline.py` | arc length, resampling, truncation, body↔world, action decode (numpy) |
 | `expert.py` | A* → medial-axis centring → NavDP action label, audited against the map |
 | `build_dataset.py` | the label-generation CLI |
-| `preprocess.py` | the one true image/depth preprocessing, shared by cache, dataset and inference |
+| `preprocess.py` | this pipeline's view of `core/planning/vlas/navdp/preprocess.py` (RGB in, CHW out); the implementation is shared with the verify tool and the server |
 | `cache_features.py` | frozen-ViT patch tokens, computed once |
 | `dataset.py` | torch `Dataset`, cached-token or live-pixel |
 | `model.py` | freeze policy, the cached-feature encoder, trainable-only checkpoints |

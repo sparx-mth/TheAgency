@@ -121,11 +121,13 @@ import object_approach_node as oan  # noqa: E402
 def _make(**params):
     _PARAMS.clear()
     # lock_mode 'detector' builds NO box tracker, and that is deliberate here: the
-    # MedianFlow one reaches for real OpenCV constants in its constructor, while a
-    # sibling test module installs a fake cv2 into the sys.modules that pytest shares
-    # for the whole session -- so with the default mode this file would pass alone and
-    # fail in a full run, purely on collection order. Nothing about the staged approach
-    # involves box tracking, so the tracker-free mode is the honest choice, not a dodge.
+    # MedianFlow one reaches for OpenCV constants in its constructor that this
+    # machine's OpenCV 5 no longer ships, so with the default mode this file would
+    # depend on the local OpenCV build. (A sibling test module used to make this
+    # worse by installing a fake cv2 into the session-wide sys.modules; that stub is
+    # now conditional -- see test_hybrid_planner._install_stubs.) Nothing about the
+    # staged approach involves box tracking, so the tracker-free mode is the honest
+    # choice, not a dodge.
     _PARAMS.update({"~lock_mode": "detector"})
     _PARAMS.update({("~" + k): v for k, v in params.items()})
     return oan.ObjectApproachNode()

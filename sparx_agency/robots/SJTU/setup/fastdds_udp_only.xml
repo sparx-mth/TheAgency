@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Fast DDS profile: UDPv4 only, no shared memory.
+
+  WHY THIS EXISTS. The simulator runs Humble inside a container and everything
+  that talks to it runs Jazzy on the host. Both default to Fast DDS with the
+  shared-memory transport enabled, and the container is started with
+  `--ipc=host -v /dev/shm:/dev/shm`, so the two agree that shared memory is
+  available -- but Humble's Fast DDS 2.6 and Jazzy's are not compatible over
+  that segment. Discovery happens over multicast UDP and succeeds, so
+  `ros2 topic list` shows every topic; the data then goes over shared memory and
+  silently arrives nowhere, so `ros2 topic echo` hangs forever. The failure is
+  indistinguishable from a simulator that never started, and the container logs
+  `sequence size exceeds remaining buffer` rather than anything about transport.
+
+  Forcing UDPv4 and switching the builtin transports off removes the shared
+  memory locator from the participant's announcement, so the writer has nowhere
+  to send but UDP. Measured with this file in place: odom 29 Hz, RGB 5.6-9.0 Hz,
+  depth 4.0-5.0 Hz across the container boundary; without it, nothing.
+
+  Export it in EVERY shell that touches ROS 2, on both sides:
+
+      export FASTRTPS_DEFAULT_PROFILES_FILE=<this file>
+      export FASTDDS_DEFAULT_PROFILES_FILE=$FASTRTPS_DEFAULT_PROFILES_FILE
+
+  (The variable was renamed in Fast DDS 3; setting both covers either runtime.)
+
+  The CycloneDDS equivalent is cyclonedds_no_shm.xml next to this file. Only one
+  of the two applies -- whichever middleware RMW_IMPLEMENTATION selects.
+-->
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_only</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="udp_only_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_only</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

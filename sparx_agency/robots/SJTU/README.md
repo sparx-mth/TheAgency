@@ -303,6 +303,14 @@ sparx_agency/robots/SJTU/setup/bringup_world.sh hospital           # gzserver on
 sparx_agency/robots/SJTU/setup/bringup_world.sh --gui playground   # with a viewer
 ```
 
+The simulator renders on the **CPU** (llvmpipe), and takes no GPU. Gazebo Classic
+has no GPU physics, so the card was only ever carrying the camera sensors' OGRE
+context -- and on a machine where a VLA server holds 7.2 of 8.1 GB, asking for
+that context in what is left hard-locks the host. Measured after the change: the
+card reads 13 MiB with the world up, and the cameras are FASTER (RGB 12.5-14.9 Hz
+against 5.6-9.0 Hz on the GPU) because they are no longer competing for it.
+`SJTU_SIM_GPU=1` restores `--gpus all` for a machine that can spare it.
+
 Flags: `--gui` / `--headless` (default), `--domain <N>` (ROS_DOMAIN_ID, default
 20 — a mismatch drops all traffic silently and looks exactly like a simulator
 that never started), `--name <NAME>`, `--skip-build`, `--help`. `--help` lists
@@ -395,3 +403,38 @@ of work.
   been re-checked at speeds near the 2 m/s ceiling.
 - `hospital` is the only large world available locally. `playground` is small
   enough that it exercises the plumbing rather than the navigation.
+
+## Ground-truth maps (`maps/`)
+
+`maps/` holds a surveyed occupancy map of the `hospital` world, computed from
+the world's own SDF and collision meshes rather than recorded from a flight, so
+it measures the building and not the mapper. Three files: `hospital.pgm` +
+`hospital.yaml` for nav2 `map_server`, and `hospital.npz` carrying an
+`OccupancyGrid2D` for this repo's planners.
+
+It is in the Gazebo **world frame** — the frame `/simple_drone/odom` reports —
+so a pose read off odom indexes straight into it with no transform. 0.05 m
+cells, 544 x 1182, origin `(-13.60, -36.10)`, height band 0.30–2.00 m.
+
+**Every cell is known**: occupied or free, never unknown, because nothing here
+was observed. That is honest for a reference map and wrong for an exploration
+map; do not hand it to something that reads "free" as "already seen".
+
+Rebuild it with the command recorded in `maps/README.md`:
+
+```bash
+.venv/bin/python -m sparx_agency.tasks.mapping.gazebo_world_occupancy.build_map \
+    --world  $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/worlds/hospital.world \
+    --search-path $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/models \
+    --search-path $SJTU_PROJECT_DIR/aws-robomaker-hospital-world/fuel_models \
+    --search-path $SJTU_PROJECT_DIR/sjtu_drone/sjtu_drone_description \
+    --search-path $SJTU_PROJECT_DIR/sjtu_drone/models \
+    --output-dir sparx_agency/robots/SJTU/maps \
+    --resolution 0.05 --z-min 0.30 --z-max 2.00
+```
+
+Anything that changes the origin or the grid size is a breaking change for
+every flight already recorded against this map. `maps/README.md` carries the
+provenance, the cross-check against the independently recorded SLAM map, and
+the caveats; the tool itself is documented in
+`tasks/mapping/gazebo_world_occupancy/README.md`.
