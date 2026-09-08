@@ -468,15 +468,17 @@ SELECT ──► TRANSIT ──► SEARCH ──► SELECT ...          (preempt
   │           │              falling / the per-room budget expires.
   │           └─ we fly, with the shared weighted A* over the live BEV and the
   │              trajectory follower. FALCON is muted by cmd_vel_arbiter_node.
-  └─ arc weights + the oracle's ranking go to a solver, which returns a visit
-     order. Until RPT* exists the built-in stub commits to ONE room.
+  └─ arc weights + the oracle's ranking go to RPT*, which returns the visit
+     order that minimises the EXPECTED time to find. The loop walks it.
 ```
 
 **Arc weights.** Every `cost_period_s` the live BEV, the room centres and the
 ranking are assembled into an `HppPtInstance` — a complete, symmetric, metric
 cost matrix plus a probability per room — and published on
 `/object_search/costs`, so the graph an "optimal" order was computed from is
-visible in a recording. One multi-source `scipy` Dijkstra sweep over the
+visible in a recording. `fold_search_budget` stays off: folding the per-room
+budget onto entering arcs costs the symmetry of the depot column, and the
+default is the contract a solver written from the paper expects. One multi-source `scipy` Dijkstra sweep over the
 planner's own passable cells, **not** N² A\*: measured on the captured hospital
 BEV, 111 ms for the whole 29×29 matrix against 6.6 s for pairwise A\*. The
 weight is binary rather than the planner's shaped cost because RPT\*'s
@@ -485,8 +487,33 @@ dominance pruning consumes the triangle inequality — worst violation measured
 snaps to the nearest passable cell; a room with none is withheld from the
 solver rather than given a fabricated weight.
 
-**The solver seam** is `solver(candidates, instance) -> [room_ids]`, injected
-like the RNG. RPT\* drops in without this node changing.
+**The order is RPT\***, and that is the contribution. The solver seam is
+`solver(candidates, instance) -> [room_ids]`, injected like the RNG;
+`core/planning/exploration/rpt_room_solver.py` fulfils it with the
+Hamiltonian-path-with-probabilistic-terminals solver in
+`core/planning/routing/rpt_star/` (arXiv:2601.12701). It returns the ordering
+that minimises the *expected* cost of finding the target — which balances how
+likely a room is against what it costs to reach, and is neither "go to the most
+likely" nor "go to the nearest". `solver:=weighted` (`SEARCH_SOLVER=weighted`)
+restores the old one-room probability draw as the A/B baseline.
+
+Four things the adapter has to do, because the two halves were built
+independently and disagree in exactly four places:
+
+| | |
+|---|---|
+| **the depot** | `HppPtInstance` appends the aircraft LAST, `RouteProblem.with_external_start` prepends it FIRST — the rows and columns are reordered, or the tour is planned from whichever room happens to be last. |
+| **the intersection** | The instance maps every reachable room; the candidates are what the policy still allows. Only rooms in both become vertices, so the solver cannot plan over a room already refused. |
+| **the belief** | `p` comes from the instance, un-normalised. `prob_renorm` is exactly 1.0 for a lone candidate, which RPT\* refuses, and normalising over mapped rooms alone asserts the target is certainly in one of them. |
+| **the cap** | **`rpt_max_rooms` (default 12) is a correctness knob, not a speed knob.** Measured on the captured hospital BEV with this node's own defaults, over four belief shapes and six aircraft positions: 13 rooms solve optimally in ≤177 ms and 14 in 750 ms, but at 15 every shape but a sharply peaked one hits the 2 s budget, and past that the answer degrades to nearest-first, which never reads the probabilities — at 20 rooms the order came back identical for a peaked, a spread and a flat belief. Uncapped on a 29-room hospital, this node would fly the baseline it exists to beat. The cap holds one slot back for the *nearest* room so it does not itself become that baseline: measured in the closed loop, that one slot takes expected time-to-find to 0.88 of ranking on probability alone. |
+
+The order the loop committed to rides on `/object_search/info` as `order`, and
+what it was worth — `status`, `guarantee`, `route_source`, `expected_cost`,
+`lower_bound`, which rooms were `capped` or `skipped` — under `solver`. An
+optimality claim nobody can audit is not a claim. A solve that cannot answer
+(no instance yet, a disconnected matrix, a NaN probability) falls back to the
+weighted draw and says so in `solver.reason`; it never raises into the timer,
+and never returns an empty order, which would park the aircraft.
 
 **Confining FALCON to the room** needs `falcon-ros-custom:v2-confine` (see
 `tasks/planning/falcon_sjtu/patches/falcon_room_confine.patch`) and

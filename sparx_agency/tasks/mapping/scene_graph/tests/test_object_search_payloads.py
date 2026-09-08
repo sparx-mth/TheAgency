@@ -233,3 +233,36 @@ def test_search_info_payload_survives_numpy_scalars_in_the_stats():
                                   np.int64(0), "note",
                                   {"selections": np.int64(3)})
     assert_plain(payload)
+
+
+def test_search_info_payload_carries_what_the_room_order_is_worth():
+    """The order alone cannot say whether it was proved optimal.
+
+    A campaign scoring a flight afterwards has only the recording, so the
+    solver's own verdict -- searched or constructed, optimal or nothing --
+    has to travel with the order rather than only reaching a log line.
+    """
+    sup = ObjectSearchSupervisor()
+    state = sup.update([], {}, None, now=0.0)
+    record = {"name": "rpt_star", "source": "rpt_star", "status": "solved",
+              "guarantee": "optimal", "route_source": "search", "rooms": 3,
+              "skipped": [7], "expected_cost": 7.15, "lower_bound": 7.15,
+              "bound_ratio": 1.0, "expansions": 3, "solve_ms": 0.4,
+              "units": "seconds", "reason": ""}
+    payload = search_info_payload(1.0, state, "wheelchair", False, False, 0,
+                                  "note", sup.stats, solver=record)
+    assert_plain(payload)
+    back = json.loads(json.dumps(payload))
+    assert back["solver"]["guarantee"] == "optimal"
+    assert back["solver"]["skipped"] == [7]
+    assert back["solver"]["expected_cost"] == 7.15
+
+
+def test_search_info_payload_says_nothing_about_a_solver_it_was_not_given():
+    """The older payload had no solver key; a reader must not require one."""
+    sup = ObjectSearchSupervisor()
+    state = sup.update([], {}, None, now=0.0)
+    payload = search_info_payload(1.0, state, "x", False, False, 0, "n",
+                                  sup.stats)
+    assert_plain(payload)
+    assert payload["solver"] is None

@@ -26,10 +26,12 @@ Four states, and the reason there are exactly four:
 ``solver(candidates, instance) -> Sequence[int]`` and returns room ids in visit
 order; ``instance`` is passed through opaquely and never inspected here, which
 is what keeps this module standard-library-only while the arc weights it is
-built from need numpy and scipy. The default stub draws ONE room weighted by
-probability -- exactly what ``RoomSearchPolicy`` does today -- so the machine
-flies before the real solver exists, and the real solver drops in without a
-line changing here.
+built from need numpy and scipy. The one flown is
+``rpt_room_solver.RptStarRoomSolver``, which returns the whole tour that
+minimises expected time-to-find; the default stub draws ONE room weighted by
+probability -- exactly what ``RoomSearchPolicy`` does -- so the machine still
+flies with no solver injected, and is what the real one falls back to when it
+cannot answer.
 
 **Why the order is re-asked rather than re-solved every tick.** The oracle
 republishes continuously and its ranking is noisy. A machine that re-solved on
@@ -276,14 +278,15 @@ class ObjectSearchState:
     completed: Optional[Tuple[int, str]] = None
 
 
-def weighted_order(candidates, instance=None):
-    # type: (Sequence[RoomCandidate], Any) -> List[int]
+def weighted_order(candidates, instance=None, rng=None):
+    # type: (Sequence[RoomCandidate], Any, Optional[random.Random]) -> List[int]
     """The default solver: one room, drawn weighted by probability.
 
-    Stands in for RPT* until it exists, and reproduces today's flown
-    ``RoomSearchPolicy`` behaviour exactly -- the highest-ranked room is drawn
-    most often, not always, because a ranking is a belief and an argmax loop
-    that believes the wrong room re-flies to it for the rest of the flight.
+    The floor under
+    :class:`~sparx_agency.core.planning.exploration.rpt_room_solver.RptStarRoomSolver`,
+    and what the loop flew before it: the highest-ranked room is drawn most
+    often, not always, because a ranking is a belief and an argmax loop that
+    believes the wrong room re-flies to it for the rest of the flight.
 
     Returns a ONE-element order on purpose. A stub that invented a full tour
     would be asserting an ordering it has no cost information to justify, and
@@ -292,13 +295,17 @@ def weighted_order(candidates, instance=None):
     Args:
         candidates: The eligible rooms, carrying ``prob_renorm``.
         instance: The arc weights. Ignored here; a real solver needs them.
+        rng: The generator to draw on. ``None`` uses the global one, which is
+            what a caller with no seed of its own wants; the supervisor and
+            the RPT* solver both pass theirs so a seeded flight replays along
+            this path too.
 
     Returns:
         A single-element list holding one room id.
     """
     if not candidates:
         return []
-    threshold = random.random()
+    threshold = (random if rng is None else rng).random()
     cumulative = 0.0
     for candidate in candidates:
         cumulative += float(candidate.prob_renorm)
@@ -602,16 +609,14 @@ class ObjectSearchSupervisor:
 
     def _draw(self, candidates, instance=None):
         # type: (Sequence[RoomCandidate], Any) -> List[int]
-        """The built-in stub solver, on the machine's own injected generator."""
-        if not candidates:
-            return []
-        threshold = self.rng.random()
-        cumulative = 0.0
-        for candidate in candidates:
-            cumulative += float(candidate.prob_renorm)
-            if threshold <= cumulative:
-                return [int(candidate.room_id)]
-        return [int(candidates[-1].room_id)]
+        """The built-in stub solver, on the machine's own injected generator.
+
+        A thin binding of :func:`weighted_order` rather than a second copy of
+        it: the two were identical but for which generator they drew on, and
+        a duplicated draw is exactly the kind of copy this tree has had fixed
+        in one place and left wrong in the other.
+        """
+        return weighted_order(candidates, instance, self.rng)
 
     def _next_in_order(self, by_id):
         # type: (Mapping[int, RoomCandidate]) -> Optional[int]

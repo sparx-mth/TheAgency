@@ -277,6 +277,24 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest sparx_agency/core/pl
   in the Noetic container. The package has also been imported and run under real
   Python 3.8.10 in `falcon-ros-custom:v1`.
 
+## Who calls this
+
+`core/planning/exploration/rpt_room_solver.py` — the object-search loop's room
+order, wired into `tasks/mapping/scene_graph/ros2/object_search_node.py`. It is
+the adapter that turns a `room_costs.HppPtInstance` into a `RouteProblem`, and
+it is worth reading before writing a second consumer: the depot lands at the
+opposite end of the two index spaces, and the vertex set has to be **capped**.
+The cap is the interesting half. This package degrades silently rather than
+loudly once the clock beats the search — it returns the best complete ordering
+it reached, or a nearest-first constructive tour if it reached none — and both
+are stamped `guarantee='none'` rather than refused. A caller that hands it
+thirty places and reads only `order` therefore gets something that looks like
+an answer and, on a flat belief, is not one. Read `status`, `guarantee` and
+`route_source`, and cap the vertex set so they stay clean.
+
+`tasks/planning/routing_benchmark/` and `tasks/planning/rpt_star_paper/` are the
+measurement rigs, not flown.
+
 ## Not in here, on purpose
 
 - **Building the cost matrix from a map.** That is `routing/`'s planned second

@@ -8,10 +8,18 @@ The loop the method describes, closed end to end:
    between room centres plus a probability per room -- and published on
    ``/object_search/costs`` so the graph a visit order was computed from is
    visible in a recording.
-2. **the order.** That instance and the eligible rooms go to a solver. Until
-   RPT* exists the built-in stub commits to ONE room, drawn weighted by
-   probability; the seam is a plain callable, so RPT* drops in without this
-   node changing.
+2. **the order.** That instance and the eligible rooms go to a solver, and by
+   default it is **RPT\\*** (arXiv:2601.12701): the visiting order that
+   minimises the *expected* time to find the target, which balances how likely
+   a room is against what it costs to reach and is neither "go to the most
+   likely" nor "go to the nearest". It returns the whole tour, and the loop
+   walks it -- re-solving every tick against a noisy ranking would flip the
+   aircraft between two near-equal rooms without ever searching either.
+   ``solver:=weighted`` is the old one-room probability draw, kept as the A/B
+   baseline; RPT* falls back to it by itself if it ever cannot answer, so a
+   solver failure costs one order rather than the mission. What the order was
+   worth -- optimal, bounded or a tour constructed once the clock beat the
+   search -- rides on ``/object_search/info`` under ``solver``.
 3. **transit.** We fly there ourselves, with the shared weighted A* over a
    fresh grid from the live BEV and the existing trajectory follower. FALCON
    is muted for the whole leg by ``cmd_vel_arbiter_node``, which this node
@@ -50,6 +58,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -63,7 +72,10 @@ from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
     FOUND, SEARCH, SELECT, TRANSIT, FlyTo, ObjectSearchParams,
     ObjectSearchSupervisor, Release, SearchRoom, StandDown)
+from sparx_agency.core.planning.exploration.rpt_room_solver import (
+    RptStarRoomSolver)
 from sparx_agency.core.planning.interfaces import PlanRequest
+from sparx_agency.core.planning.routing.rpt_star import RptStarParams
 from sparx_agency.core.planning.planners.astar import (WeightedAStarParams,
                                                        WeightedAStarPlanner2D)
 from sparx_agency.robots.SJTU.adapters import topics
@@ -93,6 +105,24 @@ tasks/planning/falcon_sjtu/patches/falcon_room_confine.patch) and
 ``room_confine:=true`` on the FALCON launch; without both, the fence is simply
 never applied and FALCON explores the whole building during the room budget.
 """
+
+def _finite(value):
+    """A float ``json.dumps`` will round-trip: an infinity becomes None.
+
+    RPT* reports an infinite expected cost when it has no route and an
+    infinite bound ratio when it has no bound, and a bare ``Infinity`` in a
+    payload is not valid JSON for whatever reads the recording back.
+    """
+    value = float(value)
+    return None if value != value or value in (INF, -INF) else value
+
+
+RPT_STAR_SOLVER = "rpt_star"
+"""Order the rooms with RPT*, weighing belief against travel cost."""
+WEIGHTED_SOLVER = "weighted"
+"""Draw one room weighted by probability, ignoring travel cost entirely."""
+
+INF = float("inf")
 
 FLYING = 1
 """``/simple_drone/state`` value that means airborne."""
@@ -144,6 +174,27 @@ class ObjectSearchNode(Node):
         # aircraft's own start, which it never returns to. Turn it on once
         # the solver is known to tolerate that.
         p("fold_search_budget", False)
+        # The solver. ``rpt_star`` orders the rooms by expected time-to-find
+        # (arXiv:2601.12701); ``weighted`` is the one-room probability draw
+        # the loop flew before it, kept as an A/B baseline rather than as a
+        # fallback -- RPT* falls back to it by itself when it cannot answer.
+        p("solver", RPT_STAR_SOLVER)
+        # Seconds one solve may block the tick before it settles for its
+        # constructive tour. See rpt_room_solver.DEFAULT_TIME_BUDGET_S.
+        p("rpt_time_budget_s", 2.0)
+        # Sub-optimality factor for F-RPT*. Negative means the exact search,
+        # which is the right default: the paper's own 0.01 returns the same
+        # routes more slowly. Worth raising to ~0.5 only if the log shows
+        # solves timing out on a concentrated belief over ~20 rooms.
+        p("rpt_epsilon", -1.0)
+        # The most rooms one solve may range over. NOT a performance knob:
+        # past ~15 rooms the exact search runs out of budget and RPT* hands
+        # back its nearest-first constructive tour, which never reads the
+        # probabilities at all -- measured on the hospital BEV, at 20 rooms
+        # the order came back identical for a peaked, a spread and a flat
+        # belief. The cap is what keeps the belief in the answer. See
+        # rpt_room_solver.DEFAULT_MAX_ROOMS for the measurement.
+        p("rpt_max_rooms", 12)
         # The loop.
         p("search_backend", FALCON_BACKEND)
         p("confine_topic", "/scene_graph/confine")
@@ -206,6 +257,28 @@ class ObjectSearchNode(Node):
                 % (HOST_SWEEP, FALCON_BACKEND, backend))
         self._backend = backend
 
+        name = str(g("solver"))
+        if name not in (RPT_STAR_SOLVER, WEIGHTED_SOLVER):
+            raise ValueError(
+                "solver must be %r or %r, got %r"
+                % (RPT_STAR_SOLVER, WEIGHTED_SOLVER, name))
+        self._solver_name = name
+        epsilon = float(g("rpt_epsilon"))
+        # ONE generator for the whole machine. The supervisor's own seeded
+        # rng is only reachable from its built-in draw, which is dead once a
+        # solver is injected -- so without this, seed:=N would stop pinning
+        # the one path that still draws: the solver's fallback.
+        seed = int(g("seed"))
+        self._rng = random.Random(seed if seed >= 0 else None)
+        self._solver = None
+        if name == RPT_STAR_SOLVER:
+            self._solver = RptStarRoomSolver(
+                RptStarParams(epsilon=None if epsilon < 0.0 else epsilon,
+                              time_budget_s=float(g("rpt_time_budget_s"))),
+                rng=self._rng,
+                max_rooms=int(g("rpt_max_rooms")))
+        self._solves_seen = 0
+
         self._supervisor = ObjectSearchSupervisor(ObjectSearchParams(
             min_prob=float(g("min_prob")),
             seed=int(g("seed")),
@@ -222,7 +295,7 @@ class ObjectSearchNode(Node):
             min_frontier_clusters=int(g("min_frontier_clusters")),
             frontier_clear_ticks=int(g("frontier_clear_ticks")),
             frontier_stall_s=float(g("frontier_stall_s")),
-            tick_hz=tick_hz))
+            tick_hz=tick_hz), solver=self._solver, rng=self._rng)
         self._planner = WeightedAStarPlanner2D(WeightedAStarParams(
             inflate_radius_m=float(g("inflate_radius_m")),
             unknown_blocked=bool(g("unknown_blocked")),
@@ -307,6 +380,16 @@ class ObjectSearchNode(Node):
                else "pure travel time",
                "asymmetric on the depot column (HPP-PT assumes symmetric)"
                if self._fold_budget else "symmetric and metric"))
+        self.get_logger().info(
+            "room order: %s"
+            % ("weighted single draw -- travel cost ignored"
+               if self._solver is None else
+               "RPT* (%s, budget %.1fs, at most %s rooms) over the arc "
+               "weights"
+               % ("exact" if self._solver.params.epsilon is None
+                  else "epsilon=%.3g" % self._solver.params.epsilon,
+                  self._solver.params.time_budget_s or 0.0,
+                  self._solver.max_rooms or "all")))
         if self._backend == FALCON_BACKEND:
             self.get_logger().warn(
                 "search_backend=falcon: FALCON explores UNBOUNDED during the "
@@ -482,6 +565,7 @@ class ObjectSearchNode(Node):
             # mute on this flag, and FALCON resumes its own exploration.
             self._clear_route()
 
+        self._log_new_solve()
         self._publish_active(self._we_are_flying(state))
         self._publish_info(state, now)
 
@@ -784,8 +868,50 @@ class ObjectSearchNode(Node):
             stats=self._supervisor.stats,
             room_facts=(None if state.room_id is None
                         else self._facts.get(int(state.room_id))),
-            backend=self._backend)
+            backend=self._backend, solver=self._solver_record())
         self._pub_info.publish(String(data=json.dumps(payload)))
+
+    def _solver_record(self):
+        """The last solve, as plain builtins, or just the name when unused.
+
+        Published rather than only logged: the order alone does not say
+        whether it was proved optimal or constructed after the clock beat the
+        search, and a campaign scoring a flight afterwards has only the
+        recording to go on.
+        """
+        if self._solver is None:
+            return {"name": self._solver_name}
+        last = self._solver.last
+        return {
+            "name": self._solver_name,
+            "source": str(last.source),
+            "reason": str(last.reason),
+            "rooms": int(last.rooms),
+            "skipped": [int(r) for r in last.skipped],
+            "capped": [int(r) for r in last.capped],
+            "depot_pid": int(last.depot_pid),
+            "expected_cost": _finite(last.expected_cost),
+            "lower_bound": _finite(last.lower_bound),
+            "bound_ratio": _finite(last.bound_ratio),
+            "status": str(last.status),
+            "guarantee": str(last.guarantee),
+            "route_source": str(last.route_source),
+            "expansions": int(last.expansions),
+            "solve_ms": float(last.solve_ms),
+            "units": str(last.units),
+        }
+
+    def _log_new_solve(self) -> None:
+        """Say what the solver decided, once per solve rather than per tick."""
+        if self._solver is None or self._solver.calls == self._solves_seen:
+            return
+        self._solves_seen = self._solver.calls
+        last = self._solver.last
+        line = "room order: %s" % last.summary()
+        if last.source != RPT_STAR_SOLVER or last.guarantee != "optimal":
+            self.get_logger().warn(line)
+        else:
+            self.get_logger().info(line)
 
     def _heartbeat(self) -> None:
         stats = self._supervisor.stats
@@ -807,6 +933,8 @@ class ObjectSearchNode(Node):
                stats["transit_timeouts"], stats["blocked"],
                sum(1 for _, v, _ in self._supervisor.history
                    if v in ("mapped", "budget_spent", "stalled"))))
+        if self._solver is not None:
+            self.get_logger().info("hb %s" % self._solver.last.summary())
 
 
 def main(args=None) -> None:

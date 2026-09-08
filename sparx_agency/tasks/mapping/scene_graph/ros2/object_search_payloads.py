@@ -222,8 +222,9 @@ def costs_payload(instance, scene_graph_stamp, stamp, dropped_pids=(),
 
 
 def search_info_payload(stamp, state, target, fly, planned, route_length,
-                        note, stats, room_facts=None, backend="host_sweep"):
-    # type: (float, ObjectSearchState, str, bool, bool, int, str, Mapping[str, int], Optional[RoomFacts], str) -> Dict[str, Any]
+                        note, stats, room_facts=None, backend="host_sweep",
+                        solver=None):
+    # type: (float, ObjectSearchState, str, bool, bool, int, str, Mapping[str, int], Optional[RoomFacts], str, Optional[Mapping[str, Any]]) -> Dict[str, Any]
     """The ``/object_search/info`` payload -- what the loop is doing and why.
 
     Deliberately a superset of ``/room_search/info`` under the same key names
@@ -245,6 +246,12 @@ def search_info_payload(stamp, state, target, fly, planned, route_length,
         stats: The supervisor's running counters.
         room_facts: The scene graph's facts for the room in force.
         backend: Which mapping backend the SEARCH state is using.
+        solver: What decided ``order``, and what that claim is worth --
+            ``rpt_room_solver.SolveRecord`` reduced to builtins. ``order``
+            alone cannot say whether it was proved optimal or constructed
+            after the clock beat the search, and a run scored afterwards has
+            only this recording to go on. ``None`` when the caller does not
+            track one.
 
     Returns:
         A dict of plain builtins, safe for ``json.dumps``.
@@ -281,4 +288,5 @@ def search_info_payload(stamp, state, target, fly, planned, route_length,
              "prob": float(c.prob), "prob_renorm": float(c.prob_renorm)}
             for c in state.candidates],
         "stats": {str(k): int(v) for k, v in stats.items()},
+        "solver": None if solver is None else dict(solver),
     }
