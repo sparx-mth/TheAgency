@@ -77,15 +77,49 @@ def _client(backend: str, replies: List[Any], **cfg_kw) -> LLMClient:
 # ---------------------------------------------------------------------
 def test_from_env_defaults(monkeypatch):
     for var in ("LLM_BACKEND", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY",
-                "LLM_TEMPERATURE", "LLM_TIMEOUT_S"):
+                "LLM_TEMPERATURE", "LLM_TIMEOUT_S", "LLM_SEED",
+                "LLM_KEEP_ALIVE", "LLM_MAX_TOKENS"):
         monkeypatch.delenv(var, raising=False)
     cfg = LLMConfig.from_env()
     assert cfg.backend == "ollama"
     assert cfg.base_url == "http://localhost:11434"
     assert cfg.model == "qwen2.5:3b-instruct"
     assert cfg.api_key == ""
-    assert cfg.temperature == pytest.approx(0.2)
+    # 0.0, not 0.2: a visit order that changes when the scene graph did not
+    # is not auditable.
+    assert cfg.temperature == pytest.approx(0.0)
     assert cfg.timeout_s == pytest.approx(30.0)
+    assert cfg.seed == 0
+    assert cfg.keep_alive == "30m"
+    assert cfg.max_tokens == 768
+
+
+def test_seed_can_be_disabled_from_the_environment(monkeypatch):
+    """Empty or 'none' sends no seed at all, rather than seeding with zero."""
+    monkeypatch.setenv("LLM_SEED", "none")
+    assert LLMConfig.from_env().seed is None
+    monkeypatch.setenv("LLM_SEED", "")
+    assert LLMConfig.from_env().seed is None
+    monkeypatch.setenv("LLM_SEED", "17")
+    assert LLMConfig.from_env().seed == 17
+
+
+def test_ollama_payload_carries_seed_keep_alive_and_token_cap():
+    client = _client("ollama", [_ollama_reply('{"a": 1}')])
+    client.chat_json("s", "u")
+    payload = client.sess.posts[0]["payload"]
+    assert payload["options"]["seed"] == 0
+    assert payload["options"]["num_predict"] == 768
+    # Ollama unloads after 5 minutes idle; a cold reload costs more than the
+    # request timeout and lands the tick in the oracle's uniform fallback.
+    assert payload["keep_alive"] == "30m"
+
+
+def test_ollama_payload_omits_the_seed_when_there_is_none():
+    client = _client("ollama", [_ollama_reply('{"a": 1}')])
+    client.cfg.seed = None
+    client.chat_json("s", "u")
+    assert "seed" not in client.sess.posts[0]["payload"]["options"]
 
 
 def test_from_env_overrides_and_normalization(monkeypatch):
@@ -120,7 +154,7 @@ def test_ollama_request_shape_forces_json():
         {"role": "system", "content": "SYS"},
         {"role": "user", "content": "USR"},
     ]
-    assert post["payload"]["options"]["temperature"] == pytest.approx(0.2)
+    assert post["payload"]["options"]["temperature"] == pytest.approx(0.0)
 
 
 def test_openai_request_shape_forces_json_and_auth():

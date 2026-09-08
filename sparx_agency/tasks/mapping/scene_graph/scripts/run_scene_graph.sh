@@ -76,6 +76,7 @@ ATTACH=0
 RVIZ_SCENE=0
 NO_SEARCH=0
 SEARCH_FLY=0
+OBJECT_SEARCH=0
 NO_APPROACH=0
 OUT_DIR=""
 MAP_NAME=""     # set in the FALCON section; referenced by the status block
@@ -103,9 +104,17 @@ while [[ $# -gt 0 ]]; do
         # buys the exploration flight nothing -- this flag is here for the run
         # where you want the target FOUND and the mapping to carry on anyway.
         --no-approach) NO_APPROACH=1; shift ;;
-        # Arming the search loop. OFF by default and NOT yet wired end to end:
-        # the two-gate cmd_vel arbiter is still missing, so this publishes a
-        # route and a handover flag that nothing consumes. See the README.
+        # object_search_node: the full find-an-object loop -- arc weights
+        # between room centres, a solver order over them, our own A* transit
+        # with FALCON muted, then a frontier sweep bounded to the chosen
+        # room's mask under a budget. Replaces room_search_node for the run
+        # (both may be launched, but only one may be armed, so this flag
+        # implies --no-search).
+        --object-search) OBJECT_SEARCH=1; NO_SEARCH=1; shift ;;
+        # Arming the search loop. OFF by default. With --object-search this
+        # is now wired end to end: cmd_vel_arbiter_node holds the FALCON mute
+        # and gates our follower's twists behind it, so exactly one process
+        # writes cmd_vel at every instant.
         --fly)    SEARCH_FLY=1; shift ;;
         # Print the header banner to its real end rather than to a line number
         # that drifts every time the banner is edited.
@@ -115,6 +124,15 @@ while [[ $# -gt 0 ]]; do
         *) die "unknown flag '$1' (see --help)" ;;
     esac
 done
+
+# room_confine starts the ROS1 shim that turns /scene_graph/confine into
+# FALCON's leased keep-in boxes. Only meaningful with the object-search loop
+# and an image carrying falcon_room_confine.patch; harmless otherwise (the
+# node simply never receives a request).
+FALCON_CONFINE_ARG=""
+if [[ "${OBJECT_SEARCH}" == "1" && "${SEARCH_BACKEND:-falcon}" == "falcon" ]]; then
+    FALCON_CONFINE_ARG="room_confine:=true"
+fi
 
 OUT_DIR="${OUT_DIR:-/tmp/scene_graph/$(date -u +%Y%m%d_%H%M%S)}"
 mkdir -p "${OUT_DIR}/pids" "${OUT_DIR}/viz" \
@@ -518,7 +536,7 @@ else
     # adapter/launch/exploration.launch and defaults to FALSE, so passing it is
     # what puts /falcon/bev_2d on the wire at all.
     FOLLOW=0 RVIZ="${RVIZ:-${RVIZ_DEFAULT}}" \
-        FALCON_LAUNCH_ARGS="enable_bev:=true ${FALCON_LAUNCH_ARGS:-}" \
+        FALCON_LAUNCH_ARGS="enable_bev:=true ${FALCON_CONFINE_ARG} ${FALCON_LAUNCH_ARGS:-}" \
         bash "${FALCON_SH}" "${MAP_NAME}" \
         2>&1 | tee "${OUT_DIR}/falcon_bringup.log"
     [[ "${PIPESTATUS[0]}" == "0" ]] || die "run_falcon_sjtu.sh failed. See ${OUT_DIR}/falcon_bringup.log"
@@ -559,6 +577,31 @@ start_node scene_graph_viz_node -p "out_dir:=${OUT_DIR}/viz" \
 # exploring and the ranking becomes visible instead of merely logged.
 if [[ "${NO_SEARCH}" == "0" ]]; then
     start_node room_search_node -p "fly:=$([[ "${SEARCH_FLY}" == "1" ]] && echo true || echo false)"
+fi
+
+# The object-search loop, and the two processes it needs to fly.
+#
+# ORDER MATTERS. The arbiter goes up FIRST so that no raw Twist is ever
+# forwarded by a gate that has not yet decided it is closed, then the
+# follower, then the supervisor that drives both. The follower lives in a
+# DIFFERENT package, so start_node (which only knows scene_graph.ros2
+# modules) cannot launch it -- but its pid file still has to match
+# stop_scene_graph.sh's *_node.pid glob or a stopped stack leaves an
+# unattended 20 Hz writer on cmd_vel_raw.
+if [[ "${OBJECT_SEARCH}" == "1" ]]; then
+    start_node cmd_vel_arbiter_node
+    if [[ "${SEARCH_FLY}" == "1" ]]; then
+        FOLLOWER_CFG="${SCRIPT_DIR}/../config/room_search_follower.yaml"
+        nohup "${VENV_PY}" -m sparx_agency.tasks.planning.sjtu_internvla_n1.ros2.trajectory_follower_node \
+            --ros-args -p use_sim_time:=true -p "config_file:=${FOLLOWER_CFG}" \
+            > "${OUT_DIR}/trajectory_follower_node.log" 2>&1 &
+        echo $! > "${OUT_DIR}/pids/trajectory_follower_node.pid"
+        say "  trajectory_follower_node  pid $(cat "${OUT_DIR}/pids/trajectory_follower_node.pid")"
+    fi
+    start_node object_search_node \
+        -p "fly:=$([[ "${SEARCH_FLY}" == "1" ]] && echo true || echo false)" \
+        -p "search_backend:=${SEARCH_BACKEND:-falcon}" \
+        -p "search_timeout_s:=${ROOM_BUDGET_S:-90.0}"
 fi
 
 # The last leg: once target_watcher_node latches /target_seen, this is what

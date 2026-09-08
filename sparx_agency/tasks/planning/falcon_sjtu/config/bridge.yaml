@@ -132,3 +132,30 @@ topics:
       reliability: reliable
       durability: transient_local
 
+  # Which room FALCON is allowed to explore, and until when. ROS2 -> ROS1,
+  # published by the scene-graph task and consumed by room_confine_node, which
+  # turns it into the three rosparams the patched planner re-reads once a
+  # second (/map_config/keep_in_runtime, keep_out_runtime, confine_deadline).
+  # Rosparams do not bridge; this topic is why that node exists.
+  #
+  # Also a LEASE, for a sharper reason than the mute above: the keep-in box is
+  # the only thing stopping the aircraft leaving a room, so a stale one is the
+  # only thing that could strand it in one. The host sends an interval and
+  # must keep refreshing it; silence -- a dead host, a dropped bridge, a killed
+  # node -- lets the deadline pass and the planner clears its own fence. The
+  # failure mode of every part of this path is therefore "no confinement",
+  # never "confined for ever".
+  #
+  # transient_local for the same reason as every other latched entry here: a
+  # VOLATILE reader of a transient_local writer gets nothing until the writer's
+  # next change, and a confinement request that arrives one room late is worse
+  # than none at all.
+  - topic: /scene_graph/confine
+    type: std_msgs/msg/String
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: reliable
+      durability: transient_local
+

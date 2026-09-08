@@ -687,7 +687,13 @@ class BsplineFollowerNode(object):
         self._odom_at = None            # type: object
         self._airborne = False
         self._stopped = False
+        # Resumable: cleared by a new trajectory, because under room-by-room
+        # confinement the planner finishes every room and then resumes.
         self._finished = False
+        # NOT resumable. The watchdog ends a mission because it has decided the
+        # mission is not recoverable, and a curve arriving afterwards is not
+        # evidence to the contrary -- it is the planner failing to notice.
+        self._aborted = False
 
         # ── The mute: handing the aircraft to another node ────────────────
         #
@@ -885,6 +891,26 @@ class BsplineFollowerNode(object):
             # condemning what it was flying, so the arrival of a curve is its
             # statement that it has found a way out.
             self._stopped = False
+            # ...and it supersedes a FINISH for the same reason, which matters
+            # far more than it used to. Upstream, exploration finished exactly
+            # once and the mission ended with it, so a one-way latch was right.
+            # Under room-by-room confinement the planner finishes EVERY room:
+            # each confined region exhausts, the FSM reaches FINISH, and the
+            # C++ resume (see falcon_room_confine.patch) puts it back into
+            # PLAN_TRAJ once the fence lifts. Without clearing this here, that
+            # resume produces curves the follower silently refuses to fly, and
+            # the aircraft is parked for the rest of a mission the planner
+            # believes is still running -- measured as
+            # "[follower] limiter share over 15s: finished 100%" for every
+            # sample after the first room.
+            #
+            # A curve is the right signal to clear on, rather than a topic of
+            # our own: it is FALCON stating, in the only way it can, that it
+            # has somewhere to go.
+            if self._finished:
+                self._finished = False
+                rospy.loginfo("[follower] a new trajectory supersedes the "
+                              "finish; resuming")
             # Keep the curve so the reference POINT can be recovered later:
             # the clearance comparison needs where the plan is, and the servo
             # reports only how far along it the reference sits.
@@ -921,7 +947,7 @@ class BsplineFollowerNode(object):
         and interrupting it mid-back-out leaves the drone against the wall it
         was leaving.
         """
-        if self._finished or self._retreat_until is not None:
+        if self._finished or self._aborted or self._retreat_until is not None:
             return
         if self._resurveys >= self._max_resurveys:
             # A scan that has not helped four times will not help a fifth, and
@@ -956,9 +982,9 @@ class BsplineFollowerNode(object):
         velocity. A velocity-commanded airframe parked on zero drifts, and the
         harness may take a few seconds to tear the stack down.
         """
-        if self._finished:
+        if self._aborted:
             return
-        self._finished = True
+        self._aborted = True
         self._servo.reset()
         self._hold_point = None
         rospy.logwarn("[follower] mission aborted by the watchdog (%s); "
@@ -1118,7 +1144,7 @@ class BsplineFollowerNode(object):
         # aircraft every 12 s for the rest of time, and a zero-velocity hold
         # open-loop drifts horizontally (the vertical twin of the drift the
         # _send guard exists for).
-        if self._finished:
+        if self._finished or self._aborted:
             self._note_limiter("finished")
             self._hold_station(position, yaw)
             return
@@ -1227,7 +1253,7 @@ class BsplineFollowerNode(object):
         binding = "following"
         worst = 1.0
         speed0 = None
-        follow = not (self._stopped or self._finished)
+        follow = not (self._stopped or self._finished or self._aborted)
         command = self._servo.update(position, velocity, yaw, dt, now.to_sec(),
                                      follow=follow)
 

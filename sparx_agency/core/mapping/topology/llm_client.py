@@ -43,6 +43,14 @@ from typing import Any, Dict, Optional
 import requests
 
 
+def _seed_from_env(raw: str) -> Optional[int]:
+    """``""`` or ``"none"`` means send no seed; anything else must parse."""
+    text = str(raw).strip().lower()
+    if text in ("", "none", "null"):
+        return None
+    return int(text)
+
+
 # ---------------------------------------------------------------------
 #  Config
 # ---------------------------------------------------------------------
@@ -55,16 +63,35 @@ class LLMConfig:
         base_url: Server root URL (no trailing slash).
         model: Model name understood by the backend.
         api_key: Bearer token for OpenAI-compatible servers ("" = none).
-        temperature: Default sampling temperature.
+        temperature: Default sampling temperature. 0.0, not 0.2: an
+            "optimal" visit order that changes when the scene graph did not
+            is not auditable, and a search nobody can replay from a recording
+            is a search nobody can debug.
         timeout_s: Per-request timeout in seconds.
+        seed: Sampling seed sent to backends that accept one. None sends no
+            seed at all. With temperature 0 this is belt and braces, but
+            Ollama's greedy decode is not bit-stable across keep-alive
+            reloads without it.
+        keep_alive: How long the backend should hold the model in memory.
+            Ollama unloads after 5 minutes idle by default, and the oracle
+            ticks every 10 s but can be quiet for longer -- a cold reload
+            costs more than ``timeout_s`` and lands the tick in the uniform
+            fallback, which reads as "the LLM said nothing useful" when in
+            fact it was never asked.
+        max_tokens: Cap on the reply. A small model that falls into repeating
+            a JSON fragment otherwise runs until ``timeout_s``, producing the
+            same silent uniform-fallback tick.
     """
 
     backend: str = "ollama"
     base_url: str = "http://localhost:11434"
     model: str = "qwen2.5:3b-instruct"
     api_key: str = ""
-    temperature: float = 0.2
+    temperature: float = 0.0
     timeout_s: float = 30.0
+    seed: Optional[int] = 0
+    keep_alive: str = "30m"
+    max_tokens: int = 768
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -78,8 +105,11 @@ class LLMConfig:
             base_url=get("LLM_BASE_URL", "http://localhost:11434").rstrip("/"),
             model=get("LLM_MODEL", "qwen2.5:3b-instruct"),
             api_key=get("LLM_API_KEY", ""),
-            temperature=float(get("LLM_TEMPERATURE", "0.2")),
+            temperature=float(get("LLM_TEMPERATURE", "0")),
             timeout_s=float(get("LLM_TIMEOUT_S", "30")),
+            seed=_seed_from_env(get("LLM_SEED", "0")),
+            keep_alive=get("LLM_KEEP_ALIVE", "30m"),
+            max_tokens=int(get("LLM_MAX_TOKENS", "768")),
         )
 
 
@@ -149,11 +179,16 @@ class LLMClient:
     # -- Backends ------------------------------------------------------
     def _ollama_chat(self, system: str, user: str, temperature: float) -> str:
         url = f"{self.cfg.base_url}/api/chat"
+        options = {"temperature": temperature,
+                   "num_predict": int(self.cfg.max_tokens)}
+        if self.cfg.seed is not None:
+            options["seed"] = int(self.cfg.seed)
         payload = {
             "model": self.cfg.model,
             "stream": False,
             "format": "json",             # ask Ollama to enforce JSON
-            "options": {"temperature": temperature},
+            "keep_alive": str(self.cfg.keep_alive),
+            "options": options,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

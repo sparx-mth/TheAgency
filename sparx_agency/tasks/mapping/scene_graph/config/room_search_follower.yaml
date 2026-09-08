@@ -45,13 +45,23 @@ topics:
 follower:
   control_rate_hz: 20.0
 
-  # 1.75 m, and this is the one number that must NOT be copied from the N1
-  # config. It is the altitude FALCON actually flies this hospital at
-  # (measured across runs: p10 1.73, p50 1.74 -- see
-  # falcon_sjtu/adapter/launch/exploration.launch), and a follower that takes
-  # over at a different one spends the first seconds of every handover climbing
-  # or sinking through a map built from a different slice.
-  target_altitude_m: 1.75
+  # 1.25 m, and this is the one number that must NOT be copied from the N1
+  # config. It is the MIDDLE of the band FALCON flies this hospital in, so a
+  # handover in either direction needs no climb: a follower that takes over at
+  # a different altitude spends the first seconds of every handover climbing or
+  # sinking through a map built from a different slice.
+  #
+  # It was 1.75, measured across runs when the planning box ceiling was 1.9.
+  # That ceiling is now 1.6 (falcon_sjtu/config/hospital.yaml:130, lowered so
+  # the aircraft stops skimming the tops of 1.79 m crates), and the follower
+  # derives alt_min = box_min_z + 0.10 = 1.00 and alt_max = box_max_z - 0.10 =
+  # 1.50 from it (bspline_follower_node.py:609-610), then actively pushes the
+  # aircraft DOWN whenever z exceeds alt_max (:2754). So 1.75 is now above
+  # FALCON's own ceiling: we would climb out of the z-slab the BEV -- and
+  # therefore the whole room map we are navigating on -- is projected from,
+  # and FALCON would shove us back down the moment the mute was released.
+  # 1.25 is alt_mid (:622).
+  target_altitude_m: 1.25
 
   # The airframe is 0.63 m across and this world's doors are 0.90 m; the plant
   # takes ~0.18 s to notice a command. Slow is not timid here, it is the only
