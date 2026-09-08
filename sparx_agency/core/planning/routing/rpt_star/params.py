@@ -31,6 +31,14 @@ class RptStarParams:
             twenty-four places, where it triples how often the search finishes
             inside its budget. Below that window exact already wins; above it,
             nothing helps and the fallback route takes over. See the README.
+        use_heuristic: Whether to guide the search with the Eq. (6) estimate.
+            ``False`` forces ``h(s) = 0``, which is the paper's own uninformed
+            ablation baseline ``RPT*_noh`` (Sec. VII-B-1, p.12), where the
+            heuristic is reported to save 50-70% of the runtime. A zero
+            heuristic is trivially admissible, so the search stays exact and
+            the guarantee is unaffected -- only the runtime changes. This
+            exists so that claim is reproducible rather than quoted; nothing
+            in production should turn it off.
         max_expansions: Stop after this many state expansions. Deterministic,
             so it is what tests use. ``None`` for no limit.
         time_budget_s: Stop after this long. Wall-clock, checked every
@@ -52,6 +60,7 @@ class RptStarParams:
     """
 
     epsilon: Optional[float] = None
+    use_heuristic: bool = True
     max_expansions: Optional[int] = None
     time_budget_s: Optional[float] = 5.0
     require_triangle_inequality: bool = True

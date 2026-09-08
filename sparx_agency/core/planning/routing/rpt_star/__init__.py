@@ -34,7 +34,9 @@ Python 3.8 syntax, standard library only, no ROS and no numpy.
 """
 from sparx_agency.core.planning.routing.rpt_star.baselines import (
     greedy_probability_order,
+    lkh_style_order,
     nearest_neighbour_order,
+    path_length,
 )
 from sparx_agency.core.planning.routing.rpt_star.brute_force import (
     brute_force_order,
@@ -55,7 +57,10 @@ from sparx_agency.core.planning.routing.rpt_star.errors import (
     RoutingInternalError,
     TriangleInequalityError,
 )
-from sparx_agency.core.planning.routing.rpt_star.heuristic import GammaTable
+from sparx_agency.core.planning.routing.rpt_star.heuristic import (
+    GammaTable,
+    ZeroTable,
+)
 from sparx_agency.core.planning.routing.rpt_star.objective import (
     RouteLeg,
     decompose,
@@ -110,9 +115,12 @@ __all__ = [
     "expected_cost_literal",
     "decompose",
     "GammaTable",
+    "ZeroTable",
     "brute_force_order",
     "greedy_probability_order",
     "nearest_neighbour_order",
+    "lkh_style_order",
+    "path_length",
     # failures
     "RoutingError",
     "InvalidProblemError",

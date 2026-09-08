@@ -124,3 +124,42 @@ class GammaTable(object):
             return 0.0
         parent_survival = survival / (1.0 - self._probs[vertex])
         return parent_survival * self._rows[remaining][vertex]
+
+
+class ZeroTable(object):
+    """``h(s) = 0`` everywhere: the paper's uninformed ablation, ``RPT*_noh``.
+
+    Section VII-B-1 (p.12) sets the h-value to zero to measure what the Eq. (6)
+    heuristic is worth, and reports it saving 50-70% of the runtime. This makes
+    that measurable here rather than merely quoted.
+
+    A zero heuristic is admissible -- no cost-to-go is ever negative -- so the
+    search remains exact and Theorem 2 still holds. Only the number of
+    expansions changes, which is exactly what the ablation is measuring. Best
+    first search under ``h = 0`` is Dijkstra's algorithm over the state space.
+
+    Args:
+        probs: ``p(v)`` by index. Read only for the vertex count, so the two
+            table types are interchangeable at the call site.
+        matrix: Unused. Accepted so this is a drop-in for :class:`GammaTable`.
+
+    Attributes:
+        n: The vertex count.
+    """
+
+    __slots__ = ("n",)
+
+    def __init__(self, probs, matrix=None):
+        # type: (Sequence[float], Sequence[Sequence[float]]) -> None
+        self.n = len(probs)
+
+    def steps(self, vertex, remaining):
+        # type: (int, int) -> float
+        """Zero, whatever is asked."""
+        return 0.0
+
+    def estimate(self, vertex, survival, visited_count):
+        # type: (int, float, int) -> float
+        """Zero, whatever is asked."""
+        return 0.0
+

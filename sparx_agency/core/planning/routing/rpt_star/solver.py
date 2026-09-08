@@ -17,7 +17,10 @@ from typing import Optional, Sequence
 from sparx_agency.core.planning.routing.rpt_star.errors import (
     RoutingInternalError,
 )
-from sparx_agency.core.planning.routing.rpt_star.heuristic import GammaTable
+from sparx_agency.core.planning.routing.rpt_star.heuristic import (
+    GammaTable,
+    ZeroTable,
+)
 from sparx_agency.core.planning.routing.rpt_star.objective import (
     decompose,
     expected_cost,
@@ -72,7 +75,11 @@ def solve(problem, matrix, params=None):
     warnings = validate(problem, matrix, params.require_triangle_inequality)
 
     build_started = time.monotonic()
-    gamma = GammaTable(problem.probs, matrix)
+    # ZeroTable is the paper's RPT*_noh ablation (Sec. VII-B-1): still exact,
+    # just unguided. Building the real table would otherwise dominate the
+    # runtime being measured, so the ablation must skip it entirely.
+    table = GammaTable if params.use_heuristic else ZeroTable
+    gamma = table(problem.probs, matrix)
     build_seconds = time.monotonic() - build_started
 
     outcome = search(problem, matrix, gamma, params)

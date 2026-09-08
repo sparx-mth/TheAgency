@@ -19,7 +19,12 @@ implements the paper that solves it exactly:
 
 **No code was released with that paper.** This is a clean-room implementation
 from the text. The correspondence table below says where every equation lives,
-and the corrections section records the three places where the paper is wrong.
+and the corrections section records the five places where the paper is wrong.
+
+The claims in this README are measured by
+[`tasks/planning/rpt_star_paper`](../../../../tasks/planning/rpt_star_paper/),
+which replicates the paper's own experiments on the paper's own datasets
+against the paper's own baselines, in isolation from any pipeline.
 
 ```python
 from sparx_agency.core.planning.routing.rpt_star import (
@@ -67,10 +72,11 @@ a dominance rule for pruning, and focal search for a bounded-suboptimal variant.
 | Eq. 6 + Lemma 5, `h(s)` (p.5–6) | `heuristic.py: GammaTable.estimate` |
 | Sec. IV-D + Thm 3, F-RPT\* (p.6–7) | `focal_list.py: FocalList` |
 | Assumption 1 + Lemma 6, why pruning is sound (p.6–7) | `validation.py: _require_triangle_inequality` |
+| Sec. VII-B-1, the `RPT*_noh` ablation (p.12) | `params.py: use_heuristic`, `heuristic.py: ZeroTable` |
 | Sec. VII-C, the Greedy and LKH baselines (p.12) | `baselines.py` |
 | Thm 2, that the answer is optimal | `brute_force.py`, and `tests/test_optimality.py` |
 
-## Three corrections to the paper
+## Five corrections to the paper
 
 **1. Algorithm 1's initial state is wrong, and provably so.** Line 1 (p.5)
 prints `s_o <- (v = v_s, g = 0, q = 1 - p(v_s), A = {})` — an empty visited set.
@@ -92,6 +98,47 @@ paper's figure would be wrong by two orders of magnitude.
 
 **3. Two figures call the algorithm "PRT\*".** Fig. 5's block and Fig. 8's
 caption (p.9, p.11). Cosmetic, noted so a reader is not confused.
+
+**4. Remark 1 is wrong, and it is the one that will cost us metres.** Eq. 1
+weights the `i`-th edge by `q_i = prod (1 - p_k)` — the chance of
+*independently* missing at each place so far. That is right for the
+multiple-target case. Remark 1 (p.3) then says the single-target case merely
+adds `sum p(v) = 1` and that "our approaches ... do not rely on those
+constraints and is applicable to all these problem variants". It is not. With
+one object that certainly exists, the misses are **mutually exclusive**, so the
+weight must be `1 - sum p_k`. Two rooms at `p = 0.3` give `1 - 0.6 = 0.40`
+where Eq. 1 uses `0.7 * 0.7 = 0.49`, so Eq. 1 over-charges the tail of the
+route and prefers a different ordering.
+
+Measured against exhaustive enumeration with a *perfect* prior, the route Eq. 1
+prefers flies a **median 8.5% further** than necessary on a concentrated belief,
+worst case 44%, and is the right route in only 2 instances out of 30. The error
+grows as the belief sharpens — which is exactly the regime this package
+recommends, and exactly the regime an LLM ranking rooms for one object
+produces.
+
+**This implementation keeps Eq. 1 as published**, deliberately: the package is
+a faithful implementation and the fix changes the problem. The corrected
+objective is available for measurement as
+`tasks/planning/rpt_star_paper/metrics.py: expected_cost_single_target`. The
+correction is one line and preserves everything else — the corrected weight is
+still additive along the route, so the Markovian state, the dominance rule and
+focal search all carry over; only the `q` update (Eq. 3) and the `gamma`
+recurrence (Eq. 5) would change.
+
+**5. Every TSPLIB instance in the paper's own benchmark violates the triangle
+inequality.** Sec. III states the edge costs satisfy it, and Lemma 6 — the
+soundness of dominance pruning — needs it. Yet `gr17`, `gr21`, `gr24`, `fri26`
+and `bays29` contain 26 to 560 violating triples each, the worst by 111 units.
+Theorem 2 therefore does not apply to Table I, the paper's headline "RPT\* beats
+Gurobi" result. Measured here, the returned routes happen to be optimal anyway
+— so this is unquantified risk rather than demonstrated damage — but a reader
+sizing confidence from Table I's 0.004%–0.062% margins is reading numbers
+smaller than the guarantee that was dropped to obtain them.
+
+This is why `require_triangle_inequality` defaults to on and why a violation
+raises rather than warns: the failure is silent, and the paper is a
+demonstration of how silent.
 
 ## What actually governs the runtime — and it is not the number of places
 
@@ -121,7 +168,7 @@ setting at around `0.5`, and only in a narrow window — a concentrated belief
 over roughly 18–24 places, where it roughly triples how often the search
 finishes inside its budget.
 
-**RPT\* is worth most exactly where it is cheapest.** Measured at 12 places,
+**RPT\* is worth most where the belief is sharpest.** Measured at 12 places,
 against the true optimum:
 
 | belief | largest `p` | nearest-neighbour | greedy-on-probability |
@@ -132,11 +179,18 @@ against the true optimum:
 | very peaked | 0.53 | 1.15× | 1.60× |
 
 The flatter the belief, the less there is to gain — simply flying to the
-nearest unvisited place is within about 5% of optimal, and the search is at its
-most expensive. The more concentrated the belief, the more RPT\* wins *and* the
-faster it runs, because a large `p` is what makes `q` collapse. Going to the
-most likely place regardless of distance is bad everywhere, and worst when the
-belief is flat.
+nearest unvisited place is within about 5% of optimal. The more concentrated
+the belief, the more RPT\* wins. Going to the most likely place regardless of
+distance is bad everywhere, and worst when the belief is flat.
+
+**Sharpening the belief does not make the search cheaper.** An earlier draft of
+this file claimed it did, on the strength of a sweep whose probabilities were
+not normalised — which models several independent targets, not one object. With
+`sum(p) = 1` the survival term is pinned near `1/e` however peaked the belief
+is, so the plateau that makes the search easy never happens, and sharpening
+measurably *increases* the work: at 16 places, 7.4k expansions on a flat belief
+against 24.9k on a sharp one, with the solve rate falling from 6/6 to 4/6.
+Route quality and tractability are two separate levers.
 
 **So the practical guidance is to keep the vertex set small and the belief
 sharp.** Beyond about 24 places with a flat belief nothing finishes, and the
