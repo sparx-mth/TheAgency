@@ -29,12 +29,12 @@ Python 3.8 syntax, standard library only.
 from __future__ import annotations
 
 import math
-import os
+import pathlib
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
 
 #: Where the vendored TSPLIB files live.
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+DATA_DIR = pathlib.Path(__file__).resolve().parent / "data"
 
 #: The five TSPLIB instances of Sec. VII-A-1, in the paper's own order.
 TSPLIB_INSTANCES = ("gr17", "gr21", "gr24", "fri26", "bays29")
@@ -149,8 +149,8 @@ def tsplib_instance(name):
         FileNotFoundError: If the vendored file is missing.
         ValueError: If the file uses an edge-weight format not handled here.
     """
-    path = os.path.join(DATA_DIR, "%s.tsp" % name)
-    with open(path) as handle:
+    path = DATA_DIR / ("%s.tsp" % name)
+    with path.open() as handle:
         return _parse_tsplib(name, handle.read())
 
 

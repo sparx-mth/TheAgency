@@ -12,21 +12,28 @@ pay attention to:
                most likely room left, however far away it is.
 ``nearest``    Distance only. Stands in for the paper's ``LKH``: ignore the
                belief entirely and just walk the shortest sensible round.
-``nearest_2opt`` Distance only, but a genuinely good tour -- nearest-neighbour
-               improved by 2-opt until it stops improving. This is the honest
-               version of the distance-only baseline, and the one to beat.
+``nearest_2opt`` Distance only, but a genuinely good tour -- the solver's own
+               LKH stand-in: nearest-neighbour restarted from every first hop,
+               each improved to a local optimum under 2-opt and Or-opt. This
+               is the honest version of the distance-only baseline, and the
+               one to beat.
 ``random``     Neither. The floor, so every other number has a scale.
 ============== ==========================================================
 
 ``clairvoyant`` is not here because it is not a planner -- it is the bound that
 knows the answer, and it lives in :mod:`.metrics`.
 
-**Why a 2-opt baseline is included even though the paper's is weaker.** The
-paper compares against LKH, a strong tour heuristic, and reports it 50-80%
-worse than optimal. A plain nearest-neighbour tour is much weaker than LKH, so
-beating it would prove very little. 2-opt is the cheapest way to get a
-distance-only baseline that is actually good, which makes the comparison
-honest rather than flattering.
+**Why a strong distance-only baseline matters.** The paper compares against
+LKH, a very good tour heuristic, and reports it 50-80% worse than optimal. A
+plain nearest-neighbour tour is far weaker than LKH, so beating *that* would
+credit RPT* with a win belonging to the baseline being bad. The ordering used
+here is close enough to optimal on these sizes that the remaining gap is the
+algorithmic difference worth measuring.
+
+**Every ordering here comes from the solver package**, not from a local copy.
+The baselines are part of what is being tested -- the paper's own Greedy and
+LKH comparators -- so they live in ``core`` beside the algorithm and are
+called from here.
 """
 from __future__ import annotations
 
@@ -40,6 +47,9 @@ from sparx_agency.core.planning.routing.rpt_star import (
     RouteVertex,
     RptStarParams,
     dense_costs,
+    greedy_probability_order,
+    lkh_style_order,
+    nearest_neighbour_order,
     solve,
 )
 from sparx_agency.core.planning.routing.rpt_star.result import (
@@ -112,24 +122,25 @@ def plan_f_rpt_star(belief, distance, epsilon=0.5):
 
 def plan_greedy(belief, distance):
     """Always the most likely room left, whatever it costs to get there."""
+    problem, _ = _problem(belief, distance)
     started = time.perf_counter()
-    entrance = len(belief)
-    order = sorted(range(len(belief)), key=lambda r: (-belief[r], r))
-    return Plan(order=(entrance,) + tuple(order),
-                seconds=time.perf_counter() - started)
+    order = greedy_probability_order(problem, distance)
+    return Plan(order=order, seconds=time.perf_counter() - started)
 
 
 def plan_nearest(belief, distance):
     """Always the closest room left, ignoring the belief entirely."""
+    problem, _ = _problem(belief, distance)
     started = time.perf_counter()
-    order = _nearest_neighbour(len(belief), distance)
+    order = nearest_neighbour_order(problem, distance)
     return Plan(order=order, seconds=time.perf_counter() - started)
 
 
 def plan_nearest_2opt(belief, distance):
     """A genuinely short round trip, still ignoring the belief."""
+    problem, _ = _problem(belief, distance)
     started = time.perf_counter()
-    order = _two_opt(_nearest_neighbour(len(belief), distance), distance)
+    order = lkh_style_order(problem, distance)
     return Plan(order=order, seconds=time.perf_counter() - started)
 
 
@@ -154,46 +165,10 @@ PLANNERS = (
 )
 
 
-# -- the distance-only baselines -----------------------------------------
-
-def _nearest_neighbour(n_rooms, distance):
-    """Walk to the closest unvisited room, repeatedly, from the entrance."""
-    entrance = n_rooms
-    remaining = set(range(n_rooms))
-    current = entrance
-    order = [entrance]
-    while remaining:
-        row = distance[current]
-        current = min(remaining, key=lambda r: (row[r], r))
-        remaining.discard(current)
-        order.append(current)
-    return tuple(order)
-
-
-def _two_opt(order, distance, max_passes=40):
-    """Untangle a tour by reversing segments while that shortens it.
-
-    A path, not a cycle, and the first element is the entrance, so the segment
-    being reversed never includes it. Stops at the first pass that finds no
-    improvement, which on these sizes is a handful of passes.
-    """
-    route = list(order)
-    count = len(route)
-    for _ in range(max_passes):
-        improved = False
-        for i in range(1, count - 1):
-            before = distance[route[i - 1]][route[i]]
-            for j in range(i + 1, count):
-                after_index = j + 1
-                gain = before + (distance[route[j]][route[after_index]]
-                                 if after_index < count else 0.0)
-                swapped = distance[route[i - 1]][route[j]] + (
-                    distance[route[i]][route[after_index]]
-                    if after_index < count else 0.0)
-                if swapped < gain - 1e-12:
-                    route[i:j + 1] = reversed(route[i:j + 1])
-                    improved = True
-                    before = distance[route[i - 1]][route[i]]
-        if not improved:
-            break
-    return tuple(route)
+# -- why there are no local implementations below this line ---------------
+#
+# The greedy, nearest-neighbour and tour-improvement orderings all live in
+# core/planning/routing/rpt_star/baselines.py and are called from there. An
+# earlier version of this file reimplemented all three inline, which is the
+# accidental-second-copy this repository has been bitten by before: the two
+# copies agree until one of them is fixed.

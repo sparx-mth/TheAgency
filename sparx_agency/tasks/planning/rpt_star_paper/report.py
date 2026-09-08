@@ -57,6 +57,7 @@ def table(headers, rows, aligns=None):
 
     def render(cells):
         # type: (Sequence[str]) -> str
+        """One row, each cell padded to its column's width."""
         out = []
         for i, cell in enumerate(cells):
             text = str(cell)

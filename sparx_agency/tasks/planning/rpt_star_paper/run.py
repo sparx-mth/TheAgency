@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import pathlib
 import sys
 import time
 from typing import Dict, List, Optional, Sequence
@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Sequence
 from sparx_agency.tasks.planning.rpt_star_paper import experiments, report
 
 #: Where raw rows land.
-OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "rpt_star_paper")
+OUTPUT_DIR = pathlib.Path.home() / "rpt_star_paper"
 
 #: The studies, in the order a reader should meet them.
 STUDIES = ("fidelity", "objective", "ablation", "baselines", "sharpness",
@@ -134,7 +134,8 @@ def main(argv=None):
                      % (unknown[0], ", ".join(STUDIES)))
 
     settings = _settings(args.full)
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = pathlib.Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     for name in chosen:
         print("\n" + "=" * 78)
@@ -144,8 +145,8 @@ def main(argv=None):
         rows = run_study(name, settings[name])
         elapsed = time.monotonic() - started
 
-        path = os.path.join(args.output_dir, "%s.json" % name)
-        with open(path, "w") as handle:
+        path = output_dir / ("%s.json" % name)
+        with path.open("w") as handle:
             json.dump(rows, handle, indent=1, default=str)
 
         print(summarise(name, rows))

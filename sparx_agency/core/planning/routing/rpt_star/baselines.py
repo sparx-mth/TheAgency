@@ -62,15 +62,33 @@ def nearest_neighbour_order(problem, matrix):
         The visiting order, as indices, starting at the start vertex.
     """
     remaining = set(range(problem.n))
-    current = problem.start
-    remaining.discard(current)
-    order = [current]                           # type: List[int]
+    remaining.discard(problem.start)
+    return tuple(_extend_greedily([problem.start], remaining, matrix))
+
+
+def _extend_greedily(order, remaining, matrix):
+    # type: (List[int], set, Sequence[Sequence[float]]) -> List[int]
+    """Walk from the end of ``order`` to the closest place left, repeatedly.
+
+    Shared by both nearest-neighbour constructions below, which differ only in
+    the prefix they start from. Ties break on the lower index so the result is
+    reproducible.
+
+    Args:
+        order: The route so far; extended in place and returned.
+        remaining: Places not yet visited; emptied.
+        matrix: The cost matrix.
+
+    Returns:
+        ``order``, now covering everything.
+    """
+    current = order[-1]
     while remaining:
         row = matrix[current]
         current = min(remaining, key=lambda v: (row[v], v))
         remaining.discard(current)
         order.append(current)
-    return tuple(order)
+    return order
 
 
 def path_length(order, matrix):
@@ -162,17 +180,10 @@ def lkh_style_order(problem, matrix, max_passes=200):
 def _nearest_neighbour_from(start, first_hop, matrix, n):
     # type: (int, int, Sequence[Sequence[float]], int) -> List[int]
     """Nearest-neighbour construction forced through a given first hop."""
-    order = [start, first_hop]
     remaining = set(range(n))
     remaining.discard(start)
     remaining.discard(first_hop)
-    current = first_hop
-    while remaining:
-        row = matrix[current]
-        current = min(remaining, key=lambda v: (row[v], v))
-        remaining.discard(current)
-        order.append(current)
-    return order
+    return _extend_greedily([start, first_hop], remaining, matrix)
 
 
 def _local_search(order, matrix, max_passes):
