@@ -6,6 +6,44 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Fixed
+- **The exploration follower no longer flies backward.** A demand pointing behind the
+  nose is now answered by turning in place first (`scripts/heading_gate.py`, on by
+  default, with a hard reverse clamp at the publish boundary that only the escape
+  reflex may bypass). The align gate that was supposed to prevent this lived inside
+  the follower's `not use_lateral` branch, so a lateral-enabled flight skipped it
+  entirely. Measured on `nav_debug_20260906_235809`: 9.5% of airborne driving ticks
+  commanded backward flight, and those ticks sat within 0.30 m of mapped geometry 33%
+  of the time against 9% otherwise (p10 clearance 0.00 m vs 0.30 m). The only camera
+  faces forward, so backward flight is blind flight. Replaying the run through the new
+  logic: a backward demand still arises on 10.2% of ticks, **85% of it answered by a turn
+  and 15% by the clamp**, and 0% of it reaches the wire. The split matters — it is how a
+  future run tells a working gate from a clamp quietly papering over one.
+- **A finished trajectory is no longer flown as if it were live.** `traj_server`
+  republishes its frozen endpoint with a fresh stamp at 100 Hz and never changes
+  `trajectory_flag` (READY on 6627/6627 samples), so neither of the follower's two
+  usability tests could ever fire. `ReferenceTracker3D` now classifies the reference
+  stream (`plan_state.py`): a plan that has commanded no motion — translation *or*
+  yaw — for longer than a grace period is finished, and the aircraft flies to its last
+  waypoint and holds there instead of chasing it indefinitely. Note what this is *not*:
+  the approach is not slower (commanded speed over finished-plan ticks is p50 0.054, p90
+  0.729, max 1.33 m/s — the position loop still pulls at ~1 m/s from 1.7 m out). The win
+  is that the aircraft **arrives and stops**, and that beyond `endpoint_reach_m` (3 m) it
+  refuses the approach entirely and holds position — a case the recorded flight spent
+  11.3 s in, drifting from 1.78 m to 9.41 m from a dead endpoint while still driving.
+- **The position loop no longer brakes backward onto a point the aircraft has passed.**
+  Being ahead of schedule is bounded (`max_lead_error_m`, 0.25 m) instead of flown out;
+  cross-track, the component that keeps the aircraft off walls, is untouched. The
+  error split now takes an explicit direction of travel and remembers the last real
+  one, so a finished plan no longer reports its whole lag as cross-track.
+- `max_yaw_rate_deg` in the follower defaulted to 45 while `nav_stack.launch` has
+  passed 90 all along — an ad hoc launch silently flew at half the measured ceiling.
+- `falcon_replan_from_pose.patch` now anchors a replan at
+  `odom_pos_ + odom_vel_*replan_duration_` rather than the pose at solve time. Without
+  that lead the guard planted each new curve *behind* a moving aircraft, which is why
+  the 2026-09-02 attempt at a 0.6 m threshold "forgave the deviation" and was reverted;
+  with it, `fsm_replan_from_pose_drift` drops to 0.05 (effectively always). **Needs a
+  docker image rebuild and a flight — the C++ half is unverified from the host.**
+
 - `rooster_twist_control_adapter.py`'s `max_yaw_rate` recalibrated from a never-validated
   0.5 rad/s to 1.8 rad/s, derived from a logged manual flight's actual turn-rate behavior
   (~4x too low previously — any planner-requested yaw rate was executed much faster than

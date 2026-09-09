@@ -83,7 +83,7 @@ def tracking_metrics(ctrl_rows):
     """
     along, cross, perr, yawerr = [], [], [], []
     along_mv, cross_mv, perr_mv = [], [], []
-    saturated = moving = holding = diverged = 0
+    saturated = moving = holding = diverged = past_end = 0
     ticks = 0
     bound = {}
     for row in ctrl_rows:
@@ -95,7 +95,15 @@ def tracking_metrics(ctrl_rows):
         ref = trace.get("reference") or {}
         is_moving = bool(ref.get("moving"))
         moving += is_moving
-        holding += bool(track.get("holding"))
+        # Split, because they are not the same fault. `holding` used to mean
+        # only "no fresh trajectory", which the scorer penalises. Since the
+        # finished-plan hold landed, a deliberate stop at the last waypoint also
+        # sets `holding` -- and that is correct behaviour, not a follower
+        # failure. Runs recorded before the change carry no `past_end` key, so
+        # the .get default keeps them scoring exactly as they did.
+        finished = bool(track.get("past_end", False))
+        past_end += finished
+        holding += bool(track.get("holding")) and not finished
         diverged += bool(track.get("diverged"))
         lag = abs(track.get("along_track_lag_m") or 0.0)
         off = abs(track.get("cross_track_error_m") or 0.0)
@@ -126,6 +134,11 @@ def tracking_metrics(ctrl_rows):
         ticks=ticks,
         frac_reference_moving=moving / float(ticks),
         frac_holding=holding / float(ticks),
+        #: Ticks holding at a FINISHED plan's last waypoint. Reported beside
+        #: frac_holding rather than inside it: this one is the aircraft doing
+        #: the right thing, and scoring it as a fault would penalise the fix.
+        past_end_ticks=past_end,
+        frac_past_end=past_end / float(ticks),
         frac_diverged=diverged / float(ticks),
         #: Share of ticks whose position correction was railed at its own limit.
         #: A saturated loop cannot answer a gain change.

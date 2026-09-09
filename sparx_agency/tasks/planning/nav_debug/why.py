@@ -54,7 +54,12 @@ def _exploration(lanes: dict) -> List[str]:
     """The exploration loop's account: tracker, reference, altitude guard."""
     parts = []
     tracking, reference = lanes.get("tracking"), lanes.get("reference")
-    if tracking is not None and tracking.holding:
+    if tracking is not None and tracking.past_end:
+        # A finished plan reads exactly like a live one on the wire -- the
+        # endpoint is restamped at 100 Hz -- so name it rather than letting a
+        # deliberate stop narrate as "holding, reference 0.0s old".
+        parts.append("plan finished; holding at its last waypoint")
+    elif tracking is not None and tracking.holding:
         parts.append("holding (reference %.1fs old)" % tracking.reference_age_s)
     elif tracking is not None and tracking.diverged:
         parts.append("diverged %.2fm off reference" % tracking.position_error_m)

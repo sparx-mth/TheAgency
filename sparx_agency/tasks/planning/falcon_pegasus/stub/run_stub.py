@@ -398,7 +398,8 @@ class _Flight:
             command = self.tracker.update(
                 self.link.reference, position, self.aircraft.yaw, DT,
                 velocity=velocity,
-                reference_age=self.link.reference_age_s(self.sim_time))
+                reference_age=self.link.reference_age_s(self.sim_time),
+                trajectory_id=self.link.trajectory_id)
             self.aircraft.step_velocity(command.velocity(), command.yaw, DT)
             return command
 
@@ -461,6 +462,7 @@ class _Flight:
 
             if self.link.trajectory_id != last_trajectory:
                 last_trajectory = self.link.trajectory_id
+                self.tracker.on_new_trajectory()
                 trajectory_at = self.sim_time
             elif self.sim_time - trajectory_at >= PLANNER_STALL_S:
                 return "planner_stopped", (

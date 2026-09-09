@@ -31,6 +31,9 @@ from math import radians
 
 from sparx_agency.core.common.types import KinematicLimits
 from sparx_agency.core.planning.trackers.drift_pid.pid import PidGains
+from sparx_agency.core.planning.trackers.reference_tracker_3d.plan_state import (
+    PlanStateParams,
+)
 
 
 def _default_horizontal_pid():
@@ -85,6 +88,23 @@ class ReferenceTrackerParams:
         limits: Ceilings on the *commanded* velocity and yaw rate. They bound the
             sum of every term, so ``max_speed_xy`` must be at least the planner's
             own velocity limit.
+        plan_state: When a streamed reference stops counting as a live plan --
+            see :mod:`~.plan_state`. A reference stream carries no curve to ask
+            for its own duration, so the end of the plan has to be inferred.
+        max_lead_error_m: How far *ahead* of the reference the position loop is
+            allowed to see, metres.
+
+            An aircraft ahead of schedule has an error pointing backward along
+            travel, and the position loop cannot tell that from being off the
+            path: it pulls straight at the reference and brakes the aircraft
+            onto a point it has already passed. Measured on one flight, the
+            reference sat behind the aircraft on 6.8% of airborne driving ticks
+            and the correction saturated pulling it back. Only the backward
+            along-track component is bounded -- cross-track, the component that
+            keeps the aircraft off walls, is untouched. The two bounds compose:
+            the effective backward limit is the smaller of this and
+            ``position_error_clamp_m``, so setting it at or above the clamp
+            restores the previous behaviour of treating both directions alike.
         accel_lead_s: How far ahead, in seconds, the reference acceleration is
             projected onto the velocity command (``v += a * accel_lead_s``). This
             is the lead that lets the aircraft start turning *before* a position
@@ -153,6 +173,8 @@ class ReferenceTrackerParams:
     horizontal_pid: PidGains = field(default_factory=_default_horizontal_pid)
     vertical_pid: PidGains = field(default_factory=_default_vertical_pid)
     limits: KinematicLimits = field(default_factory=_default_limits)
+    plan_state: PlanStateParams = field(default_factory=PlanStateParams)
+    max_lead_error_m: float = 0.25
     accel_lead_s: float = 0.25
     velocity_damping_xy: float = 0.25
     velocity_damping_z: float = 0.2
@@ -174,6 +196,9 @@ class ReferenceTrackerParams:
         if self.position_error_clamp_m <= 0.0:
             raise ValueError("position_error_clamp_m must be > 0, got %r"
                              % (self.position_error_clamp_m,))
+        if self.max_lead_error_m < 0.0:
+            raise ValueError("max_lead_error_m must be >= 0, got %r"
+                             % (self.max_lead_error_m,))
         if not 0.0 < self.command_smoothing_alpha <= 1.0:
             raise ValueError("command_smoothing_alpha must be in (0, 1], got %r"
                              % (self.command_smoothing_alpha,))

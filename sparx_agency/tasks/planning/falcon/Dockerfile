@@ -225,6 +225,7 @@ RUN cd /catkin_ws/src/FALCON && \
     grep -q "positionToGridCellId" falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp && \
     grep -q "slow_traj_target_vel" falcon_planner/exploration_manager/src/exploration_fsm.cpp && \
     grep -q "replan_from_pose_drift" falcon_planner/exploration_manager/src/exploration_fsm.cpp && \
+    grep -q "odom_vel_ \* fp_->replan_duration_" falcon_planner/exploration_manager/src/exploration_fsm.cpp && \
     grep -q "isInMap(voxel_idx)" falcon_planner/voxel_mapping/src/tsdf.cpp && \
     grep -q "addBlockedRegion" falcon_planner/exploration_preprocessing/src/frontier_finder.cpp && \
     grep -q "never enter LKH" falcon_planner/exploration_manager/src/exploration_manager.cpp && \

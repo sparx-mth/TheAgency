@@ -661,7 +661,12 @@ class ExplorationMission:
                 # damping term acts on a measured signal rather than a
                 # difference of positions.
                 velocity=velocity,
-                reference_age=self.link.reference_age_s(self.loop.sim_time))
+                reference_age=self.link.reference_age_s(self.loop.sim_time),
+                # Lets the tracker tell a freshly committed curve from the
+                # frozen endpoint of the previous one -- without it, a new
+                # trajectory arriving during a freeze is classified finished on
+                # its first tick.
+                trajectory_id=self.link.trajectory_id)
             self.px4.send_velocity_world(command.vx, command.vy, command.vz, command.yaw)
             return command
 
@@ -821,6 +826,9 @@ class ExplorationMission:
             if self.link.trajectory_id != last_trajectory:
                 last_trajectory = self.link.trajectory_id
                 trajectory_at = self.loop.sim_time
+                # A hold point latched under the previous curve belongs to a
+                # plan that no longer exists.
+                self.tracker.on_new_trajectory()
                 if self._unsafe_trajectory is not None:
                     self._unsafe_trajectory = None
                     self._say("new trajectory #%d -- following again" % last_trajectory)

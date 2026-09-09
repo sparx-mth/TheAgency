@@ -42,8 +42,15 @@ class TrackedSetpoint:
             aircraft's, wrapped to (-pi, pi].
         diverged: True while :attr:`position_error_m` exceeds the configured
             ceiling. Advisory; the tracker keeps flying.
-        holding: True when no fresh reference was available and the tracker is
-            holding station instead of following one.
+        holding: True when the tracker is holding a single point instead of
+            following a plan -- either because nothing fresh arrived or because
+            the plan has run out. :attr:`past_end` says which.
+        past_end: True when the hold is a *finished* plan rather than a missing
+            one: the aircraft has flown the path to its last valid waypoint and
+            stopped there. Kept separate from :attr:`holding` on purpose -- a
+            dead planner and a parked one need different responses, and
+            conflating them once cost a debugging session (README_exploration.md
+            documents ``holding`` as meaning "no fresh trajectory").
     """
 
     vx: float
@@ -56,6 +63,7 @@ class TrackedSetpoint:
     yaw_error_rad: float = 0.0
     diverged: bool = False
     holding: bool = False
+    past_end: bool = False
 
     def velocity(self):
         # type: () -> tuple

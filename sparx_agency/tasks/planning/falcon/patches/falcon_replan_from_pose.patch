@@ -2,7 +2,7 @@ diff --git a/falcon_planner/exploration_manager/src/exploration_fsm.cpp b/falcon
 index ed68d69..1771bd9 100644
 --- a/falcon_planner/exploration_manager/src/exploration_fsm.cpp
 +++ b/falcon_planner/exploration_manager/src/exploration_fsm.cpp
-@@ -312,6 +312,27 @@ void ExplorationFSM::FSMCallback(const ros::TimerEvent &e) {
+@@ -312,6 +312,36 @@ void ExplorationFSM::FSMCallback(const ros::TimerEvent &e) {
        fd_->start_yaw_(0) = info->yaw_traj_.evaluateDeBoorT(t_r)[0];
        fd_->start_yaw_(1) = info->yawdot_traj_.evaluateDeBoorT(t_r)[0];
        fd_->start_yaw_(2) = info->yawdotdot_traj_.evaluateDeBoorT(t_r)[0];
@@ -19,9 +19,18 @@ index ed68d69..1771bd9 100644
 +        ros::param::param("/fsm/replan_from_pose_drift", sparx_max_drift, 1.5);
 +      double sparx_drift = (fd_->start_pos_ - fd_->odom_pos_).norm();
 +      if (sparx_drift > sparx_max_drift) {
-+        ROS_WARN("[FSM] plan start is %.2f m from the aircraft; replanning from the real pose",
++        ROS_WARN_THROTTLE(5.0,
++                 "[FSM] plan start is %.2f m from the aircraft; replanning from the real pose",
 +                 sparx_drift);
-+        fd_->start_pos_ = fd_->odom_pos_;
++        // Anchor where the aircraft WILL BE when this trajectory starts, not
++        // where it is while the solver is still running. trajectory_start_time_
++        // below is now + replan_duration_, so seeding the raw pose plants the
++        // curve's origin replan_duration_ * speed BEHIND a moving aircraft --
++        // the reference is then born behind the aircraft and the position loop
++        // brakes backward onto it. That is why the 2026-09-02 attempt at a
++        // 0.6 m threshold "forgave the deviation": it fired 93 times a flight,
++        // each time seeding a curve the aircraft had already left.
++        fd_->start_pos_ = fd_->odom_pos_ + fd_->odom_vel_ * fp_->replan_duration_;
 +        fd_->start_vel_ = fd_->odom_vel_;
 +        fd_->start_acc_.setZero();
 +        fd_->start_yaw_ << fd_->odom_yaw_, 0, 0;

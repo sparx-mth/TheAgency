@@ -200,6 +200,11 @@ class Tracking:
     yaw_error_rad: float = 0.0
     diverged: bool = False
     holding: bool = False
+    #: The hold is a FINISHED plan, not a missing one: the aircraft flew the
+    #: path to its last valid waypoint and stopped there. Separate from
+    #: ``holding`` because a dead planner and a parked one need different
+    #: responses, and a run once spent 560 s reporting one as the other.
+    past_end: bool = False
     reference_age_s: float = 0.0
 
 

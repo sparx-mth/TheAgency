@@ -11,6 +11,55 @@ Format per entry:
 
 ---
 
+## 2026-09-09 — `telemetry.jsonl`'s velocity is the follower's own command echoed back, not measured velocity
+
+**Symptom:** Comparing commanded yaw rate against `telemetry.wz` on a nav_debug run showed the
+airframe delivering 99% of every commanded yaw rate, up to the full 90 deg/s ceiling — which
+reads as "the plant has headroom, raise the software limits". It is an artefact.
+
+**Root cause:** The ROS1 recorder's telemetry lane is *pose + `/cmd_vel`* (the `nav_debug`
+README says so plainly). Its `vx/vy/vz/wz` are the follower's own body twist, so comparing them
+to the command compares the command to itself. Measured on
+`nav_debug_20260906_235809`: 50.3% of telemetry rows match the body command bit-for-bit and
+1.0% match the world command; the rest is as-of join offset. Pose-differentiated speed has a
+median of 0.069 m/s against the lane's reported 0.300.
+
+**Fix / workaround:** Achieved velocity lives only in the ROS2 recorder half
+(`/R1/sphera/state`, `/R1/velocity_truth`), which is collected by a *separate* command and was
+not present in this run folder. If a run has no `ros2/` directory, achieved-vs-commanded is
+simply not answerable from it — say so rather than computing it anyway. Differentiate pose for
+a rough measured speed, and label it as such.
+
+**Don't** — don't read `telemetry.vx/vy` as world-ENU measured velocity, and don't justify
+raising a control limit with a ratio computed from that lane. See also `LOOP_BUGS.md` B31 and
+`MISSION.md` P17/P24: raising `course_slew_deg_s` is explicitly ruled out without a
+discriminator between a thrashing demand and a persistent one.
+
+## 2026-09-09 — A safety gate nested inside a performance flag is not a safety gate
+
+**Symptom:** The exploration follower flew backward at up to 1.0 m/s on 9.5% of airborne
+driving ticks, into walls, despite having an align gate, a cos-fade and a turn-creep floor
+that exist precisely to stop that.
+
+**Root cause:** All three lived inside `if heading_err is not None and not self.use_lateral:`.
+`use_lateral` is a *performance* option (command the tracker's full velocity vector instead of
+course-projected forward only), enabled for the `powerlaw_lateral` campaign variant. Turning it
+on silently removed the aircraft's only protection against flying at a demand behind its nose —
+which on a forward-facing-camera airframe is blind flight. Clearance to mapped geometry during
+those ticks: p10 0.00 m and 33% within 0.30 m, against 0.30 m and 9% otherwise.
+
+**Fix / workaround:** The turn-in-place gate (`scripts/heading_gate.py`) is unconditional — not
+keyed on `use_lateral`, `yaw_mode`, or anything else — with a hard reverse clamp applied where
+the command leaves the node, so no upstream path can violate it. The escape reflex is the one
+exemption, because reversing out of a nose-in contact is the one direction the aircraft has
+just proved is clear.
+
+**Don't** — don't gate a safety property on a tuning flag, and don't assume an existing
+guard fires just because it exists: check which branch it lives in. `gate.use_lateral` was in
+the recorded trace all along and said `true`.
+
+---
+
 ## 2026-08-18 — FALCON declared the jail "explored" after 372s with 12 clusters retired behind one; the flight was fine, the frontier tests were not
 
 **Symptom:** A mapping run in `sphera_jail` looked healthy by every control metric — reference

@@ -1252,6 +1252,23 @@
        twist adapter) instead of course-projected forward only. Default false =
        pre-change behaviour; the campaign sets it per controller variant. -->
   <arg name="explore_use_lateral"  default="false" />
+  <!-- Turn-in-place gate. The align gate above lives inside the follower's
+       `not use_lateral` branch, so a lateral-enabled flight published the
+       tracker's whole velocity vector verbatim, backward component included:
+       measured on nav_debug_20260906_235809, 9.5% of airborne driving ticks
+       commanded backward flight, and those ticks sat within 0.30 m of mapped
+       geometry 33% of the time against 9% otherwise (p10 clearance 0.00 m vs
+       0.30 m). This gate is deliberately NOT conditioned on use_lateral: the
+       only camera faces forward (hfov 135 deg), so backward flight is blind
+       flight whatever the axis mix. 90 deg is the sign change past which
+       forward thrust moves the aircraft AWAY from the demand. See
+       scripts/heading_gate.py for why not the camera's 67.5 deg half-field. -->
+  <arg name="explore_turn_in_place"      default="true" />
+  <arg name="explore_turn_in_place_deg"  default="90.0" />
+  <arg name="explore_turn_resume_deg"    default="60.0" />   <!-- hysteresis: a single threshold chatters -->
+  <arg name="explore_turn_min_speed"     default="0.25" />   <!-- below this the demand DIRECTION is noise -->
+  <arg name="explore_turn_yaw_rate_deg"  default="0.0" />    <!-- 0 = the platform ceiling below -->
+  <arg name="explore_max_reverse_mps"    default="0.0" />    <!-- publish-boundary backstop; escapes exempt -->
   <!-- Snap-up floor: below ~0.26 m/s the platform cannot move continuously
        (measured deadzone), so a smaller request is not worth emitting. -->
   <arg name="explore_min_vxy"      default="0.0" />
@@ -1540,7 +1557,20 @@
   <!-- 2026-09-02: 0.6 was BELOW normal tracking error, so this recovery
        path fired 93x in one flight and forgave the deviation every time
        instead of making the aircraft catch up. Back to the patch default. -->
-  <arg name="fsm_replan_from_pose_drift" default="1.5"/>
+  <!-- 2026-09-09: 0.05, i.e. effectively always, and the 2026-09-02 revert
+       above is why this needs an explanation rather than a number.
+       That attempt fired often and still left the aircraft behind, because
+       the patch seeded start_pos_ with the pose at SOLVE time while setting
+       the trajectory to start replan_duration_ later, so every fire planted
+       the curve's origin behind a moving aircraft. The patch now anchors at
+       odom_pos_ + odom_vel_*replan_duration_, which removes that step, and
+       only with it does an always-on threshold make sense.
+       Measured on nav_debug_20260906_235809: new trajectories started p50
+       0.19 m / p90 1.11 m / max 1.69 m from the actual pose, so the 1.5 m
+       guard fired on 3 of 144 replans and 26% of replans started over 0.5 m
+       out, uncorrected. NEEDS A FLIGHT: the C++ half only takes effect on a
+       docker image rebuild. Revert to 1.5 to restore the shipped behaviour. -->
+  <arg name="fsm_replan_from_pose_drift" default="0.05"/>
   <param name="/fsm/replan_from_pose_drift" value="$(arg fsm_replan_from_pose_drift)"/>
 
   <!-- 2026-09-02: slow_traj_target_yaw and slow_traj_ratio_max were never set,
@@ -1865,6 +1895,12 @@
     <param name="tilt_resume_deg" value="$(arg tilt_resume_deg)" />
     <param name="min_vxy"         value="$(arg explore_min_vxy)" />
     <param name="use_lateral"     value="$(arg explore_use_lateral)" />
+    <param name="turn_in_place"           value="$(arg explore_turn_in_place)" />
+    <param name="turn_in_place_deg"       value="$(arg explore_turn_in_place_deg)" />
+    <param name="turn_resume_deg"         value="$(arg explore_turn_resume_deg)" />
+    <param name="turn_in_place_min_speed" value="$(arg explore_turn_min_speed)" />
+    <param name="turn_yaw_rate_deg"       value="$(arg explore_turn_yaw_rate_deg)" />
+    <param name="max_reverse_mps"         value="$(arg explore_max_reverse_mps)" />
     <param name="course_slew_deg_s" value="$(arg explore_course_slew_deg)" />
     <param name="pinned_hold_sec" value="$(arg explore_pinned_hold_sec)" />
     <param name="escape_cooldown_sec" value="$(arg explore_escape_cooldown_sec)" />

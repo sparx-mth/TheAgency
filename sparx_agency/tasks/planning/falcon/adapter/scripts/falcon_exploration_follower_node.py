@@ -82,6 +82,8 @@ from sparx_agency.core.planning.trackers.reference_tracker_3d import (
 )
 from sparx_agency.core.planning.visual_servo import AxisForceProfile, PulseShaper
 
+from heading_gate import HeadingGate, HeadingGateParams
+
 try:
     from sparx_agency.tasks.planning.nav_debug import schema as nav_debug_schema
 except Exception:      # noqa: BLE001 -- a missing diagnostic must not stop flight
@@ -309,6 +311,30 @@ class FalconExplorationFollowerNode:
         # only needs to catch the sign change past 90 deg. See the shaping block
         # in the command path for the measurement behind that.
         self.align_gate_deg = float(G("~align_gate_deg", 85.0))
+        # ── Turn-in-place gate (unconditional) ─────────────────────────────
+        # The align gate above lives inside the `not use_lateral` branch, so a
+        # flight with lateral enabled published the tracker's whole velocity
+        # vector verbatim -- backward component included. Measured on
+        # nav_debug_20260906_235809: 9.5% of airborne driving ticks commanded
+        # backward flight, and those ticks sat within 0.30 m of mapped geometry
+        # 33% of the time against 9% otherwise. This gate is NOT conditioned on
+        # use_lateral, yaw_mode, or anything else: it is a safety property.
+        self.heading_gate = HeadingGate(HeadingGateParams(
+            enabled=_param_bool("~turn_in_place", True),
+            engage_deg=float(G("~turn_in_place_deg", 90.0)),
+            resume_deg=float(G("~turn_resume_deg", 60.0)),
+            min_speed_mps=float(G("~turn_in_place_min_speed", 0.25)),
+            max_reverse_mps=float(G("~max_reverse_mps", 0.0))))
+        #: Yaw rate commanded while turning in place, rad/s. <=0 uses the
+        #: platform ceiling.
+        #:
+        #: A committed turn is exactly the case MISSION.md P24 said deserved a
+        #: faster slew than ``course_slew_deg_s``: the target heading is a fixed
+        #: trajectory direction held for the whole manoeuvre, not the jittering
+        #: velocity direction whose oscillation P17 lowered that slew to tame.
+        #: So the turn bypasses the course limiter, and the limiter is left
+        #: alone -- raising it is explicitly ruled out by LOOP_BUGS.md B31.
+        self._turn_yaw_rate = math.radians(float(G("~turn_yaw_rate_deg", 0.0)))
         #: Ceiling on how fast the COMMANDED course may rotate, deg/s. 0 = off.
         #:
         #: A reference cannot be tracked faster than the plant can follow it.
@@ -335,7 +361,13 @@ class FalconExplorationFollowerNode:
         limits = KinematicLimits(
             max_speed_xy=float(G("~max_speed_xy", 1.2)),
             max_speed_z=float(G("~max_speed_z", 0.6)),
-            max_yaw_rate=math.radians(float(G("~max_yaw_rate_deg", 45.0))),
+            # 90, not the 45 this defaulted to for a year: nav_stack.launch has
+            # passed explore_max_yaw_rate_deg:=90 all along, so an ad hoc launch
+            # silently flew at half the ceiling the campaign measured. The
+            # aircraft turns to face its target before translating (see
+            # ~turn_in_place_*), and that turn is dead time -- halving it is the
+            # whole point of raising this.
+            max_yaw_rate=math.radians(float(G("~max_yaw_rate_deg", 90.0))),
             max_accel_xy=float(G("~max_accel_xy", 1.5)),
             max_accel_z=float(G("~max_accel_z", 1.0)),
         )
@@ -513,6 +545,8 @@ class FalconExplorationFollowerNode:
         self._reference_ready = False  # trajectory_flag == READY
         self._reference_traj_id = None
         self._reference_age_s = None   # age the tracker was actually given
+        self._tracked_traj_id = None   # the id the tracker was last stepped on
+        self._heading_decision = None  # this tick's turn-in-place verdict
 
         self.current_demo_mode = None
         self._requested_mode = None
@@ -598,6 +632,7 @@ class FalconExplorationFollowerNode:
             # whatever the integrators/heading slew accumulated while idle.
             self.tracker.reset(yaw=self._yaw)
             self.shaper.reset()
+            self.heading_gate.reset()
         self.current_demo_mode = mode
 
     # ── Demo-mode hand-off (mirrors object_approach_node.py's pattern) ──
@@ -622,6 +657,7 @@ class FalconExplorationFollowerNode:
         self._published_cmd = None
         self._requested_cmd = None
         self._reference_age_s = None   # set only where the tracker really ran
+        self._heading_decision = None  # set only where the gate really ran
         self._gate_reason = "driving"
         try:
             self._step()
@@ -680,6 +716,7 @@ class FalconExplorationFollowerNode:
             self._publish_cmd(0.0, 0.0, 0.0)
             self.tracker.reset(yaw=self._yaw)
             self.shaper.reset()
+            self.heading_gate.reset()
             rospy.logwarn_throttle(
                 1.0, "falcon_exploration_follower: no fresh attitude on %s; "
                 "cutting drive rather than fly blind on tilt", self.attitude_topic)
@@ -705,6 +742,7 @@ class FalconExplorationFollowerNode:
                 # long cut throws away what the tracker relearns in between.
                 self.tracker.reset(yaw=self._yaw)
                 self.shaper.reset()
+                self.heading_gate.reset()
                 rospy.logwarn(
                     "falcon_exploration_follower: tilt roll=%.0f pitch=%.0f deg; "
                     "cutting drive until it is back under %.0f deg",
@@ -724,9 +762,20 @@ class FalconExplorationFollowerNode:
                          if self._reference_stamp is not None else float("inf"))
         self._reference_age_s = reference_age
 
+        # A committed trajectory invalidates the hold point latched under the
+        # previous one. Done here rather than in the subscriber callback so the
+        # tracker is only ever touched from the control thread. Measured: on one
+        # trajectory handover the reference jumped 2.9 m BACKWARD past the
+        # aircraft, and a stale hold point drags the aircraft back to it.
+        traj_id = self._reference_traj_id
+        if reference is not None and traj_id != self._tracked_traj_id:
+            self._tracked_traj_id = traj_id
+            self.tracker.on_new_trajectory()
+
         setpoint = self.tracker.update(
             reference, self._pose, self._yaw, dt,
-            velocity=self._velocity, reference_age=reference_age)
+            velocity=self._velocity, reference_age=reference_age,
+            trajectory_id=traj_id)
         self._last_setpoint = setpoint
 
         # ── Heading: aim the nose along the path, not along FALCON's own yaw ──
@@ -761,7 +810,32 @@ class FalconExplorationFollowerNode:
         body_vx = setpoint.vx * cos_y + setpoint.vy * sin_y
         body_vy = -setpoint.vx * sin_y + setpoint.vy * cos_y
 
-        if heading_err is not None and not self.use_lateral:
+        # Turn toward the demand before flying at it. Unconditional, and ahead
+        # of every other shaping step, because a demand pointing behind the nose
+        # is blind flight on a forward-facing airframe -- see heading_gate.py.
+        settle = self.tracker.params.plan_state.endpoint_settle_m
+        holding_onto_endpoint = (setpoint.past_end and setpoint.holding
+                                 and setpoint.position_error_m <= settle)
+        if holding_onto_endpoint:
+            # The aircraft overshot its last waypoint by less than a handspan.
+            # That correction points BACKWARD, and gating it would answer a
+            # centimetre of overshoot with a 180 degree spin. The point was
+            # occupied moments ago, so it is known-clear -- the same argument
+            # that exempts the escape reflex, at a fraction of the speed.
+            turn = self.heading_gate.settled(body_vx, body_vy)
+        else:
+            turn = self.heading_gate.update(body_vx, body_vy)
+        self._heading_decision = turn
+        if turn.engaged_now:
+            rospy.loginfo(
+                "falcon_exploration_follower: demand %.0f deg off the nose -- "
+                "turning in place before translating",
+                math.degrees(turn.demand_angle_rad))
+        if turn.turning:
+            body_vx = 0.0
+            body_vy = 0.0
+
+        if turn.allow_translation and heading_err is not None and not self.use_lateral:
             # Turn while going, and only stop turning-in-place when the nose is
             # so far off that forward thrust would take the aircraft away from
             # the reference. Lateral is dropped either way -- it is what causes
@@ -841,11 +915,31 @@ class FalconExplorationFollowerNode:
             yaw_ff, ff_gain = self._reference_yaw_dot, self.yaw_dot_ff_gain
         else:
             yaw_ff, ff_gain = 0.0, 0.0
-        yaw_rate = saturate(ff_gain * yaw_ff + self.yaw_kp * yaw_error,
-                            self.tracker.params.limits.max_yaw_rate)
+        ceiling = self.tracker.params.limits.max_yaw_rate
+        if turn.turning:
+            # The demand angle IS the heading error to fly out, and it is held
+            # by a committed manoeuvre rather than chased -- so it needs neither
+            # the course limiter nor its feedforward.
+            turn_ceiling = self._turn_yaw_rate if self._turn_yaw_rate > 0.0 else ceiling
+            yaw_rate = saturate(self.yaw_kp * turn.demand_angle_rad,
+                                min(turn_ceiling, ceiling))
+            # Drag the course limiter along with the aircraft. It keeps slewing
+            # at course_slew_deg_s while the turn flies the heading faster, so
+            # leaving it behind means that at release heading_err is the whole
+            # gap the turn just closed -- and the yaw loop immediately commands
+            # a REVERSAL away from the target the aircraft stopped to face.
+            # Measured by replaying this node: a 180 deg demand released at
+            # +63 deg/s and inverted to -52 deg/s on the next tick, re-engaging
+            # the gate. The turn owns the heading; the limiter must follow it.
+            self._course_cmd = self._yaw
+        else:
+            yaw_rate = saturate(ff_gain * yaw_ff + self.yaw_kp * yaw_error, ceiling)
         if escape_yaw_rate is not None:
             yaw_rate = escape_yaw_rate
-        else:
+        elif not turn.turning:
+            # The scan and the turn both own yaw with no translation; letting
+            # both write it would leave the aircraft sweeping instead of
+            # finishing the turn it stopped to make.
             yaw_rate = self._park_scan(world_speed, yaw_rate, now_s)
 
         # Altitude was deliberately dropped here for a long time, because
@@ -858,7 +952,12 @@ class FalconExplorationFollowerNode:
         body_vz = 0.0 if escape_yaw_rate is not None else float(setpoint.vz)
 
         self._last_heading_err = heading_err
-        self._publish_cmd(body_vx, body_vy, yaw_rate, body_vz)
+        # The escape reflex is the one legitimate reverse: it backs out along the
+        # heading the aircraft just came from, which a nose-in contact proves is
+        # clear. Everything else is clamped.
+        self._publish_cmd(body_vx, body_vy, yaw_rate, body_vz,
+                          allow_reverse=(escape_yaw_rate is not None
+                                         or holding_onto_endpoint))
 
     def _poll_yaw_mode(self, now_s):
         """Re-read ``~yaw_mode`` periodically, for within-flight paired runs.
@@ -1138,11 +1237,12 @@ class FalconExplorationFollowerNode:
             self._escapes)
         return self._escape_sign * math.radians(self.escape_yaw_rate_deg)
 
-    def _publish_cmd(self, vx, vy, wz, vz=0.0):
+    def _publish_cmd(self, vx, vy, wz, vz=0.0, allow_reverse=False):
         """Publish a body-frame velocity command.
 
         Args:
-            vx: Forward velocity, m/s.
+            vx: Forward velocity, m/s. Clamped against backward flight unless
+                ``allow_reverse`` -- see :meth:`HeadingGate.limit_reverse`.
             vy: Lateral velocity, m/s.
             wz: Yaw rate, rad/s.
             vz: World-frame vertical velocity, m/s. Passed through UNSHAPED --
@@ -1154,7 +1254,11 @@ class FalconExplorationFollowerNode:
         """
         shaped = self.shaper.shape(ControlCommand.velocity(float(vx), float(vy), 0.0, float(wz)))
         m = Twist()
-        m.linear.x = float(shaped.x)
+        # After the shaper, not before: its brake pulse emits an OPPOSITE-signed
+        # tick after a burst ends, which would republish exactly the backward
+        # command the clamp exists to forbid.
+        m.linear.x = self.heading_gate.limit_reverse(shaped.x,
+                                                     allow_reverse=allow_reverse)
         m.linear.y = float(shaped.y)
         m.linear.z = float(vz)
         m.angular.z = float(shaped.yaw_rate)
@@ -1162,7 +1266,7 @@ class FalconExplorationFollowerNode:
         # Diagnostic bookkeeping only -- both sides of the pulse shaper, so a
         # tick the shaper (not the controller) decided is visible as a gap.
         self._requested_cmd = (float(vx), float(vy), float(wz), float(vz))
-        self._published_cmd = (float(shaped.x), float(shaped.y),
+        self._published_cmd = (float(m.linear.x), float(shaped.y),
                                float(shaped.yaw_rate), float(vz))
 
     # ── Diagnostic trace ─────────────────────────────────────────────
@@ -1212,6 +1316,10 @@ class FalconExplorationFollowerNode:
                 "cross_track_error_m": sp.cross_track_error_m,
                 "yaw_error_rad": sp.yaw_error_rad,
                 "diverged": bool(sp.diverged), "holding": bool(sp.holding),
+                # Separate from `holding`: a finished plan and a dead planner
+                # need different responses, and the two read identically once
+                # conflated.
+                "past_end": bool(getattr(sp, "past_end", False)),
                 "reference_age_s": _finite(self._reference_age_s)}
 
     def _trace_terms(self):
@@ -1227,6 +1335,7 @@ class FalconExplorationFollowerNode:
 
     def _trace_gate(self):
         """Why the tick ended where it did -- including a silently muted chain."""
+        turn = self._heading_decision
         return {
             "reason": self._gate_reason,
             "published": self._published_cmd is not None,
@@ -1244,6 +1353,9 @@ class FalconExplorationFollowerNode:
             "yaw_mode": self.yaw_mode,
             "course_rate": self._course_rate,
             "use_lateral": bool(self.use_lateral),
+            "turning_in_place": bool(turn.turning) if turn else False,
+            "demand_angle_rad": (round(float(turn.demand_angle_rad), 4)
+                                 if turn else None),
         }
 
     def _hb(self, _evt):
@@ -1256,9 +1368,11 @@ class FalconExplorationFollowerNode:
         age = None
         if self._reference_stamp is not None:
             age = (rospy.Time.now() - self._reference_stamp).to_sec()
+        turn = self._heading_decision
         rospy.loginfo(
             "falcon_exploration_follower hb  demo=%s  ref_ready=%s  ref_age=%s  "
-            "pos_err=%s  dz=%s  holding=%s  hdg_err=%s  escapes=%d%s",
+            "pos_err=%s  dz=%s  holding=%s  past_end=%s  turning=%s  "
+            "hdg_err=%s  escapes=%d%s",
             self.current_demo_mode, self._reference_ready,
             "-" if age is None else "%.1fs" % age,
             "-" if sp is None else "%.2fm" % sp.position_error_m,
@@ -1270,6 +1384,8 @@ class FalconExplorationFollowerNode:
             "-" if (self._reference is None or self._pose is None)
             else "%+.2fm" % (self._reference.z - self._pose[2]),
             "-" if sp is None else sp.holding,
+            "-" if sp is None else getattr(sp, "past_end", False),
+            "-" if turn is None else turn.turning,
             "-" if getattr(self, "_last_heading_err", None) is None
             else "%.0fdeg" % math.degrees(self._last_heading_err),
             self._escapes, " ESCAPING" if self._escape_until else "")

@@ -215,6 +215,12 @@
   <arg name="astar_coarse_max_search_time"  default="0.0001" />  <!-- A* coarse budget, 0.1 ms -->
   <arg name="explore_max_speed_xy"    default="0.8" />          <!-- must stay above max_vel with headroom -->
   <arg name="explore_use_lateral"     default="false" />        <!-- 2026-08-31: full-vector tracking incl. lateral; campaign-set -->
+  <arg name="explore_turn_in_place"        default="true" />        <!-- turn toward the demand before translating; NOT an A/B arm, a safety property -->
+  <arg name="explore_turn_in_place_deg"    default="90.0" />        <!-- sign change: past this, forward thrust moves the aircraft AWAY from the demand -->
+  <arg name="explore_turn_resume_deg"      default="60.0" />        <!-- hysteresis; a single threshold chatters -->
+  <arg name="explore_turn_min_speed"       default="0.25" />        <!-- below this the demand DIRECTION is noise (B31) -->
+  <arg name="explore_turn_yaw_rate_deg"    default="0.0" />        <!-- 0 = use the platform yaw ceiling -->
+  <arg name="explore_max_reverse_mps"      default="0.0" />        <!-- publish-boundary backstop; escape and endpoint settle exempt -->
   <arg name="explore_accel_lead_s"    default="0.25" />         <!-- reference-accel lead, s; anticipates the ~1.3 s plant lag -->
   <arg name="explore_yaw_mode"        default="course" />       <!-- course | reference (FALCON aims the camera) -->
   <arg name="explore_yaw_dot_ff"      default="0.0" />           <!-- feedforward gain on traj_server yaw_dot -->
@@ -765,6 +771,12 @@
     <arg name="astar_coarse_max_search_time"  value="$(arg astar_coarse_max_search_time)" />
     <arg name="explore_max_speed_xy"     value="$(arg explore_max_speed_xy)" />
     <arg name="explore_use_lateral"      value="$(arg explore_use_lateral)" />
+    <arg name="explore_turn_in_place"        value="$(arg explore_turn_in_place)" />
+    <arg name="explore_turn_in_place_deg"    value="$(arg explore_turn_in_place_deg)" />
+    <arg name="explore_turn_resume_deg"      value="$(arg explore_turn_resume_deg)" />
+    <arg name="explore_turn_min_speed"       value="$(arg explore_turn_min_speed)" />
+    <arg name="explore_turn_yaw_rate_deg"    value="$(arg explore_turn_yaw_rate_deg)" />
+    <arg name="explore_max_reverse_mps"      value="$(arg explore_max_reverse_mps)" />
     <arg name="explore_accel_lead_s"     value="$(arg explore_accel_lead_s)" />
     <arg name="explore_yaw_mode"         value="$(arg explore_yaw_mode)" />
     <arg name="explore_yaw_dot_ff"       value="$(arg explore_yaw_dot_ff)" />

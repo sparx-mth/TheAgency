@@ -151,6 +151,32 @@ if CONTROLLER_VARIANT not in ("powerlaw_lateral", "legacy"):
 #: The follower half of the variant (twist-adapter half: TWIST_ADAPTER_CMD).
 USE_LATERAL = CONTROLLER_VARIANT == "powerlaw_lateral"
 
+# ── Turn-in-place gate (2026-09-09) ──────────────────────────────────────
+#: Turn the nose toward the demand before translating.
+#:
+#: NOT an arm of any A/B. The align gate it replaces sat inside the follower's
+#: `not use_lateral` branch, so the powerlaw_lateral variant published the
+#: tracker's whole velocity vector verbatim -- backward component included.
+#: Measured on nav_debug_20260906_235809 (4598 airborne driving ticks): 9.5%
+#: commanded backward flight, and those ticks sat within 0.30 m of mapped
+#: geometry 33% of the time against 9% otherwise. The camera faces forward
+#: only (hfov 135 deg), so backward flight is blind flight in either variant.
+TURN_IN_PLACE = True
+#: Demand angle that stops translation, degrees. 90 is the sign change past
+#: which forward thrust moves the aircraft away from where the plan wants it.
+TURN_IN_PLACE_DEG = 90.0
+#: Angle the turn must reach before translating again. The gap is hysteresis:
+#: a single threshold chatters, as the tilt reflex did 56-196 times a run.
+TURN_RESUME_DEG = 60.0
+#: Commanded speed below which the demand DIRECTION is noise (B31's
+#: ill-conditioning), so the gate does not act on it.
+TURN_MIN_SPEED = 0.25
+#: Yaw rate during a committed turn, deg/s. 0 uses the platform ceiling.
+TURN_YAW_RATE_DEG = 0.0
+#: Hard ceiling on commanded backward body speed, m/s, at the publish
+#: boundary. 0 forbids it; the escape reflex is exempt in code.
+MAX_REVERSE_MPS = 0.0
+
 #: Which follower consumes FALCON's plan.
 #:
 #: "reference" (traj_server -> /planning/pos_cmd -> ReferenceTracker3D) is the
@@ -607,6 +633,15 @@ EXPECTED_ROSPARAMS = {
     "/fsm/slow_traj_target_vel": FSM_SLOW_TRAJ_TARGET_VEL,
     "/falcon_exploration_follower/max_speed_xy": EXPLORE_MAX_SPEED_XY,
     "/falcon_exploration_follower/use_lateral": USE_LATERAL,
+    # A knob written where nothing reads it is indistinguishable from a knob
+    # that did nothing (B35), and these four decide whether the aircraft may
+    # fly backward -- so they are asserted, not assumed.
+    "/falcon_exploration_follower/turn_in_place": TURN_IN_PLACE,
+    "/falcon_exploration_follower/turn_in_place_deg": TURN_IN_PLACE_DEG,
+    "/falcon_exploration_follower/turn_resume_deg": TURN_RESUME_DEG,
+    "/falcon_exploration_follower/turn_in_place_min_speed": TURN_MIN_SPEED,
+    "/falcon_exploration_follower/turn_yaw_rate_deg": TURN_YAW_RATE_DEG,
+    "/falcon_exploration_follower/max_reverse_mps": MAX_REVERSE_MPS,
     "/bev_publisher/z_ceil": BEV_Z_CEIL,
     # Map-epoch guard: the map yaml is mounted when the falcon CONTAINER is
     # created, so a stale container silently keeps flying an old map through
@@ -673,6 +708,12 @@ def adapter_launch_cmd(follower=None, extra=""):
         "explore_park_scan_after:={parkafter} "
         "frontier_blocked_radius:={blockrad} "
         "explore_use_lateral:={usel} "
+        "explore_turn_in_place:={turn} "
+        "explore_turn_in_place_deg:={turndeg} "
+        "explore_turn_resume_deg:={turnres} "
+        "explore_turn_min_speed:={turnmin} "
+        "explore_turn_yaw_rate_deg:={turnyaw} "
+        "explore_max_reverse_mps:={maxrev} "
     ).format(map=MAP_NAME, follower=follower, drone=DRONE_ID,
              fx=CAM["fx"], fy=CAM["fy"], cx=CAM["cx"], cy=CAM["cy"],
              w=CAM["width"], h=CAM["height"], mind=CAM["min_depth"],
@@ -681,7 +722,10 @@ def adapter_launch_cmd(follower=None, extra=""):
              infl=OBSTACLES_INFLATION, safe=SAFE_DISTANCE,
              maxvel=PLAN_MAX_VEL, slowvel=FSM_SLOW_TRAJ_TARGET_VEL, slowratio=FSM_SLOW_TRAJ_RATIO_MIN, astardef=ASTAR_DEFAULT_MAX_SEARCH_TIME, astarcoarse=ASTAR_COARSE_MAX_SEARCH_TIME,
              expspeed=EXPLORE_MAX_SPEED_XY, zceil=BEV_Z_CEIL,
-             usel=str(USE_LATERAL).lower(), lead=ACCEL_LEAD_S, yawmode=YAW_MODE, yawff=YAW_DOT_FF, yawpoll=YAW_MODE_POLL_S, blendlo=YAW_BLEND_LO, blendhi=YAW_BLEND_HI, bseed=BLOCKED_SEED, bttl=BLOCKED_TTL_S, bstrk=BLOCKED_SEED_STRIKES, bopt=BSPLINE_OPT_MAX_TIME, blift=BSPLINE_LIFT, bliftr=BSPLINE_LIFT_RADIUS, besc=BSPLINE_ESCAPE, bescg=BSPLINE_ESCAPE_GAIN, courseff=COURSE_RATE_FF, coursegate=COURSE_STEER_MIN_SPEED, coursehold=COURSE_HOLD_GAP_S, replan3=FSM_REPLAN_THRESH3, parkscan=PARK_SCAN_RATE, parkafter=PARK_SCAN_AFTER_S, blockrad=BLOCKED_REGION_RADIUS)
+             usel=str(USE_LATERAL).lower(), lead=ACCEL_LEAD_S, yawmode=YAW_MODE, yawff=YAW_DOT_FF, yawpoll=YAW_MODE_POLL_S, blendlo=YAW_BLEND_LO, blendhi=YAW_BLEND_HI, bseed=BLOCKED_SEED, bttl=BLOCKED_TTL_S, bstrk=BLOCKED_SEED_STRIKES, bopt=BSPLINE_OPT_MAX_TIME, blift=BSPLINE_LIFT, bliftr=BSPLINE_LIFT_RADIUS, besc=BSPLINE_ESCAPE, bescg=BSPLINE_ESCAPE_GAIN, courseff=COURSE_RATE_FF, coursegate=COURSE_STEER_MIN_SPEED, coursehold=COURSE_HOLD_GAP_S, replan3=FSM_REPLAN_THRESH3, parkscan=PARK_SCAN_RATE, parkafter=PARK_SCAN_AFTER_S, blockrad=BLOCKED_REGION_RADIUS,
+             turn=str(TURN_IN_PLACE).lower(), turndeg=TURN_IN_PLACE_DEG,
+             turnres=TURN_RESUME_DEG, turnmin=TURN_MIN_SPEED,
+             turnyaw=TURN_YAW_RATE_DEG, maxrev=MAX_REVERSE_MPS)
     return ("docker exec {c} bash -lc '{env} roslaunch falcon_adapter "
             "sphera_drone.launch {args}{extra}'").format(
         c=FALCON_CONTAINER, env=FALCON_ENV, args=args, extra=extra)

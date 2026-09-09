@@ -225,7 +225,20 @@ docker exec falcon bash -lc "source /opt/ros/noetic/setup.bash && rostopic hz /c
 # Follower's own status — the fastest single signal
 docker exec falcon tail -n 5 /root/.ros/log/latest/falcon_exploration_follower*.log
 #   demo=exploring                    -> mode handoff granted, it owns cmd_vel
-#   ref_ready=True                    -> traj_server is publishing a READY trajectory
+#   ref_ready=True                    -> MEANS ALMOST NOTHING. traj_server sets
+#                                         trajectory_flag once at start-up and never
+#                                         again (READY on 6627/6627 samples of one
+#                                         flight), so this reads True for the life of
+#                                         the process. Read ref_age and past_end
+#   turning=True                      -> the demand is behind the nose; the aircraft
+#                                         is rotating toward it before translating.
+#                                         Expected on sharp turns, NOT a fault. It
+#                                         never flies backward: linear.x is clamped
+#                                         at the publish boundary (escapes exempt).
+#   past_end=True                     -> the PLAN finished and the aircraft is holding
+#                                         at its last waypoint. Distinct from holding:
+#                                         traj_server restamps a dead endpoint at
+#                                         100 Hz, so "fresh" never meant "moving"
 #   holding=True                      -> no valid/fresh trajectory right now (safe
 #                                         default, not a crash) - check exploration_node's
 #                                         log next; most likely cause: not airborne yet,

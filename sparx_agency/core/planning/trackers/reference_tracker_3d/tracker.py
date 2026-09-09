@@ -46,6 +46,12 @@ from sparx_agency.core.planning.trackers.drift_pid.pid import AxisPid
 from sparx_agency.core.planning.trackers.reference_tracker_3d.params import (
     ReferenceTrackerParams,
 )
+from sparx_agency.core.planning.trackers.reference_tracker_3d.plan_state import (
+    ENDPOINT, STALE, PlanState,
+)
+from sparx_agency.core.planning.trackers.reference_tracker_3d.progress import (
+    limit_lead, split_error, unit,
+)
 from sparx_agency.core.planning.trackers.reference_tracker_3d.types import TrackedSetpoint
 
 
@@ -74,6 +80,11 @@ class ReferenceTracker3D:
         self._hold = None           # type: Optional[tuple]
         self._last_command = None   # type: Optional[tuple]
         self._last_reference_age = 0.0
+        self._plan = PlanState(self.params.plan_state)
+        #: Last direction the plan was actually travelling, for the error split
+        #: and the lead limit. A finished plan reports zero velocity, and its
+        #: last real heading is the only honest answer to "which way is ahead".
+        self._travel = None         # type: Optional[tuple]
         #: Read-only breakdown of the last command, for diagnostics only.
         #:
         #: ``None`` before the first update, then a dict of world ``(x, y, z)``
@@ -105,7 +116,27 @@ class ReferenceTracker3D:
         self._hold = None if hold_position is None else tuple(float(v) for v in hold_position)
         self._last_command = None
         self._last_reference_age = 0.0
+        self._plan.reset()
+        self._travel = None
         self.last_terms = None
+
+    def on_new_trajectory(self):
+        # type: () -> None
+        """Drop the state that a newly committed trajectory invalidates.
+
+        The integrators are deliberately *kept*: they hold a standing bias of
+        the airframe, not of the trajectory, and FALCON commits a new curve
+        roughly every 0.7 s -- resetting them that often would mean they never
+        learn anything. What must go is the latched hold point, which belongs to
+        a plan that no longer exists; carrying it across makes the aircraft fly
+        back to the previous trajectory's endpoint after the new one has
+        started.
+
+        The remembered direction of travel goes with it, for the same reason:
+        "which way is ahead" is a property of the curve, not of the airframe.
+        """
+        self._hold = None
+        self._travel = None
 
     @property
     def commanded_yaw(self):
@@ -113,8 +144,9 @@ class ReferenceTracker3D:
         """The heading last put on the wire, or None before the first update."""
         return self._yaw_cmd
 
-    def update(self, reference, position, yaw, dt, velocity=None, reference_age=0.0):
-        # type: (Optional[TrajectoryPoint], tuple, float, float, Optional[tuple], float) -> TrackedSetpoint
+    def update(self, reference, position, yaw, dt, velocity=None, reference_age=0.0,
+               trajectory_id=None):
+        # type: (Optional[TrajectoryPoint], tuple, float, float, Optional[tuple], float, object) -> TrackedSetpoint
         """Advance one control tick.
 
         The law is
@@ -140,6 +172,10 @@ class ReferenceTracker3D:
             reference_age: How long ago ``reference`` was produced, seconds. The
                 caller knows this and the tracker cannot: a reference arriving
                 over a link is already old when it lands.
+            trajectory_id: The planner's id for the curve this reference came
+                from, when the caller has one. Used only to stop a freshly
+                committed trajectory inheriting the previous one's
+                finished-plan state.
 
         Returns:
             The velocity and heading to command, with the diagnostics that say
@@ -156,10 +192,14 @@ class ReferenceTracker3D:
         if self._yaw_cmd is None:
             self._yaw_cmd = yaw
 
-        stale = reference is None or reference_age > self.params.reference_timeout_s
         self._last_reference_age = float(reference_age)
-        if stale:
+        verdict = self._plan.update(reference, reference_age,
+                                    self.params.reference_timeout_s, dt,
+                                    trajectory_id=trajectory_id)
+        if verdict == STALE:
             return self._hold_station(measured, dt)
+        if verdict == ENDPOINT:
+            return self._hold_endpoint(reference, measured, dt)
 
         self._hold = None
         target = (float(reference.x), float(reference.y), float(reference.z))
@@ -167,7 +207,15 @@ class ReferenceTracker3D:
         error = tuple(target[i] - measured[i] for i in range(3))
         damping = self._damping(reference, velocity)
 
-        correction = tuple(self._correct(i, error[i], dt) for i in range(3))
+        travel = self._travel_direction(reference)
+        # The aircraft being ahead of schedule is not an error to fly out of --
+        # but only horizontally. The defect this bounds is backward flight on a
+        # forward-facing airframe; the vertical axis has its own loop, its own
+        # gains and its own clamp, and capping it against the direction of
+        # TRAVEL would throttle a legitimate climb on a rising segment.
+        bounded = self._limit_horizontal_lead(error, travel)
+        correction = tuple(self._correct(i, bounded[i], error[i], dt)
+                           for i in range(3))
         commanded = tuple(feed_forward[i] + damping[i] + correction[i] for i in range(3))
         clamped = self._clamp_velocity(commanded)
         command = self._smooth(clamped)
@@ -176,7 +224,7 @@ class ReferenceTracker3D:
         reference_yaw = yaw if reference.yaw is None else float(reference.yaw)
         self._yaw_cmd = self._slew_yaw(reference_yaw, dt)
 
-        along, cross = _split_error(error, (reference.vx, reference.vy, reference.vz))
+        along, cross = split_error(error, travel)
         distance = math.sqrt(sum(component * component for component in error))
         return TrackedSetpoint(
             vx=command[0], vy=command[1], vz=command[2], yaw=self._yaw_cmd,
@@ -186,6 +234,47 @@ class ReferenceTracker3D:
             yaw_error_rad=normalize_angle(reference_yaw - yaw),
             diverged=distance > self.params.max_position_error_m,
         )
+
+    def _travel_direction(self, reference):
+        # type: (TrajectoryPoint) -> Optional[tuple]
+        """The plan's direction of travel, remembered across a stop.
+
+        The reference's own velocity while it is moving, and the last one it had
+        once it stops -- which is what makes the error split and the lead limit
+        keep working past the end of a curve, where the velocity is zero and
+        "ahead" would otherwise be undefined.
+        """
+        current = unit((reference.vx, reference.vy, reference.vz))
+        if current is not None:
+            self._travel = current
+        return self._travel
+
+    def _hold_endpoint(self, reference, measured, dt):
+        # type: (TrajectoryPoint, tuple, float) -> TrackedSetpoint
+        """Fly to the plan's last point and stop there.
+
+        The plan has run out, so its final point is the last thing a planner
+        actually vouched for: the aircraft finishes the path to it and holds,
+        rather than either stopping short or treating a dead setpoint as a live
+        one and chasing it at cruise. Beyond ``endpoint_reach_m`` the endpoint is
+        too far to count as finishing the path -- nothing has confirmed the
+        ground in between since the plan ended -- so the aircraft holds where it
+        is and waits for a real trajectory.
+        """
+        endpoint = (float(reference.x), float(reference.y), float(reference.z))
+        # Measured against what the aircraft is ACTUALLY flying to, which is the
+        # latched hold once there is one. Checking only the incoming reference
+        # lets an aircraft that has since been pushed away keep flying metres
+        # back to a point no live plan has vouched for since: measured on the
+        # recorded run, 93 ticks at 0.87 m/s toward a hold over 3 m away.
+        target = self._hold if self._hold is not None else endpoint
+        gap = math.sqrt(sum((target[i] - measured[i]) ** 2 for i in range(3)))
+        if gap > self.params.plan_state.endpoint_reach_m:
+            # Re-latch here. Bounded, not the ratcheting the plain hold warns
+            # about: it can only fire once per excursion, and the new gap is 0.
+            self._hold = None
+            return self._hold_station(measured, dt, past_end=True)
+        return self._hold_station(measured, dt, hold_point=endpoint, past_end=True)
 
     def _record_terms(self, feed_forward, damping, correction, commanded,
                       clamped, smoothed):
@@ -200,8 +289,27 @@ class ReferenceTracker3D:
             "smoothed": smoothed,
         }
 
-    def _correct(self, axis, error, dt):
-        # type: (int, float, float) -> float
+    def _limit_horizontal_lead(self, error, travel):
+        # type: (tuple, Optional[tuple]) -> tuple
+        """Bound the backward along-track error in the horizontal plane only.
+
+        Args:
+            error: World ``(dx, dy, dz)`` from the aircraft to the reference.
+            travel: The plan's direction of travel, or None.
+
+        Returns:
+            The error with its horizontal backward component limited and its
+            vertical component untouched.
+        """
+        if travel is None:
+            return tuple(float(component) for component in error)
+        flat = limit_lead((error[0], error[1], 0.0),
+                          (travel[0], travel[1], 0.0),
+                          self.params.max_lead_error_m)
+        return (flat[0], flat[1], error[2])
+
+    def _correct(self, axis, error, raw_error, dt):
+        # type: (int, float, float, float) -> float
         """One axis of position feedback, on a clamped error.
 
         The clamp is the collision-avoidance property (see
@@ -215,7 +323,12 @@ class ReferenceTracker3D:
         gone, and then pushes the aircraft past the reference by roughly that
         much -- measured as a 9 cm overshoot on a 1 m step, 1 cm with this gate.
         """
-        near = abs(error) <= self.params.integral_band_m
+        # Judged on the RAW error: the lead limit shrinks a backward error to
+        # at most max_lead_error_m (0.25), which is inside integral_band_m
+        # (0.5), so testing the bounded value would let an aircraft far AHEAD of
+        # its reference charge the integrator -- the exact windup the band
+        # exists to prevent, on the one side the limiter touches.
+        near = abs(raw_error) <= self.params.integral_band_m
         clamp = self.params.position_error_clamp_m
         clamped = max(-clamp, min(clamp, error))
         return self._pid[axis].update(clamped, dt, integrate=near)
@@ -263,29 +376,44 @@ class ReferenceTracker3D:
             float(reference.vz) + lead * float(reference.az),
         )
 
-    def _hold_station(self, measured, dt):
-        # type: (tuple, float) -> TrackedSetpoint
-        """Fly to where the aircraft already is, because nothing else is asking.
+    def _hold_station(self, measured, dt, hold_point=None, past_end=False):
+        # type: (tuple, float, Optional[tuple], bool) -> TrackedSetpoint
+        """Fly to a single point and stay on it, because nothing is asking for more.
 
         Velocity control has no position feedback of its own, so "stop" has to be
         commanded as "hold this point" -- an aircraft sent zero velocity drifts,
         and was measured drifting three metres sideways in five seconds. The hold
         point is latched the first time this happens so the aircraft returns to it
         rather than ratcheting away from it.
+
+        Args:
+            measured: The aircraft's measured world position.
+            dt: Seconds since the previous call.
+            hold_point: Where to hold. Defaults to wherever the aircraft is,
+                which is the right answer when nothing has vouched for anywhere
+                else; the finished-plan path passes the plan's own last point.
+            past_end: Whether this hold is a finished plan rather than a missing
+                one. Reported, not acted on.
         """
         if self._hold is None:
-            self._hold = measured
+            self._hold = tuple(measured) if hold_point is None else tuple(hold_point)
         error = tuple(self._hold[i] - measured[i] for i in range(3))
-        correction = tuple(self._correct(i, error[i], dt) for i in range(3))
+        correction = tuple(self._correct(i, error[i], error[i], dt) for i in range(3))
         clamped = self._clamp_velocity(correction)
         command = self._smooth(clamped)
         zero = (0.0, 0.0, 0.0)
         self._record_terms(zero, zero, correction, correction, clamped, command)
         distance = math.sqrt(sum(component * component for component in error))
+        # Split against the last direction the plan travelled: this is the case
+        # the explicit-direction split exists for, and reporting 0.0 lag here
+        # would hide exactly the overshoot the settle band above reacts to.
+        along, cross = split_error(error, self._travel)
         return TrackedSetpoint(
             vx=command[0], vy=command[1], vz=command[2],
             yaw=self._yaw_cmd if self._yaw_cmd is not None else 0.0,
-            position_error_m=distance, holding=True,
+            position_error_m=distance,
+            along_track_lag_m=along, cross_track_error_m=cross,
+            holding=True, past_end=past_end,
         )
 
     def _clamp_velocity(self, command):
@@ -319,28 +447,3 @@ class ReferenceTracker3D:
         step = ceiling * dt
         error = normalize_angle(reference_yaw - self._yaw_cmd)
         return normalize_angle(self._yaw_cmd + max(-step, min(step, error)))
-
-
-def _split_error(error, reference_velocity):
-    # type: (tuple, tuple) -> tuple
-    """Split a position error into along-track lag and cross-track offset.
-
-    Along-track is measured along the reference's direction of travel, so a
-    positive value means the aircraft is behind where it should be. With the
-    reference stationary there is no direction of travel and the whole error is
-    reported as cross-track, which is the safe reading: an offset from a hover
-    point is not lateness.
-
-    Returns:
-        ``(along_track_lag_m, cross_track_error_m)``.
-    """
-    speed = math.sqrt(sum(float(v) * float(v) for v in reference_velocity))
-    magnitude = math.sqrt(sum(component * component for component in error))
-    if speed <= 1e-6:
-        return 0.0, magnitude
-    direction = tuple(float(v) / speed for v in reference_velocity)
-    # The aircraft is behind the reference when the error points the way the
-    # reference is travelling, hence the sign convention: error = ref - measured.
-    along = sum(error[i] * direction[i] for i in range(3))
-    cross_squared = max(magnitude * magnitude - along * along, 0.0)
-    return along, math.sqrt(cross_squared)
