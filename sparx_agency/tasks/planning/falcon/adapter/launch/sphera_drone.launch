@@ -594,7 +594,7 @@
   <arg name="lethal_confidence" default="0.5" />
   <arg name="max_predicted_replans" default="3" />
   <arg name="min_free_cells_to_plan" default="80" />
-  <arg name="nav_debug_record" default="true" />
+  <arg name="nav_debug_record" default="$(eval str(optenv('FALCON_NAV_DEBUG','false')).strip().lower() in ('1','true','yes','on'))" />
   <!-- Sphera flies nav_mode:=exploration, where every A*-chain topic the
        recorder defaults to is gated off, which is why recorded runs were
        near-empty. These name the exploration chain instead; override to

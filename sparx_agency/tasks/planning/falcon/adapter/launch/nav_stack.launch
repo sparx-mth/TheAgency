@@ -102,8 +102,10 @@
   <!-- Offline visual replay: record the BEV map + the three route layers +
        replan events into a run folder beside the certainty CSV, so a flight can
        be replayed frame by frame (tasks/planning/nav_debug/run_folder_nav_debug.py).
-       Diagnostic-only sink; subscribes only, touches no flight code. -->
-  <arg name="nav_debug_record"      default="true" />
+       Diagnostic-only sink; subscribes only, touches no flight code.
+       OFF by default: it wrote ~150 MB per flight and filled the disk. Enable
+       per flight with FALCON_NAV_DEBUG=true, or the Mission Control checkbox. -->
+  <arg name="nav_debug_record"      default="$(eval str(optenv('FALCON_NAV_DEBUG','false')).strip().lower() in ('1','true','yes','on'))" />
 
   <!-- The recorder's exploration lane. Its A*-chain topic defaults are gated
        off in nav_mode:=exploration (the reason Sphera runs recorded almost
@@ -119,9 +121,9 @@
   <arg name="nav_debug_thinking_topic"      default="/nav/thinking" />
   <arg name="nav_debug_map_pose_topic"      default="/map_ros/pose" />
   <!-- The follower's own trace publisher, the only source of the tracker's
-       terms. Follows nav_debug_record so ONE switch turns the diagnostic off;
-       set it alone to keep either half. -->
-  <arg name="nav_debug_trace"               default="$(arg nav_debug_record)" />
+       terms. A topic, not a file: it costs no disk, and falcon_campaign's
+       trace metrics read it, so it stays on when the recorder is off. -->
+  <arg name="nav_debug_trace"               default="true" />
   <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
 
   <!-- ── Lost-localization recovery (lost_localization_node) ──────────
