@@ -138,7 +138,7 @@
   <arg name="certainty_log_path" default="$(optenv FALCON_CERTAINTY_LOG)" />
   <!-- Record BEV + routes + replan events for offline visual replay; see
        nav_stack.launch and tasks/planning/nav_debug/. -->
-  <arg name="nav_debug_record" default="true" />
+  <arg name="nav_debug_record" default="$(eval str(optenv('FALCON_NAV_DEBUG','false')).strip().lower() in ('1','true','yes','on'))" />
 
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
   <!-- WAYPOINT-CONTROLLER SPEEDS (controller:=waypoint). The one-axis follower
