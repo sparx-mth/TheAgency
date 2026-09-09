@@ -1057,10 +1057,10 @@ ROBOTICAN_SERVICES: list[Service] = [
     ),
     # ── Flight recording ──────────────────────────────────────────────────────
     # The ROS2 half of a nav_debug recording. The ROS1 half (plan, reference,
-    # tracker trace, BEV map) is already automatic -- nav_debug_record defaults
-    # true on sphera_drone.launch -- but the bridge carries none of the actuator
-    # or ground-truth topics, so without this the recording cannot say what the
-    # drone was actually told or what it actually did.
+    # tracker trace, BEV map) is opt-in as of 2026-09-09 -- tick "Record
+    # nav_debug run folder" above, or export FALCON_NAV_DEBUG=true -- but the
+    # bridge carries none of the actuator or ground-truth topics, so without
+    # this the recording cannot say what the drone was told or what it did.
     Service(
         name="Nav Debug Recorder (R1)",
         key="rooster_nav_debug_recorder",
@@ -1355,7 +1355,8 @@ ROOSTER_LAUNCH_ORDER: list[tuple[str, float]] = [
 ]
 
 
-def _run_falcon_sequence(follow_altitude: bool = False) -> None:
+def _run_falcon_sequence(follow_altitude: bool = False,
+                         record_debug: bool = False) -> None:
     """Bring the stack up, take off, and hand control to FALCON exploration.
 
     Writes progress straight into the page as it goes, so a stall is visible
@@ -1365,6 +1366,8 @@ def _run_falcon_sequence(follow_altitude: bool = False) -> None:
         follow_altitude: Whether the twist adapter is allowed to drive
             altitude. Default off -- see the checkbox comment for the measured
             direction inversion behind that.
+        record_debug: Whether to record a nav_debug run folder for this flight.
+            Default off -- the recorder wrote ~150 MB per flight.
     """
     svc_map = {s.key: s for s in ROBOTICAN_SERVICES}
     progress = st.empty()
@@ -1377,6 +1380,11 @@ def _run_falcon_sequence(follow_altitude: bool = False) -> None:
     # ── 1. Ground work: everything that must exist before the aircraft moves ──
     for key, timeout in FALCON_PREFLIGHT_ORDER:
         svc = svc_map[key]
+        # The WEB half of the nav_debug switch. The launch default is now off,
+        # and roslaunch reads the variable once at container start, so this has
+        # no effect on a falcon container that is already up.
+        if key == "rooster_planner_falcon" and record_debug:
+            svc = replace(svc, cmd="export FALCON_NAV_DEBUG=true; " + svc.cmd)
         if _is_running(svc):
             say(f"✅ {svc.name} — already running")
             continue
@@ -2198,7 +2206,7 @@ with tab_rooster:
             "brand-new ROS master and those two don't reconnect on their own."
         )
 
-    falcon_col, follow_alt_col = st.columns([1, 2])
+    falcon_col, follow_alt_col, nav_debug_col = st.columns([1, 2, 2])
     with falcon_col:
         falcon_go = st.button("🚁 Run All for FALCON", use_container_width=True,
                               type="primary")
@@ -2211,6 +2219,13 @@ with tab_rooster:
         follow_altitude = st.checkbox(
             "Let FALCON drive altitude (known inverted — leave off)",
             value=False, key="falcon_follow_altitude")
+    with nav_debug_col:
+        # Off by default: recording wrote ~150 MB per flight and filled the
+        # disk. Tick it for a flight worth replaying; it only takes effect
+        # when the falcon container actually starts here.
+        record_debug = st.checkbox(
+            "Record nav_debug run folder (~150 MB/flight)",
+            value=False, key="falcon_nav_debug_record")
     if falcon_go:
         if not st.session_state.get("falcon_seq_confirm", False):
             st.session_state.falcon_seq_confirm = True
@@ -2218,7 +2233,8 @@ with tab_rooster:
                        "this arms R1 and takes off.")
             st.stop()
         st.session_state.falcon_seq_confirm = False
-        _run_falcon_sequence(follow_altitude=follow_altitude)
+        _run_falcon_sequence(follow_altitude=follow_altitude,
+                             record_debug=record_debug)
         st.rerun()
 
     st.caption(

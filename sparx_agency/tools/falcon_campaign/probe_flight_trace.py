@@ -12,7 +12,8 @@ Everything needed is already on the ROS 1 side and was simply never captured:
 * ``/nav_debug/control_trace`` -- the follower publishes its complete per-tick
   internals (the reference it was given, the error split into along-track lag
   and cross-track, the feed-forward/damping/correction breakdown, every gate and
-  reflex flag). ``nav_debug_record`` already defaults to true, so this has been
+  reflex flag). ``nav_debug_trace`` defaults to true (the recorder that writes
+  them to disk does not), so this has been
   published on every flight and thrown away.
 * ``/planning/bspline`` -- the trajectory ITSELF, control points and knots and
   yaw points. Tracking error measured against ``pos_cmd`` is error against a
