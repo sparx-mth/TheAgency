@@ -246,6 +246,17 @@ export NAV_DEBUG_RUN_DIR="${RUN_DIR_HOST}"
 echo "[INFO] nav_debug run folder: ${RUN_DIR_HOST}"
 echo "[INFO] ROS2 recorder: pass -e NAV_DEBUG_RUN_DIR=${RUN_DIR_HOST} where it runs"
 
+# ── nav_debug recording: opt-in ───────────────────────────────────────────
+# It wrote ~150 MB per flight and filled the disk, so the launch default is
+# now false. Accept the usual spellings and hand roslaunch the lowercase word
+# its `if=` understands; Mission Control's checkbox sets this same variable.
+case "$(printf '%s' "${FALCON_NAV_DEBUG:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) FALCON_NAV_DEBUG=true ;;
+  *)             FALCON_NAV_DEBUG=false ;;
+esac
+export FALCON_NAV_DEBUG
+echo "[INFO] nav_debug recording: ${FALCON_NAV_DEBUG}"
+
 # ── Run ───────────────────────────────────────────────────────
 # NOTE: the map YAML below is intentionally still a single-file mount, NOT
 # a directory mount like scripts/launch above -- FALCON's own
@@ -276,6 +287,7 @@ docker run -it --rm \
     --volume "${SPARX_PARENT}/sparx_agency:/opt/sparx_agency:ro" \
     --env PYTHONPATH=/opt:/catkin_ws/src/falcon_adapter/scripts \
     --env FALCON_RUN_DIR="${RUN_DIR_IN_FALCON}" \
+    --env FALCON_NAV_DEBUG="${FALCON_NAV_DEBUG}" \
     --env FALCON_THOUGHT_LOG="${RUN_DIR_IN_FALCON}/thinking_${RUN_STAMP}.log" \
     --env FALCON_CERTAINTY_LOG="${RUN_DIR_IN_FALCON}/certainty_${RUN_STAMP}.csv" \
     "${SCRIPT_MOUNTS[@]}" \

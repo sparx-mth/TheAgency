@@ -220,6 +220,7 @@ docker run -it --rm \
     --volume /tmp/.X11-unix:/tmp/.X11-unix:rw \
     --volume "${SPARX_PARENT}/sparx_agency:/opt/sparx_agency:ro" \
     --env PYTHONPATH=/opt \
+    --env FALCON_NAV_DEBUG="${FALCON_NAV_DEBUG:-false}" \
     "${SCRIPT_MOUNTS[@]}" \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \
