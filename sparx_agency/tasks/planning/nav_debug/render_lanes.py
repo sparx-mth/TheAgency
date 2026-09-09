@@ -52,24 +52,114 @@ def build_lane_column(frame: NavFrame, scales: GaugeScales,
     return panel[:min(y + 8, panel.shape[0])]
 
 
-# ── the point being chased ───────────────────────────────────────────────────
+# ── the point being chased, and where the aircraft actually is ───────────────
+#: Column right edges for the target/actual/error table, as offsets from the
+#: lane's right margin. Right-aligned because the point of the table is that the
+#: digits line up and the eye can subtract down a column.
+_COL_TARGET = 160
+_COL_ACTUAL = 85
+_COL_ERROR = 12
+
+#: (label, reference attribute, state attribute, formatter, converter). ``None``
+#: for an attribute means that side does not carry the quantity at all.
+_COMPARE = (
+    ("x m", "x", "x", "%+.2f", None),
+    ("y m", "y", "y", "%+.2f", None),
+    ("z m", "z", "z", "%+.2f", None),
+    ("yaw deg", "yaw", "yaw", "%+.0f", math.degrees),
+    ("vx m/s", "vx", "vx", "%+.2f", None),
+    ("vy m/s", "vy", "vy", "%+.2f", None),
+    ("vz m/s", "vz", "vz", "%+.2f", None),
+    ("yaw' r/s", "yaw_dot", "wz", "%+.2f", None),
+)
+#: Rows whose error is an angle and must be folded to (-pi, pi] before display.
+_ANGULAR = ("yaw deg",)
+
+
 def _reference_lane(panel, x, y, width, frame: NavFrame, scales) -> int:
-    ref = frame.reference
-    if ref is None:
+    """What the aircraft was told to be doing, beside what it was doing.
+
+    The reference and the measured state name the same six quantities -- where,
+    how fast, which way round -- so they belong in one table with the error
+    already subtracted, rather than as a number on one panel and a shape on the
+    map. Everything here is in the **world** frame, which is the frame both
+    ``/planning/pos_cmd`` and the odometry are published in; the ``cmd_vel``
+    block on the other column is body frame and the two must not be read across.
+    """
+    ref, state = frame.reference, frame.state
+    if ref is None and state is None:
         return w.absent(panel, x, y, width, "REFERENCE", "no /planning/pos_cmd")
-    traj = "-" if ref.traj_id is None else str(ref.traj_id)
-    y = w.section(panel, x, y, width, "REFERENCE (pos_cmd)",
-                  palette.CYAN if ref.moving else palette.GRAY, note="traj %s" % traj)
-    y = put_line(panel, "xy %s %s   z %s" % (
-        w.num(ref.x, "%+.2f"), w.num(ref.y, "%+.2f"), w.num(ref.z, "%+.2f")),
-        x, y, palette.TEXT, 0.45)
-    yaw = "--" if ref.yaw is None else "%+.0f deg" % math.degrees(w.finite(ref.yaw))
-    y = put_line(panel, "v %s m/s   yaw %s   age %s s" % (
-        w.num(ref.speed), yaw, w.num(ref.age_s)), x, y, palette.TEXT, 0.45)
+    traj = "-" if ref is None or ref.traj_id is None else "traj %s" % ref.traj_id
+    color = palette.CYAN if ref is not None and ref.moving else palette.GRAY
+    y = w.section(panel, x, y, width, "REFERENCE vs ACTUAL (pos_cmd)", color,
+                  note=traj)
+    y = _compare_table(panel, x, y, width, ref, state)
+    y = _compare_note(panel, x, y, width, ref, state)
+    if ref is None:
+        return y
     return w.chips(panel, x, y, [
         ("MOVING", bool(ref.moving), palette.GREEN),
         ("FROZEN ENDPOINT", not ref.moving, palette.GRAY),
         ("STALE", w.finite(ref.age_s) > _REF_STALE_S, palette.RED)], width - x)
+
+
+def _compare_table(panel, x, y, width, ref, state) -> int:
+    """The target/actual/error table, one row per quantity, world frame."""
+    rights = (width - _COL_TARGET, width - _COL_ACTUAL, width - _COL_ERROR)
+    y = w.table_row(panel, x, y, "", [(rights[0], "target", palette.MUTED),
+                                      (rights[1], "actual", palette.MUTED),
+                                      (rights[2], "err", palette.MUTED)])
+    for label, ref_attr, state_attr, fmt, convert in _COMPARE:
+        target = _value(ref, ref_attr, convert)
+        actual = _value(state, state_attr, convert)
+        error = _error(label, target, actual)
+        y = w.table_row(panel, x, y, label, [
+            (rights[0], w.num(target, fmt), palette.CYAN),
+            (rights[1], w.num(actual, fmt), palette.TEXT),
+            (rights[2], w.num(error, fmt), _error_color(label, error))])
+    return y + 4
+
+
+def _value(source, attr: str, convert):
+    """One field off the reference or the state, converted for display."""
+    if source is None:
+        return None
+    value = getattr(source, attr, None)
+    if value is None:
+        return None
+    return convert(w.finite(value)) if convert else w.finite(value)
+
+
+def _error(label: str, target, actual):
+    """``actual - target``, folded to (-180, 180] on the heading row."""
+    if target is None or actual is None:
+        return None
+    delta = actual - target
+    if label in _ANGULAR:
+        delta = math.degrees(math.atan2(math.sin(math.radians(delta)),
+                                        math.cos(math.radians(delta))))
+    return delta
+
+
+def _error_color(label: str, error):
+    """Grade the position rows tightly, the rest loosely; heading in degrees."""
+    if error is None:
+        return palette.MUTED
+    if label in _ANGULAR:
+        return w.grade_color(error, 15.0, 45.0)
+    return w.grade_color(error, 0.3, 0.8)
+
+
+def _compare_note(panel, x, y, width, ref, state) -> int:
+    """Reference age and -- crucially -- which source the "actual" column used.
+
+    Three sources can fill it and they are not interchangeable (see
+    :mod:`.state_source`); a column that silently changed provenance mid-replay
+    would be worse than no column.
+    """
+    age = "age %s s" % w.num(None if ref is None else ref.age_s)
+    source = "actual: %s" % ((state.source or "?") if state is not None else "--")
+    return put_line(panel, "%s   %s" % (age, source), x, y, palette.MUTED, 0.4)
 
 
 # ── how well it is being chased ──────────────────────────────────────────────
@@ -239,12 +329,17 @@ def _map_lane(panel, x, y, width, frame: NavFrame, scales) -> int:
 
 
 def _sparkline(panel, x, y, width, label, series, color) -> int:
-    """A short trailing series under its label; nothing at all when empty."""
+    """A short trailing series under its label; nothing at all when empty.
+
+    The 26 px plot is drawn from ``y``, so the next baseline must clear
+    ``y + 26`` plus the following line's ascender -- at 34 a flat series drew
+    straight through the text beneath it.
+    """
     if not series:
         return y
     put_line(panel, label, x, y + 10, palette.MUTED, 0.4)
     spark(panel, series, x + 56, y, width - x - 68, 26, color)
-    return y + 34
+    return y + 40
 
 
 #: Lane order, top to bottom: what was asked, how it went, the vertical lane,

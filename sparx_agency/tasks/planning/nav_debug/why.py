@@ -9,10 +9,16 @@ sentence covers a run from either stack.
 """
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 
 _DRIFT_ROLL_MIN_CM_S = 1.0       # below this the drift hold is not worth saying
 _CLIMB_MIN_MS = 0.02
+#: A command this large that produces a measured speed this small is the
+#: signature of the aircraft being held -- against geometry, or by a gate -- and
+#: it is invisible to any commanded-vs-commanded comparison.
+_STUCK_CMD_MPS = 0.15
+_STUCK_MEASURED_MPS = 0.05
 
 
 def why(row: dict, our_cmd: Optional[Tuple[float, float, float, float]],
@@ -28,10 +34,29 @@ def why(row: dict, our_cmd: Optional[Tuple[float, float, float, float]],
     Returns:
         A ``'; '``-joined sentence, empty when no lane had anything to say.
     """
-    parts = _drift(row.get("drift")) + _exploration(lanes)
+    parts = (_drift(row.get("drift")) + _exploration(lanes)
+             + _not_moving(our_cmd, lanes))
     if our_cmd is not None and our_cmd[2] > _CLIMB_MIN_MS:
         parts.append("climbing")
     return "; ".join(parts)
+
+
+def _not_moving(our_cmd, lanes) -> List[str]:
+    """Commanded to move, measurably not moving.
+
+    Only sayable now that a *measured* velocity reaches the frame: comparing the
+    command to itself -- which is what the spine's ``vx``/``vy`` are -- can never
+    detect this. Names the measurement's source, because a derived velocity and
+    a ground-truth one do not carry the same weight.
+    """
+    state = lanes.get("state")
+    if our_cmd is None or state is None or state.speed is None:
+        return []
+    wanted = math.hypot(our_cmd[0], our_cmd[1])
+    if wanted <= _STUCK_CMD_MPS or state.speed >= _STUCK_MEASURED_MPS:
+        return []
+    return ["commanded %.2f m/s, measured %.2f (%s)"
+            % (wanted, state.speed, state.source or "?")]
 
 
 def _drift(drift) -> List[str]:

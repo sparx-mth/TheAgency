@@ -19,7 +19,7 @@ from typing import List, Optional
 
 from sparx_agency.tasks.planning.nav_debug.frame import (
     Actuator, Altitude, AxisTrace, ControlTerms, MapStats, Reference, Tracking,
-    Truth,
+    Truth, VelocityTarget,
 )
 from sparx_agency.tasks.planning.nav_debug.sources import to_bool, to_float
 
@@ -136,6 +136,32 @@ def tracking(row: Optional[dict]) -> Optional[Tracking]:
 def control_terms(row: Optional[dict]) -> Optional[ControlTerms]:
     """The command broken into its terms, from a ``control.jsonl`` row."""
     return build(ControlTerms, section(row, "terms"))
+
+
+def velocity_target(row: Optional[dict]) -> Optional[VelocityTarget]:
+    """The twist actually published to the velocity loop (``command``)."""
+    return build(VelocityTarget, section(row, "command"))
+
+
+def velocity_requested(row: Optional[dict]) -> Optional[VelocityTarget]:
+    """The twist the tracker asked for, before the pulse shaper.
+
+    ``command_requested`` and ``command`` differ exactly on the ticks where the
+    shaper -- not the controller -- chose the number, which is the whole reason
+    both are recorded.
+    """
+    return build(VelocityTarget, section(row, "command_requested"))
+
+
+def velocity_received(row: Optional[dict]) -> Optional[VelocityTarget]:
+    """The twist the velocity-closing block says it acted on.
+
+    The twist adapter stamps its own copy of the incoming ``cmd_vel`` into every
+    ``axis_trace`` row, so this is the same quantity as the follower's
+    ``command`` measured on the far side of the ROS1->ROS2 bridge. Comparing the
+    two is the only way to see the bridge itself drop or stale a command.
+    """
+    return build(VelocityTarget, section(row, "twist"))
 
 
 def actuator(row: Optional[dict]) -> Optional[Actuator]:

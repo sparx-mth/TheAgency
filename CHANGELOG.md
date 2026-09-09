@@ -5,6 +5,33 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added
+- nav_debug replay now shows the **velocity-loop input vector** explicitly: the target linear
+  `(vx, vy, vz)` and angular `wz` handed to the velocity-closing block, in m/s and rad/s (and
+  deg/s), beside the gauges that were previously the only view of it. The tracker's own
+  `command`/`command_requested` records — written on ~99% of control ticks and read by nothing —
+  now reach the frame, so a tick the pulse shaper or the GO gate changed is flagged
+  (`SHAPER CLIPPED` / `GO GATE BLOCKED`) instead of being invisible.
+- nav_debug replay now shows the drone's **actual state beside the reference**: a
+  target/actual/error table over position, velocity and heading (world frame, heading error
+  wrapped), replacing a reference display that gave only a scalar speed and left the outcome
+  to be read off the map. The measured state comes from the follower's own odometry, else
+  Sphera ground truth, else a centred difference of the recorded pose spine — and the lane
+  names which, because the three are not interchangeable. New `nav_debug/state_source.py`.
+- `falcon_exploration_follower_node.py` records a `state` section (its own odometry pose,
+  velocity and yaw) in the nav_debug control trace, so future runs carry a measured velocity
+  without needing the second recorder. Additive: it runs after the command is published,
+  inside the existing swallow-everything guard, and `~nav_debug_trace:=false` removes it.
+- `nav_debug/why.py` narrates **commanded-but-not-moving** (>0.15 m/s asked, <0.05 m/s
+  measured) — 15.5% of frames on run `nav_debug_20260906_235809`. No commanded-vs-commanded
+  comparison could ever have detected it.
+
+- nav_debug draws the joystick command as the **transmitter**: two Mode-2 sticks (throttle
+  and yaw on the left, forward and lateral on the right) showing the deflection a pilot's
+  hands would hold to send the same command. They replace three needle gauges that covered
+  roll, pitch and yaw only — the throttle, which the altitude hold writes underneath the
+  planner, previously had no gauge at all and was the least visible axis on the screen.
+
 ### Fixed
 - **The exploration follower no longer flies backward.** A demand pointing behind the
   nose is now answered by turning in place first (`scripts/heading_gate.py`, on by
@@ -44,6 +71,23 @@ future-you, not for a commit log.
   with it, `fsm_replan_from_pose_drift` drops to 0.05 (effectively always). **Needs a
   docker image rebuild and a flight — the C++ half is unverified from the host.**
 
+- nav_debug's `TO DRONE (cmd_nav)` block was empty on every Sphera run ever recorded, for two
+  independent reasons: `drone_cmd` could only be filled from the XTEND certainty CSV (Sphera
+  writes none), and the branch that drew it was taken only when the ROS2 half was *absent* —
+  i.e. exactly when there were no counts to draw. It is now filled from the actuator lane's
+  `ManualControl`, drawn unconditionally as a per-axis table (forward/lateral/vertical/yaw,
+  each with requested counts, counts sent and % of full scale), and the servo internals moved
+  to their own `AXES` section instead of replacing it.
+- nav_debug's `speed` history strip fell back to the *commanded* velocity whenever the ground-
+  truth lane was missing, plotting the command against itself — a flat, perfect-looking trace
+  on exactly the runs where nothing had been measured. It is now a measurement or nothing.
+- nav_debug drew Sphera runs recorded without the ROS2 half on the **XTEND gauge envelope**,
+  mis-scaling every command gauge by ~3.5x (0.45 vs 1.566 m/s full scale) on the runs with the
+  least other information. FALCON's exploration lanes now count as Rooster evidence.
+- A missing or mismatched `ros2/` half is now reported instead of rendering as a blank panel:
+  `NavSession` warns (naming `run_nav_debug_recorder.sh`), warns separately when a `--ros2`
+  directory loaded but belongs to a different flight, and the player prints `join_report()` —
+  which existed, was documented, and was called by nothing.
 - `rooster_twist_control_adapter.py`'s `max_yaw_rate` recalibrated from a never-validated
   0.5 rad/s to 1.8 rad/s, derived from a logged manual flight's actual turn-rate behavior
   (~4x too low previously — any planner-requested yaw rate was executed much faster than

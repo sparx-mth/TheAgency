@@ -39,7 +39,7 @@ def _wall(i):
     return _WALL0 + i * _DT
 
 
-def _build_run(tmp_path, *, ros2=True, lanes=True):
+def _build_run(tmp_path, *, ros2=True, lanes=True, state=False):
     """Write a synthetic Sphera run folder and return its path."""
     run = tmp_path / "nav_debug_20260902_120000"
     run.mkdir()
@@ -60,6 +60,12 @@ def _build_run(tmp_path, *, ros2=True, lanes=True):
             for i in range(_N)])
         _write(run / schema.CONTROL_FILE, [
             schema.row(_wall(i) + _ROS1_SKEW, _wall(i),
+                       command={"vx": 0.60, "vy": 0.0, "wz": 0.10, "vz": 0.0},
+                       command_requested={"vx": 0.63, "vy": 0.0,
+                                          "wz": 0.10, "vz": 0.0},
+                       state=({"x": float(i), "y": 2.0, "z": 1.5, "yaw": 0.1,
+                               "vx": 0.9, "vy": 0.0, "vz": 0.0, "wz": 0.02}
+                              if state else None),
                        tracking={"position_error_m": 0.4,
                                  "along_track_lag_m": 0.35,
                                  "cross_track_error_m": 0.12,
@@ -106,6 +112,9 @@ def _build_run(tmp_path, *, ros2=True, lanes=True):
             for i in range(_N)])
         _write(r2 / schema.AXIS_TRACE_FILE, [
             schema.row(_wall(i) + _ROS2_SKEW, _wall(i),
+                       # The adapter's own copy of the twist it acted on: the
+                       # far side of the ROS1->ROS2 bridge from `command`.
+                       twist={"vx": 0.60, "vy": 0.0, "vz": 0.0, "wz": 0.10},
                        axes=[{"name": "forward", "requested": 0.6,
                               "measured": 0.55, "error": 0.05,
                               "feed_forward": 480.0, "integral": 12.0,
@@ -310,3 +319,127 @@ def test_export_pads_rather_than_squashes_a_narrower_frame():
     assert fitted.shape == (12, 30, 3)
     assert (fitted[:10, :20] == 7).all()      # content preserved, not stretched
     assert (fitted[10:, :] == 0).all()        # padded, not resampled
+
+
+# ── the velocity loop's input vector ─────────────────────────────────────────
+def test_the_commanded_twist_reaches_the_frame(sphera_run):
+    """The exact twist handed to the velocity-closing block, both sides of the shaper.
+
+    ``command`` and ``command_requested`` were recorded on ~99% of ticks and read
+    by nothing: the panel drew the *post-gate* topic off the spine instead, so a
+    shaper or gate that changed the command was invisible.
+    """
+    frame = NavSession(sphera_run).build(_N // 2)
+    assert frame.velocity_target is not None
+    assert frame.velocity_target.linear == pytest.approx((0.60, 0.0, 0.0))
+    assert frame.velocity_target.wz == pytest.approx(0.10)
+    assert frame.velocity_requested.vx == pytest.approx(0.63)
+
+
+def test_a_tick_the_tracker_skipped_has_no_commanded_twist(tmp_path):
+    """An explicit null section must blank the lane, not build a zero command."""
+    run = _build_run(tmp_path, ros2=False)
+    _write(os.path.join(run, schema.CONTROL_FILE), [
+        schema.row(_wall(i) + _ROS1_SKEW, _wall(i), command=None,
+                   command_requested=None, tracking=None, terms=None)
+        for i in range(_N)])
+    frame = NavSession(run).build(_N // 2)
+    assert frame.velocity_target is None
+    assert frame.velocity_requested is None
+
+
+# ── the aircraft's own state, beside the reference ───────────────────────────
+def test_state_prefers_the_followers_own_odometry(tmp_path):
+    """With a recorded state section, that is the measurement -- not ground truth.
+
+    It is the state the controller reacted to, sampled on its own tick, which is
+    what a control-loop view is asking about.
+    """
+    frame = NavSession(_build_run(tmp_path, state=True)).build(_N // 2)
+    assert frame.state.source == "odom"
+    assert frame.state.vx == pytest.approx(0.9)
+    assert frame.state.wz == pytest.approx(0.02)
+
+
+def test_state_falls_back_to_sphera_ground_truth(sphera_run):
+    """No state section, but a ROS2 half: the truth lane fills the actual column."""
+    frame = NavSession(sphera_run).build(_N // 2)
+    assert frame.state.source == "truth"
+    assert frame.state.vx == pytest.approx(0.55)
+
+
+def test_state_falls_back_to_differentiating_the_pose(tmp_path):
+    """Neither source recorded -- and the pose spine still knows the speed.
+
+    This is the path every already-flown run takes, so it is the one that decides
+    whether the reference/actual comparison works on the recordings that exist.
+    """
+    run = _build_run(tmp_path, ros2=False)
+    frame = NavSession(run).build(_N // 2)
+    assert frame.state.source == "pose_diff"
+    # The fixture walks +1 m per 0.05 s frame along x.
+    assert frame.state.vx == pytest.approx(1.0 / _DT, rel=0.02)
+    assert frame.state.vy == pytest.approx(0.0, abs=1e-6)
+
+
+def test_state_carries_the_pose_even_when_velocity_is_unknown(tmp_path):
+    """At the ends of the run there is no window to difference over."""
+    frame = NavSession(_build_run(tmp_path, ros2=False)).build(0)
+    assert frame.state.source == "pose"
+    assert frame.state.vx is None          # unknown, never 0.0
+    assert frame.state.x == pytest.approx(0.0)
+
+
+def test_the_speed_strip_is_a_measurement_not_the_command(tmp_path):
+    """It used to fall back to the commanded velocity and plot it against itself."""
+    run = _build_run(tmp_path, ros2=False)
+    frame = NavSession(run).build(_N // 2)
+    # The command in the fixture is 0.5 m/s; the pose actually moves at 20 m/s.
+    assert frame.speed_history[-1] == pytest.approx(1.0 / _DT, rel=0.02)
+
+
+# ── the joystick counts ──────────────────────────────────────────────────────
+def test_drone_cmd_comes_from_the_actuator_lane_on_sphera(sphera_run):
+    """Sphera writes no certainty CSV, so the counts must come from ManualControl.
+
+    Before this, ``drone_cmd`` could only be filled from the CSV's axis columns
+    and the TO DRONE block read 'no cmd_nav' on every frame of every Sphera run.
+    """
+    frame = NavSession(sphera_run).build(_N // 2)
+    assert frame.drone_cmd == (500, 0, 700, 0)
+
+
+def test_drone_cmd_stays_absent_without_the_ros2_half(tmp_path):
+    frame = NavSession(_build_run(tmp_path, ros2=False)).build(_N // 2)
+    assert frame.drone_cmd is None
+
+
+# ── the join, reported instead of silently blank ─────────────────────────────
+def test_a_missing_ros2_half_is_reported(tmp_path):
+    session = NavSession(_build_run(tmp_path, ros2=False))
+    assert any("no ros2/ lane" in w for w in session.warnings)
+    assert "run_nav_debug_recorder.sh" in session.join_report()
+
+
+def test_a_ros2_half_from_another_flight_is_reported(tmp_path):
+    """Pointing --ros2 at the wrong stamp used to look exactly like recording none."""
+    run = _build_run(tmp_path, ros2=True)
+    other = os.path.join(run, schema.ROS2_DIR)
+    _write(os.path.join(other, schema.TRUTH_FILE), [
+        schema.row(_wall(i) + _ROS2_SKEW + 90000.0, _wall(i) + 90000.0, vx=0.1)
+        for i in range(_N)])
+    session = NavSession(run)
+    assert any("does not overlap" in w for w in session.warnings)
+
+
+def test_the_twist_the_servo_acted_on_reaches_the_frame(sphera_run):
+    """The far side of the ROS1->ROS2 bridge, recorded and previously discarded.
+
+    ``records.axes`` read only the ``axes`` list, so the adapter's own copy of
+    the incoming twist -- the only way to see the bridge drop or stale a
+    command -- never left the jsonl.
+    """
+    frame = NavSession(sphera_run).build(_N // 2)
+    assert frame.velocity_received is not None
+    assert frame.velocity_received.vx == pytest.approx(0.60)
+    assert frame.velocity_received.wz == pytest.approx(0.10)

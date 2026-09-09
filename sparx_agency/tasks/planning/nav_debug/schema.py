@@ -21,8 +21,20 @@ SCHEMA_VERSION = 2
 
 # ── run-folder layout ────────────────────────────────────────────────────────
 # Written by the ROS1 recorder (falcon container).
+# Pose from the odometry topic, plus the LAST /cmd_vel latched at that instant.
+# `vx`/`vy`/`vz`/`wz` here are the COMMAND, not a measurement -- the ROS1 half
+# records no measured velocity at all. See nav_debug/state_source.py.
 TELEMETRY_FILE = "telemetry.jsonl"     # pose + the command we ask for
 REFERENCE_FILE = "reference.jsonl"     # the point being chased, at rate
+# One row per control tick, nested by section:
+#   reference          the pos_cmd being chased          -> frame.Reference
+#   state              the aircraft's own odometry        -> frame.DroneState
+#   tracking           the tracker's verdict              -> frame.Tracking
+#   terms              the command, split into its parts  -> frame.ControlTerms
+#   command            the twist published to the velocity loop, post-shaper
+#   command_requested  the same, before the shaper        -> frame.VelocityTarget
+#   gate               why the tick ended where it did
+# `state` is world frame (matching `reference`); `command` is body frame.
 CONTROL_FILE = "control.jsonl"         # the tracker's verdict + why
 EVENTS_FILE = "events.jsonl"           # replan / FSM / blockage events
 MAPPING_FILE = "mapping.jsonl"         # map-quality stats per update

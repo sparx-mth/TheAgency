@@ -140,11 +140,19 @@ def resolve_scales(session: NavSession) -> GaugeScales:
 
     Which airframe flew is a property of the run; deciding per frame would flip
     between envelopes that differ by 3.5x whenever a lane momentarily blanks.
+
+    The evidence used to be the Rooster-only ROS2 lanes alone, which meant a
+    Sphera flight recorded without the second recorder -- the common case -- was
+    drawn on the XTEND envelope, mis-scaling every command gauge by 3.5x on
+    exactly the runs with the least other information. FALCON's own exploration
+    lanes are equally conclusive: ``/planning/pos_cmd`` and the tracker's control
+    trace only exist under ``nav_mode:=exploration``, which only Sphera flies.
     """
     step = max(1, len(session) // 40)
     for i in range(0, len(session), step):
         frame = session.build(i)
-        if frame.axes or frame.actuator is not None or frame.altitude is not None:
+        if (frame.axes or frame.actuator is not None or frame.altitude is not None
+                or frame.reference is not None or frame.terms is not None):
             return ROOSTER_SCALES
     return GaugeScales()
 
@@ -238,6 +246,7 @@ def main() -> None:
     dur = session.rows[-1]["t"] - session.rows[0]["t"]
     print("[nav_debug] %d frames over %.1fs | csv=%s" % (
         len(session), dur, os.path.basename(session.csv_path or "-- (telemetry only)")))
+    print(session.join_report())
 
     scales = build_scales(args.scales) or resolve_scales(session)
     if args.export:

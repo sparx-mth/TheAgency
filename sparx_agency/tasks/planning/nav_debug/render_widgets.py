@@ -22,7 +22,8 @@ from typing import Iterable, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from sparx_agency.tasks.planning.hud import palette
+from sparx_agency.tasks.planning.hud import gauges, palette
+from sparx_agency.tasks.planning.hud.panel import put_line
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _TRACK = (45, 45, 45)        # bar background
@@ -157,6 +158,61 @@ def chips(panel: np.ndarray, x: int, y: int,
             cv2.putText(panel, text, (cx + 4, cy), _FONT, scale, _OFF, 1, cv2.LINE_AA)
         cx += w + 6
     return cy + 22
+
+
+def table_row(panel: np.ndarray, x: int, y: int, label: str,
+              cells: Sequence[Tuple[int, str, tuple]], scale: float = 0.42,
+              step: int = 18, label_color=palette.MUTED) -> int:
+    """One row of a small table: ``label`` at ``x``, then right-aligned cells.
+
+    Comparing two quantities -- what was asked for against what happened -- is
+    only readable if the digits line up, and the HUD font is proportional, so
+    padding a format string does not align anything. Each cell therefore names
+    its own right edge.
+
+    Args:
+        cells: ``(x_right, text, colour)`` per column, in reading order.
+        step: Baseline advance. Tighter than :func:`put_line`'s 20 by default,
+            because a table earns its place by fitting more rows in.
+
+    Returns:
+        The next text baseline.
+    """
+    cv2.putText(panel, label, (x, y), _FONT, scale, label_color, 1, cv2.LINE_AA)
+    for x_right, text, color in cells:
+        cx = max(x, int(x_right) - text_width(text, scale))
+        cv2.putText(panel, str(text), (cx, y), _FONT, scale, color, 1, cv2.LINE_AA)
+    return y + step
+
+
+def gauge_set(panel: np.ndarray, x: int, y: int, title: str, color, roll: float,
+              pitch: float, yaw: float, roll_fs: float, pitch_fs: float,
+              yaw_fs: float, numbers: Sequence[str] = ()) -> int:
+    """A titled ROLL/PITCH/YAW gauge stack, optionally over a few number lines.
+
+    Drawn for both command stacks -- the velocity we ask for and the counts the
+    drone is sent -- so that the *same physical motion reads the same way* in
+    both, despite the converter inverting the lateral and yaw signs. The caller
+    un-negates; this only draws.
+
+    Returns:
+        The next text baseline, below the gauge labels and any ``numbers``.
+    """
+    y = put_line(panel, title, x, y, color, 0.5)
+    row = [("ROLL", gauges.draw_roll_gauge(roll, roll_fs, color)),
+           ("PITCH", gauges.draw_pitch_gauge(pitch, pitch_fs, color)),
+           ("YAW", gauges.draw_yaw_gauge(yaw, yaw_fs, color))]
+    size, gap = gauges.GAUGE_SIZE, 8
+    gx, gy = x, y
+    for label, gauge in row:
+        panel[gy:gy + size, gx:gx + size] = gauge
+        put_line(panel, label, gx + 2, gy + size + 16, palette.MUTED, 0.42)
+        gx += size + gap
+    y = gy + size + 36          # clear the gauge labels before the numbers line
+    for line in numbers:
+        if line:
+            y = put_line(panel, line, x, y, palette.TEXT, 0.45)
+    return y
 
 
 # ── bars ─────────────────────────────────────────────────────────────────────

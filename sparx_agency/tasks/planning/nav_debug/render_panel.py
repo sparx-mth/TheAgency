@@ -3,16 +3,50 @@
 Top to bottom this column is one causal chain, so a wrong command can be blamed
 on the stage that chose it:
 
-  * **OURS** -- ``cmd_vel``, on the ROLL/PITCH/YAW gauges;
+  * **OURS (cmd_vel)** -- the twist handed to the velocity-closing block, on the
+    ROLL/PITCH/YAW gauges and as an explicit linear + angular vector, with the
+    module that produces it and the module that consumes it named on screen;
   * **CONTROL** -- the tracker's own split of that command into feed-forward,
     damping and correction, and what the envelope and rate limiter did to it;
-  * **TO DRONE** -- either the XTEND ``cmd_nav`` gauge stack, or, when the run
-    recorded per-axis traces, the Rooster actuator lane: requested vs measured
-    speed and ``feed_forward + correction -> counts`` for each axis;
+  * **TO DRONE** -- the joystick counts, axis by axis;
+  * **AXES** -- when the twist adapter recorded them, the velocity servo's own
+    internals: requested vs measured speed and ``ff + cor -> counts`` per axis;
   * localization confidence and the history strips.
 
-An XTEND run has neither ``terms`` nor ``axes``, so it renders exactly the two
-gauge stacks it always did.
+An XTEND run has neither ``terms`` nor ``axes``, so it renders the two gauge
+stacks it always did, now with the counts spelled out beneath them.
+
+The command chain, named
+------------------------
+
+``OURS (cmd_vel)`` was a bare title for a long time, and "ours" is ambiguous the
+moment more than one node can publish a velocity. It is exactly one topic::
+
+    /planning/pos_cmd  (traj_server, 100 Hz reference)
+        |
+    falcon_exploration_follower_node   ReferenceTracker3D + PulseShaper
+        |   command_requested  = the tracker's demand, before the shaper
+        |   command            = what it published, after the shaper
+        v
+    <drone_ns>/cmd_vel_raw
+        |
+    cmd_vel_gate_node                  the GO gate: passes the twist, or zeroes it
+        v
+    <drone_ns>/cmd_vel   <-- OURS (cmd_vel): recorded in telemetry.jsonl
+        |   (ROS1 -> ROS2, bridge.yaml)
+        v
+    rooster_twist_control_adapter      THE VELOCITY-CLOSING BLOCK
+        expo feed-forward -> PI servo on /R1/velocity_truth -> slew -> cap
+        v
+    /R1/cmd_nav  ->  rooster_command_unit  ->  /R1/manual_control  ->  Sphera
+
+So ``OURS`` is the **input vector of the velocity loop** -- the last form the
+command takes as a velocity, one hop before it becomes stick counts. The three
+other copies of it (the tracker's demand, what the follower published, and what
+the adapter says it received) are drawn beside it only when they *disagree* with
+it, because the disagreement is the whole information: the shaper clipping a
+tick, the GO gate swallowing one, or the bridge staling one are otherwise
+invisible.
 """
 from __future__ import annotations
 
@@ -22,20 +56,13 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from sparx_agency.tasks.planning.hud import gauges, palette
+from sparx_agency.tasks.planning.hud import palette
 from sparx_agency.tasks.planning.hud.panel import hline, put_line, spark
-from sparx_agency.tasks.planning.nav_debug import render_widgets as w
-from sparx_agency.tasks.planning.nav_debug.frame import AxisTrace, GaugeScales, NavFrame
+from sparx_agency.tasks.planning.nav_debug import render_counts, render_widgets as w
+from sparx_agency.tasks.planning.nav_debug.frame import GaugeScales, NavFrame
 
 PANEL_WIDTH = 340
 _CANVAS_H = 1400            # generous; the panel is cropped to its content
-_G = gauges.GAUGE_SIZE
-
-_FF = (200, 160, 90)        # the feed-forward segment of a count bar
-_CORR = (90, 190, 240)      # the servo correction stacked on top of it
-_SENT = palette.WHITE       # the count actually sent
-_PRE_SLEW = (150, 150, 150)
-
 
 def build_panel(frame: NavFrame, scales: GaugeScales,
                 width: int = PANEL_WIDTH) -> np.ndarray:
@@ -44,68 +71,135 @@ def build_panel(frame: NavFrame, scales: GaugeScales,
     x, y = 12, 26
     y = put_line(panel, "NAV DEBUG", x, y, palette.MUTED, 0.55)
     y = hline(panel, y, width)
-    y = _ours(panel, x, y, width, frame, scales)
+    y = w.guarded(panel, x, y, width, "OURS", _ours, frame, scales)
     y = hline(panel, y, width)
     # The Sphera-only sections are guarded (a malformed diagnostic must cost its
     # own lane and nothing else); the XTEND path stays exactly as it was.
     if frame.terms is not None:
         y = w.guarded(panel, x, y, width, "CONTROL", _control_terms, frame)
         y = hline(panel, y, width)
-    # The actuator section owns the cmd_nav-vs-ManualControl comparison, so it
-    # must be chosen on the actuator lane too -- not on the axis trace alone,
-    # which empties whenever the adapter is stopped.
-    y = (w.guarded(panel, x, y, width, "TO DRONE", _actuator, frame, scales)
-         if (frame.axes or frame.actuator is not None)
-         else _to_drone(panel, x, y, width, frame, scales))
+    # TO DRONE is drawn unconditionally. It used to be an either/or with the
+    # rooster-axes section, which meant the cmd_nav counts had no home: without
+    # the ROS2 half there were none to draw, and with it the block was replaced.
+    y = w.guarded(panel, x, y, width, "TO DRONE", render_counts.to_drone,
+                  frame, scales)
     y = hline(panel, y, width)
+    if frame.axes:
+        y = w.guarded(panel, x, y, width, "AXES", render_counts.axis_servo,
+                      frame, scales)
+        y = hline(panel, y, width)
     y = _quality(panel, x, y, width, frame)
     y = _strips(panel, x, y, width, frame)
     return panel[:min(y + 8, panel.shape[0])]
 
 
 # ── the command we send ──────────────────────────────────────────────────────
+#: Who writes ``<drone_ns>/cmd_vel`` and who reads it. Drawn on screen, because
+#: a debug view that names a value but not its endpoints leaves the reader to
+#: grep for them (see the module docstring for the full chain).
+_CMD_VEL_FROM = "from falcon_exploration_follower (GO gate)"
+_CMD_VEL_INTO = "into rooster_twist_control_adapter"
+
+_GATE_EPS = 0.02        # m/s (rad/s) below which two stages are the same tick
+_MOVING_EPS = 0.05      # above this the follower was asking for real motion
+
+
 def _ours(panel, x, y, width, frame: NavFrame, scales: GaugeScales) -> int:
+    """The velocity-loop input vector: gauges, the numbers, then who owns it."""
     our = frame.our_cmd
-    return _gauge_set(
+    y = w.gauge_set(
         panel, x, y, "OURS (cmd_vel)", palette.GREEN,
         roll=(our[1] if our else 0.0), pitch=(our[0] if our else 0.0),
         yaw=(our[3] if our else 0.0),
         roll_fs=scales.our_vy, pitch_fs=scales.our_vx, yaw_fs=scales.our_wz,
-        numbers=("vx%+.2f vy%+.2f" % (our[0], our[1]) if our else "no cmd",
-                 "wz%+.2f vz%+.2f" % (our[3], our[2]) if our else ""))
+        numbers=())
+    y = _target_vector(panel, x, y, width, our)
+    y = _elsewhere(panel, x, y, width, frame, our)
+    y = put_line(panel, _CMD_VEL_FROM, x, y, palette.MUTED, 0.4)
+    return put_line(panel, _CMD_VEL_INTO, x, y, palette.MUTED, 0.4)
 
 
-def _to_drone(panel, x, y, width, frame: NavFrame, scales: GaugeScales) -> int:
-    """The XTEND converter output, on gauges (used when no axis trace exists)."""
-    d = frame.drone_cmd
-    # Negate lateral & yaw counts so the gauges read the same direction as OURS.
-    return _gauge_set(
-        panel, x, y, "TO DRONE (cmd_nav)", palette.CYAN,
-        roll=(-d[1] if d else 0.0), pitch=(d[0] if d else 0.0),
-        yaw=(-d[3] if d else 0.0),
-        roll_fs=scales.drone_lateral, pitch_fs=scales.drone_forward,
-        yaw_fs=scales.drone_yaw,
-        numbers=("fwd%d lat%d" % (d[0], d[1]) if d else "no cmd_nav",
-                 "yaw%d vert%d" % (d[3], d[2]) if d else ""))
+def _target_vector(panel, x, y, width, our) -> int:
+    """The target twist in full: the linear vector, then the angular one.
+
+    Split into ``lin`` and ``ang`` rather than run together, because they are
+    different physical quantities in different units, and the yaw rate is the
+    one a reader most often wants in degrees.
+    """
+    if not our:
+        return w.absent(panel, x, y, width, "target", "no cmd_vel recorded")
+    y = put_line(panel, "lin vx%+.2f vy%+.2f vz%+.2f m/s" % (
+        w.finite(our[0]), w.finite(our[1]), w.finite(our[2])),
+        x, y, palette.TEXT, 0.42)
+    wz = w.finite(our[3])
+    y = put_line(panel, "ang wz%+.3f rad/s (%+.0f deg/s)" % (wz, math.degrees(wz)),
+                 x, y, palette.TEXT, 0.42)
+    return put_line(panel, "|v| %.2f m/s   body frame" % math.hypot(
+        w.finite(our[0]), w.finite(our[1])), x, y, palette.MUTED, 0.42)
 
 
-def _gauge_set(panel, x, y, title, color, roll, pitch, yaw, roll_fs, pitch_fs,
-               yaw_fs, numbers) -> int:
-    y = put_line(panel, title, x, y, color, 0.5)
-    row = [("ROLL", gauges.draw_roll_gauge(roll, roll_fs, color)),
-           ("PITCH", gauges.draw_pitch_gauge(pitch, pitch_fs, color)),
-           ("YAW", gauges.draw_yaw_gauge(yaw, yaw_fs, color))]
-    gap = 8
-    gx, gy = x, y
-    for label, g in row:
-        panel[gy:gy + _G, gx:gx + _G] = g
-        put_line(panel, label, gx + 2, gy + _G + 16, palette.MUTED, 0.42)
-        gx += _G + gap
-    y = gy + _G + 36        # clear the gauge labels before the numbers line
-    for line in numbers:
-        if line:
-            y = put_line(panel, line, x, y, palette.TEXT, 0.45)
-    return y
+def _elsewhere(panel, x, y, width, frame: NavFrame, our) -> int:
+    """The same command as seen at the other three points on the chain.
+
+    ``velocity_requested`` is the tracker's demand, ``velocity_target`` is what
+    the follower published on ``cmd_vel_raw``, ``our`` is what came out of the GO
+    gate, and ``velocity_received`` is what the velocity servo says it acted on.
+    They agree on a healthy tick and this row stays silent; a difference names
+    the stage that took the command away.
+
+    The three comparisons are deliberately not symmetric. The shaper and the
+    bridge are compared term by term, because both make small changes. The gate
+    is not: it either passes a twist or zeroes it, so it is only reported when
+    the follower asked for real motion and nothing came out -- a test that
+    survives the timing slop of joining lanes recorded at different rates.
+    """
+    sent = frame.velocity_target
+    if sent is None:
+        return y
+    demand, got = frame.velocity_requested, frame.velocity_received
+    clipped = demand is not None and _differs(demand, sent)
+    blocked = _blocked(sent, our)
+    staled = got is not None and our is not None and _differs(_of(our), got)
+    if not (clipped or blocked or staled):
+        return y
+    y = put_line(panel, "follower vx%+.2f vy%+.2f wz%+.3f" % (
+        sent.vx, sent.vy, sent.wz), x, y,
+        palette.RED if blocked else palette.AMBER, 0.4)
+    return w.chips(panel, x, y, [("SHAPER CLIPPED", clipped, palette.AMBER),
+                                 ("GO GATE BLOCKED", blocked, palette.RED),
+                                 ("BRIDGE MISMATCH", staled, palette.ORANGE)],
+                   width - x)
+
+
+def _of(our) -> "_Twist":
+    """``(vx, vy, vz, wz)`` from the spine, in the shape a trace command has."""
+    return _Twist(w.finite(our[0]), w.finite(our[1]), w.finite(our[2]),
+                  w.finite(our[3]))
+
+
+class _Twist(object):
+    """The four fields ``_differs`` compares. Not a frame dataclass: this only
+    ever wraps the spine's own 4-tuple so it can be compared to a recorded one."""
+
+    __slots__ = ("vx", "vy", "vz", "wz")
+
+    def __init__(self, vx, vy, vz, wz):
+        self.vx, self.vy, self.vz, self.wz = vx, vy, vz, wz
+
+
+def _blocked(sent, our) -> bool:
+    """True when the follower commanded motion and the gate let nothing through."""
+    if our is None:
+        return False
+    asked = max(abs(sent.vx), abs(sent.vy), abs(sent.wz))
+    got = max(abs(w.finite(our[0])), abs(w.finite(our[1])), abs(w.finite(our[3])))
+    return asked > _MOVING_EPS and got <= _GATE_EPS
+
+
+def _differs(a, b) -> bool:
+    """True when two points on the chain did not carry the same command."""
+    return (abs(a.vx - b.vx) > _GATE_EPS or abs(a.vy - b.vy) > _GATE_EPS
+            or abs(a.vz - b.vz) > _GATE_EPS or abs(a.wz - b.wz) > _GATE_EPS)
 
 
 # ── the tracker's own split of that command ──────────────────────────────────
@@ -113,7 +207,9 @@ def _control_terms(panel, x, y, width, frame: NavFrame) -> int:
     """Feed-forward vs correction, and whether a limiter chose the output."""
     t = frame.terms
     limits = ",".join(t.limits) if t.limits else "none"
-    y = w.section(panel, x, y, width, "CONTROL (tracker)", palette.GREEN,
+    # Title kept short on purpose: `section` drops the right-aligned note rather
+    # than overprint the title, and "limits <name>" is the more useful half.
+    y = w.section(panel, x, y, width, "CONTROL (world)", palette.GREEN,
                   note="limits %s" % limits)
     y = put_line(panel, "ff %s  damp %s  cor %s m/s" % (
         w.num(_mag(t.feed_forward)), w.num(_mag(t.damping)), w.num(_mag(t.correction))),
@@ -136,88 +232,6 @@ def _bound(terms) -> bool:
     """True when the envelope or the rate limiter -- not the controller -- won."""
     raw, out = _mag(terms.commanded), _mag(terms.smoothed)
     return raw is not None and out is not None and abs(raw - out) > 0.02
-
-
-# ── the Rooster actuator lane ────────────────────────────────────────────────
-def _actuator(panel, x, y, width, frame: NavFrame, scales: GaugeScales) -> int:
-    """One row per axis: request vs measurement, and who chose the counts."""
-    y = w.section(panel, x, y, width, "TO DRONE (rooster axes)", palette.CYAN)
-    y = put_line(panel, "bar ff+corr    ticks pre-slew, sent", x, y - 6,
-                 palette.MUTED, 0.38)
-    for axis in frame.axes:
-        y = _axis_row(panel, x, y, width, axis, scales)
-    return _actuator_summary(panel, x, y, width, frame)
-
-
-def _axis_row(panel, x, y, width, axis: AxisTrace, scales: GaugeScales) -> int:
-    name = axis.name or "axis"
-    speed_fs, count_fs = _axis_scales(name, scales)
-    unit = "rad/s" if "yaw" in name.lower() else "m/s"
-    put_line(panel, name.upper(), x, y, palette.CYAN, 0.45)
-    w.put_right(panel, "req %+.2f  got %+.2f %s" % (
-        w.finite(axis.requested), w.finite(axis.measured), unit), width - x, y,
-        w.grade_color(w.finite(axis.requested) - w.finite(axis.measured),
-                      0.15 * max(speed_fs, 1e-6), 0.4 * max(speed_fs, 1e-6)), 0.42)
-    w.value_bar(panel, x, y + 6, width - 2 * x, 14,
-                [(axis.feed_forward, _FF), (axis.correction, _CORR)], count_fs,
-                markers=[(axis.pre_slew, _PRE_SLEW), (axis.counts, _SENT)])
-    y += 38
-    y = put_line(panel, "ff %+.0f  cor %+.0f  pre %+.0f  sent %+.0f" % (
-        w.finite(axis.feed_forward), w.finite(axis.correction),
-        w.finite(axis.pre_slew), w.finite(axis.counts)), x, y, palette.TEXT, 0.42)
-    flags = [("SAT", axis.saturated, palette.ORANGE),
-             ("SLEW", axis.slew_limited, palette.AMBER),
-             ("CAP", axis.capped, palette.RED),
-             ("STALE FB", axis.feedback_stale, palette.RED)]
-    if any(active for _, active, _ in flags):
-        y = w.chips(panel, x, y, flags, width - x)
-    return y + 4
-
-
-def _axis_scales(name: str, scales: GaugeScales) -> Tuple[float, float]:
-    """(speed full-scale, count full-scale) for one named axis."""
-    key = (name or "").lower()
-    if "lat" in key:
-        return scales.our_vy, scales.drone_lateral
-    if "yaw" in key:
-        return scales.our_wz, scales.drone_yaw
-    if "vert" in key or key == "z":
-        return scales.our_vz, scales.drone_vertical
-    return scales.our_vx, scales.drone_forward
-
-
-def _actuator_summary(panel, x, y, width, frame: NavFrame) -> int:
-    """``cmd_nav`` as requested vs the ManualControl actually published.
-
-    They differ whenever the altitude loop writes the throttle axis (expected)
-    or a second publisher injects a command (the failure this catches).
-    """
-    act = frame.actuator
-    if act is None:
-        return y
-    y = put_line(panel, "cmd_nav %s   age %.2fs" % (
-        _triple(act.cmd_nav), w.finite(act.cmd_nav_age_s)), x, y, palette.MUTED, 0.42)
-    y = put_line(panel, "manual  %s   age %.2fs" % (
-        _triple(act.manual), w.finite(act.manual_age_s)), x, y, palette.TEXT, 0.42)
-    return w.chips(panel, x, y, [
-        ("MANUAL != CMD_NAV", _mismatch(act), palette.RED),
-        ("CMD STALE", w.finite(act.cmd_nav_age_s) > 0.4, palette.ORANGE)], width - x)
-
-
-def _triple(values) -> str:
-    if not values:
-        return "--"
-    return " ".join("%+.0f" % w.finite(v) for v in values)
-
-
-def _mismatch(act) -> bool:
-    """True when the horizontal/yaw axes sent differ from the ones requested."""
-    if not act.cmd_nav or not act.manual or len(act.manual) < 4:
-        return False
-    # Compare x, y, r only: z is the hold loop's own axis and never requested.
-    sent = (act.manual[0], act.manual[1], act.manual[3])
-    return any(abs(w.finite(a) - w.finite(b)) > 1.0
-               for a, b in zip(act.cmd_nav, sent))
 
 
 # ── quality + history strips ─────────────────────────────────────────────────

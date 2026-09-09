@@ -55,6 +55,11 @@ ROS I/O:
   out  ~demo_mode_request_topic std_msgs/String  (this node's mode request)
   out  ~cmd_vel_topic          geometry_msgs/Twist (gated cmd_vel_raw)
   out  /nav_debug/control_trace std_msgs/String  (JSON, diagnostic only)
+         reference / state / tracking / terms / command / command_requested /
+         gate. `state` is this node's own view of the aircraft -- the odometry
+         pose, velocity and yaw it reacted to on this tick, world frame -- so a
+         replay can put the setpoint and the outcome on one row without needing
+         the ROS2 recorder's ground-truth lane.
 
 Usage: roslaunch falcon_adapter sphera_exploration.launch
 """
@@ -534,6 +539,7 @@ class FalconExplorationFollowerNode:
         self._pitch_deg = 0.0
         self._attitude_at = None   # rospy.Time of the last real attitude message
         self._velocity = None      # (vx, vy, vz), world frame
+        self._yaw_rate = None      # rad/s, world frame -- diagnostic only
 
         self._reference = None         # TrajectoryPoint, last received
         self._reference_yaw_dot = 0.0  # planner's own yaw rate, rad/s
@@ -600,6 +606,10 @@ class FalconExplorationFollowerNode:
         self._pose = (p.x, p.y, p.z)
         self._yaw = quat_to_yaw(q.x, q.y, q.z, q.w)
         self._velocity = (v.x, v.y, v.z)
+        # Read but never acted on: the yaw axis is open loop by design. Kept so
+        # the nav_debug trace can report a measured turn rate beside the
+        # commanded one instead of leaving the row blank.
+        self._yaw_rate = msg.twist.twist.angular.z
 
     def _attitude_cb(self, msg):
         # Vector3.x/y = raw roll/pitch, radians, sign UNVERIFIED -- magnitude
@@ -1281,6 +1291,7 @@ class FalconExplorationFollowerNode:
         try:
             row = _row(rospy.Time.now().to_sec(), time.time(),
                        reference=self._trace_reference(),
+                       state=self._trace_state(),
                        tracking=self._trace_tracking(),
                        terms=self._trace_terms(),
                        command=_cmd_dict(self._published_cmd),
@@ -1305,6 +1316,21 @@ class FalconExplorationFollowerNode:
                 # traj_server republishes the frozen endpoint at a trajectory's
                 # end with fresh stamps, so "fresh" does not imply "moving".
                 "moving": math.sqrt(ref.vx ** 2 + ref.vy ** 2 + ref.vz ** 2) > 1e-3}
+
+    def _trace_state(self):
+        """Where the aircraft actually was when this command was built.
+
+        The odometry the controller itself reacted to, recorded beside the
+        command it produced, so a replay can put the reference and the outcome
+        on one row. World frame, matching ``/planning/pos_cmd``; the ``command``
+        beside it is body frame.
+        """
+        if self._pose is None:
+            return None
+        vx, vy, vz = self._velocity or (None, None, None)
+        return {"x": self._pose[0], "y": self._pose[1], "z": self._pose[2],
+                "yaw": self._yaw, "vx": vx, "vy": vy, "vz": vz,
+                "wz": self._yaw_rate}
 
     def _trace_tracking(self):
         """The tracker's verdict, or None on a tick where it did not run."""

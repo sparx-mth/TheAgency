@@ -184,6 +184,89 @@ class Reference:
 
 
 @dataclass(frozen=True)
+class VelocityTarget:
+    """The twist handed to the velocity-closing control block this tick.
+
+    This is the **input vector of the velocity loop**: the linear velocity the
+    aircraft is asked to fly and the yaw rate it is asked to turn at, exactly as
+    they left ``falcon_exploration_follower_node`` on ``/cmd_vel``. The command
+    is a body-frame REP-103 twist (``+vx`` forward, ``+vy`` left, ``+wz`` CCW);
+    ``vz`` is a *request* the command unit turns into throttle nudges, not an
+    axis the follower drives directly.
+
+    Recorded twice per tick, because two different things can be wrong:
+    ``command`` is what was published, ``command_requested`` is what the tracker
+    asked for **before** the pulse shaper. A tick where the shaper -- not the
+    controller -- chose the number is only visible as the difference.
+    """
+
+    vx: float = 0.0                 # body-frame forward, m/s
+    vy: float = 0.0                 # body-frame left, m/s
+    vz: float = 0.0                 # climb request, m/s
+    wz: float = 0.0                 # yaw rate, rad/s (CCW positive)
+
+    @property
+    def linear(self) -> XYZ:
+        """The target linear velocity vector ``(vx, vy, vz)``, m/s."""
+        return (self.vx, self.vy, self.vz)
+
+    @property
+    def angular(self) -> XYZ:
+        """The target angular velocity vector, rad/s. Only yaw is commanded."""
+        return (0.0, 0.0, self.wz)
+
+    @property
+    def speed(self) -> float:
+        """Horizontal magnitude of the target linear velocity, m/s."""
+        return math.hypot(self.vx, self.vy)
+
+
+@dataclass(frozen=True)
+class DroneState:
+    """Where the aircraft actually is, and how fast it is actually going.
+
+    The counterpart to :class:`Reference`: the same six quantities the setpoint
+    names -- position, velocity and heading -- measured rather than commanded,
+    so reference and outcome can be read off one table instead of inferred from
+    a map pane.
+
+    ``source`` names where each sample came from, because the three available
+    sources are not equally authoritative and a debug screen must not hide which
+    one it used:
+
+    * ``odom`` -- ``/odom_world``'s twist, read by the follower at the instant it
+      built the command. The tightest pairing there is, but only present on runs
+      recorded after the follower started tracing its own state;
+    * ``truth`` -- Sphera's ``/R1/velocity_truth`` + ``/R1/sphera/state``, from
+      the ROS2 half of the recording. Ground truth, but a different process on a
+      different clock;
+    * ``pose_diff`` -- differentiated from the recorded pose spine. Always
+      available, including on old runs, and noisier than either.
+
+    ``None`` on a field means that source did not carry it -- never zero. A
+    velocity of zero and an unrecorded velocity look identical on a gauge and
+    mean opposite things.
+    """
+
+    x: Optional[float] = None
+    y: Optional[float] = None
+    z: Optional[float] = None
+    yaw: Optional[float] = None            # rad
+    vx: Optional[float] = None             # world m/s
+    vy: Optional[float] = None
+    vz: Optional[float] = None
+    wz: Optional[float] = None             # yaw rate, rad/s
+    source: str = ""
+
+    @property
+    def speed(self) -> Optional[float]:
+        """Achieved ground speed, m/s, or None when velocity was not recorded."""
+        if self.vx is None or self.vy is None:
+            return None
+        return math.hypot(self.vx, self.vy)
+
+
+@dataclass(frozen=True)
 class Tracking:
     """The tracker's verdict on whether the aircraft is flying the plan.
 
@@ -315,8 +398,10 @@ class Truth:
     vx: Optional[float] = None             # world m/s, from /R1/velocity_truth
     vy: Optional[float] = None
     vz: Optional[float] = None
+    yaw_rate: Optional[float] = None       # rad/s, measured -- the yaw feedback
     roll: Optional[float] = None           # rad, from /R1/attitude_rpy
     pitch: Optional[float] = None
+    yaw: Optional[float] = None            # rad, from /R1/attitude_rpy
     battery_pct: Optional[float] = None
     armed: Optional[bool] = None
     flight_mode: str = ""
@@ -393,6 +478,12 @@ class NavFrame:
 
     # ── Sphera/FALCON exploration lanes (all optional; None on an XTEND run) ──
     reference: Optional[Reference] = None
+    # The velocity loop's input vector, and the aircraft's measured state --
+    # the two halves of "what was asked for vs what is actually happening".
+    velocity_target: Optional[VelocityTarget] = None      # published /cmd_vel
+    velocity_requested: Optional[VelocityTarget] = None   # before the shaper
+    velocity_received: Optional[VelocityTarget] = None    # as the servo saw it
+    state: Optional[DroneState] = None
     tracking: Optional[Tracking] = None
     terms: Optional[ControlTerms] = None
     axes: List[AxisTrace] = field(default_factory=list)

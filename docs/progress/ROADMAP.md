@@ -10,6 +10,7 @@ entry under `entries/` when work actually starts on it.
 - [ ] BEV click-to-fly: smooth, occupancy-aware navigation to the clicked point → `entries/004-occupancy-aware-navigation.md`
 - [ ] YOLO-detected object label + position ("barrel") as a FALCON navigation goal → `entries/005-yolo-object-navigation.md`
 - [ ] Calibrate/tune the FALCON->Rooster velocity controller against real drone behavior → `entries/007-rooster-velocity-controller.md`
+- [ ] Make the FALCON->Rooster control chain readable end to end in the nav_debug replay: the velocity-loop input, the reference vs the aircraft's actual state, and the joystick counts actually sent → `entries/010-nav-debug-control-transparency.md`
 
 ## Next
 - [ ] Track down the noisy/speckled occupancy map (vendor CDR corruption suspected, not confirmed as the full explanation)

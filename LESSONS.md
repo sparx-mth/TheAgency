@@ -59,6 +59,47 @@ guard fires just because it exists: check which branch it lives in. `gate.use_la
 the recorded trace all along and said `true`.
 
 ---
+## 2026-09-09 — three nav_debug panels showed a command where a reader would assume a measurement
+
+Same root cause as the entry above (`telemetry.jsonl`'s velocity is the command echoed
+back); this is what it did to the debug screen, which is where the artefact was hardest
+to spot because three separate places reinforced each other.
+
+**Symptom:** Replaying `nav_debug_20260906_235809`, every command gauge looked healthy, the
+`speed` history strip drew a clean trace, and `TO DRONE (cmd_nav)` read `no cmd_nav`. There
+was no way to tell whether the drone was flying the command or being held against geometry
+— the question the screen exists to answer.
+
+**Root cause:** three independent defects, each individually plausible:
+
+1. `session._build_series` substituted the *commanded* velocity for achieved speed whenever
+   the ROS2 ground-truth lane was missing, so the strip plotted the command against itself
+   and could never show a gap.
+2. `NavFrame.drone_cmd` could only ever be filled from the XTEND certainty CSV's `axis_*`
+   columns, and Sphera writes no CSV — so the joystick counts were `None` on every frame of
+   every exploration run since the panel was written. The branch that drew them was also
+   only reached when the ROS2 half was *absent*, i.e. exactly when there were none to draw.
+3. `resolve_scales` took evidence only from Rooster-only ROS2 lanes, so a Sphera run
+   recorded without the second recorder was drawn on the **XTEND envelope** — 0.45 m/s full
+   scale against Rooster's 1.566 — mis-scaling every gauge by 3.5x on the runs with the
+   least other information.
+
+**Fix / workaround:** `nav_debug/state_source.py` resolves a measured state from the
+follower's odometry (now traced), else Sphera ground truth, else a centred difference of the
+pose spine — and the lane names which source it used on screen. `drone_cmd` falls back to
+the actuator lane's `ManualControl`. FALCON's own exploration lanes now count as Rooster
+evidence for the gauge envelope.
+
+First numbers out of it on that run: the aircraft achieves a **mean 0.64x** its commanded
+ground speed, and **15.5% of frames** are commanded >0.15 m/s while measuring <0.05 m/s.
+
+**Don't:**
+- Don't let a fallback silently swap a measurement for a command. Emit `None` and let the
+  widget blank — the package's own rule is "absent is never drawn as zero", and this
+  violated it in the one place nobody looked.
+- Don't read an empty panel as "the drone was told nothing". Distinguish "not recorded" from
+  "recorded as zero", and name the recorder that was not running.
+
 
 ## 2026-08-18 — FALCON declared the jail "explored" after 372s with 12 clusters retired behind one; the flight was fine, the frontier tests were not
 

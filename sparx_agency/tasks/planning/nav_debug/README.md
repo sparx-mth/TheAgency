@@ -95,9 +95,18 @@ python -m sparx_agency.tasks.planning.nav_debug.run_folder_nav_debug \
 ```
 
 `--ros2` is only needed while the two halves live in separate trees; drop it once
-the ROS2 directory has been collected into the run folder. Gauge full-scales are
-picked automatically (`--scales auto`) — Rooster's envelope is 3–4× XTEND's, so
-forcing the wrong one mis-scales every command gauge.
+the ROS2 directory has been collected into the run folder. The player prints
+`join_report()` on load, so a missing or mismatched ROS2 half is stated rather
+than left to be inferred from an empty panel.
+
+Gauge full-scales are picked automatically (`--scales auto`) — Rooster's envelope
+is 3–4× XTEND's, so forcing the wrong one mis-scales every command gauge. The
+evidence used to be the Rooster-only ROS2 lanes alone, which meant a Sphera
+flight recorded *without* the second recorder — the common case — was drawn on
+the XTEND envelope, mis-scaling every gauge by 3.5× on exactly the runs with the
+least other information. FALCON's own exploration lanes now count as evidence
+too: `/planning/pos_cmd` and the control trace exist only under
+`nav_mode:=exploration`, which only Sphera flies.
 
 **The map follows the aircraft.** The jail is ~105 m across, so on a 900 px pane
 a 30 cm cross-track error is about two pixels — the error you are chasing is
@@ -111,15 +120,67 @@ Keys: **n/→** next · **p/←** prev · **SPACE** play/pause · **z/x** render
 **+/−** speed · **s** save PNG · **q** quit. The footer names the current view.
 Headless? `--export out/` writes frames plus an mp4.
 
+## The command chain, named
+
+`OURS (cmd_vel)` was a bare label for a long time, and "ours" is ambiguous the
+moment more than one node can publish a velocity. It is exactly one topic, and
+the screen now says which:
+
+```
+/planning/pos_cmd            traj_server, 100 Hz reference   [REFERENCE lane]
+      |
+falcon_exploration_follower_node        ReferenceTracker3D + PulseShaper
+      |   command_requested   the tracker's demand, pre-shaper    [control.jsonl]
+      |   command             what it published, post-shaper      [control.jsonl]
+      v
+<drone_ns>/cmd_vel_raw
+      |
+cmd_vel_gate_node            the GO gate: passes the twist, or zeroes it
+      v
+<drone_ns>/cmd_vel      <-- OURS (cmd_vel)                     [telemetry.jsonl]
+      |   (ROS1 -> ROS2, bridge.yaml)
+      v
+rooster_twist_control_adapter           THE VELOCITY-CLOSING BLOCK
+      expo feed-forward -> PI servo on /R1/velocity_truth -> slew -> cap
+      v
+/R1/cmd_nav  ->  rooster_command_unit  ->  /R1/manual_control  ->  Sphera
+                                                       [ros2/actuator.jsonl]
+```
+
+So **`OURS (cmd_vel)` is the input vector of the velocity loop** — the last form
+the command takes as a velocity, one hop before it becomes stick counts. The
+panel draws it three ways: on the gauges, as an explicit `lin (vx, vy, vz)` +
+`ang wz` vector in both rad/s and deg/s, and with its producer and consumer
+named underneath.
+
+The two upstream stages are drawn **only when they disagree** with it, because
+the disagreement is the whole information: `SHAPER CLIPPED` means the pulse
+shaper changed the tracker's number, `GO GATE BLOCKED` means the follower asked
+for real motion and nothing came out the other side. Both were previously
+invisible — only the sum was ever drawn.
+
+**Frames.** `cmd_vel` and everything below it is **body** frame (`+vx` forward,
+`+vy` left, `+wz` CCW). `pos_cmd`, the tracker's own terms and the measured
+state are **world** frame. The two columns sit side by side and must not be read
+across, so each block names its frame on screen.
+
 ## What the screen tells you
 
 The map pane draws the BEV occupancy, the planned and **executed** paths, the
 pose trail, and the reference being chased with the gap to it drawn as a line —
 so position error is visible as geometry, not just a number. The lane column:
 
-- **REFERENCE** — the `pos_cmd` this instant, with `MOVING` / `FROZEN ENDPOINT` /
-  `STALE` badges. `traj_server` republishes a frozen endpoint with *fresh
-  stamps* at a trajectory's end, so "fresh" must never be read as "moving".
+- **REFERENCE vs ACTUAL** — the `pos_cmd` setpoint and the aircraft's measured
+  state in one table, with the error already subtracted: position, velocity and
+  heading, row by row, world frame. The reference used to appear as `x`, `y`,
+  `z`, a scalar speed and a heading, and the outcome only as a shape on the map;
+  a 0.5 m vertical error was a number you had to infer. `MOVING` /
+  `FROZEN ENDPOINT` / `STALE` badges still apply: `traj_server` republishes a
+  frozen endpoint with *fresh stamps* at a trajectory's end, so "fresh" must
+  never be read as "moving".
+
+  The `actual:` note names which of three sources filled that column, because
+  they are not interchangeable — see **Where "actual" comes from** below.
 - **TRACKING** — `position_error_m` split into **lag** (benign: late) and
   **cross-track** (not benign: this is the one that flies into walls), plus
   `diverged` / `holding`. `ReferenceTracker3D` computed all four every tick and
@@ -127,11 +188,31 @@ so position error is visible as geometry, not just a number. The lane column:
 - **CONTROL** — the command decomposed: `ff + damp + cor → cmd → clamp → out`.
   Recording only the sum makes an over-aggressive gain indistinguishable from a
   large reference velocity; this shows which term, or which *limit*, chose the tick.
-- **TO DRONE** — per axis: requested vs achieved speed, and
-  `ff + cor → pre-slew → sent` counts, flagged `saturated` / `slew_limited` /
-  `capped` / `feedback_stale`, then the `cmd_nav` request beside the
-  `ManualControl` actually published. A `MANUAL != CMD_NAV` flag catches the
-  altitude loop or a second publisher writing the stick underneath you.
+- **TO DRONE (cmd_nav)** — the joystick command, drawn as the **transmitter**:
+  two Mode-2 sticks (throttle/yaw on the left, forward/lateral on the right)
+  showing the deflection a pilot's hands would have to hold to send the same
+  command, over a table of the raw counts axis by axis — `forward` / `lateral`
+  / `vertical` / `yaw`, each with the counts requested, the counts sent and the
+  fraction of that axis's full scale, then
+  the `cmd_nav` request beside the `ManualControl` actually published. A
+  `MANUAL != CMD_NAV` flag catches the altitude loop or a second publisher
+  writing the stick underneath you. `vertical` has no request by design — the
+  planner never commands the throttle, the altitude hold owns it.
+
+  The sticks replaced three needle gauges that covered only roll, pitch and yaw:
+  the throttle had **no** gauge at all, which made the one axis a second process
+  writes underneath the planner the least visible thing on the screen. The
+  counts passed to the sticks are the raw `ManualControl` axes, because those
+  counts *are* the stick — the twist adapter has already applied its lateral and
+  yaw inversions by the time they exist. Nothing is drawn without counts: a
+  stick resting at centre is a zero command, which is not what "never recorded"
+  means.
+- **AXES (velocity servo)** — when the twist adapter recorded its internals:
+  per axis, requested vs achieved speed and `ff + cor → pre-slew → sent`,
+  flagged `saturated` / `slew_limited` / `capped` / `feedback_stale`. This used
+  to *replace* TO DRONE rather than sit beside it, so the counts had no home:
+  without the ROS2 half there were none to draw, and with it the block was
+  swapped out.
 - **ALTITUDE** — `target` vs `ranger`, `wanted_z` vs `sent_z`, `AT CEILING`, and
   a red `GUARD ×n`. The rangefinder plausibility gate used to reject a sample and
   return **silently**, so a gate firing every tick looked exactly like a healthy
@@ -144,6 +225,37 @@ so position error is visible as geometry, not just a number. The lane column:
 
 Yaw on Rooster is **open loop** — it has no rate feedback in the adapter — so its
 `measured`/`error`/`correction` read zero by construction, not by success.
+
+## Where "actual" comes from
+
+The reference and the outcome only sit in one table if there *is* a measured
+state, and this package records one in three different places depending on which
+halves of the recording ran. `state_source.py` resolves them in this order, and
+the lane names the winner on screen:
+
+| `source` | where | present when |
+|---|---|---|
+| `odom` | the follower's own `/odom_world`, sampled at the instant it built the command | the ROS1 trace carries a `state` section |
+| `truth` | `/R1/velocity_truth` + `/R1/sphera/state` | the ROS2 half was recorded and joins |
+| `pose_diff` | central-difference of the recorded pose spine | always |
+| `pose` | position and heading only | at the ends of a run, or across a dropout |
+
+The order is preference, deliberately **not** accuracy. `truth` is the more
+authoritative measurement, but it is written by a second process on a second
+clock and reaches a frame through a cross-recorder join; `odom` is the state the
+controller itself was reacting to, which is what a control-loop view is asking
+about.
+
+`pose_diff` exists because the interesting flights are the ones already on disk.
+The ROS1 half never recorded a measured velocity at all — `telemetry.jsonl`'s
+`vx`/`vy`/`vz`/`wz` are the *command*, latched off `/cmd_vel` at each pose tick,
+not a measurement — so before this every run without a ROS2 half had no measured
+velocity anywhere. A pose spine still knows how fast the aircraft was going.
+
+The same series now feeds the `speed` history strip, which used to fall back to
+the commanded velocity when the ground-truth lane was missing and so plotted the
+command against itself: a flat, perfect-looking trace on exactly the runs where
+nothing had been measured.
 
 ## Absent is never drawn as zero
 
@@ -160,6 +272,13 @@ does not know, so every unrecorded value renders as `-`, not `0`:
   `drop_reason`, `gate_state`, `outside_bbox_frac`, `depth_age_s`, `tilt_deg` —
   read `-`. Wiring them to `mapping_sync`'s per-second heartbeat (which already
   counts seven distinct drop reasons and the gate state) is the obvious next step.
+- A missing **ros2/** half is now named rather than left blank. `TO DRONE` said
+  `no cmd_nav` whether the counts had not been recorded or the drone had been
+  told nothing; it now says which, and names the script that records them.
+  `NavSession` raises the same as a warning, and the player prints
+  `join_report()` on load — including when a `--ros2` directory *loaded* but
+  belongs to a different flight, which the as-of join would otherwise reject one
+  row at a time into an identically blank panel.
 - Rooster's yaw axis is **open loop** — there is no rate feedback in the adapter —
   so its `measured`/`error`/`correction` are zero by construction, and the lane
   labels it rather than letting it read as perfect tracking.
@@ -181,10 +300,12 @@ The control lane is held to `~record_hz` rather than the follower's publish rate
 | `session.py` | assemble a run into a lazy frame timeline |
 | `timeline.py` | the spine (certainty CSV, else `telemetry.jsonl`) |
 | `sources.py` | jsonl lanes, as-of joins, the cross-recorder clock estimate |
+| `state_source.py` | the measured state, from odometry, ground truth or the pose spine |
 | `records.py` | recorded row → `frame` dataclass |
 | `bev_source.py` / `route_source.py` / `event_source.py` | the map, route and event lanes |
 | `bev_image.py` | occupancy grid → BGR + the world→pixel mapping |
-| `render.py` | compose the screen (`render_map`, `render_panel`, `render_lanes`, `render_widgets`) |
+| `render.py` | compose the screen (`render_map`, `render_panel`, `render_counts`, `render_lanes`, `render_widgets`) |
+| `render_counts.py` | the joystick counts axis by axis, and the velocity servo's internals |
 | `why.py` | the one-line narration under the screen |
 | `run_folder_nav_debug.py` | the offline player / exporter CLI |
 | `../hud/` | shared gauges + panel primitives (also used by object-approach) |

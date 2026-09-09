@@ -30,7 +30,6 @@ from __future__ import annotations
 import glob
 import itertools
 import json
-import math
 import os
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
@@ -42,6 +41,7 @@ from sparx_agency.tasks.planning.nav_debug.event_source import (
 )
 from sparx_agency.tasks.planning.nav_debug.frame import NavFrame
 from sparx_agency.tasks.planning.nav_debug.route_source import RouteSource
+from sparx_agency.tasks.planning.nav_debug.state_source import StateSource
 from sparx_agency.tasks.planning.nav_debug.sources import (
     ClockOffset, Stream, as_of_index, read_jsonl, to_float,
 )
@@ -53,6 +53,8 @@ _TRAIL_LEN = 48        # localization-trail length (frames)
 _HIST_LEN = 64         # history-strip length (frames)
 _LANE_MAX_AGE_S = 1.0  # a per-tick lane older than this is stale, not latched
 _MAP_MAX_AGE_S = 5.0   # the map lane updates slowly; latch it for longer
+#: Past this the ros2/ lanes belong to another flight, not to this one.
+_JOIN_GAP_WARN_S = 60.0
 
 # ROS1 lanes join on ROS time, ROS2 lanes on the host wall clock.
 _ROS1_LANES = ("reference", "control", "mapping")
@@ -99,6 +101,7 @@ class NavSession:
         self.lanes = self._open_lanes(run_dir, self.ros2_dir)
         self.clock, self.ros2_clock = self._estimate_clocks()
         self._check_join()
+        self.state_source = StateSource(self.rows)
         self._err_series, self._speed_series = self._build_series()
 
     def __len__(self) -> int:
@@ -163,7 +166,39 @@ class NavSession:
     def _check_join(self) -> None:
         """Record why the cross-recorder join might be wrong, if it might be."""
         if not any(len(self.lanes[n]) for n in _ROS2_LANES):
-            return          # nothing to join: a single-recorder run
+            # A single-recorder run. Say so on a stack that expects two, because
+            # every ROS2-fed panel then reads "not recorded" and there is nothing
+            # on screen to distinguish that from "the drone was told nothing".
+            if self.lanes["control"].rows or self.lanes["reference"].rows:
+                self.warnings.append(
+                    "no ros2/ lane in this run: the actuator, ground-truth and "
+                    "altitude panels have no data. Record it with "
+                    "robots/ROBOTICAN/run_nav_debug_recorder.sh")
+            return
+        self._check_overlap()
+        self._check_clocks()
+
+    def _check_overlap(self) -> None:
+        """Warn when the ROS2 lanes were recorded during a different flight.
+
+        Pointing ``--ros2`` at the wrong stamp loads thousands of rows that the
+        as-of join then rejects one at a time, and the result is indistinguishable
+        from having recorded nothing at all -- a blank panel either way.
+        """
+        span = self._wall_of(0), self._wall_of(len(self.rows) - 1)
+        for name in _ROS2_LANES:
+            walls = [to_float(r.get("wall")) for r in self.lanes[name].rows
+                     if to_float(r.get("wall")) is not None]
+            if not walls:
+                continue
+            gap = max(span[0] - max(walls), min(walls) - span[1])
+            if gap > _JOIN_GAP_WARN_S:
+                self.warnings.append(
+                    "ros2/%s does not overlap this run (%.0f s apart): it is "
+                    "almost certainly a different flight" % (name, gap))
+
+    def _check_clocks(self) -> None:
+        """Warn when either recorder's wall clock cannot be trusted as a join key."""
         if not self.clock.known:
             self.warnings.append(
                 "the ROS1 recording carries no wall clock; ros2/ lanes are joined "
@@ -185,25 +220,28 @@ class NavSession:
                  + " ".join("%s=%d" % (n, len(s)) for n, s in self.lanes.items())]
         return "\n".join(lines + ["warning: " + w for w in self.warnings])
 
-    def _build_series(self) -> Tuple[List[Optional[float]], List[float]]:
+    def _build_series(self) -> Tuple[List[Optional[float]], List[Optional[float]]]:
         """Per-frame tracking error and achieved speed, for the history strips.
 
         Read straight off the raw lane rows rather than through the dataclasses:
         these two run over the whole timeline, not just the visible frame.
+
+        The speed series is the *measured* one, from whichever source
+        :mod:`.state_source` resolved. It used to fall back to the commanded
+        velocity when the ground-truth lane was missing, which made the strip
+        plot the command against itself and read as perfect tracking on exactly
+        the runs where nothing had been measured at all.
         """
         control, truth = self.lanes["control"], self.lanes["truth"]
         err, speed = [], []
         for i, row in enumerate(self.rows):
-            tracked = records.section(control.at(row["t"], _LANE_MAX_AGE_S),
-                                      "tracking")
+            control_row = control.at(row["t"], _LANE_MAX_AGE_S)
+            tracked = records.section(control_row, "tracking")
             err.append(to_float(tracked.get("position_error_m")) if tracked else None)
-            flown = records.section(
-                truth.at_wall(self._wall_of(i), _LANE_MAX_AGE_S), "truth")
-            vx = to_float(flown.get("vx")) if flown else None
-            vy = to_float(flown.get("vy")) if flown else None
-            if vx is None or vy is None:            # no truth -> what we commanded
-                vx, vy = row.get("vx") or 0.0, row.get("vy") or 0.0
-            speed.append(math.hypot(vx, vy))
+            state = self.state_source.at(
+                i, control_row,
+                truth.at_wall(self._wall_of(i), _LANE_MAX_AGE_S))
+            speed.append(None if state is None else state.speed)
         return err, speed
 
     # ── as-of joins ────────────────────────────────────────────────────────────
@@ -221,12 +259,22 @@ class NavSession:
         wall = self.rows[i].get("wall")
         return wall if wall is not None else self.clock.to_wall(self.rows[i]["t"])
 
-    def _lanes_at(self, t: float, wall: float) -> dict:
-        """Every jsonl lane at this instant: ROS1 by ``t``, ROS2 by ``wall``."""
+    def _lanes_at(self, i: int, t: float, wall: float) -> dict:
+        """Every jsonl lane at this instant: ROS1 by ``t``, ROS2 by ``wall``.
+
+        ``i`` is the frame index, which the measured-state lane needs: its
+        last-resort source is the pose spine itself, not a lane row.
+        """
         control = self.lanes["control"].at(t, _LANE_MAX_AGE_S)
+        truth_row = self.lanes["truth"].at_wall(wall, _LANE_MAX_AGE_S)
+        axis_row = self.lanes["axis_trace"].at_wall(wall, _LANE_MAX_AGE_S)
         return {
             "reference": records.reference(
                 self.lanes["reference"].at(t, _LANE_MAX_AGE_S)),
+            "velocity_target": records.velocity_target(control),
+            "velocity_requested": records.velocity_requested(control),
+            "velocity_received": records.velocity_received(axis_row),
+            "state": self.state_source.at(i, control, truth_row),
             "tracking": records.tracking(control),
             "terms": records.control_terms(control),
             "map_stats": records.map_stats(
@@ -235,10 +283,8 @@ class NavSession:
                 self.lanes["actuator"].at_wall(wall, _LANE_MAX_AGE_S)),
             "altitude": records.altitude(
                 self.lanes["altitude"].at_wall(wall, _LANE_MAX_AGE_S)),
-            "truth": records.truth(
-                self.lanes["truth"].at_wall(wall, _LANE_MAX_AGE_S)),
-            "axes": records.axes(
-                self.lanes["axis_trace"].at_wall(wall, _LANE_MAX_AGE_S)),
+            "truth": records.truth(truth_row),
+            "axes": records.axes(axis_row),
         }
 
     # ── frame assembly ─────────────────────────────────────────────────────────
@@ -254,11 +300,12 @@ class NavSession:
             our = (r.get("vx") or 0.0, r.get("vy") or 0.0,
                    r.get("vz") or 0.0, r.get("wz") or 0.0)
 
-        lanes = self._lanes_at(t, self._wall_of(i))
+        lanes = self._lanes_at(i, t, self._wall_of(i))
         bev, conf = self.bev_source.at(t)
         return NavFrame(
             stamp=t, x=r["x"], y=r["y"], yaw=r["yaw"], z=r.get("z"),
-            trail=self._trail(i), our_cmd=our, drone_cmd=r.get("drone"),
+            trail=self._trail(i), our_cmd=our,
+            drone_cmd=_drone_cmd(r, lanes["actuator"]),
             quality=r.get("quality"), drift=r.get("drift"),
             target=self._target(r), advanced=self._advanced(i),
             bev=bev, bev_conf=conf, routes=self.route_source.at(t),
@@ -293,5 +340,31 @@ class NavSession:
                              if self.rows[k].get("conf") is not None],
             "err_history": [self._err_series[k] for k in window
                             if self._err_series[k] is not None],
-            "speed_history": [self._speed_series[k] for k in window],
+            "speed_history": [self._speed_series[k] for k in window
+                              if self._speed_series[k] is not None],
         }
+
+
+def _drone_cmd(row: dict, actuator) -> Optional[Tuple[int, int, int, int]]:
+    """The counts the drone was actually sent, as ``(fwd, lat, vert, yaw)``.
+
+    Two stacks fill this from two places, and only the first was ever wired up:
+
+    * **XTEND** writes all four axes into the certainty CSV, which the spine
+      carries as ``drone``;
+    * **Sphera** has no CSV. The counts exist only as the ``ManualControl`` the
+      Rooster command unit publishes, which lives in the ROS2 half of the
+      recording -- so on Sphera this lane read ``no cmd_nav`` on every frame of
+      every run, whether or not the counts had been recorded.
+
+    ``manual`` is ``[x, y, z, r]`` in the FCU's own axis order, which is exactly
+    ``(forward, lateral, vertical, yaw)``; the renderer un-negates the two axes
+    the twist adapter inverted so both gauge stacks read the same direction.
+    """
+    recorded = row.get("drone")
+    if recorded is not None:
+        return recorded
+    manual = getattr(actuator, "manual", None)
+    if not manual or len(manual) < 4:
+        return None
+    return tuple(int(round(to_float(v) or 0.0)) for v in manual[:4])
