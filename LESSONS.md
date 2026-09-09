@@ -1697,3 +1697,78 @@ when a fix cannot be observed working, say it is unverified -- the failure mode 
 inert edit, it was claiming success from a coincidence. (Editing a running bash script is also
 mildly hazardous in its own right: bash tracks a byte offset into the file, so an edit that
 shifts offsets can make it parse garbage.)
+
+## A ROS parameter is not wired until four things are true, and three of them fail silently
+
+`nav_stack.launch` set `/fsm/replan_thresh1,2,3`. `exploration_fsm.cpp` reads
+`/exploration_manager/fsm/replan_thresh{1,2,3}`. Read back off the live parameter server mid-flight,
+we were setting 2.0 / 2.0 / 2.0 and FALCON was using **0.05 / 0.2 / 3.0** from its own yaml. Three
+knobs the campaign believed it controlled had never taken effect, for the whole campaign. Nothing
+errored. The launch file was valid, the parameters existed on the server, and every experiment that
+touched them measured the stock behaviour.
+
+The confusing part, and the reason it survived so long: parameters **our own patches** added
+(`slow_traj_ratio_min`, `slow_traj_target_vel`) legitimately live under `/fsm/` and work fine. Stock
+FALCON FSM parameters live under `/exploration_manager/fsm/`. One launch file mixed the two
+namespaces and looked entirely reasonable.
+
+**A knob is wired only when all four hold:** declared in `nav_stack.launch`; declared in the launch
+file you actually run (`sphera_drone.launch`); forwarded from the latter's `<include>` of the former;
+and **read back after launch and compared to the intended value**. The fourth is the only one that
+fails loudly. Missing it hid the bug above indefinitely; having it caught the very next instance — an
+arg declared and consumed but never forwarded — on the first cycle, which cost eleven minutes instead
+of a campaign. Put every new knob in the readback set the moment you add it.
+
+Related: the same audit found `/voxel_mapping/obstacles_inflation`, which is read by *nothing* — the
+string "inflation" does not occur anywhere in this FALCON's source or binaries. A past experiment
+reported that tuning it "worked".
+
+## Two ways to convince yourself a parameter is used, both of which lie
+
+Auditing the above, I twice nearly concluded the opposite of the truth.
+
+**Searching the source tree from `/catkin_ws/src` includes our own launch files**, so every parameter
+matched itself and the audit reported a clean bill of health. Search the *planner's* source with our
+own files excluded, or the result is a tautology.
+
+**`strings` on the executable is not evidence either.** `safe_distance` and `cluster_min` are read
+inside shared libraries, so they score zero occurrences in `exploration_node` while being perfectly
+live. This is the same trap as counting instrumentation markers in a binary, where the linker dedups
+identical format strings: **count in the source, not in the artifact.**
+
+## A pre-registration without an `n` is not a pre-registration
+
+Four experiments were pre-registered in one day with a mechanism, a primary metric, a WANT threshold
+and revert-if conditions. Three also fixed **n** from a measured coefficient of variation. The fourth
+did not, and the omission was invisible until the variance was actually computed — at which point the
+primary turned out to have a **CV of 44 %**, needing about **90 flights per arm** to resolve the
+effect its first candidate had suggested. That is seven hours of flying for a predictable
+"inconclusive".
+
+The failure is not laziness about statistics, it is *ordering*: without a stated n, there is no
+moment at which the experiment is over, so it ends whenever someone looks at the number and likes it.
+The three experiments that had one all ended correctly, including two whose first flight looked
+excellent and whose effect dissolved as n grew (one walked 0.60 → 0.94 on its primary, another
+1.42 → 1.14). In both cases the pre-registered n, not judgement in the moment, is what prevented
+banking the favourable fluctuation.
+
+**Compute the power before the first candidate flies.** If the answer is "more flights than we will
+ever fly", that is a result too — it says the question needs a different instrument, not more
+patience.
+
+## The answer is sometimes in a return value the code already computes and throws away
+
+The question was whether a trajectory optimiser was running out of time: it is given ten milliseconds
+of NLopt budget, treats obstacle clearance as a soft penalty, and 41 % of its output is rejected by a
+hard collision check downstream. The plan was to infer the answer behaviourally — fly with a bigger
+budget, count rejections — which the power calculation above priced at ~90 flights per arm.
+
+NLopt returns a result code that says, directly, whether it stopped on the clock. The code was
+already being computed on every solve, assigned to a local, and never read; the neighbouring
+cost-reporting block was disabled behind `if (false)`. Logging it answers the question **exactly, from
+a single flight, with no statistics at all**.
+
+Before designing an experiment to infer something, check whether the system already knows it and is
+discarding the answer. Suppressed diagnostics, unread return codes and `if (false)` blocks are worth
+grepping for early — they are cheap to switch on and they measure the thing itself rather than a
+noisy consequence of it.

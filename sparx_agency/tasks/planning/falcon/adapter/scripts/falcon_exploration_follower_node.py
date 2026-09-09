@@ -60,6 +60,7 @@ Usage: roslaunch falcon_adapter sphera_exploration.launch
 """
 from __future__ import annotations
 
+import collections
 import json
 import math
 import time
@@ -73,6 +74,8 @@ from std_msgs.msg import String
 
 from sparx_agency.core.common.spatial_math import quat_to_yaw
 from sparx_agency.core.common.types import ControlCommand, KinematicLimits, TrajectoryPoint
+from sparx_agency.core.planning.recovery.contact_hold_detector import (
+    ContactHoldDetector, ContactHoldParams)
 from sparx_agency.core.planning.trackers.multi_axis_follower.allocation import saturate
 from sparx_agency.core.planning.trackers.reference_tracker_3d import (
     ReferenceTracker3D, ReferenceTrackerParams,
@@ -204,6 +207,18 @@ class FalconExplorationFollowerNode:
         self.tilt_resume_deg = float(
             G("~tilt_resume_deg", max(0.0, self.tilt_limit_deg - 8.0)))
         self._tilt_cut = False
+        #: Reports the airframe being HELD by geometry -- tilted, airborne and
+        #: rigid -- which no commanded-vs-achieved detector can see, because the
+        #: tilt reflex above reacts by commanding zero. Measured over 969
+        #: flights: 37% of flights, 3.6% of all flight time. See LOOP_BUGS.md
+        #: B33. This REPORTS ONLY and changes no command; what to do about a
+        #: confirmed hold is still an open question.
+        self._contact = ContactHoldDetector(ContactHoldParams(
+            enabled=_param_bool("~contact_hold_report", True),
+            tilt_deg=float(G("~contact_hold_tilt_deg", 40.0)),
+            confirm_s=float(G("~contact_hold_confirm_s", 2.0))))
+        self._contact_held = False
+        self._contact_since_s = 0.0
 
         # 2026-08-18: measured that this node was emitting PURE LATERAL demand
         # -- cmd_fwd exactly 0.000 and cmd_wz exactly 0.000 across 2254
@@ -230,6 +245,52 @@ class FalconExplorationFollowerNode:
         # it per controller variant and asserts it on the parameter server.
         self.use_lateral = _param_bool("~use_lateral", False)
         self.course_min_speed = float(G("~course_min_speed", 0.05))
+        #: Speed gate for course STEERING only, m/s. Negative -> course_min_speed.
+        #:
+        #: Split from ``course_min_speed`` because the two gates want different
+        #: values. The desired course is ``atan2`` of the commanded velocity,
+        #: and the direction of a small vector is ill-conditioned: measured
+        #: 2026-09-03, below 0.25 m/s half of all direction changes exceed the
+        #: 45 deg/s course slew ceiling, and 48% of ticks sit below it -- the
+        #: limiter then saturates 71% of the time chasing a demand that carries
+        #: no information. ``course_min_speed`` also gates the parked yaw-scan,
+        #: which wants to stay low, so raising one must not raise the other.
+        _steer_gate = float(G("~course_steer_min_speed", -1.0))
+        self.course_steer_min_speed = (self.course_min_speed if _steer_gate < 0.0
+                                       else _steer_gate)
+        #: How long a steering gap may last before the course demand is dropped,
+        #: seconds. 0 = drop it on every gap (the pre-2026-09-03 behaviour).
+        #:
+        #: See the gap branch in the control loop for the measurement: every
+        #: resume costs a run of ceiling-rate catch-up, so more gaps cost more
+        #: transient. Holding across short gaps is what makes a raised
+        #: ``course_steer_min_speed`` actually pay.
+        self.course_hold_gap_s = float(G("~course_hold_gap_s", 0.0))
+        #: "blend" yaw mode: speeds between which the nose is interpolated from
+        #: the planner's yaw (at or below ``yaw_blend_lo``) to the direction of
+        #: travel (at or above ``yaw_blend_hi``), m/s.
+        #:
+        #: Measured 2026-09-03 (LOOP_FIXES.md F23): following the planner's yaw
+        #: outright tracks it beautifully -- 57 deg median error becomes 0.2 --
+        #: and costs 7.5x the speed, because FALCON aims the camera ~57 deg off
+        #: travel and this airframe's lateral axis caps at 0.428 m/s against
+        #: forward's 1.566. Aiming the camera is therefore nearly free while
+        #: slow and expensive while fast, which is exactly a speed-scheduled
+        #: blend. Only used when ``yaw_mode`` is "blend".
+        self.yaw_blend_lo = float(G("~yaw_blend_lo", 0.15))
+        self.yaw_blend_hi = float(G("~yaw_blend_hi", 0.50))
+        #: Seconds between re-reads of ``~yaw_mode`` from the parameter server.
+        #: 0 disables re-reading, which is the shipped behaviour: the mode is
+        #: fixed for the flight.
+        #:
+        #: Non-zero enables a **within-flight paired experiment** (LOOP_BUGS.md
+        #: B39): the campaign flips the parameter every ~60 s and each flight
+        #: becomes its own matched pair, which removes the between-flight
+        #: variance that makes every outcome metric here cost 40-130 flights per
+        #: arm to resolve. Only parameters this node reads can be alternated
+        #: this way; FALCON's C++ reads its own in constructors.
+        self.yaw_mode_poll_s = float(G("~yaw_mode_poll_s", 0.0))
+        self._yaw_mode_next_poll = 0.0
         #: Slow yaw scan while the plan is parked, rad/s. 0 disables.
         #:
         #: Measured: both the coverage shortfall and the tracking error are
@@ -305,6 +366,15 @@ class FalconExplorationFollowerNode:
         #: Weight on traj_server's own yaw_dot when following its yaw
         #: curve. 0.0 keeps the previous behaviour (P-only, lagging).
         self.yaw_dot_ff_gain = float(G("~yaw_dot_ff_gain", 0.0))
+        #: Weight on the COURSE's own turn rate in course mode -- the exact
+        #: analogue of yaw_dot_ff_gain for the heading the follower derives
+        #: itself. Yaw is a pure P-loop on heading error, so tracking a course
+        #: that slews at R rad/s needs a standing error of R/yaw_kp: at the
+        #: 45 deg/s course slew and yaw_kp 1.0 that is a standing 45 deg. The
+        #: measured heading error (p50 24, p90 42-44 deg) sits exactly there.
+        #: 1.0 cancels it in the ideal case. DEFAULT 0.0 -- present behaviour
+        #: until its own pre-registered A/B; see LOOP_FIXES.md.
+        self.course_rate_ff_gain = float(G("~course_rate_ff_gain", 0.0))
 
         # <=0.0 disables. This checks MEASURED speed (from odometry), not the
         # commanded reference -- max_speed_xy above only clamps what the
@@ -343,6 +413,24 @@ class FalconExplorationFollowerNode:
         self.stall_cmd_mps = float(G("~stall_cmd_mps", 0.15))
         self.stall_speed_mps = float(G("~stall_speed_mps", 0.06))
         self.stall_detect_sec = float(G("~stall_detect_sec", 3.0))
+        #: Seconds of pose history the stall test measures displacement over.
+        #: 0 keeps the instantaneous velocity test.
+        #:
+        #: The velocity test resets the stall timer on a SINGLE sample above
+        #: stall_speed_mps, and the velocity it reads is /odom_world's raw 25 Hz
+        #: finite difference. Measured 2026-09-02 on a locked flight: of the
+        #: samples where the aircraft had moved under 6 cm in the whole previous
+        #: second, 5.8% still read over 0.06 m/s -- a spurious reset every ~0.7 s
+        #: against a timer that needs 3.0 CONTINUOUS seconds, so the escape
+        #: essentially cannot arm while genuinely stuck. Sustained
+        #: commanded-but-not-moving with no reflex engaged came to 8% of a
+        #: healthy flight and 23% of a locked one.
+        #:
+        #: Displacement over a window cannot be fooled by one noisy sample, and
+        #: position is exact where the differentiated velocity is not.
+        self.stall_window_s = float(G("~stall_window_s", 0.0))
+        #: Metres the aircraft must cover within that window to count as moving.
+        self.stall_window_m = float(G("~stall_window_m", 0.10))
         self.escape_sec = float(G("~escape_sec", 2.5))
         self.escape_speed_mps = float(G("~escape_speed_mps", 0.30))
         self.escape_yaw_rate_deg = float(G("~escape_yaw_rate_deg", 35.0))
@@ -417,6 +505,10 @@ class FalconExplorationFollowerNode:
 
         self._reference = None         # TrajectoryPoint, last received
         self._reference_yaw_dot = 0.0  # planner's own yaw rate, rad/s
+        self._course_rate = 0.0        # rate _slew_course applied, rad/s
+        self._course_gap_since = None  # when the steering gate last closed
+        #: (t, x, y) history for the displacement-based stall test.
+        self._pose_history = collections.deque()
         self._reference_stamp = None   # rospy.Time of that reference
         self._reference_ready = False  # trajectory_flag == READY
         self._reference_traj_id = None
@@ -551,6 +643,7 @@ class FalconExplorationFollowerNode:
             disabled or the demand is already within reach this tick.
         """
         if self.course_slew_deg_s <= 0.0 or dt <= 0.0:
+            self._course_rate = 0.0
             self._course_cmd = desired_yaw
             return desired_yaw
         if self._course_cmd is None:
@@ -562,6 +655,10 @@ class FalconExplorationFollowerNode:
             delta = step
         elif delta < -step:
             delta = -step
+        # The rate the commanded course is ACTUALLY turning at this tick. Driving
+        # yaw on proportional error alone makes this rate cost a standing error
+        # of exactly rate/yaw_kp; feeding it forward is what removes that.
+        self._course_rate = delta / dt
         self._course_cmd = math.atan2(math.sin(self._course_cmd + delta),
                                       math.cos(self._course_cmd + delta))
         return self._course_cmd
@@ -597,6 +694,8 @@ class FalconExplorationFollowerNode:
         # 2026-08-17 after a live capsize exposed that this node tracked
         # yaw only and had no attitude awareness at all -- see LESSONS.md.
         tilt = max(abs(self._roll_deg), abs(self._pitch_deg))
+        self._poll_yaw_mode(now_s)
+        self._update_contact_hold(now_s, tilt)
         if self._tilt_cut:
             self._tilt_cut = tilt > self.tilt_resume_deg
         else:
@@ -633,15 +732,29 @@ class FalconExplorationFollowerNode:
         # ── Heading: aim the nose along the path, not along FALCON's own yaw ──
         world_speed = math.hypot(setpoint.vx, setpoint.vy)
         heading_err = None
-        if self.yaw_mode == "course" and world_speed > self.course_min_speed:
-            desired_yaw = self._slew_course(
-                math.atan2(setpoint.vy, setpoint.vx), dt)
+        aim = self._nose_target(setpoint, world_speed)
+        if aim is not None:
+            self._course_gap_since = None
+            desired_yaw = self._slew_course(aim, dt)
             heading_err = math.atan2(math.sin(desired_yaw - self._yaw),
                                      math.cos(desired_yaw - self._yaw))
         else:
-            # Not steering: the next course starts from where the nose is, not
-            # from a stale demand the aircraft never flew.
-            self._course_cmd = None
+            # Not steering. The limiter is applying no rate this tick, and
+            # leaving the previous one in place made the trace report a stale --
+            # usually saturated -- rate for every gated tick, which inverted the
+            # first reading of the F19 experiment.
+            self._course_rate = 0.0
+            if self._course_gap_since is None:
+                self._course_gap_since = now_s
+            # Dropping the demand on every gap restarts the course from wherever
+            # the nose happens to be, and the catch-up slews at the ceiling:
+            # measured 2026-09-03, 98% of the first tick after a resume is
+            # saturated, decaying to 47% only after ~50 ticks. Holding it across
+            # a SHORT gap keeps a demand the aircraft was already flying; only a
+            # long gap makes it genuinely stale.
+            if (self.course_hold_gap_s <= 0.0
+                    or now_s - self._course_gap_since > self.course_hold_gap_s):
+                self._course_cmd = None
 
         # World-frame velocity -> body frame (Rooster's cmd_vel convention).
         cos_y, sin_y = math.cos(self._yaw), math.sin(self._yaw)
@@ -720,10 +833,15 @@ class FalconExplorationFollowerNode:
         # which necessarily lags a moving yaw reference (measured heading error
         # p50 18-28 deg, p90 46-50). Only meaningful in "reference" mode: in
         # course mode the target is the course, not the planner's yaw.
-        yaw_ff = (self._reference_yaw_dot
-                  if (self.yaw_mode != "course" and heading_err is None)
-                  else 0.0)
-        yaw_rate = saturate(self.yaw_dot_ff_gain * yaw_ff + self.yaw_kp * yaw_error,
+        if heading_err is not None:
+            # Course mode, steering: the feedforward is the course's own rate.
+            yaw_ff, ff_gain = self._course_rate, self.course_rate_ff_gain
+        elif self.yaw_mode != "course":
+            # Following FALCON's yaw curve: its analytic derivative.
+            yaw_ff, ff_gain = self._reference_yaw_dot, self.yaw_dot_ff_gain
+        else:
+            yaw_ff, ff_gain = 0.0, 0.0
+        yaw_rate = saturate(ff_gain * yaw_ff + self.yaw_kp * yaw_error,
                             self.tracker.params.limits.max_yaw_rate)
         if escape_yaw_rate is not None:
             yaw_rate = escape_yaw_rate
@@ -741,6 +859,93 @@ class FalconExplorationFollowerNode:
 
         self._last_heading_err = heading_err
         self._publish_cmd(body_vx, body_vy, yaw_rate, body_vz)
+
+    def _poll_yaw_mode(self, now_s):
+        """Re-read ``~yaw_mode`` periodically, for within-flight paired runs.
+
+        Disabled by default (``yaw_mode_poll_s`` = 0), in which case the mode is
+        read once at start-up exactly as before. A rosparam read is an XML-RPC
+        round trip, so this is deliberately on a slow timer rather than per tick.
+
+        Args:
+            now_s: Current time, seconds.
+        """
+        if self.yaw_mode_poll_s <= 0.0 or now_s < self._yaw_mode_next_poll:
+            return
+        self._yaw_mode_next_poll = now_s + self.yaw_mode_poll_s
+        try:
+            mode = str(rospy.get_param("~yaw_mode", self.yaw_mode)).strip().lower()
+        except Exception:
+            return
+        if mode != self.yaw_mode:
+            rospy.logwarn("falcon_exploration_follower: yaw_mode %s -> %s "
+                          "(within-flight paired run)", self.yaw_mode, mode)
+            self.yaw_mode = mode
+            self._course_cmd = None
+
+    def _nose_target(self, setpoint, world_speed):
+        """Where the nose should point this tick, or None to stop steering.
+
+        ``course`` aims along the commanded velocity. ``blend`` interpolates
+        from the planner's own yaw when slow to the direction of travel when
+        fast, because aiming the camera off the travel direction is nearly free
+        at low speed and costs most of the velocity demand at high speed on this
+        airframe -- see ``yaw_blend_lo``. Any other mode returns None, leaving
+        yaw to the planner's curve through the tracker's yaw error.
+
+        Args:
+            setpoint: The tracker's output this tick.
+            world_speed: Commanded horizontal speed, m/s.
+
+        Returns:
+            The desired course in radians, or None when this mode does not aim
+            the nose (or the aircraft is too slow for a direction to mean
+            anything).
+        """
+        if self.yaw_mode not in ("course", "blend"):
+            return None
+        moving = world_speed > self.course_steer_min_speed
+        course = (math.atan2(setpoint.vy, setpoint.vx) if moving else None)
+        if self.yaw_mode == "course":
+            return course
+        plan = getattr(self._reference, "yaw", None) if self._reference else None
+        if plan is None:
+            return course
+        if course is None:
+            return plan
+        span = max(1e-6, self.yaw_blend_hi - self.yaw_blend_lo)
+        w = min(1.0, max(0.0, (world_speed - self.yaw_blend_lo) / span))
+        delta = math.atan2(math.sin(course - plan), math.cos(course - plan))
+        return math.atan2(math.sin(plan + w * delta),
+                          math.cos(plan + w * delta))
+
+    def _update_contact_hold(self, now_s, tilt_deg):
+        """Report the airframe being held against geometry, and log episodes.
+
+        Reports only -- no command is changed here. Runs before the tilt reflex
+        so it still sees the state while the reflex is commanding zero, which is
+        exactly when every commanded-vs-achieved detector goes blind.
+
+        Args:
+            now_s: Current time, seconds.
+            tilt_deg: ``max(|roll|, |pitch|)`` of the airframe, degrees.
+        """
+        if self._velocity is None:
+            return
+        speed = math.hypot(self._velocity[0], self._velocity[1])
+        verdict = self._contact.update(now_s, tilt_deg, speed, self._velocity[2])
+        if verdict.held and not self._contact_held:
+            rospy.logwarn(
+                "falcon_exploration_follower: HELD against geometry -- tilt "
+                "%.0f deg, speed %.02f m/s, not descending. Nothing is being "
+                "commanded, so no stall detector can see this.",
+                tilt_deg, speed)
+        elif self._contact_held and not verdict.held:
+            rospy.logwarn(
+                "falcon_exploration_follower: released after %.1fs held",
+                self._contact_since_s)
+        self._contact_held = verdict.held
+        self._contact_since_s = verdict.since_s
 
     def _park_scan(self, world_speed, yaw_rate, now_s):
         """Sweep the camera slowly while the plan is parked.
@@ -775,6 +980,36 @@ class FalconExplorationFollowerNode:
             return yaw_rate
         return saturate(self.park_scan_rate,
                         self.tracker.params.limits.max_yaw_rate)
+
+    def _is_moving(self, now):
+        """Whether the aircraft is actually travelling, for the stall test.
+
+        Displacement over a window when ``stall_window_s`` is set, otherwise the
+        instantaneous velocity (the pre-2026-09-02 test). See that parameter for
+        why the velocity form cannot detect a genuine stall on this platform.
+
+        Args:
+            now: Current time, seconds.
+
+        Returns:
+            True/False, or None when there is not enough evidence yet -- which
+            the caller treats as "do not accumulate stall time", the safe reading.
+        """
+        if self._pose is not None:
+            self._pose_history.append((now, self._pose[0], self._pose[1]))
+            horizon = max(self.stall_window_s, 0.0) + 1.0
+            while (len(self._pose_history) > 2
+                   and now - self._pose_history[1][0] > horizon):
+                self._pose_history.popleft()
+        if self.stall_window_s <= 0.0:
+            if self._velocity is None:
+                return None
+            return math.hypot(self._velocity[0], self._velocity[1]) > self.stall_speed_mps
+        oldest = self._pose_history[0] if self._pose_history else None
+        if oldest is None or now - oldest[0] < self.stall_window_s:
+            return None                       # not enough history to judge yet
+        moved = math.hypot(self._pose[0] - oldest[1], self._pose[1] - oldest[2])
+        return moved > self.stall_window_m
 
     def _update_escape(self, body_vx, body_vy):
         """Detect being pinned, and drive the escape while one is running.
@@ -829,11 +1064,14 @@ class FalconExplorationFollowerNode:
             return None
 
         asking = math.hypot(body_vx, body_vy) > self.stall_cmd_mps
-        if not asking or self._velocity is None:
+        if not asking:
             self._stall_since = None
             return None
 
-        moving = math.hypot(self._velocity[0], self._velocity[1]) > self.stall_speed_mps
+        moving = self._is_moving(now)
+        if moving is None:
+            self._stall_since = None
+            return None
         if moving:
             # Sustained real motion is the only thing that proves an escape
             # achieved something, so it is what re-arms the budget below.
@@ -996,12 +1234,15 @@ class FalconExplorationFollowerNode:
             "driving": self._driving(),
             "reference_ready": bool(self._reference_ready),
             "tilt_cut": bool(self._tilt_cut),
+            "contact_held": bool(self._contact_held),
+            "contact_held_s": round(float(getattr(self, "_contact_since_s", 0.0)), 2),
             "tilt_deg": max(abs(self._roll_deg), abs(self._pitch_deg)),
             "escaping": self._escape_until is not None,
             "pinned_hold": bool(self._pinned_hold),
             "escapes": int(self._escapes),
             "heading_err_rad": self._last_heading_err,
             "yaw_mode": self.yaw_mode,
+            "course_rate": self._course_rate,
             "use_lateral": bool(self.use_lateral),
         }
 

@@ -340,6 +340,11 @@ class RoosterTwistControlNode(Node):
         # in the standing regime the feedforward alone is 802 counts at 0.6 m/s
         # (dead band 620, full scale 1.25), so any correction saturates. Only a
         # ceiling on the total holds the axis inside the benign band.
+        # Scale the (forward, lateral) demand pair together when either axis
+        # cannot deliver it, instead of clipping each independently and thereby
+        # rotating the commanded heading. DEFAULT False -- present behaviour
+        # until its own pre-registered A/B; see LOOP_FIXES.md F8.
+        preserve_demand_direction: bool = False,
         max_forward_axis: float = 900.0,
         forward_axis_step_per_sec: float = 1200.0,
         # The lateral axis gets its own, much slower ramp (2026-08-31). With
@@ -438,6 +443,7 @@ class RoosterTwistControlNode(Node):
         self.cmd_nav_pub = self.create_publisher(String, self.cmd_nav_topic, 10)
 
         self.use_velocity_servo = bool(use_velocity_servo)
+        self.preserve_demand_direction = bool(preserve_demand_direction)
         self.max_forward_axis = float(max_forward_axis)
         if not self.legacy_feedforward:
             # Never command past the last measured point of the curve.
@@ -445,6 +451,14 @@ class RoosterTwistControlNode(Node):
                                         ROOSTER_HORIZONTAL_CURVE.max_counts)
             self.max_lateral_axis = min(self.max_lateral_axis,
                                         ROOSTER_HORIZONTAL_CURVE.max_counts)
+        # What each axis can actually deliver at its own ceiling, read off the
+        # frozen measured curve rather than assumed: 900 counts -> 1.566 m/s
+        # forward, 600 -> 0.428 m/s lateral. Used only by
+        # _fit_demand_to_axes.
+        self._max_speed_x = (ROOSTER_HORIZONTAL_CURVE.speed_at(self.max_forward_axis)
+                             if self.max_forward_axis > 0.0 else 0.0)
+        self._max_speed_y = (ROOSTER_HORIZONTAL_CURVE.speed_at(self.max_lateral_axis)
+                             if self.max_lateral_axis > 0.0 else 0.0)
         self.forward_axis_step_per_sec = float(forward_axis_step_per_sec)
         self.forward_axis_release_per_sec = float(forward_axis_release_per_sec)
         self.lateral_axis_step_per_sec = float(lateral_axis_step_per_sec)
@@ -563,6 +577,46 @@ class RoosterTwistControlNode(Node):
             servo.reset()
         self._publish_cmd_nav("stop")
 
+    def _fit_demand_to_axes(self, vx: float, vy: float) -> tuple[float, float]:
+        """Scale a body velocity demand into what the two axes can deliver.
+
+        The forward axis reaches 1.566 m/s at its 900-count ceiling; the lateral
+        axis reaches 0.428 m/s at its 600-count cap. Each is then clamped
+        INDEPENDENTLY in `_servo_axis`, so an over-large diagonal loses more of
+        its lateral component than its forward one and the aircraft flies off at
+        a different heading than it was asked for -- a steering error dressed up
+        as a speed limit. `ReferenceTracker3D._clamp_velocity` refuses to do this
+        one layer up, and then this layer did it anyway.
+
+        Scaling the pair by a single factor keeps the direction exact and costs
+        only speed, which is the honest trade: the aircraft physically cannot go
+        sideways as fast as it goes forward.
+
+        No-op while the nose points along travel, because the lateral demand is
+        then small. It bites when yaw is decoupled from motion -- which is
+        exactly when a wrong heading is most expensive.
+
+        Args:
+            vx: Forward demand, m/s (signed).
+            vy: Lateral demand, m/s (signed, left positive).
+
+        Returns:
+            The scaled ``(vx, vy)``.
+        """
+        if not self.preserve_demand_direction or self.legacy_feedforward:
+            return vx, vy
+        scale = 1.0
+        for value, limit in ((vx, self._max_speed_x), (vy, self._max_speed_y)):
+            if limit > 0.0 and abs(value) > limit:
+                scale = min(scale, limit / abs(value))
+        if scale >= 1.0:
+            return vx, vy
+        self.get_logger().debug(
+            "demand %.2f/%.2f m/s exceeds axis capability %.2f/%.2f -- scaling "
+            "the pair by %.2f to hold the commanded heading"
+            % (vx, vy, self._max_speed_x, self._max_speed_y, scale))
+        return vx * scale, vy * scale
+
     def publish_move(self, twist: Twist) -> None:
         # Negated -- see module docstring. Through the measured dead-banded
         # curve, not a through-origin scale: see r_deadzone above.
@@ -584,10 +638,12 @@ class RoosterTwistControlNode(Node):
         if not self.legacy_feedforward:
             # Measured-curve path: each horizontal axis gets its own servo and
             # slew state, all in REP103 body frame (lateral positive = left).
-            ax_x = self._servo_axis("x", twist.linear.x,
+            demand_x, demand_y = self._fit_demand_to_axes(
+                twist.linear.x, twist.linear.y)
+            ax_x = self._servo_axis("x", demand_x,
                                     None if v_meas is None else v_meas[0], dt)
             ax_y_left = (self._servo_axis(
-                "y", twist.linear.y,
+                "y", demand_y,
                 None if v_meas is None else v_meas[1], dt)
                 if "y" in self._servos else 0.0)
             # Negated at the boundary -- FCU y positive is RIGHT (see module
@@ -869,12 +925,19 @@ def main(args=None):
                              "setpoint (pre-2026-08-18 behaviour)")
     parser.add_argument("--no-nav-debug-trace", action="store_true",
                         help="do not publish the per-axis nav_debug trace")
+    parser.add_argument("--preserve-demand-direction", action="store_true",
+                        help="scale the (forward, lateral) demand pair together "
+                             "when either axis cannot deliver it, instead of "
+                             "clipping each independently and rotating the "
+                             "commanded heading")
     parsed, _ = parser.parse_known_args()
 
     kwargs = {name: value for name, value in vars(parsed).items()
               if value is not None and not name.startswith("no_")
-              and name != "legacy_feedforward"}
+              and name not in ("legacy_feedforward",
+                               "preserve_demand_direction")}
     kwargs["legacy_feedforward"] = parsed.legacy_feedforward
+    kwargs["preserve_demand_direction"] = parsed.preserve_demand_direction
     if parsed.no_velocity_servo:
         kwargs["use_velocity_servo"] = False
     if parsed.no_follow_altitude:

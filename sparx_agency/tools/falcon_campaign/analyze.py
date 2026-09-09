@@ -31,8 +31,10 @@ from pathlib import Path
 
 try:
     from . import config
+    from . import trace_metrics
 except ImportError:  # executed as a plain script, e.g. inside a container
     import config
+    import trace_metrics
 
 #: MISSION.md's smoothness definition: a stop is a contiguous run below this
 #: speed lasting longer than MIN_STOP_S.
@@ -59,6 +61,8 @@ ALIGN_GATE_DEG = 85.0
 #: through it is valid for both A/B arms (2026-08-31; it retired the
 #: dead-band/moving-pair constants that previously lived here and had to be
 #: hand-synced with the adapter).
+from sparx_agency.core.planning.recovery.contact_hold_detector import (
+    ContactHoldDetector)
 from sparx_agency.robots.ROBOTICAN.rooster_axis_curve import (
     ROOSTER_HORIZONTAL_CURVE,
 )
@@ -203,13 +207,32 @@ def _normalize(records):
             t=_pick(f, "t"),
             x=_pick(f, "localization.x", "truth.x", "x"),
             y=_pick(f, "localization.y", "truth.y", "y"),
+            z=_pick(f, "localization.z", "truth.z", "z"),
             vx=_pick(f, "velocity.vx", "truth.vx", "vx"),
             vy=_pick(f, "velocity.vy", "truth.vy", "vy"),
-            yaw=_pick(f, "localization.yaw", "truth.yaw", "attitude.yaw",
+            # Vertical speed. Needed to tell a HELD airframe (tilted, airborne,
+            # not descending) from a genuine capsize (tilted and falling) --
+            # see contact_hold_metrics and LOOP_BUGS.md B33.
+            vz=_pick(f, "velocity.vz", "truth.vz", "vz"),
+            # Filled by _fill_ground_velocity: the aircraft's ACTUAL velocity,
+            # differenced from recorded ground-truth position. Kept separate
+            # from vx/vy because those are /R1/velocity_truth, i.e. the
+            # controller's own ESTIMATE -- and judging an estimator change by a
+            # metric computed from that estimator is circular.
+            gvx=None, gvy=None,
+            # localization.yaw is already the gated stream; attitude.yaw is the
+            # same node's republish. truth.yaw is raw and last for the reason above.
+            yaw=_pick(f, "localization.yaw", "attitude.yaw", "truth.yaw",
                       "yaw"),
             ax=_pick(f, "cmd_nav.x"), ay=_pick(f, "cmd_nav.y"),
-            roll=_pick(f, "truth.roll", "attitude.roll"),
-            pitch=_pick(f, "truth.pitch", "attitude.pitch"),
+            # attitude.* FIRST: it is rooster_ground_truth_localization's gated
+            # republish, whereas truth.* is the raw /R1/sphera/state topic, which
+            # intermittently carries a SECOND publisher reporting a different,
+            # stationary pawn with zero attitude -- 83 % of the messages in one
+            # measured flight. Reading truth.roll there pulls every tilt metric
+            # toward zero. See recorder._truth_is_suspect.
+            roll=_pick(f, "attitude.roll", "truth.roll"),
+            pitch=_pick(f, "attitude.pitch", "truth.pitch"),
             ranger=_pick(f, "state.ranger", "ranger"),
             battery=_pick(f, "state.battery", "battery"),
             airborne=f.get("airborne") is True,
@@ -279,6 +302,35 @@ def _fill_velocity(samples):
     return samples
 
 
+#: Seconds spanned by the ground-truth velocity difference in the analyzer.
+#: Position is exact and the recorder's own dt jitter is +/-0.4 %, so this is
+#: only smoothing the sim's stamp noise; 0.15 s is three samples at 20 Hz.
+GROUND_VELOCITY_WINDOW_S = 0.15
+
+
+def _fill_ground_velocity(samples):
+    """Differentiate the recorded pose into a velocity no estimator touched.
+
+    ``actuation_metrics`` asks "does the platform deliver what was commanded",
+    and answering it from ``/R1/velocity_truth`` measures the *estimator* as much
+    as the plant -- so any change to that estimator moves the number without the
+    aircraft flying differently. This is the estimator-independent series, and it
+    is what every achieved-vs-commanded figure is built from. Mutates in place.
+    """
+    times = _times(samples)
+    base = 0
+    for idx in range(len(samples)):
+        while (base + 1 < idx
+               and times[idx] - times[base + 1] >= GROUND_VELOCITY_WINDOW_S):
+            base += 1
+        dt = times[idx] - times[base]
+        a, b = samples[base], samples[idx]
+        if dt <= 0.0 or None in (a["x"], a["y"], b["x"], b["y"]):
+            continue
+        b["gvx"], b["gvy"] = (b["x"] - a["x"]) / dt, (b["y"] - a["y"]) / dt
+    return samples
+
+
 def _timeline(samples):
     """Return (times, dts, speeds) for the run."""
     times = _times(samples)
@@ -326,6 +378,53 @@ def motion_metrics(samples, airborne_only):
                 mean_s_between_stops=statistics.fmean(gaps) if gaps else None,
                 per_minute=_per_minute(samples),
                 **_turning_effort(samples))
+
+
+def contact_hold_metrics(samples):
+    """Time the airframe spent HELD against geometry rather than flying.
+
+    A multirotor cannot hold 40-80 deg of tilt at a constant height, so a
+    sustained tilt with no translation and no descent means something outside
+    the airframe is carrying its weight. This is invisible to every
+    commanded-vs-achieved stall detector, because the node's tilt reflex reacts
+    by commanding zero -- nothing is being asked, so nothing can be seen to
+    fail. Measured over 969 flights: 37 % of flights, 3.6 % of all flight time,
+    and the worst single flight lost 87 % of its window. See LOOP_BUGS.md B33.
+
+    Args:
+        samples: Normalized recorder samples.
+
+    Returns:
+        Episode count, total/median/max seconds held, and the fraction of the
+        flight spent that way.
+    """
+    detector = ContactHoldDetector()
+    spans = []
+    span_start = None
+    held_before = False
+    first_t = last_t = None
+    for s in samples:
+        t, roll, pitch = s["t"], s["roll"], s["pitch"]
+        if None in (t, roll, pitch) or s["vx"] is None or s["vz"] is None:
+            continue
+        first_t = t if first_t is None else first_t
+        last_t = t
+        tilt = math.degrees(max(abs(roll), abs(pitch)))
+        verdict = detector.update(t, tilt, math.hypot(s["vx"], s["vy"]), s["vz"])
+        if verdict.held and not held_before:
+            span_start = t - verdict.since_s
+        elif held_before and not verdict.held and span_start is not None:
+            spans.append(t - span_start)
+            span_start = None
+        held_before = verdict.held
+    if held_before and span_start is not None and last_t is not None:
+        spans.append(last_t - span_start)
+    flight_s = (last_t - first_t) if None not in (first_t, last_t) else None
+    total = sum(spans)
+    return dict(episodes=len(spans), total_s=round(total, 1),
+                median_s=round(statistics.median(spans), 1) if spans else None,
+                max_s=round(max(spans), 1) if spans else None,
+                frac_of_flight=(None if not flight_s else round(total / flight_s, 4)))
 
 
 def _per_minute(samples):
@@ -439,13 +538,19 @@ def tracking_metrics(lines):
                 frac_holding=None if not ticks else holding / float(ticks))
 
 
-def _body_speed(sample, axis):
-    """Body-frame speed along ``axis`` ('x' forward, 'y' lateral)."""
-    if None in (sample["vx"], sample["vy"], sample["yaw"]):
+def _body_speed(sample, axis, key=("gvx", "gvy")):
+    """Body-frame speed along ``axis`` ('x' forward, 'y' lateral).
+
+    Reads the ground-truth-derived velocity by default -- see
+    :func:`_fill_ground_velocity` for why the estimator's own stream is the
+    wrong input to an achieved-vs-commanded number.
+    """
+    vx, vy = sample[key[0]], sample[key[1]]
+    if None in (vx, vy, sample["yaw"]):
         return None
     cos_y, sin_y = math.cos(sample["yaw"]), math.sin(sample["yaw"])
-    return (sample["vx"] * cos_y + sample["vy"] * sin_y if axis == "x"
-            else -sample["vx"] * sin_y + sample["vy"] * cos_y)
+    return (vx * cos_y + vy * sin_y if axis == "x"
+            else -vx * sin_y + vy * cos_y)
 
 
 def actuation_metrics(samples):
@@ -513,6 +618,35 @@ def altitude_metrics(samples, lines):
                 converged=(best >= ALT_CONVERGED_S) if errors else None)
 
 
+#: Log needles that mean Sphera's duplicate pawn was live during the flight.
+#: Each is emitted by a different guard, so together they say which streams the
+#: defect reached.
+_DUAL_PUBLISHER_NEEDLES = (
+    ("pose_rejects", "dropped implausible sphera pose"),
+    ("pose_relatches", "re-latching pose"),
+    ("pose_relatch_refused", "refusing the streak re-latch"),
+    ("ranger_rejects", "dropped ranger"),
+)
+
+
+def _dual_publisher_health(lines):
+    """How much of this flight was flown against Sphera's duplicate pawn.
+
+    B22: a second, stationary entity intermittently publishes on the drone's own
+    topics. Flights taken while it is live are a **different sampling regime** --
+    the pose stream loses samples, the rangefinder alternates, and the altitude
+    hold fights itself -- so they must be identifiable, not silently pooled with
+    clean flights in an A/B.
+
+    Returns:
+        A dict of per-guard counts plus ``dual_publisher_active``.
+    """
+    counts = dict((key, sum(1 for ln in lines if needle in ln))
+                  for key, needle in _DUAL_PUBLISHER_NEEDLES)
+    counts["dual_publisher_active"] = any(counts.values())
+    return counts
+
+
 def health_metrics(samples, lines):
     """Stream liveness from ``age``, attitude, battery, and log events."""
     ages, never = {}, set()
@@ -536,7 +670,8 @@ def health_metrics(samples, lines):
                 battery_frac_end=battery[-1] if battery else None,
                 max_tilt_rad=_stats(tilt),
                 log_events=dict((key, sum(1 for ln in lines if needle in ln))
-                                for key, needle in _EVENTS))
+                                for key, needle in _EVENTS),
+                **_dual_publisher_health(lines))
 
 
 def _requested_window(run_dir):
@@ -740,6 +875,12 @@ def clearance_metrics(run_dir):
                 err.append(row["pos_err_m"])
             if row.get("cross_m") is not None:
                 cross.append(abs(row["cross_m"]))
+    # NOT a margin the planner applies. `obstacles_inflation` is read by nothing
+    # in this FALCON (LOOP_BUGS.md B36) -- clearance is enforced by
+    # bspline_opt/safe_distance against the ESDF. This is simply "how often was
+    # the aircraft within 0.40 m of a mapped obstacle", which is a useful
+    # clearance measure but must not be read as "inside its own inflation".
+    # The keys keep the historical names so old metrics.json stay comparable.
     inflation = getattr(config, "OBSTACLES_INFLATION", 0.4)
     frac = lambda v: (None if not v
                       else sum(1 for x in v if x < inflation) / float(len(v)))
@@ -757,6 +898,11 @@ def exploration_metrics(lines):
     """FSM transitions, replan verdicts, and whether exploration finished."""
     transitions, replans, plan_fail, finish_t = [], {}, 0, None
     reopened, traj_server_exited = 0, False
+    # The pre-publish collision check throws away ~41% of everything the planner
+    # produces, which B38 identifies as the first link in the chain that owns the
+    # campaign's largest loss -- a bigger loss than outright planning failure,
+    # and a different failure mode from it.
+    collision_rejects, collision_rejects_initial = 0, 0
     base = next((t for t in (_log_time(ln) for ln in lines)
                  if t is not None), None)
     for line in lines:
@@ -764,6 +910,8 @@ def exploration_metrics(lines):
         stamp = _log_time(line)
         when = None if None in (stamp, base) else stamp - base
         plan_fail += "plan fail" in low
+        collision_rejects += "collision detected on the trajectory before publishing" in low
+        collision_rejects_initial += ("collision also detected on the initial trajectory" in low)
         reopened += "re-opening exploration" in low
         traj_server_exited |= "traj server shutdown" in low
         if "[fsm]" in low:
@@ -779,7 +927,10 @@ def exploration_metrics(lines):
     result = dict(fsm_transitions=len(transitions), fsm_lines=transitions[:40],
                 finished=finish_t is not None, finish_t_s=finish_t,
                 reopened=reopened, traj_server_exited=traj_server_exited,
-                plan_fail=plan_fail, replan_verdicts=dict(
+                plan_fail=plan_fail,
+                collision_rejects=collision_rejects,
+                collision_rejects_initial=collision_rejects_initial,
+                replan_verdicts=dict(
                     sorted(replans.items(), key=lambda kv: -kv[1])[:12]))
     result.update(_unreachable_viewpoint(lines, base))
     return result
@@ -1354,13 +1505,15 @@ def analyze(run_dir):
             "with a log-less analysis" % run_dir.name)
     records, bad_lines = _load_jsonl(run_dir / "truth.jsonl")
     samples = _normalize(records)
-    flying, airborne_only = _airborne_window(_fill_velocity(samples))
+    flying, airborne_only = _airborne_window(
+        _fill_ground_velocity(_fill_velocity(samples)))
     lines, log_files = _read_log_lines(run_dir)
     motion = motion_metrics(flying, airborne_only)
     metrics = dict(
         run=run_dir.name, samples_recorded=len(samples),
         samples_analyzed=len(flying), log_files=log_files,
         motion=motion,
+        contact_hold=contact_hold_metrics(flying),
         actuation=actuation_metrics(flying),
         tracking=tracking_metrics(lines),
         altitude=altitude_metrics(flying, lines),
@@ -1369,6 +1522,14 @@ def analyze(run_dir):
         exploration=exploration_metrics(lines),
         clearance=clearance_metrics(run_dir),
         config=config_metrics(run_dir))
+    # The follower's own per-tick trace and the 2 Hz mapping counters. Everything
+    # above comes from 20 Hz telemetry and 0.5 Hz log lines; this is the only
+    # source that says WHERE the tracking error is (along-track lateness versus
+    # off-route) and whether the controller still had authority when it was made.
+    # Absent on runs recorded before the probe existed, hence the guard.
+    trace = trace_metrics.trace_metrics(run_dir)
+    if trace:
+        metrics["trace"] = trace
     metrics["planner_death"] = planner_death(run_dir)
     _save_planner_death_excerpt(run_dir, metrics["planner_death"])
     metrics["collapse_signature"] = collapse_signature(metrics)

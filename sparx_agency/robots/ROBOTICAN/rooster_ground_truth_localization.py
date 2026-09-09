@@ -36,6 +36,9 @@ from __future__ import annotations
 
 import math
 
+import time
+from collections import deque
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -71,6 +74,37 @@ class RoosterGroundTruthLocalization(Node):
         # consecutive drops and a totally silent /localization). After this
         # many consecutive rejections, accept the new position as truth.
         self.declare_parameter("relatch_after_rejects", 25)
+        # Metres of motion that separate the real aircraft from Sphera's
+        # stationary impostor pawn. 0 disables the cluster test below.
+        #
+        # Sphera intermittently publishes a second, stationary pawn on this
+        # topic. Its share of the messages can be the large majority (83% of one
+        # flight), so a streak of `relatch_after_rejects` from it is routine and
+        # the relatch ratchets onto it -- after which the REAL aircraft's poses
+        # are the ones rejected, its streaks are the rare ones, and the latch
+        # never comes back. Measured 2026-09-02: a whole 453 s flight published
+        # a pose frozen at the impostor's position while the aircraft flew, and
+        # the follower drove the axes to their 900-count ceiling against an
+        # error that could not close.
+        #
+        # The consecutive-reject relatch cannot help: the two publishers
+        # INTERLEAVE, so every impostor message is accepted (it matches the
+        # latch) and resets the streak, and 25 consecutive rejects never
+        # accumulate. Replaying a real contaminated flight confirmed it -- the
+        # latch stayed on the impostor for all 8749 poses either way.
+        #
+        # What does separate them is motion, over a window rather than a streak:
+        # across that flight the impostor's position spanned 2.9e-05 m and the
+        # real aircraft's spanned 44 m. So when the ACCEPTED cluster is static
+        # and the REJECTED one is moving, the latch is on the wrong pawn and is
+        # handed over. 0.01 m is ~300x the impostor's noise and well below a
+        # hovering drone's own centimetre jitter.
+        #
+        # Costs nothing on a healthy stack: with one publisher there are no
+        # rejects, so this code never runs.
+        self.declare_parameter("relatch_min_span_m", 0.01)
+        # Seconds of history the cluster test compares over.
+        self.declare_parameter("relatch_window_s", 3.0)
         rooster_id = self.get_parameter("rooster_id").value
         pose_topic = self.get_parameter("pose_topic").value or f"/{rooster_id}/localization"
         source_topic = self.get_parameter("source_topic").value or f"/{rooster_id}/localization_source"
@@ -78,6 +112,13 @@ class RoosterGroundTruthLocalization(Node):
         self.reject_radius_m = float(self.get_parameter("reject_radius_m").value)
         self.max_jump_m = float(self.get_parameter("max_jump_m").value)
         self.relatch_after_rejects = int(self.get_parameter("relatch_after_rejects").value)
+        self.relatch_min_span_m = float(
+            self.get_parameter("relatch_min_span_m").value)
+        self.relatch_window_s = float(
+            self.get_parameter("relatch_window_s").value)
+        #: Recent (t, x, y) for each cluster, for the motion comparison.
+        self._accepted_recent = deque()
+        self._rejected_recent = deque()
         self._last_xy = None
         self._rejected = 0
         self._consecutive_rejects = 0
@@ -89,14 +130,30 @@ class RoosterGroundTruthLocalization(Node):
         # World-frame linear + yaw rate; consumers rotate into body frame using
         # the pose published alongside. tau=0 disables the filter.
         self.declare_parameter("velocity_topic", "")
-        # 0.25s, raised from 0.15 after the first closed-loop flight: this is a
-        # differentiated position, so the noise it carries lands straight on the
-        # controller's proportional term. Costs a little lag, buys a usable signal.
-        self.declare_parameter("velocity_filter_tau_s", 0.25)
+        # 0.05s. Was 0.25 while velocity was differenced between CONSECUTIVE
+        # samples; with the fixed window below most of the noise is gone before
+        # the filter sees it, so the lag no longer has to be paid. See
+        # velocity_window_s.
+        self.declare_parameter("velocity_filter_tau_s", 0.05)
+        # Seconds spanned by the position difference. 0 restores the old
+        # consecutive-sample behaviour.
+        #
+        # Sphera stamps its state at ~129 Hz with 2.3x dt jitter (p90 18.1 ms
+        # against a 7.9 ms median, measured live 2026-09-02 off the message
+        # HEADER, not arrival), and a stamp that disagrees with the physics tick
+        # by a few ms turns into metres per second once divided by 8 ms: the raw
+        # consecutive derivative runs p90 1.0 m/s of noise on a 0.5 m/s signal.
+        # Differencing over a fixed 60 ms window divides the same timing error
+        # by 8x instead. Measured over 2958 live samples, the pair below is
+        # strictly better than the old one on BOTH axes -- 0.9x the tick-to-tick
+        # noise and 80 ms of total lag against 250 ms.
+        self.declare_parameter("velocity_window_s", 0.06)
         velocity_topic = (self.get_parameter("velocity_topic").value
                           or f"/{rooster_id}/velocity_truth")
         self.velocity_filter_tau_s = float(
             self.get_parameter("velocity_filter_tau_s").value)
+        self.velocity_window_s = float(
+            self.get_parameter("velocity_window_s").value)
         # Prefer the physics engine's own velocity over differentiating the
         # pose -- see _publish_velocity. False restores the pre-2026-08-18
         # differentiated path.
@@ -111,6 +168,8 @@ class RoosterGroundTruthLocalization(Node):
             self.get_parameter("dead_field_speed_mps").value)
         self._dead_velocity_field = 0
         self._prev_sample = None      # (t_sec, x, y, z, yaw)
+        #: Recent samples, newest last, trimmed to just span velocity_window_s.
+        self._window = deque()        # of (t_sec, x, y, z, yaw)
         self._filtered = [0.0, 0.0, 0.0, 0.0]   # vx, vy, vz, yaw_rate
 
         self.pose_pub = self.create_publisher(PoseStamped, pose_topic, 10)
@@ -145,17 +204,84 @@ class RoosterGroundTruthLocalization(Node):
         if (self.max_jump_m > 0.0 and self._last_xy is not None
                 and math.hypot(x - self._last_xy[0], y - self._last_xy[1]) > self.max_jump_m):
             self._note_reject("jump exceeds max_jump_m", x, y)
+            self._remember(self._rejected_recent, x, y)
+            if self._latch_is_on_a_static_pawn():
+                self.get_logger().warn(
+                    f"re-latching pose to ({x:.1f}, {y:.1f}): the latched pose "
+                    f"has not moved while this one has -- the latch was on "
+                    f"Sphera's stationary impostor pawn (known dual-publisher "
+                    f"defect)", throttle_duration_sec=10.0)
+                self._consecutive_rejects = 0
+                self._accepted_recent.clear()
+                self._rejected_recent.clear()
+                self._last_xy = (x, y)
+                self._remember(self._accepted_recent, x, y)
+                return True
             self._consecutive_rejects += 1
             if self._consecutive_rejects < self.relatch_after_rejects:
                 return False
             # Sustained divergence is a real teleport (R1 respawn), not a
             # glitch -- adopt it rather than stay latched on a dead position.
+            #
+            # UNLESS the candidate has not moved. Observed live 2026-09-02: the
+            # cluster test above correctly moved the latch onto the real
+            # aircraft, and 2.5 s later THIS path dragged it back to the
+            # impostor, because the impostor's ~83 % share reaches 25
+            # consecutive rejects within seconds while the aircraft's does not.
+            # A respawned aircraft still drifts by centimetres; the impostor
+            # spans tens of micrometres.
+            span = self._span(self._rejected_recent)
+            if (self.relatch_min_span_m > 0.0 and len(self._rejected_recent) >= 5
+                    and span < self.relatch_min_span_m):
+                self.get_logger().warn(
+                    f"refusing the streak re-latch to ({x:.1f}, {y:.1f}): "
+                    f"{self._consecutive_rejects} consecutive rejects but the "
+                    f"candidate moved only {span * 1000.0:.2f} mm -- stationary "
+                    f"pawn, not a respawn", throttle_duration_sec=10.0)
+                self._consecutive_rejects = 0
+                return False
             self.get_logger().warn(
                 f"re-latching pose to ({x:.1f}, {y:.1f}) after "
                 f"{self._consecutive_rejects} consecutive rejects (respawn?)")
         self._consecutive_rejects = 0
         self._last_xy = (x, y)
+        self._remember(self._accepted_recent, x, y)
         return True
+
+    def _remember(self, window, x: float, y: float) -> None:
+        """Append a pose to a cluster's history and drop what has aged out."""
+        now = time.monotonic()
+        window.append((now, x, y))
+        while window and now - window[0][0] > self.relatch_window_s:
+            window.popleft()
+
+    @staticmethod
+    def _span(window) -> float:
+        """Widest separation among a cluster's recent poses, metres."""
+        if len(window) < 2:
+            return 0.0
+        xs = [p[1] for p in window]
+        ys = [p[2] for p in window]
+        return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+    def _latch_is_on_a_static_pawn(self) -> bool:
+        """Whether the pose we are latched to is the impostor and this one is not.
+
+        Symmetric and conservative: it fires only when BOTH halves are true over
+        a full window -- the accepted cluster has not moved, and the rejected one
+        has. A real aircraft flying while a second static pawn interleaves gives
+        exactly that; nothing else does. On a healthy stack there are no rejects,
+        so this never runs.
+        """
+        if self.relatch_min_span_m <= 0.0:
+            return False
+        if len(self._accepted_recent) < 5 or len(self._rejected_recent) < 5:
+            return False
+        oldest = min(self._accepted_recent[0][0], self._rejected_recent[0][0])
+        if time.monotonic() - oldest < self.relatch_window_s:
+            return False                      # not a full window yet
+        return (self._span(self._accepted_recent) < self.relatch_min_span_m
+                and self._span(self._rejected_recent) >= self.relatch_min_span_m)
 
     def _note_reject(self, why: str, x: float, y: float) -> None:
         self._rejected += 1
@@ -221,14 +347,22 @@ class RoosterGroundTruthLocalization(Node):
         prev, self._prev_sample = self._prev_sample, (now, x, y, z, yaw)
         if prev is None:
             return
-        dt = now - prev[0]
+        step = now - prev[0]
+        if step <= 0.0:
+            return
+
+        base = self._window_base(now, x, y, z, yaw)
+        dt = now - base[0]
         if dt <= 0.0:
             return
 
-        yaw_delta = math.atan2(math.sin(yaw - prev[4]), math.cos(yaw - prev[4]))
-        derived = [(x - prev[1]) / dt, (y - prev[2]) / dt, (z - prev[3]) / dt]
+        yaw_delta = math.atan2(math.sin(yaw - base[4]), math.cos(yaw - base[4]))
+        derived = [(x - base[1]) / dt, (y - base[2]) / dt, (z - base[3]) / dt]
         tau = self.velocity_filter_tau_s
-        alpha = 1.0 if tau <= 0.0 else dt / (tau + dt)
+        # The filter steps on the SAMPLE interval, not on the window it differences
+        # over -- those are different times and using dt here would make the
+        # filter's own time constant depend on the window length.
+        alpha = 1.0 if tau <= 0.0 else step / (tau + step)
 
         physics = self._physics_velocity(sphera_velocity, derived)
         if physics is None:
@@ -248,6 +382,32 @@ class RoosterGroundTruthLocalization(Node):
         twist.twist.linear.z = linear[2]
         twist.twist.angular.z = self._filtered[3]
         self.velocity_pub.publish(twist)
+
+    def _window_base(self, now, x, y, z, yaw):
+        """The sample to difference against: the oldest still inside the window.
+
+        Returns the immediately previous sample when ``velocity_window_s`` is 0,
+        which is the pre-2026-09-02 behaviour.
+
+        Args:
+            now: Stamp of the sample just received, seconds.
+            x, y, z: Its sign-corrected world position, metres.
+            yaw: Its planar yaw, radians.
+
+        Returns:
+            ``(t, x, y, z, yaw)`` to difference against.
+        """
+        self._window.append((now, x, y, z, yaw))
+        window = self.velocity_window_s
+        if window <= 0.0:
+            while len(self._window) > 2:
+                self._window.popleft()
+            return self._window[0]
+        # Keep exactly one sample older than the window, so the span is >= window
+        # rather than the first one that happens to fall short of it.
+        while len(self._window) > 2 and now - self._window[1][0] >= window:
+            self._window.popleft()
+        return self._window[0]
 
     def _physics_velocity(self, raw, derived):
         """Sphera's physics velocity in ROS world frame, or None to fall back.

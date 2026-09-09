@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import pathlib
 
+import yaml
+
 # ── Paths ────────────────────────────────────────────────────────────────
 REPO_ROOT = pathlib.Path(
     os.environ.get("SPARX_REPO", "/home/user1/GIT/TheAgency")).resolve()
@@ -182,6 +184,15 @@ EXPLORATION_FOLLOWER = "reference"
 # reachability was never the binding constraint on coverage (see
 # runs/AUTOLOOP_JOURNAL.md Finding C -- coverage tracks distance r=0.95 and
 # the aircraft stops because nothing commands it, not because it is stuck).
+#
+# DEAD KNOB, confirmed 2026-09-03 (LOOP_BUGS.md B36). The string "inflation"
+# appears nowhere in this FALCON -- not in the C++, headers, yaml, or the built
+# binary -- and the pre-rebuild image has none either, so it has never been live
+# in this deployment. FALCON enforces clearance through SAFE_DISTANCE against
+# the voxel mapper's ESDF instead. Kept because it is harmless and a future port
+# from falcon_sjtu may make it real; do NOT run an experiment on it, and do not
+# read `clearance.aircraft_frac_inside_inflation` as "inside a margin the
+# planner applied" -- it is just "within 0.40 m of a mapped obstacle".
 OBSTACLES_INFLATION = 0.40
 #: The B-spline optimiser's own clearance, which is a SOFT cost (weight 50
 #: against smoothness 20), not a constraint — so it gets traded away. Measured
@@ -223,16 +234,72 @@ EXPLORE_MAX_SPEED_XY = 1.0
 #: would quietly undo the raise on exactly the segments it fires on.
 FSM_SLOW_TRAJ_TARGET_VEL = PLAN_MAX_VEL
 
+#: Floor on the slow-trajectory rescale ratio. 1.0 makes the rescale a no-op.
+#:
+#: CONFIRMED on a real flight 2026-09-02: the ratio is computed against a
+#: slow_traj_target_yaw that was never set (C++ default 1.57 rad/s), so it lands
+#: at 0.196-0.299 and is clamped to this floor EVERY time -- 11 fires in one
+#: 453 s flight, each compressing the middle of the curve by 1/0.6 = 1.667x. The
+#: affected plans are the long ones (8.1 / 5.8 / 11.3 s), roughly 12 % of flight
+#: time, and they are slow precisely because the yaw turn needs the time. See
+#: LOOP_BUGS.md B12/B13. Env-overridable so the A/B needs no file edit:
+#: SPARX_SLOW_RATIO_MIN=1.0 python3 -m ...campaign
+FSM_SLOW_TRAJ_RATIO_MIN = float(os.environ.get("SPARX_SLOW_RATIO_MIN", "0.60"))
+
+#: A* search-time budgets, seconds. Defaults reproduce astar.yaml exactly, so
+#: nothing changes until an experiment sets them.
+#:
+#: Measured 2026-09-03 over two full flights with the sparx-astar diagnostics:
+#: 400/184 and 436/163 TIMEOUT vs OPEN_SET_EMPTY -- about 70 % of every A*
+#: failure is the clock, not the geometry -- and the timeouts report **iters
+#: 13-15, nodes ~130-160**, i.e. the search is abandoned after expanding barely
+#: a dozen cells. Plan-fail flooding is 21.7 % of all flight time (B6), and this
+#: is the first evidence that says which of its two possible causes is real.
+#: Env-overridable so an A/B needs no file edit:
+#: SPARX_ASTAR_DEFAULT_T=0.005 SPARX_ASTAR_COARSE_T=0.001 python3 -m ...campaign
+ASTAR_DEFAULT_MAX_SEARCH_TIME = float(
+    os.environ.get("SPARX_ASTAR_DEFAULT_T", "0.001"))
+ASTAR_COARSE_MAX_SEARCH_TIME = float(
+    os.environ.get("SPARX_ASTAR_COARSE_T", "0.0001"))
+
 #: Top of the BEV column band, metres. 1.50 (the sphera_drone default) drops
 #: everything above head height out of the 2D obstacle view.
 BEV_Z_CEIL = 2.20
 
-#: Volume of the exploration box, m^3 -- the denominator for coverage.
-#: From `python -m sparx_agency.tasks.planning.falcon_pegasus.mapsize` on
-#: maps/sphera_jail.yaml: box 32.0 x 32.0 x 4.8 m. Re-derive it there if the
-#: map's flight_band or bounds change; it is a reporting scale only and nothing
-#: in the flight path reads it.
-EXPLORABLE_VOLUME_M3 = 4915.0
+def _explorable_box():
+    """The exploration box from the live map yaml: (volume m^3, footprint m^2).
+
+    Derived rather than written down. The constant here read 4915.0 -- a
+    32 x 32 x 4.8 m box that has not been the map since the bounds were widened
+    -- so every `frac_of_box` printed to 2026-09-02 was inflated 6.5x.
+
+    Resolved relative to THIS FILE, not to ``REPO_ROOT``: ``recorder.py`` imports
+    this module inside the ``it`` container, where the repo is mounted at
+    ``/home/rooster/sparx_agency`` and the host path does not exist. Reading a
+    host path at import time took the recorder down on every cycle
+    (2026-09-02) -- an import must not depend on where it is imported from.
+    Falls back rather than raising for the same reason.
+
+    Returns:
+        ``(volume_m3, footprint_m2)`` of ``area.building`` x ``area.flight_band``,
+        or ``(None, None)`` when the map file cannot be read here.
+    """
+    path = (pathlib.Path(__file__).resolve().parents[2] / "tasks" / "planning" /
+            "falcon" / "maps" / (MAP_NAME + ".yaml"))
+    try:
+        with open(str(path)) as handle:
+            area = yaml.safe_load(handle)["map_config"]["area"]
+        x0, y0, x1, y1 = [float(v) for v in area["building"]]
+        z0, z1 = [float(v) for v in area["flight_band"]]
+    except Exception:                    # noqa: BLE001 -- a report scale, not flight
+        return None, None
+    footprint = abs(x1 - x0) * abs(y1 - y0)
+    return footprint * abs(z1 - z0), footprint
+
+
+#: Volume and footprint of the exploration box -- the denominators for coverage.
+#: Reporting scale only; nothing in the flight path reads either.
+EXPLORABLE_VOLUME_M3, EXPLORABLE_AREA_M2 = _explorable_box()
 
 #: Flight window, seconds.
 #:
@@ -299,13 +366,112 @@ ACCEL_LEAD_S = 0.25
 #: workaround is no longer needed. Measured in course mode: heading error p50
 #: 18-28 deg, p90 46-50, i.e. the camera is aimed well off the travel
 #: direction much of the time, by a heuristic rather than by the planner.
-YAW_MODE = "course"
+#
+# Env-driven 2026-09-03 so F23 can arm it without a file edit. "reference" hands
+# the nose back to the planner; the rate is already capped at max_yaw_rate
+# (45 deg/s), the same ceiling course mode slews at, so no new limiter is needed.
+YAW_MODE = os.environ.get("SPARX_YAW_MODE", "course").strip().lower()
 
 #: Weight on traj_server's own yaw_dot (the B-spline's analytic yaw rate),
 #: which the follower discarded -- driving yaw on proportional error alone
 #: necessarily lags a moving yaw reference. Only acts in YAW_MODE="reference";
 #: the two are one change and move together.
-YAW_DOT_FF = 0.0
+YAW_DOT_FF = float(os.environ.get("SPARX_YAW_DOT_FF", "0.0"))
+
+#: "blend" yaw mode thresholds, m/s: pure planner yaw at or below LO, pure
+#: direction-of-travel at or above HI. Defaults chosen from the measured
+#: commanded-speed distribution -- about half of all ticks sit below 0.25 m/s,
+#: where aiming the camera is nearly free (F23/F24).
+#: Seconds between the follower's re-reads of ~yaw_mode. 0 = read once at
+#: start-up (shipped). >0 enables a WITHIN-FLIGHT PAIRED run (B39): the campaign
+#: alternates the mode mid-flight so each flight is its own matched pair, which
+#: removes the between-flight variance that makes every outcome metric here cost
+#: 40-130 flights per arm to resolve.
+YAW_MODE_POLL_S = float(os.environ.get("SPARX_YAW_MODE_POLL", "0.0"))
+YAW_BLEND_LO = float(os.environ.get("SPARX_YAW_BLEND_LO", "0.15"))
+YAW_BLEND_HI = float(os.environ.get("SPARX_YAW_BLEND_HI", "0.50"))
+
+#: Seed FALCON's frontier blocked-regions from the recorded hazard cells, and
+#: how long a blocked region lives (seconds; 0 = permanent).
+#:
+#: B38: parked plan, 41% trajectory rejection and physical wedging are one chain
+#: rooted in ~12 map cells. frontier_finder.cpp reads
+#: /frontier_finder/blocked_regions_runtime at construction, so seeding it makes
+#: FALCON start the flight already avoiding them. The default TTL of 90 s
+#: expires a third of the way into a flight, which is why F21 also sets it.
+BLOCKED_SEED = os.environ.get("SPARX_BLOCKED_SEED", "false").strip().lower()
+BLOCKED_TTL_S = float(os.environ.get("SPARX_BLOCKED_TTL", "90.0"))
+#: Strike count a SEEDED blocked region enters at (B45). The restore path uses
+#: 1, and strike 1 is deliberately too weak to retire a frontier -- so F21's
+#: twelve seeded cells were loaded and then ignored. 2 is the strength the code
+#: reserves for a region that has already failed twice, which they have.
+BLOCKED_SEED_STRIKES = int(os.environ.get("SPARX_BLOCKED_SEED_STRIKES", "1"))
+
+#: NLopt total budget for the B-spline solve, seconds (FALCON ships 0.01).
+#: See LOOP_FIXES.md F25: clearance is a soft penalty in the optimiser and a
+#: hard test at the gate, and 41% of curves are rejected.
+BSPLINE_OPT_MAX_TIME = float(os.environ.get("SPARX_BSPLINE_OPT_TIME", "0.01"))
+
+#: Lift control points out of obstacles before the B-spline solve (F28/B44).
+#: The ESDF is unsigned, so such a point has zero gradient and the optimiser
+#: cannot move it out however heavily the term is weighted.
+BSPLINE_LIFT = os.environ.get("SPARX_BSPLINE_LIFT", "false").strip().lower()
+BSPLINE_LIFT_RADIUS = float(os.environ.get("SPARX_BSPLINE_LIFT_RADIUS", "1.0"))
+
+#: Give the clearance cost a usable gradient inside obstacles (F29/B44). The
+#: unsigned ESDF makes dist_grad exactly zero there, so the penalty is flat and
+#: the solver cannot descend it; this substitutes an occupancy-derived escape
+#: direction. Lifting points out beforehand (F28) does not hold -- the solve
+#: puts them back.
+BSPLINE_ESCAPE = os.environ.get("SPARX_BSPLINE_ESCAPE", "false").strip().lower()
+#: Strength of the escape push. F29 flew it at 1.0: rejections fell to 0.67x
+#: but plan_fail rose 10.7x and coverage to 0.56x -- the push was blunt enough
+#: to turn rejected trajectories into failed plans. <1 nudges over several
+#: iterations instead of displacing in one.
+BSPLINE_ESCAPE_GAIN = float(os.environ.get("SPARX_BSPLINE_ESCAPE_GAIN", "1.0"))
+
+#: Weight on the COURSE's own turn rate in course mode -- the exact analogue of
+#: YAW_DOT_FF for the heading the follower derives itself.
+#:
+#: Yaw is driven by a pure P-loop on heading error (`yaw_kp` 1.0), so holding a
+#: course that slews at R rad/s costs a STANDING error of R/yaw_kp. At the
+#: 45 deg/s course slew that is a standing 45 deg, and the measured heading error
+#: sits exactly there: p50 24 deg, p90 42-44 deg over 477 heartbeats. The nose is
+#: therefore chronically behind the direction of travel, which aims the depth
+#: camera off-path and pushes demand onto the weak lateral axis.
+#:
+#: 1.0 cancels it in the ideal case. DEFAULT 0.0 -- present behaviour until its
+#: own pre-registered A/B (LOOP_FIXES.md). Env-overridable so the A/B needs no
+#: file edit between flights: SPARX_COURSE_RATE_FF=1.0 python3 -m ...campaign
+COURSE_RATE_FF = float(os.environ.get("SPARX_COURSE_RATE_FF", "0.0"))
+
+#: Speed gate for course STEERING only, m/s. Negative -> the node's
+#: course_min_speed (0.05), i.e. unchanged behaviour.
+#:
+#: The desired course is atan2 of the commanded velocity, so at low commanded
+#: speed it carries no information. Measured 2026-09-03 (B31): below 0.25 m/s
+#: half of all direction changes exceed the 45 deg/s course slew ceiling, and
+#: 48% of ticks sit there -- the limiter saturates 71% of the time absorbing it.
+COURSE_STEER_MIN_SPEED = float(os.environ.get("SPARX_COURSE_STEER_MIN_SPEED", "-1.0"))
+
+#: Hold the course demand across steering gaps shorter than this, seconds.
+#: 0 = drop it on every gap (pre-2026-09-03 behaviour).
+#:
+#: Measured (F19 interim): every resume costs a run of ceiling-rate catch-up --
+#: 98% of the first tick after a resume is saturated, decaying to 47% only after
+#: ~50 ticks -- and a gated flight had 99 gaps, so the transients ate the entire
+#: steady-state win. 2.0 s spans 81% of observed gaps (median 0.35 s, p90 2.6 s).
+COURSE_HOLD_GAP_S = float(os.environ.get("SPARX_COURSE_HOLD_GAP", "0.0"))
+
+#: FALCON's periodic replan interval, seconds (stock yaml value 3.0).
+#:
+#: B34: each published trajectory carries about three seconds of motion and then
+#: goes dead, while plans arrive every 3.28 s (p50) / 4.88 s (p90) -- so the
+#: aircraft races a plan that expires, and the reference is parked on 50% of
+#: ticks. Lowering this makes the next plan land while the aircraft is still
+#: moving. B35: this is a STOCK FALCON param under /exploration_manager/fsm/;
+#: the launch wrote it to /fsm/ and it was ignored for the whole campaign.
+FSM_REPLAN_THRESH3 = float(os.environ.get("SPARX_REPLAN_THRESH3", "3.0"))
 
 #: Slow yaw sweep while the plan is parked, rad/s (0 disables).
 #:
@@ -381,6 +547,13 @@ FRONTIER_CLUSTER_MIN = 50.0
 # Coverage did not improve either (median 1340 vs 1255). The lock in Finding I
 # is real, but blacklisting a bigger disc trades one starvation mode for
 # another -- the aircraft runs out of places it is ALLOWED to go.
+#: Base blocked-region radius, m. Env-driven 2026-09-04 for F33.
+#:
+#: B46: the launch comment derives 2.75 as the geometric requirement -- strike 1
+#: covers 2.75 m and strike >=2 escalates to min(5.5, radius_max) = 5.5 m, which
+#: is candidate_rmax exactly -- and the value below it was never changed from
+#: 1.5, so strike >=2 reaches only 3.0 m and frontiers 3.0-5.5 m from a shadow
+#: are never retired. That is why F21's seeding loaded correctly and leaked.
 BLOCKED_REGION_RADIUS = float(os.environ.get("SPARX_BLOCKED_RADIUS", "1.5"))
 
 #: Seconds the coverage tour may hold its chosen cell before re-picking. The
@@ -406,7 +579,24 @@ EXPECTED_ROSPARAMS = {
     "/falcon_exploration_follower/tracker_pos_kp": TRACKER_POS_KP,
     "/falcon_exploration_follower/accel_lead_s": ACCEL_LEAD_S,
     "/falcon_exploration_follower/yaw_mode": YAW_MODE,
+    "/falcon_exploration_follower/course_rate_ff_gain": COURSE_RATE_FF,
+    "/falcon_exploration_follower/course_steer_min_speed": COURSE_STEER_MIN_SPEED,
+    "/falcon_exploration_follower/course_hold_gap_s": COURSE_HOLD_GAP_S,
+    # Read back under the namespace FALCON actually reads (B35): the launch
+    # spent the whole campaign writing these to /fsm/, where nothing read them.
+    "/exploration_manager/fsm/replan_thresh3": FSM_REPLAN_THRESH3,
+    "/fsm/slow_traj_ratio_min": FSM_SLOW_TRAJ_RATIO_MIN,
+    "/astar/profile/default/max_search_time": ASTAR_DEFAULT_MAX_SEARCH_TIME,
+    "/astar/profile/coarse/max_search_time": ASTAR_COARSE_MAX_SEARCH_TIME,
     "/falcon_exploration_follower/yaw_dot_ff_gain": YAW_DOT_FF,
+    "/falcon_exploration_follower/yaw_mode_poll_s": YAW_MODE_POLL_S,
+    "/falcon_exploration_follower/yaw_blend_lo": YAW_BLEND_LO,
+    "/falcon_exploration_follower/yaw_blend_hi": YAW_BLEND_HI,
+    "/frontier_finder/blocked_region_ttl_s": BLOCKED_TTL_S,
+    "/frontier_finder/blocked_seed_strikes": BLOCKED_SEED_STRIKES,
+    "/bspline_opt/max_iteration_time": BSPLINE_OPT_MAX_TIME,
+    "/bspline_opt/lift_radius_m": BSPLINE_LIFT_RADIUS,
+    "/bspline_opt/escape_gain": BSPLINE_ESCAPE_GAIN,
     "/falcon_exploration_follower/park_scan_rate": PARK_SCAN_RATE,
     "/falcon_exploration_follower/park_scan_after_s": PARK_SCAN_AFTER_S,
     "/falcon_exploration_follower/pinned_hold_sec": PINNED_HOLD_SEC,
@@ -462,9 +652,24 @@ def adapter_launch_cmd(follower=None, extra=""):
         "obstacles_inflation:={infl} safe_distance:={safe} "
         # Shadowed by sphera_drone.launch if left to nav_stack's defaults.
         "max_vel:={maxvel} fsm_slow_traj_target_vel:={slowvel} "
+        "fsm_slow_traj_ratio_min:={slowratio} "
+        "astar_default_max_search_time:={astardef} "
+        "astar_coarse_max_search_time:={astarcoarse} "
         "explore_max_speed_xy:={expspeed} bev_z_ceil:={zceil} "
         "explore_accel_lead_s:={lead} explore_yaw_mode:={yawmode} "
-        "explore_yaw_dot_ff:={yawff} explore_park_scan:={parkscan} "
+        "explore_yaw_dot_ff:={yawff} explore_course_rate_ff:={courseff} "
+        "explore_yaw_mode_poll:={yawpoll} "
+        "explore_yaw_blend_lo:={blendlo} explore_yaw_blend_hi:={blendhi} "
+        "frontier_blocked_seed:={bseed} frontier_blocked_ttl:={bttl} "
+        "frontier_seed_strikes:={bstrk} "
+        "bspline_opt_max_time:={bopt} "
+        "bspline_lift_ctrlpts:={blift} bspline_lift_radius:={bliftr} "
+        "bspline_escape_gradient:={besc} "
+        "bspline_escape_gain:={bescg} "
+        "explore_course_steer_min_speed:={coursegate} "
+        "explore_course_hold_gap:={coursehold} "
+        "fsm_replan_thresh3:={replan3} "
+        "explore_park_scan:={parkscan} "
         "explore_park_scan_after:={parkafter} "
         "frontier_blocked_radius:={blockrad} "
         "explore_use_lateral:={usel} "
@@ -474,9 +679,9 @@ def adapter_launch_cmd(follower=None, extra=""):
              gx=GOAL_X, gy=GOAL_Y,
              bxmin=BEV_XMIN, bymin=BEV_YMIN, bxmax=BEV_XMAX, bymax=BEV_YMAX,
              infl=OBSTACLES_INFLATION, safe=SAFE_DISTANCE,
-             maxvel=PLAN_MAX_VEL, slowvel=FSM_SLOW_TRAJ_TARGET_VEL,
+             maxvel=PLAN_MAX_VEL, slowvel=FSM_SLOW_TRAJ_TARGET_VEL, slowratio=FSM_SLOW_TRAJ_RATIO_MIN, astardef=ASTAR_DEFAULT_MAX_SEARCH_TIME, astarcoarse=ASTAR_COARSE_MAX_SEARCH_TIME,
              expspeed=EXPLORE_MAX_SPEED_XY, zceil=BEV_Z_CEIL,
-             usel=str(USE_LATERAL).lower(), lead=ACCEL_LEAD_S, yawmode=YAW_MODE, yawff=YAW_DOT_FF, parkscan=PARK_SCAN_RATE, parkafter=PARK_SCAN_AFTER_S, blockrad=BLOCKED_REGION_RADIUS)
+             usel=str(USE_LATERAL).lower(), lead=ACCEL_LEAD_S, yawmode=YAW_MODE, yawff=YAW_DOT_FF, yawpoll=YAW_MODE_POLL_S, blendlo=YAW_BLEND_LO, blendhi=YAW_BLEND_HI, bseed=BLOCKED_SEED, bttl=BLOCKED_TTL_S, bstrk=BLOCKED_SEED_STRIKES, bopt=BSPLINE_OPT_MAX_TIME, blift=BSPLINE_LIFT, bliftr=BSPLINE_LIFT_RADIUS, besc=BSPLINE_ESCAPE, bescg=BSPLINE_ESCAPE_GAIN, courseff=COURSE_RATE_FF, coursegate=COURSE_STEER_MIN_SPEED, coursehold=COURSE_HOLD_GAP_S, replan3=FSM_REPLAN_THRESH3, parkscan=PARK_SCAN_RATE, parkafter=PARK_SCAN_AFTER_S, blockrad=BLOCKED_REGION_RADIUS)
     return ("docker exec {c} bash -lc '{env} roslaunch falcon_adapter "
             "sphera_drone.launch {args}{extra}'").format(
         c=FALCON_CONTAINER, env=FALCON_ENV, args=args, extra=extra)
@@ -493,10 +698,29 @@ COMMAND_UNIT_CMD = (
          maxr=MAX_RANGER_M, tgtr=TARGET_RANGER_M,
          rangerrate=ALTITUDE_MAX_RANGER_RATE)
 
+#: Velocity-estimator shape, both env-overridable so an interleaved A/B needs no
+#: file edit between flights: SPARX_VEL_WINDOW=0 SPARX_VEL_TAU=0.25 restores the
+#: pre-2026-09-02 estimator exactly.
+#:
+#: The servo closes its loop on /R1/velocity_truth, and on EVERY flight that is a
+#: differentiated position -- SpheraPawnState.velocity is all-zero in this vendor
+#: build, so the fallback is taken (confirmed in 11 of 11 recent runs). Measured
+#: live 2026-09-02 off 2958 samples: Sphera stamps state at ~129 Hz with 2.3x dt
+#: jitter, which puts p90 1.0 m/s of noise on a 0.5 m/s signal once differenced
+#: between consecutive samples -- hence the old 0.25 s filter, and hence a
+#: feedback estimate measured 0.20 s late (cross-correlation peak against the
+#: true derivative over a whole flight). Differencing over a fixed 60 ms window
+#: divides the same timing error by 8x, so the filter no longer has to. The pair
+#: below is strictly better on both axes: 0.94x the tick-to-tick noise at 80 ms
+#: of total lag against 250 ms.
+VELOCITY_WINDOW_S = float(os.environ.get("SPARX_VEL_WINDOW", "0.06"))
+VELOCITY_FILTER_TAU_S = float(os.environ.get("SPARX_VEL_TAU", "0.05"))
+
 GTL_CMD = (
     "python3 -m sparx_agency.robots.ROBOTICAN."
-    "rooster_ground_truth_localization --ros-args -p rooster_id:={drone}"
-).format(drone=DRONE_ID)
+    "rooster_ground_truth_localization --ros-args -p rooster_id:={drone} "
+    "-p velocity_window_s:={win} -p velocity_filter_tau_s:={tau}"
+).format(drone=DRONE_ID, win=VELOCITY_WINDOW_S, tau=VELOCITY_FILTER_TAU_S)
 
 VIDEO_TRIGGER_CMD = (
     "bash {repo}/sparx_agency/robots/ROBOTICAN/run_video_trigger.sh "
@@ -552,18 +776,76 @@ ALTITUDE_BAND_M = 0.30
 #: configurations and two maps because nothing recorded the revision; this is
 #: the guard. "v2.1" = cap 600 + gentle lateral slew (400/s attack, 600/s
 #: release) + small map. "v7.0" = v2.1 + parked yaw scan 0.5 rad/s.
-CONTROLLER_REV = "v8.0" if BLOCKED_REGION_RADIUS > 1.5 else "v2.1d"
+def _controller_rev():
+    """A revision string naming whichever experiment's arm this run belongs to.
+
+    One string per distinguishable configuration, because `compare_arms` selects
+    arms by exact match. Composed rather than hand-set so a run can never be
+    filed under the wrong arm -- the previous campaign lost a whole sample to
+    exactly that ("Round 2's sample silently mixed two slew configurations and
+    two maps because nothing recorded the revision").
+    """
+    if BSPLINE_ESCAPE == "true":
+        return "v21.0-escape%g" % BSPLINE_ESCAPE_GAIN  # F29/F30 candidate
+    if BSPLINE_LIFT == "true":
+        return "v19.0-lift%g" % BSPLINE_LIFT_RADIUS  # F28 candidate
+    if BSPLINE_OPT_MAX_TIME != 0.01:
+        return "v18.0-optms%g" % (BSPLINE_OPT_MAX_TIME * 1000.0)  # F25 candidate
+    if BLOCKED_REGION_RADIUS != 1.5:
+        return "v22.0-shadow%g" % BLOCKED_REGION_RADIUS  # F33 candidate
+    if BLOCKED_SEED == "true":
+        return "v17.%d-hazard%g" % (BLOCKED_SEED_STRIKES, BLOCKED_TTL_S)  # F21 candidate
+    if YAW_MODE == "blend":
+        return "v16.0-blend%g-%g" % (YAW_BLEND_LO, YAW_BLEND_HI)  # F24 candidate
+    if YAW_MODE != "course":
+        return "v15.0-%syaw%g" % (YAW_MODE[:3], YAW_DOT_FF)  # F23 candidate
+    if FSM_REPLAN_THRESH3 != 3.0:
+        return "v14.0-replan%g" % FSM_REPLAN_THRESH3  # F22 candidate
+    if COURSE_STEER_MIN_SPEED > 0.0 and COURSE_HOLD_GAP_S > 0.0:
+        return "v13.0-coursehold%g" % COURSE_HOLD_GAP_S  # F19b candidate
+    if COURSE_STEER_MIN_SPEED > 0.0:
+        return "v12.0-coursegate%g" % COURSE_STEER_MIN_SPEED  # F19 candidate
+    if COURSE_RATE_FF > 0.0:
+        return "v11.0-courseff"           # F18 candidate: course-rate feedforward
+    if FSM_SLOW_TRAJ_RATIO_MIN >= 1.0:
+        return "v10.0-norescale"          # F17 candidate: reverted, kept for history
+    if VELOCITY_WINDOW_S <= 0.0:
+        return "v2.1d-legacyvel"          # F3 control
+    return "v9.0-velwindow"               # F3 candidate, and the F17 control
+
+
+CONTROLLER_REV = _controller_rev()
 
 #: Lateral is opt-in at the adapter (its default keeps the axis disabled for
 #: every non-campaign /cmd_vel producer); the candidate arm enables it at
 #: LATERAL_AXIS_CAP, the baseline arm flies the verbatim pre-2026-08-31 stack.
+#: Scale the (forward, lateral) demand pair together when either axis cannot
+#: deliver it, rather than clipping each independently.
+#:
+#: The forward axis reaches 1.566 m/s at 900 counts and the lateral only
+#: 0.428 m/s at its 600-count cap (both read off the frozen measured curve), and
+#: `_servo_axis` clamps each separately -- so an over-large diagonal loses more
+#: of its lateral component than its forward one and the aircraft flies a
+#: DIFFERENT HEADING than it was asked for. Worked example: a 0.8 m/s demand at
+#: 45 deg is flown at 37.1 deg today, and at exactly 45 deg (more slowly) with
+#: this on. `ReferenceTracker3D._clamp_velocity` refuses to clip per axis for
+#: this reason one layer up, and then the adapter did it anyway.
+#:
+#: Nearly inert while the nose points along travel; it matters the moment yaw is
+#: decoupled, which is why it lands before the yaw experiment. DEFAULT off --
+#: present behaviour until its own A/B. SPARX_PRESERVE_DIRECTION=1 enables it.
+PRESERVE_DEMAND_DIRECTION = os.environ.get(
+    "SPARX_PRESERVE_DIRECTION", "0").strip().lower() in ("1", "true", "yes", "on")
+
 TWIST_ADAPTER_CMD = (
     "bash {repo}/sparx_agency/robots/ROBOTICAN/adapters/"
-    "run_twist_control_adapter.sh --rooster-id {drone}{variant}"
+    "run_twist_control_adapter.sh --rooster-id {drone}{variant}{direction}"
 ).format(repo=REPO_ROOT, drone=DRONE_ID,
          variant=((" --max-lateral-axis %.0f --altitude-band-m %.2f"
                    % (LATERAL_AXIS_CAP, ALTITUDE_BAND_M)) if USE_LATERAL
-                  else " --legacy-feedforward"))
+                  else " --legacy-feedforward"),
+         direction=(" --preserve-demand-direction"
+                    if PRESERVE_DEMAND_DIRECTION else ""))
 
 SPHERA_RESTART_CMD = (
     "cd {repo} && python3 -m sparx_agency.tools.sphera_battery_watchdog --once"

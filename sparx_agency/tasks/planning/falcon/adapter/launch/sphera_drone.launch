@@ -209,11 +209,29 @@
   <arg name="frontier_candidate_rmax" default="5.5" />
   <arg name="max_vel"                 default="0.6" />          <!-- planner speed; coverage = speed x swath and the swath is DA3-limited to ~3.5 m -->
   <arg name="fsm_slow_traj_target_vel" default="0.6" />         <!-- tracks max_vel: a lower target undoes the raise on the segments it fires on -->
+  <arg name="fsm_slow_traj_ratio_min"  default="0.60" />        <!-- 1.0 disables the mid-curve compression entirely; see nav_stack.launch -->
+  <arg name="fsm_replan_thresh3"       default="3.0" />         <!-- FALCON periodic replan interval, seconds; stock yaml value is 3.0 -->
+  <arg name="astar_default_max_search_time" default="0.001" />   <!-- A* budget, 1 ms; ~70% of failures are timeouts at this value -->
+  <arg name="astar_coarse_max_search_time"  default="0.0001" />  <!-- A* coarse budget, 0.1 ms -->
   <arg name="explore_max_speed_xy"    default="0.8" />          <!-- must stay above max_vel with headroom -->
   <arg name="explore_use_lateral"     default="false" />        <!-- 2026-08-31: full-vector tracking incl. lateral; campaign-set -->
   <arg name="explore_accel_lead_s"    default="0.25" />         <!-- reference-accel lead, s; anticipates the ~1.3 s plant lag -->
   <arg name="explore_yaw_mode"        default="course" />       <!-- course | reference (FALCON aims the camera) -->
   <arg name="explore_yaw_dot_ff"      default="0.0" />           <!-- feedforward gain on traj_server yaw_dot -->
+  <arg name="explore_course_rate_ff"  default="0.0" />           <!-- feedforward gain on the course's own turn rate -->
+  <arg name="explore_course_steer_min_speed" default="-1.0" />   <!-- speed gate for course steering only; negative uses course_min_speed -->
+  <arg name="explore_course_hold_gap" default="0.0" />            <!-- hold the course demand across gaps shorter than this, seconds -->
+  <arg name="bspline_opt_max_time" default="0.01" />              <!-- NLopt total budget for the B-spline solve, seconds -->
+  <arg name="bspline_lift_ctrlpts" default="false" />             <!-- lift control points out of obstacles before optimising (B44) -->
+  <arg name="bspline_escape_gradient" default="false" />          <!-- give the clearance cost a gradient inside obstacles (B44) -->
+  <arg name="bspline_escape_gain" default="1.0" />                <!-- strength of that escape push; <1 nudges instead of shoving -->
+  <arg name="bspline_lift_radius" default="1.0" />                <!-- bounded search radius for that lift, metres -->
+  <arg name="frontier_blocked_seed" default="false" />            <!-- seed blocked regions from runs/_analysis hazard cells -->
+  <arg name="frontier_blocked_ttl" default="90.0" />              <!-- blocked-region TTL, seconds; 0 = permanent -->
+  <arg name="frontier_seed_strikes" default="1" />                <!-- strike count a SEEDED region enters at; 2 makes it retire frontiers -->
+  <arg name="explore_yaw_mode_poll" default="0.0" />              <!-- re-read yaw_mode every N s; >0 enables within-flight paired runs (B39) -->
+  <arg name="explore_yaw_blend_lo" default="0.15" />              <!-- blend yaw mode: pure planner yaw at or below this speed -->
+  <arg name="explore_yaw_blend_hi" default="0.50" />              <!-- blend yaw mode: pure travel direction at or above this speed -->
   <arg name="explore_park_scan"       default="0.0" />           <!-- yaw sweep while parked, rad/s -->
   <arg name="explore_park_scan_after" default="2.0" />           <!-- seconds parked before it starts -->
   <arg name="frontier_blocked_radius"  default="1.5" />           <!-- base blacklist shadow radius, m -->
@@ -741,11 +759,29 @@
     <arg name="frontier_candidate_rmax"  value="$(arg frontier_candidate_rmax)" />
     <arg name="max_vel"                  value="$(arg max_vel)" />
     <arg name="fsm_slow_traj_target_vel"  value="$(arg fsm_slow_traj_target_vel)" />
+    <arg name="fsm_slow_traj_ratio_min"   value="$(arg fsm_slow_traj_ratio_min)" />
+    <arg name="fsm_replan_thresh3"        value="$(arg fsm_replan_thresh3)" />
+    <arg name="astar_default_max_search_time" value="$(arg astar_default_max_search_time)" />
+    <arg name="astar_coarse_max_search_time"  value="$(arg astar_coarse_max_search_time)" />
     <arg name="explore_max_speed_xy"     value="$(arg explore_max_speed_xy)" />
     <arg name="explore_use_lateral"      value="$(arg explore_use_lateral)" />
     <arg name="explore_accel_lead_s"     value="$(arg explore_accel_lead_s)" />
     <arg name="explore_yaw_mode"         value="$(arg explore_yaw_mode)" />
     <arg name="explore_yaw_dot_ff"       value="$(arg explore_yaw_dot_ff)" />
+    <arg name="explore_course_rate_ff"   value="$(arg explore_course_rate_ff)" />
+    <arg name="explore_course_steer_min_speed" value="$(arg explore_course_steer_min_speed)" />
+    <arg name="explore_course_hold_gap" value="$(arg explore_course_hold_gap)" />
+    <arg name="bspline_opt_max_time" value="$(arg bspline_opt_max_time)" />
+    <arg name="bspline_lift_ctrlpts" value="$(arg bspline_lift_ctrlpts)" />
+    <arg name="bspline_escape_gradient" value="$(arg bspline_escape_gradient)" />
+    <arg name="bspline_escape_gain" value="$(arg bspline_escape_gain)" />
+    <arg name="bspline_lift_radius" value="$(arg bspline_lift_radius)" />
+    <arg name="frontier_blocked_seed" value="$(arg frontier_blocked_seed)" />
+    <arg name="frontier_blocked_ttl" value="$(arg frontier_blocked_ttl)" />
+    <arg name="frontier_seed_strikes" value="$(arg frontier_seed_strikes)" />
+    <arg name="explore_yaw_mode_poll" value="$(arg explore_yaw_mode_poll)" />
+    <arg name="explore_yaw_blend_lo" value="$(arg explore_yaw_blend_lo)" />
+    <arg name="explore_yaw_blend_hi" value="$(arg explore_yaw_blend_hi)" />
     <arg name="explore_park_scan"        value="$(arg explore_park_scan)" />
     <arg name="explore_park_scan_after"  value="$(arg explore_park_scan_after)" />
     <arg name="frontier_blocked_radius"  value="$(arg frontier_blocked_radius)" />

@@ -27,6 +27,7 @@ import time
 from typing import Callable, Optional
 
 from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 from fcu_driver_interfaces.msg import ManualControl
@@ -256,6 +257,25 @@ class RoosterUnit:
         # real vertical speed is well under 1 m/s, so 3.0 rejects only the
         # physically impossible and cannot bind in normal flight. <=0 disables.
         altitude_hold_max_ranger_rate: float = 3.0,
+        # Metres the rangefinder may disagree with the localization z before the
+        # sample is dropped as coming from Sphera's duplicate pawn. 0 disables.
+        #
+        # /R1/state intermittently carries a SECOND publisher reporting a
+        # different, stationary entity, so the ranger alternates sample by sample
+        # between the real value and the impostor's -- measured live 0.131 m and
+        # 3.415 m. The hold is terrain-relative and reads exactly this, so it
+        # commands full climb then full descent several times a second and the
+        # aircraft never leaves the ground: five of eight consecutive cycles
+        # ended "hover never settled" while the defect was active.
+        #
+        # The existing rate guard cannot stop it -- it re-seeds on the rejected
+        # value, so a strictly alternating pair passes alternately. The pose z is
+        # an INDEPENDENT reference (the localization node gates its own stream),
+        # and on healthy flights the two agree closely: |z - ranger| p50 0.019 m,
+        # p90 0.063, p99 0.217, with only 0.37 % of airborne samples past 0.6 m
+        # -- measured over three flights including one with a genuine altitude
+        # excursion. The impostor differs by 1.1-3.3 m and is always rejected.
+        ranger_pose_max_disagreement_m: float = 0.6,
         # Was 1.0s -- confirmed live (2026-08-13) that /R1/state (ranger's
         # source) actually updates at ~10Hz, so a 1Hz loop was reacting to
         # only 1 in 10 fresh readings and holding a stale throttle for up to
@@ -319,6 +339,11 @@ class RoosterUnit:
         self.altitude_hold_max_step = float(altitude_hold_max_step)
         self.altitude_hold_velocity_filter_tau_s = float(altitude_hold_velocity_filter_tau_s)
         self.altitude_hold_max_ranger_rate = float(altitude_hold_max_ranger_rate)
+        self.ranger_pose_max_disagreement_m = float(ranger_pose_max_disagreement_m)
+        self._pose_z = None            # metres, from the gated localization stream
+        self._pose_z_time = None       # time.monotonic() of that sample
+        self._ranger_pose_rejects = 0
+        self.ranger_pose_rejects_total = 0
         self.altitude_hold_interval_sec = float(altitude_hold_interval_sec)
         self.max_ranger_m = float(max_ranger_m)
         self.target_ranger_m = float(target_ranger_m)
@@ -384,6 +409,9 @@ class RoosterUnit:
             KeepAlive, f"/{rooster_id}/keep_alive", 10)
         self.state_sub = node.create_subscription(
             RoosterState, f"/{rooster_id}/state", self._state_cb, 10)
+        # The independent altitude reference for the ranger gate below.
+        node.create_subscription(
+            PoseStamped, f"/{rooster_id}/localization", self._pose_cb, 10)
         self.force_arm_client = node.create_client(
             SetBool, f"/{rooster_id}/fcu/command/force_arm")
         self.altitude_trace_pub = (
@@ -419,10 +447,55 @@ class RoosterUnit:
 
     # ---- telemetry ----
 
+    def _pose_cb(self, msg: PoseStamped):
+        """Latch the gated localization height, the ranger gate's reference."""
+        self._pose_z = float(msg.pose.position.z)
+        self._pose_z_time = time.monotonic()
+
+    def _ranger_agrees_with_pose(self, ranger: float) -> bool:
+        """Whether a ranger sample is consistent with the localization height.
+
+        Fails OPEN in every uncertain case -- no pose yet, a stale pose, the gate
+        disabled, or too many rejections in a row. A filter that can silently
+        starve the altitude loop of samples is more dangerous than the defect it
+        removes, so the only thing it may do is drop an impostor reading while a
+        fresh, independent reference disagrees with it.
+        """
+        if self.ranger_pose_max_disagreement_m <= 0.0:
+            return True
+        if self._pose_z is None or self._pose_z_time is None:
+            return True
+        if time.monotonic() - self._pose_z_time > 1.0:
+            return True                       # stale reference, trust the ranger
+        if not math.isfinite(ranger):
+            return True                       # handled elsewhere
+        if abs(ranger - self._pose_z) <= self.ranger_pose_max_disagreement_m:
+            self._ranger_pose_rejects = 0
+            return True
+        self._ranger_pose_rejects += 1
+        self.ranger_pose_rejects_total += 1
+        if self._ranger_pose_rejects > 50:
+            # Sustained disagreement is not an impostor, it is a wrong reference
+            # (a sloped floor, a bad pose latch). Stop filtering rather than fly
+            # the hold blind.
+            self.node.get_logger().warn(
+                f"[{self.id}] ranger has disagreed with the pose for "
+                f"{self._ranger_pose_rejects} samples -- trusting the ranger "
+                f"again; the REFERENCE is what looks wrong",
+                throttle_duration_sec=10.0)
+            self._ranger_pose_rejects = 0
+            return True
+        self.node.get_logger().warn(
+            f"[{self.id}] dropped ranger {ranger:.3f}m: pose says "
+            f"{self._pose_z:.3f}m (#{self.ranger_pose_rejects_total}); known "
+            f"dual-publisher defect", throttle_duration_sec=5.0)
+        return False
+
     def _state_cb(self, msg: RoosterState):
         self.armed = msg.armed
         self.airborne = msg.airborne
-        self.ranger = msg.ranger
+        if self._ranger_agrees_with_pose(msg.ranger):
+            self.ranger = msg.ranger
 
     # ---- publish (called by the owning node's timers) ----
 

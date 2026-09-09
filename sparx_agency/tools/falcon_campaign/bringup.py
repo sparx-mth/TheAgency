@@ -201,6 +201,12 @@ def assert_falcon_patches():
     return True
 
 
+#: How long to let the FCU become armable before spending a Sphera restart, s.
+#: A restart costs ~35 s and the cycle; this costs seconds and recovered a
+#: failure mode that hit ~10% of cycles on 2026-09-03.
+ARMABLE_GRACE_S = 30.0
+
+
 def drone_armable(timeout=8):
     """Whether the vendor stack says the FCU will accept an arm right now.
 
@@ -375,12 +381,48 @@ def ensure_sphera(min_battery=None):
     # so nothing here ever restarted and every cycle re-attempted the same dead
     # aircraft. If it cannot arm, the drone is unflyable and a restart is the
     # only lever this campaign has.
-    if not drone_armable():
-        print("[bringup] battery is fine but the FCU is not armable -- "
-              "restarting Sphera rather than flying a drone that cannot arm",
-              flush=True)
+    # ...but give it a moment first. `drone_armable` is a single 8 s probe, and
+    # two cycles on 2026-09-03 were lost to `armable: false` with every other
+    # component healthy -- the vendor stack simply had not finished coming up.
+    # A restart costs 35 s plus the whole cycle; waiting costs seconds. Only
+    # restart once the FCU has had a real chance to report ready.
+    if not wait_for_armable(ARMABLE_GRACE_S):
+        print("[bringup] battery is fine but the FCU is still not armable after "
+              "%.0fs -- restarting Sphera rather than flying a drone that "
+              "cannot arm" % ARMABLE_GRACE_S, flush=True)
         return restart_sphera()
+    # A duplicate state publisher (B22) is REPORTED by health_report but no
+    # longer triggers a restart here. That was tried on 2026-09-02 and refuted
+    # the same hour: the duplicate survived roughly ten consecutive Sphera
+    # restarts, so the trigger was pure cost. What the stack does instead is
+    # survive it -- the localization latch prefers the cluster that is moving
+    # (F11) and the campaign aborts at hover if the pose still disagrees with the
+    # rangefinder (F10).
     return True
+
+
+def ensure_it_container():
+    """Start the stopped ``it`` container before anything reads the battery.
+
+    Cold-start deadlock, measured 2026-09-02: every battery/armable probe runs
+    ``docker exec`` inside ``it``, so with ``it`` stopped ``_fresh_drone_ready``
+    can never be true and ``ensure_sphera`` burns all four re-entry attempts --
+    each one killing a perfectly good ``R1`` -- before failing the cycle. The
+    stack had always been warm, so ordering hid this for the whole campaign.
+
+    Raises:
+        BringupError: If the container does not exist at all (only Sphera
+            creates it, so there is nothing this campaign can do).
+    """
+    if container_up(C.IT_CONTAINER):
+        return
+    r = sh("docker start %s" % C.IT_CONTAINER, 60)
+    if r.returncode != 0 or not container_up(C.IT_CONTAINER):
+        raise BringupError(
+            "%s is down and could not be started (%s); it is created alongside "
+            "Sphera, so restart Sphera from the desktop." % (
+                C.IT_CONTAINER, (r.stderr or r.stdout or "").strip()[:200]))
+    print("[bringup] started the stopped %s container" % C.IT_CONTAINER, flush=True)
 
 
 def start_containers():
@@ -388,10 +430,63 @@ def start_containers():
     if not container_up(C.DEV_CONTAINER):
         sh("cd %s && docker compose -f docker-compose.robotican.yml up -d robotican"
            % C.REPO_ROOT, 180)
-    if not container_up(C.IT_CONTAINER):
+    ensure_it_container()
+
+
+def assert_recorder_imports():
+    """Refuse to fly if the recorder cannot even import inside its container.
+
+    ``recorder.py`` runs inside ``it``, imports ``falcon_campaign.config``, and is
+    started ~90 s into a cycle after hover -- so an import-time failure there
+    costs the whole flight's telemetry and is discovered only afterwards, from an
+    empty ``truth.jsonl``. That happened on 2026-09-02: ``config`` began reading
+    the map yaml at import through a HOST path that does not exist in the
+    container, and the cycle flew, mapped and landed with nothing recorded.
+
+    ``py_compile`` cannot catch this -- it never executes the imports. This does.
+
+    Raises:
+        BringupError: If the import fails inside the container.
+    """
+    # C.IT_ENV, so the check runs in exactly the environment start_recorder
+    # uses -- a bare shell lacks rclpy and would fail for the wrong reason.
+    cmd = (C.IT_ENV +
+           "python3 -c 'from sparx_agency.tools.falcon_campaign import recorder'")
+    r = sh("docker exec %s bash -lc %s" % (C.IT_CONTAINER, shlex.quote(cmd)), 60)
+    if r.returncode != 0:
+        tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
         raise BringupError(
-            "%s is down and this campaign does not know how to recreate it "
-            "(it is created alongside Sphera). Restart Sphera." % C.IT_CONTAINER)
+            "recorder.py cannot be imported inside %s, so this cycle would fly "
+            "and record nothing: %s" % (C.IT_CONTAINER,
+                                        " | ".join(tail[-3:]) or "no output"))
+
+
+def assert_launch_xml():
+    """Refuse to fly a launch file that is not well-formed XML.
+
+    roslaunch reports this as ``RLException: Invalid roslaunch XML syntax`` from
+    inside the container, three minutes into a cycle, after Sphera has been
+    restarted and the aircraft armed -- so the whole cycle is spent to learn that
+    a comment had two hyphens in it. That is exactly what happened on
+    2026-09-02. Parsing them here costs milliseconds and fails before anything
+    has been spent.
+
+    Raises:
+        BringupError: If any launch file under the adapter fails to parse.
+    """
+    import xml.etree.ElementTree as ElementTree
+
+    launch_dir = (C.REPO_ROOT / "sparx_agency" / "tasks" / "planning" / "falcon" /
+                  "adapter" / "launch")
+    broken = []
+    for path in sorted(launch_dir.glob("*.launch")):
+        try:
+            ElementTree.parse(str(path))
+        except ElementTree.ParseError as exc:
+            broken.append("%s: %s" % (path.name, exc))
+    if broken:
+        raise BringupError("launch files are not well-formed XML -- %s"
+                           % "; ".join(broken))
 
 
 def start_falcon(follower=None, extra=""):
@@ -653,6 +748,128 @@ def start_video_watchdog():
     spawn("bash %s" % shlex.quote(str(script)), "/tmp/video_freshness_watchdog.log")
 
 
+#: Metres by which the localization z may disagree with the rangefinder once the
+#: aircraft is hovering before the pose is judged to be tracking the wrong pawn.
+#: Generous -- the two measure different things (world height vs height above
+#: whatever is underneath) and the failure this catches is a metre-scale
+#: disagreement, not a modelling one.
+POSE_RANGER_DISAGREEMENT_M = 0.6
+
+#: Metres of movement over a pose sample window that prove the stream is
+#: following something real. A hovering aircraft's own jitter is 3-8 cm; the
+#: impostor pawn spans tens of micrometres, so 0.01 m separates them by ~300x.
+POSE_STATIC_SPAN_M = 0.01
+
+
+def _sample_localization(samples=25):
+    """Recent (z, x, y) readings from the gated localization stream."""
+    # `position:` then its three fields -- orientation's x/y/z are indented
+    # identically, so anchoring on the block header is what keeps them out.
+    cmd = (C.IT_ENV + "timeout 9 ros2 topic echo %s 2>/dev/null | "
+           "grep -A3 'position:' | grep -E '^    [xyz]:' | head -%d"
+           % (C.ROS2_TOPICS["localization"], samples * 3))
+    r = sh("docker exec %s bash -lc %s" % (C.IT_CONTAINER, shlex.quote(cmd)), 30)
+    values = []
+    for line in r.stdout.splitlines():
+        try:
+            values.append(float(line.split(":")[1]))
+        except (IndexError, ValueError):
+            pass
+    return [tuple(values[i:i + 3]) for i in range(0, len(values) - 2, 3)]
+
+
+def _sample_ranger(samples=20):
+    """Recent rangefinder readings."""
+    cmd = (C.IT_ENV + "timeout 9 ros2 topic echo %s 2>/dev/null | grep -m%d ranger"
+           % (C.ROS2_TOPICS["state"], samples))
+    r = sh("docker exec %s bash -lc %s" % (C.IT_CONTAINER, shlex.quote(cmd)), 30)
+    out = []
+    for line in r.stdout.splitlines():
+        if "ranger" in line:
+            try:
+                out.append(float(line.split(":")[1]))
+            except (IndexError, ValueError):
+                pass
+    return out
+
+
+def localization_tracks_the_aircraft():
+    """Whether the pose stream is following the real drone or Sphera's impostor.
+
+    The failure this exists to catch is specific and dangerous: the localization
+    latch takes Sphera's stationary impostor pawn, every real pose is rejected
+    silently, and the aircraft flies with the whole stack believing it is parked
+    -- observed once, with the follower at 900 counts, the platform ceiling
+    (`20260902_135459Z`, B24).
+
+    **Two false-positive modes had to be designed out, both seen live:**
+
+    1. Comparing against ONE ranger sample. With the rangefinder alternating
+       between two pawns that is a coin flip; it aborted a healthy flight whose
+       pose was right (`20260902_172137Z`).
+    2. Comparing against MANY ranger samples but treating disagreement as the
+       pose's fault. When the ranger stream is *entirely* impostor -- 20 of 20
+       samples at 0.131 m while the aircraft hovered at 1.21 m -- the pose is the
+       correct stream and the ranger is the broken one, and aborting is exactly
+       backwards (`20260902_173415Z`).
+
+    So the test is not "do these agree". It is **"is the pose stuck?"** -- which
+    is the only condition that is actually unsafe. A real aircraft, even hovering,
+    jitters by centimetres (measured hover spread 3-8 cm); the impostor's pose
+    spans tens of MICROmetres. Disagreement with the ranger is required as well,
+    so a genuinely motionless-but-correct pose cannot trip it.
+
+    Returns:
+        ``(ok, detail)``. Anything unreadable is never a failure.
+    """
+    poses = _sample_localization()
+    if len(poses) < 5:
+        return True, "only %d pose samples -- not treated as a failure" % len(poses)
+    xs = [p[0] for p in poses]
+    ys = [p[1] for p in poses]
+    zs = [p[2] for p in poses]
+    span = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+    if span >= POSE_STATIC_SPAN_M:
+        return True, "pose is moving (span %.4f m over %d samples)" % (span, len(poses))
+
+    rangers = _sample_ranger()
+    if not rangers:
+        return True, "pose static (span %.4f m) but no ranger to check against" % span
+    closest = min(rangers, key=lambda v: abs(v - zs[-1]))
+    agrees = abs(closest - zs[-1]) <= POSE_RANGER_DISAGREEMENT_M
+    detail = ("pose static (span %.5f m, z=%.3f) vs %d ranger samples %.3f..%.3f"
+              % (span, zs[-1], len(rangers), min(rangers), max(rangers)))
+    return agrees, detail
+
+
+def duplicate_state_publishers():
+    """Whether Sphera has more than one entity publishing the drone's state.
+
+    Sphera intermittently registers a SECOND pawn on ``/R1/state`` and
+    ``/R1/sphera/state`` -- a stationary object at a fixed pose with zero
+    attitude, whose messages interleave with the real aircraft's. Measured
+    2026-09-02: 83 % of one flight's samples were the impostor, and the
+    downward rangefinder alternated 0.131 m / 3.415 m sample by sample.
+
+    That is not a recording nuisance. ``rooster_unit``'s altitude hold is
+    terrain-relative and reads that ranger, so it alternates between commanding
+    full climb (wanted_z 1080) and full descent (320) several times a second and
+    the aircraft never leaves the ground: **three of five consecutive cycles
+    ended "hover never settled"** while it was active, against zero before.
+
+    Cheaper to detect than to survive, and a Sphera restart is the only lever --
+    so this is a bring-up gate, not a filter.
+
+    Returns:
+        ``(is_duplicated, detail)``.
+    """
+    counts = {}
+    for topic in (C.ROS2_TOPICS["state"], C.ROS2_TOPICS["truth"]):
+        counts[topic] = ros2_publisher_count(topic)
+    bad = [t for t, n in counts.items() if n > 1]
+    return bool(bad), ", ".join("%s=%s" % (t, n) for t, n in sorted(counts.items()))
+
+
 def health_report():
     """Snapshot every check the campaign cares about, as a dict.
 
@@ -673,6 +890,8 @@ def health_report():
         "cmd_vel_raw_publishers": ros1_publisher_count(C.ROS1_TOPICS["cmd_vel_raw"]),
     }
     report["manual_authority_ok"], report["manual_authority"] = manual_control_authority()
+    duplicated, report["state_publishers"] = duplicate_state_publishers()
+    report["state_publishers_ok"] = not duplicated
     report["battery_ok"] = (report["battery"] is not None
                             and report["battery"] >= MIN_FLIGHT_BATTERY)
     report["armable"] = drone_armable()
@@ -685,6 +904,12 @@ def health_report():
         report["falcon_up"] and report["bridge_up"] and report["exploration_node"]
         and report["frames_fresh"] and report["manual_authority_ok"]
         and report["battery_ok"] and report["armable"]
+        # state_publishers_ok is ADVISORY, deliberately not part of `ok`.
+        # ensure_sphera already restarts once when it sees the duplicate; if the
+        # restart does not clear it, refusing to fly would ground the campaign
+        # over a defect flights can still survive -- a cycle took off normally
+        # with it active on 2026-09-02. Reported so the analysis can condition
+        # on it, not used to veto a flight.
         and str(report["drone_image"]).startswith(C.SIM_IMAGE_PREFIX))
     return report
 
@@ -702,6 +927,9 @@ def full_bringup(follower=None, extra="", min_battery=None):
         BringupError: If a step's health check fails irrecoverably.
     """
     stop_twist_adapter()
+    assert_launch_xml()
+    ensure_it_container()
+    assert_recorder_imports()
     if not ensure_sphera(min_battery):
         raise BringupError("Sphera restart / GUI re-entry failed; no fresh R1")
     assert_simulator()

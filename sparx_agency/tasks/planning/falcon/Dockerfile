@@ -374,6 +374,111 @@ RUN chmod +x /tmp/fix_falcon_tour_commit.sh && /tmp/fix_falcon_tour_commit.sh
 COPY patches/fix_falcon_so3_gencfg.sh /tmp/fix_falcon_so3_gencfg.sh
 RUN chmod +x /tmp/fix_falcon_so3_gencfg.sh && /tmp/fix_falcon_so3_gencfg.sh
 
+# ── Mapping-rate counters on /voxel_mapping/map_stats ─────────
+# FALCON exposes explored volume and nothing else, which cannot answer how fast
+# the map is being built: time per m2, time per m3, and how the NEW-voxel rate
+# decays as the flight revisits seen ground. The occupancy clouds carry the raw
+# data but run 14-450 MB per message, so sampling them is not an option. This
+# adds the counters to the full-grid walk publishMapCoverage() already does at
+# 2 Hz. Additive: map_coverage itself is untouched. MUST sit before the
+# catkin_make below -- see the tour-commit note above for why.
+COPY patches/sparx_map_stats.sh /tmp/sparx_map_stats.sh
+RUN chmod +x /tmp/sparx_map_stats.sh && /tmp/sparx_map_stats.sh
+
+# ── Make A*'s three failure exits distinguishable ─────────────
+# Two of the three are silent upstream (the timeout warning and the
+# open-set-empty diagnostics are both commented out), so a 1 ms search timeout
+# and a genuinely enclosed aircraft produce the identical "[FSM] Plan fail" --
+# and they call for opposite fixes. A*-plan-fail flooding is the largest single
+# sink of flight time on this platform (21.7% of every flight, worst case 254 s
+# locked on one cell), and no fix for it can be chosen while the failure mode is
+# unknown. Diagnostic only: three throttled ROS_WARNs, no control flow changed.
+COPY patches/sparx_astar_legible.sh /tmp/sparx_astar_legible.sh
+RUN chmod +x /tmp/sparx_astar_legible.sh && /tmp/sparx_astar_legible.sh
+
+# ── Make the B-spline optimiser say how it terminated ─────────
+# 41% of everything the planner produces is thrown away by a HARD occupancy
+# check, while the optimiser treats clearance as a SOFT quadratic penalty and is
+# given ten milliseconds of NLopt time for an L-BFGS over 11-21 control points.
+# NLopt already returns whether it stopped on the clock; FALCON assigned that
+# code to a local and never read it. Logging it settles the question from one
+# flight, where inferring it behaviourally needs ~90 flights per arm (the
+# rejection count has a CV of 44%). Also re-reads the time budget per solve so
+# it can be alternated within a flight. Diagnostic + a parameter read; no
+# control flow changed.
+COPY patches/sparx_opt_result.sh /tmp/sparx_opt_result.sh
+RUN chmod +x /tmp/sparx_opt_result.sh && /tmp/sparx_opt_result.sh
+
+# ── Ask the ESDF what it thinks where the collision check rejects ─
+# The optimiser converges every time and still produces curves that pass through
+# OCCUPIED voxels on 41% of attempts (LOOP_BUGS.md B40). It minimises against the
+# ESDF; the pre-publish check reads raw occupancy. Logging the ESDF distance at
+# the rejecting point separates "the clearance penalty lost the trade" from "the
+# two halves disagree about the world", which call for opposite fixes.
+# Diagnostic only: one ESDF query on a path that already logs and returns false.
+COPY patches/sparx_esdf_vs_occupancy.sh /tmp/sparx_esdf_vs_occupancy.sh
+RUN chmod +x /tmp/sparx_esdf_vs_occupancy.sh && /tmp/sparx_esdf_vs_occupancy.sh
+
+# ── Control-point clearance beside curve clearance at a rejection ─
+# B41: the ESDF and occupancy AGREE at every rejection, so it is not a map
+# problem; B40: the optimiser converges every time. It therefore converges to
+# curves passing through obstacles it can see. The optimiser penalises CONTROL
+# POINTS while the checker samples the CURVE, and a B-spline lies inside its
+# control hull -- so the control points can all be clear while the curve clips.
+# That case makes the cost WEIGHT irrelevant and calls for the opposite fix, so
+# the two are separated by logging the minimum control-point clearance.
+COPY patches/sparx_ctrlpt_clearance.sh /tmp/sparx_ctrlpt_clearance.sh
+RUN chmod +x /tmp/sparx_ctrlpt_clearance.sh && /tmp/sparx_ctrlpt_clearance.sh
+
+# ── How far the optimiser actually moves the control points ───
+# B42: 11 of 14 rejected trajectories had a control point INSIDE an obstacle,
+# accepting a 45-unit penalty against total costs of 33-668; B40: every solve
+# terminates on xtol in under a millisecond. Premature convergence would explain
+# both -- but "sub-millisecond" is not "barely iterated", and the two cases call
+# for opposite fixes (tolerance vs cost landscape). Logging the travel between
+# the variables handed to NLopt and those returned separates them.
+COPY patches/sparx_opt_travel.sh /tmp/sparx_opt_travel.sh
+RUN chmod +x /tmp/sparx_opt_travel.sh && /tmp/sparx_opt_travel.sh
+
+# ── Lift control points out of obstacles before optimising ────
+# THE B44 FIX. The ESDF is unsigned, so a control point inside an obstacle sees
+# distance 0 and gradient 0 -- a flat 45-unit penalty it cannot descend, which is
+# why 11 of 14 rejected trajectories keep one there and 41% of plans are thrown
+# away. Relocating such points to the nearest free voxel first puts the solver
+# back where its gradient works. OFF by default (/bspline_opt/lift_ctrlpts).
+COPY patches/sparx_lift_ctrlpts.sh /tmp/sparx_lift_ctrlpts.sh
+RUN chmod +x /tmp/sparx_lift_ctrlpts.sh && /tmp/sparx_lift_ctrlpts.sh
+
+# ── Give the clearance cost a gradient INSIDE obstacles ───────
+# The real B44 fix. The unsigned ESDF makes dist_grad exactly (0,0,0) inside an
+# obstacle, so the cost adds 45.4 and contributes ZERO gradient -- a flat cost
+# the solver cannot descend. Lifting points out beforehand (F28) does not hold:
+# 66% were back inside after the solve, because one L-BFGS step (0.216 m median)
+# can cross the 0.55 m gradient band into the flat interior. This substitutes an
+# escape direction built from the occupancy grid's free neighbours, so a trapped
+# point is pushed out DURING the solve. OFF by default.
+COPY patches/sparx_escape_gradient.sh /tmp/sparx_escape_gradient.sh
+RUN chmod +x /tmp/sparx_escape_gradient.sh && /tmp/sparx_escape_gradient.sh
+
+# ── Let a SEEDED blocked region enter at a chosen strike ──────
+# B45: the restore path pushes strikes=1, and the code deliberately makes strike
+# 1 too weak to retire a frontier -- right for a runtime veto that may be a
+# one-off, wrong for a seed distilled from 652 wedging episodes over 985 flights.
+# F21 loaded 12 regions and nothing changed, because they arrived at the strength
+# designed not to act. Default 1 keeps the shipped behaviour exactly.
+COPY patches/sparx_seed_strikes.sh /tmp/sparx_seed_strikes.sh
+RUN chmod +x /tmp/sparx_seed_strikes.sh && /tmp/sparx_seed_strikes.sh
+
+# ── Log the viewpoint the planner actually selects ────────────
+# F21 could not be measured because nothing recorded WHERE the planner chose to
+# go: time-inside-cells is mostly transit that blocked regions cannot touch, and
+# dormant-frontier counts run 106-157 per flight from ordinary runtime blocking,
+# so twelve seeded regions are invisible in them. One throttled line at the
+# selection site makes "viewpoints selected inside the seeded cells" countable,
+# which is the near-binary check that experiment needs. Ungated: useful always.
+COPY patches/sparx_viewpoint_log.sh /tmp/sparx_viewpoint_log.sh
+RUN chmod +x /tmp/sparx_viewpoint_log.sh && /tmp/sparx_viewpoint_log.sh
+
 # ── 6b. Skip CUDA-only + (Jetson) simulator-side packages ─────
 COPY patches/ignore_cuda_pkgs.sh /tmp/ignore_cuda_pkgs.sh
 RUN chmod +x /tmp/ignore_cuda_pkgs.sh \

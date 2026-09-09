@@ -76,6 +76,47 @@ def _num(value: float):
     return number if math.isfinite(number) else None
 
 
+#: Metres by which the raw truth pose may disagree with the gated localization
+#: pose before the truth sample is flagged as coming from the wrong publisher.
+#: They describe the same aircraft, so agreement is exact in the healthy case.
+SUSPECT_DISAGREEMENT_M = 1.0
+
+
+def _truth_is_suspect(truth, localization):
+    """Whether this truth sample came from Sphera's second, bogus publisher.
+
+    ``/R1/sphera/state`` intermittently carries a SECOND publisher reporting a
+    different, stationary pawn -- measured 2026-09-02, **83 % of the messages in
+    one flight** sat at a fixed (-0.59, -4.53, 0.12) with zero attitude while the
+    real aircraft flew. ``rooster_ground_truth_localization`` already rejects
+    those (~159 000 in that flight) so the gated ``localization`` / ``attitude``
+    streams are clean and flight control is unaffected -- but this recorder
+    subscribes the raw topic and records whatever arrives.
+
+    Flagged, not filtered: this file's contract is that truth is recorded raw,
+    because a correction cannot be un-applied once it turns out to be wrong. The
+    flag lets the analyzer drop the bad samples without the recording losing
+    them.
+
+    ``localization`` is the same pose with x and y negated, so for a healthy
+    sample ``truth.x == -localization.x`` exactly; the two disagree by tens of
+    metres when the publishers differ.
+
+    Args:
+        truth: The raw truth entry for this row.
+        localization: The gated localization entry for this row.
+
+    Returns:
+        True when the two disagree, False when they agree, and None when either
+        is missing -- which is not evidence of health.
+    """
+    tx, ty = truth.get("x"), truth.get("y")
+    lx, ly = localization.get("x"), localization.get("y")
+    if None in (tx, ty, lx, ly):
+        return None
+    return math.hypot(tx + lx, ty + ly) > SUSPECT_DISAGREEMENT_M
+
+
 class FlightRecorder(Node):
     """Samples every telemetry stream of one flight into ``truth.jsonl``.
 
@@ -214,6 +255,7 @@ class FlightRecorder(Node):
             # age None == never published; the analyzer must not read that as 0.
             entry["age"] = None if stamp is None else round(now - stamp, 4)
             row[name] = entry
+        row["truth"]["suspect"] = _truth_is_suspect(row["truth"], row["localization"])
         self._fh.write(json.dumps(row) + "\n")
         self._fh.flush()
         self.samples += 1

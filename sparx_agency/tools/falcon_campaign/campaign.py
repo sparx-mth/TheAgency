@@ -20,7 +20,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 import shlex
+import shutil
 import subprocess
 import time
 import traceback
@@ -83,6 +85,84 @@ def start_clearance_probe():
                        "> /tmp/clearance.jsonl 2>/tmp/clearance.err")), 30)
 
 
+#: Free space below which raw telemetry starts being pruned, bytes.
+#: Generous on purpose: at ~25 MB a flight and ~5 flights an hour this is months
+#: of headroom, so in normal operation nothing is ever deleted. It exists so an
+#: endless loop cannot fill the disk, not as routine housekeeping.
+PRUNE_FREE_BYTES = 80 * 1024 ** 3
+
+#: How many of the newest runs keep their raw telemetry when pruning does fire.
+PRUNE_KEEP_RUNS = 100
+
+#: Only these are ever deleted. metrics.json, summary.json, findings.md,
+#: coverage.jsonl and clearance.jsonl are small and are the campaign's memory --
+#: they are never pruned, so an old run stays fully queryable.
+PRUNE_FILES = ("truth.jsonl", "flight_trace.jsonl")
+
+
+def prune_raw_telemetry(run_dir):
+    """Delete raw telemetry from old runs, but only if the disk is filling.
+
+    The loop never stops, so its output cannot grow without bound. What it must
+    NOT do is quietly destroy the record: only the two large per-tick streams are
+    ever removed, only from runs outside the newest ``PRUNE_KEEP_RUNS``, and only
+    once free space is under ``PRUNE_FREE_BYTES``. Every derived metric survives.
+
+    Args:
+        run_dir: The run just finished, used only for the log line.
+
+    Returns:
+        The number of files removed.
+    """
+    try:
+        usage = shutil.disk_usage(str(C.RUNS_DIR))
+    except OSError:
+        return 0
+    if usage.free >= PRUNE_FREE_BYTES:
+        return 0
+    stamped = re.compile(r"^\d{8}_\d{6}Z$")
+    runs = sorted((p for p in C.RUNS_DIR.glob("*")
+                   if p.is_dir() and stamped.match(p.name)), reverse=True)
+    removed = freed = 0
+    for old in runs[PRUNE_KEEP_RUNS:]:
+        for name in PRUNE_FILES:
+            path = old / name
+            if path.exists():
+                freed += path.stat().st_size
+                path.unlink()
+                removed += 1
+    if removed:
+        log(run_dir, "disk at %.0f GB free: pruned %d raw telemetry files from "
+                     "runs older than the newest %d, freeing %.1f GB (metrics, "
+                     "summaries and findings untouched)"
+            % (usage.free / 1024.0 ** 3, removed, PRUNE_KEEP_RUNS,
+               freed / 1024.0 ** 3))
+    return removed
+
+
+def start_flight_trace_probe():
+    """Record the plan, the tracking and the map for the whole flight.
+
+    LOOP_MISSION.md section 4. The follower already publishes its complete
+    per-tick internals on ``/nav_debug/control_trace`` and FALCON already
+    publishes the B-spline itself, and neither was ever captured -- so every
+    tracking number the campaign quoted came from a 0.5 Hz log line. This probe
+    subscribes both, plus the mapping-rate counters, and writes them as JSONL.
+
+    Failure here must never cost a cycle -- it is instrumentation, not flight.
+    """
+    bringup.sh(
+        "docker cp %s %s:/tmp/probe_flight_trace.py 2>/dev/null"
+        % (shlex.quote(str(C.REPO_ROOT / "sparx_agency" / "tools" /
+                          "falcon_campaign" / "probe_flight_trace.py")),
+           C.FALCON_CONTAINER), 30)
+    bringup.sh(
+        "docker exec -d %s bash -lc %s"
+        % (C.FALCON_CONTAINER,
+           shlex.quote(C.FALCON_ENV + "python3 -u /tmp/probe_flight_trace.py "
+                       "> /tmp/flight_trace.jsonl 2>/tmp/flight_trace.err")), 30)
+
+
 def start_recorder(run_dir, duration_s):
     """Launch the flight recorder inside the vendor container, detached.
 
@@ -142,6 +222,9 @@ def collect_logs(run_dir, recorded):
                      "would be the previous flight's")
     bringup.sh("docker cp %s:/tmp/clearance.jsonl %s/ 2>/dev/null"
                % (C.FALCON_CONTAINER, shlex.quote(str(run_dir))), 30)
+    for name in ("flight_trace.jsonl", "flight_trace.err"):
+        bringup.sh("docker cp %s:/tmp/%s %s/ 2>/dev/null"
+                   % (C.FALCON_CONTAINER, name, shlex.quote(str(run_dir))), 120)
     # The follower/FSM logs live in falcon's rotating roslaunch log dir.
     #
     # rosout* is excluded on purpose. It is the master's AGGREGATE of the very
@@ -326,9 +409,24 @@ def fly(run_dir, duration_s):
         result["ended"] = "hover never settled: %s" % message
         return result
 
+    # The aircraft is hovering, which is the only moment the pose stream and the
+    # rangefinder must agree -- and the only cheap way to notice that
+    # localization has latched onto Sphera's duplicate pawn. Flying on a frozen
+    # pose drives the horizontal axes to full deflection against an error that
+    # can never close (see bringup.localization_tracks_the_aircraft).
+    pose_ok, pose_detail = bringup.localization_tracks_the_aircraft()
+    result["pose_check"] = pose_detail
+    if not pose_ok:
+        log(run_dir, "ABORT: the pose stream is not following the aircraft (%s) -- "
+                     "localization has latched onto Sphera's duplicate pawn; "
+                     "landing rather than flying blind at full stick" % pose_detail)
+        result["ended"] = "pose latched to the wrong pawn: %s" % pose_detail
+        return result
+    log(run_dir, "pose check: %s" % pose_detail)
     log(run_dir, "hover settled -- starting recorder and handing over to FALCON")
     start_recorder(run_dir, duration_s)
     start_clearance_probe()
+    start_flight_trace_probe()
     result["recorded"] = True
     time.sleep(2)
     bringup.start_twist_adapter()
@@ -410,6 +508,10 @@ def _finish(run_dir, summary):
             json.dump(summary, fh, indent=2, default=str)
     except OSError as exc:
         log(run_dir, "could not write summary.json: %s" % exc)
+    try:
+        prune_raw_telemetry(run_dir)
+    except Exception as exc:                       # noqa: BLE001 -- housekeeping
+        log(run_dir, "prune failed (harmless): %s" % exc)
     log(run_dir, "=== cycle end: %s ===" % summary.get("ended"))
     return summary
 

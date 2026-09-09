@@ -1282,6 +1282,26 @@
        analytic yaw rate forward so reference mode does not lag. -->
   <arg name="explore_yaw_mode"     default="course" />
   <arg name="explore_yaw_dot_ff"   default="0.0" />
+  <!-- The same feedforward for COURSE mode, where the heading target is the
+       follower's own slew-limited course rather than FALCON's yaw plan. Yaw is
+       a pure P-loop on heading error, so holding a course that turns at R rad/s
+       costs a standing error of R/yaw_kp: at the 45 deg/s slew and yaw_kp 1.0
+       that is a standing 45 deg, and measured heading error (p50 24, p90 42-44)
+       sits exactly there. 1.0 cancels it. Default 0.0 = present behaviour. -->
+  <arg name="explore_course_rate_ff" default="0.0" />
+  <arg name="explore_course_steer_min_speed" default="-1.0" />
+  <arg name="explore_course_hold_gap" default="0.0" />
+  <arg name="bspline_opt_max_time" default="0.01" />
+  <arg name="bspline_lift_ctrlpts" default="false" />
+  <arg name="bspline_escape_gradient" default="false" />
+  <arg name="bspline_escape_gain" default="1.0" />
+  <arg name="bspline_lift_radius" default="1.0" />
+  <arg name="frontier_blocked_seed" default="false" />
+  <arg name="frontier_blocked_ttl" default="90.0" />
+  <arg name="frontier_seed_strikes" default="1" />
+  <arg name="explore_yaw_mode_poll" default="0.0" />
+  <arg name="explore_yaw_blend_lo" default="0.15" />
+  <arg name="explore_yaw_blend_hi" default="0.50" />
   <!-- Slow yaw sweep while the plan is parked (rad/s). Parked time is what
        limits both coverage and tracking, and while parked nothing enters
        the map, so no frontier resolves. Yaw only. 0 disables. -->
@@ -1318,9 +1338,17 @@
   <arg name="frontier_candidate_rmin"    default="1.0" />
   <arg name="frontier_candidate_rmax"    default="5.5" />
 
-  <arg name="fsm_replan_thresh1"   default="2.0" />
-  <arg name="fsm_replan_thresh2"   default="2.0" />
-  <arg name="fsm_replan_thresh3"   default="2.0" />
+  <!-- These three are STOCK FALCON FSM params and live under
+       /exploration_manager/fsm/, NOT /fsm/, which is where our own patch
+       params (slow_traj_*) live. Until 2026-09-03 they were written to /fsm/
+       and silently ignored, so FALCON ran its own exploration_manager.yaml
+       values throughout the campaign (see LOOP_BUGS.md B35). The defaults
+       below ARE those yaml values, so correcting the namespace changed no
+       behaviour; replan_thresh3 is the periodic replan interval and the one
+       B34 is about. -->
+  <arg name="fsm_replan_thresh1"   default="0.05" />
+  <arg name="fsm_replan_thresh2"   default="0.2" />
+  <arg name="fsm_replan_thresh3"   default="3.0" />
   <arg name="fsm_replan_time"      default="60.0" />
   <arg name="fsm_thresh_replan"    default="60.0" />
   <arg name="fsm_thresh_no_replan" default="60.0" />
@@ -1404,6 +1432,38 @@
   <arg name="voxel_raycast_max" default="8.0" />
   <param name="/voxel_mapping/tsdf/raycast_max" value="$(arg voxel_raycast_max)"/>
 
+  <!-- A* search-time budgets, overridden here AFTER pathfinding/config/astar.yaml
+       is loaded (same pattern as raycast_max above).
+
+       Measured 2026-09-03 with the sparx-astar diagnostics. Roughly 70% of A*
+       failures are TIMEOUT rather than OPEN_SET_EMPTY, but the timeouts split
+       by PROFILE and the two halves behave completely differently:
+
+         searchUnknown          budget 0.0001 (coarse)   498 timeouts,  22 iters
+         searchUnknownOnlyBBox  budget 0.0010 (default)  457 timeouts, 238 iters
+         searchBBox             budget 0.0010 (default)  172 timeouts, 269 iters
+         search                 budget 0.0010 (default)   90 timeouts, 189 iters
+
+       CORRECTION to an earlier version of this comment, which read "iters 13-15,
+       so the budget is the binding constraint": that figure was the MINIMUM of
+       the coarse bucket alone and was wrongly generalised to all six overloads.
+       It is also a non sequitur - few iterations proves the clock expired, not
+       that more time would have terminated the search.
+
+       And the coarse half is already refuted for free: searchUnknownOnlyBBox
+       runs at 0.0010, which IS the 10x value a coarse raise would apply, and
+       still times out 457 times at 238 iterations on this same map. Raising
+       coarse is not supported. Only `default` has a defensible case, and only
+       via the connectivity graph - see LOOP_FIXES.md before changing either.
+
+       The yaml ships default=1 ms and coarse=0.1 ms. Defaults below reproduce
+       those values exactly, so this block changes NOTHING until an experiment
+       sets them; see LOOP_FIXES.md before altering. -->
+  <arg name="astar_default_max_search_time" default="0.001" />
+  <arg name="astar_coarse_max_search_time"  default="0.0001" />
+  <param name="/astar/profile/default/max_search_time" value="$(arg astar_default_max_search_time)"/>
+  <param name="/astar/profile/coarse/max_search_time"  value="$(arg astar_coarse_max_search_time)"/>
+
   <!-- How long the coverage tour may hold its chosen cell before re-picking.
        The TSP is re-solved every cycle and its first element taken as "next",
        so the target changed 190 times in 517 s (median dwell 0.3 s) and the
@@ -1481,12 +1541,27 @@
   <arg name="fsm_replan_from_pose_drift" default="1.5"/>
   <param name="/fsm/replan_from_pose_drift" value="$(arg fsm_replan_from_pose_drift)"/>
 
+  <!-- 2026-09-02: slow_traj_target_yaw and slow_traj_ratio_max were never set,
+       so the C++ defaults (1.57 rad/s, 4.0) applied and the computed ratio was
+       ALWAYS far below ratio_min. Measured on a real flight: 11 fires, every one
+       "Rescale ratio 0.196|0.258|0.299 clamped to 0.600". lengthenTime(0.60)
+       compresses only the MIDDLE knots, so peak mid-curve reference speed rises
+       up to 1.667x on trajectories that were slow deliberately (the yaw turn
+       needed the time), and nothing re-checks feasibility afterwards
+       (reallocateTime/checkFeasibility are dead code). It also desyncs yaw from
+       position, because the yaw spline's knot_span_ is not re-timed and only a
+       scalar yaw_dt reaches traj_server. ratio_min 1.0 makes lengthenTime a
+       no-op and removes all three at once. Declared here so both are visible. -->
   <arg name="fsm_slow_traj_target_vel"  default="0.40"/>
+  <arg name="fsm_slow_traj_target_yaw"  default="1.57"/>
   <arg name="fsm_slow_traj_trigger_vel" default="0.25"/>
   <arg name="fsm_slow_traj_ratio_min"   default="0.60"/>
+  <arg name="fsm_slow_traj_ratio_max"   default="4.0"/>
   <param name="/fsm/slow_traj_target_vel"  value="$(arg fsm_slow_traj_target_vel)"/>
+  <param name="/fsm/slow_traj_target_yaw"  value="$(arg fsm_slow_traj_target_yaw)"/>
   <param name="/fsm/slow_traj_trigger_vel" value="$(arg fsm_slow_traj_trigger_vel)"/>
   <param name="/fsm/slow_traj_ratio_min"   value="$(arg fsm_slow_traj_ratio_min)"/>
+  <param name="/fsm/slow_traj_ratio_max"   value="$(arg fsm_slow_traj_ratio_max)"/>
 
   <arg name="fsm_finish_grace_checks" default="40"/>
   <arg name="fsm_finish_grace_sec"    default="90.0"/>
@@ -1577,9 +1652,27 @@
   <param name="/frontier_finder/blocked_region_ttl_max_doubling"  value="$(arg frontier_blocked_ttl_doubling)" />
   <param name="/frontier_finder/finish_amnesty_max"               value="$(arg frontier_finish_amnesty_max)" />
 
-  <param name="/fsm/replan_thresh1"   value="$(arg fsm_replan_thresh1)" />
-  <param name="/fsm/replan_thresh2"   value="$(arg fsm_replan_thresh2)" />
-  <param name="/fsm/replan_thresh3"   value="$(arg fsm_replan_thresh3)" />
+  <!-- Seed the frontier blocked-regions from recorded contact-hold episodes, so
+       FALCON starts already knowing not to route into the cells that wedge the
+       aircraft and that reject 41% of its trajectories (LOOP_BUGS.md B38).
+       frontier_finder.cpp reads this at construction; loaded here, after the
+       FALCON yamls above and before the node starts. -->
+  <rosparam command="load" file="$(find falcon_adapter)/launch/blocked_seed.yaml"
+           if="$(arg frontier_blocked_seed)" />
+  <!-- NLopt total budget for the B-spline solve. FALCON ships 0.01 s for an
+       L-BFGS over 11-21 control points with six cost terms; clearance is only
+       a soft penalty there while the pre-publish check is a hard occupancy
+       test, and 41% of curves are rejected (LOOP_FIXES.md F25). -->
+  <param name="/bspline_opt/max_iteration_time" value="$(arg bspline_opt_max_time)" />
+  <param name="/bspline_opt/lift_ctrlpts" value="$(arg bspline_lift_ctrlpts)" />
+  <param name="/bspline_opt/escape_gradient" value="$(arg bspline_escape_gradient)" />
+  <param name="/bspline_opt/escape_gain" value="$(arg bspline_escape_gain)" />
+  <param name="/bspline_opt/lift_radius_m" value="$(arg bspline_lift_radius)" />
+  <param name="/frontier_finder/blocked_region_ttl_s" value="$(arg frontier_blocked_ttl)" />
+  <param name="/frontier_finder/blocked_seed_strikes" value="$(arg frontier_seed_strikes)" />
+  <param name="/exploration_manager/fsm/replan_thresh1"   value="$(arg fsm_replan_thresh1)" />
+  <param name="/exploration_manager/fsm/replan_thresh2"   value="$(arg fsm_replan_thresh2)" />
+  <param name="/exploration_manager/fsm/replan_thresh3"   value="$(arg fsm_replan_thresh3)" />
   <param name="/fsm/replan_time"      value="$(arg fsm_replan_time)" />
   <param name="/fsm/thresh_replan"    value="$(arg fsm_thresh_replan)" />
   <param name="/fsm/thresh_no_replan" value="$(arg fsm_thresh_no_replan)" />
@@ -1777,6 +1870,12 @@
     <param name="accel_lead_s" value="$(arg explore_accel_lead_s)" />
     <param name="yaw_mode"        value="$(arg explore_yaw_mode)" />
     <param name="yaw_dot_ff_gain" value="$(arg explore_yaw_dot_ff)" />
+    <param name="course_rate_ff_gain" value="$(arg explore_course_rate_ff)" />
+    <param name="course_steer_min_speed" value="$(arg explore_course_steer_min_speed)" />
+    <param name="course_hold_gap_s" value="$(arg explore_course_hold_gap)" />
+    <param name="yaw_mode_poll_s" value="$(arg explore_yaw_mode_poll)" />
+    <param name="yaw_blend_lo" value="$(arg explore_yaw_blend_lo)" />
+    <param name="yaw_blend_hi" value="$(arg explore_yaw_blend_hi)" />
     <param name="park_scan_rate"  value="$(arg explore_park_scan)" />
     <param name="park_scan_after_s" value="$(arg explore_park_scan_after)" />
     <!-- Publishes the tracker's terms on /nav_debug/control_trace. Additive

@@ -145,12 +145,34 @@ def _r1_exists() -> bool:
     return result.stdout.strip() == R1_CONTAINER
 
 
+def _start_rooster_container() -> None:
+    """Start `it` if it exists but is stopped, best-effort.
+
+    Every battery reading is a `docker exec` into `it`, so a stopped `it` makes
+    `_wait_for_fresh_r1` unsatisfiable and the restart reports failure over a
+    perfectly good `R1` (measured 2026-09-02, cost a cycle).
+    """
+    result = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"name=^{ROOSTER_CONTAINER}$",
+         "--format", "{{.Names}} {{.State}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.stdout.strip().endswith("running"):
+        return
+    if not result.stdout.strip():
+        return
+    subprocess.run(["docker", "start", ROOSTER_CONTAINER], check=False,
+                   capture_output=True)
+    print(f"[watchdog] started the stopped {ROOSTER_CONTAINER} container", flush=True)
+
+
 def _wait_for_fresh_r1(timeout_sec: float, drone_id: str) -> bool:
     """Polls for `R1` to exist AND report a readable battery after Play is
     clicked. This is the structural fallback for the whole GUI sequence: if
     a click landed wrong (unexpected dialog, Sphera slower than usual to
     render a screen, ...), this fails loudly instead of the caller silently
     assuming success."""
+    _start_rooster_container()
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         if _r1_exists() and read_battery_fraction(drone_id) is not None:
