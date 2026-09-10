@@ -34,6 +34,14 @@ from sparx_agency.core.planning.vlas.interfaces.policy import (
     PolicyResult,
 )
 from sparx_agency.core.planning.vlas.internvla_n1 import geometry
+from sparx_agency.core.planning.vlas.internvla_n1.errors import InternVlaError
+from sparx_agency.core.planning.vlas.internvla_n1.types import (
+    NON_TERMINAL_IDLE_INDICES,
+)
+
+# Metres that map to 1.0 on the wire. Set by the agent, which multiplies the
+# array it receives by 10 before clipping -- see `_to_depth`.
+DEPTH_RANGE_M = 10.0
 
 
 class InternVLAN1Policy(NavigationPolicy):
@@ -83,6 +91,8 @@ class InternVLAN1Policy(NavigationPolicy):
         self._model_name = model_name
         self._ckpt_path = ckpt_path
         self._model_settings = dict(model_settings) if model_settings else {}
+        self._last_waypoint_step = None
+        self._waypoint_age = 0
 
     def reset(self, observation=None):
         """Initialise the server agent (idempotent) and clear its episode state.
@@ -95,9 +105,38 @@ class InternVLAN1Policy(NavigationPolicy):
         Returns:
             ``True`` once the agent exists and its per-episode state is cleared.
         """
+        self._last_waypoint_step = None
+        self._waypoint_age = 0
         self.client.init_agent(model_name=self._model_name,
                                ckpt_path=self._ckpt_path,
                                model_settings=self._model_settings)
+        return self.client.reset()
+
+    def restart_episode(self):
+        """Clear the agent's episode state. Never creates one.
+
+        Deliberately NOT :meth:`reset`, and the difference is a burnt card.
+        ``reset`` calls ``init_agent`` first, whose gate is
+        ``check_agent_exists`` -- and that probe is itself a ``/reset`` POST
+        with a five-second timeout. One slow or dropped probe reads as "no
+        agent", so ``init_agent`` posts ``/agent/init``, and the server treats
+        a repeat init as a REPLACE: it builds a second agent and reloads the 7B
+        checkpoint without freeing the first, whose System-2 daemon thread
+        holds it alive. On an 8 GB card that is an out-of-memory error, and the
+        flight is over. It has happened here once already.
+
+        This is the whole teardown that a latched policy needs -- the frame
+        history, the cached pixel goal, the queued actions and both systems'
+        state -- as a single POST that cannot reach ``/agent/init`` by any
+        path.
+
+        Returns:
+            True if the server acknowledged. False on any transport failure,
+            in which case the episode state is unchanged and the caller has
+            not recovered anything.
+        """
+        self._last_waypoint_step = None
+        self._waypoint_age = 0
         return self.client.reset()
 
     def step(self, observation, goal):
@@ -109,17 +148,22 @@ class InternVLAN1Policy(NavigationPolicy):
             goal: a :class:`LanguageGoal` carrying the instruction.
 
         Returns:
-            A :class:`PolicyResult`. A transport drop returns a not-``ok`` result
-            (the caller re-sends next frame); a STOP with no curve returns a
-            not-``ok`` result with ``stop=True``.
+            A :class:`PolicyResult`. A transport drop returns a not-``ok``
+            result (the caller re-sends next frame); a genuine STOP returns a
+            not-``ok`` result with ``stop=True``; a tick that simply carries no
+            new decision -- a look-down, or a System-1 call that produced no
+            actions -- returns a not-``ok`` result with ``stop=False`` and
+            ``idle=True`` in its metadata, which a runner must read as "keep
+            flying what you already committed to".
 
         Raises:
             TypeError: ``goal`` is not a :class:`LanguageGoal`.
-            ValueError: the observation has no ``rgb``.
+            InternVlaError: the observation has no ``rgb``. A caller error, not
+                a server one -- see :mod:`..errors` for what does *not* raise.
         """
         self.check_goal(goal)
         if observation.rgb is None:
-            raise ValueError("InternVLA-N1 needs an rgb frame to step.")
+            raise InternVlaError("InternVLA-N1 needs an rgb frame to step.")
 
         bgr = self._to_bgr(observation.rgb)
         depth = self._to_depth(observation.depth_m)
@@ -132,18 +176,62 @@ class InternVLAN1Policy(NavigationPolicy):
                                           "error": result.error})
 
         trajectory = geometry.trajectory_from_response(result.raw_response)
+        from_curve = trajectory is not None
         if trajectory is None:
             trajectory = geometry.trajectory_from_action(
                 result.action_index, step_m=self.step_m, turn_deg=self.turn_deg)
 
+        # What a turn action actually MEANS, alongside the path it is rendered
+        # as. Both travel, because they are for different runners: one that can
+        # only fly a polyline uses `trajectory`, one that can command a rotation
+        # uses this and leaves the bent step alone. Reported only when the
+        # decision is a discrete turn -- a System-1 curve already carries its own
+        # heading in column 2, and answering it with a rotation as well would
+        # turn one decision into two manoeuvres.
+        turn_delta = (None if from_curve
+                      else geometry.turn_delta_rad(result.action_index,
+                                                   turn_deg=self.turn_deg))
+
+        # An idle tick is NOT a stop, and the difference is the whole point of
+        # the distinction. The agent reports -1 while a look-down is in progress
+        # and when System 1 returns no actions; both mean "ask me again", not
+        # "the task is done". Folding them into STOP -- which is what any
+        # `index not in the map -> STOP` default does -- makes a runner abandon
+        # a route it is halfway through and hold station until something else
+        # happens. System 2 emitted a real STOP zero times across five hospital
+        # flights; the agent emitted -1 seventeen times.
+        idle = result.action_index in NON_TERMINAL_IDLE_INDICES
+
+        # Is this pixel goal NEW, or the same one the agent has been holding on
+        # to since the last System-2 call? A goal is a pixel in the frame System
+        # 2 saw; once the aircraft has moved, it no longer points where it
+        # meant, so a consumer that draws it has to know how old it is.
+        fresh = (result.waypoint is not None
+                 and result.waypoint_step is not None
+                 and result.waypoint_step != self._last_waypoint_step)
+        if result.waypoint_step is not None:
+            if result.waypoint_step != self._last_waypoint_step:
+                self._last_waypoint_step = result.waypoint_step
+                self._waypoint_age = 0
+            else:
+                self._waypoint_age += 1
+
         s1_ms, s2_ms = self._timings(result.raw_response)
         return PolicyResult(
             trajectory=trajectory,
-            stop=(trajectory is None),
+            stop=(trajectory is None and not idle),
             metadata={
                 "action": result.action,
                 "action_index": result.action_index,
+                "idle": idle,
+                "look_down": bool(result.look_down),
+                "from_curve": from_curve,
+                "turn_delta_rad": turn_delta,
                 "waypoint_px": result.waypoint,
+                "waypoint_step": result.waypoint_step,
+                "waypoint_fresh": fresh,
+                "waypoint_age_steps": (self._waypoint_age
+                                       if result.waypoint is not None else None),
                 "inference_ms": result.inference_time_ms,
                 "s1_ms": s1_ms,
                 "s2_ms": s2_ms,
@@ -189,14 +277,39 @@ class InternVLAN1Policy(NavigationPolicy):
         return np.ascontiguousarray(frame)
 
     @staticmethod
-    def _to_depth(depth_m):
-        # type: (Optional[np.ndarray]) -> Optional[np.ndarray]
-        """Shape metric depth to the ``(H, W, 1)`` float32 the client sends."""
+    def _to_depth(depth_m, range_m=DEPTH_RANGE_M):
+        # type: (Optional[np.ndarray], float) -> Optional[np.ndarray]
+        """Shape metric depth to the ``(H, W, 1)`` float32 the wire expects.
+
+        **The wire is normalised, not metric.** The agent's System-1 path does
+        ``depth * 10.0`` and then clips at its 5 m threshold, with the source
+        comment ``# should be 0-10m`` -- so the array it wants is ``0..1`` over
+        a 10 m range, and metres are off by exactly that factor.
+
+        Sending metres is not a scale error that shows up as a wrong number; it
+        destroys the channel. A wall at 3 m arrives as 30 and is clipped to 5,
+        and so is everything else beyond 0.5 m, so System 1 sees a **flat plane
+        at the clip distance** and plans its trajectory with no depth
+        information at all. Nothing errors, nothing looks wrong, and the curve
+        is simply computed blind.
+
+        Args:
+            depth_m: Metric depth, ``(H, W)`` or ``(H, W, 1)`` float metres.
+            range_m: Metres that map to 1.0.
+
+        Returns:
+            ``(H, W, 1)`` float32 in ``[0, 1]``, or ``None``. Non-finite
+            samples (the sky, and a Gazebo depth camera's misses) become 1.0 --
+            "as far as this sensor can see" -- rather than a NaN the model
+            would propagate into its own latents.
+        """
         if depth_m is None:
             return None
         depth = np.asarray(depth_m, dtype=np.float32)
         if depth.ndim == 2:
             depth = depth[:, :, None]
-        return np.ascontiguousarray(depth)
+        depth = depth / float(range_m)
+        depth = np.where(np.isfinite(depth), depth, 1.0)
+        return np.ascontiguousarray(np.clip(depth, 0.0, 1.0).astype(np.float32))
 
 

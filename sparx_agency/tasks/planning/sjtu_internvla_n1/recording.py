@@ -12,10 +12,10 @@ Two panels, because the request is to see two things at once:
 * **left** -- what the drone sees: the front camera, with the instruction, the
   action, the System-1 / System-2 FPS and (when System 2 fired) its pixel goal
   drawn on top;
-* **right** -- what the network decided: a top-down map of where the drone has
-  been and the route N1 wants it to fly next (the committed part solid, the
-  speculative tail faint), which is the honest way to show a *drone's* route --
-  an aircraft flies at camera height, so its path projects to the horizon in the
+* **right** -- what the network decided: the route drawn on the hospital's own
+  occupancy map, the whole building beside a window that follows the aircraft
+  (see :mod:`top_down`). That is the honest way to show a *drone's* route -- an
+  aircraft flies at camera height, so its path projects to the horizon in the
   first-person view and only reads clearly from above.
 """
 from __future__ import annotations
@@ -29,6 +29,14 @@ try:
     import cv2
 except ImportError:  # pragma: no cover - cv2 is present in the venv and ROS env
     cv2 = None
+
+# The right-hand panel lives in its own module now that it draws the route on
+# the building's occupancy map as well as fitting axes to the trail; it is
+# re-exported here because this is the name every caller already imports.
+from sparx_agency.tasks.planning.sjtu_internvla_n1.top_down import (  # noqa: F401
+    CoverageOverlay,
+    TopDownRenderer,
+)
 
 _FONT = 0  # cv2.FONT_HERSHEY_SIMPLEX; kept as a literal so this imports without cv2.
 
@@ -80,11 +88,51 @@ class OverlayInfo:
     s2_ms: Optional[float] = None
     pixel_goal: Optional[Tuple[int, int]] = None  # (x, y) in the model's input frame
     pixel_goal_frame: Optional[Tuple[int, int]] = None  # (w, h) that goal was in
+    pixel_goal_fresh: bool = False           # System 2 chose it on THIS decision
+    pixel_goal_age: Optional[int] = None     # decisions since it was chosen
+    decision_time: Optional[float] = None    # wall clock of the decision
+    from_curve: bool = False        # this decision is System 1's continuous curve
+    curve_share_pct: Optional[float] = None  # share of decisions that were curves
+    # WHAT THE AIRCRAFT IS DOING RIGHT NOW, republished several times a second
+    # rather than once per decision. A decision lasts seconds, so a motionless
+    # drone on screen is either thinking, turning, dipping for a look-down or
+    # wedged against something -- and a recording that cannot tell those apart
+    # is a recording nobody can diagnose from. That is the whole reason seventy
+    # seconds of the last hospital flight went unexplained.
+    phase: str = ""                 # flying | settling | thinking | turning | dipping | stopped
+    think_s: Optional[float] = None  # how long it has been standing still for this one
+    blocked: bool = False           # the depth reflex allows no forward speed at all
+    traj_m: Optional[float] = None   # length of the prediction this decision produced
+    traj_pts: Optional[int] = None   # ...and how many waypoints it has
+    turn_deg: Optional[float] = None  # the rotation this decision asked for, if any
+    commits: Optional[int] = None    # routes flown so far
+    turns: Optional[int] = None      # rotations flown so far
+    escapes: Optional[int] = None    # blocked-forward escapes so far
+    # THE GOAL AS A PLACE. `pixel_goal` above is where System 2 pointed in the
+    # frame it saw; these say the marker has been re-projected into the frame
+    # being drawn, so it tracks the scene instead of sitting at a fixed screen
+    # coordinate while the world slides past it.
+    goal_projected: bool = False     # re-projected from a world point, not stale
+    goal_offscreen: bool = False     # ...and it now falls outside the frame
+    goal_behind: bool = False        # ...or behind the aircraft entirely
+    goal_range_m: Optional[float] = None   # how far away it is, metres
+    goal_age_s: Optional[float] = None     # how long ago System 2 chose it
 
 
 def _put(img, text, org, scale=0.6, color=(255, 255, 255), thick=2):
     cv2.putText(img, text, org, _FONT, scale, color, thick, cv2.LINE_AA)
 
+
+def _label_beside(img, text, x, y, gap, scale, color, thick):
+    """Write ``text`` next to (x, y), flipping to the left near the right edge.
+
+    The System-2 goal is very often near a frame edge -- it is a navigation
+    target, and those sit where the corridor leaves the picture -- so a label
+    pinned to its right is clipped exactly when it matters most.
+    """
+    (tw, _), _ = cv2.getTextSize(text, _FONT, scale, thick)
+    org_x = x + gap if x + gap + tw <= img.shape[1] - 4 else x - gap - tw
+    _put(img, text, (max(4, org_x), y), scale, color, thick)
 
 def draw_camera_panel(frame_bgr, info, size):
     # type: (np.ndarray, OverlayInfo, Tuple[int, int]) -> np.ndarray
@@ -102,23 +150,53 @@ def draw_camera_panel(frame_bgr, info, size):
     panel = cv2.resize(frame_bgr, (w, h), interpolation=cv2.INTER_AREA)
 
     # Pixel goal (System 2), rescaled from the frame it was computed in.
-    if info.pixel_goal is not None:
-        gx, gy = info.pixel_goal
-        if info.pixel_goal_frame:
-            fw, fh = info.pixel_goal_frame
-            gx = int(gx * w / max(1, fw))
-            gy = int(gy * h / max(1, fh))
-        gx = max(0, min(int(gx), w - 1))
-        gy = max(0, min(int(gy), h - 1))
-        cv2.circle(panel, (gx, gy), 16, (0, 0, 255), 3, cv2.LINE_AA)
-        cv2.circle(panel, (gx, gy), 3, (0, 0, 255), -1, cv2.LINE_AA)
-        _put(panel, "S2 goal", (gx + 20, gy), 0.5, (0, 0, 255), 2)
+    #
+    # DRAWN AS OLD AS IT IS. The agent keeps the last goal alive between
+    # System-2 calls, so this marker is non-null on almost every frame -- but it
+    # is a pixel in the frame System 2 saw, and the aircraft has been moving
+    # since. Drawn identically whether it is this decision's goal or one from
+    # eight decisions ago, it reads as a live tracker locked onto a target,
+    # which is exactly what it is not. Fresh is a solid red ring; stale is a
+    # thin dim one carrying its age, so the eye can tell a decision from a
+    # memory.
+    _draw_goal(panel, info, w, h)
 
-    # Top banner: status + action.
+    # Top banner: status + action + what the aircraft is doing this instant.
     cv2.rectangle(panel, (0, 0), (w, 66), (0, 0, 0), -1)
     _put(panel, "DRONE CAMERA", (10, 24), 0.6, (0, 255, 0), 2)
     _put(panel, "action: %s   status: %s" % (info.action or "-", info.status or "-"),
          (10, 52), 0.55, (255, 255, 255), 1)
+    _draw_phase(panel, info, w)
+
+    # Where this decision came from. System 1's curve is the continuous output
+    # the dual-system design exists to produce; a discrete action rendered as a
+    # 0.25 m step is the fallback. Showing which, and how often, is the only way
+    # to read a recording and know what you actually got.
+    # "of decisions", spelled out. The share counts every decision -- turns and
+    # STOPs included -- while the run log's [curve]/[action] tag counts
+    # COMMITTED ROUTES, and the two legitimately differ: a run whose every route
+    # was a curve can still report 38% here because most of its decisions were
+    # STOPs. Labelling this one "curves" invited the two to be read as the same
+    # number and one of them to look broken.
+    source = "S1 CURVE" if info.from_curve else "action step"
+    colour = (0, 255, 180) if info.from_curve else (0, 165, 255)
+    label = source if info.curve_share_pct is None else (
+        "%s   (curve on %.0f%% of decisions)" % (source, info.curve_share_pct))
+    (tw, _), _ = cv2.getTextSize(label, _FONT, 0.5, 2)
+    cv2.rectangle(panel, (w - tw - 24, 70), (w, 96), (0, 0, 0), -1)
+    _put(panel, label, (w - tw - 14, 89), 0.5, colour, 2)
+
+    # What this decision actually produced, under the source tag: a length and a
+    # point count. "S1 CURVE" says System 1 ran; only these say whether what it
+    # produced is a route or a twitch.
+    if info.traj_m is not None:
+        if info.turn_deg is not None:
+            shape = "rotate %+.0f deg" % info.turn_deg
+        else:
+            shape = "%.2f m / %d pts" % (info.traj_m, info.traj_pts or 0)
+        (tw2, _), _ = cv2.getTextSize(shape, _FONT, 0.45, 1)
+        cv2.rectangle(panel, (w - tw2 - 24, 98), (w, 120), (0, 0, 0), -1)
+        _put(panel, shape, (w - tw2 - 14, 114), 0.45, (200, 200, 200), 1)
 
     # FPS block, the headline the request asks for, bottom-left.
     def _fps(label, fps, ms):
@@ -131,7 +209,13 @@ def draw_camera_panel(frame_bgr, info, size):
     _put(panel, _fps("System 2:", info.s2_fps, info.s2_ms), (10, h - 10), 0.6, (0, 200, 255), 2)
 
     # Instruction, wrapped, bottom band.
-    lines = _wrap(info.instruction, 54)[:2]
+    # Four lines, not three, and not two. The instruction is the one thing on
+    # screen that a viewer has to read in full to judge anything else, and it
+    # keeps growing: a room-and-table order does not fit in two, and the
+    # exploration order -- go in, look, come back out, go on to the next --
+    # does not fit in three. A clipped instruction is a video that cannot be
+    # used as evidence about the instruction.
+    lines = _wrap(info.instruction, 54)[:4]
     y = h - 58 - 8 - (len(lines) - 1) * 22
     for line in lines:
         (tw, _), _ = cv2.getTextSize(line, _FONT, 0.5, 1)
@@ -141,122 +225,97 @@ def draw_camera_panel(frame_bgr, info, size):
     return panel
 
 
-class TopDownRenderer:
-    """Accumulate the flight and draw N1's route from above.
+def _draw_goal(panel, info, w, h):
+    """Draw where System 2 said to go, on the frame in front of the aircraft.
 
-    Stateful: it remembers where the drone has been so the right panel grows a
-    breadcrumb trail, which is what makes "reach every area at least once"
-    legible as coverage rather than as a single moving dot.
+    Three cases, and the difference between them is the point:
+
+    * **projected** -- the goal has been turned into a world point and put back
+      on this frame from the live pose. It moves with the scene, so a viewer can
+      see the aircraft closing on it or losing it. Labelled with its range and
+      how long ago the model chose it.
+    * **off-screen or behind** -- an arrow at the edge, because "the goal is no
+      longer in view" is a fact worth showing and an unguarded projection would
+      instead draw it confidently on the wrong side of the image.
+    * **not projected** -- no usable depth at the goal pixel, so all that is
+      known is a coordinate in a frame that has gone. Drawn dim and marked
+      stale, which is the old behaviour and the honest one for that case.
     """
+    if info.goal_behind:
+        _edge_marker(panel, "S2 goal behind", w, h, left=False)
+        return
+    if info.pixel_goal is None:
+        return
+    gx, gy = info.pixel_goal
+    if info.pixel_goal_frame:
+        fw, fh = info.pixel_goal_frame
+        gx = int(gx * w / max(1, fw))
+        gy = int(gy * h / max(1, fh))
+    if info.goal_offscreen:
+        _edge_marker(panel, "S2 goal", w, h, left=gx < 0)
+        return
+    gx = max(0, min(int(gx), w - 1))
+    gy = max(0, min(int(gy), h - 1))
+    if not info.goal_projected:
+        cv2.circle(panel, (gx, gy), 13, (70, 70, 150), 1, cv2.LINE_AA)
+        age = "" if info.pixel_goal_age is None else " +%d" % info.pixel_goal_age
+        _label_beside(panel, "S2 goal (no depth%s)" % age, gx, gy, 18, 0.42,
+                      (90, 90, 170), 1)
+        return
+    fresh = bool(info.pixel_goal_fresh)
+    colour = (0, 0, 255) if fresh else (60, 120, 255)
+    cv2.circle(panel, (gx, gy), 16, colour, 3 if fresh else 2, cv2.LINE_AA)
+    cv2.circle(panel, (gx, gy), 3, colour, -1, cv2.LINE_AA)
+    bits = ["S2 goal"]
+    if info.goal_range_m is not None:
+        bits.append("%.1f m" % info.goal_range_m)
+    if info.goal_age_s is not None:
+        bits.append("%.0fs ago" % info.goal_age_s)
+    _label_beside(panel, "  ".join(bits), gx, gy, 20, 0.45, colour, 2)
 
-    def __init__(self, size=(640, 480), margin_m=1.5, trail_max=4000):
-        self.w, self.h = int(size[0]), int(size[1])
-        self.margin_m = float(margin_m)
-        self.trail = []  # type: List[Tuple[float, float]]
-        self.trail_max = int(trail_max)
-        self._bounds = None  # (min_x, min_y, max_x, max_y)
 
-    def add_pose(self, x, y):
-        # type: (float, float) -> None
-        """Record where the drone is; extends the trail and the view bounds."""
-        if self.trail and abs(x - self.trail[-1][0]) < 0.05 and abs(y - self.trail[-1][1]) < 0.05:
-            return
-        self.trail.append((float(x), float(y)))
-        if len(self.trail) > self.trail_max:
-            self.trail = self.trail[-self.trail_max:]
+def _edge_marker(panel, text, w, h, left):
+    """An arrow at the frame edge for a goal that is no longer in view."""
+    y = h // 2
+    x = 22 if left else w - 22
+    tip = (6, y) if left else (w - 6, y)
+    cv2.arrowedLine(panel, (x, y), tip, (60, 120, 255), 3, cv2.LINE_AA, tipLength=0.5)
+    _label_beside(panel, text, x, y - 22, 10, 0.45, (60, 120, 255), 1)
 
-    def _fit(self, extra):
-        # type: (List[Tuple[float, float]]) -> Tuple[float, float, float, float]
-        pts = list(self.trail) + list(extra)
-        if not pts:
-            return (-1.0, -1.0, 1.0, 1.0)
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        lo_x, hi_x = min(xs) - self.margin_m, max(xs) + self.margin_m
-        lo_y, hi_y = min(ys) - self.margin_m, max(ys) + self.margin_m
-        # Keep at least a few metres of span so a hovering start is not zoomed in absurdly.
-        if hi_x - lo_x < 4.0:
-            c = 0.5 * (lo_x + hi_x)
-            lo_x, hi_x = c - 2.0, c + 2.0
-        if hi_y - lo_y < 4.0:
-            c = 0.5 * (lo_y + hi_y)
-            lo_y, hi_y = c - 2.0, c + 2.0
-        return (lo_x, lo_y, hi_x, hi_y)
 
-    def render(self, pose, committed_xy, full_xy):
-        # type: (Optional[Tuple[float, float, float]], Optional[np.ndarray], Optional[np.ndarray]) -> np.ndarray
-        """Draw the top-down panel.
+_PHASE_COLOURS = {
+    "flying": (0, 220, 0),
+    "settling": (0, 200, 255),
+    "thinking": (0, 200, 255),
+    "turning": (255, 180, 0),
+    "dipping": (255, 140, 60),
+    "stopped": (160, 160, 160),
+}
 
-        Args:
-            pose: ``(x, y, yaw)`` current world pose, or None.
-            committed_xy: ``(N, 2)`` world polyline N1 is committed to, or None.
-            full_xy: ``(M, 2)`` world polyline of the whole prediction, or None.
 
-        Returns:
-            A ``(h, w, 3)`` BGR panel.
-        """
-        panel = np.full((self.h, self.w, 3), 24, dtype=np.uint8)
-        extra = []  # type: List[Tuple[float, float]]
-        for arr in (committed_xy, full_xy):
-            if arr is not None and len(arr):
-                extra.extend((float(p[0]), float(p[1])) for p in np.asarray(arr).reshape(-1, 2))
-        if pose is not None:
-            extra.append((pose[0], pose[1]))
-        lo_x, lo_y, hi_x, hi_y = self._fit(extra)
-        sx = (self.w - 20) / max(1e-6, hi_x - lo_x)
-        sy = (self.h - 20) / max(1e-6, hi_y - lo_y)
-        scale = min(sx, sy)
+def _draw_phase(panel, info, w):
+    """A pill saying what the aircraft is doing, and for how long.
 
-        def to_px(x, y):
-            # world x right, y up -> image x right, y down
-            px = int(10 + (x - lo_x) * scale)
-            py = int(self.h - 10 - (y - lo_y) * scale)
-            return px, py
-
-        self._grid(panel, lo_x, lo_y, hi_x, hi_y, to_px)
-
-        # Trail (where it has been) -- green, the coverage.
-        if len(self.trail) >= 2:
-            pts = np.array([to_px(x, y) for x, y in self.trail], dtype=np.int32)
-            cv2.polylines(panel, [pts], False, (0, 200, 0), 2, cv2.LINE_AA)
-        if self.trail:
-            cv2.circle(panel, to_px(*self.trail[0]), 5, (255, 160, 0), -1, cv2.LINE_AA)  # start
-
-        # Full prediction (speculative tail) -- faint orange.
-        self._polyline(panel, full_xy, to_px, (0, 140, 220), 1)
-        # Committed route (what it will fly) -- bold yellow.
-        self._polyline(panel, committed_xy, to_px, (0, 255, 255), 3)
-
-        # Current pose -- a heading arrow.
-        if pose is not None:
-            px, py = to_px(pose[0], pose[1])
-            hx = int(px + 18 * np.cos(pose[2]))
-            hy = int(py - 18 * np.sin(pose[2]))
-            cv2.arrowedLine(panel, (px, py), (hx, hy), (255, 255, 255), 2, cv2.LINE_AA, tipLength=0.4)
-            cv2.circle(panel, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
-
-        cv2.rectangle(panel, (0, 0), (self.w, 28), (0, 0, 0), -1)
-        _put(panel, "N1 ROUTE (top-down)   committed=yellow  plan=orange  trail=green",
-             (10, 20), 0.45, (255, 255, 255), 1)
-        return panel
-
-    @staticmethod
-    def _polyline(panel, xy, to_px, color, thick):
-        if xy is None or not len(xy):
-            return
-        pts = np.array([to_px(float(p[0]), float(p[1]))
-                        for p in np.asarray(xy).reshape(-1, 2)], dtype=np.int32)
-        if len(pts) >= 2:
-            cv2.polylines(panel, [pts], False, color, thick, cv2.LINE_AA)
-        cv2.circle(panel, tuple(pts[-1]), 4, color, -1, cv2.LINE_AA)
-
-    def _grid(self, panel, lo_x, lo_y, hi_x, hi_y, to_px):
-        for gx in range(int(np.floor(lo_x)), int(np.ceil(hi_x)) + 1):
-            p0, p1 = to_px(gx, lo_y), to_px(gx, hi_y)
-            cv2.line(panel, p0, p1, (40, 40, 40), 1)
-        for gy in range(int(np.floor(lo_y)), int(np.ceil(hi_y)) + 1):
-            p0, p1 = to_px(lo_x, gy), to_px(hi_x, gy)
-            cv2.line(panel, p0, p1, (40, 40, 40), 1)
+    Placed top-right and coloured, because it is the field a viewer checks
+    first: a stationary drone is fine when it is THINKING and a bug when it is
+    FLYING, and the picture is identical either way.
+    """
+    if not info.phase and not info.blocked:
+        return
+    text = (info.phase or "").upper()
+    if info.think_s and info.phase in ("thinking", "settling", "dipping"):
+        text = "%s %.1fs" % (text, info.think_s)
+    colour = _PHASE_COLOURS.get(info.phase, (200, 200, 200))
+    if info.blocked:
+        # BLOCKED outranks everything else on screen. It is the one state in
+        # which the policy's decisions cannot be flown at all, and it looks
+        # exactly like thinking from the outside.
+        text = "BLOCKED  " + text
+        colour = (0, 0, 255)
+    (tw, _), _ = cv2.getTextSize(text, _FONT, 0.55, 2)
+    cv2.rectangle(panel, (w - tw - 24, 4), (w - 4, 34), (0, 0, 0), -1)
+    cv2.rectangle(panel, (w - tw - 24, 4), (w - 4, 34), colour, 1)
+    _put(panel, text, (w - tw - 14, 26), 0.55, colour, 2)
 
 
 def compose(left, right):

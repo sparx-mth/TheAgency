@@ -206,3 +206,53 @@ def test_the_carrot_is_a_fixed_distance_along_the_route():
         # Exactly a lookahead further along, until the route runs out.
         assert there - here == pytest.approx(min(1.2, plan.total_arc_m - here),
                                              abs=0.02)
+
+
+# ── a prediction that starts AT the robot ────────────────────────────────
+#
+# Both of InternVLA-N1's producers do this: the integrated System-1 curve and
+# the single step rendered from a discrete action both begin at (0, 0). The
+# anchor prepended by `anchor_plan` would otherwise duplicate that first
+# waypoint -- invisible on a 33-point curve, fatal on the 2-point action step,
+# where `commit_index_for(2, 0.5)` commits through the copy and the commitment
+# is two identical points 0.00 m apart. Measured in flight: the executor called
+# every such plan TOO_SHORT, re-inferred immediately, and the aircraft hovered
+# while the log filled with commitments it never flew.
+
+
+def test_a_leading_origin_waypoint_is_not_duplicated_by_the_anchor():
+    trajectory = np.array([[0.0, 0.0], [0.25, 0.0]])
+    plan = anchor_plan(trajectory, (1.0, 2.0, 0.0), issued_s=0.0, fraction=0.5)
+    assert plan.world_xy.shape == (2, 2)
+    assert plan.world_xy[0] == pytest.approx((1.0, 2.0))
+    assert plan.world_xy[1] == pytest.approx((1.25, 2.0))
+    assert plan.commit_arc_m == pytest.approx(0.25)
+
+
+def test_the_two_point_action_step_is_flyable_not_zero_length():
+    """The exact shape `geometry.trajectory_from_action` emits."""
+    step = np.array([[0.0, 0.0, 0.0], [0.2165, 0.125, 0.5236]])  # 0.25 m, 30 deg
+    plan = anchor_plan(step, (0.0, 0.0, 0.0), issued_s=0.0, fraction=0.5)
+    assert plan.commit_arc_m == pytest.approx(0.25, abs=1e-3)
+    assert len(plan.committed_xy) == 2
+
+
+def test_a_curve_that_starts_at_the_robot_keeps_every_real_waypoint():
+    curve = np.concatenate([np.zeros((1, 2)),
+                            np.stack([np.linspace(0.1, 1.6, 16), np.zeros(16)], axis=1)])
+    plan = anchor_plan(curve, (0.0, 0.0, 0.0), issued_s=0.0, fraction=0.5)
+    assert plan.world_xy.shape == (17, 2)          # anchor + 16, not anchor + 17
+    assert plan.world_xy[-1] == pytest.approx((1.6, 0.0))
+
+
+def test_a_waypoint_a_centimetre_out_is_a_step_not_the_robot():
+    """The epsilon is a millimetre: 1 cm is a real, if short, motion."""
+    plan = anchor_plan(np.array([[0.01, 0.0], [0.3, 0.0]]), (0.0, 0.0, 0.0),
+                       issued_s=0.0, fraction=1.0)
+    assert plan.world_xy.shape == (3, 2)
+    assert plan.world_xy[1] == pytest.approx((0.01, 0.0))
+
+
+def test_a_prediction_that_is_only_the_robot_is_rejected():
+    with pytest.raises(ValueError):
+        anchor_plan(np.array([[0.0, 0.0]]), (0.0, 0.0, 0.0), issued_s=0.0, fraction=1.0)

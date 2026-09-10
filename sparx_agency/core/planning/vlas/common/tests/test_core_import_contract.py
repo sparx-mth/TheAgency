@@ -55,12 +55,21 @@ def _py_files():
     "sparx_agency.core.planning.vlas.flownav",
     "sparx_agency.core.planning.vlas.flownav.client",
     "sparx_agency.core.planning.vlas.flownav.trt",
+    "sparx_agency.core.planning.vlas.internvla_n1",
+    "sparx_agency.core.planning.vlas.internvla_n1.client",
+    "sparx_agency.core.planning.vlas.internvla_n1.policy",
+    "sparx_agency.core.planning.vlas.internvla_n1.stop_latch",
+    "sparx_agency.core.planning.vlas.internvla_n1.trt",
     "sparx_agency.core.planning.vlas.common.trt",
     # The only module under vlas/ that imports from another core/planning
     # package (trackers, for the pure-pursuit lookahead), so it is the one whose
     # import chain can grow a heavy dependency without anyone here touching a
     # file. navdp_click_node imports it inside the Noetic container.
     "sparx_agency.core.planning.vlas.common.plan_commit",
+    # Stdlib maths only, and it has to stay that way: the FALCON adapters would
+    # want the same stop-and-turn primitive, and that container has no scipy.
+    "sparx_agency.core.planning.vlas.common.turn_in_place",
+    "sparx_agency.core.planning.vlas.common.yaw_search",
 ])
 def test_import_pulls_no_heavy_dependency(module):
     # Run in a FRESH interpreter: an in-process check passes trivially once any
