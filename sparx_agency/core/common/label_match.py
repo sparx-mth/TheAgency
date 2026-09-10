@@ -14,9 +14,34 @@ scene-graph target ladder's offline rung in
 would force one of them to import the other across the ``planning`` /
 ``mapping`` boundary.
 
+:func:`normalize_label` is the canonical *form* of a label, for code that
+needs an exact comparison rather than this fuzzy one -- the ObjectNav label
+tables in :mod:`sparx_agency.core.planning.objnav` compare detector output
+against a dataset category's accept set with it, because on a benchmark a
+fuzzy accept is a false STOP.
+
 Pure string work: no numpy, no ROS, Python-3.8-safe.
 """
 from __future__ import annotations
+
+
+def normalize_label(label: str) -> str:
+    """The canonical form of a class label or category name.
+
+    Lowercased, underscores read as spaces, runs of whitespace collapsed and
+    both ends trimmed: ``"TV_Monitor "`` and ``"tv  monitor"`` both become
+    ``"tv monitor"``. Hyphens are kept (``"x-ray machine"``), and CamelCase is
+    deliberately *not* split -- a table that wants ``"house plant"`` for
+    AI2-THOR's ``HousePlant`` says so explicitly rather than trusting a
+    heuristic that would also split ``"iPad"``.
+
+    Args:
+        label: A detector class, a dataset category, or a phrase.
+
+    Returns:
+        The normalised label; empty when the input is blank.
+    """
+    return " ".join(str(label).replace("_", " ").lower().split())
 
 
 def label_matches(target: str, label: str) -> bool:
