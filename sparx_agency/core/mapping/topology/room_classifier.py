@@ -1,25 +1,18 @@
 """Room-type classification from observed object classes, via an LLM.
 
-The prompt for a room is a function of its OBSERVED OBJECT CLASSES only.
-:class:`RoomTypeClassifier` caches the LLM answer by ``frozenset`` of
-class names — as long as a room's object *set* doesn't change (counts
-may), no new LLM call is made. A room with fewer than ``min_objects``
-observed objects is labelled ``"unknown"`` without calling the LLM.
-
-ROS-free port of the LLM plane of the SJTU ``room_classifier_node.py``;
-the ROS wiring (topics, markers, tick loop) stays in the task layer.
+Defaults cache by the class set for existing callers. Count-sensitive cache
+keys, minimum class diversity and explicit refresh are available for online
+room revisiting. Transport/parse errors propagate without caching a failure.
 """
-
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, List, Sequence
+import math
+from typing import Dict, List, Sequence, Tuple
 
 from sparx_agency.core.mapping.topology.llm_client import LLMClient
 
-# Default candidate labels (15). Override per deployment if the world
-# contains room types this set doesn't name.
 DEFAULT_LABEL_SET = [
     "kitchen", "bedroom", "bathroom", "living_room", "dining_room",
     "office", "hallway", "storage_closet", "laundry_room",
@@ -27,12 +20,15 @@ DEFAULT_LABEL_SET = [
     "reception", "unknown",
 ]
 
-SYSTEM_PROMPT_TEMPLATE = """You are a scene-understanding assistant that \
+SYSTEM_PROMPT_TEMPLATE = """You are a scene-understanding assistant that
 classifies indoor rooms from the objects observed inside them.
 
-You will be given a list of objects observed in one room. Based ONLY on \
-those objects and common sense about where they occur, output a single \
-best room label.
+You will be given a list of objects observed in one room. Based ONLY on
+those objects and common sense about where they occur, output one room label.
+Observations are incomplete and may contain false detections. Prefer distinctive
+room-function evidence over generic furniture. Use unknown when evidence is
+insufficient or contradictory. Do not invent unobserved objects. Reassess the
+current evidence rather than assuming an earlier room label was correct.
 
 Choose the label from this set (do not invent new ones):
 {label_set}
@@ -42,7 +38,6 @@ Reply with a JSON object of the form:
   "confidence": <float between 0 and 1>,
   "reasoning": "<one short sentence>"}}"""
 
-
 USER_PROMPT_TEMPLATE = """Room observed objects:
 {obj_list}
 
@@ -50,24 +45,16 @@ Classify this room."""
 
 
 def format_object_list(classes: Sequence[str]) -> str:
-    """Collapse duplicate class names into ``- name xN`` count lines."""
+    """Collapse duplicate class names into sorted '- name xN' count lines."""
     if not classes:
         return "(no objects observed yet)"
-    c = Counter(classes)
-    return "\n".join(f"- {name} x{n}" for name, n in sorted(c.items()))
+    counts = Counter(classes)
+    return "\n".join("- %s x%d" % (name, n) for name, n in sorted(counts.items()))
 
 
 @dataclass(frozen=True)
 class RoomLabel:
-    """One room-type verdict.
-
-    Attributes:
-        label: A label from the classifier's label set (out-of-set
-            replies are coerced to ``"unknown"``).
-        confidence: The model's self-reported confidence in [0, 1]
-            (0.0 when unparseable or when no LLM call was made).
-        reasoning: One short sentence from the model (<= 200 chars).
-    """
+    """One room-type verdict: label, self-reported confidence and short rationale."""
 
     label: str
     confidence: float
@@ -75,77 +62,69 @@ class RoomLabel:
 
 
 class RoomTypeClassifier:
-    """Objects-in-room -> LLM -> room type label, with a signature cache.
+    """Objects -> LLM -> room type, with optional evidence-aware cache keys.
 
     Args:
-        client: The :class:`LLMClient` to query.
-        label_set: Candidate labels offered to the model. Replies
-            outside this set are coerced to ``"unknown"``.
-        min_objects: Rooms with fewer observed objects are labelled
-            ``"unknown"`` without an LLM call.
-
-    LLM transport/parse errors propagate as exceptions (``RuntimeError``
-    / ``ValueError`` from the client) — the caller decides whether to
-    keep a stale label; nothing is silently cached on failure.
+        client: Existing LLMClient or equivalent chat_json interface.
+        label_set: Accepted room labels; unrecognized replies become unknown.
+        min_objects: Minimum observed objects before querying the model.
+        min_classes: Minimum distinct observed classes before querying.
+        count_sensitive: Include class multiplicities in the cache signature.
+            False by default, preserving the historical class-set cache.
     """
 
     def __init__(self, client: LLMClient,
                  label_set: Sequence[str] = DEFAULT_LABEL_SET,
-                 min_objects: int = 1):
+                 min_objects: int = 1, min_classes: int = 1,
+                 count_sensitive: bool = False):
         self._client = client
         self._label_set = [str(s) for s in label_set]
         self._min_objects = int(min_objects)
-        # Cache: frozenset(class names) -> RoomLabel. The signature is
-        # *which* classes were seen, so count changes never re-call.
-        self._sig_cache: Dict[FrozenSet[str], RoomLabel] = {}
+        self._min_classes = int(min_classes)
+        self._count_sensitive = bool(count_sensitive)
+        if self._min_objects < 1 or self._min_classes < 1:
+            raise ValueError("Room evidence thresholds must be positive")
+        self._sig_cache: Dict[Tuple, RoomLabel] = {}
 
     @property
     def label_set(self) -> List[str]:
-        """The candidate labels offered to the model (a copy)."""
+        """Candidate labels offered to the model (a copy)."""
         return list(self._label_set)
 
     @property
     def cache_size(self) -> int:
-        """Number of distinct object-set signatures answered so far."""
+        """Number of distinct successfully classified evidence signatures."""
         return len(self._sig_cache)
 
-    def classify(self, classes: Sequence[str]) -> RoomLabel:
-        """Classify one room from its observed object class names.
+    def classify(self, classes: Sequence[str], refresh: bool = False) -> RoomLabel:
+        """Classify current evidence; refresh bypasses a previous cached answer.
 
-        Class names are lower-cased/stripped and empties dropped before
-        gating and signature computation, mirroring the ROS node's
-        normalization of scene-graph entries.
+        Failure leaves an existing cache entry untouched. Caller controls the
+        refresh cadence; this ROS-free core reads no clock or episode state.
         """
-        norm = [str(c).strip().lower() for c in classes
-                if str(c).strip()]
-        if len(norm) < self._min_objects:
-            # Don't call the LLM for an (almost) empty room.
-            return RoomLabel(label="unknown", confidence=0.0,
-                             reasoning="no objects observed yet")
-        sig = frozenset(norm)
-        cached = self._sig_cache.get(sig)
-        if cached is not None:
+        norm = [str(c).strip().lower() for c in classes if str(c).strip()]
+        if len(norm) < self._min_objects or len(set(norm)) < self._min_classes:
+            return RoomLabel("unknown", 0.0, "no objects observed yet" if not norm
+                             else "insufficient observed object evidence")
+        signature = (tuple(sorted(Counter(norm).items())) if self._count_sensitive
+                     else tuple(sorted(set(norm))))
+        cached = self._sig_cache.get(signature)
+        if cached is not None and not refresh:
             return cached
         result = self._classify(norm)
-        self._sig_cache[sig] = result
+        self._sig_cache[signature] = result
         return result
 
-    # -- LLM call ------------------------------------------------------
     def _classify(self, classes: List[str]) -> RoomLabel:
-        system = SYSTEM_PROMPT_TEMPLATE.format(
-            label_set=", ".join(self._label_set))
-        user = USER_PROMPT_TEMPLATE.format(
-            obj_list=format_object_list(classes))
+        system = SYSTEM_PROMPT_TEMPLATE.format(label_set=", ".join(self._label_set))
+        user = USER_PROMPT_TEMPLATE.format(obj_list=format_object_list(classes))
         reply = self._client.chat_json(system, user)
-
         label = str(reply.get("label", "unknown")).strip().lower()
         if label not in self._label_set:
-            # Coerce unknown-to-us labels into 'unknown' so downstream
-            # stays in-set.
             label = "unknown"
         try:
-            conf = float(reply.get("confidence", 0.0))
+            confidence = float(reply.get("confidence", 0.0))
         except (TypeError, ValueError):
-            conf = 0.0
-        reasoning = str(reply.get("reasoning", ""))[:200]
-        return RoomLabel(label=label, confidence=conf, reasoning=reasoning)
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else 0.0
+        return RoomLabel(label, confidence, str(reply.get("reasoning", ""))[:200])
