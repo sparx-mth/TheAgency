@@ -77,6 +77,10 @@ decides whether to keep a stale label — nothing is cached on failure.
   `coerce_bool()` (never `bool()`: a small model answers with the word
   quoted, and `bool("false")` is True).
 - `room_classifier.py` — object list → room type via LLM.
+  Legacy callers still cache by class set. Online callers can request
+  `min_classes`, `count_sensitive=True` and `classify(..., refresh=True)` to
+  revise a label after more objects are observed or a region is resegmented.
+  Refresh failures propagate without replacing the previous cache entry.
 - `search_oracle.py` — per-room target probabilities.
 - `target_matcher.py` — target-name matching: exact → cache → LLM →
   token-overlap fallback. The fallback rung is not implemented here: it

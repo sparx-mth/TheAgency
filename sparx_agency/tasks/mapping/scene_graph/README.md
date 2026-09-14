@@ -357,6 +357,15 @@ JSON payload schemas are pinned in the module docstrings of the publishing
 nodes under `ros2/`; the detection HTTP wire types live in `serve/contract.py`
 (`DEFAULT_PORT=8092`, `DEFAULT_HOSPITAL_VOCABULARY`, 27 terms).
 
+For reproducible offline benchmarks the detector's `/health` also reports
+`metadata`: the checkpoint SHA-256, full detector configuration and
+torch/ultralytics/numpy versions. `/detect` includes the vocabulary and this
+metadata captured under the same lock as inference, so a client can reject
+a model or vocabulary change mid-run. Existing response fields are unchanged.
+The [shared ObjectNav runtime](../../planning/objnav_benchmark_runtime/README.md)
+uses this service on a dedicated CPU/remote endpoint while the simulator owns the
+rendering GPU; it never changes another mission's vocabulary automatically.
+
 **Room tints are a two-part contract.** `OccupancyGrid` data is `int8` and room
 pids grow without bound, so `/scene_graph/room_labels_grid` carries a small
 recycled *grid value* per room (`0` = no room) with the BEV's own `info` and

@@ -1,0 +1,11 @@
+# Shared CPU runtime extras; use the deployment's existing constraints/runtime.
+# No torch, model weights, simulator bindings, or dataset-specific scorers here.
+numpy
+scipy
+scikit-image
+networkx
+requests
+opencv-python
+matplotlib
+# Recording additionally needs an installed FFmpeg executable with libx264.
+

@@ -1,0 +1,98 @@
+"""Optional detector client reusing the scene-graph wire protocol and geometry."""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import requests
+
+from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth
+from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
+from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
+from sparx_agency.tasks.mapping.scene_graph.serve.contract import (
+    detections_from_json, encode_frame)
+
+
+class HttpDetector:
+    """Dedicated existing YOLO-World service; models never load in the evaluator.
+
+    Vocabulary must be configured by the operator before the run. Refusing a
+    mismatch avoids changing a service another mission might be using.
+    """
+
+    def __init__(self, url, vocabulary, timeout_s=30.0):
+        self.url = url.rstrip("/")
+        self.vocabulary = tuple(vocabulary)
+        self.timeout_s = timeout_s
+        self.session = requests.Session()
+        self._identity = None
+        self.last_detections = ()
+        self.last_inference_ms = None
+
+    def health(self):
+        response = self.session.get(self.url + "/health", timeout=self.timeout_s)
+        response.raise_for_status()
+        data = response.json()
+        if not data.get("ok") or tuple(data.get("classes", ())) != self.vocabulary:
+            raise ObjNavInternalError(
+                "Detector vocabulary mismatch; configure a dedicated service with "
+                "the benchmark's --print-vocabulary output, in that exact order")
+        metadata = data.get("metadata", {})
+        if not metadata.get("checkpoint_sha256") or not metadata.get("detector_config"):
+            raise ObjNavInternalError("Detector lacks checkpoint/config provenance; restart "
+                                     "the dedicated service from this checkout")
+        identity = {key: data.get(key) for key in ("model", "device", "classes", "metadata")}
+        if self._identity is not None and identity != self._identity:
+            raise ObjNavInternalError("Detector model/config changed during the evaluation")
+        self._identity = identity
+        return identity
+
+    def detect(self, rgb):
+        try:
+            self.health()  # detect external reconfiguration rather than silently drifting
+            body = encode_frame(np.ascontiguousarray(rgb[..., ::-1]))
+            response = self.session.post(
+                self.url + "/detect", data=body,
+                headers={"Content-Type": "image/jpeg"}, timeout=self.timeout_s)
+            response.raise_for_status()
+            data = response.json()
+            if (data.get("h"), data.get("w")) != rgb.shape[:2]:
+                raise ValueError("Detector boxes do not refer to the submitted frame")
+            if (tuple(data.get("classes", ())) != self.vocabulary
+                    or data.get("metadata") != self._identity["metadata"]):
+                raise ValueError("Detector was reconfigured during inference")
+            detections = detections_from_json(data["detections"])
+            for detection in detections:
+                if (detection.cls not in self.vocabulary
+                        or not math.isfinite(detection.conf)
+                        or not 0 <= detection.conf <= 1
+                        or not all(math.isfinite(v) for v in detection.xyxy)):
+                    raise ValueError("Invalid detection or unexpected vocabulary")
+            self.last_detections = tuple(detections)
+            self.last_inference_ms = data.get("ms")
+            return detections
+        except (requests.RequestException, ValueError, KeyError) as exc:
+            raise ObjNavInternalError("Detector service failed: %s" % exc) from exc
+
+
+def observed_objects(observation, detections, confidence):
+    """Yield (label, ENU XYZ) from predicted boxes and robust GT metric depth."""
+    camera = observation.camera
+    k = camera.intrinsics
+    transform = world_T_camera_optical(observation.pose, camera)
+    for detection in detections:
+        if detection.conf < confidence:
+            continue
+        x1, y1, x2, y2 = detection.xyxy
+        if not (0 <= x1 < x2 <= k.width and 0 <= y1 < y2 <= k.height):
+            continue
+        depth = robust_bbox_depth(
+            observation.depth_m, detection.xyxy,
+            min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
+        if depth is None:
+            continue
+        point = np.array([((x1 + x2) / 2 - k.cx) * depth / k.fx,
+                          ((y1 + y2) / 2 - k.cy) * depth / k.fy, depth, 1.0])
+        yield detection.cls, (transform @ point)[:3]
+
+

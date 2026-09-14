@@ -1,35 +1,21 @@
-"""Scene-graph YOLO-World detection HTTP server (conda side, GPU, no ROS).
+"""Scene-graph YOLO-World HTTP service; no ROS, lazy model imports.
 
-On this machine the ROS2 python (host jazzy / ``.venv``) has no torch and conda
-(``navdp``) has no ``rclpy``, so open-vocabulary detection runs here as a plain
-HTTP server and a thin ROS2 client node posts frames to it. stdlib
-``http.server`` only — no flask — and single-threaded on purpose (one client,
-one GPU, one CUDA context).
+Threaded requests share one serialized detector. GET /health returns model,
+device, classes, metadata and frames_served. POST /detect accepts JPEG bytes
+and returns w, h, ms, detections, classes and metadata, captured atomically
+with inference. Metadata identifies checkpoint bytes, configuration and
+library versions. POST /set_classes changes the vocabulary explicitly.
 
-Routes (wire types in :mod:`.contract`):
-  * ``GET /health`` -> ``{ok, model, device, classes, frames_served}``
-  * ``POST /set_classes`` body ``{"classes": [...]}`` -> re-prompts the detector
-  * ``POST /detect`` body = raw JPEG bytes ->
-    ``{w, h, ms, detections: [{cls, conf, xyxy}]}``
-
-Failure policy (repo rule: raise, never silently degrade): a missing model
-path, a missing torch, or ``--device cuda:*`` without a visible CUDA device all
-abort at STARTUP with a fatal message — there is no CPU fallback unless
-``--device cpu`` is explicit. The model is warm-loaded before serving so a
-broken checkpoint never becomes a 500 on the first frame. Check the GPU is
-actually free first (``nvidia-smi``): a resident VLA server owns the card.
-
-Run (conda ``navdp`` env; PYTHONPATH = repo root):
-    python -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \\
-        --model /path/to/yolov8s-world.pt
-
-``--selftest`` exercises the request routing against a stub detector with no
-model and no torch — it runs in the plain ``.venv`` (implementation in the
-sibling :mod:`.selftest` module).
+Use --device cpu for a CPU detector while Habitat owns the rendering GPU.
+A missing checkpoint or unavailable requested device fails at startup; there
+is no automatic model download or CPU fallback. --selftest needs no model.
 """
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
+import hashlib
+import importlib.metadata
 import json
 import time
 import threading
@@ -62,11 +48,12 @@ class _ServerContext:
     """
 
     def __init__(self, detector: DetectionModel, model_name: str, device: str,
-                 classes: Sequence[str]) -> None:
+                 classes: Sequence[str], metadata: Optional[Dict[str, Any]] = None) -> None:
         self.detector = detector
         self.model_name = model_name
         self.device = device
         self.classes: List[str] = list(classes)
+        self.metadata = dict(metadata or {})
         self.frames_served = 0
         self.lock = threading.Lock()
 
@@ -110,13 +97,11 @@ class _DetectionHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "unknown path %s" % self.path}, 404)
             return
         ctx = self.server.ctx  # type: ignore[attr-defined]
-        self._send_json({
-            "ok": True,
-            "model": ctx.model_name,
-            "device": ctx.device,
-            "classes": list(ctx.classes),
-            "frames_served": ctx.frames_served,
-        })
+        with ctx.lock:
+            payload = {"ok": True, "model": ctx.model_name, "device": ctx.device,
+                       "classes": list(ctx.classes), "metadata": dict(ctx.metadata),
+                       "frames_served": ctx.frames_served}
+        self._send_json(payload)
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
         try:
@@ -135,20 +120,18 @@ class _DetectionHandler(BaseHTTPRequestHandler):
 
     def _handle_detect(self) -> None:
         ctx = self.server.ctx  # type: ignore[attr-defined]
-        bgr = decode_frame(self._read_body())          # raises ValueError -> 400
-        rgb = np.ascontiguousarray(bgr[:, :, ::-1])    # DetectionModel wants RGB
+        bgr = decode_frame(self._read_body())
+        rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         t0 = time.perf_counter()
-        # One model, one GPU: inference is serialised even though the server
-        # is threaded. Threading is about not REFUSING a second client, not
-        # about parallel inference.
         with ctx.lock:
             dets = ctx.detector.detect(rgb)
-        ms = (time.perf_counter() - t0) * 1000.0
-        ctx.frames_served += 1
+            classes = list(ctx.classes)
+            metadata = dict(ctx.metadata)
+            ctx.frames_served += 1
         self._send_json({
-            "w": int(bgr.shape[1]),
-            "h": int(bgr.shape[0]),
-            "ms": float(ms),
+            "w": int(bgr.shape[1]), "h": int(bgr.shape[0]),
+            "ms": float((time.perf_counter() - t0) * 1000.0),
+            "classes": classes, "metadata": metadata,
             "detections": detections_to_json(_wire_from_core(dets)),
         })
 
@@ -172,23 +155,7 @@ class _DetectionHandler(BaseHTTPRequestHandler):
 
 
 def _make_server(ctx: _ServerContext, host: str, port: int) -> ThreadingHTTPServer:
-    """Bind the HTTP server and attach the context.
-
-    THREADED, and the reason is a measured failure rather than a preference.
-    With the single-threaded ``HTTPServer`` a second client simply cannot be
-    served: the detector client posts a frame every second, and while that
-    request is in flight every other connection waits in the accept backlog
-    until it times out. When the target-approach node joined at ~2 POST/s the
-    whole approach ran with ``posts=2 dets=0 conn_err=2`` -- every request
-    timed out, the servo never got a box, and the approach hit its 120 s
-    timeout without ever seeing the object. ``/health`` was unanswerable for
-    the same reason.
-
-    Inference itself stays serialised behind ``ctx.lock``: there is one model
-    on one GPU. Threading buys concurrent *connections*, not concurrent
-    inference -- at ~7 ms a frame the queue drains far faster than either
-    client fills it.
-    """
+    """Threaded connections, serialized inference, one detector instance."""
     server = ThreadingHTTPServer((host, port), _DetectionHandler)
     server.daemon_threads = True
     server.ctx = ctx  # type: ignore[attr-defined]
@@ -272,8 +239,17 @@ def main() -> None:
         run_selftest()
         return
     detector = _build_real_detector(args)
+    digest = hashlib.sha256()
+    with Path(args.model).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    metadata = {"checkpoint_sha256": digest.hexdigest(),
+                "detector_config": asdict(detector.cfg),
+                "packages": {name: importlib.metadata.version(name)
+                             for name in ("torch", "ultralytics", "numpy")}}
     ctx = _ServerContext(detector, model_name=Path(args.model).name,
-                         device=args.device, classes=_parse_classes(args.classes))
+                         device=args.device, classes=_parse_classes(args.classes),
+                         metadata=metadata)
     server = _make_server(ctx, args.host, args.port)
     print("%s serving on %s:%d  conf>=%.2f  vocab=%d"
           % (_TAG, args.host, args.port, args.conf, len(ctx.classes)))
