@@ -197,7 +197,7 @@ def prepare(args):
     return env, policy, config, issues
 
 
-def main(argv=None):
+def main(argv=None, *, configuration_guard=None):
     args = parser().parse_args(argv)
     if args.print_vocabulary:
         print(",".join(gibson_label_mapper().vocabulary()))
@@ -209,6 +209,9 @@ def main(argv=None):
         if issues:
             print(json.dumps({"ready": False, "issues": issues}, indent=2))
             return 1
+        if configuration_guard is not None:
+            # Validate THIS prepared policy, not only an earlier preflight.
+            configuration_guard(config)
         if args.preflight:
             print(json.dumps({"ready": True, "configuration": config}, indent=2))
             return 0
@@ -252,3 +255,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

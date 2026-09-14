@@ -1,279 +1,217 @@
-indoor profile uses a 0.75 m door cut, 1 m seed separation, 0.3 m minimum
-clearance, 50-cell minimum room and 0.2 m basin-merge dynamics at the method's
-This runtime composes the existing scene graph, LLM room reasoning, RPT*,
-weighted A* and discrete action converter. It uses simulated RGB-D and GT pose,
-not flight control, learned depth or estimated localization. The method sees
-only observations and the requested category: GT semantic maps, goal positions
-and distance telemetry stay on the evaluator/recorder side.
+# Gibson ObjectNav runtime
 
-The optional Habitat/LLM/scientific dependencies live in the sibling
-`objnav_benchmark_runtime` package. Scoring, logging, statistics and the run
-loop remain in [`objnav_benchmark`](../../objnav_benchmark/README.md), without a
-per-benchmark fork. Host frontier sweeps replace FALCON's local exploration;
-this is an adaptation, not an unchanged flight-stack evaluation.
+The method remains **scene graph -> LLM room probabilities -> RPT* room order
+-> weighted A* -> discrete action converter**. Habitat supplies RGB-D and pose.
+**FALCON itself is not running**: it is a 3D exploration/mapping system, not the
+object detector. Its local exploration is represented here by the existing 2D
+host frontier sweep. Navigation starts without a mandatory initial 360-degree
+rotation.
 
-## Final five-scene smoke: 2026-09-14
+This optional runtime uses the [shared benchmark harness](../../objnav_benchmark/README.md).
+GT goals, semantic floor maps and distance telemetry reach only the scorer and
+recorder, never the policy. No navigation-specific training is performed.
 
-Run: `~/objnav_benchmark/gibson/demos/door-room-fixes-final-20260914-124814-UTC`.
-Exactly the first published episode (`<scene>/000000`) was run in each scene,
-sequentially, under one frozen source fingerprint and configuration. All five
-processes exited 0; all five have complete videos and no agent errors.
+## Refinements without replacing the algorithm
 
-| Scene | Target | SR | SPL | DTG m | SoftSPL | Actions | STOP | Confirmed doors | Maximum/final regions |
-|---|---|---:|---:|---:|---:|---:|---|---:|---|
-| Collierville | toilet | 1 | 0.4976 | 0.0000 | 0.4976 | 55 | yes | 1 | 4 / 4 |
-| Corozal | bed | 1 | 0.8295 | 0.0000 | 0.8295 | 76 | yes | 1 | 4 / 4 |
-| Darden | bed | 0 | 0.0000 | 7.0068 | 0.0000 | 4 | yes | 0 | 1 / 1 |
-| Markleeville | bed | 0 | 0.0000 | 3.6638 | 0.1947 | 9 | yes | 0 | 1 / 1 |
-| Wiconisco | toilet | 0 | 0.0000 | 11.3278 | 0.0000 | 500 | no | 1 | 8 / 5 |
-| **Mean** | | **0.4000** | **0.2654** | **4.3997** | **0.3044** | | | | |
+- **Committed routes:** keep a safe path through turns, minor goal drift and
+  unrelated map changes. Replan for obstruction, blocked movement, excessive
+  cross-track error, a changed goal or bounded lack of progress, not a timer.
+  `replan_steps` remains accepted for old configurations but no longer replaces
+  paths periodically. Positional stagnation survives safety-triggered replans.
+- **Correct arrival:** reuse the discrete converter's arrival rule on the actual
+  path, including a snapped endpoint. Merely standing near the endpoint of an
+  unwalked return leg does not complete the route. Frontier completion and
+  target verification agree with the executor.
+- **Ground-robot map:** back-project depth in 3D and integrate a robot-height
+  2.5D slab. Visible floor cells provide free evidence without clearing occupied
+  columns or inventing free rays through furniture. A substantial floor-height
+  change resets local state instead of superimposing storeys. This is not full
+  multi-floor FALCON exploration.
+- **Physical clearance:** retain preferred 0.30 m clearance and a physical
+  0.18 m floor. Room/frontier eligibility uses the physical-radius field, so a
+  narrow doorway is not rejected before A* can try its relaxation ladder.
+  Execution checks use the accepted route's actual inflation radius. Genuine
+  obstacles are not removed to make a path feasible.
+- **Detection duplicates:** canonicalize couch/sofa and tv/television aliases,
+  suppress overlapping duplicate boxes, associate the nearest eligible
+  landmark, and count at most one observation per landmark per frame.
+- **Target evidence:** STOP requires fresh repeated support from separated
+  views of one hypothesis. Verification has a bounded turn budget attached to
+  the selected landmark, not another visible object. Rejected/stalled targets
+  are cooled down and require fresh evidence. This is not infallible visual
+  recognition and never uses GT success as a STOP oracle.
+- **Doors and rooms:** retain depth-backed door confirmation, door-aware
+  watershed, evidence-gated room typing, count-sensitive refresh and label
+  invalidation after partition changes. Geometric route commitment is not
+  discarded merely because room IDs change.
 
-**Interpretation:** both successful episodes called STOP. Darden and
-Markleeville stopped outside the success region; Wiconisco exhausted its
-budget. Target verification/stopping and exploration efficiency remain open
-problems. These five development episodes are NOT a full Gibson benchmark,
-a SOTA result, a room-segmentation accuracy measurement, or an ablation isolating
-the benefit of doors from the changed geometric room settings.
+Records include route adoptions/keeps/invalidations, planning calls, blocked
+motion, duplicates removed, target support, floor revisions and room/door
+reasoning. More landmarks or rooms are not themselves accuracy improvements.
 
-There were 20, 23, 0, 3 and 142 door candidates respectively, but only the
-three confirmed landmarks listed above could affect segmentation. Room-label
-history recorded 6, 6, 0, 0 and 18 changes; these include unknown-to-known
-classification and resets to unknown after a partition changes. No direct
-known-type-to-different-known-type revision occurred in this small run. That
-revision path is covered by regression tests, not claimed as observed here.
+## Detector choice and measured limitations
 
-The first attempt remains at
-`~/objnav_benchmark/gibson/demos/door-room-fixes-20260914-121507-UTC` and is not
-mixed into the final results. It exposed an unselected invalid start, a native
-sliding tolerance issue and JSON-incompatible infinite solver diagnostics.
-The original single-scene recording also remains at
-`~/objnav_benchmark/gibson/demos/Collierville-20260914-110342-UTC`: SR 1.0,
-SPL/SoftSPL 0.1131, DTG 0, but **500 actions with no STOP**. SemExp credited its
-final position, not an explicit target-found declaration.
+Checkpoint identity, SHA-256, configuration and package versions are recorded.
+A service with a different checkpoint cannot silently reuse the same run.
+Both checkpoints are available on this workstation:
 
-0.1 m grid. These are recorded as method settings, not benchmark changes.
-Confirmed doors are never merged across by the core segmenter, and displayed
+- Original/default: `~/GIT/TheAgency/yolov8s-worldv2.pt`.
+- Larger alternative: `~/models/objnav/yolov8l-worldv2.pt`.
 
-Doorway position is estimated from jamb/lintel depth bands instead of the far
-wall visible through the centre of an open doorway. A plausible width and
-height, three observations, and separated viewpoints are required before a
-landmark can force a boundary. Overlapping aliases in one frame count once;
-a strong competing object detection prevents a low-score door proposal from
-becoming a boundary. No surveyed doors or GT semantic detections are used.
+The inherited five-scene development comparison finished with **2/5 successes
+for both models**: mean SPL **0.1811 (S)** versus **0.1574 (L)**, DTG **2.5693 m
+(S)** versus **4.2834 m (L)**. These are the complete inherited batches, not
+best episodes mixed across attempts. On 12 previously inspected development
+views, median CPU inference was approximately 37 ms (S) versus 152 ms (L).
+These measurements do not establish detection AP or statistical superiority.
+The larger checkpoint therefore does not justify replacing the small default.
 
-The small checkpoint produced doorway scores below 0.07 on raw development
-views. The dedicated service therefore emits candidates at **0.05**, but
-**navigation targets still require 0.35**. The lower value is a proposal gate,
-not sufficient evidence of a door. These choices were adjusted during smoke
-debugging, not a held-out evaluation. The actual quality of the predicted
-boundaries must be inspected rather than inferred from their count.
-even then they remain revisable. New room partitions also retire stale search
-goals. The goal detector's STOP logic is unchanged by these two fixes.
-clearance, 50-cell minimum room and 0.2 m basin-merge dynamics on the method's
-0.1 m grid. The core watershed preserves confirmed door barriers during
-merging. Door-to-room links are vetted against actual region adjacency.
-These are method settings recorded in `run.json`, not changes to scoring.
+False-positive target stops remain a known limitation. GroundingDINO or another
+open-vocabulary verifier would require a separate controlled integration and
+training/development evaluation; changing model size alone is not a cure.
+See [recovery results and remaining work](RESUME_STATUS.md).
 
-Room labels wait for three confirmed landmarks spanning two distinct classes
-and two graph updates. They are reconsidered when class counts/categories
-change, refreshed every 50 actions, and invalidated after room splits/merges.
-Labels remain provisional until repeated confident agreement, and can still
-change afterwards. A changed partition retires stale search goals.
-  curve, with reset and terminal observations included.
-The shared `RoomTypeClassifier` retains its legacy class-set cache by default.
-Online callers opt into class-diversity gating, count-sensitive signatures and
-`classify(..., refresh=True)`. Refresh failures propagate rather than replacing
-an old answer with a fabricated one. The recordings include provisional labels,
-door nodes/links and the label history with step, old/new label and trigger.
-- `metrics.json`, `episode.json`, `run.log`: per-episode results and provenance.
-## Data and licence
-  --allow-sim-version-mismatch --output "$HOME/objnav_benchmark/gibson/one-scene"
-Obtain **Gibson for Habitat-sim**, normally `gibson_habitat_trainval.zip`, after
-completing the [publisher's licence form](https://forms.gle/36TW9uVpjrE1Mkf9A).
-The launcher never accepts the licence or generates a substitute scene.
-The user-supplied archive on this workstation has now provided all five
-validation scene pairs in `~/datasets/gibson/scenes`.
-`IMAGEIO_FFMPEG_EXE` overrides that choice. Existing environments are reused;
-The public SemExp ObjectNav **v1.1** release comes from
-[the publisher's instructions](https://github.com/devendrachaplot/Object-Goal-Navigation#downloading-episode-dataset)
-(Google Drive id `1tslnZAkH8m3V5nP8pbtBmaR2XEfr8Rau`). It is already installed
-here at `~/datasets/objectnav/gibson/objectnav/gibson/v1.1/val`.
-checks categories, floors, origins, starts, quaternions, map contents, meshes
-and navmeshes. It qualifies ids as `<scene>/<six-digit row index>` and never
-$GIBSON_SCENES_DIR/Collierville.glb
-The legacy map pickle uses a numpy-only restricted unpickler; still obtain
-data only from the publisher, not arbitrary pickle files.
+Detector services emit proposals at 0.05 for low-scoring doorway/frame prompts.
+Navigation objects still require 0.35; door candidates need geometric and
+multi-view checks. The default detector runs on CPU, not Habitat's rendering GPU.
 
-## Runtime and services
+## Published split and fair interpretation
 
-`GIBSON_EPISODES_DIR` means the **v1.1/val directory**. The five canonical
-scenes are Collierville, Corozal, Darden, Markleeville and Wiconisco, with 200
-published episodes each. `Collierville.glb.json.gz` is episode metadata, NOT
-a mesh. PointNav episodes, raw OBJ archives and PONI multi-goal episode files
-are not substitutes for this release.
+The comparison set is the released **SemExp Gibson ObjectNav v1.1 validation
+split: 1,000 episodes, 200 each in Collierville, Corozal, Darden, Markleeville
+and Wiconisco**. All starts are retained, including the reference finite FMM
+sentinel case `Markleeville/000188`. Bounds/corruption checks remain.
+
+The first episode per scene has already been used for development. These five
+examples are not an untouched holdout and cannot support a SOTA claim. Further
+systematic tuning should use the 25 training scenes or synthetic scenarios,
+not repeated full-validation feedback. Training archive dummy PointNav rows
+must not be mistaken for released ObjectNav evaluation episodes.
+
+[Protocol and tuning audit](PROTOCOL_AND_TUNING.md) cites OSG Navigator's Gibson
+validation protocol, distinguishes train/validation/test, and records what the
+papers do not establish about parameter selection. ApexNav and SG-Nav do not
+report Gibson results. There is insufficient evidence to accuse their authors
+of overfitting or to guarantee absence of validation/pretraining contamination.
+
+The freeze-then-run entrypoint locks source, method/model configuration, runtime,
+seed, data and motion tolerances. It validates the actual execution configuration
+again after preflight. This is a reproducibility guard, not proof of unseen
+validation; role metadata retains the development-contamination disclosure.
+
+## Data and running
+
+Installed data:
+
+```text
+~/datasets/gibson/scenes/<scene>.glb
+~/datasets/gibson/scenes/<scene>.navmesh
+~/datasets/objectnav/gibson/objectnav/gibson/v1.1/val/val_info.pbz2
+~/datasets/objectnav/gibson/objectnav/gibson/v1.1/val/content/<scene>_episodes.json.gz
 ```
-**Import scene ZIP…** extracts only the selected scene's GLB/navmesh pair.
-It refuses missing/ambiguous members, traversal paths, symlinks, invalid GLB
-headers and overwriting existing files. It does not regenerate navmeshes.
-The legacy map pickle uses a numpy-only restricted unpickler; use only the
-publisher's trusted archive. All inputs and meshes are fingerprinted.
-The existing scene-graph detection HTTP service is reused. Give this run a
-## One-button demo and recordings
 
-In PyCharm select **Gibson One Scene Demo** and press Run. The configuration
-is `.run/Gibson One Scene Demo.run.xml`. Alternatively:
+On another workstation, complete the [Gibson licence form](https://forms.gle/36TW9uVpjrE1Mkf9A)
+and obtain the publisher's assets. The launcher's **Import scene ZIP...** extracts
+only the selected scene pair without overwriting assets. A `.glb.json.gz` file
+is metadata, not a mesh. Episodes are linked in [SemExp's dataset instructions](https://github.com/devendrachaplot/Object-Goal-Navigation#downloading-episode-dataset).
+Legacy floor maps use a restricted numpy-only unpickler.
+
+In PyCharm choose **Gibson One Scene Demo**, or launch the UI from the repo root:
 
 ```bash
 .venv/bin/python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.demo
 ```
 
-Select the data directories once, acknowledge the simulator-version caveat,
-and click **Run one-scene demo**. Defaults are Collierville and one episode;
-the UI permits only 1–10 episodes in a named scene, not the entire dataset.
-Settings are saved outside git in `~/.config/sparx/gibson-demo.json`.
+Configure paths once and acknowledge the simulator-version caveat. UI settings
+are in `~/.config/sparx/gibson-demo.json`. The UI runs 1-10 episodes in one scene
+and can reuse/start dedicated CPU detector/Ollama services without reconfiguring
+unrelated services.
 
-The launcher can reuse/start the existing CPU-only Ollama container and a
-dedicated CPU YOLO-World service on port **18092**. Habitat alone owns the
-rendering GPU. It will not reconfigure an unrelated model service. Stop
-interrupts the child evaluation and closes its recorder; only processes
-started by the launcher are cleaned up. Auxiliary model weights must be
-provisioned with operator authorization.
+With the Habitat conda environment active:
 
-Every recorded run includes:
+```bash
+export GIBSON_SCENES_DIR="$HOME/datasets/gibson/scenes"
+export GIBSON_EPISODES_DIR="$HOME/datasets/objectnav/gibson/objectnav/gibson/v1.1/val"
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run \
+  --scene Collierville --limit 1 --record --detector-url http://127.0.0.1:18092 \
+  --allow-sim-version-mismatch --output "$HOME/objnav_benchmark/gibson/smoke"
 
-- `live.html`, `latest.jpg`, `live.json`: live RGB/depth, detections, observed
-  rooms, executed trail and actual planned path.
-- `index.html`, `metrics.png`, `metrics.csv`, `demo_metrics.json`: the four
-  metrics, plots and exports, with STOP/termination status made explicit.
-- `recordings/<episode-key>/video.mp4`: browser-playable 1600×900 H.264 video,
-  normally six decisions per playback second, NOT wall-clock speed.
-- Per-recording `trajectory.png`/`.csv`, `steps.jsonl`, `metrics.json`,
-  `episode.json` and `final.jpg`: path, evaluator-only distance curve, actual
-  detections, policy decisions, room reasoning and label revisions.
-- `run.json`, `episodes.jsonl`, `summary.json`, `audit.json`, `comparison.md`
-  and logs: configuration, provenance, scores and qualified paper comparisons.
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
+  --episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" \
+  --detector-url http://127.0.0.1:18092 --allow-sim-version-mismatch \
+  --output "$HOME/objnav_benchmark/gibson/five-scene"
+```
 
-Maps in the video are **observed maps**, not GT floorplans. Low-confidence
-proposal boxes are not confirmed landmarks. GT distance telemetry never reaches
-the policy. No metrics are invented for an incomplete episode.
+`--preflight` checks inputs/services without rendering. Five-scene smoke runs
+one previously inspected start per scene sequentially and refuses source drift.
+Use the same output with `--resume` only for unchanged configuration/data/source.
+Never mix attempts. Full validation uses the separate
+[freeze workflow](PROTOCOL_AND_TUNING.md#freeze-then-evaluate).
 
-## Runtime and commands
-
-Use the existing Habitat conda Python for simulation. The runtime requires
-habitat-sim, numpy-quaternion, numpy, scipy, scikit-image, scikit-fmm, OpenCV,
-networkx and requests. Direct habitat-sim is used; habitat-lab is not needed.
-Recording additionally needs matplotlib and a working FFmpeg with libx264.
-`IMAGEIO_FFMPEG_EXE` selects an encoder; the launcher uses the detector
-environment's encoder when the Habitat environment's executable is broken.
+For a larger CPU detector, run in the existing detector environment:
 
 ```bash
 VOCAB=$(python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run --print-vocabulary)
 python -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \
-export GIBSON_SCENES_DIR="$HOME/datasets/gibson/scenes"
-export GIBSON_EPISODES_DIR="$HOME/datasets/objectnav/gibson/objectnav/gibson/v1.1/val"
-  --model "$PWD/yolov8s-worldv2.pt" --device cpu --host 127.0.0.1 \
-  --port 8092 --conf 0.25 --classes "$VOCAB"
-If starting the detector manually, use its existing model environment and
-checkpoint; never let it compete with Habitat on a nearly-full GPU:
-containers, paid services, or licensed scenes are started/downloaded by the CLI.
-GPU occupancy is checked immediately before rendering; the expert-only
-`--allow-shared-gpu` override requires deliberate memory budgeting.
+  --model "$HOME/models/objnav/yolov8l-worldv2.pt" --device cpu \
+  --host 127.0.0.1 --port 18093 --conf 0.05 --classes "$VOCAB"
+```
 
-## Preflight → smoke → full run  --port 8092 --conf 0.05 --classes "$VOCAB"
-  --port 18092 --conf 0.05 --classes "$VOCAB"
-invalid selected episode. Full runs still check all starts. The published
-Markleeville episode 188 is currently rejected as unreachable by the GT-map
-Configure `LLM_BACKEND`, `LLM_BASE_URL`, `LLM_MODEL` as for the existing
-LLMClient (default Ollama/qwen2.5:3b-instruct). Keys remain in `LLM_API_KEY`,
-not `run.json`. Preflight checks the actual model and detector configuration;
-Ollama model digests and detector checkpoint/configuration identities are
-verified, not merely a reachable port. A service threshold that suppresses
-door candidates is refused. The CLI does not download/start model services.
-# One named scene and one episode, with recording; preflight adds --preflight.
-  --scene Collierville --limit 1 --record --detector-url http://127.0.0.1:18092 \
-  --allow-sim-version-mismatch --output "$HOME/objnav_benchmark/gibson/one-scene"
+Configure `LLM_BACKEND`, `LLM_BASE_URL`, `LLM_MODEL` as for the shared LLM client.
+API keys stay in environment variables, not result artifacts. Preflight verifies
+model identity and vocabulary, not just a live port. GPU ownership is checked
+before rendering. No models or licensed scenes are downloaded by the CLI.
 
-# Exactly the first episode in each of the five scenes, sequentially.
-python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
-  --episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" \
-  --allow-sim-version-mismatch --output "$HOME/objnav_benchmark/gibson/five-scene"
-The five-scene entrypoint calls the same runner in isolated child processes;
-it is not a second evaluator. `campaign.json` tracks completed/failed scenes,
-and the parent HTML/CSV/JSON summarize actual records with links to each video.
-It refuses source changes mid-campaign. Do not mix attempts or select the best
-run per scene. The first failed attempt was retained separately here.
+Runtime: habitat-sim, numpy-quaternion, numpy, scipy, scikit-image, scikit-fmm,
+OpenCV, networkx and requests; no habitat-lab or ROS. `requirements.txt` lists
+extra CPU packages. Recording needs matplotlib and FFmpeg/libx264;
+`IMAGEIO_FFMPEG_EXE` can select the detector environment's working encoder.
 
-For a full run omit `--scene` and `--limit`. For distributed runs use
-`--shards N --shard-index I`, the same seed/configuration, no limit and separate
-outputs. Merge complete shards with `gibson.report <run dirs> --merge-output
-<new dir>`. Missing/overlapping/limited or incompatible shards are rejected.
-Resume the exact original command/output with `--resume`; input, source,
-settings, runtime or selection changes refuse resume. `--policy-config` changes
-method settings, not the benchmark protocol.
+## Simulation realism and recordings
 
-**Full-run caveat:** Markleeville episode 188 currently fails the GT-map start
-reachability check. Subset preflight now checks exactly the selected starts;
-it never discards an invalid selected episode. Full validation still checks
-all starts. This release/evaluator issue must be resolved before claiming a
-complete 1,000-episode evaluation, not silently excluded.
-## Scoring protocol and paper comparisons
-The implemented profile is **SemExp Gibson ObjectNav v1.1**, not Habitat's
-HM3D/MP3D goal-viewpoint evaluator. References inspected:
-- [SemExp](https://github.com/devendrachaplot/Object-Goal-Navigation), revision
-  `5d76902`: `arguments.py`, `constants.py`, `envs/habitat/objectgoal_env.py`,
-  `envs/habitat/__init__.py`, its task YAML and `envs/utils/fmm_planner.py`.
-- [PONI](https://github.com/srama2512/PONI), revision `30682c2`: its current
-  multi-goal schema, goal-map validation and STOP-gated progress differ; they
-  are not silently substituted for SemExp v1.1.
-- [OSG Navigator](https://arxiv.org/abs/2508.04678), v1 p.11 §7.1 and Table 2
-  p.12: five Gibson validation scenes and 1,000 episodes; SR, SPL and DTG.
-  Its exact evaluator revision/episode hashes were not identified in the
-  supplied paper. Exact OSG equivalence remains **unverified**.
-- [ApexNav](https://arxiv.org/abs/2504.14478), v3 p.6 §V-A/Table I, and
-  [SG-Nav](https://arxiv.org/abs/2410.08189), p.7 §4.1/Table 1: **no Gibson
-  results**. Do not transplant their other-dataset values into this comparison.
-Paper-reported rows in `report.py` are reference values, not reproduced results
-or a claim about all current SOTA. They were transcribed from extracted text;
-check the original table visually before publication.
+Habitat renders a **3D scanned mesh**, not stitched input frames. Scan texture
+seams, missing geometry and quality limitations can affect perception. Apparent
+jumps also come from the published instantaneous 0.25 m/30-degree actions and
+six-decisions-per-second playback. Changing those observations/actions would
+change the benchmark, so realism improvements are confined to a separate replay:
 
-| Quantity | This profile |
-|---|---|
-| Camera | registered 640×480 RGB-D, 79° horizontal FOV, 0.88 m height |
-| Depth / radius | 0.5–5 m optical depth; 0.18 m agent radius |
-| Actions | 0.25 m forward, 30° turns, STOP; 500-action limit; sliding enabled |
-| Episode quaternion | publisher WXYZ, not assumed XYZW |
-| GT scoring map | 5 cm floor map; free-space dilation two cells, category dilation 20 cells |
-| Success | final FMM distance to the 1 m success region is exactly zero; STOP not required |
-| SPL reference | initial boundary distance + 1 m |
-| Travel | planar displacement, initial accumulator 1e-5 m |
-| DTG | SemExp distance-to-success boundary, not Euclidean object-centre distance |
-| Unreachable field cells | reference finite sentinel: maximum valid FMM distance + one cell |
+```bash
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.smooth_replay \
+  "$HOME/objnav_benchmark/gibson/smoke"
+```
 
-**SR/SPL/DTG are all-episode means, failures included.** SoftSPL is supplementary
-progress/efficiency, with boundary distance used consistently at both ends.
-TF means training-free and NM means non-metric: these are method labels, not
-numeric metrics. Our metric map/RPT method is TF, not NM. OSG's `-GT` variants
-mean semantic annotations, not merely the perfect geometry used here.
+Run replay only after evaluation releases the GPU. `smooth_rgb.mp4` is explicitly
+visualization-only: interpolated frames never enter policy/scoring, and original
+trajectories/metrics/videos remain intact. It smooths motion, not scan defects.
+The observed library/process failures are not evidence that texture seams crash
+Habitat.
 
-The reference requests habitat-sim 0.1.5; this workstation uses 0.2.4. That
-mismatch requires explicit acknowledgment and is recorded. STOP omits the
-upstream dummy right turn, which does not change position-based SemExp scoring.
-The four-action profile adds no extra LOOK sweeps. The Gibson motion guard
-allows one 5 cm navmesh cell of sliding correction: a native 0.285 m step was
-observed between valid Wiconisco points. The requested step remains 0.25 m;
-all motion tolerances and actual travel are retained. Undefined solver bounds
-are JSON null instead of erasing the episode's semantic diagnostics.
+Recorded runs include live/HTML dashboards, H.264 video, trajectories, metrics,
+per-step predictions and reasoning. GT distance curves remain evaluator-only.
 
-## Validation
+## Scoring caveats and tests
+
+The SemExp profile uses registered 640x480 RGB-D, 79-degree HFOV, 0.88 m camera,
+0.18 m radius, depth 0.5-5 m, 500 actions and sliding. GT floor scoring uses 5 cm
+cells, two-cell free dilation and 20-cell goal-category dilation. Success is
+zero final FMM distance to the 1 m success region; **this evaluator does not
+require STOP**. SPL uses initial boundary distance plus 1 m and actual planar
+travel with the reference 1e-5 m initial accumulator. SoftSPL is supplementary.
+
+The reference used Habitat 0.1.5; this workstation runs 0.2.4. That mismatch is
+explicit. Native sliding may include a bounded 5 cm navmesh correction; motion
+and path-length cross-checks remain. Exact OSG implementation equivalence is not
+established. Our method is metric, not non-metric.
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest \
   sparx_agency/tasks/planning/objnav_benchmark_runtime/tests \
-  sparx_agency/core/mapping/topology/tests \
-  sparx_agency/tasks/planning/objnav_benchmark -q
-The final affected suite reported **1,482 passed**. The known .venv OMPL
-allocator abort can occur after the pytest summary; it did so in that run
-(exit 134). The actual final five-scene runtime exited 0 in every scene.
-All five recorded videos were verified as H.264 at 1600×900, and the GPU
-returned to its baseline occupancy after evaluation.
-`habitat.smoke` provides an additional temporary synthetic-room renderer check,
-explicitly marked as not a benchmark result. Unit tests use synthetic fixtures
-and stub services; the recorded scene runs above used real Gibson assets and
-the real detector/LLM. Do not confuse those evidence sources.
+  sparx_agency/core/mapping/objects/tests sparx_agency/core/mapping/topology/tests \
+  sparx_agency/core/planning/objnav sparx_agency/tasks/planning/objnav_benchmark \
+  sparx_agency/core/planning/planners/common/tests \
+  sparx_agency/core/planning/planners/astar/tests -q
+```
+
+A*/ObjectNav now avoid unnecessary native OMPL imports, eliminating the previous
+post-pytest allocator abort on this path. Explicit OMPL users still depend on
+the installed binding's health; this change does not repair that library.

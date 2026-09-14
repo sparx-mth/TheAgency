@@ -55,7 +55,10 @@ def test_target_confirmation_uses_distinct_frames_and_reset_clears_memory():
     assert not first.stop
     assert len(policy.landmarks) == 1
     assert policy.landmarks.all_landmarks()[0].count == 1
-    assert policy.plan(observation(episode, 1)).stop
+    assert not policy.plan(observation(episode, 1)).stop
+    from dataclasses import replace
+    distinct_view = replace(observation(episode, 2), pose=AgentPose(0, 0.25, 0, 0))
+    assert policy.plan(distinct_view).stop
     policy.reset(episode, policy.target)
     assert len(policy.landmarks) == 0
     assert not policy.plan(observation(episode, 0)).stop
@@ -111,6 +114,7 @@ def test_nearby_frontier_is_retired_not_idled_forever(monkeypatch):
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import rpt_policy
     policy, episode = setup_policy()
     policy._goal = (0.25, 0.0)
+    policy.route_memory.kind = "frontier"
     monkeypatch.setattr(rpt_policy, "in_room_frontier_goals", lambda *args: [(0.25, 0.0)])
     goal = policy._frontier(observation(episode, 1), SimpleNamespace(resolution=0.1), None, None)
     assert goal is None and (0.25, 0.0) in policy._visited_frontiers

@@ -16,7 +16,7 @@ from __future__ import annotations
 import colorsys
 import hashlib
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _HUE_BUCKETS = 997
 """Prime hue-bucket count (ported constant): spreads class hues over [0, 1)."""
@@ -75,7 +75,7 @@ class ObjectLandmarkMap:
     """
 
     def __init__(self, dedupe_radius_m: float = 0.70,
-                 min_observations: int = 2) -> None:
+                 min_observations: int = 2, nearest_match: bool = False) -> None:
         if float(dedupe_radius_m) <= 0.0:
             raise ValueError("dedupe_radius_m must be positive, got %r"
                              % (dedupe_radius_m,))
@@ -84,11 +84,13 @@ class ObjectLandmarkMap:
                              % (min_observations,))
         self._radius_sq = float(dedupe_radius_m) ** 2
         self._min_obs = int(min_observations)
+        self._nearest_match = nearest_match
+        self._frames = {}  # type: Dict[int, int]
         self._landmarks = {}  # type: Dict[int, ObjectLandmark]
         self._next_id = 0
 
     def observe(self, class_name: str,
-                xy: Tuple[float, float]) -> ObjectLandmark:
+                xy: Tuple[float, float], frame_id: Optional[int] = None) -> ObjectLandmark:
         """Fold one world-ENU observation in; return the landmark it landed on.
 
         The first same-class landmark (in discovery order) whose running
@@ -104,19 +106,28 @@ class ObjectLandmarkMap:
             ``xy``/``count`` keep updating on later observations).
         """
         wx, wy = float(xy[0]), float(xy[1])
-        for landmark in self._landmarks.values():
+        candidates = list(self._landmarks.values())
+        if self._nearest_match:
+            candidates.sort(key=lambda lm: (lm.xy[0] - wx) ** 2 + (lm.xy[1] - wy) ** 2)
+        for landmark in candidates:
             if landmark.class_name != class_name:
                 continue
             ox, oy = landmark.xy
             if (ox - wx) ** 2 + (oy - wy) ** 2 <= self._radius_sq:
+                if frame_id is not None and self._frames.get(landmark.id) == frame_id:
+                    return landmark
                 n = landmark.count
                 landmark.xy = ((ox * n + wx) / (n + 1),
                                (oy * n + wy) / (n + 1))
                 landmark.count = n + 1
+                if frame_id is not None:
+                    self._frames[landmark.id] = frame_id
                 return landmark
         landmark = ObjectLandmark(id=self._next_id, class_name=class_name,
                                   xy=(wx, wy), count=1)
         self._landmarks[self._next_id] = landmark
+        if frame_id is not None:
+            self._frames[landmark.id] = frame_id
         self._next_id += 1
         return landmark
 

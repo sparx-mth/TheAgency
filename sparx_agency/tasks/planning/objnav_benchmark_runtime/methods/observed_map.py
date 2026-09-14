@@ -8,7 +8,7 @@ import numpy as np
 from sparx_agency.core.mapping.costmap.depth_to_grid import update_grid_from_depth
 from sparx_agency.core.mapping.costmap.log_odds_grid import LogOddsGridConfig, LogOddsGridCostmap
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
-from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
+from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical, backproject_depth
 
 
 class ObservedMap:
@@ -20,11 +20,13 @@ class ObservedMap:
     simulator for scene bounds. The initial footprint uses only known pose.
     """
 
-    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8):
+    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88):
         self.grid = LogOddsGridCostmap(LogOddsGridConfig(
             size_m=size_m, resolution_m=resolution_m))
         self.stride = stride
+        self.body_height_m = body_height_m
         self._anchor = None
+        self.floor_revision = 0
 
     def update(self, observation):
         pose, camera = observation.pose, observation.camera
@@ -32,6 +34,12 @@ class ObservedMap:
             self._anchor = pose.z
             self.grid.origin_x = pose.x - self.grid.cfg.size_m / 2
             self.grid.origin_y = pose.y - self.grid.cfg.size_m / 2
+        if abs(pose.z - self._anchor) > 0.6:
+            # Do not overlay two storeys in one XY map. This remains a local
+            # 2.5D ground-robot adaptation, not full FALCON 3D exploration.
+            self.grid.reset()
+            self._anchor = pose.z
+            self.floor_revision += 1
         margin = camera.max_depth_m
         if (abs(pose.x - self.grid.origin_x - self.grid.cfg.size_m / 2)
                 > self.grid.cfg.size_m / 2 - margin
@@ -43,11 +51,26 @@ class ObservedMap:
         update_grid_from_depth(
             self.grid, observation.depth_m, matrix,
             world_T_camera_optical(pose, camera),
-            z_min_world=self._anchor + 0.15, z_max_world=self._anchor + 1.5,
+            z_min_world=self._anchor + 0.15,
+            z_max_world=self._anchor + self.body_height_m + 0.05,
             depth_min_m=camera.min_depth_m, depth_max_m=camera.max_depth_m,
             downsample=self.stride, stamp_sec=float(observation.step),
             raytrace=True, raytrace_stride=1)
         spec, probabilities = self.grid.get_grid()
+        # A visible floor sample is free evidence at its OWN cell, not an
+        # unobserved free ray under/through furniture. Never erase an occupied
+        # column: robot-height obstacle evidence takes precedence.
+        points = backproject_depth(observation.depth_m, camera, pose, self.stride)
+        floor = points[np.abs(points[:, 2] - self._anchor) <= 0.10]
+        free_mask = np.zeros(probabilities.shape, dtype=bool)
+        if len(floor):
+            xs = np.floor((floor[:, 0] - spec.origin_x) / spec.resolution_m).astype(int)
+            ys = np.floor((floor[:, 1] - spec.origin_y) / spec.resolution_m).astype(int)
+            inside = (xs >= 0) & (xs < spec.width) & (ys >= 0) & (ys < spec.height)
+            free_mask[ys[inside], xs[inside]] = True
+            free_mask &= probabilities < 65
+            self.grid.apply_free_mask(free_mask)
+            spec, probabilities = self.grid.get_grid()
         # Explicit ternary encoding; raw probabilities are not occupied=100.
         data = np.full(probabilities.shape, -1, dtype=np.int8)
         data[(probabilities >= 0) & (probabilities <= 45)] = 0

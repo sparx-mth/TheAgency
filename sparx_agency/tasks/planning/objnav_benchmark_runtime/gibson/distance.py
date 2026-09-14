@@ -17,7 +17,8 @@ class GibsonDistanceField:
 
     The source fills masked/unreachable cells with max(valid distance)+1 cell.
     That finite sentinel is preserved for DTG, rather than dropping failures
-    from its mean. Starts there are rejected, never silently excluded.
+    from its mean. Published starts there are retained as upstream does;
+    callers can audit them through start_uses_sentinel().
     """
 
     def __init__(self, semantic, origin_cm, category_index):
@@ -53,10 +54,11 @@ class GibsonDistanceField:
         return int(row_f), int(col_f)
 
     def distance(self, habitat_position, start=False):
-        """Reference DTG/DTS in metres; validate reachability at reset."""
+        """Reference DTG/DTS in metres, including the upstream finite sentinel."""
         cell = self.map_cell(habitat_position)
-        if start and self.unreachable[cell]:
-            raise ValueError("Published episode start has no reachable goal; "
-                             "check the release and origin, do not skip it")
         return float(self.cells[cell]) * PROTOCOL.map_resolution_m
+
+    def start_uses_sentinel(self, habitat_position):
+        """Whether this in-bounds published start uses the reference fill value."""
+        return bool(self.unreachable[self.map_cell(habitat_position)])
 

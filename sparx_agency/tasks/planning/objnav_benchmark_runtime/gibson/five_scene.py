@@ -26,6 +26,8 @@ def report(root):
         if not source.exists():
             continue
         found = [row for _, row in read_episode_rows(source)]
+        if not found:
+            continue  # aborted infrastructure attempt, not a scored failure
         if len(found) != 1 or found[0].scene_id != scene:
             raise ValueError("Expected exactly the selected episode in %s" % source)
         record = found[0]

@@ -1,6 +1,7 @@
 """One-scene demo service bring-up using existing environments and checkpoints."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,13 @@ def start_detector(python, checkpoint, vocabulary, output, port=18092, cancelled
     Returns a process only when this call started it. Callers stop only that
     owned process; a pre-existing matching service is left alone.
     """
+    checkpoint = Path(checkpoint).expanduser().resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError("Local detector checkpoint missing: %s" % checkpoint)
+    digest = hashlib.sha256()
+    with checkpoint.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
     url = "http://127.0.0.1:%d/health" % port
     current = health(url)
     if current is not None:
@@ -66,6 +74,8 @@ def start_detector(python, checkpoint, vocabulary, output, port=18092, cancelled
         threshold = current.get("metadata", {}).get("detector_config", {}).get("conf_thresh", 1.0)
         if float(threshold) > 0.05:
             raise RuntimeError("Restart the dedicated detector with --conf 0.05 for door candidates")
+        if current.get("metadata", {}).get("checkpoint_sha256") != digest.hexdigest():
+            raise RuntimeError("Selected checkpoint differs from the running detector; use another dedicated port or restart it")
         return None
     checkpoint = Path(checkpoint).expanduser().resolve()
     if not checkpoint.is_file():
