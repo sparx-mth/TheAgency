@@ -1,4 +1,4 @@
-"""YOLO-World open-vocabulary detector backend ("OpenYOLO").
+"""YOLO-World open-vocabulary detector backend, defaulting to X-v2.
 
 The torch analog of
 :class:`sparx_agency.core.mapping.depth.depth_anything_v2.DepthAnythingV2DepthModel`:
@@ -17,7 +17,7 @@ will subclass the same ABC; the engine-build tooling belongs under
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -31,7 +31,7 @@ class YoloWorldConfig:
     """Configuration for :class:`YoloWorldDetector`.
 
     Attributes:
-        model_path: Ultralytics YOLO-World checkpoint (default the small variant).
+        model_path: Ultralytics YOLO-World checkpoint (default X-v2).
         device: Torch device string, e.g. ``"cuda:0"`` or ``"cpu"``.
         conf_thresh: Minimum detection confidence to keep.
         iou_thresh: NMS IoU threshold.
@@ -39,7 +39,7 @@ class YoloWorldConfig:
         max_det: Cap on detections returned per frame.
     """
 
-    model_path: str = "yolov8s-world.pt"
+    model_path: str = "yolov8x-worldv2.pt"
     device: str = "cuda:0"
     conf_thresh: float = 0.25
     iou_thresh: float = 0.5

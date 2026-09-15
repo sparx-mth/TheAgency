@@ -111,6 +111,25 @@ state, actions, predictions, paths and reasoning. Model service metadata pins
 checkpoint bytes and vocabulary atomically with inference. Missing or changed
 services raise rather than silently changing the evaluated method.
 
+### Selectable detection without a policy fork
+
+The existing HTTP endpoint supports **YOLO-World X-v2 by default** and the
+official pretrained LLMDet Swin-L as an explicit alternative. S/L checkpoints
+remain available through `--model`. The adapter still supplies its vocabulary in
+exact order; RGB-D projection, alias suppression, nearest-landmark association,
+one observation per frame, multi-view confirmation and STOP logic are unchanged.
+Select the backend on a dedicated service and pass its URL to the adapter.
+`HttpDetector` optionally verifies `expected_backend` as well as identity drift.
+
+The user selected X after the development comparison. This does not change
+confidence thresholds or implement fusion/reasoning from the reviewed papers.
+
+Use an independently calibrated `RPTSettings.detection_confidence` through the
+adapter's policy config, not a translated/rescaled YOLO score. The target study
+does not calibrate door thresholds. Keep model dependencies outside this runtime
+and the core test environment, and inference on CPU while the simulator renders.
+See the [sourced detector comparison, setup and development results](../../mapping/scene_graph/serve/README.md).
+
 `render_replay(recording_dir, render_pose, ...)` takes a callback receiving an
 `AgentPose` and returning uint8 RGB. The adapter owns scene loading, GPU safety
 and camera-pitch handling. Replay interpolates translation/pitch and the shortest

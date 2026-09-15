@@ -32,7 +32,7 @@ from sparx_agency.core.mapping.detection.registry import (
 # ── YoloWorldConfig validation ───────────────────────────────────────────
 def test_config_defaults_ok():
     cfg = YoloWorldConfig()
-    assert cfg.model_path == "yolov8s-world.pt"
+    assert cfg.model_path == "yolov8x-worldv2.pt"
     assert 0.0 <= cfg.conf_thresh <= 1.0
     assert 0.0 <= cfg.iou_thresh <= 1.0
     assert cfg.imgsz > 0
@@ -134,9 +134,9 @@ def test_detect_bad_shape_raises_valueerror():
 
 
 # ── Registry / factory idiom ─────────────────────────────────────────────
-def test_default_registry_lists_yolo_world():
+def test_default_registry_lists_both_detectors():
     reg = default_detection_registry()
-    assert "yolo_world" in reg.names()
+    assert reg.names() == ["llmdet", "yolo_world"]
 
 
 def test_registry_create_returns_detection_model_lazily():
@@ -144,6 +144,7 @@ def test_registry_create_returns_detection_model_lazily():
     det = reg.create("yolo_world")
     assert isinstance(det, DetectionModel)
     assert isinstance(det, YoloWorldDetector)
+    assert det.cfg.model_path == "yolov8x-worldv2.pt"
     # Construction is lazy: no model loaded, no prompts yet.
     assert det.prompts == []
 

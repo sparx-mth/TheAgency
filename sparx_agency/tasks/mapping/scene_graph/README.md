@@ -72,7 +72,7 @@ call:
 |               v                                     v                      |
 |  +-- conda navdp (GPU cuda:0) ---------+  +-- docker: ollama (CPU) ------+ |
 |  | detection_server.py                 |  | ollama-scene-graph           | |
-|  | YOLO-World yolov8s-worldv2          |  | qwen2.5:3b-instruct          | |
+|  | YOLO-World yolov8x-worldv2          |  | qwen2.5:3b-instruct          | |
 |  | :8092 /health /detect /set_classes  |  | 127.0.0.1:11434              | |
 |  +-------------------------------------+  +------------------------------+ |
 +---------------------------------------------------------------------------+
@@ -358,8 +358,11 @@ nodes under `ros2/`; the detection HTTP wire types live in `serve/contract.py`
 (`DEFAULT_PORT=8092`, `DEFAULT_HOSPITAL_VOCABULARY`, 27 terms).
 
 For reproducible offline benchmarks the detector's `/health` also reports
-`metadata`: the checkpoint SHA-256, full detector configuration and
-torch/ultralytics/numpy versions. `/detect` includes the vocabulary and this
+`metadata`: the checkpoint SHA-256 (complete inference bundle for HF snapshots),
+backend, full configuration, preprocessing, and actual package versions.
+The service supports explicit `--backend yolo_world` (X-v2 by default) and
+`--backend llmdet`. See the [detector selection, setup and measured evaluation](serve/README.md).
+`/detect` includes the vocabulary and this
 metadata captured under the same lock as inference, so a client can reject
 a model or vocabulary change mid-run. Existing response fields are unchanged.
 The [shared ObjectNav runtime](../../planning/objnav_benchmark_runtime/README.md)
@@ -571,7 +574,7 @@ method.
 | `ROS_DOMAIN_ID` | `20` | every participant, containers included — a mismatch is silent zero data |
 | `RMW_IMPLEMENTATION` | auto (cyclonedds if installed, else fastrtps) | CycloneDDS is the only RMW the ROS1 bridge can reach; both profiles under `robots/SJTU/setup/` disable shared memory (SHM does not cross the container boundary) |
 | `LLM_BACKEND` / `LLM_BASE_URL` / `LLM_MODEL` | `ollama` / `http://127.0.0.1:11434` / `qwen2.5:3b-instruct` | the `LLMClient.from_env()` contract (also `LLM_API_KEY`, `LLM_TEMPERATURE`, `LLM_TIMEOUT_S`) |
-| `DETECT_PORT` / `DETECT_MODEL` | `8092` / `<repo>/yolov8s-worldv2.pt` | detection server (checkpoint is gitignored, per-device) |
+| `DETECT_PORT` / `DETECT_MODEL` | `8092` / `<repo>/yolov8x-worldv2.pt` | detection server (checkpoint is gitignored, per-device; override for S/L rollback) |
 | `SKIP_GPU_CHECK` | `0` | `1` bypasses the empty-card gate — **expert-only**, see below |
 | `KILL_STALE` | `1` | auto-kill scene-graph nodes left over from a previous run |
 | `RVIZ` / `FALCON_LAUNCH_ARGS` / `SAFE_DISTANCE` | — | forwarded to `run_falcon_sjtu.sh` (the script always injects `enable_bev:=true`) |
