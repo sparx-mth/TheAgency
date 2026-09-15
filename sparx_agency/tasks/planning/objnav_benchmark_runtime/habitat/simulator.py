@@ -1,8 +1,20 @@
 """Optional reusable habitat-sim RGB-D bridge. No task goals or metric access.
 
-Uses existing navmeshes, never recomputes them or snaps episode starts. Import
-is GPU-free; a rendering context is created only by reset(). The same bridge
-can serve Gibson, HM3D and MP3D behind their separate dataset evaluators.
+Never snaps a published episode start. Import is GPU-free; a rendering context
+is created only by reset(). The same bridge can serve Gibson, HM3D and MP3D
+behind their separate dataset evaluators.
+
+**Which navmesh an episode runs on is an explicit adapter choice**, because it
+is not a detail: the navmesh decides what is reachable, so it sets the geodesic
+``l`` and therefore every SPL. ``navmesh="published"`` loads the file the
+publisher shipped and uses exactly that. ``navmesh="agent"`` is habitat-sim's
+own behaviour, and the one habitat-lab's ObjectNav actually runs:
+``Simulator._config_pathfinder`` loads the sibling ``<scene>.navmesh`` and then
+recomputes it whenever the mesh's recorded settings differ from the agent's
+radius and height -- which they do for HM3D, whose meshes are built at the
+library defaults (0.10 m / 1.50 m) while ObjectNav's agent is 0.18 m / 0.88 m.
+Neither is guessed from a benchmark name, and whichever is chosen,
+``navmesh_provenance()`` records what was actually in force.
 """
 from __future__ import annotations
 
@@ -58,12 +70,20 @@ class HabitatRGBDSimulator:
         allow_sliding: Must match the chosen benchmark, not a library default.
         gpu_device: Rendering device index; this class never starts other models.
         height_m: Physical body height, independent of the camera mounting height.
+        navmesh: ``"published"`` to navigate the shipped navmesh verbatim, or
+            ``"agent"`` for habitat-sim's own load-then-recompute-at-the-agent's
+            -dimensions behaviour, which is what habitat-lab's ObjectNav does.
+            See the module docstring; this is a protocol decision.
     """
 
-    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, *, height_m):
+    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, *,
+                 height_m, navmesh="published"):
         if any(isinstance(v, bool) or not math.isfinite(v) or v <= 0
                for v in (radius_m, height_m)):
             raise ValueError("Explicit positive finite body radius and height are required")
+        if navmesh not in ("published", "agent"):
+            raise ValueError("navmesh must be 'published' or 'agent', got %r" % (navmesh,))
+        self.navmesh = navmesh
         self.camera = camera
         self.actions = actions
         self.radius_m = radius_m
@@ -74,16 +94,38 @@ class HabitatRGBDSimulator:
         self._scene = None
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
-        """Load the scene if needed and teleport ONLY to the published start."""
+        """Load the scene if needed and teleport ONLY to the published start.
+
+        Under ``navmesh="agent"`` the constructor has already loaded the
+        sibling navmesh and recomputed it for this agent, so ``navmesh_path`` is
+        only checked to be the sibling habitat-sim would have found -- a
+        navmesh somewhere else would be silently ignored, and a run measured
+        against a mesh it never navigated is worse than a loud failure.
+        """
         import habitat_sim
         import quaternion
 
         if self._scene != str(scene_path):
             self.close()
             self._sim = habitat_sim.Simulator(self._configuration(scene_path))
-            if not self._sim.pathfinder.load_nav_mesh(str(navmesh_path)):
-                self.close()
-                raise EnvContractError("Unable to load published navmesh: %s" % navmesh_path)
+            if self.navmesh == "published":
+                if not self._sim.pathfinder.load_nav_mesh(str(navmesh_path)):
+                    self.close()
+                    raise EnvContractError("Unable to load published navmesh: %s"
+                                           % navmesh_path)
+            else:
+                sibling = str(scene_path)
+                sibling = sibling[:sibling.rfind(".")] + ".navmesh"
+                if str(navmesh_path) != sibling:
+                    self.close()
+                    raise EnvContractError(
+                        "navmesh='agent' uses the navmesh habitat-sim finds beside "
+                        "the scene (%s), not %s" % (sibling, navmesh_path))
+                if not self._sim.pathfinder.is_loaded:
+                    self.close()
+                    raise EnvContractError(
+                        "habitat-sim loaded no navmesh for %s; nothing can be "
+                        "measured on it" % scene_path)
             self._scene = str(scene_path)
         self._sim.seed(seed)
         state = habitat_sim.AgentState()
@@ -126,6 +168,39 @@ class HabitatRGBDSimulator:
                 a.name.lower(), habitat_sim.agent.ActuationSpec(amount=amounts[a.name.lower()]))
             for a in self.actions.actions if a != DiscreteAction.STOP}
         return habitat_sim.Configuration(config, [agent])
+
+    @property
+    def pathfinder(self):
+        """The loaded navmesh, for an adapter's own privileged measurements.
+
+        Geodesic distances belong to the evaluator, never to the policy: this
+        is the same navmesh the episode is executed on, so a distance measured
+        through it is the one the benchmark means. It is available only between
+        reset() and close(), because a navmesh is a property of a loaded scene.
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; there is no navmesh yet")
+        return self._sim.pathfinder
+
+    def navmesh_provenance(self):
+        """What navmesh is actually in force, as recorded run metadata.
+
+        Returns:
+            The requested mode, the pathfinder's own settings, its navigable
+            area and island count -- enough to tell afterwards which mesh a
+            number was measured on.
+        """
+        pathfinder = self.pathfinder
+        settings = {}
+        recorded = getattr(pathfinder, "nav_mesh_settings", None)
+        for name in ("agent_radius", "agent_height", "agent_max_climb",
+                     "agent_max_slope", "cell_size", "cell_height"):
+            value = getattr(recorded, name, None)
+            if value is not None:
+                settings[name] = float(value)
+        return {"mode": self.navmesh, "settings": settings,
+                "navigable_area_m2": float(pathfinder.navigable_area),
+                "islands": int(pathfinder.num_islands)}
 
     def step(self, action):
         """STOP preserves the final view; other actions use native collision tests."""
