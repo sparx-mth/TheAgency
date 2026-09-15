@@ -32,7 +32,7 @@ def defaults():
               "scenes_dir": os.environ.get("GIBSON_SCENES_DIR", str(base / "gibson/scenes")),
               "habitat_python": os.environ.get("GIBSON_PYTHON", ""),
               "detector_python": os.environ.get("GIBSON_DETECTOR_PYTHON", ""),
-              "checkpoint": str(REPO_ROOT / "yolov8s-worldv2.pt"),
+              "checkpoint": str(REPO_ROOT / "yolov8x-worldv2.pt"),
               "output_root": str(Path.home() / "objnav_benchmark/gibson/demos"),
               "start_services": True, "allow_version_mismatch": False}
     if SETTINGS_PATH.exists():

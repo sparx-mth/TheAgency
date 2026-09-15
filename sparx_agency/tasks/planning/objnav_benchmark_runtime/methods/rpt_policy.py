@@ -1,13 +1,10 @@
-"""Observed-only scene-graph/LLM/RPT* search with committed local routes.
-
-FALCON itself is not started. Existing room ordering and frontier exploration
-are retained; route execution and perception evidence are refined here.
-"""
+"""Observed-only ObjectNav with selectable frontier or bounded planar FALCON."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, replace
 import math
 import random
+import time
 import numpy as np
 
 from sparx_agency.core.common.types import Pose2D
@@ -15,6 +12,7 @@ from sparx_agency.core.mapping.objects.landmarks import ObjectLandmarkMap
 from sparx_agency.core.planning.exploration.object_search_supervisor import ObjectSearchParams, ObjectSearchSupervisor, SEARCH, TRANSIT
 from sparx_agency.core.planning.exploration.room_costs import build_instance, in_room_frontier_goals
 from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSolver
+from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCON_SOURCE
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
@@ -29,37 +27,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels im
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute, RouteSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidence, TargetEvidenceSettings, deduplicate_detections
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingSearchOracle
-
-
-@dataclass(frozen=True)
-class RPTSettings:
-    map_size_m: float = 80.0
-    map_resolution_m: float = 0.1
-    depth_stride: int = 8
-    graph_period_steps: int = 10
-    replan_steps: int = 5  # retained for old configs; no periodic path replacement
-    action_time_s: float = 1.0
-    detection_confidence: float = 0.35
-    stop_distance_m: float = 0.75
-    target_memory_steps: int = 30
-    seed: int = 0
-    max_rooms: int = 12
-    body_height_m: float = 0.88
-    body_radius_m: float = 0.18
-    preferred_clearance_m: float = 0.30
-
-    def __post_init__(self):
-        for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m", "preferred_clearance_m"):
-            value = getattr(self, key)
-            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-                raise ValueError("%s must be positive and finite" % key)
-        for key in ("depth_stride", "graph_period_steps", "replan_steps", "target_memory_steps", "max_rooms"):
-            if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
-                raise ValueError("%s must be a positive integer" % key)
-        if not 0 <= self.detection_confidence <= 1 or type(self.seed) is not int:
-            raise ValueError("Invalid confidence or seed")
-        if self.preferred_clearance_m < self.body_radius_m:
-            raise ValueError("Preferred clearance cannot be smaller than the robot radius")
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_metrics import ExplorationMetrics
 
 
 class RPTSearchPolicy:
@@ -69,6 +38,8 @@ class RPTSearchPolicy:
         self.detector, self.llm_client = detector, llm_client
         self.settings = settings or RPTSettings()
         s = self.settings
+        if s.local_exploration == "falcon":
+            self.name = "sparx-rpt-llm-falcon-planar"
         self.converter_params = ActionConverterParams()
         self.planner_params = WeightedAStarParams(
             inflate_radius_m=s.preferred_clearance_m, inflate_floor_m=s.body_radius_m,
@@ -84,14 +55,16 @@ class RPTSearchPolicy:
                 "supervisor": asdict(self.supervisor_params), "doors": asdict(self.door_settings),
                 "room_labels": asdict(self.room_label_settings), "room_segmentation": asdict(DEFAULT_SEGMENTATION),
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
-                "oracle_schema_repairs": 1, "local_exploration": "observed-map host frontier sweep",
-                "falcon_running": False, "ground_truth_semantics": False, "training_free": True,
+                "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
+                "falcon_running": self.settings.local_exploration == "falcon",
+                "falcon_source": dict(FALCON_SOURCE) if self.settings.local_exploration == "falcon" else None,
+                "ground_truth_semantics": False, "training_free": True,
                 "non_metric": False, "clock": "action_index * action_time_s"}
 
     def reset(self, episode, target):
         self.episode, self.target = episode, target
         s = self.settings
-        self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m)
+        self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m)
         self.solver = RptStarRoomSolver(rng=random.Random("%s/%s" % (s.seed, episode.episode_id)), max_rooms=s.max_rooms)
         self.planner = WeightedAStarPlanner2D(self.planner_params)
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
@@ -102,6 +75,11 @@ class RPTSearchPolicy:
         self._blocked = self._plan_calls = self._duplicates_removed = 0
         self._solver_records = []
         self.last_world = None
+        self.telemetry = ExplorationMetrics()
+        self.hierarchy = None
+        if s.local_exploration == "falcon":
+            from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_policy import FalconObjectNav
+            self.hierarchy = FalconObjectNav(self)
 
     def _reset_floor(self):
         self.graph = ObservedSceneGraph(self.llm_client, label_settings=self.room_label_settings)
@@ -125,24 +103,51 @@ class RPTSearchPolicy:
             self._visited_frontiers.append(self._goal)
         self.route_memory.clear("forward_blocked")
         self._route, self._goal = None, None
+        if self.hierarchy is not None:
+            self.hierarchy.blocked()
 
     def plan(self, observation):
+        started = time.monotonic()
+        try:
+            command = self._plan(observation)
+            phase = self.hierarchy.machine.phase if self.hierarchy else str(command.info.get("kind", self.supervisor.state))
+            self.telemetry.phase = phase
+            return replace(command, info=dict(command.info, explorer=self.settings.local_exploration, phase=phase))
+        finally:
+            self.telemetry.latencies["policy_decision"].append((time.monotonic() - started) * 1000)
+
+    def filter_action(self, observation, action):
+        return self.hierarchy.filter_action(observation, action) if self.hierarchy else action
+
+    def notify_action(self, observation, action):
+        if self.hierarchy:
+            self.hierarchy.machine.charge(observation.step)
+            self.telemetry.phase = self.hierarchy.machine.phase
+        self.telemetry.emitted(observation, action, self.telemetry.phase)
+
+    def _plan(self, observation):
         s, pose = self.settings, observation.pose
+        started = time.monotonic()
         floor_revision = self.mapping.floor_revision
         world = self.mapping.update(observation)
+        self.telemetry.latencies["mapping"].append((time.monotonic() - started) * 1000)
         if self.mapping.floor_revision != floor_revision:
             self._reset_floor()
         self.last_world = world
+        self.telemetry.observe(observation, world, self.mapping.floor_revision)
         if self._last_pose is not None and math.dist((pose.x, pose.y), self._last_pose) > 0.05:
             self._blocked_since = None
         self._last_pose = (pose.x, pose.y)
         self.graph.credit_time(world, pose, 0.0 if observation.step == 0 else s.action_time_s)
         confirmed = self._perceive(observation)
-        if confirmed and self._target_xy is not None and math.dist((pose.x, pose.y), self._target_xy) <= s.stop_distance_m:
+        if self.hierarchy is None and confirmed and self._target_xy is not None and math.dist((pose.x, pose.y), self._target_xy) <= s.stop_distance_m:
             return NavigationCommand.stop_here(info={"reason": "fresh multi-view-confirmed target"})
         if observation.step - self._last_graph_step >= s.graph_period_steps or self.doors.revision != self._last_door_revision:
-            self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(), step=observation.step)
+            self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(), step=observation.step,
+                              reason=self.hierarchy is None)
             self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
+        if self.hierarchy is not None:
+            return self.hierarchy.plan(observation, world, confirmed)
         if self._target_xy is not None and observation.step - self._target_step <= self.target_settings.max_unseen_steps:
             approach = self._approach(observation, world)
             if approach is not None:
@@ -193,7 +198,9 @@ class RPTSearchPolicy:
         return NavigationCommand.follow(self._route, final_yaw=final_yaw, info={"route": self.route_memory.reason, "kind": kind})
 
     def _perceive(self, observation):
+        started = time.monotonic()
         raw = self.detector.detect(observation.rgb)
+        self.telemetry.latencies["detector_http"].append((time.monotonic() - started) * 1000)
         self.doors.update(observation, raw)
         detections = deduplicate_detections(raw)
         self._duplicates_removed += len(raw) - len(detections)
@@ -216,12 +223,10 @@ class RPTSearchPolicy:
         dx, dy = self._target_xy[0] - p.x, self._target_xy[1] - p.y
         distance = math.hypot(dx, dy)
         at_path_end = self.route_memory.kind == "target" and self.route_memory.arrived(observation)
-        if (distance <= self.settings.stop_distance_m or at_path_end
-                or self.target_evidence.verification_started(self._target_id)):
+        if distance <= self.settings.stop_distance_m or at_path_end or self.target_evidence.verification_started(self._target_id):
             self.route_memory.clear("target_route_arrived")
             self._route = self._goal = None
-            yaw = self.target_evidence.verification_yaw(
-                self._target_id, p.yaw, self.episode.action_spec.turn_angle_rad)
+            yaw = self.target_evidence.verification_yaw(self._target_id, p.yaw, self.episode.action_spec.turn_angle_rad)
             if yaw is not None:
                 return NavigationCommand.hold(final_yaw=yaw, info={"reason": "bounded target verification"})
             self.target_evidence.reject(self._target_id, observation.step)
@@ -255,7 +260,9 @@ class RPTSearchPolicy:
     def _plan_to(self, observation, world, goal):
         p = observation.pose
         self._plan_calls += 1
+        started = time.monotonic()
         result = self.planner.plan(PlanRequest(Pose2D(p.x, p.y, p.yaw), Pose2D(*goal), frame_id="world"), world)
+        self.telemetry.latencies["astar"].append((time.monotonic() - started) * 1000)
         self._plan_step = observation.step
         if not result.ok:
             return None
@@ -270,5 +277,6 @@ class RPTSearchPolicy:
                 "last_reasoning": self.graph.last_reasoning, "route_commitment": dict(self.route_memory.stats),
                 "plan_calls": self._plan_calls, "duplicates_removed": self._duplicates_removed,
                 "target_evidence": self.target_evidence.diagnostics(), "floor_revisions": self.mapping.floor_revision,
+                "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,
                 "oracle_repair_successes": self.graph.oracle.repair_successes}

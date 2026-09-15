@@ -114,5 +114,17 @@ class CommittedRoute:
         self.reason = "committed_safe_route"
         return True
 
+    def resume_after_pause(self, actions):
+        """Exclude an explicit inactive phase from route-only watchdog clocks.
+
+        This does not reset position/progress, change a path or refill any
+        exploration/global allowance. Safety is rechecked on the next reuse.
+        Never call for ordinary replanning or blocked movement.
+        """
+        if type(actions) is not int or actions < 0:
+            raise ValueError("Paused actions must be a nonnegative integer")
+        self.last_progress_step += actions
+        self._motion_step += actions
+
 
 

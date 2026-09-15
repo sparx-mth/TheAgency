@@ -36,8 +36,9 @@ class RevisableRoomLabels:
         self._last_query = {}
         self._agreement = {}
         self.queries = 0
+        self._evidence_steps = {}
 
-    def update(self, objects, step, partition_changed=False):
+    def update(self, objects, step, partition_changed=False, allow_query=True):
         if partition_changed:
             # Pids survive one side of a split: retaining their old cached
             # label would attach the whole-room verdict to a different region.
@@ -45,19 +46,22 @@ class RevisableRoomLabels:
             self._evidence_updates.clear()
             self._last_query.clear()
             self._agreement.clear()
+            self._evidence_steps.clear()
         live = set(objects)
         self.labels = {pid: label for pid, label in self.labels.items() if pid in live}
         self.metadata = {pid: item for pid, item in self.metadata.items() if pid in live}
         for pid, classes in objects.items():
-            self._update_room(pid, classes, step)
+            self._update_room(pid, classes, step, allow_query)
         return dict(self.labels)
 
-    def _update_room(self, pid, classes, step):
+    def _update_room(self, pid, classes, step, allow_query=True):
         # Prompt aliases must not count as extra kinds of semantic evidence.
         aliases = {"couch": "sofa", "tv": "television"}
         classes = [aliases.get(name, name) for name in classes]
         signature = tuple(sorted(Counter(classes).items()))
-        self._evidence_updates[pid] = self._evidence_updates.get(pid, 0) + 1
+        if self._evidence_steps.get(pid) != step:
+            self._evidence_updates[pid] = self._evidence_updates.get(pid, 0) + 1
+            self._evidence_steps[pid] = step
         s = self.settings
         ready = (len(classes) >= s.min_objects and len(set(classes)) >= s.min_classes
                  and self._evidence_updates[pid] >= s.min_evidence_updates)
@@ -68,6 +72,8 @@ class RevisableRoomLabels:
             result = RoomLabel("unknown", 0.0, "insufficient stable confirmed-object evidence")
             reason = "evidence_gate"
             self._agreement[pid] = 0
+        elif not allow_query:
+            return  # preserve accumulated evidence; classify at a burst boundary
         elif changed or elapsed >= s.refresh_steps:
             result = self.classifier.classify(classes, refresh=True)
             self.queries += 1

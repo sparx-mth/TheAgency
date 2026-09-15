@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import math
-
 import numpy as np
 
 from sparx_agency.core.mapping.topology.room_adjacency import room_adjacency
@@ -31,16 +30,14 @@ class ObservedSceneGraph:
         self.classifier = self.label_tracker.classifier
         self.oracle = SearchOracle(client)
         self.segmentation = segmentation or DEFAULT_SEGMENTATION
-        self.options = []
-        self.facts = {}
-        self.probs = {}
-        self.searched = {}
+        self.options, self.facts, self.probs, self.searched = [], {}, {}, {}
         self.queries = 0
         self.last_reasoning = {}
         self.doors = []
         self._partition = None
         self.partition_revision = 0
         self.max_rooms = 0
+        self._objects = {}
 
     def credit_time(self, world, pose, seconds):
         gx, gy = world.world_to_grid(pose.x, pose.y)
@@ -50,7 +47,7 @@ class ObservedSceneGraph:
                     self.searched[pid] = self.searched.get(pid, 0.0) + seconds
                     break
 
-    def update(self, world, landmarks, target, doors=(), step=0):
+    def update(self, world, landmarks, target, doors=(), step=0, reason=True):
         doors = tuple(doors)
         cells = [world.world_to_grid(*door.xy) for door in doors]
         _, _, stats = segment_rooms_watershed(
@@ -68,16 +65,25 @@ class ObservedSceneGraph:
             pid_labels[room.mask] = pid + 1
         self._door_links(world, pid_labels, doors, cells)
         counts = count_frontier_clusters(world.grid, pid_labels, min_cluster_cells=4)
-        self.facts = {pid: RoomFacts(pid, counts.get(pid + 1, 0),
-                                    self.searched.get(pid, 0.0), room.n_cells)
+        self.facts = {pid: RoomFacts(pid, counts.get(pid + 1, 0), self.searched.get(pid, 0.0), room.n_cells)
                       for pid, room in rooms.items()}
-        objects = self._room_objects(world, pid_labels, landmarks)
+        self._objects = self._room_objects(world, pid_labels, landmarks)
         if not rooms:
             self.label_tracker.update({}, step, changed)
             self.last_reasoning = {}
             self.options, self.probs = [], {}
             return
-        self._reason(world, objects, target, step, changed)
+        if reason:
+            self._reason(world, self._objects, target, step, changed)
+        else:
+            self.label_tracker.update(self._objects, step, changed, allow_query=False)
+            self.options = [RoomOption(room_id=pid, label="unknown", prob=self.probs.get(pid, 0.0), xy=room.centroid)
+                            for pid, room in rooms.items()]
+
+    def reason(self, world, target, step):
+        """Refresh accumulated observations without inventing a partition change."""
+        if self.registry.rooms:
+            self._reason(world, self._objects, target, step, False)
 
     def _door_links(self, world, pid_labels, doors, cells):
         cut = int(round(self.segmentation.door_cut_m / world.resolution))
@@ -103,21 +109,18 @@ class ObservedSceneGraph:
         rooms = self.registry.rooms
         try:
             labels = self.label_tracker.update(objects, step, changed)
-            oracle_rooms = [OracleRoom(
-                pid, labels[pid].label, self.searched.get(pid, 0.0),
-                self.facts[pid].frontier_clusters, tuple(objects[pid]),
-                room.n_cells * world.resolution ** 2) for pid, room in rooms.items()]
+            oracle_rooms = [OracleRoom(pid, labels[pid].label, self.searched.get(pid, 0.0),
+                                      self.facts[pid].frontier_clusters, tuple(objects[pid]),
+                                      room.n_cells * world.resolution ** 2) for pid, room in rooms.items()]
             result = self.oracle.probabilities(target.query, oracle_rooms)
         except Exception as exc:
             raise ObjNavInternalError("Room LLM failed: %s" % exc) from exc
-        if result.source != "llm" or not all(
-                math.isfinite(p) and 0 <= p <= 1 for p in result.probs.values()):
+        if result.source != "llm" or not all(math.isfinite(p) and 0 <= p <= 1 for p in result.probs.values()):
             raise ObjNavInternalError("Room oracle failed; refusing a uniform fallback run")
         self.queries += 1
         self.probs = {pid: prob * result.p_present for pid, prob in result.probs.items()}
         self.options = [RoomOption(room_id=pid, label=labels[pid].label,
-                                   prob=result.probs[pid], xy=room.centroid)
-                        for pid, room in rooms.items()]
+                                   prob=result.probs[pid], xy=room.centroid) for pid, room in rooms.items()]
         self.last_reasoning = {"labels": {str(pid): item for pid, item in self.label_tracker.metadata.items()},
                                "oracle": asdict(result), "doors": self.doors,
                                "label_history": list(self.label_tracker.history),

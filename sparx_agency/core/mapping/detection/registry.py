@@ -1,8 +1,7 @@
 """Registry of open-vocabulary detector backends (factory idiom).
 
 Mirrors :mod:`sparx_agency.core.planning.trackers.registry`. Lets a task node
-select a detector by name (``"yolo_world"`` today; a TensorRT runtime or NanoOWL
-backend later) without importing the heavy backend module until it is created.
+select YOLO-World or LLMDet without importing model dependencies.
 """
 from __future__ import annotations
 
@@ -42,7 +41,7 @@ class DetectionRegistry:
         return self._factories[name].create()
 
 
-def default_detection_registry() -> DetectionRegistry:
+def default_detection_registry(*, yolo_world_config=None, llmdet_config=None) -> DetectionRegistry:
     """Registry with the built-in backends registered.
 
     The factory imports the backend lazily so a registry can be constructed (and
@@ -56,7 +55,13 @@ def default_detection_registry() -> DetectionRegistry:
             YoloWorldDetector,
         )
 
-        return YoloWorldDetector(YoloWorldConfig())
+        return YoloWorldDetector(yolo_world_config or YoloWorldConfig())
+
+    def _make_llmdet() -> DetectionModel:
+        from sparx_agency.core.mapping.detection.llmdet import LlmDetDetector
+
+        return LlmDetDetector(llmdet_config)
 
     reg.register(DetectorFactory(name="yolo_world", create=_make_yolo_world))
+    reg.register(DetectorFactory(name="llmdet", create=_make_llmdet))
     return reg

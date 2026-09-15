@@ -96,6 +96,11 @@ class PolicyProbe:
 		if callback:
 			callback(observation)
 
+	def notify_action(self, observation, action):
+		callback = getattr(self.policy, "notify_action", None)
+		if callback:
+			callback(observation, action)
+
 	def episode_info(self):
 		callback = getattr(self.policy, "episode_info", None)
 		return callback() if callback is not None else {}

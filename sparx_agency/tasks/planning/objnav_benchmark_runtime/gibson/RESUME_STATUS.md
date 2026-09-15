@@ -1,4 +1,46 @@
-# Gibson/ZSON recovery and results — 2026-09-14
+# Current handoff — 2026-09-15
+
+## Expanded recorded comparison: 15 distinct buildings
+
+The requested 15-building campaign is complete: **30 runs, 30 verified H.264
+recordings, zero agent errors**. Because published Gibson validation has only
+five buildings, this uses frozen generated ObjectNav starts in 15 official
+training buildings, explicitly labeled `train-development`.
+
+Frontier: **12/15 success**, mean SPL **0.3181**, mean DTG **0.322 m**.
+FALCON: **7/15 success**, mean SPL **0.3707**, mean DTG **1.622 m**.
+Navigation and detector/LLM settings were not tuned during the campaign. Keep
+frontier as the default; the SPL difference is not statistically established.
+
+See [results and recording details](DISTINCT_BUILDINGS_RESULTS.md) and
+[generation/run/resume instructions](DISTINCT_BUILDINGS.md).
+Gallery: `~/objnav_benchmark/gibson/distinct-15-20260915/comparison/index.html`.
+The local gallery server is on port 18815; the campaign-owned detector was
+stopped after validation. Existing services/worktrees were preserved. No commit
+or push was made.
+
+## Earlier integration validation
+
+Bounded FALCON is now connected to the actual Gibson policy behind
+`--explorer falcon`; `--explorer frontier` remains the default. The completed
+detector delta `5c465f97` is preserved, including YOLO-World X-v2 and selectable
+LLMDet. This is a ROS-free FALCON 2D/2.5D adaptation, not the unchanged drone
+binary. Gibson's 500-action cap and scoring remain unchanged.
+
+**2,242 tests passed.** The final same-source two-scene development pair
+demonstrates FALCON planning, accumulated LLM room classification/probabilities,
+RPT*, transit and target interruption. Frontier succeeded 2/2; FALCON 1/2.
+Corozal improved to 49 actions/SPL 0.9204, but Collierville regressed to failure.
+These previously inspected starts are not held out. No commit or push was made.
+
+Start with [FALCON_HANDOFF.md](FALCON_HANDOFF.md),
+[sourced design/runbook](BOUNDED_FALCON.md), and
+[complete measured results/limitations](FALCON_RESULTS.md).
+Artifacts: `~/objnav_benchmark/gibson/falcon-dev-20260915/paired-validated/`.
+
+---
+
+# Historical Gibson/ZSON recovery and results — 2026-09-14
 
 ## Recovered state
 

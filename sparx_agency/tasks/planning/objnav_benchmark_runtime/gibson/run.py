@@ -26,10 +26,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import
 class StopDiagnostic:
     """Non-privileged plumbing check, never labelled as the search method."""
     name = "diagnostic-stop"
-
     def reset(self, episode, target):
         pass
-
     def plan(self, observation):
         return NavigationCommand.stop_here()
 
@@ -43,6 +41,8 @@ def parser():
     p.add_argument("--print-vocabulary", action="store_true")
     p.add_argument("--agent", choices=("rpt", "stop"), default="rpt")
     p.add_argument("--policy-config", type=Path)
+    p.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
+    p.add_argument("--detector-backend", choices=("yolo_world", "llmdet"), default=None)
     p.add_argument("--detector-url", default="http://127.0.0.1:8092")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--gpu-device", type=int, default=0)
@@ -111,11 +111,16 @@ def _method(args):
     overrides = json.loads(args.policy_config.read_text()) if args.policy_config else {}
     if not isinstance(overrides, dict):
         raise ValueError("--policy-config must hold a JSON object")
+    if args.explorer is not None:
+        if overrides.get("local_exploration", args.explorer) != args.explorer:
+            raise ValueError("--explorer disagrees with --policy-config")
+        overrides["local_exploration"] = args.explorer
     settings = RPTSettings(**dict(overrides, seed=args.seed))
     config = LLMConfig.from_env()
     config.seed = args.seed
     client = VerifiedLLMClient(LLMClient(config))
-    detector = HttpDetector(public_service_url(args.detector_url), gibson_label_mapper().vocabulary())
+    detector = HttpDetector(public_service_url(args.detector_url), gibson_label_mapper().vocabulary(),
+                            expected_backend=args.detector_backend)
     problems, identities = [], {}
     for name, service in (("LLM", client), ("detector", detector)):
         try:
@@ -210,7 +215,6 @@ def main(argv=None, *, configuration_guard=None):
             print(json.dumps({"ready": False, "issues": issues}, indent=2))
             return 1
         if configuration_guard is not None:
-            # Validate THIS prepared policy, not only an earlier preflight.
             configuration_guard(config)
         if args.preflight:
             print(json.dumps({"ready": True, "configuration": config}, indent=2))
@@ -231,6 +235,11 @@ def main(argv=None, *, configuration_guard=None):
             agent = HeadlessObjNavAgent(policy, gibson_label_mapper(), name=policy.name)
 
         def progress(i, n, row):
+            # Evaluator-only sidecar: not injected into agent_info or observations.
+            base = getattr(env, "env", env)
+            diagnostics = base.evaluation_diagnostics()
+            with (output / "evaluation_diagnostics.jsonl").open("a") as stream:
+                stream.write(json.dumps(dict(diagnostics, episode_id=row.episode_id), allow_nan=False) + "\n")
             if recorder is not None:
                 recorder.complete(row)
             print("%d/%d %s SR=%d SPL=%.3f DTG=%s SoftSPL=%.3f" %

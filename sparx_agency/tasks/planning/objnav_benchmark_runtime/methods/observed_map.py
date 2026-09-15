@@ -20,11 +20,12 @@ class ObservedMap:
     simulator for scene bounds. The initial footprint uses only known pose.
     """
 
-    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88):
+    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18):
         self.grid = LogOddsGridCostmap(LogOddsGridConfig(
             size_m=size_m, resolution_m=resolution_m))
         self.stride = stride
         self.body_height_m = body_height_m
+        self.body_radius_m = body_radius_m
         self._anchor = None
         self.floor_revision = 0
 
@@ -77,6 +78,16 @@ class ObservedMap:
         data[probabilities >= 65] = 100
         gx = int((pose.x - spec.origin_x) / spec.resolution_m)
         gy = int((pose.y - spec.origin_y) / spec.resolution_m)
+        # The occupied footprint at the measured pose is direct embodiment
+        # evidence, not an opening panorama or a free-space oracle. Never clear
+        # observed obstacles or carve a disk around a future destination.
+        radius = int(math.ceil(self.body_radius_m / spec.resolution_m))
+        yy, xx = np.ogrid[max(0, gy - radius):min(data.shape[0], gy + radius + 1),
+                          max(0, gx - radius):min(data.shape[1], gx + radius + 1)]
+        footprint = (xx - gx) ** 2 + (yy - gy) ** 2 <= (self.body_radius_m / spec.resolution_m) ** 2
+        block = data[max(0, gy - radius):min(data.shape[0], gy + radius + 1),
+                     max(0, gx - radius):min(data.shape[1], gx + radius + 1)]
+        block[footprint & (block != 100)] = 0
         data[gy, gx] = 0  # the observed base itself is reachable
         return OccupancyGrid2D(
             data, OccupancyGrid2DParams(spec.resolution_m, spec.origin_x,

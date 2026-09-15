@@ -14,20 +14,22 @@ from sparx_agency.tasks.mapping.scene_graph.serve.contract import (
 
 
 class HttpDetector:
-    """Dedicated existing YOLO-World service; models never load in the evaluator.
+    """Shared detector service; models never load in the evaluator.
 
     Vocabulary must be configured by the operator before the run. Refusing a
     mismatch avoids changing a service another mission might be using.
     """
 
-    def __init__(self, url, vocabulary, timeout_s=30.0):
+    def __init__(self, url, vocabulary, timeout_s=30.0, expected_backend=None):
         self.url = url.rstrip("/")
         self.vocabulary = tuple(vocabulary)
         self.timeout_s = timeout_s
+        self.expected_backend = expected_backend
         self.session = requests.Session()
         self._identity = None
         self.last_detections = ()
         self.last_inference_ms = None
+        self.last_peak_rss_mib = None
 
     def health(self):
         response = self.session.get(self.url + "/health", timeout=self.timeout_s)
@@ -38,6 +40,8 @@ class HttpDetector:
                 "Detector vocabulary mismatch; configure a dedicated service with "
                 "the benchmark's --print-vocabulary output, in that exact order")
         metadata = data.get("metadata", {})
+        if self.expected_backend is not None and metadata.get("backend") != self.expected_backend:
+            raise ObjNavInternalError("Detector backend differs from the explicitly requested backend")
         if not metadata.get("checkpoint_sha256") or not metadata.get("detector_config"):
             raise ObjNavInternalError("Detector lacks checkpoint/config provenance; restart "
                                      "the dedicated service from this checkout")
@@ -70,6 +74,7 @@ class HttpDetector:
                     raise ValueError("Invalid detection or unexpected vocabulary")
             self.last_detections = tuple(detections)
             self.last_inference_ms = data.get("ms")
+            self.last_peak_rss_mib = data.get("peak_rss_mib")
             return detections
         except (requests.RequestException, ValueError, KeyError) as exc:
             raise ObjNavInternalError("Detector service failed: %s" % exc) from exc

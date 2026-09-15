@@ -213,6 +213,12 @@ class DiscreteActionConverter:
         self._last_pose = pose
         return result
 
+    def record_emitted_action(self, pose: AgentPose, action: DiscreteAction) -> None:
+        """Record a downstream safety veto using the unchanged episode action set."""
+        if not isinstance(pose, AgentPose) or not self._spec.allows(action):
+            raise ObjNavError("Invalid executed action/pose after safety filtering")
+        self._last_pose, self._last_action = pose, action
+
     def rollout(self, pose: AgentPose, command: NavigationCommand,
                 max_actions: int) -> Rollout:
         """Execute ``command`` to completion under perfect execution.

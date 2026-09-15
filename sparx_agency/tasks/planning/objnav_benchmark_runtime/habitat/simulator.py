@@ -67,6 +67,7 @@ class HabitatRGBDSimulator:
         self.gpu_device = gpu_device
         self._sim = None
         self._scene = None
+        self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
         """Load the scene if needed and teleport ONLY to the published start."""
@@ -85,6 +86,7 @@ class HabitatRGBDSimulator:
         state.position = np.asarray(position, dtype=np.float32)
         state.rotation = quaternion.from_float_array(rotation_wxyz)
         self._sim.get_agent(0).set_state(state, reset_sensors=True)
+        self.last_collision = None
         return self._observe()
 
     def _configuration(self, scene_path):
@@ -128,7 +130,10 @@ class HabitatRGBDSimulator:
             raise EnvContractError("Simulator not reset, or unsupported action")
         if action != DiscreteAction.STOP:
             raw = self._sim.step(action.name.lower())
+            collided = raw.get("collided", getattr(self._sim, "previous_step_collided", None))
+            self.last_collision = None if collided is None else bool(collided)
             return self._observe(raw)
+        self.last_collision = False
         return self._observe()
 
     def _observe(self, raw=None):

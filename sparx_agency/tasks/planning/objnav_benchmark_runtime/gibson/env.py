@@ -39,7 +39,7 @@ class GibsonEnv(ObjNavEnv):
         return GibsonDistanceField(semantic, origin, category_index)
 
     def validate_starts(self, episode_ids=None):
-        """Check the exact selection; audit but never remove upstream sentinel starts."""
+        """Audit exact selected starts; never remove upstream finite-sentinel rows."""
         ids = self.episode_ids() if episode_ids is None else tuple(episode_ids)
         episodes = [self._dataset.episodes[episode_id] for episode_id in ids]
         self.sentinel_start_ids = []
@@ -64,10 +64,12 @@ class GibsonEnv(ObjNavEnv):
         self._shortest = self._start_dtg + PROTOCOL.success_radius_m
         self._steps, self._stopped = 0, False
         self._path = PROTOCOL.path_length_epsilon_m
+        self._collisions, self._collision_available = 0, True
+        self._first_success_action = 0 if self._start_dtg == 0.0 else None
         tag = "%d/%s" % (self._seed, episode_id)
         seed = int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "big")
         self._episode = ObjNavEpisode(episode_id, row.scene, PROTOCOL.benchmark, PROTOCOL.split,
-                                      row.category, self._camera, self._actions, PROTOCOL.max_steps)
+                                     row.category, self._camera, self._actions, PROTOCOL.max_steps)
         frame = self._simulator.reset(self._dataset.scenes_dir / (row.scene + ".glb"),
                                       self._dataset.scenes_dir / (row.scene + ".navmesh"),
                                       row.start_position, row.start_rotation, seed)
@@ -94,6 +96,13 @@ class GibsonEnv(ObjNavEnv):
         self._observation = self._observation_from(frame)
         after = self._observation.pose
         self._path += math.hypot(after.x - before.x, after.y - before.y)
+        collision = getattr(self._simulator, "last_collision", None)
+        if collision is None:
+            self._collision_available = False
+        else:
+            self._collisions += int(collision)
+        if self._first_success_action is None and self._distance.distance(self._habitat_position()) == 0.0:
+            self._first_success_action = self._steps
         return self._observation
 
     @property
@@ -106,7 +115,9 @@ class GibsonEnv(ObjNavEnv):
             raise EnvContractError("No episode has been reset")
         return {"distance_to_goal_m": self._distance.distance(self._habitat_position()),
                 "path_length_m": self._path, "shortest_path_m": self._shortest,
-                "start_uses_reference_sentinel": self._start_sentinel}
+                "start_uses_reference_sentinel": self._start_sentinel,
+                "collisions": self._collisions if self._collision_available else None,
+                "first_success_action": self._first_success_action}
 
     def measure(self):
         if not self.episode_over:

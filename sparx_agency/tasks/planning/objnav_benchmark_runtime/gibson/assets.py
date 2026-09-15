@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import struct
 import tempfile
@@ -20,19 +21,19 @@ DATA_ACCESS = "https://forms.gle/36TW9uVpjrE1Mkf9A"
 MAX_ASSET_BYTES = 2 * 1024 ** 3
 
 
-def import_scene_zip(archive, scene, destination, cancelled=None):
+def import_scene_zip(archive, scene, destination, cancelled=None, *, allowed_scenes=SCENES):
     """Validate both members, stage both, then install without overwriting files.
 
     Args:
         archive: The publisher's Habitat-sim ZIP, obtained after licence acceptance.
-        scene: One of the five validation scenes.
+        scene: A member of the explicitly supplied scene allowlist.
         destination: Directory that will contain <scene>.glb and <scene>.navmesh.
         cancelled: Optional threading.Event; checked between copy chunks.
 
     Returns:
         Resolved destination directory. Existing files are never overwritten.
     """
-    if scene not in SCENES:
+    if scene not in allowed_scenes or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", scene):
         raise ValueError("Choose a known Gibson validation scene")
     destination = Path(destination).expanduser().resolve()
     wanted = (scene + ".glb", scene + ".navmesh")

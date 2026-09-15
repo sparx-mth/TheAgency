@@ -1,11 +1,13 @@
 # Gibson ObjectNav runtime
 
-The method remains **scene graph -> LLM room probabilities -> RPT* room order
--> weighted A* -> discrete action converter**. Habitat supplies RGB-D and pose.
-**FALCON itself is not running**: it is a 3D exploration/mapping system, not the
-object detector. Its local exploration is represented here by the existing 2D
-host frontier sweep. Navigation starts without a mandatory initial 360-degree
-rotation.
+Habitat supplies RGB-D and pose. `--explorer frontier` retains the existing
+scene-graph/LLM/RPT*/weighted-A* frontier baseline. `--explorer falcon` runs:
+**bounded local FALCON -> room LLM -> RPT* room order -> A*/WA* transit**, with
+immediate bounded target verification and committed routes. This is a sourced
+**FALCON 2D/2.5D ObjectNav adaptation**, not the unchanged ROS aerial binary.
+Neither selection requires an opening 360-degree scan. See the
+[component mapping and runbook](BOUNDED_FALCON.md) and
+[measured results and limitations](FALCON_RESULTS.md).
 
 This optional runtime uses the [shared benchmark harness](../../objnav_benchmark/README.md).
 GT goals, semantic floor maps and distance telemetry reach only the scorer and
@@ -55,20 +57,28 @@ Checkpoint identity, SHA-256, configuration and package versions are recorded.
 A service with a different checkpoint cannot silently reuse the same run.
 Both checkpoints are available on this workstation:
 
-- Original/default: `~/GIT/TheAgency/yolov8s-worldv2.pt`.
-- Larger alternative: `~/models/objnav/yolov8l-worldv2.pt`.
+- Current completed-integration default: `~/models/objnav/yolov8x-worldv2.pt`.
+- Explicit earlier rollback choices: `yolov8s-worldv2.pt` and `yolov8l-worldv2.pt`.
+- Selectable alternative: pretrained LLMDet Swin-L, via its dedicated backend.
 
-The inherited five-scene development comparison finished with **2/5 successes
+The detector upgrade from `feat/objnav-open-vocabulary-detector-nadav` is now
+preserved here. See its [setup, backend selection and provenance](../../../mapping/scene_graph/serve/README.md).
+New demo configurations use X-v2; previously saved explicit checkpoint choices
+are not overwritten. CLI clients verify and record the selected service, not
+just the checkpoint filename.
+
+The **earlier, S-versus-L** five-scene development comparison finished with **2/5 successes
 for both models**: mean SPL **0.1811 (S)** versus **0.1574 (L)**, DTG **2.5693 m
 (S)** versus **4.2834 m (L)**. These are the complete inherited batches, not
 best episodes mixed across attempts. On 12 previously inspected development
 views, median CPU inference was approximately 37 ms (S) versus 152 ms (L).
 These measurements do not establish detection AP or statistical superiority.
-The larger checkpoint therefore does not justify replacing the small default.
+Those historical results are not a comparison of the completed X-v2 integration
+and do not override the user's later X-v2 selection.
 
-False-positive target stops remain a known limitation. GroundingDINO or another
-open-vocabulary verifier would require a separate controlled integration and
-training/development evaluation; changing model size alone is not a cure.
+False-positive target stops remain a known limitation. The completed selectable
+detector upgrade does not replace the existing multi-view target-evidence logic
+or establish that a larger model alone cures false STOPs.
 See [recovery results and remaining work](RESUME_STATUS.md).
 
 Detector services emit proposals at 0.05 for low-scoring doorway/frame prompts.
@@ -133,28 +143,31 @@ With the Habitat conda environment active:
 export GIBSON_SCENES_DIR="$HOME/datasets/gibson/scenes"
 export GIBSON_EPISODES_DIR="$HOME/datasets/objectnav/gibson/objectnav/gibson/v1.1/val"
 python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run \
-  --scene Collierville --limit 1 --record --detector-url http://127.0.0.1:18092 \
+  --scene Collierville --limit 1 --explorer falcon --record \
+  --detector-backend yolo_world --detector-url http://127.0.0.1:18095 \
   --allow-sim-version-mismatch --output "$HOME/objnav_benchmark/gibson/smoke"
 
 python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
   --episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" \
-  --detector-url http://127.0.0.1:18092 --allow-sim-version-mismatch \
+  --detector-url http://127.0.0.1:18095 --allow-sim-version-mismatch \
   --output "$HOME/objnav_benchmark/gibson/five-scene"
 ```
 
-`--preflight` checks inputs/services without rendering. Five-scene smoke runs
+`--preflight` checks inputs/services without rendering. The five-scene entrypoint
+above retains its existing baseline configuration; use `compare_explorers` from
+the FALCON runbook for a matched, explicitly selected comparison. Five-scene smoke runs
 one previously inspected start per scene sequentially and refuses source drift.
 Use the same output with `--resume` only for unchanged configuration/data/source.
 Never mix attempts. Full validation uses the separate
 [freeze workflow](PROTOCOL_AND_TUNING.md#freeze-then-evaluate).
 
-For a larger CPU detector, run in the existing detector environment:
+For the completed default CPU detector, run in the existing detector environment:
 
 ```bash
 VOCAB=$(python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run --print-vocabulary)
 python -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \
-  --model "$HOME/models/objnav/yolov8l-worldv2.pt" --device cpu \
-  --host 127.0.0.1 --port 18093 --conf 0.05 --classes "$VOCAB"
+  --backend yolo_world --model "$HOME/models/objnav/yolov8x-worldv2.pt" --device cpu \
+  --host 127.0.0.1 --port 18095 --conf 0.05 --torch-threads 4 --classes "$VOCAB"
 ```
 
 Configure `LLM_BACKEND`, `LLM_BASE_URL`, `LLM_MODEL` as for the shared LLM client.

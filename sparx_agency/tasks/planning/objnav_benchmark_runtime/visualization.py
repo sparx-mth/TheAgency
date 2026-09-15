@@ -71,8 +71,13 @@ def method_snapshot(policy):
     detector = getattr(policy, "detector", None)
     boxes = [{"label": d.cls, "confidence": float(d.conf), "xyxy": list(d.xyxy)}
              for d in getattr(detector, "last_detections", ())]
-    return {"state": getattr(getattr(policy, "supervisor", None), "state", "starting"),
-            "room_id": getattr(getattr(policy, "supervisor", None), "room_id", None),
+    hierarchy = getattr(policy, "hierarchy", None)
+    supervisor = getattr(policy, "supervisor", None)
+    burst = hierarchy.machine.burst if hierarchy is not None else None
+    return {"state": hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting"),
+            "room_id": hierarchy.regions.room_id if hierarchy is not None else getattr(supervisor, "room_id", None),
+            "explorer": getattr(getattr(policy, "settings", None), "local_exploration", "unknown"),
+            "burst_actions_left": max(0, hierarchy.params.burst_actions - burst.actions) if burst is not None else None,
             "planned_path": [[float(p.x), float(p.y)] if hasattr(p, "x") else list(p[:2]) for p in points],
             "detections": boxes, "detector_ms": getattr(detector, "last_inference_ms", None),
             "objects": [{"id": lm.id, "class": lm.class_name, "xy": list(lm.xy), "count": lm.count}
@@ -94,8 +99,9 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
     """RGB boxes, metric depth, observed rooms, route/trail and actual decision reasons."""
     frame = np.full((900, 1600, 3), 20, np.uint8)
     action = "TERMINAL" if final else str(decision.get("action", "waiting"))
-    _text(frame, "%s | target: %s | step %d | %s | single-scene diagnostic" %
-          (episode_id, observation.target_category, observation.step, action), (12, 26), width=190, lines=1)
+    _text(frame, "%s | %s | target: %s | step %d | %s | burst left: %s" %
+          (episode_id, snapshot.get("explorer", "unknown"), observation.target_category,
+           observation.step, action, snapshot.get("burst_actions_left")), (12, 26), width=190, lines=1)
     rgb = np.ascontiguousarray(observation.rgb[..., ::-1])
     for detection in snapshot.get("detections", ()) if not final else ():
         x1, y1, x2, y2 = (int(v) for v in detection["xyxy"])
