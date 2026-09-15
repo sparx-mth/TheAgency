@@ -17,6 +17,7 @@ The search algorithm has not been replaced, and FALCON is not launched here.
 | `methods/doors.py`, `room_labels.py`, `scene_graph.py` | Depth-backed doors, observed room segmentation and revisable evidence-based room labels |
 | `methods/perception.py`, `services.py` | Existing detector/LLM clients with model/vocabulary provenance and service-drift checks |
 | `habitat/simulator.py` | Optional RGB-D/action/frame bridge reusable by Habitat-backed adapters |
+| `thor/simulator.py` | The same for AI2-THOR: teleport, discrete actions, metric depth, and the Y-up/bearing-clockwise frame converted once |
 | `evaluation.py` | One shared prepared-environment execution path, optional recording, resume and pre-execution lock checks |
 | `provenance.py` | Actual-source fingerprint, deterministic episode sharding and generic exact-configuration locks |
 | `recording.py`, `visualization.py`, `dashboard.py` | Observations, trajectories, per-step decisions, videos and benchmark-neutral result dashboards |
@@ -50,9 +51,17 @@ Each simulator branch supplies:
 
 MP3D, HM3Dv1 and HM3Dv2 can reuse the Habitat bridge. The HM3D versions should
 share an adapter implementation where their schemas permit it, with separate
-versioned data/protocol configurations. RoboTHOR needs an AI2-THOR environment
-bridge but reuses the policy, action conversion, provenance and recording.
-Neither its adapter nor the new Habitat dataset adapters are implemented here.
+versioned data/protocol configurations. The Habitat dataset adapters are not
+implemented here.
+
+**RoboTHOR is implemented**, on its own branch, as the worked example of an
+adapter for a second simulator family: `thor/` is the reusable AI2-THOR bridge
+(the sibling of `habitat/`), and `robothor/` is the benchmark — its episode
+files, its challenge profile, its success rule and its published comparison
+numbers. It reuses the policy, action conversion, evaluation, provenance and
+recording unchanged, and it is the first adapter to drive `run_evaluation`
+rather than its own loop. `thor/` is named to avoid shadowing the real
+`ai2thor` distribution on the import path.
 
 ### Explicit embodiment and method settings
 

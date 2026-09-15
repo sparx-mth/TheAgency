@@ -1,0 +1,30 @@
+# RoboTHOR adapter extras, on top of the shared runtime's requirements.txt.
+#
+# Install in a DEDICATED environment. ai2thor 5.0.0 is a 2022 release whose
+# transitive botocore pin downgrades urllib3 2.6.3 -> 1.26.20 on Python 3.9,
+# which would mutate the `habitat` environment the Gibson/HM3D/MP3D
+# evaluations run in.
+#
+#   conda create -y -n ai2thor python=3.10
+#   conda run -n ai2thor pip install -r <this file>
+#
+# Pin numpy below 2: ai2thor 5.0.0 predates it. Installing scikit-image or
+# scipy afterwards will silently pull numpy 2 back in, so reassert the pin
+# last, or install everything in one resolve.
+#
+# The Unity build is NOT a pip dependency. It is ~553 MiB, downloaded by the
+# controller on first use into ~/.ai2thor/releases/. ai2thor's own downloader
+# buffers the whole archive in memory and is very slow; fetching the zip with
+# curl and unzipping it into ~/.ai2thor/releases/thor-Linux64-<commit>/ (then
+# chmod 755 on the same-named executable inside) is the identical result. The
+# publisher serves a .sha256 beside the .zip; check it.
+#
+# Nothing in this package downloads the build, the episodes or any model.
+ai2thor==5.0.0
+numpy<2
+scipy
+scikit-image
+scikit-fmm
+networkx
+opencv-python-headless==4.11.0.86  # 5.x requires numpy>=2
+requests

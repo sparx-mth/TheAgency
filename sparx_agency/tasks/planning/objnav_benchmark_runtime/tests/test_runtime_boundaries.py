@@ -20,11 +20,20 @@ def test_runtime_has_no_dataset_specific_imports():
     root = Path(__file__).resolve().parents[1]
     shared = list(root.glob("*.py"))
     shared += list((root / "methods").rglob("*.py")) + list((root / "habitat").rglob("*.py"))
+    # thor/ is a simulator bridge like habitat/: reusable, and it must not
+    # reach into the RoboTHOR adapter that happens to be its only caller.
+    shared += list((root / "thor").rglob("*.py"))
     for path in shared:
         for node in ast.walk(ast.parse(path.read_text())):
             names = ([node.module or ""] if isinstance(node, ast.ImportFrom)
                      else [a.name for a in node.names] if isinstance(node, ast.Import) else [])
-            assert not any(".gibson" in n or ".datasets." in n for n in names), path
+            benchmark = [n for n in names
+                         if ".gibson" in n or ".robothor" in n or ".datasets." in n]
+            # thor/smoke.py is the one exception the habitat bridge also makes:
+            # a smoke check needs a concrete profile to drive.
+            if path.name == "smoke.py":
+                continue
+            assert not benchmark, (path, benchmark)
 
 
 def test_imports_do_not_load_simulators_models_or_native_ompl():
@@ -42,6 +51,9 @@ from sparx_agency.core.planning.planners import WeightedAStarPlanner2D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime import evaluation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat import simulator, smoke
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.thor import simulator as thor_simulator
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.thor import smoke as thor_smoke
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.robothor import run, env, report
 assert not attempts, attempts
 '''
     result = subprocess.run([sys.executable, "-c", code], cwd=root, text=True,

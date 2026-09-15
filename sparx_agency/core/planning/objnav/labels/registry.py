@@ -139,7 +139,7 @@ class LabelMapperRegistry:
 
 
 def default_label_mapper_registry() -> LabelMapperRegistry:
-    """The label mappers of the benchmarks this repo runs. Registers nothing yet.
+    """The label mappers of the benchmarks this repo runs, built lazily.
 
     Each benchmark branch adds its dataset table as
     ``labels/datasets/<dataset>.py`` (a function returning a
@@ -160,4 +160,13 @@ def default_label_mapper_registry() -> LabelMapperRegistry:
         A new registry, so registering on it never changes another caller's.
     """
     registry = LabelMapperRegistry()
+
+    def _robothor() -> LabelMapper:
+        from sparx_agency.core.planning.objnav.labels.datasets.robothor import (
+            robothor_label_mapper)
+        return robothor_label_mapper()
+
+    registry.register(LabelMapperFactory(
+        name="robothor", create=_robothor,
+        description="RoboTHOR ObjectNav challenge, 12 categories"))
     return registry
