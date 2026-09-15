@@ -53,7 +53,7 @@ def evaluation_configuration(config, episode_ids, settings=None, *, policy):
 def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                    episode_ids=None, resume=False, frozen_lock=None,
                    expected_episode_ids=None, record=False, video_fps=6,
-                   writer_factory=None, dashboard=True):
+                   writer_factory=None, dashboard=True, progress=None):
     """Run the exact prepared policy, optionally locked/recorded, and close the env.
 
     Adapters own data loading, published episode identities, model provisioning,
@@ -65,6 +65,10 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
     Extra evaluator telemetry is recorder-only and optional. The policy sees
     only ObjNavObservation. Recording preserves the converter settings used by
     route commitment; wrappers do not silently construct a different controller.
+
+    An optional ``progress(index, total, row)`` is called after each scored
+    episode, for an adapter's console line. It receives the recorded row the
+    logger wrote, never evaluator telemetry the policy may not see.
     """
     options = settings or EvaluationSettings()
     recorder = None
@@ -97,12 +101,14 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
             else:
                 agent = HeadlessObjNavAgent(policy, label_mapper, params, name=policy.name)
 
-            def progress(index, total, row):
+            def on_episode(index, total, row):
                 if recorder is not None:
                     recorder.complete(row)
+                if progress is not None:
+                    progress(index, total, row)
 
             summary = run_benchmark(
-                active_env, agent, logger=logger, episode_ids=ids, progress=progress,
+                active_env, agent, logger=logger, episode_ids=ids, progress=on_episode,
                 require_stop_for_success=options.require_stop_for_success,
                 path_length_dimension=options.path_length_dimension,
                 path_length_epsilon_m=options.path_length_epsilon_m,

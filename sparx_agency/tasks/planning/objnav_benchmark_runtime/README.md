@@ -52,7 +52,15 @@ MP3D, HM3Dv1 and HM3Dv2 can reuse the Habitat bridge. The HM3D versions should
 share an adapter implementation where their schemas permit it, with separate
 versioned data/protocol configurations. RoboTHOR needs an AI2-THOR environment
 bridge but reuses the policy, action conversion, provenance and recording.
-Neither its adapter nor the new Habitat dataset adapters are implemented here.
+
+On this branch the [MP3D adapter](mp3d/README.md) is implemented as the first
+such package: Habitat ObjectNav MP3D v1, scored with habitat-lab's own rules
+(STOP required, geodesic distance to published view points, 3-D path) rather
+than SemExp's Gibson evaluator. It is a worked example of the boundary above -
+every benchmark rule lives in `mp3d/`, and the only shared additions it needed
+were an optional `progress` hook in `run_evaluation`, and `habitat_position` and
+a read-only `pathfinder` accessor on the Habitat bridge, both of which HM3D
+will reuse unchanged.
 
 ### Explicit embodiment and method settings
 
@@ -68,9 +76,23 @@ uses the same converter settings in the actual headless agent, so route
 arrival/progress checks agree with the executor.
 
 `HabitatRGBDSimulator` separately requires body height and radius; camera mount
-height is not body height. It loads the supplied navmesh, never recomputes a
-published navmesh or snaps a published start. Only the explicitly synthetic
-renderer smoke constructs its own fixture navmesh.
+height is not body height. It never snaps a published start, and only the
+explicitly synthetic renderer smoke constructs its own fixture navmesh.
+
+**Which navmesh scores the run is an explicit adapter choice**, because the two
+answers are not close. habitat-sim auto-loads `<scene>.navmesh`, compares its
+stored settings against the agent's radius and height, and silently recomputes
+it when they differ; habitat-lab copies a task's `AGENT_0.RADIUS`/`HEIGHT`
+straight into the agent config, so every habitat-lab ObjectNav run measures
+distances and filters collisions on a navmesh recomputed for that embodiment,
+not on the shipped file. Measured here on Collierville with habitat-sim 0.2.4
+at 0.18 m / 0.88 m: 44.145 m² navigable recomputed against 58.006 m² shipped,
+16 of 25 sampled geodesic distances differing by over 5 cm, and 14 of 39
+sampled point pairs reachable only on the shipped one. `navmesh=` therefore
+takes `NAVMESH_AGENT_RECOMPUTED` (what habitat-lab runs, and what MP3D uses) or
+`NAVMESH_PUBLISHED` (the shipped file, which the dataset generators used). An
+adapter states which, and it is recorded in the run configuration and the
+lock.
 
 The current search commands and map remain planar/2.5D. Floor changes reset
 local state; this is not complete multi-floor exploration or a claim that all
@@ -119,7 +141,8 @@ separate `smooth_rgb.mp4`. It does not alter original scores or observations.
 
 ## Dependencies and validation
 
-`requirements.txt` lists the shared CPU/scientific extras. Core contracts and the
+`requirements.txt` lists the shared CPU/scientific extras; an adapter adds its
+own beside it. Core contracts and the
 lightweight harness remain free of simulator/model imports. Install simulator
 bindings in their dedicated environments; do not install torch into the
 lightweight test environment. Recording requires a working FFmpeg/libx264;

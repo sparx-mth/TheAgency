@@ -139,7 +139,10 @@ class LabelMapperRegistry:
 
 
 def default_label_mapper_registry() -> LabelMapperRegistry:
-    """The label mappers of the benchmarks this repo runs. Registers nothing yet.
+    """The label mappers of the benchmarks this repo runs.
+
+    MP3D ObjectNav v1 is registered here; the other benchmarks are added by
+    their own branches.
 
     Each benchmark branch adds its dataset table as
     ``labels/datasets/<dataset>.py`` (a function returning a
@@ -160,4 +163,13 @@ def default_label_mapper_registry() -> LabelMapperRegistry:
         A new registry, so registering on it never changes another caller's.
     """
     registry = LabelMapperRegistry()
+
+    def _mp3d() -> LabelMapper:
+        from sparx_agency.core.planning.objnav.labels.datasets.mp3d import (
+            mp3d_label_mapper)
+        return mp3d_label_mapper()
+
+    registry.register(LabelMapperFactory(
+        name="mp3d", create=_mp3d,
+        description="MP3D ObjectNav v1, 21 categories"))
     return registry
