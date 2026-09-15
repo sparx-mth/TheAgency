@@ -168,3 +168,19 @@ def test_json_reloaded_configuration_keeps_tuple_settings_and_detects_converter_
         evaluation_configuration(reloaded, ["one"], policy=policy)
 
 
+
+
+def test_a_caller_may_watch_episodes_finish_without_displacing_the_recorder(tmp_path):
+    """A thousand-episode run that prints nothing until it ends is unusable, and
+    an adapter's CLI is the only thing positioned to say how it is going. The
+    recorder's own hook still runs first: it is what finishes writing an
+    episode's artifacts, and a caller's printer must not be able to skip it."""
+    seen = []
+    env = Env()
+    summary = run_evaluation(env, LinePolicy(), fake_label_mapper(),
+                             output=tmp_path / "out", config={"experiment": "progress"},
+                             progress=lambda index, total, row: seen.append(
+                                 (index, total, row.episode_id)))
+    assert [(index, total) for index, total, _ in seen] == [(1, 2), (2, 2)]
+    assert {episode for _, _, episode in seen} == set(env.episode_ids())
+    assert summary.overall.n_episodes == 2

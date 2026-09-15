@@ -48,11 +48,19 @@ Each simulator branch supplies:
    package versions, seed and protocol. Keep credentials out of this metadata;
    the shared service URL validator rejects embedded credentials/query strings.
 
-MP3D, HM3Dv1 and HM3Dv2 can reuse the Habitat bridge. The HM3D versions should
-share an adapter implementation where their schemas permit it, with separate
-versioned data/protocol configurations. RoboTHOR needs an AI2-THOR environment
-bridge but reuses the policy, action conversion, provenance and recording.
-Neither its adapter nor the new Habitat dataset adapters are implemented here.
+MP3D, HM3Dv1 and HM3Dv2 can reuse the Habitat bridge. The HM3D versions do
+share one adapter -- [`hm3d/`](hm3d/README.md), the worked example of this
+boundary -- with two versioned protocol objects, because only their episodes and
+scene release differ. RoboTHOR needs an AI2-THOR environment bridge but reuses
+the policy, action conversion, provenance and recording; neither it nor MP3D is
+implemented here.
+
+The Habitat bridge takes an explicit `navmesh` policy, because which navmesh an
+episode runs on decides what is reachable and therefore sets `l` and every SPL.
+`"published"` uses the shipped mesh verbatim; `"agent"` is habitat-sim's own
+load-then-recompute-at-the-agent's-dimensions behaviour, which is what
+habitat-lab's ObjectNav actually runs. Whichever an adapter picks,
+`navmesh_provenance()` records what was in force.
 
 ### Explicit embodiment and method settings
 
@@ -83,6 +91,11 @@ Construct the environment, policy, label mapper and adapter metadata, then call
 `run_benchmark`/`MetricsLogger`, not a second scoring loop, and closes the
 environment even on recording failures. Extra `evaluation_diagnostics()` is an
 optional recorder-only hook; environments without it remain recordable.
+
+`progress=` takes a `(index, total, record)` callback, so an adapter's CLI can
+report each finished episode — a thousand-episode run that prints nothing until
+it ends is unusable. It runs *after* the recorder's own hook, which is what
+finishes writing an episode's artifacts, so a caller can never displace it.
 
 For frozen evaluation:
 
