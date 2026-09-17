@@ -8,19 +8,19 @@ import numpy as np
 from sparx_agency.core.mapping.costmap.depth_to_grid import update_grid_from_depth
 from sparx_agency.core.mapping.costmap.log_odds_grid import LogOddsGridConfig, LogOddsGridCostmap
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+from sparx_agency.core.planning.exploration.floor_atlas import FloorAtlas, MultiFloorParams
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical, backproject_depth
 
 
 class ObservedMap:
     """A fresh map per episode, centred on its first observed position.
 
-    This is the method's map, NOT the Gibson scoring map. Height filtering is
-    relative to the first observed floor, matching the current planar search
-    method. Running out of map is a method error, never a licence to ask the
-    simulator for scene bounds. The initial footprint uses only known pose.
+    Each settled floor owns an independent grid at a shared observed XY origin.
+    Intermediate stair observations are not fused into either floor. This is
+    NOT the scoring map; no scene bounds or floor heights are supplied by GT.
     """
 
-    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18):
+    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18, multifloor=None):
         self.grid = LogOddsGridCostmap(LogOddsGridConfig(
             size_m=size_m, resolution_m=resolution_m))
         self.stride = stride
@@ -28,19 +28,34 @@ class ObservedMap:
         self.body_radius_m = body_radius_m
         self._anchor = None
         self.floor_revision = 0
+        self.atlas = FloorAtlas(multifloor or MultiFloorParams())
+        self.floor_id = 0
+        self.maps, self.worlds = {0: self.grid}, {}
 
-    def update(self, observation):
+    def update(self, observation, integrate=True):
         pose, camera = observation.pose, observation.camera
         if self._anchor is None:
             self._anchor = pose.z
             self.grid.origin_x = pose.x - self.grid.cfg.size_m / 2
             self.grid.origin_y = pose.y - self.grid.cfg.size_m / 2
-        if abs(pose.z - self._anchor) > 0.6:
-            # Do not overlay two storeys in one XY map. This remains a local
-            # 2.5D ground-robot adaptation, not full FALCON 3D exploration.
+        if self.atlas.params.enabled:
+            floor_id = self.atlas.update(pose)
+            if floor_id not in self.maps:
+                grid = LogOddsGridCostmap(self.grid.cfg)
+                grid.origin_x, grid.origin_y = self.grid.origin_x, self.grid.origin_y
+                self.maps[floor_id] = grid
+            self.floor_id = floor_id
+            self.grid = self.maps[floor_id]
+            self.floor_revision = self.atlas.revision
+            self._anchor = self.atlas.elevation_m
+            if (self.atlas.in_transition or not integrate) and floor_id in self.worlds:
+                return self.worlds[floor_id]
+        elif abs(pose.z - self._anchor) > 0.6:
+            # Explicit legacy ablation only, recorded in method configuration.
             self.grid.reset()
             self._anchor = pose.z
             self.floor_revision += 1
+            self.floor_id = self.floor_revision
         margin = camera.max_depth_m
         if (abs(pose.x - self.grid.origin_x - self.grid.cfg.size_m / 2)
                 > self.grid.cfg.size_m / 2 - margin
@@ -89,10 +104,12 @@ class ObservedMap:
                      max(0, gx - radius):min(data.shape[1], gx + radius + 1)]
         block[footprint & (block != 100)] = 0
         data[gy, gx] = 0  # the observed base itself is reachable
-        return OccupancyGrid2D(
+        world = OccupancyGrid2D(
             data, OccupancyGrid2DParams(spec.resolution_m, spec.origin_x,
                                         spec.origin_y, "world"),
             values=OccupancyValues(free=0, occupied=100, unknown=-1))
+        self.worlds[self.floor_id] = world
+        return world
 
     def notify_blocked(self, observation, forward_step_m):
         """Record a failed forward step as local evidence, not a GT wall lookup."""

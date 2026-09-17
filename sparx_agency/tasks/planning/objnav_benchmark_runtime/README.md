@@ -27,6 +27,11 @@ For the **15 distinct-building, 30-recording comparison**, see
 ObjectNav starts in official Gibson training buildings, not repeated episodes
 in the five validation scenes. Policies and the 500-action cap remain unchanged.
 
+For **multi-story houses**, both explorers now retain per-floor scene graphs
+linked by observed stair traversals. See [MULTISTORY.md](gibson/MULTISTORY.md)
+for the architecture and the five-building × three-episode development campaign,
+including one preselected recording per building and explicit scoring caveats.
+
 ## Reusable pieces
 
 | Component | Responsibility |
@@ -35,7 +40,8 @@ in the five validation scenes. Policies and the 500-action cap remain unchanged.
 | `methods/falcon_policy.py` | Explicit bounded hierarchy; existing RPT* and target-evidence integration |
 | `methods/falcon_regions.py` | Observed local scopes, reachable entry goals and split/merge visit history |
 | `methods/falcon_motion.py`, `falcon_routes.py` | Ground-safe action checks and paused route persistence |
-| `methods/observed_map.py` | Metric depth → robot-height 2.5D occupancy, measured footprint, floor reset |
+| `methods/observed_map.py`, `floor_context.py` | Persistent floor-local maps, graphs, target evidence and paused room clocks |
+| `methods/multifloor_policy.py`, `stair_terrain.py` | Observed stair proposals/traversal and building-level scheduling |
 | `methods/route_memory.py` | Committed routes, snapped arrival and stagnation safeguards |
 | `methods/object_evidence.py` | Alias/frame deduplication, multi-view support and bounded rejection |
 | `methods/scene_graph.py`, `room_labels.py`, `doors.py` | Observed rooms/doors and revisable accumulated room reasoning |
@@ -47,7 +53,9 @@ Algorithms live in `core/planning/exploration/falcon/`; they are ROS-free and
 simulator-neutral. Host-side numpy/scipy dependencies do not enter the existing
 Noetic exploration facade. The Gibson bridge retains its existing camera-height
 body configuration; future simulators must supply their own explicit embodiment
-rather than inherit Gibson defaults. This is not complete multi-floor navigation.
+rather than inherit Gibson defaults. Persistent floor identity/connectivity lives
+in `core/planning/exploration/floor_atlas.py`; depth-based stair handling is the
+host-side ground-robot adaptation, not an aerial-controller change.
 
 ## Completed detector preserved
 
@@ -73,9 +81,9 @@ native-score schema and Gibson SR/SPL rules are unchanged.
 
 Coverage is **ever-observed occupancy area**, a proxy, not ground-truth coverage.
 The initial observation is excluded from gained-per-action. Curves sample
-observations at decision indices. Each observed floor revision has a separate
-mask, so repeated visits to the same physical floor are not deduplicated across
-floor resets. Those proxy limitations must accompany comparisons.
+observations at decision indices. Masks are keyed by stable floor ID, so a
+return visit does not recount known area. Transient stair terrain is excluded.
+Historical reset-only results retain their original coverage limitation.
 
 Recording and smooth replay remain optional; interpolated replay images are
 never policy inputs. Use the existing Gibson freeze workflow for later published

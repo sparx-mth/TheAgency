@@ -38,6 +38,8 @@ class FalconObjectNav:
         self.errors = []
         self._burst_recorded = -1
         self._floor = policy.mapping.floor_revision
+        self._floor_id = policy.mapping.floor_id
+        self._floor_states = {}
         self._transit_start = 0
         self.recovery_phase = EXPLORE
         self.nonlocal_failures = {TRANSIT: 0, VERIFY: 0}
@@ -47,14 +49,20 @@ class FalconObjectNav:
         m.check_limits()
         if self._floor != p.mapping.floor_revision:
             m.end("floor_change")
-            m.transition(REASON, "observed floor changed; geometry invalidated, allowance retained")
+            self._floor_states[self._floor_id] = (self.regions, self.explorer, self.routes)
+            self._floor_id = p.mapping.floor_id
             self._floor = p.mapping.floor_revision
-            self.archived_plans.extend(self.explorer.records)
-            self.archived_regions.extend(self.regions.diagnostics())
-            self.regions = ObservedRegions(self.params, self.entry_margin)
-            self.explorer = FalconPlanner(self.params)
-            self.routes = LocalRouteBank()
+            if self._floor_id in self._floor_states:
+                self.regions, self.explorer, self.routes = self._floor_states.pop(self._floor_id)
+            else:
+                self.regions = ObservedRegions(self.params, self.entry_margin)
+                self.explorer = FalconPlanner(self.params)
+                self.routes = LocalRouteBank()
             self.current = self.saved_route = self.selected = None
+            m.burst = None
+            m.resume_phase = None
+            m.transition(TRANSIT, "settled floor entry; persistent geometry restored")
+            self._begin(observation, world)
         self.explorer.observe(world)
         self.cost = self.motion.update(observation, world)
         if self.regions.anchor is None and m.burst is None:
@@ -288,8 +296,10 @@ class FalconObjectNav:
 
     def diagnostics(self):
         self.machine.check_limits()
-        return {**self.machine.snapshot(), "regions": self.archived_regions + self.regions.diagnostics(),
-                "falcon_plans": self.archived_plans + list(self.explorer.records), "frontier_updates": self.explorer.frontiers.updates,
+        archived_regions = [dict(row, floor_id=floor) for floor, (regions, _, _) in self._floor_states.items() for row in regions.diagnostics()]
+        archived_plans = [dict(row, floor_id=floor) for floor, (_, explorer, _) in self._floor_states.items() for row in explorer.records]
+        return {**self.machine.snapshot(), "regions": archived_regions + self.regions.diagnostics(),
+                "falcon_plans": archived_plans + list(self.explorer.records), "frontier_updates": self.explorer.frontiers.updates,
                 "rejected_viewpoints": len(self.explorer.rejected), "visited_viewpoints": len(self.explorer.visited),
                 "route_bank": self.routes.diagnostics(), "safety_vetoes": self.safety_vetoes,
                 "errors": list(self.errors), "fallback": None}

@@ -22,6 +22,8 @@ class ExplorationMetrics:
         self.seen = None
         self.floor = None
         self.previous_floor_area = 0.0
+        self.floor_masks = {}
+        self.floor_areas = {}
         self.last_pose = None
         self.last_action = None
         self.repeated_turns = self.turn_reversals = self.revisits = 0
@@ -33,12 +35,11 @@ class ExplorationMetrics:
 
     def observe(self, observation, world, floor):
         if self.floor != floor:
-            if self.curve:
-                self.previous_floor_area = self.curve[-1]["observed_m2"]
-            self.seen = np.zeros(world.grid.shape, bool)
+            self.seen = self.floor_masks.setdefault(floor, np.zeros(world.grid.shape, bool))
             self.floor = floor
         self.seen |= world.grid != world.values.unknown
-        area = self.previous_floor_area + float(self.seen.sum()) * world.resolution ** 2
+        self.floor_areas[floor] = float(self.seen.sum()) * world.resolution ** 2
+        area = sum(self.floor_areas.values())
         gain = 0.0 if not self.curve else max(0.0, area - self.curve[-1]["observed_m2"])
         pose = observation.pose
         cell = (floor, int(math.floor(pose.x / 0.5)), int(math.floor(pose.y / 0.5)))
@@ -75,7 +76,8 @@ class ExplorationMetrics:
                               "p99_ms": float(np.percentile(values, 99)), "max_ms": float(max(values))}
         gain = self.curve[-1]["observed_m2"] - self.curve[0]["observed_m2"] if self.curve else 0.0
         actions = sum(self.actions.values())
-        return {"coverage_definition": "ever-observed occupancy area proxy; initial excluded from gain; decision observations only",
+        return {"coverage_definition": "ever-observed occupancy area proxy; stable floors deduplicated; transition surfaces excluded; initial excluded from gain; decision observations only",
+                "observed_area_by_floor_m2": dict(self.floor_areas),
                 "observed_gain_m2": gain, "coverage_gain_m2_per_action": gain / max(1, actions),
                 "coverage_curve": list(self.curve), "actions": dict(self.actions),
                 "actions_by_phase": dict(self.allocation), "latency": samples,

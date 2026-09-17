@@ -19,15 +19,18 @@ from sparx_agency.tasks.planning.objnav_benchmark.aggregate import paired_compar
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.compare_explorers import summarize
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.development_dataset import SCHEMA, SPLIT
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_SCHEMA
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import source_fingerprint
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import run_development
 
 
-def jobs_for(scenes):
+def jobs_for(scenes, explorers=("frontier", "falcon")):
     """Predeclared counterbalanced order, unrelated to any navigation outcome."""
+    if not explorers or len(explorers) != len(set(explorers)) or not set(explorers) <= {"frontier", "falcon"}:
+        raise ValueError("Need distinct, supported explorers")
     jobs = []
     for index, scene in enumerate(scenes):
-        order = ("frontier", "falcon") if index % 2 == 0 else ("falcon", "frontier")
+        order = tuple(explorers) if index % 2 == 0 else tuple(reversed(explorers))
         jobs.extend((backend, scene) for backend in order)
     return jobs
 
@@ -37,6 +40,8 @@ def command_for(args, backend, scene):
                "--output", str(args.output / backend / scene), "--explorer", backend,
                "--seed", str(args.seed), "--record", "--video-fps", str(args.video_fps),
                "--detector-url", args.detector_url, "--detector-backend", args.detector_backend]
+    if getattr(args, "record_first", False):
+        command.append("--record-first")
     if args.allow_sim_version_mismatch:
         command.append("--allow-sim-version-mismatch")
     if args.policy_config:
@@ -49,7 +54,8 @@ def freeze(args, data):
     locks.mkdir()
     source = source_fingerprint()
     identities = {}
-    for backend, scene in jobs_for(data["scenes"]):
+    jobs = jobs_for(data["scenes"], getattr(args, "explorers", ("frontier", "falcon")))
+    for backend, scene in jobs:
         arguments = run_development.parser().parse_args(command_for(args, backend, scene))
         env, _, config = run_development.prepare(arguments)
         env.close()
@@ -70,11 +76,12 @@ def freeze(args, data):
         with (locks / (backend + "-" + scene + ".json")).open("x") as stream:
             json.dump(config, stream, indent=2, allow_nan=False)
             stream.write("\n")
-    manifest = {"role": "frozen_generated_training_development", "split": SPLIT,
+    recordings = len(jobs) if getattr(args, "record_first", False) else len(data["episodes"]) * len({job[0] for job in jobs})
+    manifest = {"role": "frozen_generated_training_development", "split": data.get("split", SPLIT),
                 "held_out_claim": False, "policy_tuning": False, "source_sha256": source,
                 "manifest_sha256": hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
-                "jobs": jobs_for(data["scenes"]), "buildings": data["scenes"],
-                "recordings_expected": 2 * len(data["scenes"]), "video_fps": args.video_fps,
+                "jobs": jobs, "buildings": data["scenes"],
+                "recordings_expected": recordings, "video_fps": args.video_fps,
                 "seed": args.seed, "detector_url": args.detector_url}
     with (args.output / "campaign.json").open("x") as stream:
         json.dump(manifest, stream, indent=2)
@@ -83,6 +90,9 @@ def freeze(args, data):
 
 def finish(root, data):
     """Reuse metric aggregation and write an accessible paired video gallery."""
+    if data.get("schema") == MULTIFLOOR_SCHEMA:
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_report import write_multifloor_report
+        return write_multifloor_report(root, data)
     report = summarize(root, role="frozen_generated_training_development", require_falcon_activity=False)
     expected = {scene + "/000000" for scene in data["scenes"]}
     records = {}
@@ -126,13 +136,17 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--video-fps", type=int, default=6)
     parser.add_argument("--policy-config", type=Path)
+    parser.add_argument("--explorers", nargs="+", choices=("frontier", "falcon"), default=["frontier", "falcon"])
+    parser.add_argument("--record-first", action="store_true")
     parser.add_argument("--allow-sim-version-mismatch", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--summarize-only", action="store_true")
     args = parser.parse_args(argv)
     data = json.loads(args.manifest.read_text())
-    if data.get("schema") != SCHEMA or len(data["scenes"]) != len(set(data["scenes"])):
+    if data.get("schema") not in (SCHEMA, MULTIFLOOR_SCHEMA) or len(data["scenes"]) != len(set(data["scenes"])):
         raise ValueError("Need a distinct-building generated training manifest")
+    if data["schema"] == SCHEMA and set(args.explorers) != {"frontier", "falcon"}:
+        raise ValueError("The legacy comparison requires both explorers; single-explorer campaigns use --multistory data")
     if args.summarize_only:
         finish(args.output, data)
         return
@@ -143,7 +157,9 @@ def main(argv=None):
     else:
         args.output.mkdir(parents=True, exist_ok=False)
         campaign = freeze(args, data)
-    jobs = jobs_for(data["scenes"])
+    jobs = jobs_for(data["scenes"], args.explorers)
+    if [list(job) for job in jobs] != [list(job) for job in campaign["jobs"]]:
+        raise RuntimeError("Requested job selection differs from frozen campaign")
     for number, (backend, scene) in enumerate(jobs, 1):
         if campaign["source_sha256"] != source_fingerprint():
             raise RuntimeError("Source changed during the frozen comparison")

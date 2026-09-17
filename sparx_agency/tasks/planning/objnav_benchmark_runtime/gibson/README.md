@@ -13,6 +13,13 @@ This optional runtime uses the [shared benchmark harness](../../objnav_benchmark
 GT goals, semantic floor maps and distance telemetry reach only the scorer and
 recorder, never the policy. No navigation-specific training is performed.
 
+**Multi-story support:** persistent floor scene graphs and observed stair
+connections now wrap both local explorers. [MULTISTORY.md](MULTISTORY.md)
+describes the five-building × three-episode campaign and its first-episode-per-
+building recordings. It uses a separately named 3D development metric, not the
+single-floor SemExp validation score documented below. Full-building semantic
+annotations are not available in the installed Gibson release.
+
 ## Refinements without replacing the algorithm
 
 - **Committed routes:** keep a safe path through turns, minor goal drift and
@@ -26,9 +33,10 @@ recorder, never the policy. No navigation-specific training is performed.
   target verification agree with the executor.
 - **Ground-robot map:** back-project depth in 3D and integrate a robot-height
   2.5D slab. Visible floor cells provide free evidence without clearing occupied
-  columns or inventing free rays through furniture. A substantial floor-height
-  change resets local state instead of superimposing storeys. This is not full
-  multi-floor FALCON exploration.
+  columns or inventing free rays through furniture. Stable floor changes switch
+  persistent map/scene-graph contexts instead of superimposing or discarding
+  storeys. A separate observed support-surface layer handles stair transitions;
+  the historical reset behavior remains an explicit multi-floor-disabled ablation.
 - **Physical clearance:** retain preferred 0.30 m clearance and a physical
   0.18 m floor. Room/frontier eligibility uses the physical-radius field, so a
   narrow doorway is not rejected before A* can try its relaxation ladder.

@@ -19,11 +19,12 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator impo
 class GibsonEnv(ObjNavEnv):
     name = "habitat/gibson-semexp-v1.1"
 
-    def __init__(self, dataset, seed=0, gpu_device=0, simulator=None):
+    def __init__(self, dataset, seed=0, gpu_device=0, simulator=None, protocol=PROTOCOL):
         self._dataset, self._seed = dataset, seed
-        self._camera, self._actions = PROTOCOL.camera(), PROTOCOL.actions()
+        self.protocol = protocol
+        self._camera, self._actions = protocol.camera(), protocol.actions()
         self._simulator = simulator if simulator is not None else HabitatRGBDSimulator(
-            self._camera, self._actions, PROTOCOL.agent_radius_m, PROTOCOL.allow_sliding, gpu_device)
+            self._camera, self._actions, protocol.agent_radius_m, protocol.allow_sliding, gpu_device)
         self._episode = None
         self._steps, self._stopped = 0, False
         self.sentinel_start_ids = []
@@ -61,15 +62,15 @@ class GibsonEnv(ObjNavEnv):
         self._distance = self._field(row.scene, row.floor_id, row.category_index)
         self._start_dtg = self._distance.distance(row.start_position, start=True)
         self._start_sentinel = self._distance.start_uses_sentinel(row.start_position)
-        self._shortest = self._start_dtg + PROTOCOL.success_radius_m
+        self._shortest = self._start_dtg + (0.0 if self.protocol.path_length_dimension == "3d" else self.protocol.success_radius_m)
         self._steps, self._stopped = 0, False
-        self._path = PROTOCOL.path_length_epsilon_m
+        self._path = self.protocol.path_length_epsilon_m
         self._collisions, self._collision_available = 0, True
         self._first_success_action = 0 if self._start_dtg == 0.0 else None
         tag = "%d/%s" % (self._seed, episode_id)
         seed = int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "big")
-        self._episode = ObjNavEpisode(episode_id, row.scene, PROTOCOL.benchmark, PROTOCOL.split,
-                                     row.category, self._camera, self._actions, PROTOCOL.max_steps)
+        self._episode = ObjNavEpisode(episode_id, row.scene, self.protocol.benchmark, self.protocol.split,
+                                     row.category, self._camera, self._actions, self.protocol.max_steps)
         frame = self._simulator.reset(self._dataset.scenes_dir / (row.scene + ".glb"),
                                       self._dataset.scenes_dir / (row.scene + ".navmesh"),
                                       row.start_position, row.start_rotation, seed)
@@ -95,7 +96,10 @@ class GibsonEnv(ObjNavEnv):
         self._stopped = action == DiscreteAction.STOP
         self._observation = self._observation_from(frame)
         after = self._observation.pose
-        self._path += math.hypot(after.x - before.x, after.y - before.y)
+        if self.protocol.path_length_dimension == "3d":
+            self._path += math.dist((after.x, after.y, after.z), (before.x, before.y, before.z))
+        else:
+            self._path += math.hypot(after.x - before.x, after.y - before.y)
         collision = getattr(self._simulator, "last_collision", None)
         if collision is None:
             self._collision_available = False
@@ -107,7 +111,7 @@ class GibsonEnv(ObjNavEnv):
 
     @property
     def episode_over(self):
-        return self._episode is not None and (self._stopped or self._steps >= PROTOCOL.max_steps)
+        return self._episode is not None and (self._stopped or self._steps >= self.protocol.max_steps)
 
     def evaluation_diagnostics(self):
         """Recorder/evaluator-only values, never policy observations."""

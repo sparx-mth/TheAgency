@@ -47,10 +47,12 @@ def load_training_maps(path):
 class DevelopmentDataset(GibsonDataset):
     """Load an immutable generated manifest; never interpret PointNav placeholders."""
 
+    schema, split = SCHEMA, SPLIT
+
     def __init__(self, manifest, scene=None):
         self.manifest_path = Path(manifest).expanduser().resolve()
         data = json.loads(self.manifest_path.read_text())
-        if data.get("schema") != SCHEMA or data.get("split") != SPLIT:
+        if data.get("schema") != self.schema or data.get("split") != self.split:
             raise ValueError("Not a generated Gibson training-development manifest")
         scenes = data["scenes"]
         if len(scenes) != len(set(scenes)) or (scene is not None and scene not in scenes):
@@ -89,7 +91,7 @@ class DevelopmentDataset(GibsonDataset):
     def manifest(self):
         result = super().manifest()
         result.update(release="SemExp Gibson TRAIN maps; generated ObjectNav development starts",
-                      split=SPLIT, episode_source="generated-not-published-validation",
+                      split=self.split, episode_source="generated-not-published-validation",
                       generation=self.definition["generation"], held_out_claim=False)
         return result
 
@@ -101,6 +103,6 @@ class DevelopmentEnv(GibsonEnv):
 
     def reset(self, episode_id):
         episode, observation = super().reset(episode_id)
-        self._episode = replace(episode, split=SPLIT)
+        self._episode = replace(episode, split=self._dataset.split)
         return self._episode, observation
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import math
 
 from sparx_agency.core.planning.exploration.falcon.params import FalconParams
+from sparx_agency.core.planning.exploration.floor_atlas import MultiFloorParams
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class RPTSettings:
     preferred_clearance_m: float = 0.30
     local_exploration: str = "frontier"
     falcon: FalconParams = field(default_factory=FalconParams)
+    multifloor: MultiFloorParams = field(default_factory=MultiFloorParams)
 
     def __post_init__(self):
         for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m", "preferred_clearance_m"):
@@ -44,3 +46,7 @@ class RPTSettings:
             object.__setattr__(self, "falcon", FalconParams(**self.falcon))
         if not isinstance(self.falcon, FalconParams):
             raise ValueError("falcon must be FalconParams or an object of parameter overrides")
+        if isinstance(self.multifloor, dict):
+            object.__setattr__(self, "multifloor", MultiFloorParams(**self.multifloor))
+        if not isinstance(self.multifloor, MultiFloorParams):
+            raise ValueError("multifloor must be MultiFloorParams or parameter overrides")

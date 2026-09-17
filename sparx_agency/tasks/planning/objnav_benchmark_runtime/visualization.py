@@ -20,6 +20,9 @@ def visual_state(policy, observation, trail):
     graph = getattr(policy, "graph", None)
     landmarks = getattr(policy, "landmarks", None)
     world = getattr(policy, "last_world", None)
+    mapping = getattr(policy, "mapping", None)
+    if mapping is not None:
+        world = getattr(mapping, "worlds", {}).get(getattr(mapping, "floor_id", 0), world)
     state = {"pose": (pose.x, pose.y, pose.yaw), "trail": list(trail),
              "sim_time": float(observation.step),
              "oracle": {"target": observation.target_category, "source": "waiting", "rooms": []}}
@@ -74,7 +77,13 @@ def method_snapshot(policy):
     hierarchy = getattr(policy, "hierarchy", None)
     supervisor = getattr(policy, "supervisor", None)
     burst = hierarchy.machine.burst if hierarchy is not None else None
-    return {"state": hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting"),
+    building = getattr(policy, "building", None)
+    atlas = building.policy.mapping.atlas.diagnostics() if building else {}
+    state = hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting")
+    if building and building.phase != "floor_search":
+        state = building.phase
+    return {"state": state, "floor_id": getattr(getattr(policy, "mapping", None), "floor_id", 0),
+            "floor_atlas": atlas,
             "room_id": hierarchy.regions.room_id if hierarchy is not None else getattr(supervisor, "room_id", None),
             "explorer": getattr(getattr(policy, "settings", None), "local_exploration", "unknown"),
             "burst_actions_left": max(0, hierarchy.params.burst_actions - burst.actions) if burst is not None else None,
@@ -99,9 +108,11 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
     """RGB boxes, metric depth, observed rooms, route/trail and actual decision reasons."""
     frame = np.full((900, 1600, 3), 20, np.uint8)
     action = "TERMINAL" if final else str(decision.get("action", "waiting"))
-    _text(frame, "%s | %s | target: %s | step %d | %s | burst left: %s" %
+    _text(frame, "%s | %s | target: %s | step %d | %s | floor %s | z %.2fm | levels %d | links %d" %
           (episode_id, snapshot.get("explorer", "unknown"), observation.target_category,
-           observation.step, action, snapshot.get("burst_actions_left")), (12, 26), width=190, lines=1)
+           observation.step, action, snapshot.get("floor_id", 0), observation.pose.z,
+           len(snapshot.get("floor_atlas", {}).get("floors", [0])),
+           len(snapshot.get("floor_atlas", {}).get("connections", []))), (12, 26), width=190, lines=1)
     rgb = np.ascontiguousarray(observation.rgb[..., ::-1])
     for detection in snapshot.get("detections", ()) if not final else ():
         x1, y1, x2, y2 = (int(v) for v in detection["xyxy"])
@@ -128,7 +139,9 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
     if len(points) >= 2:
         cv2.polylines(panel, [np.asarray(points, np.int32)], False, (255, 180, 0), 2, cv2.LINE_AA)
     frame[40:760, 640:] = panel
-    _text(frame, "Observed map only | green: executed trail | cyan: planned route", (654, 783), width=122, lines=1)
+    floors = snapshot.get("floor_atlas", {}).get("floors", [])
+    levels = " ".join("F%d: %.1fm" % (f["id"], f["elevation_m"]) for f in floors)
+    _text(frame, "Active floor only | green: floor trail | cyan: route | " + levels, (654, 783), width=122, lines=1)
     reason = decision.get("info", {}).get("policy", {})
     _text(frame, "DECISION: " + json.dumps(reason, ensure_ascii=True), (12, 814), width=175, lines=2)
     oracle = snapshot.get("reasoning", {}).get("oracle", {})

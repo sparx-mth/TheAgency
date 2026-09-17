@@ -109,19 +109,27 @@ class PolicyProbe:
 class EpisodeRecorder:
 	"""Record actual observations/decisions and evaluator-only telemetry separately."""
 
-	def __init__(self, root, policy, fps=6, writer_factory=VideoSink):
+	def __init__(self, root, policy, fps=6, writer_factory=VideoSink, selected_episode_ids=None):
 		self.root, self.policy = Path(root), policy
 		self.fps, self.writer_factory = fps, writer_factory
+		self.selected_episode_ids = None if selected_episode_ids is None else set(selected_episode_ids)
+		self.enabled = True
 		self.video = self.trace = self.csv_file = None
 		self.episode_dir = None
 		self.last_frame = None
 
 	def begin(self, episode, observation, telemetry):
 		self.close()
+		self.episode_dir = None
+		self.last_frame = None
+		self.enabled = self.selected_episode_ids is None or episode.episode_id in self.selected_episode_ids
+		if not self.enabled:
+			return
 		self.episode = episode
 		self.started = time.monotonic()
 		self.last_snapshot = None
 		self.trail = [(observation.pose.x, observation.pose.y)]
+		self.floor_trails = {}
 		# Qualified ids are hashed into directories to avoid path traversal.
 		import hashlib
 		key = hashlib.sha256(episode.episode_id.encode()).hexdigest()[:12]
@@ -148,6 +156,8 @@ class EpisodeRecorder:
 		self.csv_file.flush()
 
 	def decision(self, observation, decision, command):
+		if not self.enabled:
+			return
 		try:
 			snapshot = method_snapshot(self.policy)
 			if command is not None:
@@ -165,6 +175,8 @@ class EpisodeRecorder:
 			raise HarnessError("Recording failed, not an agent failure: %s" % exc) from exc
 
 	def after_step(self, observation, telemetry, terminal):
+		if not self.enabled:
+			return
 		self.trail.append((observation.pose.x, observation.pose.y))
 		self._position(observation, telemetry)
 		if terminal:
@@ -172,7 +184,14 @@ class EpisodeRecorder:
 			self._frame(observation, {}, snapshot, final=True)
 
 	def _frame(self, observation, decision, snapshot, final=False):
-		frame = render_dashboard(self.policy, observation, self.trail, decision,
+		floor_id = snapshot.get("floor_id", 0)
+		trail = self.floor_trails.setdefault(floor_id, [])
+		mapping = getattr(self.policy, "mapping", None)
+		if not getattr(getattr(mapping, "atlas", None), "in_transition", False):
+			point = (observation.pose.x, observation.pose.y)
+			if not trail or trail[-1] != point:
+				trail.append(point)
+		frame = render_dashboard(self.policy, observation, trail, decision,
 								 self.episode.episode_id, snapshot, final=final)
 		if self.video is None:
 			self.video = self.writer_factory(self.episode_dir / "video.mp4", self.fps)

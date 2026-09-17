@@ -78,6 +78,18 @@ def generate_start(scene, floors, pathfinder, seed, min_distance=1.5, max_distan
     raise RuntimeError("No valid ObjectNav start found in selected building %s; no replacement building selected" % scene)
 
 
+def stage_building(args, scene, maps):
+    """Reuse complete local asset pairs, or extract without overwriting files."""
+    args.scenes_dir.mkdir(parents=True, exist_ok=True)
+    paths = [args.scenes_dir / (scene + suffix) for suffix in (".glb", ".navmesh")]
+    if any(path.exists() for path in paths):
+        if not all(path.is_file() for path in paths):
+            raise FileExistsError("Incomplete existing asset pair for " + scene)
+    else:
+        import_scene_zip(args.archive, scene, args.scenes_dir, allowed_scenes=tuple(maps))
+    return [file_identity(path) for path in paths]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-info", type=Path, required=True)
@@ -86,22 +98,25 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--buildings", type=int, default=15)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--multistory", action="store_true")
+    parser.add_argument("--episodes-per-building", type=int, default=1)
     args = parser.parse_args(argv)
     if args.output.exists():
         raise FileExistsError("Not overwriting an existing episode manifest")
     maps = load_training_maps(args.train_info)
+    if args.multistory:
+        if not 1 <= args.buildings <= len(maps) or args.seed < 0:
+            raise ValueError("Invalid building count or seed")
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_generation import generate_multifloor
+        return generate_multifloor(args, maps)
+    if args.episodes_per_building != 1:
+        raise ValueError("Multiple generated starts require --multistory")
     scenes = select_buildings(maps, args.buildings, args.seed)
     print("Selected buildings before any policy run:", ", ".join(scenes), flush=True)
     args.scenes_dir.mkdir(parents=True, exist_ok=True)
     assets = []
     for scene in scenes:
-        paths = [args.scenes_dir / (scene + suffix) for suffix in (".glb", ".navmesh")]
-        if any(path.exists() for path in paths):
-            if not all(path.is_file() for path in paths):
-                raise FileExistsError("Incomplete existing asset pair for " + scene)
-        else:
-            import_scene_zip(args.archive, scene, args.scenes_dir, allowed_scenes=tuple(maps))
-        assets.extend(file_identity(path) for path in paths)
+        assets.extend(stage_building(args, scene, maps))
     import habitat_sim  # PathFinder needs no renderer/GPU context
     episodes, audits = [], []
     for scene in scenes:

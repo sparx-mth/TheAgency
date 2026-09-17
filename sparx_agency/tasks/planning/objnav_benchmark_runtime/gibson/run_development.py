@@ -1,8 +1,7 @@
-"""Recorded ObjectNav in generated Gibson training buildings; never val scores.
+"""Generated Gibson development runs through the existing shared benchmark loop.
 
-This thin adapter reuses Gibson service checks, the same search policy, scoring
-harness and recorder. It intentionally does not call the validation-only paper
-comparison report or relax its five-scene validation contract.
+The manifest selects either the historical planar development protocol or the
+explicit multi-story protocol. Neither is reported as published validation.
 """
 from __future__ import annotations
 
@@ -17,7 +16,8 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_labe
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.development_dataset import DEVELOPMENT_PROTOCOL, DevelopmentDataset, DevelopmentEnv
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import _gpu_gate, _method, _runtime, source_fingerprint
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_SCHEMA, MultiFloorDataset, MultiFloorEnv
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import _gpu_gate, _method, _runtime, select_episodes, source_fingerprint
 
 
 def prepare(args):
@@ -28,18 +28,23 @@ def prepare(args):
         raise RuntimeError("; ".join(issues))
     if runtime.get("habitat-sim") != DEVELOPMENT_PROTOCOL.reference_sim_version and not args.allow_sim_version_mismatch:
         raise RuntimeError("Acknowledge Habitat 0.2.4 versus reference 0.1.5")
-    dataset = DevelopmentDataset(args.manifest, args.scene)
-    env = DevelopmentEnv(dataset, args.seed, args.gpu_device)
+    multistory = json.loads(args.manifest.read_text()).get("schema") == MULTIFLOOR_SCHEMA
+    dataset = (MultiFloorDataset if multistory else DevelopmentDataset)(args.manifest, args.scene)
+    env = (MultiFloorEnv if multistory else DevelopmentEnv)(dataset, args.seed, args.gpu_device)
     try:
-        env.validate_starts()
+        ids = list(select_episodes(env.episode_ids(), getattr(args, "limit", None)))
+        env.validate_starts(ids)
         policy, method = _method(args)
-        config = {"protocol": asdict(DEVELOPMENT_PROTOCOL), "runtime": runtime,
+        protocol = env.protocol if multistory else DEVELOPMENT_PROTOCOL
+        recorded = ids[:1] if getattr(args, "record_first", False) else ids
+        config = {"protocol": asdict(protocol), "runtime": runtime,
                   "source_sha256": source_fingerprint(), "method": method, "seed": args.seed,
                   "gpu_device": args.gpu_device, "allow_shared_gpu": False,
-                  "selected_episode_ids": list(env.episode_ids()), "dataset": dataset.manifest(),
-                  "kinematics": asdict(DEVELOPMENT_PROTOCOL.kinematics()),
-                  "recording": {"enabled": args.record, "fps": args.video_fps}, "full_split": False,
-                  "reference_sim_version_match": runtime.get("habitat-sim") == DEVELOPMENT_PROTOCOL.reference_sim_version,
+                  "selected_episode_ids": ids, "dataset": dataset.manifest(),
+                  "kinematics": asdict(protocol.kinematics()),
+                  "recording": {"enabled": args.record, "fps": args.video_fps,
+                                "episode_ids": recorded if args.record else []}, "full_split": False,
+                  "reference_sim_version_match": runtime.get("habitat-sim") == protocol.reference_sim_version,
                   "evaluation_role": "frozen_generated_training_development", "held_out_claim": False,
                   "navigation_tuning_during_batch": False, "on_agent_error": "record"}
         return env, policy, json.loads(json.dumps(config, allow_nan=False))
@@ -62,7 +67,8 @@ def execute(args, env, policy, config):
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import EpisodeRecorder, PolicyProbe, RecordingAgent, RecordingEnv
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_live_page
                 write_live_page(args.output)
-                recorder = EpisodeRecorder(args.output, policy, fps=args.video_fps)
+                recorder = EpisodeRecorder(args.output, policy, fps=args.video_fps,
+                                           selected_episode_ids=config["recording"]["episode_ids"])
                 probe = PolicyProbe(policy)
                 agent = RecordingAgent(HeadlessObjNavAgent(probe, gibson_label_mapper(), params, name=policy.name), probe, recorder)
                 active_env = RecordingEnv(env, recorder)
@@ -78,9 +84,10 @@ def execute(args, env, policy, config):
                       (index, total, row.episode_id, args.explorer, row.success, row.spl, row.steps), flush=True)
 
             summary = run_benchmark(active_env, agent, logger=logger, episode_ids=config["selected_episode_ids"],
-                                    require_stop_for_success=False, path_length_dimension="planar",
-                                    path_length_epsilon_m=DEVELOPMENT_PROTOCOL.path_length_epsilon_m,
-                                    kinematics=DEVELOPMENT_PROTOCOL.kinematics(), on_agent_error="record", progress=completed)
+                                    require_stop_for_success=False,
+                                    path_length_dimension="3d" if env.protocol.path_length_dimension == "3d" else "planar",
+                                    path_length_epsilon_m=env.protocol.path_length_epsilon_m,
+                                    kinematics=env.protocol.kinematics(), on_agent_error="record", progress=completed)
         if args.record:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_dashboard
             write_dashboard(args.output)
@@ -101,8 +108,10 @@ def parser():
     p.add_argument("--detector-backend", choices=("yolo_world", "llmdet"), required=True)
     p.add_argument("--policy-config", type=Path)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--limit", type=int, help="Explicit smoke-test subset; omitted for the complete building batch")
     p.add_argument("--gpu-device", type=int, default=0)
     p.add_argument("--record", action="store_true")
+    p.add_argument("--record-first", action="store_true", help="Record only the first selected episode")
     p.add_argument("--video-fps", type=int, default=6)
     p.add_argument("--preflight-output", type=Path)
     p.add_argument("--expect-config", type=Path)
@@ -114,6 +123,8 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.record_first:
+        args.record = True
     if args.seed < 0 or args.gpu_device < 0 or not 1 <= args.video_fps <= 60:
         raise ValueError("Invalid seed, GPU index or recording rate")
     if args.record:
@@ -133,5 +144,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-
 
