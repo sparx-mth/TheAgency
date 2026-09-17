@@ -32,6 +32,27 @@ RGB/depth files are copied into `--rgb-out-dir`/`--depth-out-dir` (default
 pipeline uses), so a consumer mounting those fixed directories doesn't need
 to know whether it's live or replayed.
 
+## New Orin-NX architecture (onboard V4L2 capture)
+
+On the new Orin-NX architecture the companion computer is mounted on the
+drone itself and can read the camera directly as a local V4L2 device
+(`--device`, default `/dev/HD_CAMERA` -- same device
+`orin_nx_raw_flight_test.py`'s `--camera-device` uses), instead of decoding
+a UDP/RTP-H264 stream transmitted wirelessly to a ground station.
+`rooster_v4l2_frame_publisher.py` is the drop-in replacement for
+`rooster_frame_dir_publisher.py` in that setup: same
+`/<rooster-id>/rgb_frame_path` topic, same `"{path} {sec} {nanosec}"` wire
+format, same bad-frame-guard/cage-removal processing -- every existing
+consumer (DA3, NanoOwl, vLLM) needs zero changes. It additionally publishes
+each frame's `(path, frame_id, capture instant)` as JSON on a new
+`/<rooster-id>/rgb_frame_sync` topic, for the video/IMU sync module only --
+purely additive, nothing about the legacy topic changes.
+
+```bash
+./sparx_agency/robots/ROBOTICAN/run_rooster_v4l2_frame_publisher.sh \
+  --rooster-id R1 --device /dev/HD_CAMERA
+```
+
 ## Where things run (read this first)
 
 Not everything runs on the host. `rooster_command_unit.py` needs the custom
@@ -51,6 +72,7 @@ live there immediately, no rebuild/copy step).
 |---|---|---|
 | `rooster_command_unit.py` | **container `it`** | needs Foxy-built custom Rooster interfaces |
 | `rooster_frame_dir_publisher.py` | host | only `std_msgs`, `rclpy`, `gi`/GStreamer |
+| `rooster_v4l2_frame_publisher.py` | new Orin-NX architecture, onboard | only `std_msgs`, `rclpy`, `cv2` -- no GStreamer |
 | `depth_processor_node.py` | host | runs DA3 on the PC's GPU |
 | `localization_node.py` | host | only `std_msgs`/`geometry_msgs` |
 | `ui.py` | host | only `std_msgs`, `rclpy` |
