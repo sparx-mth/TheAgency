@@ -1,91 +1,93 @@
 # ObjectNav runtime and Gibson adapter
 
-This checkout composes observed mapping, object evidence, room reasoning,
-RPT* and A*/WA* with the existing benchmark harness. Gibson `cc57809f` is the
-base; the completed detector delta `5c465f97` is preserved without merging the
-divergent infrastructure branch `60d91714` wholesale. Other simulator worktrees
-remain separate.
+Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order →
+local exploration and A*/WA* paths → existing discrete actions. Both explorers
+retain persistent floor contexts and observed stair connections. This is an
+experimental multi-story algorithm, **not a claim of solved navigation**.
 
 ## Exploration selection
 
-- `--explorer frontier`: preserved observed-frontier baseline (default).
-- `--explorer falcon`: bounded **FALCON 2D/2.5D ObjectNav adaptation** with
-  connectivity-aware decomposition, coverage-path/SOP ordering, viewpoint
-  refinement and free-space routes. This is not the unchanged ROS aerial binary.
+- `--explorer frontier`: the existing observed-frontier baseline (default).
+- `--explorer falcon`: bounded FALCON 2D/2.5D adaptation, not the unchanged ROS
+  aerial binary. Local bursts, target interrupts and the episode ledger remain
+  distinct; all emitted actions count toward the public 500-action cap.
 
-The hierarchy is local exploration → room LLM → RPT* room selection → A*/WA*
-transit, with bounded target interrupts/recovery. Mapping and detection continue
-in both motion phases. All emitted actions count toward the unchanged Gibson
-500-action limit; FALCON bursts have a separate 48-action default allowance.
-
-See the [source mapping and runbook](gibson/BOUNDED_FALCON.md),
-[results and limitations](gibson/FALCON_RESULTS.md), and
-[Gibson protocol guide](gibson/PROTOCOL_AND_TUNING.md).
-
-For the **15 distinct-building, 30-recording comparison**, see
-[DISTINCT_BUILDINGS.md](gibson/DISTINCT_BUILDINGS.md). It uses frozen generated
-ObjectNav starts in official Gibson training buildings, not repeated episodes
-in the five validation scenes. Policies and the 500-action cap remain unchanged.
-
-For **multi-story houses**, both explorers now retain per-floor scene graphs
-linked by observed stair traversals. See [MULTISTORY.md](gibson/MULTISTORY.md)
-for the architecture and the five-building × three-episode development campaign,
-including one preselected recording per building and explicit scoring caveats.
+See [FALCON component mapping](gibson/BOUNDED_FALCON.md),
+[historical FALCON results](gibson/FALCON_RESULTS.md),
+[distinct-building comparison](gibson/DISTINCT_BUILDINGS.md),
+[Gibson protocol](gibson/PROTOCOL_AND_TUNING.md), and
+[multi-story protocol](gibson/MULTISTORY.md). Earlier campaigns retain their
+own frozen configurations; changed code does not relabel their outcomes.
 
 ## Reusable pieces
 
 | Component | Responsibility |
 |---|---|
-| `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, baseline selection and recorded configuration |
-| `methods/falcon_policy.py` | Explicit bounded hierarchy; existing RPT* and target-evidence integration |
-| `methods/falcon_regions.py` | Observed local scopes, reachable entry goals and split/merge visit history |
-| `methods/falcon_motion.py`, `falcon_routes.py` | Ground-safe action checks and paused route persistence |
-| `methods/observed_map.py`, `floor_context.py` | Persistent floor-local maps, graphs, target evidence and paused room clocks |
-| `methods/multifloor_policy.py`, `stair_terrain.py` | Observed stair proposals/traversal and building-level scheduling |
-| `methods/route_memory.py` | Committed routes, snapped arrival and stagnation safeguards |
-| `methods/object_evidence.py` | Alias/frame deduplication, multi-view support and bounded rejection |
+| `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
+| `methods/camera_control.py` | Sole pitch owner; bounded inspection and safe restoration |
+| `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
+| `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
+| `methods/multifloor_policy.py`, `stair_traversal.py` | RPT* portal scheduling and committed transition lifecycle |
+| `methods/stair_terrain.py` | Measured support, step-connected paths and native-heading safety checks |
+| `methods/falcon_policy.py`, `falcon_regions.py` | Bounded hierarchy and persistent local region history |
+| `methods/falcon_motion.py`, `falcon_routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
+| `methods/object_evidence.py` | Alias/frame deduplication, separated-view target evidence and bounded rejection |
 | `methods/scene_graph.py`, `room_labels.py`, `doors.py` | Observed rooms/doors and revisable accumulated room reasoning |
-| `methods/exploration_metrics.py` | Observed-area proxy curves, actions, revisits, stagnation and latency tails |
-| `habitat/simulator.py` | Registered RGB-D, metric depth, ENU pose and existing discrete actions |
-| `gibson/run.py`, `frozen_eval.py`, `compare_explorers.py` | Exact protocol execution, source/configuration checks and controlled comparison |
+| `methods/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
+| `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose |
+| `recording.py`, `floor_panels.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels, grids and video |
+| `gibson/run.py`, `frozen_eval.py`, `run_development.py` | Protocol execution and frozen source/model/data checks |
 
-Algorithms live in `core/planning/exploration/falcon/`; they are ROS-free and
-simulator-neutral. Host-side numpy/scipy dependencies do not enter the existing
-Noetic exploration facade. The Gibson bridge retains its existing camera-height
-body configuration; future simulators must supply their own explicit embodiment
-rather than inherit Gibson defaults. Persistent floor identity/connectivity lives
-in `core/planning/exploration/floor_atlas.py`; depth-based stair handling is the
-host-side ground-robot adaptation, not an aerial-controller change.
+The floor tracker remains ROS-free in `core/planning/exploration/floor_atlas.py`.
+Host-side numpy/scipy terrain processing does not enter the Noetic exploration
+facade. No robot's flight controller is changed.
 
-## Completed detector preserved
+## Camera, perception and transitions
 
-**YOLO-World X-v2 is the completed-integration default**. Pretrained LLMDet
-Swin-L remains selectable on a dedicated HTTP service; S/L are explicit
-checkpoint rollback choices. No confidence thresholds, target-confirmation
-rules or model architecture were redesigned for FALCON.
+`SEARCH → APPROACH_STAIRS → TRAVERSE → CONFIRM_DESTINATION → SEARCH` retains
+connector, direction and progress across turns. Recovery uses the measured
+reverse trail including the source-platform approach. Unconfirmed recovery
+ends visibly in `SAFE_HALT`, not silent room search on a tread. Height
+hysteresis alone cannot finish either traversal or retreat.
 
-`HttpDetector` validates vocabulary, checkpoint/configuration, runtime and
-prompt provenance, and optionally `expected_backend`. `gibson.run` exposes
-`--detector-backend`. Missing or drifting services fail visibly. Models do not
-load in the evaluator. Use the [detector setup and runbook](../../mapping/scene_graph/serve/README.md),
-CPU model services and the existing Habitat environment for rendering.
-Previously saved explicit demo checkpoint choices are not overwritten.
+Positive camera pitch looks down. One controller arbitrates all pitch: a
+location-deduplicated bounded inspection, a latched stair view, or ordinary
+level viewing. STOP carries no camera action. Raw detection runs on every
+observation; committed transitions and inspection views are quarantined from
+room/object fusion and target confirmation. Coherent depth pixels are projected
+at their actual image coordinates, with frame/floor/association rejection
+reasons recorded. No bed/sofa proximity blacklist is used.
 
-## Evaluation boundary
+## Models and vocabulary
 
-Ground-truth floor maps, goal distances and first success-region entry are
-**evaluator-only**. The policy gets RGB, metric depth, pose and public task/action
-information, not a navigation oracle. Additional native collision/entry
-statistics are written to `evaluation_diagnostics.jsonl`; the existing primary
-native-score schema and Gibson SR/SPL rules are unchanged.
+YOLO-World X-v2 remains the default; pretrained LLMDet Swin-L and explicit S/L
+checkpoints remain selectable. The Gibson context vocabulary includes `stairs`
+and `staircase`, neither a goal category nor a navigation oracle. Semantics can
+request inspection; observed step geometry must independently support a portal.
 
-Coverage is **ever-observed occupancy area**, a proxy, not ground-truth coverage.
-The initial observation is excluded from gained-per-action. Curves sample
-observations at decision indices. Masks are keyed by stable floor ID, so a
-return visit does not recount known area. Transient stair terrain is excluded.
-Historical reset-only results retain their original coverage limitation.
+Restart a dedicated detector with the exact `gibson.run --print-vocabulary`
+output. A former 24-prompt service is intentionally rejected. HTTP checks pin
+classes, checkpoint, configuration, runtime and prompt-feature provenance on
+health and inference responses. See the [CPU detector runbook](../../mapping/scene_graph/serve/README.md).
+Do not reconfigure another mission's service or place inference on Habitat's GPU.
 
-Recording and smooth replay remain optional; interpolated replay images are
-never policy inputs. Use the existing Gibson freeze workflow for later published
-validation, not the paired development runner. Previously inspected starts are
-not an untouched holdout; no small-run or SOTA claim is supported.
+## Persistent display and evaluation boundary
+
+The recorder reserves **one occupancy map for each of K configured storeys**,
+not K layers within every storey. All slots start UNKNOWN, gray; discovery IDs
+bind slots without surveyed floor numbering. Each retains its full grid, objects
+and trail. Panels use one fixed observed-origin viewport/scale; full arrays are
+saved in `floor_maps.npz`. Display counts remain recorder-only, never in policy
+settings or episode knowledge. Unvisited slots have no inferred elevation.
+
+GT goals, topology, occupied cells, heights, distances and navmesh queries are
+evaluator-only. The policy gets RGB, metric depth, pose and public task/action
+information. Gibson reference-floor annotations are incomplete for full-building
+ObjectNav; a real unannotated instance cannot be verified by its own detector.
+The development-v2 native vertical validator remains **0.60 m**, distinct from
+the policy's unchanged **0.24 m** maximum observed tread step.
+
+Coverage is ever-observed occupancy area, not true coverage; it excludes initial
+gain and transient terrain, and deduplicates revisits by stable floor ID.
+Recordings and interpolated replays never feed evaluator data back to decisions.
+Passing tests, encoded videos and completed episodes are not navigation success.

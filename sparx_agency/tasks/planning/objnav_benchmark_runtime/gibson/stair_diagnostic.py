@@ -19,7 +19,7 @@ from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL as PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import _gpu_gate, _method
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import _gpu_gate, _method, source_fingerprint
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import EpisodeRecorder, PolicyProbe, RecordingAgent
 
@@ -36,7 +36,7 @@ def run(args):
     episode = ObjNavEpisode("diagnostic/" + args.scene, args.scene, "gibson", "stair-component-diagnostic",
                             args.target, PROTOCOL.camera(), PROTOCOL.actions(), args.steps)
     probe = PolicyProbe(policy)
-    recorder = EpisodeRecorder(args.output, policy)
+    recorder = EpisodeRecorder(args.output, policy, display_floor_counts={args.scene: args.display_floors})
     agent = RecordingAgent(HeadlessObjNavAgent(probe, gibson_label_mapper()), probe, recorder)
     bridge = HabitatRGBDSimulator(PROTOCOL.camera(), PROTOCOL.actions(), PROTOCOL.agent_radius_m,
                                   PROTOCOL.allow_sliding, args.gpu_device)
@@ -49,13 +49,17 @@ def run(args):
         if args.spent_floor_budget:
             policy.building.entered_step = -policy.settings.multifloor.floor_search_actions
         recorder.begin(episode, obs, {})
+        collisions = 0
         for step in range(args.steps):
             decision = agent.act(obs)
             before = obs.pose
             frame = bridge.step(decision.action)
             obs = ObjNavObservation(*frame, PROTOCOL.camera(), args.target, step + 1)
             check_motion(decision.action, before, obs.pose, PROTOCOL.actions(), PROTOCOL.kinematics())
-            terminal = decision.action.name == "STOP" or len(policy.mapping.atlas.floors) > 1 or step == args.steps - 1
+            collisions += int(bool(bridge.last_collision))
+            traversals = sum(edge.traversals for edge in policy.mapping.atlas.connections)
+            complete = traversals >= args.transitions and not policy.building.traversing
+            terminal = decision.action.name == "STOP" or complete or step == args.steps - 1
             recorder.after_step(obs, {}, terminal)
             if step % 5 == 0 or terminal:
                 terrain = policy.building.terrain
@@ -66,7 +70,9 @@ def run(args):
                 break
         result = {"benchmark_result": False, "start_source": str(args.trajectory), "start_step": args.start_step,
                   "spent_floor_budget": args.spent_floor_budget, "configuration": config,
-                  "transition_completed": bool(policy.mapping.atlas.connections),
+                  "transition_completed": complete, "required_transitions": args.transitions,
+                  "source_sha256": source_fingerprint(), "native_collisions": collisions,
+                  "sensor_alignment": bridge.last_sensor_alignment,
                   "policy": policy.episode_info(), "final_pose": asdict(obs.pose)}
         (args.output / "diagnostic.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
         print("Transition completed:", result["transition_completed"], flush=True)
@@ -84,6 +90,8 @@ def main(argv=None):
     parser.add_argument("--scenes-dir", type=Path, required=True)
     parser.add_argument("--target", default="toilet")
     parser.add_argument("--steps", type=int, default=140)
+    parser.add_argument("--transitions", type=int, default=1, help="Require completed traversals, including a genuine return visit")
+    parser.add_argument("--display-floors", type=int, default=1, help="Recorder-only unknown slots; no heights/topology")
     parser.add_argument("--spent-floor-budget", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--explorer", choices=("frontier", "falcon"), default="frontier")
@@ -94,7 +102,7 @@ def main(argv=None):
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.set_defaults(agent="rpt", allow_shared_gpu=False)
     args = parser.parse_args(argv)
-    if not 1 <= args.steps <= 500 or args.start_step < 0:
+    if not 1 <= args.steps <= 500 or args.start_step < 0 or not 1 <= args.transitions <= 4 or not 1 <= args.display_floors <= 16:
         raise ValueError("Invalid bounded diagnostic selection")
     run(args)
 

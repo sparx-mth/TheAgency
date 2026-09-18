@@ -15,7 +15,7 @@ class FloorContextBank:
     FIELDS = ("graph", "doors", "landmarks", "target_evidence", "supervisor",
               "_target_xy", "_target_id", "_target_step", "_last_door_revision",
               "_visited_frontiers", "_last_graph_step", "_last_plan_s",
-              "_blocked_since", "_floor_time")
+              "_blocked_since", "_floor_time", "_object_geometry", "_target_floor_id")
 
     def __init__(self, policy):
         self.policy = policy
@@ -30,7 +30,8 @@ class FloorContextBank:
         p.landmarks = ObjectLandmarkMap(nearest_match=True)
         p.target_evidence = TargetEvidence(p.target_settings)
         p.supervisor = ObjectSearchSupervisor(p.supervisor_params, solver=p.solver)
-        p._target_xy = p._target_id = None
+        p._target_xy = p._target_id = p._target_floor_id = None
+        p._object_geometry = {}
         p._target_step = -p.settings.target_memory_steps - 1
         p._last_door_revision = 0
         p._visited_frontiers = []
@@ -56,7 +57,7 @@ class FloorContextBank:
         # but no old XY route or stale target latch may cross a floor boundary.
         p = self.policy
         p.route_memory.clear("floor_context_changed")
-        p._route = p._goal = p._target_id = p._target_xy = None
+        p._route = p._goal = p._target_id = p._target_xy = p._target_floor_id = None
         p._blocked_since = p._last_pose = None
         p._last_graph_step = -p.settings.graph_period_steps
 

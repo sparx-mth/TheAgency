@@ -24,7 +24,7 @@ def rig(monkeypatch, **settings):
     agent = HeadlessObjNavAgent(policy, gibson_label_mapper())
     agent.reset(episode)
     world, cost, scope, request = open_fixture()
-    monkeypatch.setattr(policy.mapping, "update", lambda obs: world)
+    monkeypatch.setattr(policy.mapping, "update", lambda obs, **kwargs: world)
     monkeypatch.setattr(policy, "_perceive", lambda obs: False)
     make = lambda step: replace(observation(episode, step, depth=3), pose=request.pose)
     return policy, agent, world, make

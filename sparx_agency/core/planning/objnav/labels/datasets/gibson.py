@@ -25,4 +25,4 @@ def gibson_label_mapper() -> TableLabelMapper:
         context_vocabulary=("dining table", "oven", "sink", "refrigerator",
                             "book", "clock", "vase", "cup", "bottle",
                             "door", "doorway", "open doorway", "door frame",
-                            "cabinet", "desk", "shower"))
+                            "cabinet", "desk", "shower", "stairs", "staircase"))

@@ -1,15 +1,14 @@
-"""Observed-only ObjectNav dashboard, reusing the flown scene-graph renderer."""
+"""Observed-only ObjectNav dashboard, with recorder-owned persistent floor panels."""
 from __future__ import annotations
 
 import json
+import math
 import textwrap
-
 import cv2
 import numpy as np
 
 from sparx_agency.tasks.mapping.scene_graph.viz_canvas import compute_extent, world_to_px
 from sparx_agency.tasks.mapping.scene_graph.viz_render import render_scene
-
 
 FRAME_SIZE = (1600, 900)
 
@@ -23,18 +22,16 @@ def visual_state(policy, observation, trail):
     mapping = getattr(policy, "mapping", None)
     if mapping is not None:
         world = getattr(mapping, "worlds", {}).get(getattr(mapping, "floor_id", 0), world)
-    state = {"pose": (pose.x, pose.y, pose.yaw), "trail": list(trail),
-             "sim_time": float(observation.step),
+    state = {"pose": (pose.x, pose.y, pose.yaw), "trail": list(trail), "sim_time": float(observation.step),
              "oracle": {"target": observation.target_category, "source": "waiting", "rooms": []}}
     if graph is None or world is None:
         return state
-    objects = [{"id": lm.id, "class": lm.class_name, "xy": lm.xy, "count": lm.count}
-               for lm in landmarks.all_landmarks()]
+    objects = [{"id": lm.id, "class": lm.class_name, "xy": lm.xy, "count": lm.count} for lm in landmarks.all_landmarks()]
     rooms, grid_values = [], np.zeros(world.grid.shape, np.uint8)
     pid_map = {}
     for value, (pid, room) in enumerate(graph.registry.rooms.items(), 1):
         if value > 127:
-            break  # renderer grid encoding, not a limit on the algorithm
+            break
         grid_values[room.mask] = value
         pid_map[str(value)] = pid
         members = []
@@ -66,24 +63,28 @@ def visual_state(policy, observation, trail):
 
 
 def method_snapshot(policy):
-    """Small JSON-ready observed state, excluding image/map arrays and GT goals."""
+    """JSON-ready policy observations, excluding arrays and private goal data."""
     graph = getattr(policy, "graph", None)
     solver = getattr(policy, "solver", None)
     route = getattr(policy, "_route", None)
     points = [] if route is None else getattr(route, "points", route)
     detector = getattr(policy, "detector", None)
-    boxes = [{"label": d.cls, "confidence": float(d.conf), "xyxy": list(d.xyxy)}
-             for d in getattr(detector, "last_detections", ())]
+    perception = getattr(policy, "perception", None)
+    raw = perception.raw if perception is not None else getattr(detector, "last_detections", ())
+    boxes = [{"label": d.cls, "confidence": float(d.conf), "xyxy": list(d.xyxy)} for d in raw]
     hierarchy = getattr(policy, "hierarchy", None)
     supervisor = getattr(policy, "supervisor", None)
     burst = hierarchy.machine.burst if hierarchy is not None else None
     building = getattr(policy, "building", None)
     atlas = building.policy.mapping.atlas.diagnostics() if building else {}
     state = hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting")
-    if building and building.phase != "floor_search":
+    if building and building.phase != "SEARCH":
         state = building.phase
     return {"state": state, "floor_id": getattr(getattr(policy, "mapping", None), "floor_id", 0),
-            "floor_atlas": atlas,
+            "floor_atlas": atlas, "transition": building.transition.diagnostics() if building and building.transition else None,
+            "completion_reason": atlas.get("completion_reason"),
+            "camera": dict(policy.camera_control.last) if hasattr(policy, "camera_control") else {},
+            "perception": perception.diagnostics() if perception is not None else {},
             "room_id": hierarchy.regions.room_id if hierarchy is not None else getattr(supervisor, "room_id", None),
             "explorer": getattr(getattr(policy, "settings", None), "local_exploration", "unknown"),
             "burst_actions_left": max(0, hierarchy.params.burst_actions - burst.actions) if burst is not None else None,
@@ -100,12 +101,11 @@ def method_snapshot(policy):
 def _text(image, value, origin, width=115, lines=4, color=(230, 230, 230)):
     x, y = origin
     for index, line in enumerate(textwrap.wrap(str(value), width=width)[:lines]):
-        cv2.putText(image, line, (x, y + index * 21), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.47, color, 1, cv2.LINE_AA)
+        cv2.putText(image, line, (x, y + index * 21), cv2.FONT_HERSHEY_SIMPLEX, 0.47, color, 1, cv2.LINE_AA)
 
 
-def render_dashboard(policy, observation, trail, decision, episode_id, snapshot, final=False):
-    """RGB boxes, metric depth, observed rooms, route/trail and actual decision reasons."""
+def render_dashboard(policy, observation, trail, decision, episode_id, snapshot, final=False, floor_panels=None):
+    """RGB predictions, depth, persistent observed floors and actual decision reasons."""
     frame = np.full((900, 1600, 3), 20, np.uint8)
     action = "TERMINAL" if final else str(decision.get("action", "waiting"))
     _text(frame, "%s | %s | target: %s | step %d | %s | floor %s | z %.2fm | levels %d | links %d" %
@@ -127,25 +127,28 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
     colored = cv2.applyColorMap(scaled, cv2.COLORMAP_TURBO)
     colored[~finite] = 0
     frame[545:785, :320] = cv2.resize(colored, (320, 240))
-    _text(frame, "GT depth (metres); black = invalid/clipped", (8, 539), width=76, lines=1)
-    _text(frame, "STATE: %s\nROOM: %s\nDETECTIONS: %d\nOBJECTS: %d\nROOMS: %d\nCONFIRMED DOORS: %d" %
+    _text(frame, "Metric depth; black = invalid/clipped", (8, 539), width=76, lines=1)
+    _text(frame, "STATE: %s ROOM: %s RAW BOXES: %d OBJECTS: %d ROOMS: %d DOORS: %d" %
           (snapshot["state"], snapshot["room_id"], len(snapshot["detections"]), len(snapshot["objects"]),
-           snapshot.get("rooms", 0), snapshot.get("doors", {}).get("confirmed", 0)),
-          (332, 563), width=37, lines=6)
-    state = visual_state(policy, observation, trail)
-    panel = render_scene(state, size=(960, 720), map_panel_w=640)
-    extent = compute_extent(state, None, (640, 720))
-    points = [world_to_px(extent, (640, 720), *xy) for xy in snapshot.get("planned_path", ())]
-    if len(points) >= 2:
-        cv2.polylines(panel, [np.asarray(points, np.int32)], False, (255, 180, 0), 2, cv2.LINE_AA)
+           snapshot.get("rooms", 0), snapshot.get("doors", {}).get("confirmed", 0)), (332, 563), width=37, lines=6)
+    if floor_panels is not None:
+        panel = floor_panels.render(snapshot.get("floor_id", 0), snapshot.get("planned_path", ()))
+    else:
+        state = visual_state(policy, observation, trail)
+        panel = render_scene(state, size=(960, 720), map_panel_w=640)
+        extent = compute_extent(state, None, (640, 720))
+        points = [world_to_px(extent, (640, 720), *xy) for xy in snapshot.get("planned_path", ())]
+        if len(points) >= 2:
+            cv2.polylines(panel, [np.asarray(points, np.int32)], False, (255, 180, 0), 2, cv2.LINE_AA)
     frame[40:760, 640:] = panel
-    floors = snapshot.get("floor_atlas", {}).get("floors", [])
-    levels = " ".join("F%d: %.1fm" % (f["id"], f["elevation_m"]) for f in floors)
-    _text(frame, "Active floor only | green: floor trail | cyan: route | " + levels, (654, 783), width=122, lines=1)
+    transition = snapshot.get("transition") or {}
+    camera = snapshot.get("camera", {})
+    _text(frame, "pitch %.0f deg down | %s | connector %s | %s" % (
+        math.degrees(observation.pose.camera_pitch), camera.get("owner", "unknown"), transition.get("portal_id", "-"),
+        snapshot.get("completion_reason") or "transition not completed"), (654, 783), width=120, lines=1)
     reason = decision.get("info", {}).get("policy", {})
     _text(frame, "DECISION: " + json.dumps(reason, ensure_ascii=True), (12, 814), width=175, lines=2)
     oracle = snapshot.get("reasoning", {}).get("oracle", {})
     _text(frame, "LLM ROOM REASONS: " + json.dumps(oracle.get("reasons", {}), ensure_ascii=True),
           (12, 858), width=175, lines=2)
     return frame
-

@@ -1,8 +1,4 @@
-"""Generated Gibson development runs through the existing shared benchmark loop.
-
-The manifest selects either the historical planar development protocol or the
-explicit multi-story protocol. Neither is reported as published validation.
-"""
+"""Frozen generated Gibson development runs through the shared benchmark loop."""
 from __future__ import annotations
 
 import argparse
@@ -37,12 +33,14 @@ def prepare(args):
         policy, method = _method(args)
         protocol = env.protocol if multistory else DEVELOPMENT_PROTOCOL
         recorded = ids[:1] if getattr(args, "record_first", False) else ids
+        display_counts = {scene: len(audit["levels"]) for scene, audit in
+                          dataset.definition.get("generation", {}).get("scene_audits", {}).items()} if multistory else {}
         config = {"protocol": asdict(protocol), "runtime": runtime,
                   "source_sha256": source_fingerprint(), "method": method, "seed": args.seed,
                   "gpu_device": args.gpu_device, "allow_shared_gpu": False,
                   "selected_episode_ids": ids, "dataset": dataset.manifest(),
                   "kinematics": asdict(protocol.kinematics()),
-                  "recording": {"enabled": args.record, "fps": args.video_fps,
+                  "recording": {"enabled": args.record, "fps": args.video_fps, "display_floor_counts": display_counts,
                                 "episode_ids": recorded if args.record else []}, "full_split": False,
                   "reference_sim_version_match": runtime.get("habitat-sim") == protocol.reference_sim_version,
                   "evaluation_role": "frozen_generated_training_development", "held_out_claim": False,
@@ -68,7 +66,8 @@ def execute(args, env, policy, config):
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_live_page
                 write_live_page(args.output)
                 recorder = EpisodeRecorder(args.output, policy, fps=args.video_fps,
-                                           selected_episode_ids=config["recording"]["episode_ids"])
+                                           selected_episode_ids=config["recording"]["episode_ids"],
+                                           display_floor_counts=config["recording"].get("display_floor_counts", {}))
                 probe = PolicyProbe(policy)
                 agent = RecordingAgent(HeadlessObjNavAgent(probe, gibson_label_mapper(), params, name=policy.name), probe, recorder)
                 active_env = RecordingEnv(env, recorder)
@@ -144,4 +143,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-

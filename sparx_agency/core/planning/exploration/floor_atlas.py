@@ -26,6 +26,8 @@ class MultiFloorParams:
     stable_samples: int = 3
     floor_search_actions: int = 140
     transition_actions: int = 120
+    retreat_actions: int = 80
+    exit_distance_m: float = 0.75
     portal_cooldown_actions: int = 100
     max_step_m: float = 0.24
     terrain_radius_m: float = 6.0
@@ -37,12 +39,12 @@ class MultiFloorParams:
             raise ValueError("multifloor.enabled must be boolean")
         for name in ("departure_m", "floor_match_m", "min_floor_separation_m",
                      "min_floor_area_m2", "stable_height_m", "stable_distance_m", "max_step_m",
-                     "terrain_radius_m", "stair_min_rise_m"):
+                     "terrain_radius_m", "stair_min_rise_m", "exit_distance_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
         for name in ("stable_samples", "floor_search_actions", "transition_actions",
-                     "portal_cooldown_actions", "max_failures"):
+                     "retreat_actions", "portal_cooldown_actions", "max_failures"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
         if not self.stable_height_m < self.floor_match_m < self.departure_m < self.min_floor_separation_m:
@@ -100,12 +102,24 @@ class FloorAtlas:
         self._trail: List[Tuple[float, float, float]] = []
         self._previous = None
         self._approach = deque(maxlen=20)
+        self.destination_height_m = None
+        self.completion_reason = None
 
     @property
     def elevation_m(self):
         return self.floors[self.active_id].elevation_m
 
-    def update(self, pose, plateau_area_m2=None):
+    def begin_transition(self, pose):
+        """Commit before the first tread, independently of departure hysteresis."""
+        if not self.floors:
+            self.update(pose)
+        if not self.in_transition:
+            self.in_transition = True
+            self._trail = list(self._approach) or [(pose.x, pose.y, pose.z)]
+            self._samples.clear()
+            self.completion_reason = None
+
+    def update(self, pose, plateau_area_m2=None, *, arrival_allowed=True):
         if plateau_area_m2 is None and self.plateau_observer is not None:
             plateau_area_m2 = self.plateau_observer(pose)
         xyz = (float(pose.x), float(pose.y), float(pose.z))
@@ -130,18 +144,23 @@ class FloorAtlas:
                 self._samples.append(xyz)
             if self._settled():
                 height = sum(p[2] for p in self._samples) / len(self._samples)
+                self.destination_height_m = height
                 matches = [f for f in self.floors.values()
                            if abs(f.elevation_m - height) <= self.params.floor_match_m]
-                if matches:
+                supported = plateau_area_m2 is None or plateau_area_m2 >= self.params.min_floor_area_m2
+                if not arrival_allowed or not supported:
+                    destination = None
+                elif matches:
                     destination = min(matches, key=lambda f: abs(f.elevation_m - height)).id
-                elif (min(abs(f.elevation_m - height) for f in self.floors.values()) >= self.params.min_floor_separation_m
-                      and (plateau_area_m2 is None or plateau_area_m2 >= self.params.min_floor_area_m2)):
+                elif min(abs(f.elevation_m - height) for f in self.floors.values()) >= self.params.min_floor_separation_m:
                     destination = len(self.floors)
                     self.floors[destination] = ObservedFloor(destination, height, visits=0)
                 else:
                     destination = None  # a stair landing, not another storey
                 if destination is not None:
                     self._arrive(destination)
+            else:
+                self.destination_height_m = None
         self._previous = xyz
         return self.active_id
 
@@ -149,11 +168,13 @@ class FloorAtlas:
         if len(self._samples) < self.params.stable_samples:
             return False
         heights = [p[2] for p in self._samples]
-        distance = sum(math.hypot(a[0] - b[0], a[1] - b[1])
-                       for a, b in zip(self._samples, list(self._samples)[1:]))
+        # Net translation, not a back-and-forth shuffle on one tread.
+        distance = math.hypot(self._samples[-1][0] - self._samples[0][0],
+                              self._samples[-1][1] - self._samples[0][1])
         return max(heights) - min(heights) <= self.params.stable_height_m and distance >= self.params.stable_distance_m
 
     def _arrive(self, destination):
+        self.completion_reason = "destination_platform_confirmed" if destination != self.active_id else "source_platform_returned"
         if destination != self.active_id:
             match = None
             for edge in self.connections:
@@ -173,6 +194,7 @@ class FloorAtlas:
             self.floors[destination].visits += 1
             self.revision += 1
         self.in_transition = False
+        self.destination_height_m = None
         self._samples.clear()
         self._approach.clear()
         if self._trail:
@@ -198,6 +220,7 @@ class FloorAtlas:
 
     def diagnostics(self):
         return {"active_floor": self.active_id, "in_transition": self.in_transition,
+                "destination_height_m": self.destination_height_m, "completion_reason": self.completion_reason,
                 "revision": self.revision, "floors": [asdict(f) for f in self.floors.values()],
                 "connections": [dict(asdict(e), length_m=e.length_m) for e in self.connections]}
 

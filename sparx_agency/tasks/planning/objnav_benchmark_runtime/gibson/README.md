@@ -1,228 +1,136 @@
 # Gibson ObjectNav runtime
 
-Habitat supplies RGB-D and pose. `--explorer frontier` retains the existing
-scene-graph/LLM/RPT*/weighted-A* frontier baseline. `--explorer falcon` runs:
-**bounded local FALCON -> room LLM -> RPT* room order -> A*/WA* transit**, with
-immediate bounded target verification and committed routes. This is a sourced
-**FALCON 2D/2.5D ObjectNav adaptation**, not the unchanged ROS aerial binary.
-Neither selection requires an opening 360-degree scan. See the
-[component mapping and runbook](BOUNDED_FALCON.md) and
-[measured results and limitations](FALCON_RESULTS.md).
+Habitat supplies registered RGB-D and measured pose. `--explorer frontier`
+retains the observed-frontier baseline; `--explorer falcon` selects the bounded
+FALCON planar adaptation. Both retain semantic scene graphs, room LLM reasoning,
+RPT* room/portal ordering, local exploration and A*/WA* path planning. The ROS
+aerial FALCON controller is unchanged. Neither explorer requires an opening
+panorama.
 
-This optional runtime uses the [shared benchmark harness](../../objnav_benchmark/README.md).
-GT goals, semantic floor maps and distance telemetry reach only the scorer and
-recorder, never the policy. No navigation-specific training is performed.
-
-**Multi-story support:** persistent floor scene graphs and observed stair
-connections now wrap both local explorers. [MULTISTORY.md](MULTISTORY.md)
-describes the five-building × three-episode campaign and its first-episode-per-
-building recordings. It uses a separately named 3D development metric, not the
-single-floor SemExp validation score documented below. Full-building semantic
-annotations are not available in the installed Gibson release.
+See [runtime architecture](../README.md), [FALCON mapping](BOUNDED_FALCON.md),
+[historical FALCON results](FALCON_RESULTS.md),
+[distinct-building experiments](DISTINCT_BUILDINGS.md),
+[protocol/tuning audit](PROTOCOL_AND_TUNING.md),
+[multi-story protocol](MULTISTORY.md), and
+[original multi-story outcomes](MULTISTORY_RESULTS.md).
 
 ## Refinements without replacing the algorithm
 
-- **Committed routes:** keep a safe path through turns, minor goal drift and
-  unrelated map changes. Replan for obstruction, blocked movement, excessive
-  cross-track error, a changed goal or bounded lack of progress, not a timer.
-  `replan_steps` remains accepted for old configurations but no longer replaces
-  paths periodically. Positional stagnation survives safety-triggered replans.
-- **Correct arrival:** reuse the discrete converter's arrival rule on the actual
-  path, including a snapped endpoint. Merely standing near the endpoint of an
-  unwalked return leg does not complete the route. Frontier completion and
-  target verification agree with the executor.
-- **Ground-robot map:** back-project depth in 3D and integrate a robot-height
-  2.5D slab. Visible floor cells provide free evidence without clearing occupied
-  columns or inventing free rays through furniture. Stable floor changes switch
-  persistent map/scene-graph contexts instead of superimposing or discarding
-  storeys. A separate observed support-surface layer handles stair transitions;
-  the historical reset behavior remains an explicit multi-floor-disabled ablation.
-- **Physical clearance:** retain preferred 0.30 m clearance and a physical
-  0.18 m floor. Room/frontier eligibility uses the physical-radius field, so a
-  narrow doorway is not rejected before A* can try its relaxation ladder.
-  Execution checks use the accepted route's actual inflation radius. Genuine
-  obstacles are not removed to make a path feasible.
-- **Detection duplicates:** canonicalize couch/sofa and tv/television aliases,
-  suppress overlapping duplicate boxes, associate the nearest eligible
-  landmark, and count at most one observation per landmark per frame.
-- **Target evidence:** STOP requires fresh repeated support from separated
-  views of one hypothesis. Verification has a bounded turn budget attached to
-  the selected landmark, not another visible object. Rejected/stalled targets
-  are cooled down and require fresh evidence. This is not infallible visual
-  recognition and never uses GT success as a STOP oracle.
-- **Doors and rooms:** retain depth-backed door confirmation, door-aware
-  watershed, evidence-gated room typing, count-sensitive refresh and label
-  invalidation after partition changes. Geometric route commitment is not
-  discarded merely because room IDs change.
-
-Records include route adoptions/keeps/invalidations, planning calls, blocked
-motion, duplicates removed, target support, floor revisions and room/door
-reasoning. More landmarks or rooms are not themselves accuracy improvements.
-
-## Detector choice and measured limitations
-
-Checkpoint identity, SHA-256, configuration and package versions are recorded.
-A service with a different checkpoint cannot silently reuse the same run.
-Both checkpoints are available on this workstation:
-
-- Current completed-integration default: `~/models/objnav/yolov8x-worldv2.pt`.
-- Explicit earlier rollback choices: `yolov8s-worldv2.pt` and `yolov8l-worldv2.pt`.
-- Selectable alternative: pretrained LLMDet Swin-L, via its dedicated backend.
-
-The detector upgrade from `feat/objnav-open-vocabulary-detector-nadav` is now
-preserved here. See its [setup, backend selection and provenance](../../../mapping/scene_graph/serve/README.md).
-New demo configurations use X-v2; previously saved explicit checkpoint choices
-are not overwritten. CLI clients verify and record the selected service, not
-just the checkpoint filename.
-
-The **earlier, S-versus-L** five-scene development comparison finished with **2/5 successes
-for both models**: mean SPL **0.1811 (S)** versus **0.1574 (L)**, DTG **2.5693 m
-(S)** versus **4.2834 m (L)**. These are the complete inherited batches, not
-best episodes mixed across attempts. On 12 previously inspected development
-views, median CPU inference was approximately 37 ms (S) versus 152 ms (L).
-These measurements do not establish detection AP or statistical superiority.
-Those historical results are not a comparison of the completed X-v2 integration
-and do not override the user's later X-v2 selection.
-
-False-positive target stops remain a known limitation. The completed selectable
-detector upgrade does not replace the existing multi-view target-evidence logic
-or establish that a larger model alone cures false STOPs.
-See [recovery results and remaining work](RESUME_STATUS.md).
-
-Detector services emit proposals at 0.05 for low-scoring doorway/frame prompts.
-Navigation objects still require 0.35; door candidates need geometric and
-multi-view checks. The default detector runs on CPU, not Habitat's rendering GPU.
-
-## Published split and fair interpretation
-
-The comparison set is the released **SemExp Gibson ObjectNav v1.1 validation
-split: 1,000 episodes, 200 each in Collierville, Corozal, Darden, Markleeville
-and Wiconisco**. All starts are retained, including the reference finite FMM
-sentinel case `Markleeville/000188`. Bounds/corruption checks remain.
-
-The first episode per scene has already been used for development. These five
-examples are not an untouched holdout and cannot support a SOTA claim. Further
-systematic tuning should use the 25 training scenes or synthetic scenarios,
-not repeated full-validation feedback. Training archive dummy PointNav rows
-must not be mistaken for released ObjectNav evaluation episodes.
-
-[Protocol and tuning audit](PROTOCOL_AND_TUNING.md) cites OSG Navigator's Gibson
-validation protocol, distinguishes train/validation/test, and records what the
-papers do not establish about parameter selection. ApexNav and SG-Nav do not
-report Gibson results. There is insufficient evidence to accuse their authors
-of overfitting or to guarantee absence of validation/pretraining contamination.
-
-The freeze-then-run entrypoint locks source, method/model configuration, runtime,
-seed, data and motion tolerances. It validates the actual execution configuration
-again after preflight. This is a reproducibility guard, not proof of unseen
-validation; role metadata retains the development-contamination disclosure.
+- **Routes:** preserve paths through turns, minor goal drift and unrelated map
+  changes. Replan for obstruction, excessive cross-track error, changed goals
+  or bounded lack of progress, not a periodic timer. Arrival uses the converter's
+  rule on the actual walked path, including snapped endpoints.
+- **Maps:** persistent floor grids share only an observed XY origin. Visible
+  floor cells supply free evidence at their own locations; occupied columns are
+  not erased and future destinations are never carved free. Transient stair
+  observations do not enter semantic floor maps.
+- **Transitions:** commit through approach, traversal and destination confirmation.
+  Completion requires translated stable support and exit from the stair region.
+  Retreat follows observed history back to a source platform; a height threshold
+  alone cannot finish it. Exhausted recovery is an explicit non-target safety halt.
+- **Camera:** one controller owns pitch. Positive pitch looks down. Inspections
+  are bounded and keyed by floor/location, not changing yaw/pitch. Stair pitch
+  stays latched until a safe transition completes. STOP never carries a LOOK.
+- **Perception:** raw predictions run continuously, including stairs. Projection,
+  semantic fusion and STOP confirmation are distinct. Coherent depth pixels use
+  their own rays; mixed depth, unsupported floors and inconsistent 3D association
+  are quarantined. No bed/sofa blacklist is used. Fresh separated-view evidence is
+  still required for target STOP; recognition is not infallible.
+- **Room reasoning:** observed doors, watershed rooms, revisable accumulated room
+  labels, RPT* order and both local explorers remain. Room clocks pause during
+  committed floor transitions; global action allowance never refills.
 
 ## Data and running
 
-Installed data:
+Use licensed local Gibson meshes/navmeshes and the released ObjectNav episode
+annotations. `.glb.json.gz` rows in scene archives are dummy PointNav metadata,
+not the 1,000 ObjectNav validation episodes. On another workstation obtain assets
+through the publisher's [Gibson licence form](https://forms.gle/36TW9uVpjrE1Mkf9A)
+and [episode instructions](https://github.com/devendrachaplot/Object-Goal-Navigation#downloading-episode-dataset).
 
-```text
-~/datasets/gibson/scenes/<scene>.glb
-~/datasets/gibson/scenes/<scene>.navmesh
-~/datasets/objectnav/gibson/objectnav/gibson/v1.1/val/val_info.pbz2
-~/datasets/objectnav/gibson/objectnav/gibson/v1.1/val/content/<scene>_episodes.json.gz
-```
+The existing demo is available with `.venv/bin/python -m
+sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.demo`; saved settings
+are in `~/.config/sparx/gibson-demo.json`. It does not download licensed scenes.
 
-On another workstation, complete the [Gibson licence form](https://forms.gle/36TW9uVpjrE1Mkf9A)
-and obtain the publisher's assets. The launcher's **Import scene ZIP...** extracts
-only the selected scene pair without overwriting assets. A `.glb.json.gz` file
-is metadata, not a mesh. Episodes are linked in [SemExp's dataset instructions](https://github.com/devendrachaplot/Object-Goal-Navigation#downloading-episode-dataset).
-Legacy floor maps use a restricted numpy-only unpickler.
+Run simulator jobs with the existing Habitat conda interpreter; use `.venv`
+only for lightweight tests/tools. Before rendering, check GPU ownership. Detector
+and room-language services run on CPU on this workstation.
 
-In PyCharm choose **Gibson One Scene Demo**, or launch the UI from the repo root:
+### Detector setup
 
-```bash
-.venv/bin/python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.demo
-```
+YOLO-World X-v2 remains the completed-integration default. LLMDet Swin-L remains
+selectable; S/L are explicit checkpoint overrides. Do not change another mission's
+service or silently substitute a smaller model. See the
+[detector setup and provenance](../../../mapping/scene_graph/serve/README.md).
 
-Configure paths once and acknowledge the simulator-version caveat. UI settings
-are in `~/.config/sparx/gibson-demo.json`. The UI runs 1-10 episodes in one scene
-and can reuse/start dedicated CPU detector/Ollama services without reconfiguring
-unrelated services.
-
-With the Habitat conda environment active:
-
-```bash
-export GIBSON_SCENES_DIR="$HOME/datasets/gibson/scenes"
-export GIBSON_EPISODES_DIR="$HOME/datasets/objectnav/gibson/objectnav/gibson/v1.1/val"
-python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run \
-  --scene Collierville --limit 1 --explorer falcon --record \
-  --detector-backend yolo_world --detector-url http://127.0.0.1:18095 \
-  --allow-sim-version-mismatch --output "$HOME/objnav_benchmark/gibson/smoke"
-
-python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
-  --episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" \
-  --detector-url http://127.0.0.1:18095 --allow-sim-version-mismatch \
-  --output "$HOME/objnav_benchmark/gibson/five-scene"
-```
-
-`--preflight` checks inputs/services without rendering. The five-scene entrypoint
-above retains its existing baseline configuration; use `compare_explorers` from
-the FALCON runbook for a matched, explicitly selected comparison. Five-scene smoke runs
-one previously inspected start per scene sequentially and refuses source drift.
-Use the same output with `--resume` only for unchanged configuration/data/source.
-Never mix attempts. Full validation uses the separate
-[freeze workflow](PROTOCOL_AND_TUNING.md#freeze-then-evaluate).
-
-For the completed default CPU detector, run in the existing detector environment:
+The scene-independent Gibson context vocabulary now includes `stairs` and
+`staircase`. They cannot match a navigation target or create a portal without
+observed geometry. Restart the dedicated service with the exact ordered output
+of `gibson.run --print-vocabulary`; a former 24-prompt service must fail validation.
+Checkpoint, classes, prompt features, configuration and packages are pinned on
+health/inference responses and in the frozen run configuration.
 
 ```bash
-VOCAB=$(python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run --print-vocabulary)
-python -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \
+VOCAB=$(.venv/bin/python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run --print-vocabulary)
+CUDA_VISIBLE_DEVICES="" "$HOME/.venvs/objnav-detector/bin/python" -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \
   --backend yolo_world --model "$HOME/models/objnav/yolov8x-worldv2.pt" --device cpu \
   --host 127.0.0.1 --port 18095 --conf 0.05 --torch-threads 4 --classes "$VOCAB"
 ```
 
-Configure `LLM_BACKEND`, `LLM_BASE_URL`, `LLM_MODEL` as for the shared LLM client.
-API keys stay in environment variables, not result artifacts. Preflight verifies
-model identity and vocabulary, not just a live port. GPU ownership is checked
-before rendering. No models or licensed scenes are downloaded by the CLI.
+LLM settings use `LLM_BACKEND`, `LLM_BASE_URL`, `LLM_MODEL`; keys stay outside
+artifacts. Use the existing CPU-only Ollama service and verify its model digest.
+No inference models load inside the evaluator.
 
-Runtime: habitat-sim, numpy-quaternion, numpy, scipy, scikit-image, scikit-fmm,
-OpenCV, networkx and requests; no habitat-lab or ROS. `requirements.txt` lists
-extra CPU packages. Recording needs matplotlib and FFmpeg/libx264;
-`IMAGEIO_FFMPEG_EXE` can select the detector environment's working encoder.
+### Recordings and frozen multi-story runs
 
-## Simulation realism and recordings
+`distinct_buildings --manifest <frozen-episodes.json> --output <new-directory>
+--explorers frontier --record-first --seed 17 --detector-url http://127.0.0.1:18095
+--detector-backend yolo_world --allow-sim-version-mismatch` preflights and freezes
+all jobs before rendering. See [MULTISTORY.md](MULTISTORY.md) for the full
+generation/run commands. Use a new output directory after any source/model/data
+change; never mix failed attempts or protocol versions into a resume.
 
-Habitat renders a **3D scanned mesh**, not stitched input frames. Scan texture
-seams, missing geometry and quality limitations can affect perception. Apparent
-jumps also come from the published instantaneous 0.25 m/30-degree actions and
-six-decisions-per-second playback. Changing those observations/actions would
-change the benchmark, so realism improvements are confined to a separate replay:
+Recording needs a working FFmpeg/libx264. `IMAGEIO_FFMPEG_EXE` can select the
+detector environment's installed static encoder; the Habitat environment's
+FFmpeg may fail to load its shared libraries. Verify the encoder before a run.
 
-```bash
-python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.smooth_replay \
-  "$HOME/objnav_benchmark/gibson/smoke"
-```
+There is **one persistent panel per configured storey**, not K layers per floor.
+The evaluator passes only a display count to the recorder. Unknown slots start
+gray with no elevation/topology; policy knowledge remains observed-only. Full
+independent grids are saved as numeric `floor_maps.npz`, with slot bindings,
+objects and checksums in `floor_panels.json`. `steps.jsonl` separates raw
+predictions, projection/fusion decisions, commands, observed pitch, transition
+state and display metadata. All failures are retained. Smooth replay is optional
+and evaluator-only; interpolated frames never enter navigation.
 
-Run replay only after evaluation releases the GPU. `smooth_rgb.mp4` is explicitly
-visualization-only: interpolated frames never enter policy/scoring, and original
-trajectories/metrics/videos remain intact. It smooths motion, not scan defects.
-The observed library/process failures are not evidence that texture seams crash
-Habitat.
+`stair_diagnostic` uses ordinary search unless its explicitly labelled historical
+`--spent-floor-budget` override is requested. Do not use that override as autonomy
+evidence. `--transitions 2` requires a genuine completed second traversal; an early
+target STOP or safety halt remains a failed transition test.
 
-Recorded runs include live/HTML dashboards, H.264 video, trajectories, metrics,
-per-step predictions and reasoning. GT distance curves remain evaluator-only.
+## Scoring and interpretation
 
-## Scoring caveats and tests
+Published SemExp Gibson validation has 1,000 episodes, 200 each in Collierville,
+Corozal, Darden, Markleeville and Wiconisco. The reference-floor planar score uses
+5 cm cells, two-cell free dilation, a 1 m category dilation, final zero FMM
+distance and no mandatory STOP. Preserve its sentinel start and protocol.
+Reference Habitat is 0.1.5; this installation is 0.2.4. The mismatch is explicit.
 
-The SemExp profile uses registered 640x480 RGB-D, 79-degree HFOV, 0.88 m camera,
-0.18 m radius, depth 0.5-5 m, 500 actions and sliding. GT floor scoring uses 5 cm
-cells, two-cell free dilation and 20-cell goal-category dilation. Success is
-zero final FMM distance to the 1 m success region; **this evaluator does not
-require STOP**. SPL uses initial boundary distance plus 1 m and actual planar
-travel with the reference 1e-5 m initial accumulator. SoftSPL is supplementary.
+The separate **multi-story development/2** protocol uses 3D travel and
+height-qualified reference-floor goals. Its audited native vertical bound remains
+**0.60 m**, not the policy's **0.24 m** observed tread limit. Cameras remain
+640×480 RGB-D, 79° HFOV, 0.88 m height, 0.18 m radius, 0.5–5 m depth; actions are
+0.25 m forward, 30° yaw, bounded 30° LOOK and a 500-action cap.
 
-The reference used Habitat 0.1.5; this workstation runs 0.2.4. That mismatch is
-explicit. Native sliding may include a bounded 5 cm navmesh correction; motion
-and path-length cross-checks remain. Exact OSG implementation equivalence is not
-established. Our method is metric, not non-metric.
+Installed Gibson semantics are incomplete across storeys. A legitimate target
+on an unannotated floor cannot be verified using the policy detector as ground
+truth. Goal coordinates, distance fields, topology and navmesh queries remain
+evaluator-only. Report annotated success and STOP correctness separately from
+transition completion, collisions, stalls, integrity and runtime errors. These
+development runs are not an untouched holdout, a complete multi-floor ObjectNav
+benchmark, or a SOTA claim.
+
+## Tests
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest \
@@ -233,6 +141,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest \
   sparx_agency/core/planning/planners/astar/tests -q
 ```
 
-A*/ObjectNav now avoid unnecessary native OMPL imports, eliminating the previous
-post-pytest allocator abort on this path. Explicit OMPL users still depend on
-the installed binding's health; this change does not repair that library.
+Native staircase episodes remain necessary. Green tests, decoded recordings or
+completed episodes alone do not establish successful navigation.

@@ -142,8 +142,20 @@ class HabitatRGBDSimulator:
         if raw is None:
             raw = self._sim.get_sensor_observations()
         state = self._sim.get_agent(0).get_state()
+        rgb_sensor, depth_sensor = state.sensor_states["rgb"], state.sensor_states["depth"]
+        rgb_rotation = quaternion.as_rotation_matrix(rgb_sensor.rotation)
+        depth_rotation = quaternion.as_rotation_matrix(depth_sensor.rotation)
+        expected_position = np.asarray(state.position) + np.array([0.0, self.camera.height_m, 0.0])
+        if (not np.allclose(rgb_sensor.position, depth_sensor.position, atol=1e-5, rtol=0)
+                or not np.allclose(rgb_rotation, depth_rotation, atol=1e-5, rtol=0)
+                or not np.allclose(depth_sensor.position, expected_position, atol=1e-4, rtol=0)):
+            raise EnvContractError("RGB/depth/pose extrinsics are not registered to the declared camera mount")
         pose = habitat_pose(state.position, quaternion.as_rotation_matrix(state.rotation),
-                            quaternion.as_rotation_matrix(state.sensor_states["depth"].rotation))
+                            depth_rotation)
+        rgb_pose = habitat_pose(state.position, quaternion.as_rotation_matrix(state.rotation), rgb_rotation)
+        self.last_sensor_alignment = {"rgb_pitch_rad": rgb_pose.camera_pitch, "depth_pitch_rad": pose.camera_pitch,
+                                      "mount_error_m": float(np.linalg.norm(depth_sensor.position - expected_position)),
+                                      "registered": True}
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
         return rgb, metric_depth(raw["depth"], self.camera), pose
 

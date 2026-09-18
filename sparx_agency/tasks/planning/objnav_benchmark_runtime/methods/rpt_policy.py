@@ -14,21 +14,21 @@ from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSo
 from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCON_SOURCE
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
-from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.params import WeightedAStarParams
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.planners.astar.weighted_planner_2d import WeightedAStarPlanner2D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.observed_map import ObservedMap
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import observed_objects
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import DEFAULT_SEGMENTATION
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS, DoorSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DoorSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RoomLabelSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute, RouteSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidenceSettings, deduplicate_detections
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidenceSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context import FloorContextBank
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_metrics import ExplorationMetrics
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.camera_control import CameraController, CameraControlSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import PerceptionCycle
 
 
 class RPTSearchPolicy:
@@ -55,7 +55,8 @@ class RPTSearchPolicy:
                 "supervisor": asdict(self.supervisor_params), "doors": asdict(self.door_settings),
                 "room_labels": asdict(self.room_label_settings), "room_segmentation": asdict(DEFAULT_SEGMENTATION),
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
-                "oracle_schema_repairs": 1, "local_exploration": s.local_exploration if (s := self.settings) else "frontier",
+                "camera_control": asdict(CameraControlSettings()), "perception_fusion": "coherent-depth/floor-qualified-v1",
+                "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
                 "falcon_running": self.settings.local_exploration == "falcon",
                 "falcon_source": dict(FALCON_SOURCE) if self.settings.local_exploration == "falcon" else None,
                 "ground_truth_semantics": False, "training_free": True,
@@ -77,6 +78,8 @@ class RPTSearchPolicy:
         self._solver_records = []
         self.last_world = None
         self.telemetry = ExplorationMetrics()
+        self.camera_control = CameraController(episode.action_spec)
+        self.perception = PerceptionCycle(self)
         self.hierarchy = None
         if s.local_exploration == "falcon":
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_policy import FalconObjectNav
@@ -112,33 +115,38 @@ class RPTSearchPolicy:
         try:
             command = self._plan(observation)
             phase = self.hierarchy.machine.phase if self.hierarchy else str(command.info.get("kind", self.supervisor.state))
-            if self.building and self.building.phase != "floor_search":
+            if self.building and self.building.phase != "SEARCH":
                 phase = self.building.phase
-            elif not command.stop and command.camera_pitch is None and self.episode.action_spec.allows(DiscreteAction.LOOK_UP):
-                command = replace(command, camera_pitch=0.0)
+            transition = self.building.transition if self.building else None
+            command = self.camera_control.apply(
+                observation, command, self.building.phase if self.building else "SEARCH",
+                transition.direction if transition else 0, transition.close_support if transition else False)
             self.telemetry.phase = phase
             return replace(command, info=dict(command.info, explorer=self.settings.local_exploration, phase=phase, floor_id=self.mapping.floor_id))
         finally:
             self.telemetry.latencies["policy_decision"].append((time.monotonic() - started) * 1000)
 
     def filter_action(self, observation, action):
-        if self.building and (self.building.traversing or self.building.active is not None):
+        if self.building and self.building.committed:
             return self.building.filter_action(observation, action)
         return self.hierarchy.filter_action(observation, action) if self.hierarchy else action
 
     def notify_action(self, observation, action):
-        if not self.building or not self.building.traversing:
+        if not self.building or not self.building.committed:
             self._floor_time += self.settings.action_time_s
         if self.hierarchy:
             self.hierarchy.machine.charge(observation.step)
-            self.telemetry.phase = self.hierarchy.machine.phase
         self.telemetry.emitted(observation, action, self.telemetry.phase)
 
     def _plan(self, observation):
-        s, pose = self.settings, observation.pose
+        self.perception.observe(observation)
+        if self.building:
+            self.building.prepare_observation(observation)
         started = time.monotonic()
         floor_revision = self.mapping.floor_revision
-        world = self.mapping.update(observation, integrate=False) if self.building and self.building.traversing else self.mapping.update(observation)
+        transition = self.building.transition if self.building else None
+        world = self.mapping.update(observation, integrate=not (self.building and self.building.traversing),
+                                    arrival_allowed=transition.arrival_allowed if transition else True)
         self.telemetry.latencies["mapping"].append((time.monotonic() - started) * 1000)
         if self.mapping.floor_revision != floor_revision:
             if self.building:
@@ -146,19 +154,28 @@ class RPTSearchPolicy:
             else:
                 self._reset_floor()
         self.last_world = world
-        if not self.building or not self.building.traversing:
-            self.telemetry.observe(observation, world, self.mapping.floor_id)
         if self.building:
             self.building.observe(observation)
-            if self.building.traversing:
-                return self.building.plan(observation, world)
+        if not self.building or not self.building.traversing:
+            self.telemetry.observe(observation, world, self.mapping.floor_id)
+        confirmed = self._perceive(observation)
+        if self.building and self.building.committed:
+            command = self.building.plan(observation, world)
+            if command is not None:
+                return command
+        inspection = self.camera_control.inspection_command(observation)
+        if inspection is not None:
+            return inspection
+        return self._search(observation, world, confirmed)
+
+    def _search(self, observation, world, confirmed):
+        s, pose = self.settings, observation.pose
         if self._last_pose is not None and math.dist((pose.x, pose.y), self._last_pose) > 0.05:
             self._blocked_since = None
         self._last_pose = (pose.x, pose.y)
         self.graph.credit_time(world, pose, 0.0 if observation.step == 0 else s.action_time_s)
-        confirmed = self._perceive(observation)
         if self.hierarchy is None and confirmed and self._target_xy is not None and math.dist((pose.x, pose.y), self._target_xy) <= s.stop_distance_m:
-            return NavigationCommand.stop_here(info={"reason": "fresh multi-view-confirmed target"})
+            return NavigationCommand.stop_here(info={"reason": "fresh multi-view-confirmed target", "target_confirmed": True})
         if observation.step - self._last_graph_step >= s.graph_period_steps or self.doors.revision != self._last_door_revision:
             self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(), step=observation.step,
                               reason=self.hierarchy is None)
@@ -230,27 +247,7 @@ class RPTSearchPolicy:
         return NavigationCommand.follow(self._route, final_yaw=final_yaw, info={"route": self.route_memory.reason, "kind": kind})
 
     def _perceive(self, observation):
-        started = time.monotonic()
-        raw = self.detector.detect(observation.rgb)
-        self.telemetry.latencies["detector_http"].append((time.monotonic() - started) * 1000)
-        self.doors.update(observation, raw)
-        detections = deduplicate_detections(raw)
-        self._duplicates_removed += len(raw) - len(detections)
-        if observation.step - self._target_step > self.target_settings.max_unseen_steps:
-            self._target_id = self._target_xy = None
-        confirmed = False
-        for label, xyz in observed_objects(observation, detections, self.settings.detection_confidence):
-            if label in DOOR_LABELS:
-                continue
-            if self.building and self.mapping._anchor is not None and not self.mapping._anchor - 0.30 <= xyz[2] <= self.mapping._anchor + 2.2:
-                continue
-            landmark = self.landmarks.observe(label, (float(xyz[0]), float(xyz[1])), frame_id=observation.step)
-            if self.target.accepts(label) and not self.target_evidence.is_suppressed(landmark.id, observation.step):
-                supported = self.target_evidence.observe(landmark, observation.pose, observation.step)
-                if self._target_id in (None, landmark.id):
-                    self._target_id, self._target_xy, self._target_step = landmark.id, landmark.xy, observation.step
-                    confirmed = confirmed or supported
-        return confirmed
+        return self.perception.fuse(observation)
 
     def _approach(self, observation, world):
         p = observation.pose
@@ -311,6 +308,7 @@ class RPTSearchPolicy:
                 "last_reasoning": self.graph.last_reasoning, "route_commitment": dict(self.route_memory.stats),
                 "plan_calls": self._plan_calls, "duplicates_removed": self._duplicates_removed,
                 "target_evidence": self.target_evidence.diagnostics(), "floor_revisions": self.mapping.floor_revision,
+                "perception": self.perception.diagnostics(), "camera": dict(self.camera_control.last), "floor_maps": self.mapping.integrity(),
                 "building": self.building.diagnostics() if self.building else None,
                 "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,
