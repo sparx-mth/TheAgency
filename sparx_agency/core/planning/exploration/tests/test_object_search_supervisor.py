@@ -4,7 +4,7 @@ Every fact here is a fact about a flight, replayed in microseconds because the
 machine holds no clock -- a ninety-second room budget is one function call
 away rather than ninety seconds away.
 
-Six groups:
+Seven groups:
 
 * **the loop** -- that a full turn runs select -> transit -> search -> select
   and lands on the next room, which is the whole pipeline in one test;
@@ -21,7 +21,11 @@ Six groups:
 * **the memory** -- cooldown, repeated failure and the deferral that follows,
   and the renumbering that must wipe all of it;
 * **the no-ops** -- no pose, not airborne, an empty ranking, and the target
-  latch that ends everything. All four happen on a real flight.
+  latch that ends everything. All four happen on a real flight;
+* **the caller-driven exits** -- ``frontier_exhausted`` and ``route_failed``,
+  which end a turn on the tick the caller knows the answer instead of on a
+  clock, and which the discrete-action ObjectNav agent spent a quarter of its
+  actions waiting for before they existed.
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ import pytest
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
     BLOCKED,
     BUDGET_SPENT,
+    EXHAUSTED,
     FOUND,
     MAPPED,
     SEARCH,
@@ -424,3 +429,75 @@ def test_target_seen_stands_down_from_any_state_and_is_terminal():
     again = sup.update(TWO_ROOMS, facts(r1=1), (5.0, 0.0), now=2.0,
                        last_plan_s=2.0, target_seen=False)
     assert again.state == FOUND
+
+
+# -- the caller-driven exits ----------------------------------------------
+def arrived_in_room_one():
+    """A supervisor that has just arrived in R1, inside every grace window."""
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    arrived = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=1.0,
+                         last_plan_s=1.0)
+    assert arrived.state == SEARCH
+    return sup
+
+
+def test_frontier_exhausted_ends_the_room_at_once_and_is_productive():
+    """No grace, no stall clock: the caller read the live map.
+
+    The frontier count still says three clusters and only one second has
+    passed since arrival -- every clock-based exit is far away -- yet the
+    room ends now, and counts as searched rather than as a failed attempt.
+    """
+    sup = arrived_in_room_one()
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+                     last_plan_s=1.0, frontier_exhausted=True)
+    assert isinstance(out.action, Release)
+    assert out.action.verdict == EXHAUSTED
+    assert out.completed == (1, EXHAUSTED)
+    assert out.state == SELECT
+    assert out.rooms_done == 1
+    assert sup.stats["exhausted"] == 1
+    # The next tick moves on to the next room in the order.
+    nxt = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=3.0,
+                     last_plan_s=1.0)
+    assert nxt.state == TRANSIT and nxt.action.room_id == 2
+
+
+def test_frontier_exhausted_is_ignored_outside_search():
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=3), (5.0, 0.0), now=1.0,
+                     last_plan_s=1.0, frontier_exhausted=True)
+    assert out.state == TRANSIT
+    assert isinstance(out.action, Hold)
+    assert sup.stats["exhausted"] == 0
+
+
+def test_route_failed_ends_a_transit_as_unreachable_without_the_grace_wait():
+    """A planner that has answered no is not a planner that has not answered."""
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.5,
+                     last_plan_s=0.0, route_failed=True)
+    assert isinstance(out.action, Release)
+    assert out.action.verdict == UNREACHABLE
+    assert out.state == SELECT
+    assert out.rooms_done == 0
+    assert sup.stats["plan_fails"] == 1
+    nxt = sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=1.0,
+                     last_plan_s=0.0)
+    assert nxt.state == TRANSIT and nxt.action.room_id == 2
+
+
+def test_arrival_beats_route_failed():
+    """Standing in the room, a refused route to its centre changes nothing."""
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=3), (10.0, 0.0), now=1.0,
+                     last_plan_s=0.0, route_failed=True)
+    assert out.state == SEARCH
+    assert isinstance(out.action, SearchRoom)
+    assert sup.stats["plan_fails"] == 0
+
+

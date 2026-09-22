@@ -111,13 +111,14 @@ def test_approach_arrival_band_is_inside_stop_radius(monkeypatch):
 
 def test_nearby_frontier_is_retired_not_idled_forever(monkeypatch):
     from types import SimpleNamespace
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import rpt_policy
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import frontier_sweep
     policy, episode = setup_policy()
     policy._goal = (0.25, 0.0)
     policy.route_memory.kind = "frontier"
-    monkeypatch.setattr(rpt_policy, "in_room_frontier_goals", lambda *args: [(0.25, 0.0)])
-    goal = policy._frontier(observation(episode, 1), SimpleNamespace(resolution=0.1), None, None)
-    assert goal is None and (0.25, 0.0) in policy._visited_frontiers
+    monkeypatch.setattr(frontier_sweep, "ranked_frontier_goals",
+                        lambda *args, **kwargs: [SimpleNamespace(xy=(0.25, 0.0))])
+    goals = policy.sweep._goals(observation(episode, 1), SimpleNamespace(resolution=0.1), None, None)
+    assert goals == [] and (0.25, 0.0) in policy._visited_frontiers
 
 
 def test_observed_mapping_reaches_llm_rpt_and_astar():

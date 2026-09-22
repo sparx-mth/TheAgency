@@ -39,19 +39,37 @@ class CommittedRoute:
         self._motion_step = 0
         self.stats = {"adoptions": 0, "kept": 0, "invalidations": 0}
         self.reason = "unplanned"
+        #: The reason of the most recent :meth:`clear` since the last
+        #: :meth:`adopt`, or None. Kept apart from :attr:`reason`, which
+        #: :meth:`reusable` resets to ``unplanned`` on the next question -- a
+        #: reset that must stay, because ``no_progress`` is read by the policy
+        #: as "detected on THIS call" and a latched verdict would refuse every
+        #: later goal without planning.
+        self.cleared = None
+        #: Why the route in force before the latest :meth:`adopt` was dropped
+        #: (``goal_changed``, ``route_obstructed``, ``no_progress``,
+        #: ``frontier_completed_or_invalid`` ...), or ``unplanned`` for the
+        #: first route. A recording that only shows ``new_goal_or_invalid_route``
+        #: cannot say whether a route was abandoned for a new goal or re-derived
+        #: around an obstacle -- the Ranchester video analysis could not tell
+        #: the two apart until this was kept.
+        self.replaced = None
 
     def clear(self, reason):
         if self.path is not None:
             self.stats["invalidations"] += 1
+            self.stats["cleared:" + str(reason)] = self.stats.get("cleared:" + str(reason), 0) + 1
         self.path = self.goal = self.kind = None
         self.progress = PathProgress()
         # A replacement path is not evidence of movement. Keep the positional
         # watchdog across safety replans, including a failed forward action.
         if reason not in ("route_obstructed", "off_route", "forward_blocked"):
             self._motion_xy = None
-        self.reason = reason
+        self.reason = self.cleared = reason
 
     def adopt(self, path, goal, kind, observation):
+        self.replaced = self.cleared or "unplanned"
+        self.cleared = None
         self.path, self.goal, self.kind = path, tuple(goal), kind
         raw = getattr(path, "points", path)
         self._points = tuple(Pose2D(float(p.x), float(p.y)) if hasattr(p, "x")

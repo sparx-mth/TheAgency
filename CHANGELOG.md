@@ -6,6 +6,35 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Fixed
+- ObjectNav frontier explorer no longer spins in place for the supervisor's 30/90 s clocks
+  once a room is swept: the new `frontier_sweep.py` gives a swept room one bounded
+  look-around (a full rotation by default) and then ends it at once through two new
+  `ObjectSearchSupervisor` exits, `frontier_exhausted` (verdict `EXHAUSTED`, productive) and
+  `route_failed` (`UNREACHABLE` without the plan-grace wait). A released room is replaced by
+  the next transit on the same action instead of by a throwaway floor-wide route. The
+  Ranchester recording `e7c4f2ad5402` spent 24 % of its 472 actions on these idle turns. See
+  `docs/progress/entries/010-objnav-exploration-efficiency.md`.
+- Stair (look-down) inspections no longer fire every cooldown while following a path once the
+  floor allowance is spent: they now start only for a named reason (`floor_exhausted`,
+  `stair_detection`, `periodic`), the latter two only at an action with no committed route,
+  and unprompted ones at most every `periodic_inspection_actions` (100). The same recording
+  ran ten sweeps (17 % of actions) plus 7 % of turns recovering the heading each left behind.
+- `CommittedRoute.reusable` no longer overwrites the recorded clear reason with `unplanned`,
+  so `route_replaced` (new in every adopted route's info) and the per-reason
+  `cleared:<reason>` stats say why a route was really dropped.
+
+### Changed
+- Frontier goals are ranked by utility (`core/planning/exploration/frontier_ranking.py`):
+  sub-linear cluster size over geodesic distance on the planner's passable graph, with facing
+  as a discount. Clusters with no known-free path are dropped instead of proposed, and up to
+  three ranked goals are tried per action, so a refused A* no longer costs an idle turn. A
+  committed frontier goal is kept while it is passable, still borders unknown space and is
+  near the room being swept -- a re-segmented room mask alone no longer replaces it every
+  ten actions, and a boundary the camera has already resolved no longer keeps it.
+  `in_room_frontier_goals` (size order) remains for pose-free callers and the scene-graph
+  count; both now share `frontier_cluster_cells`.
+
+### Fixed (earlier)
 - `rooster_twist_control_adapter.py`'s `max_yaw_rate` recalibrated from a never-validated
   0.5 rad/s to 1.8 rad/s, derived from a logged manual flight's actual turn-rate behavior
   (~4x too low previously — any planner-requested yaw rate was executed much faster than

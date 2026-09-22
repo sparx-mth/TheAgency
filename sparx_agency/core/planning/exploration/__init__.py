@@ -39,14 +39,15 @@ from .object_search_supervisor import (
     ObjectSearchParams, ObjectSearchSupervisor, ObjectSearchState, RoomFacts,
     FlyTo, SearchRoom, Release, StandDown, weighted_order,
     SELECT, TRANSIT, SEARCH, FOUND,
-    MAPPED, BUDGET_SPENT, STALLED, UNREACHABLE, TRANSIT_TIMEOUT, BLOCKED,
-    PRODUCTIVE,
+    MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED, UNREACHABLE, TRANSIT_TIMEOUT,
+    BLOCKED, PRODUCTIVE,
 )
-# ``room_costs`` is DELIBERATELY not re-exported. It needs numpy and scipy,
-# and this facade is imported inside the Noetic FALCON container (whose
-# mission_watchdog_node imports .progress_monitor through it) where scipy does
-# not exist. Import it by module path -- ``from ...exploration.room_costs
-# import build_instance`` -- from the ROS 2 side only.
+# ``room_costs`` and ``frontier_ranking`` are DELIBERATELY not re-exported.
+# They need numpy and scipy, and this facade is imported inside the Noetic
+# FALCON container (whose mission_watchdog_node imports .progress_monitor
+# through it) where scipy does not exist. Import them by module path --
+# ``from ...exploration.room_costs import build_instance`` -- from the ROS 2
+# side only.
 #
 # ``rpt_room_solver`` is not re-exported either, for a milder reason: it is
 # standard-library-only and would import cleanly in the container, but it
@@ -77,8 +78,8 @@ __all__ = [
     "ObjectSearchParams", "ObjectSearchSupervisor", "ObjectSearchState",
     "RoomFacts", "FlyTo", "SearchRoom", "Release", "StandDown",
     "weighted_order", "SELECT", "TRANSIT", "SEARCH", "FOUND",
-    "MAPPED", "BUDGET_SPENT", "STALLED", "UNREACHABLE", "TRANSIT_TIMEOUT",
-    "BLOCKED", "PRODUCTIVE",
+    "MAPPED", "BUDGET_SPENT", "STALLED", "EXHAUSTED", "UNREACHABLE",
+    "TRANSIT_TIMEOUT", "BLOCKED", "PRODUCTIVE",
     "BriefingStyle", "brief",
     "load_survey", "save_survey",
     "RandomWalkParams",

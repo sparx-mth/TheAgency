@@ -24,7 +24,8 @@ own frozen configurations; changed code does not relabel their outcomes.
 | Component | Responsibility |
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
-| `methods/camera_control.py` | Sole pitch owner; bounded inspection and safe restoration |
+| `methods/frontier_sweep.py` | Room-by-room frontier sweep: ranked goals, one bounded look-around per swept room, release-and-reselect on the same action |
+| `methods/camera_control.py` | Sole pitch owner; bounded inspection, long unprompted cadence and safe restoration |
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
 | `methods/multifloor_policy.py`, `stair_traversal.py` | RPT* portal scheduling and committed transition lifecycle |
@@ -42,6 +43,32 @@ The floor tracker remains ROS-free in `core/planning/exploration/floor_atlas.py`
 Host-side numpy/scipy terrain processing does not enter the Noetic exploration
 facade. No robot's flight controller is changed.
 
+## Frontier sweep and the action economy
+
+Every action counts against the public 500-action cap, so the frontier explorer
+is built to spend them moving toward unmapped space (the Ranchester recording
+`e7c4f2ad5402` that motivated this spent 48 % of its actions on idle turns,
+stair inspections and heading recovery):
+
+- In-room and floor-wide goals come from
+  `core/planning/exploration/frontier_ranking.py`: gain over *geodesic* cost on
+  the planner's own passable graph, facing as a discount. A boundary with no
+  known-free path is never proposed. Up to `SweepSettings.plan_attempts` goals
+  are tried per action, so a refused A* costs no idle action.
+- A committed frontier goal is kept while it is passable, still has unknown
+  space near it and still lies near the room being swept. A re-segmented room
+  mask alone does not drop it; a boundary the camera has resolved does.
+- A room with nothing reachable left gets **one** look-around
+  (`SweepSettings.room_scan_turns`, a full rotation by default, once per visit)
+  and is then released through the supervisor's `frontier_exhausted` exit on the
+  same action; a transit goal the planner refuses ends the room through
+  `route_failed`. Neither waits on the 30 s stall or 90 s budget clocks, which
+  remain as backstops. A released room is replaced by the next transit on the
+  same action -- no throwaway floor-wide route in between.
+- Every adopted route records `route_replaced`: why the route before it was
+  dropped (`goal_changed`, `route_obstructed`, `frontier_completed_or_invalid`,
+  `room_completed` ...). `route_commitment` stats count clears per reason.
+
 ## Camera, perception and transitions
 
 `SEARCH → APPROACH_STAIRS → TRAVERSE → CONFIRM_DESTINATION → SEARCH` retains
@@ -52,11 +79,17 @@ hysteresis alone cannot finish either traversal or retreat.
 
 Positive camera pitch looks down. One controller arbitrates all pitch: a
 location-deduplicated bounded inspection, a latched stair view, or ordinary
-level viewing. STOP carries no camera action. Raw detection runs on every
-observation; committed transitions and inspection views are quarantined from
-room/object fusion and target confirmation. Coherent depth pixels are projected
-at their actual image coordinates, with frame/floor/association rejection
-reasons recorded. No bed/sofa proximity blacklist is used.
+level viewing. A look-down inspection starts for one of three named reasons,
+recorded in the building events: the floor has no frontier left
+(`floor_exhausted`), a stair detection is pending (`stair_detection`), or the
+floor allowance is spent and `periodic_inspection_actions` have passed since
+the last sweep (`periodic`). The last two wait until no route is committed --
+an inspection mid-route costs its own actions plus the turns to recover the
+heading it leaves behind. STOP carries no camera action. Raw detection runs on
+every observation; committed transitions and inspection views are quarantined
+from room/object fusion and target confirmation. Coherent depth pixels are
+projected at their actual image coordinates, with frame/floor/association
+rejection reasons recorded. No bed/sofa proximity blacklist is used.
 
 ## Models and vocabulary
 

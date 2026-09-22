@@ -11,6 +11,52 @@ Format per entry:
 
 ---
 
+## 2026-09-22 — ObjectNav spent half its actions spinning, and the step log said why only once decoded
+
+**Symptom:** In the Ranchester Gibson recording (`runs/grounded_vlm_gibson_3x3_20260922T084950Z/
+.../e7c4f2ad5402`, 472 actions, `toilet` not found) the robot turned in place for ~50 actions
+after finishing a room, tilted the camera down and up every ~24 actions while following a
+path, then turned 120° back, and repeatedly planned a 7-9 m route only to replace it on the
+next action. Video-wise it looked like four unrelated bugs.
+
+**Root cause:** Four code paths, each individually "correct" for the 1 Hz aircraft it was
+written for, all paid in discrete actions:
+1. `ObjectSearchSupervisor.SEARCH` only ended on a 30 s stall / 90 s budget / a *stale*
+   cluster count reaching zero, while the policy's own in-room goal generator was already
+   empty. Every empty action became the headless agent's idle `TURN_LEFT` — 52 in a row once.
+2. `MultiFloorSearch.plan` marked a stair inspection "due" on every action after
+   `floor_search_actions` (140), so one fired at every 24-action cooldown in every new 1 m
+   cell, mid-route, and the follower then spent four turns undoing the sweep's 120°.
+3. `in_room_frontier_goals` ordered clusters by size only, with no reachability check: the
+   robot reversed to a big cluster behind it (step 297), and three goals in the first thirty
+   actions had no known-free path — one failed A* and one idle turn each.
+4. `Release` fell through to a floor-wide frontier on the release action; `SELECT` replaced
+   that route one action later. And `CommittedRoute.adopt` overwrote the clear reason with
+   `new_goal_or_invalid_route`, so the log could not distinguish "new goal" from "replanned
+   around an obstacle".
+
+**Fix / workaround:** Caller-driven supervisor exits (`frontier_exhausted`, `route_failed`);
+`FrontierSweep` with one bounded look-around per swept room and release-and-reselect on the
+same action; `frontier_ranking.ranked_frontier_goals` (geodesic + facing, unreachable dropped,
+several goals tried per action); inspection gated on "no committed route" plus a named
+trigger and a 100-action unprompted cadence; `route_replaced` in the route info.
+
+**How to see it next time:** `steps.jsonl` already carries everything — bucket each row by
+`decision.info.status` (`arrived` with no waypoints = idle turn), `command.info.kind`
+(`stair_inspection`, `room_scan`, `transit/N`, `frontier`) and `command.info.route`
+(`new_goal_or_invalid_route` = a route was adopted; `route_replaced` now says why). A
+twenty-line script over the log attributes every action in seconds; do that before watching
+the video frame by frame.
+
+**Don't:** Don't tune `search_timeout_s`/`frontier_stall_s` down to "fix" the spin — they are
+backstops for a room whose count never clears, and the real signal (the goal generator is
+empty) was always available on the same tick. Don't remove the room look-around entirely
+either: the detector has to see the room from inside; `room_scan_turns=0` is a setting, not
+the default. And don't issue two edits to the same file in one parallel tool batch — only
+one of them lands, silently (cost an hour of "why is my edit gone" today).
+
+---
+
 ## 2026-09-22 — Grounding DINO shared-head loading can look clean but substitute tensors
 
 **Symptom:** Transformers 5.17.0 reported no missing/unexpected weights for the

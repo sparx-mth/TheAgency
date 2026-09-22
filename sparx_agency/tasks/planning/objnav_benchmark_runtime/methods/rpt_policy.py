@@ -5,18 +5,15 @@ from dataclasses import asdict, replace
 import math
 import random
 import time
-import numpy as np
 
 from sparx_agency.core.common.types import Pose2D
-from sparx_agency.core.planning.exploration.object_search_supervisor import ObjectSearchParams, SEARCH, TRANSIT
-from sparx_agency.core.planning.exploration.room_costs import build_instance, in_room_frontier_goals
+from sparx_agency.core.planning.exploration.object_search_supervisor import ObjectSearchParams
 from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSolver
 from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCON_SOURCE
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.params import WeightedAStarParams
-from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.planners.astar.weighted_planner_2d import WeightedAStarPlanner2D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.observed_map import ObservedMap
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import DEFAULT_SEGMENTATION
@@ -25,6 +22,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels im
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute, RouteSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidenceSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context import FloorContextBank
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import FrontierSweep, SweepSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_metrics import ExplorationMetrics
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.camera_control import CameraController, CameraControlSettings
@@ -48,6 +46,7 @@ class RPTSearchPolicy:
         self.supervisor_params = ObjectSearchParams(seed=s.seed)
         self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings()
         self.route_settings, self.target_settings = RouteSettings(), TargetEvidenceSettings()
+        self.sweep_settings = SweepSettings()
 
     def configuration(self):
         return {"method": self.name, "adaptation": asdict(self.settings),
@@ -55,6 +54,7 @@ class RPTSearchPolicy:
                 "supervisor": asdict(self.supervisor_params), "doors": asdict(self.door_settings),
                 "room_labels": asdict(self.room_label_settings), "room_segmentation": asdict(DEFAULT_SEGMENTATION),
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
+                "frontier_sweep": asdict(self.sweep_settings),
                 "camera_control": asdict(CameraControlSettings()), "perception_fusion": "coherent-depth/floor-qualified-v1",
                 "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
                 "falcon_running": self.settings.local_exploration == "falcon",
@@ -80,6 +80,7 @@ class RPTSearchPolicy:
         self.telemetry = ExplorationMetrics()
         self.camera_control = CameraController(episode.action_spec)
         self.perception = PerceptionCycle(self)
+        self.sweep = FrontierSweep(self, self.sweep_settings)
         self.hierarchy = None
         if s.local_exploration == "falcon":
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_policy import FalconObjectNav
@@ -193,42 +194,7 @@ class RPTSearchPolicy:
             approach = self._approach(observation, world)
             if approach is not None:
                 return approach
-        return self._local_frontier(observation, world)
-
-    def _local_frontier(self, observation, world):
-        s = self.settings
-        cost = assemble_cost_grid(self.planner.fields_for(world), self.planner_params, s.body_radius_m)[0]
-        state = self._search_state(observation, world, cost)
-        if state.completed:
-            self._route = self._goal = None
-            self.route_memory.clear("room_completed")
-        if state.state == TRANSIT and state.goal_xy is not None:
-            goal, kind = state.goal_xy, "transit/%s" % state.room_id
-        else:
-            room = self.graph.registry.rooms.get(state.room_id)
-            mask = room.mask if state.state == SEARCH and room is not None else np.ones(world.grid.shape, bool)
-            goal, kind = self._frontier(observation, world, cost, mask), "frontier"
-        if goal is None:
-            if self.building:
-                command = self.building.plan(observation, world, exhausted=True)
-                if command is not None:
-                    return command
-            return NavigationCommand.hold(info={"reason": "no safe observed frontier; acquire another view"})
-        return self._navigate(observation, world, goal, kind) or NavigationCommand.hold(info={"reason": "route unavailable"})
-
-    def _search_state(self, observation, world, cost):
-        p, s = observation.pose, self.settings
-        instance = None
-        if self.graph.options and self.supervisor.state == "select":
-            instance, _ = build_instance(world, cost, {r.room_id: r.xy for r in self.graph.options}, self.graph.probs,
-                                        depot_xy=(p.x, p.y), cruise_speed_mps=self.episode.action_spec.forward_step_m / s.action_time_s)
-        calls = self.solver.calls
-        state = self.supervisor.update(self.graph.options, self.graph.facts, (p.x, p.y), self._floor_time,
-                                       last_plan_s=self._last_plan_s, instance=instance, blocked_since=self._blocked_since)
-        if self.solver.calls != calls:
-            data = asdict(self.solver.last)
-            self._solver_records.append({k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in data.items()})
-        return state
+        return self.sweep.plan(observation, world)
 
     def _navigate(self, observation, world, goal, kind, final_yaw=None):
         if not self.route_memory.reusable(observation, world, self.planner, goal, kind):
@@ -244,7 +210,10 @@ class RPTSearchPolicy:
                 return None
             self.route_memory.adopt(path, goal, kind, observation)
         self._route, self._goal = self.route_memory.path, self.route_memory.goal
-        return NavigationCommand.follow(self._route, final_yaw=final_yaw, info={"route": self.route_memory.reason, "kind": kind})
+        info = {"route": self.route_memory.reason, "kind": kind}
+        if self.route_memory.reason == "new_goal_or_invalid_route":
+            info["route_replaced"] = self.route_memory.replaced
+        return NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)
 
     def _perceive(self, observation):
         return self.perception.fuse(observation)
@@ -272,22 +241,6 @@ class RPTSearchPolicy:
             self._target_xy = self._target_id = None
         return command
 
-    def _frontier(self, observation, world, cost, mask):
-        xy = (observation.pose.x, observation.pose.y)
-        arrival = self.converter_params.goal_tolerance_m + world.resolution
-        if self._goal is not None and self.route_memory.kind == "frontier":
-            if math.dist(xy, self._goal) > arrival and not self.route_memory.arrived(observation):
-                gx, gy = world.world_to_grid(*self._goal)
-                if world.in_bounds(gx, gy) and mask[gy, gx] and np.isfinite(cost[gy, gx]):
-                    return self._goal
-            self._visited_frontiers.append(self._goal)
-            self._goal = self._route = None
-            self.route_memory.clear("frontier_completed_or_invalid")
-        for goal in in_room_frontier_goals(world, cost, mask):
-            if math.dist(xy, goal) > arrival and not any(math.dist(goal, used) < 0.4 for used in self._visited_frontiers[-100:]):
-                return goal
-        return None
-
     def _plan_to(self, observation, world, goal):
         p = observation.pose
         self._plan_calls += 1
@@ -310,6 +263,7 @@ class RPTSearchPolicy:
                 "target_evidence": self.target_evidence.diagnostics(), "floor_revisions": self.mapping.floor_revision,
                 "perception": self.perception.diagnostics(), "camera": dict(self.camera_control.last), "floor_maps": self.mapping.integrity(),
                 "building": self.building.diagnostics() if self.building else None,
+                "frontier_sweep": self.sweep.diagnostics(),
                 "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,
                 "oracle_repair_successes": self.graph.oracle.repair_successes}

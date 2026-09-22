@@ -14,17 +14,39 @@ from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 
 @dataclass(frozen=True)
 class CameraControlSettings:
+    """Inspection shape and cadence. Counts are actions, angles degrees.
+
+    Attributes:
+        inspection_turns: In-place turns per look-down sweep.
+        inspection_actions: Actions after which an unfinished sweep restores.
+        inspection_cooldown_actions: Minimum gap between ANY two inspections.
+        periodic_inspection_actions: Minimum gap between two *unprompted*
+            inspections -- the ones a spent floor allowance requests with no
+            stair detection and no exhausted frontier behind them. The
+            Ranchester recording fired one every cooldown once its floor
+            allowance ran out, ten sweeps in 472 actions, each also costing
+            four turns to recover the heading: 24 % of the episode. This is
+            deliberately several times the cooldown.
+        normal_pitch_deg: Level viewing pitch.
+        ascent_pitch_deg: Pitch while climbing a connector.
+        inspection_pitch_deg: Pitch during a look-down sweep or descent.
+    """
+
     inspection_turns: int = 4
     inspection_actions: int = 12
     inspection_cooldown_actions: int = 24
+    periodic_inspection_actions: int = 100
     normal_pitch_deg: float = 0.0
     ascent_pitch_deg: float = 30.0
     inspection_pitch_deg: float = 60.0
 
     def __post_init__(self):
-        for key in ("inspection_turns", "inspection_actions", "inspection_cooldown_actions"):
+        for key in ("inspection_turns", "inspection_actions", "inspection_cooldown_actions",
+                    "periodic_inspection_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive integer" % key)
+        if self.periodic_inspection_actions < self.inspection_cooldown_actions:
+            raise ValueError("periodic_inspection_actions cannot be shorter than the cooldown")
         for key in ("normal_pitch_deg", "ascent_pitch_deg", "inspection_pitch_deg"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 60:
@@ -44,6 +66,10 @@ class CameraController:
     def normal_view(self, pose):
         return (self.inspection is None
                 and abs(pose.camera_pitch - math.radians(self.settings.normal_pitch_deg)) < math.radians(10))
+
+    def periodic_due(self, step):
+        """Whether an unprompted sweep may start: none yet, or the long cadence has elapsed."""
+        return not self.inspected or step - self.last_inspection >= self.settings.periodic_inspection_actions
 
     def begin_inspection(self, obs, floor_id):
         key = (floor_id, round(obs.pose.x), round(obs.pose.y))

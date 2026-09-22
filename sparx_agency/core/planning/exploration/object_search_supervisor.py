@@ -13,11 +13,17 @@ Four states, and the reason there are exactly four:
   worth flying to, hand them and the arc weights to the solver, and commit to
   the order it returns.
 * :data:`TRANSIT` -- flying to the head of that order under our own planner.
-  It ends four ways: arrival, a planner that never answered, a clock, or a
-  follower that reported itself blocked.
+  It ends five ways: arrival, a planner that never answered, a planner that
+  answered *no route* (``route_failed``), a clock, or a follower that reported
+  itself blocked.
 * :data:`SEARCH` -- inside the room, mapping it under a per-room budget. It
-  ends three ways, and all three are needed (see :attr:`ObjectSearchParams
-  .search_timeout_s`).
+  ends four ways, and all four are needed (see :attr:`ObjectSearchParams
+  .search_timeout_s`). The fourth, ``frontier_exhausted``, is the caller
+  saying its own goal generator has nothing reachable left in the room and
+  its look-around is done; it fires at once, because the caller read the
+  live map rather than the stale cluster count the other three exits wait on.
+  Without it a discrete-action agent spends the whole stall clock turning in
+  place -- 52 of 472 actions in one Gibson recording.
 * :data:`FOUND` -- the detector saw the target. Terminal, deliberately: the
   ``/target_seen`` latch never un-latches, so a resume path would be dead code
   that nobody could ever exercise.
@@ -67,14 +73,18 @@ BUDGET_SPENT = "budget_spent"
 """The per-room clock ran out with frontier still showing."""
 STALLED = "stalled"
 """The frontier count stopped falling: what is left is not reachable from here."""
+EXHAUSTED = "exhausted"
+"""The caller's own goal generator found nothing reachable left in the room and
+its look-around allowance is spent. Productive: the room was searched from where
+the aircraft stands, whatever the stale cluster count still says."""
 UNREACHABLE = "unreachable"
-"""No route was ever produced to the room."""
+"""No route was ever produced to the room, or the planner refused the goal."""
 TRANSIT_TIMEOUT = "transit_timeout"
 """The aircraft did not arrive in time."""
 BLOCKED = "blocked"
 """The follower reported itself blocked for too long on the way in."""
 
-PRODUCTIVE = (MAPPED, BUDGET_SPENT, STALLED)
+PRODUCTIVE = (MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED)
 """Verdicts that mean the room was actually visited and searched."""
 
 
@@ -362,7 +372,7 @@ class ObjectSearchSupervisor:
         self._rooms_done = 0
         self.history = []               # type: List[Tuple[int, str, float]]
         self.stats = dict(selections=0, transits=0, arrivals=0, mapped=0,
-                          budget_spent=0, stalls=0, plan_fails=0,
+                          budget_spent=0, stalls=0, exhausted=0, plan_fails=0,
                           transit_timeouts=0, blocked=0, solver_calls=0)
 
     @property
@@ -400,8 +410,8 @@ class ObjectSearchSupervisor:
     # -- the tick ---------------------------------------------------------
     def update(self, rooms, facts=None, xy=None, now=0.0, last_plan_s=None,
                target_seen=False, instance=None, airborne=True,
-               blocked_since=None):
-        # type: (Sequence[RoomOption], Optional[Mapping[int, RoomFacts]], Optional[Tuple[float, float]], float, Optional[float], bool, Any, bool, Optional[float]) -> ObjectSearchState
+               blocked_since=None, frontier_exhausted=False, route_failed=False):
+        # type: (Sequence[RoomOption], Optional[Mapping[int, RoomFacts]], Optional[Tuple[float, float]], float, Optional[float], bool, Any, bool, Optional[float], bool, bool) -> ObjectSearchState
         """Advance the search by one observation.
 
         Args:
@@ -422,6 +432,16 @@ class ObjectSearchSupervisor:
                 strands the aircraft on its skids.
             blocked_since: When the follower first reported itself blocked,
                 or None if it is not.
+            frontier_exhausted: The caller's own in-room goal generator has
+                nothing reachable left and its look-around is spent. Ends a
+                :data:`SEARCH` turn at once with :data:`EXHAUSTED`; ignored
+                in every other state.
+            route_failed: The caller's planner refused the transit goal on
+                the current map. Ends a :data:`TRANSIT` turn at once with
+                :data:`UNREACHABLE` -- there is nothing to wait
+                :attr:`ObjectSearchParams.plan_grace_s` for when the answer is
+                already no. Arrival still wins if the aircraft is inside the
+                arrival tolerance. Ignored in every other state.
 
         Returns:
             The state, with the action to take on it.
@@ -450,8 +470,8 @@ class ObjectSearchSupervisor:
         if self._state == SELECT:
             return self._select(rooms, now, last_plan_s, instance)
         if self._state == TRANSIT:
-            return self._transit(xy, now, last_plan_s, blocked_since)
-        return self._search(now)
+            return self._transit(xy, now, last_plan_s, blocked_since, route_failed)
+        return self._search(now, frontier_exhausted)
 
     # -- the three working states -----------------------------------------
     def _select(self, rooms, now, last_plan_s, instance):
@@ -491,9 +511,9 @@ class ObjectSearchSupervisor:
                   prob=pick.prob, order_index=self._order_index, note=note),
             now, changed=True)
 
-    def _transit(self, xy, now, last_plan_s, blocked_since):
-        # type: (Tuple[float, float], float, Optional[float], Optional[float]) -> ObjectSearchState
-        """Hold the chosen room until arrival, a dead planner, a clock or a wedge."""
+    def _transit(self, xy, now, last_plan_s, blocked_since, route_failed=False):
+        # type: (Tuple[float, float], float, Optional[float], Optional[float], bool) -> ObjectSearchState
+        """Hold the chosen room until arrival, a refused or dead planner, a clock or a wedge."""
         params = self.params
         distance = math.hypot(self._goal_xy[0] - xy[0], self._goal_xy[1] - xy[1])
         elapsed = now - self._goal_s
@@ -512,6 +532,13 @@ class ObjectSearchSupervisor:
                            label=self._label or "?",
                            deadline_s=self._search_end_s, note=note),
                 now, changed=True)
+        if route_failed:
+            # The planner has already said no on the map as it stands; the
+            # grace window below is for a planner that has not answered yet.
+            self.stats["plan_fails"] += 1
+            return self._end_room(
+                UNREACHABLE, "R%d: planner refused a route on the current map "
+                "-- centre unreachable" % (self._room_id,), now)
         if blocked_since is not None and (now - blocked_since) > params.blocked_abandon_s:
             self.stats["blocked"] += 1
             return self._end_room(
@@ -533,8 +560,8 @@ class ObjectSearchSupervisor:
         return self._snapshot(
             Hold("flying to R%d, %.2f m to run" % (self._room_id, distance)), now)
 
-    def _search(self, now):
-        # type: (float) -> ObjectSearchState
+    def _search(self, now, frontier_exhausted=False):
+        # type: (float, bool) -> ObjectSearchState
         """Map the room under its budget, and decide when its turn is over."""
         params = self.params
         elapsed = now - self._goal_s if self._goal_s is not None else 0.0
@@ -552,6 +579,14 @@ class ObjectSearchSupervisor:
             else:
                 self._clear_ticks = 0
 
+        # The caller's verdict comes first and needs no grace: it read the
+        # live map and spent its own look-around, whereas the three exits
+        # below reason from a cluster count that lags the map.
+        if frontier_exhausted:
+            self.stats["exhausted"] += 1
+            return self._end_room(
+                EXHAUSTED, "R%d swept -- nothing reachable left to look at "
+                "after %.0f s" % (self._room_id, since_arrival), now)
         # Order matters. MAPPED is the truest verdict whenever it holds, so it
         # is tested first. BUDGET_SPENT then beats STALLED: once the clock is
         # gone the room's turn is over on the budget, and reporting a stall

@@ -5,6 +5,7 @@ entry under `entries/` when work actually starts on it.
 
 ## Now
 - [ ] Native grounded-only Gibson evaluation: three buildings, three episodes each, all videos and failures retained → `entries/009-grounded-vlm-gibson-evaluation.md`
+- [ ] ObjectNav exploration efficiency: no redundant spinning, no route-interrupting camera inspections, frontiers ranked by worth → `entries/010-objnav-exploration-efficiency.md`
 - [ ] FALCON BEV click-to-fly for Rooster/Sphera, end-to-end and reliable → `entries/001-falcon-rooster-clickfly.md`
 - [ ] Move every Rooster node still running on the bare host into `robotican_dev`/`theagency:robotican` → `entries/002-rooster-full-containerize.md`
 - [ ] Incoming updated FALCON/planning drop from the user — integrate and re-verify → `entries/003-falcon-planning-update.md`
