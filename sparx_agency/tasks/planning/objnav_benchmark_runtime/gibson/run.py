@@ -19,6 +19,7 @@ from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
 
@@ -42,8 +43,7 @@ def parser():
     p.add_argument("--agent", choices=("rpt", "stop"), default="rpt")
     p.add_argument("--policy-config", type=Path)
     p.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
-    p.add_argument("--detector-backend", choices=("yolo_world", "llmdet"), default=None)
-    p.add_argument("--detector-url", default="http://127.0.0.1:8092")
+    add_detector_options(p, url_default="http://127.0.0.1:8092")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--gpu-device", type=int, default=0)
     p.add_argument("--limit", type=int)
@@ -120,7 +120,8 @@ def _method(args):
     config.seed = args.seed
     client = VerifiedLLMClient(LLMClient(config))
     detector = HttpDetector(public_service_url(args.detector_url), gibson_label_mapper().vocabulary(),
-                            expected_backend=args.detector_backend)
+                            expected_backend=args.detector_backend,
+                            timeout_s=getattr(args, "detector_timeout_s", 30.0))
     problems, identities = [], {}
     for name, service in (("LLM", client), ("detector", detector)):
         try:
@@ -136,7 +137,8 @@ def _method(args):
     info = policy.configuration()
     llm = asdict(config)
     llm.pop("api_key", None)
-    info.update(llm=llm, llm_identity=identities["LLM"], detector=identities["detector"], detector_url=args.detector_url)
+    info.update(llm=llm, llm_identity=identities["LLM"], detector=identities["detector"],
+                detector_url=args.detector_url, detector_timeout_s=detector.timeout_s)
     return policy, info
 
 

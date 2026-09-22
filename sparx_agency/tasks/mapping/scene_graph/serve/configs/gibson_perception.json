@@ -1,0 +1,20 @@
+{
+  "backend": "hybrid",
+  "grounding_model": "~/models/objnav/grounding-dino-base",
+  "blip2_model": "~/models/objnav/blip2-flan-t5-xl",
+  "yolo_model": "~/models/objnav/yolov8x-worldv2.pt",
+  "clip_model": "~/models/objnav/clip/ViT-B-32.pt",
+  "device": "cpu",
+  "dtype": "float32",
+  "host": "127.0.0.1",
+  "port": 18100,
+  "torch_threads": 4,
+  "conf": 0.05,
+  "max_det": 100,
+  "verify_labels": "*",
+  "max_verifications": 8,
+  "verification_iou": 0.6,
+  "blip2_max_tokens": 12,
+  "classes": "chair,couch,sofa,potted plant,bed,toilet,tv,television,dining table,oven,sink,refrigerator,book,clock,vase,cup,bottle,door,doorway,open doorway,door frame,cabinet,desk,shower,stairs,staircase"
+}
+

@@ -18,6 +18,7 @@ will subclass the same ABC; the engine-build tooling belongs under
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -45,6 +46,7 @@ class YoloWorldConfig:
     iou_thresh: float = 0.5
     imgsz: int = 640
     max_det: int = 100
+    clip_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not str(self.model_path).strip():
@@ -55,6 +57,8 @@ class YoloWorldConfig:
             raise ValueError("iou_thresh must be in [0, 1].")
         if int(self.imgsz) <= 0:
             raise ValueError("imgsz must be > 0.")
+        if self.clip_path is not None and not self.clip_path.strip():
+            raise ValueError("clip_path must be a non-empty local checkpoint path")
 
 
 class YoloWorldDetector(DetectionModel):
@@ -140,6 +144,8 @@ class YoloWorldDetector(DetectionModel):
         """Load YOLO-World on first use; raises loudly if ultralytics is absent."""
         if self._model is not None:
             return self._model
+        if self.cfg.clip_path is not None and not Path(self.cfg.clip_path).expanduser().is_file():
+            raise FileNotFoundError("Local CLIP checkpoint missing: %s" % self.cfg.clip_path)
         try:
             from ultralytics import YOLOWorld  # lazy: heavy torch dep
         except Exception as exc:  # pragma: no cover - env-dependent
@@ -149,6 +155,11 @@ class YoloWorldDetector(DetectionModel):
             )
         model = YOLOWorld(str(self.cfg.model_path))
         model.to(self.cfg.device)
+        if self.cfg.clip_path is not None:
+            from ultralytics.nn.text_model import CLIP
+
+            model.model.clip_model = CLIP(str(Path(self.cfg.clip_path).expanduser()),
+                                         device=next(model.model.parameters()).device)
         model.set_classes(self._prompts)
         self._model = model
         return model

@@ -1,4 +1,4 @@
-"""Shared YOLO-World / LLMDet HTTP service; no ROS, lazy model imports.
+"""Selectable YOLO / grounded detection and BLIP-2 service; lazy model imports.
 
 Threaded requests share one serialized detector. GET /health returns model,
 device, classes, metadata and frames_served. POST /detect accepts JPEG bytes
@@ -14,6 +14,8 @@ is no checkpoint substitution or CPU fallback. --selftest needs no model.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
+import hashlib
 import json
 import resource
 import time
@@ -26,13 +28,10 @@ import numpy as np
 
 from sparx_agency.core.common.types.perception import Detection2D
 from sparx_agency.core.mapping.interfaces.detection_model import DetectionModel
-from sparx_agency.core.mapping.detection.registry import default_detection_registry
-from sparx_agency.core.mapping.detection.yolo_world import YoloWorldConfig
 from sparx_agency.tasks.mapping.scene_graph.serve.backends import (
     build_detector, refresh_vocabulary_metadata)
+from sparx_agency.tasks.mapping.scene_graph.serve.detector_args import parse_args
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import (
-    DEFAULT_HOSPITAL_VOCABULARY,
-    DEFAULT_PORT,
     DetectionWire,
     decode_frame,
     detections_to_json,
@@ -123,13 +122,16 @@ class _DetectionHandler(BaseHTTPRequestHandler):
 
     def _handle_detect(self) -> None:
         ctx = self.server.ctx  # type: ignore[attr-defined]
-        bgr = decode_frame(self._read_body())
+        body = self._read_body()
+        bgr = decode_frame(body)
         rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         t0 = time.perf_counter()
         with ctx.lock:
             dets = ctx.detector.detect(rgb)
             classes = list(ctx.classes)
             metadata = dict(ctx.metadata)
+            diagnostics = (deepcopy(ctx.detector.diagnostics())
+                           if hasattr(ctx.detector, "diagnostics") else {})
             ctx.frames_served += 1
         self._send_json({
             "w": int(bgr.shape[1]), "h": int(bgr.shape[0]),
@@ -137,6 +139,8 @@ class _DetectionHandler(BaseHTTPRequestHandler):
             "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
             "classes": classes, "metadata": metadata,
             "detections": detections_to_json(_wire_from_core(dets)),
+            "diagnostics": diagnostics,
+            "request_sha256": hashlib.sha256(body).hexdigest(),
         })
 
     def _handle_set_classes(self) -> None:
@@ -187,47 +191,6 @@ def _parse_classes(spec: str) -> List[str]:
     return classes
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--backend", choices=default_detection_registry().names(),
-                   default="yolo_world", help="Detector backend (default: YOLO-World X-v2)")
-    p.add_argument("--model", default=None,
-                   help="Local checkpoint; YOLO defaults to %s in the working directory; "
-                        "LLMDet requires an explicit HF snapshot directory" % YoloWorldConfig().model_path)
-    p.add_argument("--device", default="cuda:0",
-                   help="Torch device (default cuda:0; pass cpu explicitly "
-                        "for a CPU run)")
-    p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT)
-    p.add_argument("--conf", type=float, default=None,
-                   help="Required for LLMDet; YOLO default 0.25. Downstream filters again")
-    p.add_argument("--imgsz", type=int, default=640, help="YOLO input size")
-    p.add_argument("--iou", type=float, default=0.5, help="YOLO NMS IoU")
-    p.add_argument("--shortest-edge", type=int, default=800, help="LLMDet resize short edge")
-    p.add_argument("--longest-edge", type=int, default=1333, help="LLMDet resize long edge cap")
-    p.add_argument("--chunk-size", type=int, default=80, help="LLMDet categories per caption at most")
-    p.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
-    p.add_argument("--max-det", type=int, default=100)
-    p.add_argument("--torch-threads", type=int, default=None, help="Explicit CPU intra-op thread count")
-    p.add_argument("--classes", default=",".join(DEFAULT_HOSPITAL_VOCABULARY),
-                   help="Comma-separated vocabulary (default: the hospital list)")
-    p.add_argument("--selftest", action="store_true",
-                   help="Exercise request routing against a stub detector "
-                        "(no model, no torch) and exit")
-    args = p.parse_args(argv)
-    if args.model is None:
-        if args.backend == "yolo_world":
-            args.model = YoloWorldConfig().model_path
-        elif not args.selftest:
-            p.error("--model is required for LLMDet")
-    elif not args.model.strip():
-        p.error("--model must be a non-empty local checkpoint path")
-    if args.conf is None:
-        if args.backend == "llmdet" and not args.selftest:
-            p.error("--conf is required for LLMDet; do not inherit YOLO thresholds")
-        args.conf = 0.25
-    return args
 
 
 def main() -> None:

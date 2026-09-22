@@ -11,6 +11,30 @@ Format per entry:
 
 ---
 
+## 2026-09-22 — Grounding DINO shared-head loading can look clean but substitute tensors
+
+**Symptom:** Transformers 5.17.0 reported no missing/unexpected weights for the
+official Grounding DINO Base snapshot, but direct comparison found a saved
+decoder bias had been substituted. Reusing LLMDet's independent-head alias fix
+then left thirty decoder parameters on the meta device, failing on `.to(cpu)`.
+
+**Root cause:** This snapshot saves only `model.decoder.bbox_embed.0` (six
+tensors), with shared decoder heads. Upstream's chained alias map can use the
+unsaved `bbox_embed.0` as canonical. LLMDet's distinct-head layout is different;
+its loader correction is not transferable unchanged.
+
+**Fix / workaround:** A local Grounding DINO subclass maps all decoder/output
+aliases directly to the saved head. Validate that exact checkpoint layout,
+compare the six saved tensors with loaded values, and reject any remaining meta
+parameters/buffers before serving. The upstream architecture/forward and model
+weights are unchanged. Real CPU inference and HTTP mode smokes passed.
+
+**Don't:** Do not trust an empty loading-info report alone, initialize missing
+learned parameters randomly, call `to_empty()` to conceal the defect, or apply
+the independent-head LLMDet correction to a shared-head model.
+
+---
+
 ## 2026-07-29 — new detector container: numpy/CLIP/TensorRT-version traps, in sequence
 
 **Symptom:** Building `docker/Dockerfile.detector` (torch + ultralytics on top of the

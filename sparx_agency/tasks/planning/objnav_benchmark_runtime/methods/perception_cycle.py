@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 import math
 import time
 import numpy as np
@@ -18,6 +19,7 @@ class PerceptionCycle:
         self.raw = self.detections = ()
         self.projections = []
         self.counts = Counter()
+        self.detector_evidence = {}
 
     def observe(self, obs):
         """Exactly one synchronous prediction for this RGB/depth/pose tuple."""
@@ -26,6 +28,7 @@ class PerceptionCycle:
         p = self.policy
         started = time.monotonic()
         self.raw = tuple(p.detector.detect(obs.rgb))
+        self.detector_evidence = deepcopy(getattr(p.detector, "last_diagnostics", {}))
         p.telemetry.latencies["detector_http"].append((time.monotonic() - started) * 1000)
         self.step = obs.step
         self.detections = tuple(deduplicate_detections(self.raw))
@@ -107,5 +110,6 @@ class PerceptionCycle:
         return None if np.count_nonzero(patch == world.values.free) >= 3 else "unobserved_floor_support"
 
     def diagnostics(self):
-        return {"observation_step": self.step, "counts": dict(self.counts), "projections": list(self.projections)}
+        return {"observation_step": self.step, "counts": dict(self.counts),
+                "projections": list(self.projections), "detector_evidence": self.detector_evidence}
 

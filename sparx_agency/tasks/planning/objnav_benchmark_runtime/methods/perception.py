@@ -1,6 +1,7 @@
 """Detector provenance and coherent RGB-D object projection."""
 from __future__ import annotations
 
+import hashlib
 import math
 import numpy as np
 import requests
@@ -19,11 +20,14 @@ class HttpDetector:
     def __init__(self, url, vocabulary, timeout_s=30.0, expected_backend=None):
         self.url = url.rstrip("/")
         self.vocabulary = tuple(vocabulary)
-        self.timeout_s = timeout_s
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("Detector timeout must be finite and positive")
+        self.timeout_s = float(timeout_s)
         self.expected_backend = expected_backend
         self.session = requests.Session()
         self._identity = None
         self.last_detections = ()
+        self.last_diagnostics = {}
         self.last_inference_ms = None
         self.last_peak_rss_mib = None
 
@@ -45,6 +49,7 @@ class HttpDetector:
         return identity
 
     def detect(self, rgb):
+        self.last_detections, self.last_diagnostics = (), {}
         try:
             self.health()
             body = encode_frame(np.ascontiguousarray(rgb[..., ::-1]))
@@ -56,12 +61,20 @@ class HttpDetector:
                 raise ValueError("Detector boxes do not refer to the submitted frame")
             if tuple(data.get("classes", ())) != self.vocabulary or data.get("metadata") != self._identity["metadata"]:
                 raise ValueError("Detector was reconfigured during inference")
+            request_hash = data.get("request_sha256")
+            verified = self._identity["metadata"].get("backend") in ("grounded_vlm", "hybrid")
+            if (verified or request_hash is not None) and request_hash != hashlib.sha256(body).hexdigest():
+                raise ValueError("Detector verification belongs to a different submitted frame")
+            diagnostics = data.get("diagnostics", {})
+            if not isinstance(diagnostics, dict) or (verified and diagnostics.get("mode") != self._identity["metadata"]["backend"]):
+                raise ValueError("Invalid detector verification diagnostics")
             detections = detections_from_json(data["detections"])
             for detection in detections:
                 if (detection.cls not in self.vocabulary or not math.isfinite(detection.conf)
                         or not 0 <= detection.conf <= 1 or not all(math.isfinite(v) for v in detection.xyxy)):
                     raise ValueError("Invalid detection or unexpected vocabulary")
             self.last_detections = tuple(detections)
+            self.last_diagnostics = dict(diagnostics, request_sha256=request_hash) if diagnostics else {}
             self.last_inference_ms = data.get("ms")
             self.last_peak_rss_mib = data.get("peak_rss_mib")
             return detections

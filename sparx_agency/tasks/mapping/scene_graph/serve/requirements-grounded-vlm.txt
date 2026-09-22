@@ -1,0 +1,6 @@
+# Dedicated model environment only. Supply device-matched torch/torchvision first.
+-r requirements-llmdet.txt
+sentencepiece==0.2.1
+pillow==12.3.0
+ultralytics==8.4.110
+clip @ git+https://github.com/ultralytics/CLIP.git@a13192f8cb767260d7dfd98c843b0716593169e7

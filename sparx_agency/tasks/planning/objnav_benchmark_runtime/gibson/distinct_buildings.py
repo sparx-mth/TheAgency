@@ -19,6 +19,7 @@ from sparx_agency.tasks.planning.objnav_benchmark.aggregate import paired_compar
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.compare_explorers import summarize
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.development_dataset import SCHEMA, SPLIT
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options, detector_flags
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_SCHEMA
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import source_fingerprint
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import run_development
@@ -38,12 +39,14 @@ def jobs_for(scenes, explorers=("frontier", "falcon")):
 def command_for(args, backend, scene):
     command = ["--manifest", str(args.manifest.resolve()), "--scene", scene,
                "--output", str(args.output / backend / scene), "--explorer", backend,
-               "--seed", str(args.seed), "--record", "--video-fps", str(args.video_fps),
-               "--detector-url", args.detector_url, "--detector-backend", args.detector_backend]
+               "--seed", str(args.seed), "--record", "--video-fps", str(args.video_fps)]
+    command += detector_flags(args)
     if getattr(args, "record_first", False):
         command.append("--record-first")
     if args.allow_sim_version_mismatch:
         command.append("--allow-sim-version-mismatch")
+    if getattr(args, "allow_shared_gpu", False):
+        command.append("--allow-shared-gpu")
     if args.policy_config:
         command += ["--policy-config", str(args.policy_config)]
     return command
@@ -131,17 +134,21 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--detector-url", required=True)
-    parser.add_argument("--detector-backend", choices=("yolo_world", "llmdet"), required=True)
+    add_detector_options(parser, required=True)
+    parser.add_argument("--job-timeout-s", type=int, default=3600)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--video-fps", type=int, default=6)
     parser.add_argument("--policy-config", type=Path)
     parser.add_argument("--explorers", nargs="+", choices=("frontier", "falcon"), default=["frontier", "falcon"])
     parser.add_argument("--record-first", action="store_true")
     parser.add_argument("--allow-sim-version-mismatch", action="store_true")
+    parser.add_argument("--allow-shared-gpu", action="store_true",
+                        help="Explicit operator authorization; forwarded into every preflight and frozen job")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--summarize-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.job_timeout_s <= 0:
+        parser.error("--job-timeout-s must be positive")
     data = json.loads(args.manifest.read_text())
     if data.get("schema") not in (SCHEMA, MULTIFLOOR_SCHEMA) or len(data["scenes"]) != len(set(data["scenes"])):
         raise ValueError("Need a distinct-building generated training manifest")
@@ -173,7 +180,7 @@ def main(argv=None):
         print("%d/%d %s %s" % (number, len(jobs), backend, scene), flush=True)
         (args.output / "progress.json").write_text(json.dumps({"job": number, "total": len(jobs), "explorer": backend, "scene": scene}))
         with (destination / "console.log").open("a") as stream:
-            subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=3600)
+            subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=args.job_timeout_s)
     finish(args.output, data)
     print("Recordings and results:", args.output / "index.html", flush=True)
 

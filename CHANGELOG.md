@@ -16,6 +16,17 @@ future-you, not for a commit log.
   despite being reported installed (corrupted/interrupted earlier install). See LESSONS.md.
 
 ### Added
+- Explicit, default-off shared-GPU authorization for the detector and frozen
+  Gibson development campaigns; records the permission in model/run identity
+  without changing navigation, scoring, CUDA checks or the detector memory cap.
+  See `docs/progress/entries/009-grounded-vlm-gibson-evaluation.md`.
+- Selectable Gibson perception modes: YOLO only, Grounding DINO Base + BLIP-2
+  FLAN-T5 XL, or all three. One JSON `backend` setting controls model loading;
+  raw/verified frame evidence is recorded without changing depth, floor or STOP
+  safeguards. Added pinned/checksummed offline weight provisioning, explicit
+  local CLIP loading, bounded verification and forwarded detector timeouts.
+  See `docs/progress/entries/008-grounded-vlm-perception.md`; native staircase
+  accuracy is not yet established.
 - New `detector` container (`docker/Dockerfile.detector`, `bake.hcl` sibling target off
   `perception`, `docker-compose.detector.yml`, started persistently as `detector_dev`) running
   the YOLO-World detector sidecar — torch/ultralytics/CLIP kept out of `perception`/`robotican`

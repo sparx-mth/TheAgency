@@ -103,16 +103,21 @@ def test_validation_maps_cannot_be_relabeled_training(tmp_path):
         load_training_maps(path)
 
 
-def test_each_building_has_both_recorded_jobs_with_fixed_action_protocol(tmp_path):
+@pytest.mark.parametrize("shared", [False, True])
+def test_each_building_has_both_recorded_jobs_with_fixed_action_protocol(tmp_path, shared):
     jobs = jobs_for(["A", "B"])
     assert jobs == [("frontier", "A"), ("falcon", "A"), ("falcon", "B"), ("frontier", "B")]
     args = SimpleNamespace(manifest=tmp_path / "episodes.json", output=tmp_path / "out", seed=0,
                            video_fps=6, detector_url="http://127.0.0.1:18095", detector_backend="yolo_world",
-                           policy_config=None, allow_sim_version_mismatch=True)
+                           policy_config=None, allow_sim_version_mismatch=True, allow_shared_gpu=shared)
     command = command_for(args, "falcon", "A")
     assert "--record" in command and "--video-fps" in command
+    assert "--record-first" not in command
     assert "--max-steps" not in command
     assert command[command.index("--explorer") + 1] == "falcon"
+    assert ("--allow-shared-gpu" in command) is shared
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run_development import parser
+    assert parser().parse_args(command).allow_shared_gpu is shared
 
 
 def test_falcon_recording_shows_actual_phase_and_renders():
