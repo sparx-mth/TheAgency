@@ -48,9 +48,21 @@ each frame's `(path, frame_id, capture instant)` as JSON on a new
 `/<rooster-id>/rgb_frame_sync` topic, for the video/IMU sync module only --
 purely additive, nothing about the legacy topic changes.
 
+Runs directly on the Jetson host, same as `orin_nx_raw_flight_test.py` --
+not `robotican_dev` (no reason to pass `/dev/HD_CAMERA` through a container
+boundary here):
 ```bash
-./sparx_agency/robots/ROBOTICAN/run_rooster_v4l2_frame_publisher.sh \
+python3 sparx_agency/robots/ROBOTICAN/rooster_v4l2_frame_publisher.py \
   --rooster-id R1 --device /dev/HD_CAMERA
+```
+
+`rooster_imu_video_sync.py` consumes `rgb_frame_sync` and the FCU's
+`HIGHRES_IMU` directly over MAVLink (`/dev/FCU`), publishing an
+IMU-at-that-instant reading per frame on `/<rooster-id>/frame_imu_sync`.
+Also host-run, same reasoning:
+```bash
+python3 sparx_agency/robots/ROBOTICAN/rooster_imu_video_sync.py \
+  --rooster-id R1 --device /dev/FCU
 ```
 
 ## Where things run (read this first)
@@ -73,6 +85,7 @@ live there immediately, no rebuild/copy step).
 | `rooster_command_unit.py` | **container `it`** | needs Foxy-built custom Rooster interfaces |
 | `rooster_frame_dir_publisher.py` | host | only `std_msgs`, `rclpy`, `gi`/GStreamer |
 | `rooster_v4l2_frame_publisher.py` | new Orin-NX architecture, onboard | only `std_msgs`, `rclpy`, `cv2` -- no GStreamer |
+| `rooster_imu_video_sync.py` | new Orin-NX architecture, onboard | `std_msgs`, `rclpy`, `pymavlink` -- owns the FCU link directly |
 | `depth_processor_node.py` | host | runs DA3 on the PC's GPU |
 | `localization_node.py` | host | only `std_msgs`/`geometry_msgs` |
 | `ui.py` | host | only `std_msgs`, `rclpy` |
