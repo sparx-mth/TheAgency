@@ -1,6 +1,14 @@
 # InternVLA-N1 System 1 — TensorRT deployment runtime
 
-What flies. Numpy-only at import, Python-3.8 clean, no torch and no diffusers:
+**Status: built, validated, and not yet on any flight path.** Nothing outside
+this directory's own tests imports it. System 1 is 1.1% of the checkpoint's
+parameters but only ~4% of the wall clock of a call — System 2's autoregressive
+generate is 98.5% — so converting it does not move an episode, and the ROS2 node
+still talks to the HTTP server. What is finished here is the expensive part: the
+graphs, the parity harness and the per-engine precision selection. Read the rest
+as the design, not as what the drone did last night.
+
+What it is. Numpy-only at import, Python-3.8 clean, no torch and no diffusers:
 TensorRT and pycuda are lazy-imported by the shared
 `core/planning/vlas/common/trt/engine_runner.py`. The build tooling lives in
 `tasks/planning/vlas/internvla_n1/trt/` and is not imported from here.

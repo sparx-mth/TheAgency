@@ -19,6 +19,46 @@ import numpy as np
 from sparx_agency.core.planning.vlas.common.errors import VlaError
 
 
+def _requests():
+    """The ``requests`` module, imported on first use (see the module docstring)."""
+    import requests
+    return requests
+
+
+class Attempt:
+    """One HTTP attempt: the response if it arrived, else why it did not.
+
+    ``_post`` collapses everything that is not a 200 into ``None``, which is the
+    right answer for a policy step -- a drop and a 503 are equally "no
+    trajectory this frame". It is the wrong answer for a *session* route, where
+    201, 409 and a timeout mean three different things and only one of them is a
+    failure. Rather than give the shared client a second, subtly different
+    ``_post``, both are built on this.
+    """
+
+    __slots__ = ("response", "error")
+
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+
+    @property
+    def arrived(self):
+        """True if the server answered at all, whatever it answered."""
+        return self.response is not None
+
+    @property
+    def status(self):
+        """HTTP status, or ``None`` if nothing arrived."""
+        return None if self.response is None else self.response.status_code
+
+    def timed_out(self):
+        """True if the attempt failed specifically on a timeout."""
+        if self.error is None:
+            return False
+        return isinstance(self.error, _requests().exceptions.Timeout)
+
+
 class HttpPolicyClient:
     """Shared plumbing for a policy server client: URL, timeout, logging, POST.
 
@@ -38,12 +78,83 @@ class HttpPolicyClient:
     #: Exception raised for malformed content. Subclasses override with their own.
     error_cls = VlaError
 
-    def __init__(self, url, timeout_s=30.0, logger=None):
+    def __init__(self, url, timeout_s=30.0, logger=None, pooled=False):
         self.url = url.rstrip("/")
         self.timeout_s = float(timeout_s)
-        self._log = logger or (lambda *a, **k: None)
+        self.logger = logger
+        self._log = logger if callable(logger) else (lambda *a, **k: None)
+        self._pooled = bool(pooled)
+        self._session = None
+
+    # ── logging ──────────────────────────────────────────────────────
+    def _say(self, level, msg):
+        """Log ``msg`` at ``level``, whatever flavour of logger was handed in.
+
+        Two conventions meet here. ROS1 clients pass a bare callable
+        (``rospy.logwarn``), which is what ``self._log(fmt, *args)`` serves.
+        ROS2 clients pass a logger *object* and need severity dispatch -- and it
+        must be **one call site per severity**: ``rclpy`` caches a severity per
+        logging call site, so a single shared ``getattr(logger, level)(msg)``
+        line raises ``ValueError: Logger severity cannot be changed between
+        calls`` the first time a client logs at a second severity, out of
+        whatever callback it was in. ``rclpy``'s logger also spells it
+        ``warning``, not ``warn``, so a ``getattr`` lookup silently demotes every
+        warning to info.
+        """
+        logger = self.logger
+        if logger is None:
+            print("[%s] %s" % (level.upper(), msg))
+        elif callable(logger):
+            logger("%s", msg)
+        elif level == "error":
+            logger.error(msg)
+        elif level in ("warn", "warning"):
+            logger.warning(msg)
+        elif level == "debug":
+            logger.debug(msg)
+        else:
+            logger.info(msg)
 
     # ── transport ────────────────────────────────────────────────────
+    def _transport(self):
+        """The object requests are issued through: a pooled session, or the module.
+
+        Pooling is opt-in because it is a real behaviour change on a live flight
+        path (connection reuse, keep-alive) and the ROS1 clients have flown
+        without it for a long time. A client posting a large payload several
+        times a second -- N1 base64s a pickled observation -- asks for it.
+        """
+        if not self._pooled:
+            return _requests()
+        if self._session is None:
+            self._session = _requests().Session()
+        return self._session
+
+    def _attempt(self, method, route, what, timeout_s=None, quiet=False, **kwargs):
+        """Issue one request and report what happened, without judging it.
+
+        Args:
+            method: ``"get"`` or ``"post"``.
+            route: path beginning with ``/``.
+            what: short label for the log line.
+            timeout_s: per-call override; defaults to the client's timeout.
+            quiet: do not log a transport failure (the caller expects them).
+            **kwargs: forwarded to ``requests`` (``json``/``files``/``data``).
+
+        Returns:
+            An :class:`Attempt`. A non-200 is *not* a failure here -- see the
+            class docstring.
+        """
+        timeout = self.timeout_s if timeout_s is None else float(timeout_s)
+        try:
+            r = getattr(self._transport(), method)(
+                self.url + route, timeout=timeout, **kwargs)
+        except Exception as e:                       # noqa: BLE001
+            if not quiet:
+                self._log("%s %s failed: %s", self.name(), what, e)
+            return Attempt(error=e)
+        return Attempt(response=r)
+
     def _post(self, route, what, **kwargs):
         """POST to ``<url><route>``; return the ``requests`` response or ``None``.
 
@@ -55,17 +166,23 @@ class HttpPolicyClient:
         Returns:
             The response on HTTP 200, else ``None`` (a warning is logged).
         """
-        import requests
+        attempt = self._attempt("post", route, what, **kwargs)
+        if not attempt.arrived:
+            return None
+        if attempt.status != 200:
+            self._log("%s %s HTTP %s", self.name(), what, attempt.status)
+            return None
+        return attempt.response
 
-        try:
-            r = requests.post(self.url + route, timeout=self.timeout_s, **kwargs)
-        except Exception as e:                       # noqa: BLE001
-            self._log("%s %s failed: %s", self.name(), what, e)
+    def _get(self, route, what, **kwargs):
+        """GET ``<url><route>``; return the response on HTTP 200, else ``None``."""
+        attempt = self._attempt("get", route, what, **kwargs)
+        if not attempt.arrived:
             return None
-        if r.status_code != 200:
-            self._log("%s %s HTTP %s", self.name(), what, r.status_code)
+        if attempt.status != 200:
+            self._log("%s %s HTTP %s", self.name(), what, attempt.status)
             return None
-        return r
+        return attempt.response
 
     def _post_json(self, route, what, **kwargs):
         """:meth:`_post` then ``.json()``; ``None`` on transport or decode failure."""

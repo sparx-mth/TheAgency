@@ -428,6 +428,32 @@
        "climbing would not clear it either at 1.25 m". -->
   <arg name="escape_climb_ceiling_margin_m" default="0.0" />
 
+  <!-- ── Handing the aircraft over: the cmd_vel mute ──────────────────────
+       This follower writes a twist on EVERY tick in EVERY state, so a second
+       node cannot simply start publishing cmd_vel too: that is not a hand-off,
+       it is two writers at 50 Hz and the last one wins. A node that wants to
+       fly the aircraft itself — today, the scene-graph task's final approach
+       onto a found target, from ROS 2 over ros1_bridge — latches `true` here
+       and the follower goes silent; `false`, or an expired claim, gives it
+       back.
+
+       Nothing in the exploration stack publishes this topic, so by default the
+       follower never receives a message and behaves exactly as it did before
+       the flag existed.
+
+       The timeout is the reason this is a LEASE and not a switch. The claimant
+       lives in another process, in another container, on the far side of a
+       bridge; if it dies while the latch reads `true`, the last value is all
+       that survives and the aircraft would hang there, muted, for the rest of
+       the run. So the claimant must REPUBLISH `true` as a heartbeat (1 Hz is
+       the contract, and any period comfortably under a third of this timeout
+       is safe); after this many seconds without one the follower logs a
+       warning and takes the aircraft back. 0 disables the watchdog and
+       restores a plain latch — only for a claimant that can prove it cannot
+       outlive its own flag. -->
+  <arg name="external_ctrl_topic"     default="/scene_graph/external_ctrl" />
+  <arg name="external_ctrl_timeout_s" default="5.0" />
+
   <!-- ── camera model FALCON maps with (corrected; see the header) ── -->
   <param name="/uav_model/sensing_parameters/camera_intrinsics/fx" value="390.6427" />
   <param name="/uav_model/sensing_parameters/camera_intrinsics/fy" value="390.6427" />
@@ -531,5 +557,7 @@
     <param name="jam_move_m"          value="$(arg jam_move_m)" />
     <param name="escape_climb_ceiling_margin_m"
            value="$(arg escape_climb_ceiling_margin_m)" />
+    <param name="external_ctrl_topic"     value="$(arg external_ctrl_topic)" />
+    <param name="external_ctrl_timeout_s" value="$(arg external_ctrl_timeout_s)" />
   </node>
 </launch>

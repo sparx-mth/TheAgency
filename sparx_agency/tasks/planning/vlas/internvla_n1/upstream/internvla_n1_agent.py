@@ -35,6 +35,23 @@ class InternVLAN1Agent(Agent):
         self.device = torch.device(self._model_settings.device)
         self.mode = getattr(self._model_settings, 'infer_mode', 'sync')
         self.sys2_max_forward_step = getattr(self._model_settings, 'sys2_max_forward_step', 8)
+        # PATCH 7: fly the CURVE, not a discretisation of the curve you already
+        # gave away. See the branch at the end of step() for what it changes and
+        # why. Off by default so this file still behaves like upstream unless a
+        # client asks for it on /agent/init.
+        self.sys1_continuous_only = getattr(self._model_settings, 'sys1_continuous_only', False)
+        # PATCH 8: one turn per look. See the discrete branch in step().
+        self.sys2_one_turn_per_look = getattr(self._model_settings, 'sys2_one_turn_per_look', False)
+        # SAY WHICH PATCHES ARE LIVE. `/agent/init` against an agent that
+        # already exists is a server-side no-op, so a settings change reaches a
+        # running server and is silently ignored -- and the flight then behaves
+        # like a configuration no file on disk describes. This line is the only
+        # place that says what the agent was actually built with. It cost two
+        # rounds of misdiagnosis to learn that; one print is cheap.
+        print('[PATCHES] sys1_continuous_only=%r sys2_one_turn_per_look=%r '
+              'sys2_max_forward_step=%r' % (self.sys1_continuous_only,
+                                            self.sys2_one_turn_per_look,
+                                            self.sys2_max_forward_step), flush=True)
 
         policy = get_policy(self._model_settings.policy_name)
         policy_config = get_config(self._model_settings.policy_name)
@@ -341,6 +358,33 @@ class InternVLAN1Agent(Agent):
                 self.sys1_infer_times = 0
             else:
                 self.look_down = False
+                # PATCH 8: ONE TURN PER LOOK.
+                #
+                # System 2 answers a frame it cannot name a waypoint in with a
+                # BATCH of turns -- `→→→→`, four right turns, 60 degrees -- and
+                # upstream returns them one per step without looking again. That
+                # is open-loop rotation on a single observation: by the third
+                # arrow the thing it was turning toward has swung past the
+                # centre of the frame, so the next batch is `←←←←` and the
+                # aircraft hunts. Measured in the hospital: 12 right turns and
+                # 11 left turns in one flight, and a doorway 27 degrees off the
+                # nose never entered in ten runs.
+                #
+                # Dropping the rest of the batch after the first turn forces
+                # `should_infer_s2` to re-run System 2 on the frame the aircraft
+                # can actually see now. A turn is the one action that invalidates
+                # its own observation, which is why this applies to turns and not
+                # to a queued forward step: rotating changes what is in view,
+                # advancing barely changes the bearing to it.
+                #
+                # It costs a System-2 pass per 15 degrees. That is the price of
+                # closing the loop on the axis that decides where the camera
+                # points.
+                if self.sys2_one_turn_per_look and output['action'][0] in (2, 3):
+                    with self.s2_output_lock:
+                        self.s2_output.output_action = None
+                        self.s2_output.output_latent = None
+                        self.s2_output.output_pixel = None
                 if self.sys1_infer_times > 0:
                     self.dual_forward_step += 1
 
@@ -395,7 +439,35 @@ class InternVLAN1Agent(Agent):
             else:
                 output['action'] = [self.s1_output.idx[0]]
             with self.s2_output_lock:
-                if len(self.s1_output.idx) > 1:
+                if self.sys1_continuous_only and self._current_trajectory is not None:
+                    # PATCH 7: DO NOT QUEUE THE DISCRETISATION OF A CURVE THAT
+                    # HAS ALREADY BEEN HANDED OUT.
+                    #
+                    # `self.s1_output.idx` and `self._current_trajectory` are the
+                    # same prediction twice: `traj_to_actions` turns one set of
+                    # `dp_actions` into a continuous path and into the list of
+                    # 0.25 m / 15 deg steps that approximates it. Upstream
+                    # returns idx[0] now and queues idx[1:] to be returned over
+                    # the next three calls, which is correct for a client that
+                    # only speaks the discrete alphabet.
+                    #
+                    # A client flying the CURVE has already covered that ground
+                    # by the time it asks again. Draining the queue then makes
+                    # it fly the first metre of the same prediction a second
+                    # time, in 0.25 m pieces -- and, because those queued steps
+                    # carry no trajectory, three quarters of its decisions are
+                    # discrete even though System 1 ran for every one of them.
+                    # Measured over a ninety-second hospital flight: 18 of 22
+                    # committed routes were 0.25 m stubs.
+                    #
+                    # Dropping the queue makes the next call re-run System 1 on
+                    # the CURRENT frame against the same System-2 latent, which
+                    # is a fresh curve rather than a stale approximation of the
+                    # last one. It also changes what `sys2_max_forward_step`
+                    # counts -- System 1 runs, not executed action steps -- so a
+                    # client turning this on should lower it.
+                    self.s2_output.output_action = None
+                elif len(self.s1_output.idx) > 1:
                     self.s2_output.output_action = self.s1_output.idx[1:]
                     if self.s2_output.output_action == []:
                         self.s2_output.output_action = None
@@ -455,17 +527,26 @@ class InternVLAN1Agent(Agent):
         # PATCH 4/4: Include pixel_goal in return value for HTTP response
         # PATCH 5/5: ...and S1's continuous trajectory, so a trajectory follower
         # can fly the curve instead of the discrete action.
+        # PATCH 6/6: say when a LOOK-DOWN has been requested. The action index
+        # cannot carry it: the branch above overwrites action 5 with -1, and -1
+        # is also what an empty System-1 list reports, so on the wire the two
+        # are indistinguishable. A client that wants to actually PERFORM the
+        # look-down -- the model expects the next frame to be a lower view, and
+        # its pixel goal is computed in that frame -- has to be told which one
+        # it is.
         if 'action' in output:
             return [{'action': output['action'], 'ideal_flag': True,
                      'pixel_goal': self._current_pixel_goal,
                      'pixel_goal_step': self._pixel_goal_step,
                      'trajectory': self._current_trajectory,
+                     'look_down': bool(self.look_down),
                      's1_ms': self._last_s1_ms, 's2_ms': self._last_s2_ms}]
         elif 'velocity' in output:
             return [{'action': output['velocity'], 'ideal_flag': False,
                      'pixel_goal': self._current_pixel_goal,
                      'pixel_goal_step': self._pixel_goal_step,
                      'trajectory': self._current_trajectory,
+                     'look_down': bool(self.look_down),
                      's1_ms': self._last_s1_ms, 's2_ms': self._last_s2_ms}]
         else:
             assert False

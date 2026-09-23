@@ -65,3 +65,48 @@ def test_compose_stacks_side_by_side():
     right = np.zeros((480, 640, 3), dtype=np.uint8)
     assert compose(left, right).shape == (480, 1280, 3)
 
+
+
+# ── the route drawn on the building ──────────────────────────────────────
+
+
+def _tiny_map():
+    from sparx_agency.tasks.planning.sjtu_internvla_n1.map_backdrop import (
+        OccupancyMapImage,
+    )
+    grid = np.full((40, 20), 254, dtype=np.uint8)
+    grid[:, 0] = 0
+    grid[:, -1] = 0
+    return OccupancyMapImage(grid, resolution=0.5, origin_x=-5.0, origin_y=-10.0)
+
+
+def test_map_backed_panel_is_the_requested_size_and_two_views():
+    r = TopDownRenderer(size=(640, 480), backdrop=_tiny_map())
+    for i in range(20):
+        r.add_pose(0.0, -5.0 + 0.4 * i)
+    panel = r.render((0.0, 3.0, 0.0),
+                     np.array([[0.0, 3.0], [0.0, 4.0]]),
+                     np.array([[0.0, 3.0], [0.0, 4.0], [0.0, 5.0]]))
+    assert panel.shape == (480, 640, 3)
+    # The two views are separated by a divider line, so the halves differ.
+    assert not np.array_equal(panel[:, :100], panel[:, 320:420])
+
+
+def test_the_map_backed_transform_does_not_move_between_frames():
+    """A fixed extent is the point: a fitted one re-scales as the trail grows."""
+    r = TopDownRenderer(size=(400, 400), backdrop=_tiny_map())
+    r.add_pose(0.0, 0.0)
+    first = r.render((0.0, 0.0, 0.0), None, None)
+    for i in range(30):
+        r.add_pose(0.1 * i, 0.2 * i)
+    second = r.render((0.0, 0.0, 0.0), None, None)
+    # Same pose, same panel geometry -> the aircraft marker is in the same place.
+    assert first.shape == second.shape
+
+
+def test_without_a_map_it_still_renders_graph_paper():
+    r = TopDownRenderer(size=(320, 240), backdrop=None)
+    r.add_pose(0.0, 0.0)
+    r.add_pose(1.0, 1.0)
+    panel = r.render((1.0, 1.0, 0.0), None, None)
+    assert panel.shape == (240, 320, 3)

@@ -29,7 +29,11 @@ from cv_bridge import CvBridge
 # The model contract (wire protocol + action vocabulary) is ROS-free and lives in
 # core; only the ROS plumbing and the YAML loader are local to this package.
 from sparx_agency.core.planning.vlas.internvla_n1.client import ModelClient
-from sparx_agency.core.planning.vlas.internvla_n1.types import ActionType, BridgeState
+from sparx_agency.core.planning.vlas.internvla_n1.types import (
+    NON_TERMINAL_IDLE_INDICES,
+    ActionType,
+    BridgeState,
+)
 
 from .config import load_config
 
@@ -380,15 +384,26 @@ class InternNavBridge(Node):
         return payload
 
     def _process_result(self, result):
+        action = self._action_from_result(result)
         action_str = result.action
-        action = self._parse_action(action_str)
         outputs = self.config['outputs']
+
+        # -1 (NO_ACTION) and 5 (LOOK_DOWN) are not decisions. The agent emits
+        # them while System 2 tilts the camera and whenever System 1 returns an
+        # empty action list, and they mean "ask me again", not "the task is
+        # done". Acting on them -- which is what any unknown-index-to-STOP
+        # fallback does -- brakes the robot mid-route and, under manual control,
+        # actually sends STOP's axes, because that is the action_mapping entry
+        # the lookup falls back to. Measured over five hospital flights:
+        # System 2 said STOP zero times, the agent emitted -1 seventeen times.
+        idle = result.action_index in NON_TERMINAL_IDLE_INDICES
 
         if action == ActionType.STOP:
             self.consecutive_stops += 1
-        else:
+        elif not idle:
             self.consecutive_stops = 0
-        self.last_action = action
+        if not idle:
+            self.last_action = action
         self.inference_step += 1
         step = self.inference_step
 
@@ -406,7 +421,9 @@ class InternNavBridge(Node):
             wp_str = f"goal=({wp[0]},{wp[1]})" if wp else "goal=none"
             self.get_logger().info(f"[step {step}] {mapped} | {wp_str} [{mode}]")
 
-        if self.rooster is not None and outputs.get('manual_control', {}).get('enabled'):
+        if idle:
+            pass    # No decision to actuate; whatever is already running stands.
+        elif self.rooster is not None and outputs.get('manual_control', {}).get('enabled'):
             if not self.rooster.armed:
                 self.rooster.request_arm()
                 return
@@ -427,7 +444,8 @@ class InternNavBridge(Node):
         # --- Publish S2 waypoint and annotated image ---
         self._publish_waypoint(result)
 
-        self._publish_status("paused" if action == ActionType.STOP else "navigating")
+        if not idle:
+            self._publish_status("paused" if action == ActionType.STOP else "navigating")
 
     def _execute_manual_control_action(self, action: ActionType):
         mc_cfg = self.config['outputs']['manual_control']
@@ -454,18 +472,21 @@ class InternNavBridge(Node):
         self.get_logger().info(
             f"Exec {action.value}: x={axes.x}, z={axes.z}, r={axes.r} for {duration:.2f}s")
 
-    def _parse_action(self, action_str: str) -> ActionType:
-        upper = action_str.upper().strip()
-        for at in ActionType:
-            if at.value in upper:
-                return at
-        if 'FORWARD' in upper:
-            return ActionType.MOVE_FORWARD
-        if 'LEFT' in upper:
-            return ActionType.TURN_LEFT
-        if 'RIGHT' in upper:
-            return ActionType.TURN_RIGHT
-        return ActionType.STOP if 'STOP' in upper or 'DONE' in upper else ActionType.UNKNOWN
+    @staticmethod
+    def _action_from_result(result) -> ActionType:
+        """The action the server chose, off the index ``ModelClient`` decoded.
+
+        ``ModelClient._parse_response`` has already turned the wire's action
+        index into an :class:`ActionType` name via ``INDEX_TO_ACTION``, or into
+        ``"UNKNOWN"`` when the index is one it has never heard of. Re-deriving
+        it here by matching substrings of that name only creates a second,
+        looser vocabulary that can disagree with the first -- and the disagreement
+        lands on STOP, which is the one answer that ends a run.
+        """
+        try:
+            return ActionType(result.action)
+        except ValueError:
+            return ActionType.UNKNOWN
 
     def _publish_velocity(self, action: ActionType):
         cfg = self.config['outputs']['continuous']

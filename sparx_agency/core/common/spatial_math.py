@@ -3,6 +3,7 @@ import math
 import numpy as np
 import yaml
 
+from sparx_agency.core.common.math.se3 import yaw_from_quaternion
 from sparx_agency.core.common.types import Intrinsics
 
 
@@ -152,9 +153,17 @@ def quat_msg_to_rpy_deg(q) -> tuple:
 # ── Pose / transform helpers ──────────────────────────────────────────────────
 
 def quat_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
-    """Quaternion (xyzw) → yaw angle in radians (rotation around Z axis)."""
-    return math.atan2(2.0 * (qw * qz + qx * qy),
-                      1.0 - 2.0 * (qy * qy + qz * qz))
+    """Quaternion (xyzw) → yaw angle in radians (rotation around Z axis).
+
+    A scalar-argument spelling of
+    :func:`sparx_agency.core.common.math.se3.yaw_from_quaternion`, which is the
+    one implementation. Both spellings exist because callers genuinely differ --
+    a ROS message hands you four fields, an SE(3) helper hands you a sequence --
+    and both are kept because 25 files across the repo already import one or the
+    other, two of them importing *both*. What is not kept is the second copy of
+    the arithmetic: they were byte-identical, and identical copies drift.
+    """
+    return yaw_from_quaternion((qx, qy, qz, qw))
 
 
 def yaw_to_quat(yaw_rad: float) -> tuple:

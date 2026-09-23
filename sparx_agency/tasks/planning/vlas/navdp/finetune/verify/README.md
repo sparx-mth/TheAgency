@@ -15,6 +15,14 @@ GPU-hours fine-tuning. It implements the exact loop you described:
 If the corrected trajectory looks right across many clicks/frames, the fine-tune
 target is trustworthy — then (and only then) generate labels and train.
 
+> **Changed 2026-08:** the preprocessing now comes from
+> `core/planning/vlas/navdp/preprocess.py` and feeds the encoder **BGR**, which is
+> what the deployed TensorRT server does. This tool previously fed RGB, so its
+> trajectories were produced by a slightly different network input than the one
+> that flies. Trajectories drawn here — and any pixel-goal labels generated from
+> them — will differ from ones produced before this change. Pass
+> `NavDPInfer(..., color_order="rgb")` to reproduce the old behaviour.
+
 ## The "connection" (why no coordinate transform is needed)
 
 Everything already lives in **one frame**: the drone **body FLU** frame, `x = forward`,
