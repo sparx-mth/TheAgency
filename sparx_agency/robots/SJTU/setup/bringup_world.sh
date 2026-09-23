@@ -244,8 +244,33 @@ if [[ -t 0 ]]; then
   TTY_ARGS=(-it)
 fi
 
+# THE SIMULATOR DOES NOT GET THE GPU.
+#
+# Gazebo Classic renders its camera sensors through OGRE, and with `--gpus all`
+# that rendering context lands on the same card a VLA server is holding. On an
+# 8 GB card with InternVLA-N1 resident at ~7.2 GB there is under a gigabyte
+# left, and Gazebo asking for a GL context in what remains takes the whole
+# machine down -- not the container, the machine. Software rendering costs
+# frames on a box with 32 threads to spare; the alternative costs the session.
+#
+# So: no `--gpus`, and llvmpipe forced below, unless someone deliberately asks
+# for the card with SJTU_SIM_GPU=1 (a machine with a second GPU, or no VLA
+# running). The physics never touched the GPU in the first place -- Gazebo
+# Classic has no GPU physics -- so this only moves the rendering.
+GPU_ARGS=()
+RENDER_ENV=(-e LIBGL_ALWAYS_SOFTWARE=1 -e GALLIUM_DRIVER=llvmpipe -e MESA_LOADER_DRIVER_OVERRIDE=llvmpipe)
+if [[ "${SJTU_SIM_GPU:-0}" == "1" ]]; then
+  GPU_ARGS=(--gpus all)
+  RENDER_ENV=()
+  echo "[sjtu/bringup] SJTU_SIM_GPU=1: the simulator is taking the GPU." >&2
+  echo "  If a VLA server is resident on the same card this can hard-lock the host." >&2
+else
+  echo "[sjtu/bringup] rendering on the CPU (llvmpipe); the GPU is left free."
+fi
+
 docker run "${TTY_ARGS[@]}" --rm \
-  --gpus all \
+  "${GPU_ARGS[@]}" \
+  "${RENDER_ENV[@]}" \
   --privileged \
   --net=host \
   --ipc=host \
@@ -253,6 +278,7 @@ docker run "${TTY_ARGS[@]}" --rm \
   --name "${CONTAINER_NAME}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   -v "${SJTU_PROJECT_DIR}:${SJTU_CONTAINER_WS}:rw" \
+  -v "${SCRIPT_DIR}/../sim_overlay:/agency_sim_overlay:ro" \
   -e DISPLAY="${DISPLAY}" \
   -e QT_X11_NO_MITSHM=1 \
   -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" \
@@ -263,6 +289,8 @@ docker run "${TTY_ARGS[@]}" --rm \
   -e CONTAINER_WORLD="${CONTAINER_WORLD}" \
   -e USE_GUI="${USE_GUI}" \
   -e SKIP_BUILD="${SKIP_BUILD}" \
+  -e SJTU_DRONE_SPAWN="${SJTU_DRONE_SPAWN:-}" \
+  -e OVERLAY_DIR="/agency_sim_overlay" \
   "${IMAGE}" \
   bash -c '
     set -eo pipefail
@@ -321,6 +349,46 @@ docker run "${TTY_ARGS[@]}" --rm \
     export GAZEBO_AUDIO_DEVICE=null
 
     cd "$SJTU_CONTAINER_WS"
+
+    # ── This repo owns these sim files; the checkout only hosts them ──────
+    # Applied on EVERY bring-up, before the build and before the launch, so a
+    # fresh or rebuilt sjtu_project checkout cannot silently revert them. See
+    # robots/SJTU/sim_overlay/README.md.
+    #
+    # Copied into BOTH trees deliberately. colcon builds sjtu_drone_bringup
+    # from the SOURCE tree, so a source-only overlay is rebuilt away when
+    # --skip-build is dropped; and --skip-build (which run_scene_graph.sh
+    # always passes) reads only install/, so an install-only overlay never
+    # takes effect. Neither alone is correct.
+    if [[ -d "${OVERLAY_DIR:-}" ]]; then
+      overlay_applied=0
+      for rel in \
+          "sjtu_drone_bringup/sjtu_drone_bringup/spawn_drone.py" \
+          "sjtu_drone_bringup/launch/sjtu_drone_gazebo.launch.py"; do
+        src="$OVERLAY_DIR/$rel"
+        [[ -f "$src" ]] || { echo "[sjtu/bringup] overlay missing: $rel" >&2; continue; }
+        pkg="${rel%%/*}"                      # sjtu_drone_bringup
+        tail_path="${rel#*/}"                 # the package-relative remainder
+        # The source tree, which the build reads.
+        dst_src="$SJTU_CONTAINER_WS/sjtu_drone/$pkg/$tail_path"
+        if [[ -f "$dst_src" ]] && ! cmp -s "$src" "$dst_src"; then
+          cp "$src" "$dst_src" && overlay_applied=$((overlay_applied + 1))
+        fi
+        # The install tree, which --skip-build reads. Python packages land
+        # under lib/pythonX.Y/site-packages, everything else under share/.
+        case "$tail_path" in
+          "$pkg"/*) dst_ins=$(ls -d "$SJTU_CONTAINER_WS/install/$pkg/lib/python"*/site-packages 2>/dev/null | head -1)/"$tail_path" ;;
+          *)        dst_ins="$SJTU_CONTAINER_WS/install/$pkg/share/$pkg/$tail_path" ;;
+        esac
+        if [[ -f "$dst_ins" ]] && ! cmp -s "$src" "$dst_ins"; then
+          cp "$src" "$dst_ins" && overlay_applied=$((overlay_applied + 1))
+        fi
+      done
+      [[ "$overlay_applied" -gt 0 ]] \
+        && echo "[sjtu/bringup] applied $overlay_applied file(s) from the TheAgency sim overlay" \
+        || echo "[sjtu/bringup] sim overlay already current"
+    fi
+
     if [[ "$SKIP_BUILD" != "true" ]]; then
       echo "[sjtu/bringup] building sjtu_drone_{bringup,description,control} ..."
       colcon build --packages-select sjtu_drone_bringup sjtu_drone_description sjtu_drone_control \

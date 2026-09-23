@@ -30,6 +30,13 @@ camera:
   cy: 300.0
   hfov_deg: 75.046
 
+# NOTE ON DEPTH. The depth topic below is 32FC1 **metres**, but the wire to the
+# model server is **normalised 0..1 over 10 m** -- the agent multiplies what it
+# receives by 10 and clips at its 5 m System-1 threshold. The conversion lives
+# in `InternVLAN1Policy._to_depth`; do not "simplify" it away. Sending metres
+# does not produce a wrong distance, it flattens the channel: a 3 m wall
+# arrives as 30 and clips to 5, and so does everything else past 0.5 m, so
+# System 1 plans its trajectory against a featureless plane and nothing errors.
 topics:
   rgb: /simple_drone/front/image_raw
   rgb_type: raw                       # raw | compressed
@@ -37,9 +44,16 @@ topics:
   depth_enabled: true
   odom: /simple_drone/odom
   instruction: /simple_drone/navigation/instruction
+  state: /simple_drone/state                        # Int8: 0 landed, 1 flying
+  altitude_offset: /simple_drone/n1/altitude_offset  # Float32: look-down dip, metres
+  hold: /simple_drone/n1/hold                        # Bool: stop, the policy is thinking
+  yaw_goal: /simple_drone/n1/yaw_goal                # Float32: absolute world heading to rotate to
+  blocked: /simple_drone/n1/blocked                  # Bool: the depth reflex allows no forward speed
   trajectory: /simple_drone/n1/trajectory          # committed route (nav_msgs/Path, world)
   trajectory_full: /simple_drone/n1/trajectory_full  # whole prediction, for RViz
   info: /simple_drone/n1/info                        # JSON status: action, S1/S2 FPS, pixel goal
+  mission: /simple_drone/n1/mission                  # JSON: the supervisor's current order and survey progress
+  nudge: /simple_drone/n1/nudge_back                 # Empty: supervisor -> follower, break contact and back off
   cmd_vel: /simple_drone/cmd_vel                    # the drone's only control input
 
 frames:
@@ -48,20 +62,245 @@ frames:
 # The N1 policy node: how often it asks the server, and the default instruction.
 policy_params:
   inference_rate_hz: 4.0
-  default_instruction: "explore the warehouse and avoid the shelves"
+  # THE EXPLORATION ORDER, and it is only usable because the run is now
+  # MEASURED. The objection to it was always sound and has not gone away: there
+  # is no state at which "explore the entire hospital" is satisfied, so a flight
+  # under it cannot be scored pass or fail the way the room-and-table order
+  # could. What changed is that the recorder computes the share of the
+  # building's floor the camera has had a clear line to
+  # (`recorder.coverage` below), so the episode produces a number that rises
+  # with the thing the instruction is actually asking for. Judge a run on that
+  # curve and on which rooms the overview panel leaves unwashed, not on whether
+  # it looked busy.
+  #
+  # It also asks for the loop the order names -- go in, look, come back out, go
+  # on -- rather than only for the goal, because System 2 answers with
+  # coordinates when it can name something concrete to fly to and with an arrow
+  # when it cannot, and "the next room you pass" is a concrete thing at every
+  # step of a corridor. Counterbalanced A/B over four instructions found no
+  # significant difference in that ratio (see the package README), so this is
+  # phrasing for the reader as much as for the model.
+  #
+  # No apostrophes. run_sjtu_n1.sh publishes it as
+  # `ros2 topic pub ... "{data: '<instruction>'}"`, and one would end the string.
+  default_instruction: "Explore the entire hospital. Enter every room you pass, look around inside to see what is in it, then come back out into the corridor and go on to the next room."
   step_m: 0.25          # forward reach rendered from a discrete FORWARD action
+  # 15 degrees, because that is what THIS producer means by a turn:
+  # `vln_utils.trajectory_to_discrete_actions_close_to_goal` hard-codes
+  # `turn_angle_deg=15` and moves `pos` only on a forward action. 30 was picked
+  # from VLN-CE's general convention and is simply wrong here -- it doubled
+  # every commanded rotation. The reason 15 "bent too little" was not the angle
+  # but the follower's stop_turn_rad sitting ABOVE it; that is fixed below, and
+  # the pair has to stay ordered stop_turn_rad < turn_deg or a turn is flown as
+  # a sideways crab instead of a rotation.
   turn_deg: 15.0        # heading a discrete turn action bends its step by
+
+  # How many System-1 steps the agent plays out before calling System 2 again.
+  # THIS IS THE KNOB FOR "I want the continuous trajectory, not the discrete
+  # action". Measured over 168 System-2 replies in the hospital: coordinates
+  # 30.4%, look-downs 32.7%, turns/forwards 36.9%, real STOPs 0% -- and 92.7%
+  # of look-downs are followed by coordinates. Coordinates are the ONLY branch
+  # that runs System 1, so a System-2 call is very nearly one chance at a curve
+  # and this number is how many discrete steps separate two chances.
+  #
+  # ONE. Not four, not eight.
+  #
+  # This is how many System-1 steps the agent plays out before asking System 2
+  # again, and with `sys1_continuous_only` on, every one of those steps is a
+  # WHOLE CURVE flown to its end. At 4 it meant the pixel goal stayed fixed
+  # across four curves: measured in run 05 of the last campaign, one goal drove
+  # five consecutive decisions over which the aircraft flew 5.1 m and rotated
+  # 160 degrees, ending at a pose where that pixel pointed nowhere in the frame
+  # -- and System 1 dutifully produced a trajectory from it. The route looked
+  # fine and went somewhere meaningless.
+  #
+  # At 1 the loop is: look, decide, fly the curve, stop, LOOK AGAIN. Every
+  # trajectory is computed from a goal chosen at the pose the aircraft is
+  # actually at. It costs a System-2 pass per curve -- 3 to 8 seconds per 1-2 m
+  # -- and that is the whole trade this deployment is willing to make.
+  sys2_max_forward_step: 1
+
+  # FLY THE CURVE, NOT A DISCRETISATION OF THE CURVE YOU ALREADY HAVE.
+  # Server-side PATCH 7 (tasks/planning/vlas/internvla_n1/upstream/). System 1
+  # produces one prediction and the agent renders it twice: as the continuous
+  # path, and as the list of 0.25 m / 15 deg steps that approximates it. Stock,
+  # it hands over the curve and then queues those steps to be returned over the
+  # next three calls -- so a client flying the curve covers that ground and is
+  # then asked to fly the first metre of it again in pieces, and three quarters
+  # of its decisions carry no curve at all. Measured over a ninety-second
+  # hospital flight: 18 of 22 committed routes were 0.25 m stubs, which is
+  # exactly what "I can barely see a trajectory on the map" looks like from the
+  # outside. With this on, every System-1 step is a fresh curve computed from
+  # the frame in front of the aircraft now.
+  sys1_continuous_only: true
+
+  # ONE TURN PER LOOK. Server-side PATCH 8, and the fix for the failure that
+  # kept the aircraft out of the room across two campaigns.
+  #
+  # Asked about a corridor frame with an open door 27 degrees to its right,
+  # System 2 replies `->->->->` -- four right turns, 60 degrees -- from ONE
+  # observation, and upstream returns them one per step without looking again.
+  # Measured against the live model on the real start frame: every wording of
+  # the instruction that names a direction gets the same four arrows. So the
+  # aircraft rotates 60 degrees open-loop, the door swings past the centre of
+  # the frame, the next batch is four LEFT turns, and it hunts: 12 right and 11
+  # left turns in a single flight, a doorway never entered in ten runs.
+  #
+  # A turn is the one action that invalidates its own observation. With this on,
+  # the rest of the batch is dropped and System 2 looks again after every 15
+  # degrees -- which is what "turn X degrees and stop and wait to see the next
+  # target" actually requires. It costs a System-2 pass per 15 degrees.
+  sys2_one_turn_per_look: true
+
+  # ── STOP, LOOK, THINK ────────────────────────────────────────────────
+  # System 2 needs 2.6-10 s. Until this existed the aircraft flew through all of
+  # it, which broke the two things a dual-system policy depends on:
+  #
+  #   * the frame the model reasoned about was metres behind the aircraft by the
+  #     time the answer arrived;
+  #   * the route was anchored at the pose that frame was taken from, so a 3 m
+  #     curve began behind the drone and the pursuit's first move was backwards.
+  #
+  # Holding is slower and it is what the model was trained on: VLN-CE takes
+  # every observation from a standstill, after the previous action finished. The
+  # flight becomes stop -> look -> think -> fly the whole curve -> stop.
+  hold_to_think: true
+  settle_speed_mps: 0.05      # ...and "stopped" means measured, not commanded:
+  settle_yaw_rate_rad_s: 0.05 #    this airframe translates by TILTING and coasts
+  settle_s: 0.3               #    for most of a second after the command is zero
+  settle_timeout_s: 3.0       # never wedge on an aircraft the world is pushing
+  status_period_s: 0.2        # republish the live phase for the overlay
+
+  # ── A TURN IS A ROTATION ─────────────────────────────────────────────
+  # `rotate` hands a discrete TURN action to the follower as a heading and flies
+  # it as a slow rotation that ends stopped -- which is what the action means
+  # upstream, where `trajectory_to_discrete_actions_close_to_goal` moves the
+  # position only on a forward action. `crab` restores the old behaviour of
+  # flying the bent step the action is rendered as, which a holonomic pursuit
+  # can satisfy by translating 0.25 m sideways without looking anywhere new. The
+  # pair exists so the two can be compared on the same aircraft; `rotate` is the
+  # correct one and the reason `stop_turn_rad` below no longer has to be tuned
+  # against `turn_deg`.
+  discrete_turn_mode: rotate
+  # A System-1 curve too short to be a route is the same message in continuous
+  # clothing: the model is asking to pivot and look again, not to travel 20 cm.
+  # Flown as a path it creeps forward, the view barely changes, and the next
+  # prediction is the same one. Flown as a rotation to the curve's own end
+  # bearing, the aircraft actually looks where the curve points.
+  pivot_min_deg: 7.5          # ...but only when the short curve HAS a bearing
+  pivot_min_reach_m: 0.05     #    (atan2 of nearly (0,0) is noise, not intent)
+
+  # ── THE BLOCKED-FORWARD ESCAPE ───────────────────────────────────────
+  # Not a planner, a reflex, and it exists because of a measured deadlock. The
+  # follower's depth brake can pin the aircraft at zero forward speed; the
+  # policy cannot see that, so it asks to fly forward again -- and now that the
+  # aircraft holds still to think, the frame it asks from is IDENTICAL, so the
+  # answer is too. Measured before any of this: seventy seconds of a ninety
+  # second flight pinned 0.43 m from a wall, re-committing a 0.25 m forward step
+  # every twelve seconds. After this many consecutive decisions that ask to
+  # translate while hard-blocked, turn toward whichever half of the depth frame
+  # has more room and let the policy decide again from there.
+  # Two, not three. Each blocked decision costs a full System-2 think plus the
+  # commitment's own deadline before the next one -- ten seconds and more -- so
+  # a patient counter is thirty seconds of a three-minute flight spent proving
+  # something the first two decisions already showed.
+  blocked_escape_after: 2
+  blocked_escape_deg: 45.0
+
+  # THE LOOK-DOWN, PERFORMED RATHER THAN IGNORED.
+  #
+  # System 2 answers with a down arrow before almost every pixel goal -- 92.7%
+  # of look-downs are immediately followed by coordinates -- and it expects the
+  # NEXT frame to be that lower view, because the coordinates it then gives are
+  # a pixel in that frame. This airframe's camera is fixed, so the stack used
+  # to hand it the same cruise-altitude frame and let it name a waypoint in a
+  # view it believed was tilted.
+  #
+  # Instead the aircraft DIPS: the follower is asked for a lower altitude, the
+  # policy node waits until it is actually down there, sends exactly that one
+  # frame from the same forward camera, and climbs back. No downward camera is
+  # involved -- the bottom camera sees straight down, which is not the view the
+  # model was trained on either.
+  # AND IT MUST NOT FLY THE AIRCRAFT INTO THE FURNITURE. Measured off the
+  # world's own collision meshes over the two office bays: at the 1.20 m cruise
+  # **71%** of the floor area is flyable by this airframe (best clearance
+  # 1.25 m); at the old 0.70 m dip altitude only **45%** is. A 0.5 m dip
+  # therefore took the aircraft out of the band it can navigate in and down
+  # among the desks (0.75 m) and chair backs, for the sake of a frame it then
+  # flew away from. Three of every six dips in the last campaign also never
+  # arrived at all -- see the ramp fix in `follower` below.
+  #
+  # Kept small and floored. The model is asking for a 30 DEGREE CAMERA TILT
+  # (the upstream prompt says so in as many words); this airframe's camera is
+  # fixed, so a descent is a proxy for it and not a good one -- a translation
+  # is not a rotation, and the near floor a tilt would reveal stays out of frame
+  # either way. What the dip can honestly buy is a slightly lower viewpoint from
+  # a height the aircraft can still fly at. Set look_down_dip_m to 0 to send the
+  # cruise frame unchanged.
+  # WHEN THE POLICY HAS STOPPED LISTENING, AND WHAT TO DO ABOUT IT.
+  # Measured over six hospital flights: STOP was 45-73% of every answer, and it
+  # came in runs whose lengths were bimodal with nothing in between --
+  # 1, 4, 6 ... then 34, 40, 49, 51, 66, 66, 69, 82, 406. Short runs recover
+  # unaided; long ones never did. The worst was 406 consecutive STOPs over
+  # 50.1 minutes -- 56% of a 90-minute flight, 0.0 coverage points, the
+  # aircraft motionless, every frame carrying a freshly written instruction it
+  # ignored. Five is deliberately BELOW the longest run that recovered on its
+  # own: interrupting one of those costs a single POST and an episode of
+  # history that was about to be thrown away, while missing a latch costs half
+  # a flight. On reaching it the agent is dropped and
+  # raised again: the frame history, the cached pixel goal and both systems'
+  # state are cleared, with no checkpoint reload. Set to 0 to switch it off.
+  stop_restart_after: 5
+  look_down_dip_m: 0.25       # 1.20 m cruise -> 0.95 m
+  look_down_min_altitude_m: 0.95   # ...and never below this, whatever the dip
+  look_down_tolerance_m: 0.15 # close enough to call it arrived
+  look_down_timeout_s: 8.0    # never got there: send the frame anyway rather
+                              # than wedge the episode, and say so
 
 # Plan-commitment: fly one prediction as a route until roughly half is behind
 # the aircraft, then re-infer -- the same discipline NavDP flies. Kept short
 # because N1's discrete-action fallback produces ~0.25 m steps.
 commit:
-  fraction: 0.5
+  # FLY THE WHOLE PREDICTION, not half of it. NavDP's half-commitment exists
+  # because NavDP re-infers at 3 Hz and its far half is extrapolation into
+  # unseen space; InternVLA-N1 is nothing like that here. System 2 needs
+  # 2.6-6.8 s to produce the next decision, so committing half a ~3 m curve
+  # threw away the half the aircraft had time to fly and left it hovering for
+  # the remainder of the wait. Measured before this change: 43% of the flight
+  # stationary, with 80% of commitments a 0.25 m stub.
+  fraction: 1.0
   lookahead_m: 1.0
   arrive_radius_m: 0.15
   min_commit_m: 0.20
-  max_commit_s: 8.0
-  max_deviation_m: 1.5
+  # Long enough to actually fly a full curve. A ~3 m System-1 curve at the
+  # 0.30 m/s cruise takes about 10 s, so the old 3 s cut every real trajectory
+  # off a third of the way through and re-inferred -- which looks exactly like
+  # the model producing short plans, and was not. It is still a ceiling, not a
+  # schedule: a blocked aircraft never reaches its commit point and this is the
+  # only thing that frees it.
+  max_commit_s: 16.0
+  # The deadline is SIZED BY THE ROUTE, not a flat clock: a commitment expires
+  # once it has had the time it would take to fly plus the grace, capped by
+  # max_commit_s. Without this, max_commit_s has to be long enough for the
+  # longest curve (about 12 s) and is then ten times too long for the 0.25 m
+  # action step that is most commitments -- a short step whose arrival never
+  # registers sits out the whole ceiling. Measured: five twelve-second stalls
+  # in a ninety-second flight, which was most of the time it spent stationary.
+  expected_speed_mps: 0.30    # the follower's cruise
+  # Generous, because the cruise speed is not the average speed. A route is
+  # accelerated into and braked out of at both ends, the depth reflex trims it
+  # wherever the corridor narrows, and the pursuit's own slow-down zone runs the
+  # last stretch below cruise. Measured on a 2 m curve here: 6.3 s of flight for
+  # a 5.0 s nominal. Too tight and a route expires with a metre still to fly,
+  # which under `hold_to_think` means stopping in the middle of a curve to
+  # re-ask -- the exact chopping-up this whole change removes.
+  commit_grace_s: 4.0
+  # Matched to the follower's path_tolerance_m (0.8), not left above it. Between
+  # the two thresholds is a dead band: the follower calls path_diverged and
+  # zeroes the twist every cycle, so the aircraft cannot move, so the lateral
+  # error never grows to reach this one and the executor never re-plans. The
+  # aircraft simply freezes until the deadline.
+  max_deviation_m: 0.7
   min_period_s: 0.5
 
 # The pure-pursuit follower. Speeds are held well under the SJTU airframe's 2 m/s
@@ -69,14 +308,165 @@ commit:
 # and clamps it with the SJTU velocity adapter before publishing cmd_vel.
 follower:
   control_rate_hz: 20.0
-  cruise_speed: 0.4
-  max_speed_xy: 1.0
+  # 0.30, not 0.40. The rooms this drone is asked to enter are reached through
+  # gaps whose widest flyable line is **0.90 m** (measured: the widest-corridor
+  # route from the spine to either AdjTable bottlenecks at 0.90 m). The airframe
+  # is 0.63 m across, so the aircraft has +-0.13 m to play with, and the plant
+  # takes 0.18 s to notice a command and 0.5 s to reach it -- at 0.40 m/s that
+  # is 0.2 m of travel before it responds, which is more than the whole margin.
+  cruise_speed: 0.30
+  # Kept well under the 2 m/s airframe ceiling on purpose. The plugin
+  # translates by TILTING, its roll/pitch PIDs are limited to 0.5 rad, and past
+  # about 0.61 rad the airframe capsizes -- after which it cannot climb,
+  # translate or yaw while still reporting healthy odometry. A high speed limit
+  # here does not buy speed, it buys tilt.
+  max_speed_xy: 0.6
   max_speed_z: 0.5
   max_yaw_rate: 1.2
-  goal_tolerance_m: 0.2
+  # Small enough that the executor's arrival test can actually fire. It is not
+  # enough to be under commit.arrive_radius_m: `_reason` needs
+  # `peak_arc >= commit_arc - min(arrive_radius_m, 0.25 * commit_arc)`, and on
+  # the 0.25 m step that is most commitments the slack term is only 0.0625 m,
+  # so arrival needs 0.1875 m of the 0.25 m flown. A follower that halts
+  # 0.10 m short leaves 0.153 m and the commitment can only ever EXPIRE.
+  goal_tolerance_m: 0.06
+  path_tolerance_m: 0.8       # cross-track beyond which the pursuit re-acquires
   target_altitude_m: 1.2      # cruise altitude the follower holds after takeoff
-  lookahead_m: 0.8
+  altitude_capture_m: 0.25    # enter route tracking inside this band...
+  # Kept well inside path_tolerance_m. The tracker's cross-track test is a 3D
+  # distance to a route laid at target_altitude_m, so an altitude error eats
+  # directly into the lateral budget: at 0.60 m off, only sqrt(0.8^2 - 0.6^2) =
+  # 0.53 m of lateral error is left before the pursuit calls path_diverged and
+  # stops the aircraft dead in a state both knobs call legal.
+  altitude_release_m: 0.35    # ...and hand back to the climb outside this one
+  # 1.6, and see altitude_offset_rate_m_s: the pair sets how far the aircraft
+  # lags a moving altitude command, and that lag was eating the look-down.
+  altitude_kp: 1.6
+  odom_timeout_s: 1.0         # no fresh feedback -> zero twist, never the stale one
+  # 0.5, not 0.8. A pure-pursuit lookahead cuts the inside of a turn by roughly
+  # lookahead^2 / (8 * radius); on the ~1 m radius turn into a doorway that is
+  # 0.08 m at 0.8 m and 0.03 m at 0.5 m. Against +-0.13 m of margin the
+  # difference decides whether the aircraft clips the jamb.
+  lookahead_m: 0.5
   yaw_lookahead_m: 1.5
+  # How far out the pursuit starts braking for the end of the route. It has to
+  # be SHORTER than the routes actually flown, and here 80% of them are the
+  # 0.25 m step rendered from a discrete action. At the tracker's 1.0 m default
+  # the aircraft is inside the braking zone for the WHOLE of every action step
+  # and never exceeds 0.19 m/s against a 0.40 m/s cruise -- measured mean while
+  # moving, 0.12 m/s. That is most of the reason a recording looks like it is
+  # creeping and pausing rather than flying.
+  slow_down_distance_m: 0.15
+  min_speed: 0.1
+  altitude_offset_limit_m: 0.8  # a runaway offset flies it into the floor
+  # Ramp rate for that offset, and the comment that used to be here was WRONG.
+  # A proportional altitude hold tracks a ramp with a steady-state error of
+  # rate/kp: 0.35 / 1.2 = 0.29 m, which is 83% of altitude_release_m (0.35)
+  # before the plant's own 0.18 s delay and 0.5 s lag are counted. So every dip
+  # overshot the release band, the follower declared "altitude lost", climbed
+  # against its own ramp, and the descent stalled around 0.82 m -- which is
+  # exactly the "look-down: never reached 0.70 m" warning that appeared in all
+  # five runs of the last campaign, three times in some.
+  # 0.20 / 1.6 = 0.125 m of lag, comfortably inside the band.
+  altitude_offset_rate_m_s: 0.20
+  # This is the pursuit's OWN stop-and-rotate, for a route that heads off the
+  # nose -- it no longer has to carry N1's discrete turns, which are now flown
+  # as real rotations (policy_params.discrete_turn_mode). It still has to stay
+  # below policy_params.turn_deg for the `crab` comparison mode to behave.
+  stop_turn_rad: 0.18         # hold position and rotate past ~10 deg off route
+  resume_turn_rad: 0.06       # ...and fly again below ~3.5 deg (hysteresis band)
+
+  # ── THE STOP-AND-TURN MANOEUVRE ──────────────────────────────────────
+  # How a discrete TURN action is actually flown: rotate, stop, and only then
+  # let the policy look again. Deliberately SLOW. The frame at the end of the
+  # rotation is the entire reason the model asked for it, and this airframe
+  # yaws by tilting its thrust vector -- a fast turn arrives blurred and
+  # ringing, and the settle then has to wait out the ringing anyway, so nothing
+  # is saved. 20 deg/s puts N1's 15 deg turn at about a second of rotation plus
+  # a 0.4 s standstill.
+  turn:
+    yaw_rate_deg_s: 20.0      # cruise rate of the rotation
+    min_yaw_rate_deg_s: 6.0   # floor under the taper: below this the plugin's
+                              # yaw PID does nothing and the last two degrees
+                              # never close, so every turn times out just short
+    slow_down_deg: 12.0       # taper to the floor inside this error
+    tolerance_deg: 2.5        # comfortably above the platform's yaw noise
+    settle_rate_deg_s: 3.0    # ...and "stopped" is measured, not commanded
+    settle_s: 0.4
+    timeout_s: 14.0           # a rotation that cannot happen (capsized, landed,
+                              # jammed) must never wedge the flight. Long enough
+                              # to cover the back-off below plus a 45 deg turn,
+                              # because the policy node runs the same manoeuvre
+                              # clock and starts it when it ASKS, not when the
+                              # follower begins.
+
+  # ── BREAKING CONTACT ─────────────────────────────────────────────────
+  # A turn requested while the depth reflex is hard-blocked backs off first.
+  # Rotating on the spot does not free an aircraft that is already inside its
+  # own stopping distance of a wall: the wall stays inside the depth corridor
+  # across most of the arc, so every heading reads blocked and the policy is
+  # asked to choose between them for ever. Measured in the hospital with the
+  # rotation fix in and this one out: pinned 0.45-0.70 m from the office wall
+  # for a whole run, thirteen rotations, zero metres flown.
+  #
+  # The reverse is UNGUARDED -- there is no rear sensor on this airframe -- and
+  # that is acceptable for exactly one reason: it retraces ground the aircraft
+  # was occupying seconds earlier, since the escape only fires after it has
+  # stopped there. It is bounded at back_s * back_speed and nothing else.
+  escape:
+    enabled: true
+    brake_s: 0.4              # it is still coasting into whatever it hit
+    back_s: 2.0               # 0.50 m of reverse -- enough to clear
+    back_speed: 0.25          #    hard_block_d_m (0.70) by a real margin
+    allow_lateral: false      # the corridor only protects FORWARD; a sideways
+                              # probe next to a wall slides toward a jamb
+                              # nothing is watching
+    settle_s: 0.5             # a stationary frame before the rotation
+    max_attempts: 3           # per blockage episode; reset when it flies again
+  capsize_deg: 35.0           # past this the plugin cannot act; stop commanding
+  depth_timeout_s: 3.0        # older than this is not depth, it is a memory
+  # How long a hard-block report stays live without being refreshed. The depth
+  # reflex has an opinion only while the aircraft is translating, and it
+  # evaluates at the control rate -- so twelve missed evaluations is plenty of
+  # hysteresis, and anything longer publishes a memory as a state. Measured
+  # before this existed: `blocked` true through 4-18% of settling samples and up
+  # to 62% of turning samples, which is where "BLOCKED settling" on screen came
+  # from.
+  blocked_hold_s: 0.6
+
+# The forward-speed reflex. N1 decides WHERE to go and nothing in this stack
+# decides whether the way is clear, so this is the only thing between the policy
+# and a wall: core/planning/safety/depth_proximity_brake, the corridor minimum of
+# the raw depth image against a stopping distance. Its defaults were tuned for
+# the same camera on the FALCON hospital campaign; the margins here are tighter
+# because the hospital's 0.93 m doorways are not passable at the FALCON numbers.
+brake:
+  enabled: true
+  corridor_halfwidth_m: 0.35   # airframe radius 0.314 m, plus a little
+  corridor_halfheight_m: 0.35
+  nose_offset_m: 0.10          # depth is to the camera, the strike is at the nose
+  min_valid_m: 0.15
+  brake_decel: 0.8
+  react_s: 0.30
+  # THESE TWO WERE SIZED FOR A DIFFERENT CAMERA. The 0.45/0.70 pair came from
+  # the FALCON XTEND, whose depth camera cannot see inside ~0.95 m -- the brake
+  # had to stop the aircraft before its own blind zone. **This camera's near
+  # clip is 0.10 m** (robots/SJTU/config/camera_front_depth_600x600.yaml,
+  # range_min_m), so there is no blind zone to protect against and 0.70 m is
+  # simply an early stop.
+  #
+  # It is also the reason the aircraft cannot get through a door. The hospital's
+  # openings are 0.96 m; passing one puts a jamb 0.40-0.50 m from the corridor
+  # centre, and at 0.70 m that is a dead stop with the aircraft still short of
+  # the threshold. Measured in the last campaign: stops at 0.56, 0.60, 0.65 and
+  # 0.70 m, none of them in contact with anything, each one ending an entry.
+  #
+  # Sized from the stopping distance instead: 0.30 m/s with brake_decel 0.8 and
+  # react_s 0.30 needs 0.15 m to stop. 0.25 m of margin covers it with room, and
+  # the hard floor sits at 0.35 m -- 0.25 m of air in front of the nose.
+  margin_m: 0.25
+  hard_block_d_m: 0.35         # anything closer than this is a full stop
+  stride: 4
 
 # The run recorder: drone camera (left) + N1's route top-down (right), with the
 # System-1 / System-2 FPS drawn on. Written with OpenCV's mp4v encoder.
@@ -85,4 +475,191 @@ recorder:
   panel_width: 640
   panel_height: 480
   output: /tmp/sjtu_n1/run.mp4
+  # The occupancy map the route is drawn on, relative to the repo root. Built by
+  # tasks/mapping/gazebo_world_occupancy from the world's own collision meshes,
+  # so it is ground truth in the same frame /simple_drone/odom reports. Leave it
+  # empty (or point at a world with no map) and the route panel falls back to
+  # graph paper.
+  map: sparx_agency/robots/SJTU/maps/hospital.yaml
+  local_span_m: 14.0        # side of the world square the following view shows
+  overview_fraction: 0.42   # share of the panel given to the whole-building view
 
+  # HOW MUCH OF THE BUILDING HAS BEEN SEEN. The measurement that makes the
+  # exploration instruction above judgeable at all: the camera's field of view
+  # is swept across the same map the route is drawn on, the free cells it
+  # reaches before a wall stops it are marked, and the share of the building's
+  # floor is drawn on the overview panel and logged as `N1 COVERAGE`.
+  #
+  # The denominator is the map's largest ENCLOSED free region -- the hospital's
+  # own floor, 1140 m2. Not all free space: this map was computed from collision
+  # meshes, so it has free cells outside the outer wall and inside every closed
+  # cupboard, and counting either would put a ceiling on the percentage that
+  # looks like a plateau.
+  #
+  # Read it as "the share of the floor that has passed through the camera's
+  # bearing and range window with nothing in between". It is a plan-view proxy:
+  # the vertical field of view and the aircraft's altitude are not modelled, and
+  # the map's 0.30-2.00 m band means a desk occludes. It is not a claim that the
+  # room was understood.
+  coverage:
+    enabled: true
+    # The DEPTH sensor's far clip (camera_front_depth_600x600.yaml), not a
+    # preference. Past it the pixels carry no measurement, and a ray that keeps
+    # going marks floor straight through the far wall.
+    max_range_m: 10.0
+    # The front camera sits 0.2 m ahead of the body origin -- see
+    # robots/SJTU/adapters/topics.py, FRONT_CAMERA_OFFSET_FLU. It carves space
+    # outward from itself, so the body origin is the one place it never sees.
+    camera_forward_m: 0.2
+    rate_hz: 5.0            # poses folded in per second; ~2 ms each
+    log_every_s: 10.0       # how often the running number reaches nodes.log
+
+# THE EXPLORATION SUPERVISOR -- the layer above System 1 and System 2.
+#
+# It holds the abstract goal ("map this hospital") that the policy cannot, and
+# hands down one bounded, concrete order at a time: look around this area, go
+# through that doorway, come back out, carry on down the corridor. Its whole
+# interface to the flight is the instruction topic above, which the policy node
+# already re-reads on every decision -- nothing in the flight loop changes.
+#
+# Started only with supervise:=true. Without it the policy flies
+# `policy_params.default_instruction` for the whole run, which is the arm this
+# is measured against: five runs of that order saw 9-16% of the building and
+# four of them stopped themselves part-way through.
+supervisor:
+  # The building, decomposed into rooms, corridors and doorways. Built offline
+  # by tasks/mapping/gazebo_world_occupancy/build_regions.py from two height
+  # bands of the same world -- the flight band, where every door stands open,
+  # and a band at lintel height, where they are closed and the rooms fall apart
+  # into connected components on their own. Empty disables the supervisor.
+  region_map: sparx_agency/robots/SJTU/maps/hospital_regions.yaml
+
+  # THE SURVEY, CARRIED BETWEEN FLIGHTS. A hospital is bigger than one flight:
+  # at ~22 s a decision and ~1 m of route per decision, twenty rooms is hours of
+  # flying, and a capsize ends a flight outright because the SJTU plugin cannot
+  # right itself. With a state file the campaign's world restart and re-ferry
+  # become a *continuation* -- run n+1 picks up run n's seen-mask and its list
+  # of rooms already finished or given up on. Empty starts fresh every run.
+  #
+  # It is refused rather than silently reset if it was built against a map of a
+  # different shape, resolution or origin. Delete the file to start a new survey.
+  # NOT under /tmp. That is where it lived first, and the directory was cleaned
+  # between sessions, taking a survey that was 68.5% of the way through the
+  # building with it. Relative paths here resolve against the repo root.
+  state_file: run_state/hospital_survey.npz
+  save_every_s: 20.0
+
+  rate_hz: 2.0            # how often it re-decides; System 2 answers at 0.2-0.4 Hz
+  observe_rate_hz: 5.0    # poses folded into its own coverage tracker, ~2 ms each
+  # The policy subscribes to the instruction VOLATILE with depth 1, so one that
+  # arrives while it is not listening is gone. Re-send this often even unchanged.
+  republish_s: 20.0
+
+  # WHEN A ROOM COUNTS AS DONE. Well under 1.0 on purpose: the corner behind a
+  # bed is occluded from every pose the aircraft can reach, and a supervisor
+  # holding out for all of it would never leave the first room.
+  scanned_fraction: 0.60
+
+  doorway_radius_m: 1.2   # how close to an opening counts as standing in it
+  # An opening narrower than this is never offered. The airframe is 0.63 m and
+  # this building's doors are 0.90 and 1.45 m, so the margin is real and small.
+  min_portal_m: 0.80
+
+  # GIVING UP, AND GIVING UP FOR GOOD. A policy that cannot get through a door
+  # will not start being able to, so a mission is abandoned after
+  # mission_timeout_s, left alone for defer_s, and retired for the rest of the
+  # flight after max_attempts. Without that ceiling the deferral only paces the
+  # loop instead of ending it, and the survey can never report itself finished.
+  # PATIENCE, SIZED FROM THE DECISION RATE RATHER THAN GUESSED.
+  #
+  # Measured over the 211 System-2 decisions of five supervised flights, one
+  # decision costs about **22 s** end to end -- the model's own 3-8 s, plus the
+  # hold that keeps the aircraft still while it thinks, plus the look-down dip
+  # that precedes most coordinate replies -- and buys roughly **one metre** of
+  # committed route. A doorway is typically 5-7 m from where its mission is
+  # issued.
+  #
+  # So a 150 s budget was seven decisions and seven metres: enough to reach a
+  # door only if every single answer was perfect, and every entry timed out.
+  # 400 s is about eighteen decisions, which is a real attempt rather than an
+  # arithmetically unwinnable one.
+  mission_timeout_s: 400.0
+  defer_s: 120.0
+  max_attempts: 4
+
+  # WHEN NOTHING HAS CHANGED, BACK OFF. An aircraft wedged against a jamb gets
+  # the same frame and returns the same answer for ever; the cheapest thing
+  # that changes anything is to break contact. The supervisor watches for a
+  # mission that has run this long without the aircraft moving and asks the
+  # follower to run the reverse it already owns for the depth reflex -- a
+  # second trigger, not a second manoeuvre.
+  # SEVENTY, not thirty-five, and never while the aircraft is busy. At ~22 s a
+  # decision, 35 s of stillness is barely one decision -- and the aircraft is
+  # legitimately motionless for most of one, thinking or rotating or dipping.
+  # Measured: three nudges in a single run at a drone that was rotating freely
+  # with nothing in front of it. The supervisor now also refuses to nudge while
+  # `/n1/info` reports a thinking, settling, turning or dipping phase.
+  nudge_after_s: 45.0
+  nudge_min_move_m: 0.6
+  nudge_cooldown_s: 45.0
+
+  # A CORRIDOR IS FINISHED WHERE IT WAS LOOKED AT, NOT AS A WHOLE. The middle
+  # spine is forty metres long; "60% of it seen from one end" written off as
+  # done leaves its far third unsurveyed for the rest of the campaign. A scan
+  # clears the vicinity it was flown from, and the aircraft has to move this far
+  # before that area is worth looking at again. Larger than the biggest room, so
+  # one look still finishes a room.
+  rescan_radius_m: 9.0
+
+  # EVERY ROOM GETS ONE TRY BEFORE ANY GETS A SECOND. Measured on this building,
+  # flying the corridors and spinning would see 79.6% of the floor and thirteen
+  # of its twenty rooms clear the scanned threshold without ever being entered.
+  # So a corridor the aircraft can reach is worth more than a doorway it has
+  # already failed to cross -- while the instruction still gets its one honest
+  # attempt at every room.
+  first_try_rooms_first: true
+
+  # HOW FAR ONE "GO AND LOOK OVER THERE" ORDER REACHES. Sized to the decision
+  # rate: at ~22 s a decision and ~1 m of route per decision, ten metres is
+  # about ten decisions, which fits one mission budget. It is also a rescan
+  # radius, so arriving somewhere new is immediately worth a fresh look around.
+  travel_step_m: 10.0
+  travel_arrive_m: 2.0
+  # A hop's own clock, well under mission_timeout_s. A hop ends the moment its
+  # target patch of floor is seen, which normally happens from several metres
+  # short of it, so one still running after this is one the aircraft is not
+  # making progress on -- and the cheapest answer is a different patch. The
+  # long clock is for crossing a doorway, which is the thing this policy is
+  # genuinely slow at.
+  travel_timeout_s: 150.0
+  # STOP on a hop is the policy declining the order, not pausing over it. It
+  # does not change its mind: over one 33-minute flight STOP was 46% of every
+  # answer it gave, and four hops in a row expired with the aircraft standing
+  # still. Write the target off after a few seconds and aim somewhere else.
+  # Long enough only to outlast the single STOP that follows a real arrival.
+  refuse_after_s: 15.0
+  refuse_radius_m: 5.0
+
+  # HOW LONG A DIRECTION WORD STANDS.
+  bearing_hold_s: 20.0
+
+  # WHAT THE CAMERA CAN SEE, and what it costs to point it somewhere else.
+  # in_frame_deg is half the 75-degree field of view: inside it a target can be
+  # shown to the policy, outside it the aircraft must turn first, and every
+  # out-of-frame order is one the policy is measurably worse at. The turn cost
+  # converts degrees into the metres of flying they are worth -- ~2.1 deg/s of
+  # yaw against ~1 m per decision -- so a target ninety degrees round costs
+  # about twenty metres of travel, and surveys nothing on the way.
+  in_frame_deg: 35.0
+  turn_cost_m_per_deg: 0.4
+  # How far back from a doorway the approach stops. Far enough to see the whole
+  # opening, close enough that crossing is then one short straight move.
+  approach_offset_m: 1.6
+  # While scanning, how long coverage may fail to rise before the area counts as
+  # done for want of anything more to see.
+  scan_stall_s: 25.0
+  # A STOP during a scan is accepted as completion only above this coverage.
+  # Below it the model is stopping for its own reasons -- which it demonstrably
+  # does -- and accepting it would walk the whole checklist without the aircraft
+  # moving.
+  stop_hint_min_fraction: 0.35

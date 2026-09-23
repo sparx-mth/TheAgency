@@ -99,6 +99,89 @@ the image, or nothing at all. `rospack find falcon_adapter` resolves to
 `/catkin_ws/src/falcon_adapter`, so a mounted, executable script is found
 without an image rebuild; `run_falcon_sjtu.sh` does the `chmod +x` itself.
 
+### `enable_bev` — the BEV grid, bridged for the scene-graph task
+
+```bash
+FALCON_LAUNCH_ARGS="enable_bev:=true" ./run_falcon_sjtu.sh hospital
+```
+
+Off by default: nothing in the flight loop reads it. On, the XTEND stack's
+`bev_publisher_node.py` (mounted per file from `tasks/planning/falcon` — the
+node is thin glue over `core/mapping/bev` and is shared, not copied, so a fix
+lands in both deployments at once) projects FALCON's voxel clouds onto a
+latched `/falcon/bev_2d` `nav_msgs/OccupancyGrid`: 0.15 m cells over a
+0.30–1.80 m z-slab, bounds read per map from the same `/map_config/map_size`
+the `map_name` yaml load provides, plus the node's 1 m margin.
+`config/bridge.yaml` carries it to ROS2 as **reliable / transient_local** —
+the ROS2 spelling of a ROS1 latched publisher — so the scene-graph task
+(`tasks/mapping/scene_graph`) gets the last grid however late it joins. The
+`/falcon/bev_2d_conf` confidence companion exists on the ROS1 side but is
+deliberately not bridged; bridge only what has a consumer.
+
+### `external_ctrl` — handing the aircraft to another node
+
+The follower publishes a twist on **every tick in every state**: following,
+holding, surveying, retreating, unsticking, and the position hold it settles
+into once the mission is over. So a second node cannot simply start writing
+`cmd_vel` as well. That is not a hand-off, it is two writers at 50 Hz and the
+last one wins, tick by tick.
+
+The hand-off is a mute instead. The follower subscribes a **latched
+`std_msgs/Bool` on `~external_ctrl_topic`, default `/scene_graph/external_ctrl`**,
+and while the latest value is `true` it puts *nothing* on `cmd_vel` — not the
+command, not a zero, not a hold. A zero twist is itself an instruction, and one
+arriving at 50 Hz would fight whatever the other node is flying. The claimant
+is the scene-graph task (`tasks/mapping/scene_graph`), which takes the aircraft
+for the visual final approach once it has found its target; `config/bridge.yaml`
+carries the flag ROS2 → ROS1 as **reliable / transient_local**, the ROS2
+spelling of a ROS1 latched publisher, so FALCON's container picks up a claim
+that was made before it started.
+
+The mute sits at `_send()`, the one choke point every state reaches the wire
+through — one test, all states, and a state added later is muted by
+construction. Transitions are logged once each (`muted: another node owns
+cmd_vel` / `unmuted: resuming`), never per tick.
+
+**Nothing in the exploration stack publishes this topic.** A follower that has
+never received a message behaves exactly as it did before the flag existed, and
+that is the point: the mute may not cost the mapping mission anything.
+
+#### The claim is a lease, not a switch
+
+A latch that only the claimant can clear is a way to lose an aircraft. The
+claimant is a different process, in a different container, on the far side of
+`ros1_bridge`; if it segfaults while the latch reads `true`, that last `true` is
+all that survives, and the drone hangs in the air, muted, for the rest of the
+run with nothing left alive to release it.
+
+So the follower runs a watchdog on it, `~external_ctrl_timeout_s`, **default
+5 s**. Every `true` renews the lease as well as taking it. After that many
+seconds with no renewal the follower logs a `WARNING` naming the topic, the
+silence and the timeout, unmutes itself and flies again. `0` disables the
+watchdog and restores a plain latch — only for a claimant that can prove it
+cannot outlive its own flag.
+
+**The contract the other node must honour**
+
+| | |
+|---|---|
+| topic | `/scene_graph/external_ctrl` (`~external_ctrl_topic`) |
+| type | `std_msgs/Bool`, latched / `transient_local`, depth 1, reliable |
+| take control | publish `true` |
+| **keep control** | **republish `true` at ~1 Hz** — any period comfortably under a third of the timeout |
+| release | publish `false` (takes effect on the next tick), or stop publishing and wait out the timeout |
+| deadline | 5 s of silence and the follower takes the aircraft back |
+
+Publishing `true` once and going quiet is *not* holding the aircraft: it is
+holding it for 5 s. A claimant that means to park the drone indefinitely — a
+terminal `LAND`, say — must keep the heartbeat running for as long as it means
+to keep it.
+
+Both parameters are declared in `bspline_follower.launch`. `exploration.launch`
+does not forward them (a roslaunch `<include>` passes only the args it names),
+so overriding either from the top of the stack means adding the forward there
+first; the defaults are what fly today.
+
 ### Why it reads `/planning/bspline` and not `/planning/pos_cmd`
 
 The previous stack's `cmd_to_vel.py` subscribed to `/planning/pos_cmd`, the
