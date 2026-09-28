@@ -6,6 +6,26 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- HM3D ObjectNav now runs the same navigation core as Gibson. `feat/objnav-habitat-gibson-nadav`
+  is merged into `feat/objnav-habitat-hm3d-nadav`: `objnav_benchmark_runtime/methods/` (RPT*,
+  room-search loop, frontier sweep, exploration fallback, multi-floor coordinator with
+  ground-truth stairs, YOLO-World default detector), `habitat/` and the shared
+  evaluation/recording path are one core; `gibson/` and `hm3d/` are the two task modules
+  that own their environments, loaders and protocols. The core imports neither task
+  (`tests/test_runtime_boundaries.py`). `hm3d.run` gains `--explorer frontier|falcon`,
+  `--detector-backend` and `--detector-timeout-s`; `HM3DEnv` attaches the navmesh storeys
+  and stair connectors to the episode like `GibsonEnv` does. See
+  `docs/progress/entries/013-*.md`.
+- `hm3d/README.md` rewritten as the HM3D execution guide: environments, dataset and weight
+  downloads, one recorded episode with the live dashboard, and the scene-per-process
+  campaign, sharding and freeze-then-evaluate workflow for the full published split.
+### Changed
+- `habitat/simulator.py` is the union of both branches: explicit `height_m` and the
+  `navmesh="published"|"agent"` protocol choice with `navmesh_provenance()` (HM3D), plus
+  `scene_structure()`, `last_collision` and RGB/depth extrinsic checks (Gibson). Gibson's
+  protocol now states `agent_height_m = 0.88` explicitly instead of reusing the camera height.
+- `gibson/stair_connectors.py` moved to `habitat/stair_connectors.py` (it reads any habitat-sim
+  navmesh); the old path re-exports it.
 - ObjectNav exploration fallback (`objnav_benchmark_runtime/methods/exploration_fallback.py`):
   every failure of the decision pipeline -- an A* with no path, an RPT* instance that cannot
   be built, a room LLM that times out or answers badly, a bug in the loop -- now ends in a

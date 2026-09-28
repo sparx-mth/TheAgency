@@ -11,6 +11,28 @@ Format per entry:
 
 ---
 
+## 2026-09-28 — `git stash` during a half-resolved merge drops MERGE_HEAD
+
+**Symptom:** After resolving ~25 conflicts of `git merge feat/objnav-habitat-gibson-nadav`
+I ran `git stash; git checkout <other>; …; git checkout -; git stash pop` to check whether a
+test failure pre-dated the merge. The tree came back with every resolution intact, but
+`git status` no longer said "All conflicts fixed but you are still merging" — a `git commit`
+at that point would have produced an ordinary single-parent commit, and the Gibson branch
+would look unmerged forever (`git log --merges`, `git branch --merged`, and every future
+merge redoing the same conflicts).
+
+**Root cause:** `git stash` refuses nothing during a merge, but `git stash pop` restores
+only the index and worktree, never `.git/MERGE_HEAD` / `MERGE_MSG`.
+
+**Fix / workaround:** `git rev-parse <source-branch> > .git/MERGE_HEAD` before committing;
+verify with `git log -1 --format=%P` that the commit has two parents. To test another
+revision mid-merge, use `git worktree add /tmp/wt <rev>` instead of stashing.
+
+**Don't:** don't stash mid-merge; don't trust "the files look right" as proof the merge
+state is right.
+
+---
+
 ## 2026-09-22 — ObjectNav spent half its actions spinning, and the step log said why only once decoded
 
 **Symptom:** In the Ranchester Gibson recording (`runs/grounded_vlm_gibson_3x3_20260922T084950Z/
