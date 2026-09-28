@@ -58,6 +58,18 @@ and room-language services run on CPU on this workstation.
 
 ### Detector setup
 
+Optional **hybrid** (YOLO + Grounding DINO + BLIP-2) and **grounded_vlm**
+(DINO + BLIP-2, no YOLO) modes are available through the same detector HTTP
+contract. Use the [configuration and provisioning runbook](../../../mapping/scene_graph/serve/GROUNDED_VLM.md)
+and change only `backend` in its JSON example; `yolo_world` restores YOLO only.
+The example uses a dedicated localhost:18100 service and verifies all labels by
+default. Match `--detector-backend` to the selected service, and set
+`--detector-timeout-s` explicitly for slower CPU verification. These options are
+forwarded through generated runs, frozen campaigns and stair diagnostics.
+Raw proposals, verification answers and rejection reasons are recorded under
+`method.perception.detector_evidence` in `steps.jsonl`. They do not create
+geometric portals, count as additional views or replace existing STOP safeguards.
+
 YOLO-World X-v2 remains the completed-integration default. LLMDet Swin-L remains
 selectable; S/L are explicit checkpoint overrides. Do not change another mission's
 service or silently substitute a smaller model. See the
@@ -89,6 +101,15 @@ No inference models load inside the evaluator.
 all jobs before rendering. See [MULTISTORY.md](MULTISTORY.md) for the full
 generation/run commands. Use a new output directory after any source/model/data
 change; never mix failed attempts or protocol versions into a resume.
+
+An operator-authorized shared GPU can be selected with `--allow-shared-gpu` in
+`run_development` and `distinct_buildings`, as in `run`. It is off by default and
+is recorded in each frozen job; inspect owners and VRAM before using it. The
+detector service needs its own explicit authorization, not an implicit bypass.
+For three buildings with three episodes each, generate with `--multistory
+--buildings 3 --episodes-per-building 3` and use one explorer. **Omit
+`--record-first` to record all nine episodes.** Navigation, STOP, action limits
+and scoring are unchanged by these deployment/recording choices.
 
 Recording needs a working FFmpeg/libx264. `IMAGEIO_FFMPEG_EXE` can select the
 detector environment's installed static encoder; the Habitat environment's

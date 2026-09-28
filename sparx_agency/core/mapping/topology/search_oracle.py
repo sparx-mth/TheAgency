@@ -41,8 +41,8 @@ to 1 over the rooms (callers depend on that), but ``OracleResult`` carries
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from sparx_agency.core.mapping.topology.llm_client import LLMClient
 
@@ -201,6 +201,12 @@ class OracleResult:
             willing to fly somewhere it has not mapped.
         spread: Max minus min of ``probs``. A tick where this is ~0 is a tick
             where the oracle said nothing useful.
+        reused: True when the model was not asked this time: the prompt it
+            would have been shown is byte-identical to the last one it
+            answered, so its last reply was re-scored against the fresh
+            ``searched_s`` and ``frontier_clusters`` instead. The result is
+            the model's own answer either way; this only says whether a call
+            was spent on it.
     """
 
     probs: Dict[int, float]
@@ -210,6 +216,7 @@ class OracleResult:
     scores: Dict[int, float] = field(default_factory=dict)
     p_present: float = 1.0
     spread: float = 0.0
+    reused: bool = False
 
 
 MAX_CLASSES_IN_PROMPT = 6
@@ -315,12 +322,41 @@ def effort_factor(searched_s: float, frontier_clusters: int, area_m2: float,
 
 
 class SearchOracle:
-    """Per-room target-probability oracle over an :class:`LLMClient`."""
+    """Per-room target-probability oracle over an :class:`LLMClient`.
+
+    The model is asked only when what it would be shown has changed. Its
+    reply depends on the prompt alone -- room ids, labels, observed classes
+    and areas to the square metre -- while ``searched_s`` and
+    ``frontier_clusters`` are applied in code afterwards. So the last reply is
+    kept with the prompt that produced it, and a query whose prompt is
+    byte-identical re-scores that reply against the fresh effort numbers
+    instead of spending a call. A search loop that re-estimates at every room
+    release would otherwise ask the same question, and pay the model's
+    latency, several times over a map that has not changed.
+
+    Attributes:
+        reuses: How many queries were answered from the kept reply.
+    """
 
     def __init__(self, client: LLMClient,
                  scoring: OracleScoring = OracleScoring()):
         self._client = client
         self.scoring = scoring
+        self._last_prompt = None  # type: Optional[str]
+        self._last_reply = None   # type: Optional[Dict[str, Any]]
+        self.reuses = 0
+
+    def prompt(self, target: str, rooms: Sequence[OracleRoom]) -> str:
+        """The user prompt for ``rooms`` -- everything the model is shown."""
+        return USER_PROMPT_TEMPLATE.format(
+            target=target,
+            rooms_block=format_rooms_block(rooms),
+            n_rooms=len(rooms),
+        )
+
+    def remember(self, prompt: str, reply: Dict[str, Any]) -> None:
+        """Keep a usable reply as the answer to ``prompt``."""
+        self._last_prompt, self._last_reply = prompt, reply
 
     def probabilities(self, target: str,
                       rooms: Sequence[OracleRoom]) -> OracleResult:
@@ -333,11 +369,12 @@ class SearchOracle:
         """
         if not rooms:
             raise ValueError("SearchOracle needs at least one room")
-        user = USER_PROMPT_TEMPLATE.format(
-            target=target,
-            rooms_block=format_rooms_block(rooms),
-            n_rooms=len(rooms),
-        )
+        user = self.prompt(target, rooms)
+        if user == self._last_prompt and self._last_reply is not None:
+            kept = self._score(self._last_reply, rooms)
+            if kept is not None:
+                self.reuses += 1
+                return replace(kept, reused=True)
         try:
             reply = self._client.chat_json(SYSTEM_PROMPT, user)
         except Exception:
@@ -345,6 +382,7 @@ class SearchOracle:
         result = self._score(reply, rooms)
         if result is None:
             return self._uniform(rooms, raw_reply=reply)
+        self.remember(user, reply)
         return result
 
     # -- Internals -----------------------------------------------------

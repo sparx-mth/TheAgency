@@ -8,6 +8,16 @@ contract. No navigation, frontier, camera-control or STOP algorithm is replaced.
 YOLO S/L remain explicit checkpoint overrides. The default change does not
 change confidence thresholds or add fusion/reasoning from the reviewed papers.
 
+## Optional grounded visual verification
+
+The new [Grounding DINO + BLIP-2 runbook](GROUNDED_VLM.md) adds `grounded_vlm`
+(DINO + BLIP-2, no YOLO) and `hybrid` (all three), with one `backend` field in
+[`configs/gibson_perception.json`](configs/gibson_perception.json). Set it to
+`yolo_world` for YOLO only. The no-config default above is unchanged.
+Grounding DINO Base and BLIP-2 FLAN-T5 XL use pinned, verified local snapshots.
+Verification is experimental, defaults to all classes and never replaces depth,
+floor-transition or multi-view safety checks. Its evidence is recorded per frame.
+
 ## Selection review — 2026-09-15
 
 Here *open vocabulary* means localizing category names supplied as text. Unknown

@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import SCENES
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options, detector_flags
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import source_fingerprint
 
 
@@ -92,8 +93,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--scenes", nargs="+", choices=SCENES, default=["Collierville", "Corozal"])
-    parser.add_argument("--detector-url", required=True)
-    parser.add_argument("--detector-backend", choices=("yolo_world", "llmdet"), required=True)
+    add_detector_options(parser, required=True)
+    parser.add_argument("--job-timeout-s", type=int, default=1800)
     parser.add_argument("--episodes-dir", required=True)
     parser.add_argument("--scenes-dir", required=True)
     parser.add_argument("--seed", type=int, default=0)
@@ -101,6 +102,8 @@ def main(argv=None):
     parser.add_argument("--allow-sim-version-mismatch", action="store_true")
     parser.add_argument("--summarize-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.job_timeout_s <= 0:
+        parser.error("--job-timeout-s must be positive")
     if not args.summarize_only:
         args.output.mkdir(parents=True, exist_ok=False)
         fingerprint = source_fingerprint()
@@ -112,15 +115,15 @@ def main(argv=None):
                 destination.mkdir(parents=True)
                 command = [sys.executable, "-u", "-m", "sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run",
                            "--scene", scene, "--limit", "1", "--explorer", backend, "--output", str(destination),
-                           "--detector-url", args.detector_url, "--detector-backend", args.detector_backend,
                            "--episodes-dir", args.episodes_dir, "--scenes-dir", args.scenes_dir, "--seed", str(args.seed)]
+                command += detector_flags(args)
                 if args.policy_config:
                     command += ["--policy-config", str(args.policy_config)]
                 if args.allow_sim_version_mismatch:
                     command += ["--allow-sim-version-mismatch"]
                 print("Running", backend, scene, flush=True)
                 with (destination / "console.log").open("w") as stream:
-                    subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=1800)
+                    subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=args.job_timeout_s)
     summarize(args.output)
     print(args.output / "COMPARISON.md")
 

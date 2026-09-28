@@ -138,11 +138,24 @@ def test_checkpoint_identity_covers_weights_tokenizer_and_preprocessing(tmp_path
     assert after != backends.checkpoint_identity(tmp_path)
 
 
-def test_occupied_gpu_refused_before_torch(monkeypatch):
+@pytest.mark.parametrize("shared, available, error", [(False, True, "occupied"),
+                                                     (True, False, "unavailable"),
+                                                     (True, True, None)])
+def test_occupied_gpu_refused_before_torch(monkeypatch, shared, available, error):
     monkeypatch.setattr(backends.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="7000\n"))
-    monkeypatch.setitem(sys.modules, "torch", None)
-    with pytest.raises(RuntimeError, match="occupied"):
-        backends._configure_runtime(SimpleNamespace(device="cuda:0"))
+    limits = []
+    fake_torch = SimpleNamespace(cuda=SimpleNamespace(
+        is_available=lambda: available,
+        set_per_process_memory_fraction=lambda fraction, device: limits.append((fraction, device))))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch if shared else None)
+    args = SimpleNamespace(device="cuda:0", torch_threads=None, allow_shared_gpu=shared)
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            backends._configure_runtime(args)
+        assert limits == []
+    else:
+        backends._configure_runtime(args)
+        assert limits == [(0.70, "cuda:0")]
 
 
 def test_http_rgb_coordinates_and_provenance_drift():

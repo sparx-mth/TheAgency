@@ -6,13 +6,14 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import Obje
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import ObservedDoors
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidence
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingSearchOracle
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import RoomSearchLoop
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import ObservedSceneGraph
 
 
 class FloorContextBank:
     """Floor-qualified object/room IDs and an action clock that pauses off-floor."""
 
-    FIELDS = ("graph", "doors", "landmarks", "target_evidence", "supervisor",
+    FIELDS = ("graph", "doors", "landmarks", "target_evidence", "supervisor", "loop",
               "_target_xy", "_target_id", "_target_step", "_last_door_revision",
               "_visited_frontiers", "_last_graph_step", "_last_plan_s",
               "_blocked_since", "_floor_time", "_object_geometry", "_target_floor_id")
@@ -30,6 +31,9 @@ class FloorContextBank:
         p.landmarks = ObjectLandmarkMap(nearest_match=True)
         p.target_evidence = TargetEvidence(p.target_settings)
         p.supervisor = ObjectSearchSupervisor(p.supervisor_params, solver=p.solver)
+        # The loop mirrors the supervisor: the room in force and the local
+        # step counter are facts about THIS floor's search, restored with it.
+        p.loop = RoomSearchLoop(p, p.loop_settings)
         p._target_xy = p._target_id = p._target_floor_id = None
         p._object_geometry = {}
         p._target_step = -p.settings.target_memory_steps - 1

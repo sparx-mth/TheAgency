@@ -25,6 +25,9 @@ class MultiFloorSearch:
         self.completed = []
         self._observed_step = None
         self.semantic_stair_hint = False
+        #: A stair detection seen while a route was committed is kept until the
+        #: next action without one, rather than interrupting the route.
+        self.stair_hint_pending = False
         self.safety_vetoes = 0
         self.source_trail = []
 
@@ -143,10 +146,36 @@ class MultiFloorSearch:
             if command is not None:
                 return command
             self._abandon(obs, "portal approach unavailable")
+        return self._inspect(obs, exhausted)
+
+    def _inspect(self, obs, exhausted):
+        """Start a look-down sweep only at a natural pause, and say what asked for it.
+
+        The three triggers, in precedence: the floor has no frontier left
+        (``exhausted`` -- the robot has nothing else to do); a stair detection
+        is pending; or the floor allowance is spent and the long periodic
+        cadence has elapsed. The last two wait until no route is committed,
+        because a sweep mid-route costs its own actions plus the turns to
+        recover the heading it leaves behind. The former per-cooldown timer
+        interrupted routes ten times in one 472-action recording.
+        """
         camera = self.policy.camera_control
-        due = exhausted or self.semantic_stair_hint or obs.step - self.entered_step >= self.params.floor_search_actions
-        if due:
-            camera.begin_inspection(obs, self.floor_id)
+        if self.semantic_stair_hint:
+            self.stair_hint_pending = True
+        idle = self.policy.route_memory.path is None
+        allowance_spent = obs.step - self.entered_step >= self.params.floor_search_actions
+        if exhausted:
+            reason = "floor_exhausted"
+        elif idle and self.stair_hint_pending:
+            reason = "stair_detection"
+        elif idle and allowance_spent and camera.periodic_due(obs.step):
+            reason = "periodic"
+        else:
+            reason = None
+        if reason is not None and camera.begin_inspection(obs, self.floor_id):
+            self.stair_hint_pending = False
+            self.events.append({"action": obs.step, "event": "inspection_started", "reason": reason,
+                                "floor_id": self.floor_id})
         return camera.inspection_command(obs)
 
     def _select(self, obs, world):

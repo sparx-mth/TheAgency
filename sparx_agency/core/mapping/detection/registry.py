@@ -41,7 +41,9 @@ class DetectionRegistry:
         return self._factories[name].create()
 
 
-def default_detection_registry(*, yolo_world_config=None, llmdet_config=None) -> DetectionRegistry:
+def default_detection_registry(*, yolo_world_config=None, llmdet_config=None,
+                               grounding_dino_config=None, grounded_vlm_config=None,
+                               hybrid_config=None) -> DetectionRegistry:
     """Registry with the built-in backends registered.
 
     The factory imports the backend lazily so a registry can be constructed (and
@@ -62,6 +64,31 @@ def default_detection_registry(*, yolo_world_config=None, llmdet_config=None) ->
 
         return LlmDetDetector(llmdet_config)
 
+    def _make_grounding_dino() -> DetectionModel:
+        from sparx_agency.core.mapping.detection.grounding_dino import GroundingDinoDetector
+
+        return GroundingDinoDetector(grounding_dino_config)
+
+    def _make_grounded_vlm() -> DetectionModel:
+        from sparx_agency.core.mapping.detection.grounded_vlm import GroundedVlmConfig, GroundedVlmDetector
+
+        config = grounded_vlm_config or GroundedVlmConfig()
+        if config.yolo is not None:
+            raise ValueError("grounded_vlm must not include YOLO; select hybrid instead")
+        return GroundedVlmDetector(config)
+
+    def _make_hybrid() -> DetectionModel:
+        from sparx_agency.core.mapping.detection.grounded_vlm import GroundedVlmConfig, GroundedVlmDetector
+        from sparx_agency.core.mapping.detection.yolo_world import YoloWorldConfig
+
+        config = hybrid_config or GroundedVlmConfig(yolo=YoloWorldConfig(device="cpu"))
+        if config.yolo is None:
+            raise ValueError("hybrid requires an explicit YOLO configuration")
+        return GroundedVlmDetector(config)
+
     reg.register(DetectorFactory(name="yolo_world", create=_make_yolo_world))
     reg.register(DetectorFactory(name="llmdet", create=_make_llmdet))
+    reg.register(DetectorFactory(name="grounding_dino", create=_make_grounding_dino))
+    reg.register(DetectorFactory(name="grounded_vlm", create=_make_grounded_vlm))
+    reg.register(DetectorFactory(name="hybrid", create=_make_hybrid))
     return reg

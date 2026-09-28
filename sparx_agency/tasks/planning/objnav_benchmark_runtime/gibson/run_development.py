@@ -12,6 +12,7 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_labe
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.development_dataset import DEVELOPMENT_PROTOCOL, DevelopmentDataset, DevelopmentEnv
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_SCHEMA, MultiFloorDataset, MultiFloorEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import _gpu_gate, _method, _runtime, select_episodes, source_fingerprint
 
@@ -37,7 +38,7 @@ def prepare(args):
                           dataset.definition.get("generation", {}).get("scene_audits", {}).items()} if multistory else {}
         config = {"protocol": asdict(protocol), "runtime": runtime,
                   "source_sha256": source_fingerprint(), "method": method, "seed": args.seed,
-                  "gpu_device": args.gpu_device, "allow_shared_gpu": False,
+                  "gpu_device": args.gpu_device, "allow_shared_gpu": args.allow_shared_gpu,
                   "selected_episode_ids": ids, "dataset": dataset.manifest(),
                   "kinematics": asdict(protocol.kinematics()),
                   "recording": {"enabled": args.record, "fps": args.video_fps, "display_floor_counts": display_counts,
@@ -103,8 +104,7 @@ def parser():
     p.add_argument("--scene", required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--explorer", choices=("frontier", "falcon"), required=True)
-    p.add_argument("--detector-url", required=True)
-    p.add_argument("--detector-backend", choices=("yolo_world", "llmdet"), required=True)
+    add_detector_options(p, required=True)
     p.add_argument("--policy-config", type=Path)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--limit", type=int, help="Explicit smoke-test subset; omitted for the complete building batch")
@@ -116,7 +116,9 @@ def parser():
     p.add_argument("--expect-config", type=Path)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--allow-sim-version-mismatch", action="store_true")
-    p.set_defaults(agent="rpt", allow_shared_gpu=False)
+    p.add_argument("--allow-shared-gpu", action="store_true",
+                   help="Explicit operator authorization after GPU ownership/memory preflight; frozen in run identity")
+    p.set_defaults(agent="rpt")
     return p
 
 
