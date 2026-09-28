@@ -22,7 +22,16 @@ DEFAULT_SEGMENTATION = WatershedRoomParams(
 
 
 class ObservedSceneGraph:
-    """No surveyed door positions, GT semantic labels or privileged map inputs."""
+    """No surveyed door positions, GT semantic labels or privileged map inputs.
+
+    Attributes:
+        labels: ``(H, W)`` int32 room label image from the latest
+            :meth:`update` -- ``pid + 1`` inside a room, 0 elsewhere -- or
+            None before the first update. The room-search loop reads it every
+            action: to confine in-room routes to the room in force and to
+            credit frontier clusters to rooms by the same majority vote
+            :attr:`facts` counts them with.
+    """
 
     def __init__(self, client, segmentation=None, label_settings=None):
         self.registry = RoomRegistry(iou_threshold=0.15)
@@ -32,8 +41,10 @@ class ObservedSceneGraph:
         self.segmentation = segmentation or DEFAULT_SEGMENTATION
         self.options, self.facts, self.probs, self.searched = [], {}, {}, {}
         self.queries = 0
+        self.oracle_reuses = 0
         self.last_reasoning = {}
         self.doors = []
+        self.labels = None
         self._partition = None
         self.partition_revision = 0
         self.max_rooms = 0
@@ -46,6 +57,14 @@ class ObservedSceneGraph:
                 if room.mask[gy, gx]:
                     self.searched[pid] = self.searched.get(pid, 0.0) + seconds
                     break
+
+    def room_at(self, world, xy):
+        """The pid of the room whose mask holds world ``xy``, or None."""
+        gx, gy = world.world_to_grid(*xy)
+        if self.labels is None or not world.in_bounds(gx, gy):
+            return None
+        label = int(self.labels[gy, gx])
+        return label - 1 if label > 0 else None
 
     def update(self, world, landmarks, target, doors=(), step=0, reason=True):
         doors = tuple(doors)
@@ -63,6 +82,7 @@ class ObservedSceneGraph:
         pid_labels = np.zeros(world.grid.shape, dtype=np.int32)
         for pid, room in rooms.items():
             pid_labels[room.mask] = pid + 1
+        self.labels = pid_labels
         self._door_links(world, pid_labels, doors, cells)
         counts = count_frontier_clusters(world.grid, pid_labels, min_cluster_cells=4)
         self.facts = {pid: RoomFacts(pid, counts.get(pid + 1, 0), self.searched.get(pid, 0.0), room.n_cells)
@@ -76,8 +96,9 @@ class ObservedSceneGraph:
         if reason:
             self._reason(world, self._objects, target, step, changed)
         else:
-            self.label_tracker.update(self._objects, step, changed, allow_query=False)
-            self.options = [RoomOption(room_id=pid, label="unknown", prob=self.probs.get(pid, 0.0), xy=room.centroid)
+            labels = self.label_tracker.update(self._objects, step, changed, allow_query=False)
+            self.options = [RoomOption(room_id=pid, label=labels[pid].label if pid in labels else "unknown",
+                                       prob=self.probs.get(pid, 0.0), xy=room.centroid)
                             for pid, room in rooms.items()]
 
     def reason(self, world, target, step):
@@ -117,7 +138,10 @@ class ObservedSceneGraph:
             raise ObjNavInternalError("Room LLM failed: %s" % exc) from exc
         if result.source != "llm" or not all(math.isfinite(p) and 0 <= p <= 1 for p in result.probs.values()):
             raise ObjNavInternalError("Room oracle failed; refusing a uniform fallback run")
-        self.queries += 1
+        if result.reused:
+            self.oracle_reuses += 1
+        else:
+            self.queries += 1
         self.probs = {pid: prob * result.p_present for pid, prob in result.probs.items()}
         self.options = [RoomOption(room_id=pid, label=labels[pid].label,
                                    prob=result.probs[pid], xy=room.centroid) for pid, room in rooms.items()]

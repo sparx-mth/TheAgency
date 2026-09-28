@@ -25,14 +25,23 @@ Gain is ``size ** gain_exponent`` -- sub-linear by default, because a cluster
 twice as long is not twice as informative once the camera's field of view
 covers it, and a linear gain reproduces the size-only order at any distance.
 
+:func:`frontier_goals_by_room` is the same ranking for EVERY room at once --
+one extraction, one Dijkstra -- with each cluster credited to a room by the
+majority vote :func:`~sparx_agency.core.mapping.topology.room_stats.count_frontier_clusters`
+uses, so the goals a room is offered and the ``frontier_clusters`` the scene
+graph reports for it are the same population. The room-search loop needs
+this per action in transit: the entry point into a room is its nearest
+frontier, and asking for it room by room would run one Dijkstra per room.
+
 numpy and scipy, host side only, like :mod:`room_costs`: not imported by the
 Noetic FALCON facade.
 """
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.sparse.csgraph import dijkstra
@@ -40,7 +49,7 @@ from scipy.sparse.csgraph import dijkstra
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.room_costs import (
-    frontier_cluster_cells, passable_graph, snap_cell)
+    FrontierCluster, frontier_clusters, passable_graph, snap_cell)
 
 
 @dataclass(frozen=True)
@@ -144,27 +153,124 @@ def ranked_frontier_goals(world: OccupancyGrid2D,
             origin or yaw is not finite.
     """
     params = params or FrontierRankingParams()
+    ids, graph = _graph(cost, ids, graph, origin_xy, yaw)
+    clusters = frontier_clusters(world, room_mask, ids, min_cluster_cells)
+    if not clusters:
+        return []
+    dist = _distances(world, ids, graph, origin_xy, params)
+    if dist is None:
+        return []
+    return _rank(world, clusters, dist, ids, origin_xy, yaw, params)
+
+
+def frontier_goals_by_room(world: OccupancyGrid2D,
+                           cost: np.ndarray,
+                           room_labels: np.ndarray,
+                           origin_xy: Tuple[float, float],
+                           yaw: float,
+                           params: Optional[FrontierRankingParams] = None,
+                           min_cluster_cells: int = 4,
+                           ids: Optional[np.ndarray] = None,
+                           graph=None) -> Dict[int, List[FrontierGoal]]:
+    """Every room's reachable frontier goals in one pass, keyed by room label.
+
+    One extraction over the whole grid and one Dijkstra from the robot, then
+    each cluster is credited to ONE room by majority vote over the room
+    labels at its cells -- label-0 cells abstain and a cluster with no
+    labelled cell is dropped -- which is exactly the rule
+    :func:`~sparx_agency.core.mapping.topology.room_stats.count_frontier_clusters`
+    applies. A cluster straddling a doorway therefore goes to the room the
+    count credits it to, and a room's goal list is empty exactly when its
+    count is zero (up to reachability: a cluster with no path through known
+    free space is dropped here and still counted there).
+
+    Args:
+        world: The BEV grid.
+        cost: The planner's cost array for ``world``, ``inf`` where blocked.
+        room_labels: ``(H, W)`` int label image, 0 = no room, > 0 = a room.
+            Keys of the result are the labels exactly as they appear here;
+            whether they are pids or pid+1 is the caller's convention.
+        origin_xy: Where the robot is, world metres.
+        yaw: The robot's heading, radians.
+        params: Tuning. Defaults to :class:`FrontierRankingParams`.
+        min_cluster_cells: Clusters smaller than this are noise and dropped.
+        ids: The index image from :func:`passable_graph`, if already built.
+        graph: The matching CSR graph, if already built. Both or neither.
+
+    Returns:
+        ``{room_label: [FrontierGoal, ...]}``, each list utility descending
+        and never empty -- a room with nothing reachable is simply absent.
+        Empty when the robot stands off the passable graph.
+
+    Raises:
+        ValueError: If exactly one of ``ids`` and ``graph`` is given, the
+            origin or yaw is not finite, or ``room_labels`` is not shaped
+            like the grid.
+    """
+    params = params or FrontierRankingParams()
+    labels = np.asarray(room_labels)
+    if labels.shape != world.grid.shape:
+        raise ValueError("room_labels %s is not shaped like the grid %s"
+                         % (labels.shape, world.grid.shape))
+    ids, graph = _graph(cost, ids, graph, origin_xy, yaw)
+    everywhere = np.ones(world.grid.shape, dtype=bool)
+    clusters = frontier_clusters(world, everywhere, ids, min_cluster_cells)
+    if not clusters:
+        return {}
+    dist = _distances(world, ids, graph, origin_xy, params)
+    if dist is None:
+        return {}
+    by_room: Dict[int, List[FrontierCluster]] = {}
+    for cluster in clusters:
+        room = _room_of(labels, cluster)
+        if room is not None:
+            by_room.setdefault(room, []).append(cluster)
+    out: Dict[int, List[FrontierGoal]] = {}
+    for room, members in by_room.items():
+        goals = _rank(world, members, dist, ids, origin_xy, yaw, params)
+        if goals:
+            out[room] = goals
+    return out
+
+
+def _room_of(labels: np.ndarray, cluster: FrontierCluster) -> Optional[int]:
+    """The room label most of the cluster's labelled cells carry, or None."""
+    here = labels[cluster.rows, cluster.cols]
+    here = here[here > 0]
+    if here.size == 0:
+        return None
+    return int(Counter(here.tolist()).most_common(1)[0][0])
+
+
+def _graph(cost, ids, graph, origin_xy, yaw) -> Tuple[np.ndarray, Any]:
+    """Validate the inputs and build the passable graph if it was not passed."""
     if (ids is None) != (graph is None):
         raise ValueError("pass both ids and graph from passable_graph, or neither")
     if not all(math.isfinite(float(v)) for v in (origin_xy[0], origin_xy[1], yaw)):
         raise ValueError("origin_xy and yaw must be finite")
     if ids is None:
         ids, graph = passable_graph(cost)
-    clusters = frontier_cluster_cells(world, room_mask, ids, min_cluster_cells)
-    if not clusters:
-        return []
+    return ids, graph
 
+
+def _distances(world, ids, graph, origin_xy, params) -> Optional[np.ndarray]:
+    """Geodesic steps from the robot to every graph node, or None if it is off-graph."""
     ox, oy = world.world_to_grid(float(origin_xy[0]), float(origin_xy[1]))
     radius = max(1, int(round(params.snap_radius_m / world.resolution)))
     source = snap_cell(ids, ox, oy, radius)
     if source is None:
-        return []
+        return None
     limit_cells = params.max_geodesic_m / world.resolution
-    dist = dijkstra(graph, directed=False, indices=int(ids[source[1], source[0]]),
+    return dijkstra(graph, directed=False, indices=int(ids[source[1], source[0]]),
                     limit=limit_cells)
 
+
+def _rank(world, clusters: Sequence[FrontierCluster], dist, ids, origin_xy, yaw,
+          params) -> List[FrontierGoal]:
+    """Score reachable clusters -- gain over geodesic cost, facing as a discount."""
     goals: List[FrontierGoal] = []
-    for size, (gx, gy) in clusters:
+    for cluster in clusters:
+        gx, gy = cluster.cell
         steps = float(dist[int(ids[gy, gx])])
         if not math.isfinite(steps):
             continue
@@ -173,10 +279,10 @@ def ranked_frontier_goals(world: OccupancyGrid2D,
         error = normalize_angle(math.atan2(y - float(origin_xy[1]),
                                            x - float(origin_xy[0])) - float(yaw))
         facing = 1.0 + params.heading_weight * abs(error) / math.pi
-        utility = (float(size) ** params.gain_exponent
+        utility = (float(cluster.size) ** params.gain_exponent
                    / ((geodesic + params.distance_floor_m) * facing))
         goals.append(FrontierGoal(xy=(x, y), cell=(int(gx), int(gy)),
-                                  size_cells=int(size), geodesic_m=geodesic,
+                                  size_cells=int(cluster.size), geodesic_m=geodesic,
                                   heading_error_rad=float(error),
                                   utility=float(utility)))
     goals.sort(key=lambda g: (-g.utility, g.geodesic_m))

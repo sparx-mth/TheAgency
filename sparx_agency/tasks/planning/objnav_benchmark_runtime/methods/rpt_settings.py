@@ -10,10 +10,22 @@ from sparx_agency.core.planning.exploration.floor_atlas import MultiFloorParams
 
 @dataclass(frozen=True)
 class RPTSettings:
+    """Method configuration.
+
+    Attributes:
+        graph_period_steps: How often the scene graph's GEOMETRY is refreshed
+            -- rooms, object->room association, doors, per-room search time
+            and frontier counts. Every action by default: the room-search
+            loop reads the room masks and frontier counts on every action,
+            and a ten-action-old mask confines routes to a room that has
+            since moved. This is not the LLM cadence; the room LLM runs at
+            the loop's own points (see ``room_search_loop.LoopSettings``).
+    """
+
     map_size_m: float = 80.0
     map_resolution_m: float = 0.1
     depth_stride: int = 8
-    graph_period_steps: int = 10
+    graph_period_steps: int = 1
     replan_steps: int = 5  # accepted for old configs; not a path replacement timer
     action_time_s: float = 1.0
     detection_confidence: float = 0.35

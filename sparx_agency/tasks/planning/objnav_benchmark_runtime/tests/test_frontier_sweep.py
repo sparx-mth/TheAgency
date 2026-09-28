@@ -1,9 +1,11 @@
-"""Regressions for the bounded frontier sweep and the inspection gate.
+"""Regressions for the frontier goal generator, its committed goal, and the inspection gate.
 
 Each test is one wasted-action pattern read off the Ranchester recording
-``e7c4f2ad5402``; the supervisor is scripted so a room can be exhausted,
-released and re-selected in microseconds, and the planner is stubbed so the
-sweep's decisions are tested rather than A*.
+``e7c4f2ad5402``. Which room is swept, when its turn ends and where the
+aircraft goes next are the room-search loop's decisions and are tested in
+``test_room_search_loop.py``; here the planner is stubbed so the sweep's own
+decisions -- which goal, whether the committed one still stands, how many
+look-around turns -- are tested rather than A*.
 """
 from __future__ import annotations
 
@@ -15,9 +17,6 @@ import numpy as np
 import pytest
 
 from sparx_agency.core.common.types import Pose2D
-from sparx_agency.core.planning.exploration.object_search_supervisor import (
-    EXHAUSTED, SEARCH, SELECT, TRANSIT, UNREACHABLE, FlyTo, ObjectSearchState, Release)
-from sparx_agency.core.planning.exploration.room_search_policy import Hold
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
@@ -33,104 +32,63 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method impo
     FakeDetector, FakeLLM, observation, setup_policy)
 
 
-class ScriptedSupervisor:
-    """Returns the scripted states in order (the last one repeats) and records every call."""
-
-    def __init__(self, *states):
-        self.states = list(states)
-        self.calls = []
-        self.state = states[0].state
-
-    def update(self, *args, **kwargs):
-        self.calls.append(kwargs)
-        state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
-        self.state = state.state
-        return state
-
-
-def searching(room_id=0):
-    return ObjectSearchState(state=SEARCH, action=Hold("mapping"), room_id=room_id, goal_xy=(0.0, 0.0))
-
-
-def released(room_id, verdict):
-    return ObjectSearchState(state=SELECT, action=Release(room_id, verdict), completed=(room_id, verdict))
-
-
-def flying_to(room_id, xy):
-    return ObjectSearchState(state=TRANSIT, action=FlyTo(room_id, xy), room_id=room_id, goal_xy=xy, changed=True)
-
-
 def swept_policy(monkeypatch):
-    """A policy after one real observation, with no frontier anywhere and one room."""
+    """A policy after one real observation, with no frontier anywhere."""
     policy, episode = setup_policy()
     policy.plan(observation(episode, 0, depth=3.0))
     world = policy.last_world
     monkeypatch.setattr(frontier_sweep, "ranked_frontier_goals", lambda *a, **k: [])
-    policy.graph.registry.rooms = {0: SimpleNamespace(mask=np.ones(world.grid.shape, bool))}
     return policy, episode, world
 
 
-def test_a_swept_room_gets_one_rotation_then_leaves_on_the_same_action(monkeypatch):
+# -- the look-around ----------------------------------------------------------
+def test_the_look_around_is_off_by_default_and_bounded_when_on(monkeypatch):
+    """The loop's termination rule is N steps or no frontier left, so a swept
+    room leaves at once unless a detector asks for one more look."""
     policy, episode, world = swept_policy(monkeypatch)
-    sup = ScriptedSupervisor(searching(0))
-    policy.supervisor = sup
+    key = (0, 0)
+    policy.sweep.begin_scan(key)
+    assert policy.sweep.settings.room_scan_turns == 0
+    assert policy.sweep.scan_turn(observation(episode, 1), key) is None
+
+    policy.sweep.settings = replace(policy.sweep.settings, room_scan_turns=-1)
+    policy.sweep.begin_scan(key)
     turns = int(math.ceil(2 * math.pi / episode.action_spec.turn_angle_rad))
-    commands = [policy.sweep.plan(observation(episode, step, depth=3.0), world) for step in range(1, turns + 1)]
+    commands = [policy.sweep.scan_turn(observation(episode, step), key) for step in range(1, turns + 1)]
     assert all(c.info.get("kind") == "room_scan" and c.final_yaw is not None for c in commands)
     assert [c.info["scan_turn"] for c in commands] == list(range(1, turns + 1))
-    assert not any(call.get("frontier_exhausted") for call in sup.calls)
-
-    sup.states = [searching(0), released(0, EXHAUSTED), ObjectSearchState(state=SELECT, action=Hold("no room"))]
-    after = policy.sweep.plan(observation(episode, turns + 1, depth=3.0), world)
-    assert after.info.get("kind") != "room_scan"
-    assert sup.calls[-2].get("frontier_exhausted") is True, "the exhausted flag released the room"
-    assert sup.calls[-1].get("frontier_exhausted", False) is False, "the reselect call carries no stale flag"
-    assert policy.sweep.stats["rooms_released"] == 1
+    assert policy.sweep.scan_turn(observation(episode, turns + 1), key) is None, "one rotation, then leave"
     assert policy.sweep.stats["scan_turns"] == turns
+    policy.sweep.begin_scan(key)
+    assert policy.sweep.scan_turn(observation(episode, turns + 2), key) is not None, "a new visit starts afresh"
 
 
-def test_room_scan_budget_zero_leaves_at_once(monkeypatch):
-    policy, episode, world = swept_policy(monkeypatch)
-    policy.sweep.settings = replace(policy.sweep.settings, room_scan_turns=0)
-    sup = ScriptedSupervisor(searching(0), released(0, EXHAUSTED),
-                             ObjectSearchState(state=SELECT, action=Hold("no room")))
-    policy.supervisor = sup
-    command = policy.sweep.plan(observation(episode, 1, depth=3.0), world)
-    assert command.info.get("kind") != "room_scan"
-    assert sup.calls[1]["frontier_exhausted"] is True
-
-
-def test_a_released_room_is_replaced_by_a_transit_on_the_same_action(monkeypatch):
-    """The recording planned a throwaway 7-9 m floor route on every release."""
-    policy, episode, world = swept_policy(monkeypatch)
-    navigated = []
+def test_explore_tries_ranked_goals_in_order_and_plans_on_the_planning_world(monkeypatch):
+    """Frontiers are read off the observed map; the route is planned on whatever the loop hands over."""
+    policy, episode = setup_policy()
+    policy.plan(observation(episode, 0, depth=3.0))
+    world = policy.last_world
+    monkeypatch.setattr(frontier_sweep, "ranked_frontier_goals",
+                        lambda *a, **k: [SimpleNamespace(xy=(2.0, 0.0)), SimpleNamespace(xy=(3.0, 0.0)),
+                                         SimpleNamespace(xy=(4.0, 0.0)), SimpleNamespace(xy=(5.0, 0.0))])
+    seen = []
+    answers = iter([None, None, NavigationCommand.follow([(0.0, 0.0), (4.0, 0.0)], info={"kind": "frontier"})])
 
     def navigate(obs, world_, goal, kind, final_yaw=None):
-        navigated.append((goal, kind))
-        return NavigationCommand.follow([(0.0, 0.0), goal], info={"kind": kind})
+        seen.append((world_, goal, kind))
+        return next(answers)
 
     monkeypatch.setattr(policy, "_navigate", navigate)
-    sup = ScriptedSupervisor(released(0, EXHAUSTED), flying_to(1, (2.0, 0.0)))
-    policy.supervisor = sup
-    command = policy.sweep.plan(observation(episode, 1, depth=3.0), world)
-    assert len(sup.calls) == 2
-    assert navigated == [((2.0, 0.0), "transit/1")]
-    assert command.info["kind"] == "transit/1"
-    assert policy.route_memory.path is None, "the released room's route was dropped before the transit"
+    planning = SimpleNamespace(resolution=world.resolution)
+    command = policy.sweep.explore(observation(episode, 1), world, np.ones(world.grid.shape), None,
+                                   planning_world=planning)
+    assert command is not None and command.info["kind"] == "frontier"
+    assert [goal for _, goal, _ in seen] == [(2.0, 0.0), (3.0, 0.0), (4.0, 0.0)], "plan_attempts goals, in order"
+    assert all(w is planning for w, _, _ in seen), "the route is planned on the planning world"
+    assert policy.sweep.stats["plan_failures"] == 2
 
 
-def test_a_refused_transit_route_ends_the_room_instead_of_idling(monkeypatch):
-    policy, episode, world = swept_policy(monkeypatch)
-    answers = iter([None, NavigationCommand.follow([(0.0, 0.0), (4.0, 0.0)], info={"kind": "transit/2"})])
-    monkeypatch.setattr(policy, "_navigate", lambda *a, **k: next(answers))
-    sup = ScriptedSupervisor(flying_to(1, (2.0, 0.0)), released(1, UNREACHABLE), flying_to(2, (4.0, 0.0)))
-    policy.supervisor = sup
-    command = policy.sweep.plan(observation(episode, 1, depth=3.0), world)
-    assert sup.calls[1]["route_failed"] is True
-    assert command.info["kind"] == "transit/2"
-    assert policy.sweep.stats["plan_failures"] == 1
-
-
+# -- the committed goal -------------------------------------------------------
 def test_a_committed_goal_survives_a_moved_room_mask_but_not_a_resolved_boundary():
     policy, episode = setup_policy()
     policy.plan(observation(episode, 0, depth=3.0))

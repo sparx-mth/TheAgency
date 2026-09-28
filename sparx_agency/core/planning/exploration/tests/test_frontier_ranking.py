@@ -20,7 +20,7 @@ import pytest
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
 from sparx_agency.core.planning.exploration.frontier_ranking import (
-    FrontierGoal, FrontierRankingParams, ranked_frontier_goals)
+    FrontierGoal, FrontierRankingParams, frontier_goals_by_room, ranked_frontier_goals)
 from sparx_agency.core.planning.exploration.room_costs import (
     in_room_frontier_goals, passable_graph)
 
@@ -190,10 +190,130 @@ def test_a_far_boundary_beyond_the_horizon_is_withheld_this_tick():
     assert ranked_frontier_goals(hall, flat_cost(hall), mask, at(1, 1), 0.0, min_cluster_cells=1)
 
 
+def test_an_arc_shaped_boundary_gets_a_goal_on_the_boundary_not_at_its_centroid():
+    """The edge of the depth range bows around the robot. Its centroid sits
+    in the middle of the seen floor, where a goal has no unknown cell near
+    it; the goal must be one of the arc's own cells."""
+    arc = world_from([
+        "#############",
+        "#.....??????#",
+        "#........???#",
+        "#..........?#",
+        "#...........#",
+        "#..........?#",
+        "#........???#",
+        "#.....??????#",
+        "#############",
+    ])
+    mask = arc.grid != OCC
+    goals = ranked_frontier_goals(arc, flat_cost(arc), mask, at(2, 4), 0.0, min_cluster_cells=1)
+    assert len(goals) == 1
+    gx, gy = goals[0].cell
+    assert arc.grid[gy, gx] == FREE
+    around = arc.grid[gy - 1:gy + 2, gx - 1:gx + 2]
+    assert (around == UNK).any(), "the goal touches unknown space: it is on the boundary"
+    frontier_cells = {(4, 1), (5, 1), (7, 2), (8, 2), (9, 3), (10, 3), (10, 4), (11, 4), (10, 5), (9, 5),
+                      (8, 6), (7, 6), (5, 7), (4, 7)}
+    assert (gx, gy) in frontier_cells or any(abs(gx - x) + abs(gy - y) <= 1 for x, y in frontier_cells)
+    assert (gx, gy) != (7, 4), "not the centroid, which is a cell of seen floor two columns from any boundary"
+
+
 @pytest.mark.parametrize("kwargs", [{"gain_exponent": -0.1}, {"distance_floor_m": 0.0},
                                     {"heading_weight": float("inf")}, {"max_geodesic_m": -1.0},
                                     {"snap_radius_m": 0.0}])
 def test_ranking_params_reject_nonsense(kwargs):
     with pytest.raises(ValueError):
         FrontierRankingParams(**kwargs)
+
+
+# -- goals for every room at once -------------------------------------------
+TWO_ROOMS = [
+    "#############",
+    "#?....#....?#",
+    "#?....#.....#",
+    "#......#....#",
+    "#.....#.....#",
+    "#############",
+]
+"""Two rooms joined by a one-cell gap in row 3; a frontier column in each."""
+
+
+def labels_for(world, split_col=6):
+    """Room 1 left of ``split_col``, room 2 right of it; walls and the gap are 0."""
+    lbl = np.zeros(world.grid.shape, dtype=np.int32)
+    free = world.grid == FREE
+    cols = np.arange(world.grid.shape[1])[None, :]
+    lbl[free & (cols < split_col)] = 1
+    lbl[free & (cols > split_col)] = 2
+    return lbl
+
+
+def test_goals_are_keyed_by_the_room_label_and_ranked_within_each_room():
+    world = world_from(TWO_ROOMS)
+    labels = labels_for(world)
+    by_room = frontier_goals_by_room(world, flat_cost(world), labels, at(3, 3), 0.0,
+                                     min_cluster_cells=1)
+    assert set(by_room) == {1, 2}
+    assert all(g.cell[0] <= 2 for g in by_room[1]), "room 1's goals lie in room 1"
+    assert all(g.cell[0] >= 10 for g in by_room[2]), "room 2's goals lie in room 2"
+    for goals in by_room.values():
+        assert [g.utility for g in goals] == sorted((g.utility for g in goals), reverse=True)
+    assert min(by_room[1], key=lambda g: g.geodesic_m).geodesic_m < \
+        min(by_room[2], key=lambda g: g.geodesic_m).geodesic_m, (
+            "from inside room 1 its own boundary is the nearer one")
+
+
+def test_by_room_matches_the_single_room_ranking_and_the_scene_graph_count():
+    """One pass over the floor must agree with a pass per room, and with the count."""
+    from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters
+    world = world_from(TWO_ROOMS)
+    labels = labels_for(world)
+    cost = flat_cost(world)
+    by_room = frontier_goals_by_room(world, cost, labels, at(3, 3), 0.0, min_cluster_cells=1)
+    for room in (1, 2):
+        alone = ranked_frontier_goals(world, cost, labels == room, at(3, 3), 0.0, min_cluster_cells=1)
+        assert [g.cell for g in by_room[room]] == [g.cell for g in alone]
+    counts = count_frontier_clusters(world.grid.astype(np.int8), labels, min_cluster_cells=1)
+    assert {room: len(goals) for room, goals in by_room.items()} == \
+        {room: n for room, n in counts.items() if n}
+
+
+def test_a_straddling_cluster_goes_to_the_room_holding_most_of_it():
+    """Three of its five cells are labelled 2, so the count credits room 2 -- and so do we."""
+    world = world_from([
+        "#########",
+        "#.......#",
+        "#.......#",
+        "#.......#",
+        "#?????..#",
+        "#########",
+    ])
+    labels = np.zeros(world.grid.shape, dtype=np.int32)
+    labels[world.grid == FREE] = 1
+    labels[1:5, 3:8][world.grid[1:5, 3:8] == FREE] = 2     # room 2 owns columns 3..7
+    by_room = frontier_goals_by_room(world, flat_cost(world), labels, at(6, 2), 0.0,
+                                     min_cluster_cells=1)
+    assert set(by_room) == {2}
+    from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters
+    counts = count_frontier_clusters(world.grid.astype(np.int8), labels, min_cluster_cells=1)
+    assert counts == {1: 0, 2: 1}
+
+
+def test_a_cluster_in_unlabelled_space_is_dropped_and_shape_is_checked():
+    world = world_from([
+        "#######",
+        "#....?#",
+        "#.....#",
+        "#######",
+    ])
+    nowhere = np.zeros(world.grid.shape, dtype=np.int32)
+    assert frontier_goals_by_room(world, flat_cost(world), nowhere, at(2, 2), 0.0,
+                                  min_cluster_cells=1) == {}
+    with pytest.raises(ValueError):
+        frontier_goals_by_room(world, flat_cost(world), np.zeros((2, 2), np.int32), at(2, 2), 0.0)
+    off_graph = FrontierRankingParams(snap_radius_m=0.5)
+    labels = (world.grid == FREE).astype(np.int32)
+    assert frontier_goals_by_room(world, flat_cost(world), labels, (20.0, 20.0), 0.0,
+                                  min_cluster_cells=1, params=off_graph) == {}
+
 

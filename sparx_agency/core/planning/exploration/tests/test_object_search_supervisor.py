@@ -25,7 +25,12 @@ Seven groups:
 * **the caller-driven exits** -- ``frontier_exhausted`` and ``route_failed``,
   which end a turn on the tick the caller knows the answer instead of on a
   clock, and which the discrete-action ObjectNav agent spent a quarter of its
-  actions waiting for before they existed.
+  actions waiting for before they existed;
+* **the room-search loop's exits and knobs** -- ``arrived`` by the caller's
+  own mask test, ``budget_spent`` by its own action counter,
+  ``frontier_exhausted`` while still in transit, and the two params that let
+  the loop re-choose a budget-spent room at once and re-solve the order after
+  every release.
 """
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ import random
 import pytest
 
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
+    ALL_VERDICTS,
     BLOCKED,
     BUDGET_SPENT,
     EXHAUSTED,
@@ -464,14 +470,14 @@ def test_frontier_exhausted_ends_the_room_at_once_and_is_productive():
     assert nxt.state == TRANSIT and nxt.action.room_id == 2
 
 
-def test_frontier_exhausted_is_ignored_outside_search():
+def test_frontier_exhausted_is_ignored_in_select():
+    """In SELECT there is no room in force for the flag to be about."""
     sup = supervisor(solver=fixed_solver(1, 2))
-    sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
-    out = sup.update(TWO_ROOMS, facts(r1=3), (5.0, 0.0), now=1.0,
-                     last_plan_s=1.0, frontier_exhausted=True)
-    assert out.state == TRANSIT
-    assert isinstance(out.action, Hold)
+    out = sup.update(TWO_ROOMS, facts(r1=0, r2=2), HERE, now=0.0, last_plan_s=0.0,
+                     frontier_exhausted=True)
+    assert out.state == TRANSIT and out.action.room_id == 1
     assert sup.stats["exhausted"] == 0
+    assert sup.history == []
 
 
 def test_route_failed_ends_a_transit_as_unreachable_without_the_grace_wait():
@@ -499,5 +505,238 @@ def test_arrival_beats_route_failed():
     assert out.state == SEARCH
     assert isinstance(out.action, SearchRoom)
     assert sup.stats["plan_fails"] == 0
+
+
+# -- the room-search loop's exits and knobs -------------------------------
+def test_arrived_by_the_callers_own_test_enters_search_at_any_distance():
+    """The caller reads the room mask; the machine only sees a point.
+
+    Four metres from the room's entry point is far outside the 0.6 m arrival
+    tolerance, yet the caller says the aircraft is inside the mask, and that
+    is the test that counts.
+    """
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (6.0, 0.0), now=1.0,
+                     last_plan_s=0.9, arrived=True)
+    assert out.state == SEARCH
+    assert isinstance(out.action, SearchRoom)
+    assert out.changed is True
+    assert "caller" in out.action.note
+    assert sup.stats["arrivals"] == 1
+
+
+def test_arrived_is_ignored_outside_transit():
+    sup = arrived_in_room_one()
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+                     last_plan_s=1.0, arrived=True)
+    assert out.state == SEARCH
+    assert isinstance(out.action, Hold)
+    assert sup.stats["arrivals"] == 1
+
+
+def test_budget_spent_ends_the_room_at_once_and_is_productive():
+    """The caller's action counter is up: no clock, no grace, no stall test.
+
+    One second after arrival the machine's own 90 s budget is untouched and
+    the grace window has not even opened, yet the room ends now -- and counts
+    as searched, so the room is not charged a failed attempt.
+    """
+    sup = arrived_in_room_one()
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+                     last_plan_s=1.0, budget_spent=True)
+    assert isinstance(out.action, Release)
+    assert out.action.verdict == BUDGET_SPENT
+    assert out.completed == (1, BUDGET_SPENT)
+    assert out.state == SELECT
+    assert out.rooms_done == 1
+    assert sup.stats["budget_spent"] == 1
+    assert sup._attempts.get(1) is None
+
+
+def test_budget_spent_is_ignored_outside_search():
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=3), (5.0, 0.0), now=1.0,
+                     last_plan_s=1.0, budget_spent=True)
+    assert out.state == TRANSIT
+    assert isinstance(out.action, Hold)
+    assert sup.stats["budget_spent"] == 0
+
+
+def test_frontier_exhausted_beats_budget_spent():
+    """Both fire at once; the truer statement wins the verdict."""
+    sup = arrived_in_room_one()
+    out = sup.update(TWO_ROOMS, facts(r1=0, r2=2), (10.0, 0.0), now=2.0,
+                     last_plan_s=1.0, frontier_exhausted=True, budget_spent=True)
+    assert out.action.verdict == EXHAUSTED
+    assert sup.stats["budget_spent"] == 0
+
+
+def test_frontier_exhausted_in_transit_skips_the_room_productively():
+    """The map filled the room in from the doorway; the visit buys nothing.
+
+    Productive, deliberately: the room was searched from where the aircraft
+    stood, and charging it a failed attempt would defer a room that is done.
+    """
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=0, r2=2), (5.0, 0.0), now=1.0,
+                     last_plan_s=0.9, frontier_exhausted=True)
+    assert isinstance(out.action, Release)
+    assert out.action.verdict == EXHAUSTED
+    assert out.completed == (1, EXHAUSTED)
+    assert out.rooms_done == 1
+    assert sup.stats["exhausted"] == 1
+    assert sup.stats["exhausted_in_transit"] == 1
+    assert sup.stats["arrivals"] == 0
+    assert sup._attempts.get(1) is None
+    nxt = sup.update(TWO_ROOMS, facts(r1=0, r2=2), (5.0, 0.0), now=2.0,
+                     last_plan_s=0.9)
+    assert nxt.state == TRANSIT and nxt.action.room_id == 2
+
+
+def test_arrival_beats_frontier_exhausted_in_transit():
+    """Already inside the room, the aircraft may as well look."""
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=0), (10.0, 0.0), now=1.0,
+                     last_plan_s=0.9, frontier_exhausted=True)
+    assert out.state == SEARCH
+    assert sup.stats["exhausted_in_transit"] == 0
+
+
+def test_cooldown_verdicts_can_leave_a_budget_spent_room_selectable():
+    """The loop's setting: a room that only ran out of budget is not cooled.
+
+    With every verdict cooling (the default), R1 is skipped for 120 s after
+    its budget runs out and the order falls through to R2. With BUDGET_SPENT
+    left out of the cooldown AND the order re-solved on release -- the two
+    knobs the loop sets together -- the fresh solve may send the aircraft
+    straight back to R1, which is the room the estimate still favours.
+    """
+    cooled = supervisor(solver=fixed_solver(1, 2))
+    arrived_in(cooled)
+    cooled.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+                  last_plan_s=1.0, budget_spent=True)
+    out = cooled.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=3.0,
+                        last_plan_s=1.0)
+    assert out.action.room_id == 2
+    assert 1 not in {c.room_id for c in out.candidates}
+
+    warm = supervisor(
+        ObjectSearchParams(cooldown_verdicts=tuple(v for v in ALL_VERDICTS
+                                                   if v != BUDGET_SPENT),
+                           resolve_on_release=True),
+        solver=fixed_solver(1, 2))
+    arrived_in(warm)
+    warm.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+                last_plan_s=1.0, budget_spent=True)
+    out = warm.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=3.0,
+                      last_plan_s=1.0)
+    assert 1 in {c.room_id for c in out.candidates}
+    assert out.action.room_id == 1, "the fresh solve may pick the same room again"
+
+
+def test_cooldown_verdicts_still_cool_the_verdicts_they_name():
+    params = ObjectSearchParams(cooldown_verdicts=(EXHAUSTED,))
+    sup = supervisor(params, solver=fixed_solver(1, 2))
+    arrived_in(sup)
+    sup.update(TWO_ROOMS, facts(r1=0, r2=2), (10.0, 0.0), now=2.0,
+               last_plan_s=1.0, frontier_exhausted=True)
+    out = sup.update(TWO_ROOMS, facts(r1=0, r2=2), (10.0, 0.0), now=3.0,
+                     last_plan_s=1.0)
+    assert 1 not in {c.room_id for c in out.candidates}
+
+
+def test_cooldown_verdicts_reject_an_unknown_verdict():
+    with pytest.raises(ValueError):
+        ObjectSearchParams(cooldown_verdicts=("mapped", "went_home"))
+    with pytest.raises(ValueError):
+        ObjectSearchParams(repeat_verdicts=("went_home",))
+
+
+def test_repeat_verdicts_keep_a_finished_room_out_of_the_escape_hatch():
+    """One room, exhausted: by default it is re-chosen (a search that stops is
+    worse than one that repeats); with EXHAUSTED left out of repeat_verdicts
+    the machine holds and the caller falls back to something else."""
+    one = rooms((1, 1.0, (10.0, 0.0)))
+    facts_one = facts(r1=3)
+
+    def exhaust(sup):
+        sup.update(one, facts_one, HERE, now=0.0, last_plan_s=0.0)
+        sup.update(one, facts_one, (10.0, 0.0), now=1.0, last_plan_s=0.9)
+        out = sup.update(one, facts_one, (10.0, 0.0), now=2.0, last_plan_s=0.9,
+                         frontier_exhausted=True)
+        assert out.action.verdict == EXHAUSTED
+        return sup.update(one, facts_one, (10.0, 0.0), now=3.0, last_plan_s=0.9)
+
+    repeated = exhaust(supervisor(solver=fixed_solver(1)))
+    assert repeated.state == TRANSIT and repeated.action.room_id == 1
+
+    held = exhaust(supervisor(
+        ObjectSearchParams(repeat_verdicts=tuple(v for v in ALL_VERDICTS if v != EXHAUSTED)),
+        solver=fixed_solver(1)))
+    assert held.state == SELECT and isinstance(held.action, Hold)
+
+    # A room cooling under a verdict that IS repeatable still gets the hatch.
+    sup = supervisor(ObjectSearchParams(repeat_verdicts=(BUDGET_SPENT,)), solver=fixed_solver(1))
+    sup.update(one, facts_one, HERE, now=0.0, last_plan_s=0.0)
+    sup.update(one, facts_one, (10.0, 0.0), now=1.0, last_plan_s=0.9)
+    sup.update(one, facts_one, (10.0, 0.0), now=2.0, last_plan_s=0.9, budget_spent=True)
+    out = sup.update(one, facts_one, (10.0, 0.0), now=3.0, last_plan_s=0.9)
+    assert out.state == TRANSIT
+    sup.forget_rooms()
+    assert sup._cooling_verdict == {}
+
+
+def test_resolve_on_release_re_asks_the_solver_after_every_room():
+    """The order is re-solved once per release -- and still not per tick."""
+    calls = []
+
+    def solve(candidates, instance=None):
+        calls.append(tuple(c.room_id for c in candidates))
+        return [c.room_id for c in candidates]
+
+    sup = supervisor(ObjectSearchParams(resolve_on_release=True, visit_cooldown=False),
+                     solver=solve)
+    arrived_in(sup)
+    assert len(calls) == 1
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+               last_plan_s=1.0)                              # a plain SEARCH tick
+    assert len(calls) == 1, "no re-solve while a room is in force"
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=3.0,
+               last_plan_s=1.0, budget_spent=True)
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=4.0,
+                     last_plan_s=1.0)
+    assert len(calls) == 2, "the release re-asks the solver"
+    assert out.state == TRANSIT
+    assert out.order_index == 0, "the new order starts from its head"
+
+
+def test_without_resolve_on_release_the_committed_order_is_walked():
+    calls = []
+
+    def solve(candidates, instance=None):
+        calls.append(1)
+        return [1, 2]
+
+    sup = supervisor(ObjectSearchParams(visit_cooldown=False), solver=solve)
+    arrived_in(sup)
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+               last_plan_s=1.0, budget_spent=True)
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=3.0,
+                     last_plan_s=1.0)
+    assert len(calls) == 1
+    assert out.action.room_id == 2 and out.order_index == 1
+
+
+def arrived_in(sup, room_xy=(10.0, 0.0)):
+    """Select and arrive, with both rooms still showing frontier."""
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), room_xy, now=1.0,
+                     last_plan_s=0.9)
+    assert out.state == SEARCH
+    return out
 
 

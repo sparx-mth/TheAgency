@@ -24,7 +24,8 @@ own frozen configurations; changed code does not relabel their outcomes.
 | Component | Responsibility |
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
-| `methods/frontier_sweep.py` | Room-by-room frontier sweep: ranked goals, one bounded look-around per swept room, release-and-reselect on the same action |
+| `methods/room_search_loop.py` | The seven-step room-search loop: bounded, room-confined local exploration; re-classify → re-estimate → re-order at each loop point; transit to the chosen room's nearest frontier |
+| `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around |
 | `methods/camera_control.py` | Sole pitch owner; bounded inspection, long unprompted cadence and safe restoration |
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
@@ -33,15 +34,68 @@ own frozen configurations; changed code does not relabel their outcomes.
 | `methods/falcon_policy.py`, `falcon_regions.py` | Bounded hierarchy and persistent local region history |
 | `methods/falcon_motion.py`, `falcon_routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
 | `methods/object_evidence.py` | Alias/frame deduplication, separated-view target evidence and bounded rejection |
-| `methods/scene_graph.py`, `room_labels.py`, `doors.py` | Observed rooms/doors and revisable accumulated room reasoning |
+| `methods/scene_graph.py`, `room_labels.py`, `doors.py` | Observed rooms/doors, the room label image, and revisable accumulated room reasoning |
 | `methods/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
 | `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose |
 | `recording.py`, `floor_panels.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels, grids and video |
 | `gibson/run.py`, `frozen_eval.py`, `run_development.py` | Protocol execution and frozen source/model/data checks |
+| `tests/trace_room_search_loop.py` | Development probe: the loop on the production map size with fake services and a crude route-following executor; not a test |
 
 The floor tracker remains ROS-free in `core/planning/exploration/floor_atlas.py`.
 Host-side numpy/scipy terrain processing does not enter the Noetic exploration
 facade. No robot's flight controller is changed.
+
+## The room-search loop (frontier explorer)
+
+`--explorer frontier` runs one explicit loop, with the scene graph maintained
+in the background on every action (`RPTSettings.graph_period_steps`, default 1):
+room geometry, object→room association, confirmed doors, cumulative search
+time and remaining frontier clusters per room. No LLM call is part of that
+refresh.
+
+1. **Local exploration, bounded to the room in force.** Goals are the frontier
+   clusters the room label image credits to the room (the same majority vote
+   the scene graph's `frontier_clusters` count uses), ranked by
+   `core/planning/exploration/frontier_ranking.py` -- gain over *geodesic*
+   cost, facing as a discount. Each route is planned on a **copy of the map in
+   which every other room's cells are written unknown**, so no in-room route
+   crosses a door or takes the stairs (`LoopSettings.confine_routes`; lifted
+   while the agent's own cell is outside the room, so a doorway or a moved
+   mask cannot wall it out). The burst ends after `LoopSettings.local_steps`
+   actions (10) or when nothing reachable is left -- whichever first -- and
+   the supervisor is told so through its `budget_spent` / `frontier_exhausted`
+   exits on that same action.
+2. **Global re-classification.** At the loop point `graph.reason` re-labels
+   every known room from every confirmed object observed so far.
+3. **Per-room probability** -- the same call: the oracle's P(target in room ∧
+   search ends there) from remaining frontiers, cumulative search time and
+   room type. Distance enters through the RPT* objective, not the probability
+   (both would charge travel twice); the per-room record in
+   `room_search_loop.estimates` carries it. The oracle reuses the model's last
+   reply when the prompt it would show is byte-identical, re-applying the
+   code-side effort factors, so a loop point over an unchanged map costs no
+   call (`oracle_reuses` in the episode record).
+4. **Visit order** -- RPT* over the surviving rooms, with the local budget
+   folded in as per-room service time; the order is re-solved at every loop
+   point (`ObjectSearchParams.resolve_on_release`), never per action.
+5. **A\*** -- the weighted planner behind `_navigate`.
+6. **Direct transit to the closest frontier inside the chosen room**
+   (`LoopSettings.entry_frontier`); a room with no frontier left keeps a
+   centroid entry so the detector can still get a close look. A committed
+   entry frontier that the camera resolves en route is re-aimed at the
+   room's next one; a room with none left is released without the visit
+   (`frontier_exhausted` in transit).
+7. **Reset** -- arrival is the agent's own cell inside the room's mask
+   (`arrived`), which restarts the local counter.
+
+Steps 2–6 run on the action a room's turn ends, so a released room is
+replaced by a transit at once -- never by a throwaway floor-wide route. A
+room whose budget ran out is **not** put on the visit cooldown (the fresh
+estimate may rightly send the agent straight back), while a room the live
+map says is finished (exhausted or mapped) is never repeated by the
+every-room-cooling escape hatch: the floor-wide frontier carries the search
+instead. `room_search_loop.events` in the episode record lists every
+transit, arrival and release with its verdict and local step count.
 
 ## Frontier sweep and the action economy
 
@@ -50,21 +104,23 @@ is built to spend them moving toward unmapped space (the Ranchester recording
 `e7c4f2ad5402` that motivated this spent 48 % of its actions on idle turns,
 stair inspections and heading recovery):
 
-- In-room and floor-wide goals come from
-  `core/planning/exploration/frontier_ranking.py`: gain over *geodesic* cost on
-  the planner's own passable graph, facing as a discount. A boundary with no
-  known-free path is never proposed. Up to `SweepSettings.plan_attempts` goals
-  are tried per action, so a refused A* costs no idle action.
+- A boundary with no known-free path is never proposed. Up to
+  `SweepSettings.plan_attempts` goals are tried per action, so a refused A*
+  costs no idle action; a refused *transit* route ends the room through the
+  supervisor's `route_failed` exit and the next room is chosen on the same
+  action.
+- A frontier cluster's goal is its **member cell nearest the centroid**, on
+  the boundary. The centroid itself lies inside seen floor for the arc-shaped
+  clusters a depth range produces, which made every goal "no longer
+  informative" on the action it was adopted.
 - A committed frontier goal is kept while it is passable, still has unknown
   space near it and still lies near the room being swept. A re-segmented room
   mask alone does not drop it; a boundary the camera has resolved does.
-- A room with nothing reachable left gets **one** look-around
-  (`SweepSettings.room_scan_turns`, a full rotation by default, once per visit)
-  and is then released through the supervisor's `frontier_exhausted` exit on the
-  same action; a transit goal the planner refuses ends the room through
-  `route_failed`. Neither waits on the 30 s stall or 90 s budget clocks, which
-  remain as backstops. A released room is replaced by the next transit on the
-  same action -- no throwaway floor-wide route in between.
+- The look-around after a swept room is off by default
+  (`SweepSettings.room_scan_turns = 0`): the loop's termination rule is *N
+  steps or nothing left*, and a swept room is released on the action its last
+  goal resolves. The supervisor's 30 s stall and 90 s budget clocks remain as
+  backstops behind the caller-driven exits.
 - Every adopted route records `route_replaced`: why the route before it was
   dropped (`goal_changed`, `route_obstructed`, `frontier_completed_or_invalid`,
   `room_completed` ...). `route_commitment` stats count clears per reason.

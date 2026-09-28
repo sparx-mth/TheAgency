@@ -7,7 +7,6 @@ import random
 import time
 
 from sparx_agency.core.common.types import Pose2D
-from sparx_agency.core.planning.exploration.object_search_supervisor import ObjectSearchParams
 from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSolver
 from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCON_SOURCE
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
@@ -23,6 +22,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory i
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidenceSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context import FloorContextBank
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import FrontierSweep, SweepSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_metrics import ExplorationMetrics
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.camera_control import CameraController, CameraControlSettings
@@ -43,7 +43,8 @@ class RPTSearchPolicy:
             inflate_radius_m=s.preferred_clearance_m, inflate_floor_m=s.body_radius_m,
             unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
             start_skip_m=0.0, search_margin_m=s.map_size_m)
-        self.supervisor_params = ObjectSearchParams(seed=s.seed)
+        self.loop_settings = LoopSettings()
+        self.supervisor_params = self.loop_settings.supervisor_params(s.seed)
         self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings()
         self.route_settings, self.target_settings = RouteSettings(), TargetEvidenceSettings()
         self.sweep_settings = SweepSettings()
@@ -54,7 +55,9 @@ class RPTSearchPolicy:
                 "supervisor": asdict(self.supervisor_params), "doors": asdict(self.door_settings),
                 "room_labels": asdict(self.room_label_settings), "room_segmentation": asdict(DEFAULT_SEGMENTATION),
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
-                "frontier_sweep": asdict(self.sweep_settings),
+                "frontier_sweep": asdict(self.sweep_settings), "room_search_loop": asdict(self.loop_settings),
+                "reasoning_cadence": "room LLM at loop points only; scene-graph geometry every %d action(s)"
+                                     % self.settings.graph_period_steps,
                 "camera_control": asdict(CameraControlSettings()), "perception_fusion": "coherent-depth/floor-qualified-v1",
                 "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
                 "falcon_running": self.settings.local_exploration == "falcon",
@@ -135,6 +138,8 @@ class RPTSearchPolicy:
     def notify_action(self, observation, action):
         if not self.building or not self.building.committed:
             self._floor_time += self.settings.action_time_s
+            if self.hierarchy is None:
+                self.loop.charge()
         if self.hierarchy:
             self.hierarchy.machine.charge(observation.step)
         self.telemetry.emitted(observation, action, self.telemetry.phase)
@@ -178,8 +183,13 @@ class RPTSearchPolicy:
         if self.hierarchy is None and confirmed and self._target_xy is not None and math.dist((pose.x, pose.y), self._target_xy) <= s.stop_distance_m:
             return NavigationCommand.stop_here(info={"reason": "fresh multi-view-confirmed target", "target_confirmed": True})
         if observation.step - self._last_graph_step >= s.graph_period_steps or self.doors.revision != self._last_door_revision:
+            # The background process: geometry, object->room, doors, per-room time and
+            # frontier counts -- no LLM. Reasoning belongs to the loop point (room_search_loop)
+            # for the frontier explorer and to the burst boundary for FALCON.
+            started = time.monotonic()
             self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(), step=observation.step,
-                              reason=self.hierarchy is None)
+                              reason=False)
+            self.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
             self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
         if self.building and self._target_xy is None:
             command = self.building.plan(observation, world)
@@ -194,7 +204,7 @@ class RPTSearchPolicy:
             approach = self._approach(observation, world)
             if approach is not None:
                 return approach
-        return self.sweep.plan(observation, world)
+        return self.loop.plan(observation, world)
 
     def _navigate(self, observation, world, goal, kind, final_yaw=None):
         if not self.route_memory.reusable(observation, world, self.planner, goal, kind):
@@ -255,7 +265,8 @@ class RPTSearchPolicy:
 
     def episode_info(self):
         return {"method": self.name, "rooms": len(self.graph.registry.rooms), "landmarks": len(self.landmarks),
-                "llm_queries": self.graph.queries, "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,
+                "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
+                "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,
                 "blocked": self._blocked, "doors": self.doors.diagnostics(), "max_rooms": self.graph.max_rooms,
                 "room_label_queries": self.graph.label_tracker.queries, "room_label_history": list(self.graph.label_tracker.history),
                 "last_reasoning": self.graph.last_reasoning, "route_commitment": dict(self.route_memory.stats),
@@ -264,6 +275,7 @@ class RPTSearchPolicy:
                 "perception": self.perception.diagnostics(), "camera": dict(self.camera_control.last), "floor_maps": self.mapping.integrity(),
                 "building": self.building.diagnostics() if self.building else None,
                 "frontier_sweep": self.sweep.diagnostics(),
+                "room_search_loop": self.loop.diagnostics(),
                 "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,
                 "oracle_repair_successes": self.graph.oracle.repair_successes}

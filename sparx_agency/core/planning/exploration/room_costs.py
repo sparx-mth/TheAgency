@@ -423,36 +423,72 @@ def build_instance(world: OccupancyGrid2D,
 
 
 # -- in-room sweep goals --------------------------------------------------
-def frontier_cluster_cells(world: OccupancyGrid2D,
-                           room_mask: np.ndarray,
-                           ids: np.ndarray,
-                           min_cluster_cells: int = 4,
-                           snap_radius_cells: int = 8
-                           ) -> List[Tuple[int, Tuple[int, int]]]:
-    """Every unscanned boundary inside one room, as ``(size, snapped cell)``.
+@dataclass(frozen=True)
+class FrontierCluster:
+    """One unscanned boundary, with the cells it is made of.
+
+    Attributes:
+        size: How many frontier cells the cluster holds.
+        cell: ``(gx, gy)`` of the goal that stands for the cluster: its
+            member cell nearest the centroid, snapped onto the passable
+            graph -- the cell a planner will accept as a goal.
+        rows: Row index of every member cell.
+        cols: Column index of every member cell, same order. Kept so a
+            caller can ask which room the cluster lies in by the same
+            majority vote ``room_stats.count_frontier_clusters`` uses,
+            without extracting the frontier a second time.
+    """
+
+    size: int
+    cell: Tuple[int, int]
+    rows: np.ndarray
+    cols: np.ndarray
+
+
+def frontier_clusters(world: OccupancyGrid2D,
+                      room_mask: np.ndarray,
+                      ids: np.ndarray,
+                      min_cluster_cells: int = 4,
+                      snap_radius_cells: int = 8
+                      ) -> List[FrontierCluster]:
+    """Every unscanned boundary inside ``room_mask``, cells and all.
 
     A frontier cell is a free cell 4-adjacent to an unknown one -- the same
     definition ``room_stats.count_frontier_clusters`` uses, so the goals built
     on this and the ``frontier_clusters`` the scene graph reports are the same
-    population. Each cluster's centroid is snapped onto the passable graph so
-    the planner will accept it; a cluster with no passable cell within
-    ``snap_radius_cells`` is dropped, not proposed.
+    population. Each cluster is stood for by its MEMBER cell nearest the
+    centroid, snapped onto the passable graph so the planner will accept it;
+    a cluster with no passable cell within ``snap_radius_cells`` is dropped,
+    not proposed.
+
+    The member cell, not the centroid itself: a frontier is usually an arc
+    -- the edge of the depth range, bowed around the robot -- and the
+    centroid of an arc lies inside the space already seen. A goal there has
+    no unknown cell near it on the action it is adopted, so a sweep that
+    keeps a goal only while unknown space remains around it retired every
+    goal at once, and the next arc's centroid landed within the "recently
+    retired" radius of the last one, so the room read exhausted with three
+    clusters showing. On the boundary a goal is informative by construction.
 
     The one place the frontier is extracted for goal-making:
-    :func:`in_room_frontier_goals` orders these by size,
+    :func:`frontier_cluster_cells` and :func:`in_room_frontier_goals` order
+    these by size,
     :func:`~sparx_agency.core.planning.exploration.frontier_ranking.ranked_frontier_goals`
-    by utility. Two extractions would drift.
+    by utility, and
+    :func:`~sparx_agency.core.planning.exploration.frontier_ranking.frontier_goals_by_room`
+    assigns them to rooms. Two extractions would drift.
 
     Args:
         world: The BEV grid.
-        room_mask: ``(H, W)`` bool, True inside the room.
+        room_mask: ``(H, W)`` bool, True inside the room; all-True for the
+            whole floor.
         ids: The index image from :func:`passable_graph`.
         min_cluster_cells: Clusters smaller than this are noise and dropped.
-        snap_radius_cells: How far a cluster centroid may move to reach the
+        snap_radius_cells: How far the goal cell may move to reach the
             passable graph.
 
     Returns:
-        ``(size_cells, (gx, gy))`` per surviving cluster, in label order.
+        One :class:`FrontierCluster` per surviving cluster, in label order.
     """
     grid = world.grid
     free = grid == world.values.free
@@ -466,18 +502,45 @@ def frontier_cluster_cells(world: OccupancyGrid2D,
     if not frontier.any():
         return []
     lbl, n = cc_label(frontier, structure=np.ones((3, 3), dtype=np.uint8))
-    out: List[Tuple[int, Tuple[int, int]]] = []
+    out: List[FrontierCluster] = []
     for k in range(1, n + 1):
         ys, xs = np.nonzero(lbl == k)
         if ys.size < int(min_cluster_cells):
             continue
-        gx = int(round(float(xs.mean())))
-        gy = int(round(float(ys.mean())))
-        cell = snap_cell(ids, gx, gy, int(snap_radius_cells))
+        nearest = int(np.argmin((xs - xs.mean()) ** 2 + (ys - ys.mean()) ** 2))
+        cell = snap_cell(ids, int(xs[nearest]), int(ys[nearest]), int(snap_radius_cells))
         if cell is None:
             continue
-        out.append((int(ys.size), (int(cell[0]), int(cell[1]))))
+        out.append(FrontierCluster(size=int(ys.size),
+                                   cell=(int(cell[0]), int(cell[1])),
+                                   rows=ys, cols=xs))
     return out
+
+
+def frontier_cluster_cells(world: OccupancyGrid2D,
+                           room_mask: np.ndarray,
+                           ids: np.ndarray,
+                           min_cluster_cells: int = 4,
+                           snap_radius_cells: int = 8
+                           ) -> List[Tuple[int, Tuple[int, int]]]:
+    """Every unscanned boundary inside one room, as ``(size, snapped cell)``.
+
+    A thin view over :func:`frontier_clusters` for callers that only want a
+    goal per cluster; see there for the definition and the snapping rule.
+
+    Args:
+        world: The BEV grid.
+        room_mask: ``(H, W)`` bool, True inside the room.
+        ids: The index image from :func:`passable_graph`.
+        min_cluster_cells: Clusters smaller than this are noise and dropped.
+        snap_radius_cells: How far a cluster centroid may move to reach the
+            passable graph.
+
+    Returns:
+        ``(size_cells, (gx, gy))`` per surviving cluster, in label order.
+    """
+    return [(c.size, c.cell) for c in frontier_clusters(
+        world, room_mask, ids, min_cluster_cells, snap_radius_cells)]
 
 
 def in_room_frontier_goals(world: OccupancyGrid2D,

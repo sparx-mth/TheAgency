@@ -57,6 +57,123 @@ one of them lands, silently (cost an hour of "why is my edit gone" today).
 
 ---
 
+## 2026-09-28 — Every Ranchester episode died on "Room oracle failed", and the model was never the problem
+
+**Symptom:** Three Ranchester attempts across two campaigns (472, 281 and 18 actions) all ended
+with `ObjNavInternalError: Room oracle failed; refusing a uniform fallback run`. The natural
+reading -- qwen2.5:3b cannot produce the JSON -- was wrong: the recorded oracle rounds before
+each abort were all `source=llm`.
+
+**Root cause:** Latency. The frozen campaign ran Ollama CPU-only (`CUDA_VISIBLE_DEVICES=-1`)
+with `LLM_TIMEOUT_S=30`. Measured against that service, qwen2.5:3b needs ~2.2 s per room in the
+prompt: 6 rooms 14 s, 9 rooms 22 s, 12 rooms 29-44 s, 13-14 rooms 45-90 s. The oracle is asked
+over EVERY room (only the solver caps at `max_rooms`), so the first loop point after the map
+reached 13-14 rooms timed out, the base call fell to uniform, the one repair call timed out too,
+and the runtime -- correctly -- refused to fly on a uniform prior. All three recordings died at
+the moment the room count crossed that line.
+
+**Fix / workaround:** `LLM_TIMEOUT_S=120` (a documented env setting; recorded in the run's
+`preflight.json` under `method.llm`). With it both Ranchester episodes completed: 10 oracle
+rounds, none failed, median 34 s, max 48 s. The loop's LLM-at-loop-points cadence and the
+oracle's prompt-keyed reply reuse keep the count of calls small; they do not make a call fast.
+The system Ollama on 11434 answers the same prompts in 2-5 s with llama3 -- but it runs on the
+GPU, which this project's policy reserves for the detector and the renderer, so it was not used.
+
+**How to see it next time:** Probe before launching: `RepairingSearchOracle(LLMClient(cfg))
+.probabilities("toilet", rooms)` at 6/12/14 rooms against the real service, and read the wall
+time, not just `source`. If the 14-room call is within a factor of two of the timeout, the
+episode will die the moment the building has 14 rooms.
+
+**Don't:** Don't lower `max_rooms` to shorten the prompt -- the oracle sees every room anyway.
+Don't switch the room-language service onto the GPU to make it fast without saying so in the
+run's provenance; the frozen campaigns are CPU-LLM by design.
+
+---
+
+## 2026-09-28 — 31 idle turns at a transit's route end: arrived by the converter, "not arrived" by the loop
+
+**Symptom:** In the first recorded room-search-loop episode (`runs/room_search_loop_ranchester_
+20260928T091752Z`, 000000), steps 41-71 are 31 consecutive `TURN_LEFT` with
+`decision.info.status=arrived` and a committed `transit/0` route: the converter said the route
+was finished, and the agent turned in place for 31 actions until the room was released as
+`unreachable`.
+
+**Root cause:** The transit's entry frontier was re-aimed mid-route (the map re-segmented from
+3 to 7 rooms while the agent walked), the agent reached the new route end, and there the loop's
+arrival test -- the agent's cell INSIDE the room's mask -- was false: the spot now belonged to a
+neighbouring room, and even a correct entry frontier sits on the boundary that the watershed's
+eroded mask stops short of. The supervisor's own distance test still pointed at the ORIGINAL
+entry 2.4 m away. Neither could fire; `_navigate` kept reusing the committed route as
+`committed_safe_route`; the converter, at its end, emitted idle turns; and only
+`CommittedRoute`'s 30-action no-progress clock ended it -- as `unreachable`, which is also the
+wrong verdict for a room the agent was standing next to.
+
+**Fix / workaround:** `RoomSearchLoop._transit` now (a) counts arrival when the route has ended
+and the agent is within the sweep's `mask_slack_m` of the room (the boundary case), and (b)
+when the route has ended somewhere the room is not, retires that entry, re-aims once at the
+room's frontier nearest NOW, and releases the room as unreachable if it has none -- all on the
+same action (`entry_lost` stat/event).
+
+**How to see it next time:** `decision.info.status == "arrived"` with no `command.waypoints` is
+an idle turn; bucket them by `command.info.kind`. A run of them under one `transit/N` is this
+bug or a relative of it. The confirmation run of the same episode has zero.
+
+**Don't:** Don't make the supervisor's `arrival_tol_m` larger to cover this -- the supervisor's
+goal was the stale entry, so no tolerance short of the room's diameter would have fired, and a
+large one declares arrival at rooms never entered. Don't shorten `progress_timeout_steps`
+either: it is the last line, not the first.
+
+---
+
+## 2026-09-28 — The room-search loop released a room with three clusters showing, on every action
+
+**Symptom:** The first headless trace of the room-search loop (`tests/trace_room_search_loop.py`,
+one room, 12 actions) showed the same room released `exhausted` on five of them, a room LLM
+call for each, and the in-room sweep never lasting more than one action while the scene graph
+reported `frontier_clusters=3` for that room the whole time. The supervisor's own tests and the
+loop's own tests were green.
+
+**Root cause:** Three separate mechanisms, none of them in the loop's control flow:
+1. **The frontier goal was the cluster centroid.** A frontier is usually an arc (the edge of
+   the depth range, bowed around the robot), and the centroid of an arc lies inside the floor
+   already seen. `FrontierSweep._current_goal` keeps a goal only while unknown space remains
+   within 1 m of it, so a freshly adopted goal was "resolved" on the very next action. Its
+   replacement -- the next arc's centroid, 0.25 m further on -- fell inside the 0.4 m
+   "recently retired" radius and was refused. No admissible goal, so `frontier_exhausted`.
+2. **The count and the sweep disagreed about which cells belong to a room.**
+   `count_frontier_clusters` credits a cluster to a room by majority vote over the labels at
+   its cells; the sweep required the frontier cell itself to lie *inside* the watershed mask,
+   which is eroded by `min_clearance_m`, so boundary cells sit just outside it. Three
+   clusters counted, zero offered.
+3. **The supervisor's every-room-cooling escape hatch.** With one room, an `EXHAUSTED`
+   release cooled it, the hatch immediately repeated it ("a search that stops is worse than
+   one that repeats"), the loop re-reasoned (a loop point) and re-entered it. Correct for an
+   aircraft with nothing else to do; wrong for a loop that has a floor-wide frontier to fall
+   back to.
+
+**Fix / workaround:** `room_costs.frontier_clusters` stands a cluster for by its *member*
+cell nearest the centroid (on the boundary, informative by construction); the in-room sweep,
+the room entry point and the transit re-aim all draw their goals from
+`frontier_goals_by_room` (the count's own majority vote) through one admissibility filter;
+`ObjectSearchParams.repeat_verdicts` lets the loop keep `EXHAUSTED`/`MAPPED` rooms out of the
+hatch. Separately, the N-step budget check sat *inside* `_local`, after a plain supervisor
+tick, so a budget release spent a round before its flag was raised and the same-action chain
+overran the 3-round guard, dropping a pending `frontier_exhausted` on the floor and planning
+a throwaway route; the flag is now raised before the first tick, the guard is 5 and an overrun
+is counted and logged.
+
+**How to see it next time:** Run the trace probe before trusting the unit tests -- every
+mechanism above was invisible to tests that install rooms by hand, because the disagreement
+was between the *real* segmentation, the *real* frontier geometry and the sweep. Read
+`room_search_loop.events` (release verdicts with `local_steps`) against `graph.facts`: a
+release with `local_steps < 3` and a non-zero cluster count is this bug or a relative of it.
+
+**Don't:** Don't widen `visited_radius_m` down or `informative_radius_m` up to make the sweep
+survive -- both hide the geometric mismatch instead of removing it. Don't put the room LLM
+back on an action timer to "smooth" the calls; the calls were a symptom.
+
+---
+
 ## 2026-09-22 — Grounding DINO shared-head loading can look clean but substitute tensors
 
 **Symptom:** Transformers 5.17.0 reported no missing/unexpected weights for the

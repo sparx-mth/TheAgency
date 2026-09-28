@@ -5,7 +5,64 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added
+- ObjectNav frontier explorer now runs the room-search loop as specified
+  (`objnav_benchmark_runtime/methods/room_search_loop.py`): bounded local exploration of the
+  room in force -- `LoopSettings.local_steps` (10) actions or no frontier left -- with every
+  in-room route planned on a copy of the map in which the other rooms are blocked, so no
+  route crosses a door; then, on the same action the room ends, re-classify every room from
+  every object so far, re-estimate P(target) per room, re-solve the RPT* order (local budget
+  folded in as service time) and transit to the *nearest frontier inside* the chosen room
+  (centroid when it has none); arrival is the agent's cell inside the room mask and resets
+  the counter. The room LLM runs at loop points only (plus once at the start and when a room
+  the estimate has never seen appears while nothing is in force); scene-graph geometry
+  refreshes every action (`graph_period_steps` default 10 -> 1). The episode record carries
+  `room_search_loop` (per-room estimates with the distance the order charged, and one event
+  per transit/arrival/release). See `docs/progress/entries/011-objnav-room-search-loop.md`.
+- `ObjectSearchSupervisor`: caller-driven `arrived` (TRANSIT -> SEARCH by the caller's own
+  mask test) and `budget_spent` (SEARCH -> `BUDGET_SPENT` by the caller's action count);
+  `frontier_exhausted` now also ends a TRANSIT whose room the map filled in from outside
+  (`exhausted_in_transit` stat). New params `cooldown_verdicts` (which verdicts cool a room),
+  `repeat_verdicts` (which cooling rooms the every-room-cooling escape hatch may repeat) and
+  `resolve_on_release` (re-ask the solver after every release). Defaults keep the flown
+  behaviour; the loop leaves `BUDGET_SPENT` out of the cooldown and `EXHAUSTED`/`MAPPED` out
+  of the hatch.
+- `frontier_ranking.frontier_goals_by_room`: every room's ranked, reachable frontier goals in
+  one extraction and one Dijkstra, clusters credited to rooms by the same majority vote
+  `count_frontier_clusters` uses -- so a room's goals and its reported cluster count are one
+  population. `room_costs.frontier_clusters` exposes cluster member cells for it.
+- `SearchOracle` reuses the model's last reply when the prompt it would show is
+  byte-identical, re-applying the code-side time/frontier factors (`OracleResult.reused`,
+  `oracle_reuses` in the episode record): a loop point over an unchanged map costs no call.
+- `ObservedSceneGraph.labels` (the pid+1 room label image) and `room_at()`.
+- Two full recorded Ranchester episodes of the room-search loop from two start positions
+  (`runs/room_search_loop_ranchester_20260928T091752Z`: 000000 toilet from (2.97, -11.49),
+  000001 couch from (-1.03, -19.97)) -- the first Ranchester episodes ever to run to
+  completion on this workstation; every earlier attempt aborted on the room LLM. Plus
+  `objnav_benchmark_runtime/tests/timeline_room_search_loop.py`, which prints a recording's
+  `steps.jsonl` as a collapsed phase/room/command timeline with the oracle rounds and the
+  detections that reached the target track.
+
+### Changed
+- A frontier cluster's goal is now its member cell nearest the centroid (on the boundary),
+  not the centroid itself: for the arc-shaped clusters a depth range produces the centroid
+  lies inside seen floor, so every goal was "no longer informative" on the action it was
+  adopted and the room read exhausted with clusters still showing (see LESSONS).
+- `frontier_sweep.py` is reduced to goal generation, committed-goal lifetime and the optional
+  look-around; `SweepSettings.room_scan_turns` defaults to 0 (the loop's termination rule is
+  *N steps or nothing left*) and `supervisor_rounds` moved to `LoopSettings` (default 5, the
+  longest legitimate same-action chain; an overrun is counted and logged, not silent).
+  In-room goals, the room entry point and the transit re-aim share one admissibility filter.
+
 ### Fixed
+- Room-search loop transit no longer idles at a route end that the re-segmenting map moved out
+  of the target room: arrival now also counts on the room's boundary (within the sweep's mask
+  slack -- the eroded watershed mask stops short of the very frontier the transit aims at), and
+  a route that ends where the room is not re-aims once at the room's current nearest frontier
+  or releases the room as unreachable (`entry_lost` stat and event). The first recorded
+  Ranchester run (`runs/room_search_loop_ranchester_20260928T091752Z`, episode 000000) spent
+  31 of 299 actions turning in place at exactly such a spot until the route memory's 30-action
+  no-progress clock released the room. See LESSONS.
 - ObjectNav frontier explorer no longer spins in place for the supervisor's 30/90 s clocks
   once a room is swept: the new `frontier_sweep.py` gives a swept room one bounded
   look-around (a full rotation by default) and then ends it at once through two new
