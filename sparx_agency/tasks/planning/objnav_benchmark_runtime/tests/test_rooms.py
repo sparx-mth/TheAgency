@@ -1,4 +1,4 @@
-"""Door and revisable-room regressions on synthetic observed geometry."""
+"""Door and revisable-room regressions, independent of any Gibson scene labels."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -10,11 +10,11 @@ import pytest
 from sparx_agency.core.mapping.topology.room_classifier import RoomTypeClassifier
 from sparx_agency.core.mapping.topology.room_watershed import WatershedRoomParams
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
-from sparx_agency.tasks.planning.objnav_benchmark.fake_env.labels import fake_label_mapper
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import camera as synthetic_camera
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DoorSettings, ObservedDoors, doorway_position
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RevisableRoomLabels, RoomLabelSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import ObservedSceneGraph
@@ -59,7 +59,7 @@ def test_core_classifier_preserves_default_cache_but_allows_explicit_refresh():
 
 
 def observation(step, y=0.0):
-    camera = synthetic_camera()
+    camera = PROTOCOL.camera()
     depth = np.full((480, 640), 4.5, np.float32)
     depth[80:440, 240:270] = 2.0
     depth[80:440, 370:400] = 2.0
@@ -109,7 +109,7 @@ def test_confirmed_door_splits_rooms_and_survives_merging():
     settings = WatershedRoomParams(min_room_separation_m=1, min_clearance_m=0.3,
                                     min_room_cells=40, door_cut_m=0.75, merge_dynamics_m=10)
     graph = ObservedSceneGraph(FakeLLM(), segmentation=settings)
-    target = fake_label_mapper().target_labels("chair")
+    target = gibson_label_mapper().target_labels("chair")
     graph.update(world, [], target)
     assert len(graph.registry.rooms) == 1
     door = SimpleNamespace(id=0, xy=(8.05, 5.05), count=3)

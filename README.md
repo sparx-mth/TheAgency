@@ -6,6 +6,12 @@ The SPARX Agency system is composed of several packages, each of which provides 
 
 ![Package Diagram](docs/diagrams/block_diagram.svg)
 
+## Quick start: Gibson ObjectNav simulation
+
+To set up and run the full ObjectNav pipeline (Habitat + Gibson, YOLO-World, room LLM, RPT*
+room ordering, room-search loop) end to end, follow
+[`sparx_agency/tasks/planning/objnav_benchmark_runtime/QUICKSTART.md`](sparx_agency/tasks/planning/objnav_benchmark_runtime/QUICKSTART.md).
+
 
 ### Core Package
 

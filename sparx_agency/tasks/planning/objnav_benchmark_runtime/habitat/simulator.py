@@ -15,6 +15,11 @@ radius and height -- which they do for HM3D, whose meshes are built at the
 library defaults (0.10 m / 1.50 m) while ObjectNav's agent is 0.18 m / 0.88 m.
 Neither is guessed from a benchmark name, and whichever is chosen,
 ``navmesh_provenance()`` records what was actually in force.
+
+Beyond RGB-D and pose the bridge exposes two evaluator/policy-side readings of
+the loaded navmesh: :meth:`scene_structure` (storeys and stair connectors, the
+one declared ground-truth input of the multi-floor search) and
+:attr:`last_collision` (recorder-only). Neither is part of an observation.
 """
 from __future__ import annotations
 
@@ -92,6 +97,9 @@ class HabitatRGBDSimulator:
         self.gpu_device = gpu_device
         self._sim = None
         self._scene = None
+        self._structure = None  # per-scene navmesh storeys and stair connectors
+        self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
+        self.last_sensor_alignment = None
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
         """Load the scene if needed and teleport ONLY to the published start.
@@ -127,12 +135,29 @@ class HabitatRGBDSimulator:
                         "habitat-sim loaded no navmesh for %s; nothing can be "
                         "measured on it" % scene_path)
             self._scene = str(scene_path)
+            self._structure = None
         self._sim.seed(seed)
         state = habitat_sim.AgentState()
         state.position = np.asarray(position, dtype=np.float32)
         state.rotation = quaternion.from_float_array(rotation_wxyz)
         self._sim.get_agent(0).set_state(state, reset_sensors=True)
+        self.last_collision = None
         return self._observe()
+
+    def scene_structure(self):
+        """Storeys and stair connectors of the loaded scene's navmesh, ENU.
+
+        Ground truth for the building's vertical structure -- never the goal.
+        Computed once per scene from whichever navmesh is in force (see
+        ``habitat/stair_connectors.py``).
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; no navmesh to read the building from")
+        if self._structure is None:
+            from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.stair_connectors import (
+                scene_structure_from_pathfinder)
+            self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
+        return self._structure
 
     def _configuration(self, scene_path):
         import habitat_sim
@@ -208,7 +233,10 @@ class HabitatRGBDSimulator:
             raise EnvContractError("Simulator not reset, or unsupported action")
         if action != DiscreteAction.STOP:
             raw = self._sim.step(action.name.lower())
+            collided = raw.get("collided", getattr(self._sim, "previous_step_collided", None))
+            self.last_collision = None if collided is None else bool(collided)
             return self._observe(raw)
+        self.last_collision = False
         return self._observe()
 
     def _observe(self, raw=None):
@@ -217,8 +245,20 @@ class HabitatRGBDSimulator:
         if raw is None:
             raw = self._sim.get_sensor_observations()
         state = self._sim.get_agent(0).get_state()
-        pose = habitat_pose(state.position, quaternion.as_rotation_matrix(state.rotation),
-                            quaternion.as_rotation_matrix(state.sensor_states["depth"].rotation))
+        rgb_sensor, depth_sensor = state.sensor_states["rgb"], state.sensor_states["depth"]
+        rgb_rotation = quaternion.as_rotation_matrix(rgb_sensor.rotation)
+        depth_rotation = quaternion.as_rotation_matrix(depth_sensor.rotation)
+        expected_position = np.asarray(state.position) + np.array([0.0, self.camera.height_m, 0.0])
+        if (not np.allclose(rgb_sensor.position, depth_sensor.position, atol=1e-5, rtol=0)
+                or not np.allclose(rgb_rotation, depth_rotation, atol=1e-5, rtol=0)
+                or not np.allclose(depth_sensor.position, expected_position, atol=1e-4, rtol=0)):
+            raise EnvContractError("RGB/depth/pose extrinsics are not registered to the declared camera mount")
+        body_rotation = quaternion.as_rotation_matrix(state.rotation)
+        pose = habitat_pose(state.position, body_rotation, depth_rotation)
+        rgb_pose = habitat_pose(state.position, body_rotation, rgb_rotation)
+        self.last_sensor_alignment = {"rgb_pitch_rad": rgb_pose.camera_pitch, "depth_pitch_rad": pose.camera_pitch,
+                                      "mount_error_m": float(np.linalg.norm(depth_sensor.position - expected_position)),
+                                      "registered": True}
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
         return rgb, metric_depth(raw["depth"], self.camera), pose
 
@@ -228,4 +268,5 @@ class HabitatRGBDSimulator:
             self._sim.close()
         self._sim = None
         self._scene = None
+        self._structure = None
 

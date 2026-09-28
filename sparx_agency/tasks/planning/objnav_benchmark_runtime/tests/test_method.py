@@ -6,12 +6,12 @@ import re
 import numpy as np
 import pytest
 
-from sparx_agency.tasks.planning.objnav_benchmark.fake_env.labels import fake_label_mapper
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import camera, actions, settings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
 
 
@@ -32,12 +32,15 @@ class FakeDetector:
         return [row, row] if self.duplicate else [row]
 
 
-def setup_policy(label="chair", duplicate=False):
-    episode = ObjNavEpisode("synthetic/0", "synthetic", "synthetic", "development", "chair",
-                            camera(), actions(), 500)
+def setup_policy(label="chair", duplicate=False, **overrides):
+    """A policy on a 20 m synthetic map; ``overrides`` are RPTSettings fields
+    (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests)."""
+    camera = PROTOCOL.camera()
+    episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
+                            camera, PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
     policy = RPTSearchPolicy(FakeDetector(label, duplicate), FakeLLM(),
-                             settings())
-    policy.reset(episode, fake_label_mapper().target_labels("chair"))
+                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)))
+    policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     return policy, episode
 
 
@@ -88,7 +91,7 @@ def test_missing_llm_is_not_silently_run_as_uniform():
                                     {"map_size_m": float("nan")}, {"stop_distance_m": 0}])
 def test_invalid_method_settings_refused(kwargs):
     with pytest.raises(ValueError):
-        settings(**kwargs)
+        RPTSettings(**kwargs)
 
 
 def test_approach_arrival_band_is_inside_stop_radius(monkeypatch):
@@ -110,13 +113,14 @@ def test_approach_arrival_band_is_inside_stop_radius(monkeypatch):
 
 def test_nearby_frontier_is_retired_not_idled_forever(monkeypatch):
     from types import SimpleNamespace
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import rpt_policy
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import frontier_sweep
     policy, episode = setup_policy()
     policy._goal = (0.25, 0.0)
     policy.route_memory.kind = "frontier"
-    monkeypatch.setattr(rpt_policy, "in_room_frontier_goals", lambda *args: [(0.25, 0.0)])
-    goal = policy._frontier(observation(episode, 1), SimpleNamespace(resolution=0.1), None, None)
-    assert goal is None and (0.25, 0.0) in policy._visited_frontiers
+    monkeypatch.setattr(frontier_sweep, "ranked_frontier_goals",
+                        lambda *args, **kwargs: [SimpleNamespace(xy=(0.25, 0.0))])
+    goals = policy.sweep._goals(observation(episode, 1), SimpleNamespace(resolution=0.1), None, None)
+    assert goals == [] and (0.25, 0.0) in policy._visited_frontiers
 
 
 def test_observed_mapping_reaches_llm_rpt_and_astar():

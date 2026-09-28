@@ -12,14 +12,14 @@ from sparx_agency.core.mapping.objects.landmarks import ObjectLandmarkMap
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import actions
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import deduplicate_detections, TargetEvidence
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 
 
 def test_safe_route_survives_turns_and_goal_jitter_without_readoption():
-    route = CommittedRoute(actions(), ActionConverterParams())
+    route = CommittedRoute(PROTOCOL.actions(), ActionConverterParams())
     path = SimpleNamespace(points=[Pose2D(0, 0), Pose2D(2, 0)])
     planner = SimpleNamespace(path_collides=lambda *args, **kwargs: False)
     route.adopt(path, (2, 0), "frontier", SimpleNamespace(step=0))
@@ -31,7 +31,7 @@ def test_safe_route_survives_turns_and_goal_jitter_without_readoption():
 
 
 def test_real_obstacle_overrides_commitment_immediately():
-    route = CommittedRoute(actions(), ActionConverterParams())
+    route = CommittedRoute(PROTOCOL.actions(), ActionConverterParams())
     route.adopt(SimpleNamespace(points=[Pose2D(0, 0), Pose2D(2, 0)]), (2, 0), "frontier", SimpleNamespace(step=0))
     assert not route.reusable(SimpleNamespace(step=1, pose=AgentPose(0, 0, 0, 0)), None,
                               SimpleNamespace(path_collides=lambda *args, **kwargs: True), (2, 0), "frontier")

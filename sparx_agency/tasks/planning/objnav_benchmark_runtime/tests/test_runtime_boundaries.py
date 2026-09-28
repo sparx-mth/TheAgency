@@ -50,8 +50,11 @@ assert not attempts, attempts
 
 
 def test_robot_geometry_is_required_and_not_derived_from_camera_height():
-    with pytest.raises(TypeError):
-        RPTSettings()
+    # The shared core's RPTSettings carries defaults so both tasks share one
+    # definition; each task's run.py overrides embodiment from its protocol.
+    # Physical inflation can never be relaxed below the body radius.
+    with pytest.raises(ValueError):
+        RPTSettings(body_radius_m=0.3, preferred_clearance_m=0.2)
     with pytest.raises(TypeError):
         HabitatRGBDSimulator(camera(), actions(), 0.2, False)
     bridge = HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=0.7)

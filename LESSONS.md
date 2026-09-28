@@ -11,6 +11,251 @@ Format per entry:
 
 ---
 
+## 2026-09-22 — ObjectNav spent half its actions spinning, and the step log said why only once decoded
+
+**Symptom:** In the Ranchester Gibson recording (`runs/grounded_vlm_gibson_3x3_20260922T084950Z/
+.../e7c4f2ad5402`, 472 actions, `toilet` not found) the robot turned in place for ~50 actions
+after finishing a room, tilted the camera down and up every ~24 actions while following a
+path, then turned 120° back, and repeatedly planned a 7-9 m route only to replace it on the
+next action. Video-wise it looked like four unrelated bugs.
+
+**Root cause:** Four code paths, each individually "correct" for the 1 Hz aircraft it was
+written for, all paid in discrete actions:
+1. `ObjectSearchSupervisor.SEARCH` only ended on a 30 s stall / 90 s budget / a *stale*
+   cluster count reaching zero, while the policy's own in-room goal generator was already
+   empty. Every empty action became the headless agent's idle `TURN_LEFT` — 52 in a row once.
+2. `MultiFloorSearch.plan` marked a stair inspection "due" on every action after
+   `floor_search_actions` (140), so one fired at every 24-action cooldown in every new 1 m
+   cell, mid-route, and the follower then spent four turns undoing the sweep's 120°.
+3. `in_room_frontier_goals` ordered clusters by size only, with no reachability check: the
+   robot reversed to a big cluster behind it (step 297), and three goals in the first thirty
+   actions had no known-free path — one failed A* and one idle turn each.
+4. `Release` fell through to a floor-wide frontier on the release action; `SELECT` replaced
+   that route one action later. And `CommittedRoute.adopt` overwrote the clear reason with
+   `new_goal_or_invalid_route`, so the log could not distinguish "new goal" from "replanned
+   around an obstacle".
+
+**Fix / workaround:** Caller-driven supervisor exits (`frontier_exhausted`, `route_failed`);
+`FrontierSweep` with one bounded look-around per swept room and release-and-reselect on the
+same action; `frontier_ranking.ranked_frontier_goals` (geodesic + facing, unreachable dropped,
+several goals tried per action); inspection gated on "no committed route" plus a named
+trigger and a 100-action unprompted cadence; `route_replaced` in the route info.
+
+**How to see it next time:** `steps.jsonl` already carries everything — bucket each row by
+`decision.info.status` (`arrived` with no waypoints = idle turn), `command.info.kind`
+(`stair_inspection`, `room_scan`, `transit/N`, `frontier`) and `command.info.route`
+(`new_goal_or_invalid_route` = a route was adopted; `route_replaced` now says why). A
+twenty-line script over the log attributes every action in seconds; do that before watching
+the video frame by frame.
+
+**Don't:** Don't tune `search_timeout_s`/`frontier_stall_s` down to "fix" the spin — they are
+backstops for a room whose count never clears, and the real signal (the goal generator is
+empty) was always available on the same tick. Don't remove the room look-around entirely
+either: the detector has to see the room from inside; `room_scan_turns=0` is a setting, not
+the default. And don't issue two edits to the same file in one parallel tool batch — only
+one of them lands, silently (cost an hour of "why is my edit gone" today).
+
+---
+
+## 2026-09-28 — Every Ranchester episode died on "Room oracle failed", and the model was never the problem
+
+**Symptom:** Three Ranchester attempts across two campaigns (472, 281 and 18 actions) all ended
+with `ObjNavInternalError: Room oracle failed; refusing a uniform fallback run`. The natural
+reading -- qwen2.5:3b cannot produce the JSON -- was wrong: the recorded oracle rounds before
+each abort were all `source=llm`.
+
+**Root cause:** Latency. The frozen campaign ran Ollama CPU-only (`CUDA_VISIBLE_DEVICES=-1`)
+with `LLM_TIMEOUT_S=30`. Measured against that service, qwen2.5:3b needs ~2.2 s per room in the
+prompt: 6 rooms 14 s, 9 rooms 22 s, 12 rooms 29-44 s, 13-14 rooms 45-90 s. The oracle is asked
+over EVERY room (only the solver caps at `max_rooms`), so the first loop point after the map
+reached 13-14 rooms timed out, the base call fell to uniform, the one repair call timed out too,
+and the runtime -- correctly -- refused to fly on a uniform prior. All three recordings died at
+the moment the room count crossed that line.
+
+**Fix / workaround:** `LLM_TIMEOUT_S=120` (a documented env setting; recorded in the run's
+`preflight.json` under `method.llm`). With it both Ranchester episodes completed: 10 oracle
+rounds, none failed, median 34 s, max 48 s. The loop's LLM-at-loop-points cadence and the
+oracle's prompt-keyed reply reuse keep the count of calls small; they do not make a call fast.
+The system Ollama on 11434 answers the same prompts in 2-5 s with llama3 -- but it runs on the
+GPU, which this project's policy reserves for the detector and the renderer, so it was not used.
+
+**How to see it next time:** Probe before launching: `RepairingSearchOracle(LLMClient(cfg))
+.probabilities("toilet", rooms)` at 6/12/14 rooms against the real service, and read the wall
+time, not just `source`. If the 14-room call is within a factor of two of the timeout, the
+episode will die the moment the building has 14 rooms.
+
+**Don't:** Don't lower `max_rooms` to shorten the prompt -- the oracle sees every room anyway.
+Don't switch the room-language service onto the GPU to make it fast without saying so in the
+run's provenance; the frozen campaigns are CPU-LLM by design.
+
+---
+
+## 2026-09-28 — 31 idle turns at a transit's route end: arrived by the converter, "not arrived" by the loop
+
+**Symptom:** In the first recorded room-search-loop episode (`runs/room_search_loop_ranchester_
+20260928T091752Z`, 000000), steps 41-71 are 31 consecutive `TURN_LEFT` with
+`decision.info.status=arrived` and a committed `transit/0` route: the converter said the route
+was finished, and the agent turned in place for 31 actions until the room was released as
+`unreachable`.
+
+**Root cause:** The transit's entry frontier was re-aimed mid-route (the map re-segmented from
+3 to 7 rooms while the agent walked), the agent reached the new route end, and there the loop's
+arrival test -- the agent's cell INSIDE the room's mask -- was false: the spot now belonged to a
+neighbouring room, and even a correct entry frontier sits on the boundary that the watershed's
+eroded mask stops short of. The supervisor's own distance test still pointed at the ORIGINAL
+entry 2.4 m away. Neither could fire; `_navigate` kept reusing the committed route as
+`committed_safe_route`; the converter, at its end, emitted idle turns; and only
+`CommittedRoute`'s 30-action no-progress clock ended it -- as `unreachable`, which is also the
+wrong verdict for a room the agent was standing next to.
+
+**Fix / workaround:** `RoomSearchLoop._transit` now (a) counts arrival when the route has ended
+and the agent is within the sweep's `mask_slack_m` of the room (the boundary case), and (b)
+when the route has ended somewhere the room is not, retires that entry, re-aims once at the
+room's frontier nearest NOW, and releases the room as unreachable if it has none -- all on the
+same action (`entry_lost` stat/event).
+
+**How to see it next time:** `decision.info.status == "arrived"` with no `command.waypoints` is
+an idle turn; bucket them by `command.info.kind`. A run of them under one `transit/N` is this
+bug or a relative of it. The confirmation run of the same episode has zero.
+
+**Don't:** Don't make the supervisor's `arrival_tol_m` larger to cover this -- the supervisor's
+goal was the stale entry, so no tolerance short of the room's diameter would have fired, and a
+large one declares arrival at rooms never entered. Don't shorten `progress_timeout_steps`
+either: it is the last line, not the first.
+
+---
+
+## 2026-09-28 — The room-search loop released a room with three clusters showing, on every action
+
+**Symptom:** The first headless trace of the room-search loop (`tests/trace_room_search_loop.py`,
+one room, 12 actions) showed the same room released `exhausted` on five of them, a room LLM
+call for each, and the in-room sweep never lasting more than one action while the scene graph
+reported `frontier_clusters=3` for that room the whole time. The supervisor's own tests and the
+loop's own tests were green.
+
+**Root cause:** Three separate mechanisms, none of them in the loop's control flow:
+1. **The frontier goal was the cluster centroid.** A frontier is usually an arc (the edge of
+   the depth range, bowed around the robot), and the centroid of an arc lies inside the floor
+   already seen. `FrontierSweep._current_goal` keeps a goal only while unknown space remains
+   within 1 m of it, so a freshly adopted goal was "resolved" on the very next action. Its
+   replacement -- the next arc's centroid, 0.25 m further on -- fell inside the 0.4 m
+   "recently retired" radius and was refused. No admissible goal, so `frontier_exhausted`.
+2. **The count and the sweep disagreed about which cells belong to a room.**
+   `count_frontier_clusters` credits a cluster to a room by majority vote over the labels at
+   its cells; the sweep required the frontier cell itself to lie *inside* the watershed mask,
+   which is eroded by `min_clearance_m`, so boundary cells sit just outside it. Three
+   clusters counted, zero offered.
+3. **The supervisor's every-room-cooling escape hatch.** With one room, an `EXHAUSTED`
+   release cooled it, the hatch immediately repeated it ("a search that stops is worse than
+   one that repeats"), the loop re-reasoned (a loop point) and re-entered it. Correct for an
+   aircraft with nothing else to do; wrong for a loop that has a floor-wide frontier to fall
+   back to.
+
+**Fix / workaround:** `room_costs.frontier_clusters` stands a cluster for by its *member*
+cell nearest the centroid (on the boundary, informative by construction); the in-room sweep,
+the room entry point and the transit re-aim all draw their goals from
+`frontier_goals_by_room` (the count's own majority vote) through one admissibility filter;
+`ObjectSearchParams.repeat_verdicts` lets the loop keep `EXHAUSTED`/`MAPPED` rooms out of the
+hatch. Separately, the N-step budget check sat *inside* `_local`, after a plain supervisor
+tick, so a budget release spent a round before its flag was raised and the same-action chain
+overran the 3-round guard, dropping a pending `frontier_exhausted` on the floor and planning
+a throwaway route; the flag is now raised before the first tick, the guard is 5 and an overrun
+is counted and logged.
+
+**How to see it next time:** Run the trace probe before trusting the unit tests -- every
+mechanism above was invisible to tests that install rooms by hand, because the disagreement
+was between the *real* segmentation, the *real* frontier geometry and the sweep. Read
+`room_search_loop.events` (release verdicts with `local_steps`) against `graph.facts`: a
+release with `local_steps < 3` and a non-zero cluster count is this bug or a relative of it.
+
+**Don't:** Don't widen `visited_radius_m` down or `informative_radius_m` up to make the sweep
+survive -- both hide the geometric mismatch instead of removing it. Don't put the room LLM
+back on an action timer to "smooth" the calls; the calls were a symptom.
+
+---
+
+## 2026-09-28 — 132 actions "acquiring tread support" on a bathroom floor and a stair head: depth-found stairs are not stairs
+
+**Symptom:** In the confirmation recording of the room-search loop
+(`runs/room_search_loop_ranchester_20260928T093541Z_transitfix`, 000000, 500 actions,
+`toilet` not found) the phase timeline shows `TRAVERSE` with `reason=acquire connected tread
+support` twice: steps 187-306 (120 actions) at the top of the real staircase, ending in a
+`RETREAT`, and steps 488-499 (12 actions, to the step cap) after the agent walked into a
+bathroom on the ground floor. Both look on video like the camera spinning in place with the
+pitch pinned down. The episode ended 9 m from any stairs, "traversing".
+
+**Root cause:** Two, one per incident, both in the observed-only stair discovery:
+1. **A height departure of `stable_height_m` (12 cm) started a traversal.** `MultiFloorSearch
+   .prepare_observation` began a `StairTraversal` whenever `|z - floor| > 0.12` with no
+   committed portal -- the agent at the stair head dipped 12 cm onto the first tread, a
+   traversal began with a one-point "portal" at the agent's own feet, and `StairTraversal
+   ._surface_route` then needed depth-measured *connected* tread support to plan on. From the
+   top of a flight looking down, the treads' risers occlude their surfaces, the support graph
+   is empty, and the transition's answer to "no path" is a `hold(final_yaw=+30°)`: one turn per
+   action, twelve turns per `failure`, four failures before retreat. Checked against the navmesh
+   afterwards: the agent was 0.24 m from the real stair polyline -- these WERE the stairs, and
+   the observed mode still could not walk them from where it stood.
+2. **A 13 cm raised bathroom floor is indistinguishable from a first tread by height alone.**
+   The same rule fired at step 488 on a threshold 9.3 m from the staircase. `stair_min_rise_m`
+   (0.40) guards the *proposal* path (`StairTerrain._candidate_paths`), not the unplanned
+   departure path, which has no rise check at all.
+
+The YOLO `stairs`/`staircase` labels played no part in either -- they are context-only and
+were already correct in not creating portals. The loop's own fallback for "nothing to do" was a
+plain `hold()`, so wherever the transition did *not* own the action, the headless agent's idle
+`TURN_LEFT` produced the same spin from a different cause.
+
+**Fix / workaround:** `MultiFloorParams.stair_source = "ground_truth"` (default). The
+evaluator reads each scene's navmesh once (`gibson/stair_connectors.py`) and hands the policy
+the storeys and stair connectors through the episode metadata; a transition begins only ON a
+known connector (within 0.75 m of its polyline, beyond `departure_m` = 0.45 m), follows the
+connector's own polyline with a FOLLOW on every action, and never scans in place. The bathroom
+step never reaches 0.45 m; the stair-head wobble is on the polyline and now completes the climb.
+Separately, every "nothing to do" and every decision exception goes through
+`exploration_fallback.py` (nearest frontier anywhere → stairs → retired frontier → relocation),
+so an empty hold is issued only when the agent is off the passable map.
+
+**How to see it next time:** `timeline_room_search_loop.py` on `steps.jsonl`, then look for
+long runs of `TURN_*` under one `kind` with no `waypoints` in the command. `reason=acquire
+connected tread support` is the observed stair mode; `kind=fallback_hold` is the new fallback's
+last resort and should be rare -- if it is not, the agent is boxed in, not the planner.
+`building.events` now carries `height_departure_ignored` (with the height) and `floor_decision`
+(with every candidate's verdict), so "why did/didn't it take the stairs" reads straight off the
+record.
+
+**Don't:** Don't raise `stable_height_m` to stop the false starts -- the atlas uses it to
+decide when the agent is *off* a floor, and a larger value lets real stair treads read as level.
+Don't put a rise check on the unplanned path and call the observed mode fixed: it would still
+have spun at the real stair head, where the failure was tread support, not detection. Don't
+disable `multifloor` to avoid it all: the target floor in the multi-story protocol is by
+construction not the start floor.
+
+---
+
+## 2026-09-22 — Grounding DINO shared-head loading can look clean but substitute tensors
+
+**Symptom:** Transformers 5.17.0 reported no missing/unexpected weights for the
+official Grounding DINO Base snapshot, but direct comparison found a saved
+decoder bias had been substituted. Reusing LLMDet's independent-head alias fix
+then left thirty decoder parameters on the meta device, failing on `.to(cpu)`.
+
+**Root cause:** This snapshot saves only `model.decoder.bbox_embed.0` (six
+tensors), with shared decoder heads. Upstream's chained alias map can use the
+unsaved `bbox_embed.0` as canonical. LLMDet's distinct-head layout is different;
+its loader correction is not transferable unchanged.
+
+**Fix / workaround:** A local Grounding DINO subclass maps all decoder/output
+aliases directly to the saved head. Validate that exact checkpoint layout,
+compare the six saved tensors with loaded values, and reject any remaining meta
+parameters/buffers before serving. The upstream architecture/forward and model
+weights are unchanged. Real CPU inference and HTTP mode smokes passed.
+
+**Don't:** Do not trust an empty loading-info report alone, initialize missing
+learned parameters randomly, call `to_empty()` to conceal the defect, or apply
+the independent-head LLMDet correction to a shared-head model.
+
+---
+
 ## 2026-07-29 — new detector container: numpy/CLIP/TensorRT-version traps, in sequence
 
 **Symptom:** Building `docker/Dockerfile.detector` (torch + ultralytics on top of the

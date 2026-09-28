@@ -7,6 +7,7 @@ from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.mapping.topology.search_oracle import OracleRoom
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingSearchOracle
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene import report
 
 
 def test_arrival_enters_bounded_verification_not_idle_face_ping_pong():
@@ -50,4 +51,9 @@ def test_oracle_repair_is_bounded_and_does_not_invent_a_valid_answer():
     assert client.calls == 2 and oracle.repair_successes == 0
 
 
+def test_empty_aborted_episode_does_not_abort_campaign_reporting(tmp_path):
+    directory = tmp_path / "Collierville"
+    directory.mkdir()
+    (directory / "episodes.jsonl").write_text("")
+    assert report(tmp_path) is None
 

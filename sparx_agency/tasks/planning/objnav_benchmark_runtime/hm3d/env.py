@@ -25,7 +25,13 @@ the harness can cross-check our scoring against it. Where habitat-lab's formula
 is undefined (it divides by ``d0`` without guarding it), the key is omitted
 rather than filled with a convention habitat-lab does not have.
 
-Nothing privileged reaches the agent: ``ObjNavEpisode.metadata`` stays empty.
+Nothing privileged about the *task* reaches the agent: no goal position, no
+geodesic, no target floor. The one thing ``ObjNavEpisode.metadata`` does carry
+is the building's own vertical structure -- storeys and stair connectors read
+from the navmesh in force (``HabitatRGBDSimulator.scene_structure``) -- which
+the multi-floor search declares as its ground-truth stair source in
+``configuration()["ground_truth_stairs"]``. A simulator without that reading
+(the synthetic ones in tests) yields empty metadata.
 """
 from __future__ import annotations
 
@@ -199,7 +205,8 @@ class HM3DEnv(ObjNavEnv):
         self._path_m = self._protocol.path_length_epsilon_m
         self._episode = ObjNavEpisode(
             episode_id, row.scene_key, self._protocol.benchmark, self._protocol.split,
-            row.category, self._camera, self._actions, self._protocol.max_steps)
+            row.category, self._camera, self._actions, self._protocol.max_steps,
+            metadata=self._scene_metadata())
         self._observation = self._observation_from(frame)
         if any(abs(a - b) > 1e-4 for a, b in
                zip(self._habitat_position(), row.start_position)):
@@ -214,6 +221,16 @@ class HM3DEnv(ObjNavEnv):
                 "benchmark cannot measure its shortest path. Run the start "
                 "validation and exclude it explicitly." % episode_id)
         return self._episode, self._observation
+
+    def _scene_metadata(self):
+        """Non-privileged scene structure for the policy: storeys and stair connectors.
+
+        Read from the simulator's navmesh when it can provide it (the Habitat
+        bridge); a simulator without ``scene_structure`` yields empty metadata.
+        Nothing about the goal is in it.
+        """
+        provider = getattr(self._simulator, "scene_structure", None)
+        return dict(provider()) if callable(provider) else {}
 
     def _simulator_scene(self):
         return getattr(self._simulator, "_scene", None)

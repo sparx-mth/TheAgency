@@ -13,11 +13,21 @@ Four states, and the reason there are exactly four:
   worth flying to, hand them and the arc weights to the solver, and commit to
   the order it returns.
 * :data:`TRANSIT` -- flying to the head of that order under our own planner.
-  It ends four ways: arrival, a planner that never answered, a clock, or a
-  follower that reported itself blocked.
+  It ends seven ways: arrival by distance or by the caller's own test
+  (``arrived`` -- the caller can read the room mask, this machine only sees a
+  point), a planner that never answered, a planner that answered *no route*
+  (``route_failed``), a clock, a follower that reported itself blocked, or the
+  caller reporting that the room has nothing left to look at before the
+  aircraft even got there (``frontier_exhausted``).
 * :data:`SEARCH` -- inside the room, mapping it under a per-room budget. It
-  ends three ways, and all three are needed (see :attr:`ObjectSearchParams
-  .search_timeout_s`).
+  ends five ways, and all five are needed (see :attr:`ObjectSearchParams
+  .search_timeout_s`). Two are the caller's: ``frontier_exhausted`` says its
+  own goal generator has nothing reachable left in the room and its
+  look-around is done, ``budget_spent`` says its own action counter is up.
+  Both fire at once, because the caller read the live map or its own ledger
+  rather than the stale cluster count and the clock the other three exits
+  wait on. Without the first a discrete-action agent spends the whole stall
+  clock turning in place -- 52 of 472 actions in one Gibson recording.
 * :data:`FOUND` -- the detector saw the target. Terminal, deliberately: the
   ``/target_seen`` latch never un-latches, so a resume path would be dead code
   that nobody could ever exercise.
@@ -39,7 +49,11 @@ a timer would flip the head of its order between two near-equal rooms and fly
 the aircraft back and forth between them without ever searching either -- the
 same failure the smart-replan and commit-horizon work fixed for paths. So the
 order is committed, and a new one is asked for only when it is spent, when its
-head stops being eligible, or when the room set itself changes.
+head stops being eligible, or when the room set itself changes -- or, under
+:attr:`ObjectSearchParams.resolve_on_release`, once per room release: the
+room-search loop re-estimates every room's probability at that moment, so the
+committed order is stale by construction there and the solver is re-asked with
+the fresh estimate. That is still one solve per room, never one per tick.
 
 Python 3.8 syntax, standard library only.
 """
@@ -67,15 +81,22 @@ BUDGET_SPENT = "budget_spent"
 """The per-room clock ran out with frontier still showing."""
 STALLED = "stalled"
 """The frontier count stopped falling: what is left is not reachable from here."""
+EXHAUSTED = "exhausted"
+"""The caller's own goal generator found nothing reachable left in the room and
+its look-around allowance is spent. Productive: the room was searched from where
+the aircraft stands, whatever the stale cluster count still says."""
 UNREACHABLE = "unreachable"
-"""No route was ever produced to the room."""
+"""No route was ever produced to the room, or the planner refused the goal."""
 TRANSIT_TIMEOUT = "transit_timeout"
 """The aircraft did not arrive in time."""
 BLOCKED = "blocked"
 """The follower reported itself blocked for too long on the way in."""
 
-PRODUCTIVE = (MAPPED, BUDGET_SPENT, STALLED)
+PRODUCTIVE = (MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED)
 """Verdicts that mean the room was actually visited and searched."""
+
+ALL_VERDICTS = PRODUCTIVE + (UNREACHABLE, TRANSIT_TIMEOUT, BLOCKED)
+"""Every way a room's turn can end, productive or not."""
 
 
 @dataclass(frozen=True)
@@ -215,6 +236,31 @@ class ObjectSearchParams:
         tick_hz: The rate the caller is expected to call :meth:`update` at.
             The machine holds no timer and does not use it; it is here so the
             node and the machine read their cadence off one dataclass.
+        cooldown_verdicts: Which verdicts put a room on the visit cooldown.
+            Every verdict by default, which is the flown behaviour. The
+            room-search loop leaves :data:`BUDGET_SPENT` out: a room whose
+            local budget ran out with frontier still showing is exactly the
+            room the fresh estimate may send the aircraft straight back to,
+            and a 120 s cooldown there is the loop refusing its own answer.
+        repeat_verdicts: When EVERY survivor is cooling, which of them the
+            escape hatch may still choose: those whose turn ended under one
+            of these verdicts. All of them by default, the flown behaviour --
+            a search that stops entirely is worse than one that repeats a
+            room. The room-search loop leaves out :data:`EXHAUSTED` and
+            :data:`MAPPED`: a room the live map says has nothing reachable
+            left gains nothing from being re-entered while it cools, and the
+            loop has a floor-wide frontier to fall back to, so its search
+            does not stop. Measured before this existed: one room, exhausted
+            and re-chosen on every action, five releases in twelve actions
+            and a room LLM call for each.
+        resolve_on_release: Ask the solver for a fresh order every time a
+            room's turn ends, rather than walking the committed order to its
+            end. Off by default (the flown behaviour). The room-search loop
+            turns it on because it re-estimates every room's probability at
+            each release, which makes the committed order stale by
+            construction. This is still one solve per room, not per tick,
+            so the back-and-forth the commitment exists to prevent cannot
+            return through it.
     """
 
     min_prob: float = 0.01
@@ -233,6 +279,16 @@ class ObjectSearchParams:
     frontier_clear_ticks: int = 3
     frontier_stall_s: float = 30.0
     tick_hz: float = 1.0
+    cooldown_verdicts: Tuple[str, ...] = ALL_VERDICTS
+    repeat_verdicts: Tuple[str, ...] = ALL_VERDICTS
+    resolve_on_release: bool = False
+
+    def __post_init__(self):
+        # type: () -> None
+        for name in ("cooldown_verdicts", "repeat_verdicts"):
+            unknown = [v for v in getattr(self, name) if v not in ALL_VERDICTS]
+            if unknown:
+                raise ValueError("%s holds no such verdict: %s" % (name, unknown))
 
 
 @dataclass(frozen=True)
@@ -353,6 +409,7 @@ class ObjectSearchSupervisor:
         self._frontier_low_s = None     # type: Optional[float]
         self._frontier_now = None       # type: Optional[int]
         self._cooling = {}              # type: Dict[int, float]
+        self._cooling_verdict = {}      # type: Dict[int, str]
         self._attempts = {}             # type: Dict[int, int]
         self._deferred = {}             # type: Dict[int, float]
         self._order = ()                # type: Tuple[int, ...]
@@ -362,7 +419,8 @@ class ObjectSearchSupervisor:
         self._rooms_done = 0
         self.history = []               # type: List[Tuple[int, str, float]]
         self.stats = dict(selections=0, transits=0, arrivals=0, mapped=0,
-                          budget_spent=0, stalls=0, plan_fails=0,
+                          budget_spent=0, stalls=0, exhausted=0,
+                          exhausted_in_transit=0, plan_fails=0,
                           transit_timeouts=0, blocked=0, solver_calls=0)
 
     @property
@@ -391,6 +449,7 @@ class ObjectSearchSupervisor:
         shown ids.
         """
         self._cooling = {}
+        self._cooling_verdict = {}
         self._attempts = {}
         self._deferred = {}
         self._order = ()
@@ -400,8 +459,9 @@ class ObjectSearchSupervisor:
     # -- the tick ---------------------------------------------------------
     def update(self, rooms, facts=None, xy=None, now=0.0, last_plan_s=None,
                target_seen=False, instance=None, airborne=True,
-               blocked_since=None):
-        # type: (Sequence[RoomOption], Optional[Mapping[int, RoomFacts]], Optional[Tuple[float, float]], float, Optional[float], bool, Any, bool, Optional[float]) -> ObjectSearchState
+               blocked_since=None, frontier_exhausted=False, route_failed=False,
+               arrived=False, budget_spent=False):
+        # type: (Sequence[RoomOption], Optional[Mapping[int, RoomFacts]], Optional[Tuple[float, float]], float, Optional[float], bool, Any, bool, Optional[float], bool, bool, bool, bool) -> ObjectSearchState
         """Advance the search by one observation.
 
         Args:
@@ -422,6 +482,27 @@ class ObjectSearchSupervisor:
                 strands the aircraft on its skids.
             blocked_since: When the follower first reported itself blocked,
                 or None if it is not.
+            frontier_exhausted: The caller's own in-room goal generator has
+                nothing reachable left and its look-around is spent. Ends a
+                :data:`SEARCH` turn at once with :data:`EXHAUSTED`. In
+                :data:`TRANSIT` it means the room the aircraft is flying to
+                has no unscanned boundary left -- the map filled it in from
+                the doorway -- and ends the turn the same way, without the
+                visit; arrival still wins. Ignored in every other state.
+            route_failed: The caller's planner refused the transit goal on
+                the current map. Ends a :data:`TRANSIT` turn at once with
+                :data:`UNREACHABLE` -- there is nothing to wait
+                :attr:`ObjectSearchParams.plan_grace_s` for when the answer is
+                already no. Arrival still wins if the aircraft is inside the
+                arrival tolerance. Ignored in every other state.
+            arrived: The caller's own arrival test -- it can read the room
+                mask, this machine only sees a point. True in
+                :data:`TRANSIT` enters :data:`SEARCH` whatever the distance
+                to ``goal_xy`` says; ignored in every other state.
+            budget_spent: The caller's own local budget for the room in
+                force is up -- its action counter, not this machine's clock.
+                Ends a :data:`SEARCH` turn at once with :data:`BUDGET_SPENT`;
+                ignored in every other state.
 
         Returns:
             The state, with the action to take on it.
@@ -450,8 +531,9 @@ class ObjectSearchSupervisor:
         if self._state == SELECT:
             return self._select(rooms, now, last_plan_s, instance)
         if self._state == TRANSIT:
-            return self._transit(xy, now, last_plan_s, blocked_since)
-        return self._search(now)
+            return self._transit(xy, now, last_plan_s, blocked_since, route_failed,
+                                 arrived, frontier_exhausted)
+        return self._search(now, frontier_exhausted, budget_spent)
 
     # -- the three working states -----------------------------------------
     def _select(self, rooms, now, last_plan_s, instance):
@@ -491,27 +573,44 @@ class ObjectSearchSupervisor:
                   prob=pick.prob, order_index=self._order_index, note=note),
             now, changed=True)
 
-    def _transit(self, xy, now, last_plan_s, blocked_since):
-        # type: (Tuple[float, float], float, Optional[float], Optional[float]) -> ObjectSearchState
-        """Hold the chosen room until arrival, a dead planner, a clock or a wedge."""
+    def _transit(self, xy, now, last_plan_s, blocked_since, route_failed=False,
+                 arrived=False, frontier_exhausted=False):
+        # type: (Tuple[float, float], float, Optional[float], Optional[float], bool, bool, bool) -> ObjectSearchState
+        """Hold the chosen room until arrival, a refused or dead planner, a clock or a wedge."""
         params = self.params
         distance = math.hypot(self._goal_xy[0] - xy[0], self._goal_xy[1] - xy[1])
         elapsed = now - self._goal_s
-        if distance < params.arrival_tol_m:
+        if arrived or distance < params.arrival_tol_m:
             self._state = SEARCH
             self._search_end_s = now + params.search_timeout_s
             self._clear_ticks = 0
             self._frontier_low = self._frontier_now
             self._frontier_low_s = now
             self.stats["arrivals"] += 1
-            note = ("arrived at R%d (%.2f m) after %.1f s -- mapping it for "
-                    "up to %.0f s" % (self._room_id, distance, elapsed,
-                                      params.search_timeout_s))
+            note = ("arrived at R%d (%.2f m%s) after %.1f s -- mapping it for "
+                    "up to %.0f s" % (self._room_id, distance,
+                                      ", by the caller's test" if arrived else "",
+                                      elapsed, params.search_timeout_s))
             return self._snapshot(
                 SearchRoom(room_id=self._room_id, xy=(float(xy[0]), float(xy[1])),
                            label=self._label or "?",
                            deadline_s=self._search_end_s, note=note),
                 now, changed=True)
+        if frontier_exhausted:
+            # The map filled the room in before the aircraft got there. What
+            # the detector could see of it, it has seen; the visit buys nothing.
+            self.stats["exhausted"] += 1
+            self.stats["exhausted_in_transit"] += 1
+            return self._end_room(
+                EXHAUSTED, "R%d has nothing left to look at -- resolved from "
+                "outside after %.1f s of transit" % (self._room_id, elapsed), now)
+        if route_failed:
+            # The planner has already said no on the map as it stands; the
+            # grace window below is for a planner that has not answered yet.
+            self.stats["plan_fails"] += 1
+            return self._end_room(
+                UNREACHABLE, "R%d: planner refused a route on the current map "
+                "-- centre unreachable" % (self._room_id,), now)
         if blocked_since is not None and (now - blocked_since) > params.blocked_abandon_s:
             self.stats["blocked"] += 1
             return self._end_room(
@@ -533,8 +632,8 @@ class ObjectSearchSupervisor:
         return self._snapshot(
             Hold("flying to R%d, %.2f m to run" % (self._room_id, distance)), now)
 
-    def _search(self, now):
-        # type: (float) -> ObjectSearchState
+    def _search(self, now, frontier_exhausted=False, budget_spent=False):
+        # type: (float, bool, bool) -> ObjectSearchState
         """Map the room under its budget, and decide when its turn is over."""
         params = self.params
         elapsed = now - self._goal_s if self._goal_s is not None else 0.0
@@ -552,6 +651,21 @@ class ObjectSearchSupervisor:
             else:
                 self._clear_ticks = 0
 
+        # The caller's verdicts come first and need no grace: it read the
+        # live map or its own action ledger, whereas the three exits below
+        # reason from a cluster count and a clock that lag the map. Exhausted
+        # beats budget-spent because it is the truer statement: a room with
+        # nothing left to look at is finished whatever the counter says.
+        if frontier_exhausted:
+            self.stats["exhausted"] += 1
+            return self._end_room(
+                EXHAUSTED, "R%d swept -- nothing reachable left to look at "
+                "after %.0f s" % (self._room_id, since_arrival), now)
+        if budget_spent:
+            self.stats["budget_spent"] += 1
+            return self._end_room(
+                BUDGET_SPENT, "R%d local budget spent by the caller's count "
+                "with %s clusters left" % (self._room_id, frontier), now)
         # Order matters. MAPPED is the truest verdict whenever it holds, so it
         # is tested first. BUDGET_SPENT then beats STALLED: once the clock is
         # gone the room's turn is over on the budget, and reporting a stall
@@ -595,8 +709,13 @@ class ObjectSearchSupervisor:
             # EVERY survivor cooling is not a reason to stand still. The
             # cooldown exists to spread the search out, and a search that
             # stops entirely is strictly worse than one that repeats a room.
+            # Which rooms may be repeated is the caller's call, by verdict.
             if fresh:
                 survivors = fresh
+            else:
+                survivors = [room for room in survivors
+                             if self._cooling_verdict.get(int(room.room_id))
+                             in self.params.repeat_verdicts]
         total = sum(float(room.prob) for room in survivors)
         if total <= 0.0:
             return ()
@@ -634,7 +753,9 @@ class ObjectSearchSupervisor:
         """Finish the room in force with a verdict, and go back to SELECT."""
         room_id = self._room_id
         if room_id is not None:
-            self._cooling[int(room_id)] = float(now)
+            if verdict in self.params.cooldown_verdicts:
+                self._cooling[int(room_id)] = float(now)
+                self._cooling_verdict[int(room_id)] = str(verdict)
             self.history.append((int(room_id), str(verdict), float(now)))
             if verdict in PRODUCTIVE:
                 self._rooms_done += 1
@@ -645,6 +766,13 @@ class ObjectSearchSupervisor:
                 if tries >= self.params.max_attempts:
                     self._deferred[int(room_id)] = float(now)
         self._order_index += 1
+        if self.params.resolve_on_release:
+            # The caller re-estimates every room at this point, so the order
+            # this room came from is stale by construction. Dropping it makes
+            # the next SELECT ask the solver again, with the fresh estimate.
+            self._order = ()
+            self._order_index = 0
+            self._order_rooms = ()
         self._release()
         return self._snapshot(
             Release(room_id=room_id, verdict=verdict, note=note), now,

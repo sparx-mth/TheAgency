@@ -81,7 +81,13 @@ decides whether to keep a stale label — nothing is cached on failure.
   `min_classes`, `count_sensitive=True` and `classify(..., refresh=True)` to
   revise a label after more objects are observed or a region is resegmented.
   Refresh failures propagate without replacing the previous cache entry.
-- `search_oracle.py` — per-room target probabilities.
+- `search_oracle.py` — per-room target probabilities. The model is asked
+  only when the prompt it would be shown has changed (room ids, labels,
+  observed classes, area); `searched_s` and `frontier_clusters` are
+  applied in code, so a query over an unchanged map re-scores the kept
+  reply against the fresh effort numbers instead of spending a call
+  (`OracleResult.reused`, `SearchOracle.reuses`). A reply that fell back
+  to uniform is never kept.
 - `target_matcher.py` — target-name matching: exact → cache → LLM →
   token-overlap fallback. The fallback rung is not implemented here: it
   delegates to `core/common/label_match.py`, which is the same rule the

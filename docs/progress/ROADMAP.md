@@ -4,6 +4,10 @@ High-level direction only — no implementation detail here. Each line becomes a
 entry under `entries/` when work actually starts on it.
 
 ## Now
+- [ ] Native grounded-only Gibson evaluation: three buildings, three episodes each, all videos and failures retained → `entries/009-grounded-vlm-gibson-evaluation.md`
+- [ ] ObjectNav exploration efficiency: no redundant spinning, no route-interrupting camera inspections, frontiers ranked by worth → `entries/010-objnav-exploration-efficiency.md`
+- [ ] ObjectNav room-search loop: bounded in-room exploration, then re-classify → re-estimate → re-order → transit to the next room's nearest frontier → `entries/011-objnav-room-search-loop.md`
+- [ ] ObjectNav robustness: a failed plan or model keeps the agent exploring (nearest frontier, never a spin), stairs from the simulator's ground truth with an explicit up/down decision, YOLO-only detector default → `entries/012-objnav-fallback-gt-stairs-yolo-default.md`
 - [ ] FALCON BEV click-to-fly for Rooster/Sphera, end-to-end and reliable → `entries/001-falcon-rooster-clickfly.md`
 - [ ] Move every Rooster node still running on the bare host into `robotican_dev`/`theagency:robotican` → `entries/002-rooster-full-containerize.md`
 - [ ] Incoming updated FALCON/planning drop from the user — integrate and re-verify → `entries/003-falcon-planning-update.md`
@@ -21,6 +25,7 @@ entry under `entries/` when work actually starts on it.
 - Long-tail migration of remaining DA3-consumer scripts/launch files to the model registry (explicitly deprioritized for now)
 
 ## Done
+- [x] Selectable YOLO / Grounding DINO + BLIP-2 perception for Gibson, with auditable visual verification → `entries/008-grounded-vlm-perception.md`
 - [x] GPU hardware-detection consolidation, model/engine registry, x86 dev container for Sphera/ROBOTICAN (commit `55f96e33`)
 - [x] Rooster/Sphera takeoff, video streaming, depth `.npy` output, closed-loop altitude hold
 - [x] Rooster frame capture → direct relay to the Jetson, orchestrated via mission_control.py → `entries/006-rooster-frame-jetson-relay.md`

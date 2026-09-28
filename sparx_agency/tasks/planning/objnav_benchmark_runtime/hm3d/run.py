@@ -36,6 +36,11 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
 #: navmesh snapping put the two numbers a hair apart.
 GEODESIC_AGREEMENT_FRACTION = 0.99
 
+#: The detector service mode every HM3D entrypoint expects unless told otherwise.
+#: YOLO-World only; ``grounded_vlm`` / ``hybrid`` stay selectable via
+#: ``--detector-backend`` but are not the default.
+DEFAULT_DETECTOR_BACKEND = "yolo_world"
+
 #: Packages the runtime needs, and the distribution each version is read from.
 RUNTIME_PACKAGES = (
     ("numpy", "numpy"), ("scipy", "scipy"), ("skimage", "scikit-image"),
@@ -73,7 +78,18 @@ def parser():
     p.add_argument("--agent", choices=("rpt", "stop"), default="rpt")
     p.add_argument("--policy-config", type=Path,
                    help="JSON object of RPTSettings overrides")
+    p.add_argument("--explorer", choices=("frontier", "falcon"), default=None,
+                   help="Local exploration inside a room: the observed-map frontier "
+                        "sweep (default) or the planar FALCON adaptation. Must agree "
+                        "with local_exploration in --policy-config when both are given")
     p.add_argument("--detector-url", default="http://127.0.0.1:18092")
+    p.add_argument("--detector-backend", default=DEFAULT_DETECTOR_BACKEND,
+                   help="Detector service mode expected on --detector-url; the run "
+                        "refuses a service reporting a different backend "
+                        "(default: %s)" % DEFAULT_DETECTOR_BACKEND)
+    p.add_argument("--detector-timeout-s", type=float, default=30.0,
+                   help="Bounded HTTP timeout per frame; raise it explicitly for a "
+                        "CPU grounded-VLM detector")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--gpu-device", type=int, default=0)
     p.add_argument("--limit", type=int)
@@ -163,6 +179,10 @@ def _method(args, protocol):
     overrides = json.loads(args.policy_config.read_text()) if args.policy_config else {}
     if not isinstance(overrides, dict):
         raise ValueError("--policy-config must hold a JSON object")
+    if args.explorer is not None:
+        if overrides.get("local_exploration", args.explorer) != args.explorer:
+            raise ValueError("--explorer disagrees with --policy-config")
+        overrides["local_exploration"] = args.explorer
     # Embodiment comes from the benchmark's own agent, never from a default.
     embodiment = {"body_height_m": protocol.agent_height_m,
                   "body_radius_m": protocol.agent_radius_m,
@@ -173,7 +193,9 @@ def _method(args, protocol):
     config.seed = args.seed
     client = VerifiedLLMClient(LLMClient(config))
     detector = HttpDetector(public_service_url(args.detector_url),
-                            hm3d_label_mapper().vocabulary())
+                            hm3d_label_mapper().vocabulary(),
+                            expected_backend=args.detector_backend,
+                            timeout_s=args.detector_timeout_s)
     problems, identities = [], {}
     for name, service in (("LLM", client), ("detector", detector)):
         try:
@@ -191,7 +213,9 @@ def _method(args, protocol):
     llm = asdict(config)
     llm.pop("api_key", None)
     info.update(llm=llm, llm_identity=identities["LLM"],
-                detector=identities["detector"], detector_url=args.detector_url)
+                detector=identities["detector"], detector_url=args.detector_url,
+                detector_backend=args.detector_backend,
+                detector_timeout_s=detector.timeout_s)
     return policy, info
 
 
