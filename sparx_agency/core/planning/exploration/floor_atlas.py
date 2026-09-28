@@ -14,9 +14,31 @@ import math
 from typing import Dict, List, Optional, Tuple
 
 
+#: Where the building coordinator learns where the stairs are.
+STAIR_SOURCE_GROUND_TRUTH = "ground_truth"
+STAIR_SOURCE_OBSERVED = "observed"
+STAIR_SOURCES = (STAIR_SOURCE_GROUND_TRUTH, STAIR_SOURCE_OBSERVED)
+
+
 @dataclass(frozen=True)
 class MultiFloorParams:
+    """Floor hysteresis for the atlas plus the building coordinator's knobs.
+
+    Attributes:
+        stair_source: ``ground_truth`` -- stair connectors and floor levels
+            come from the simulator's navmesh through the episode metadata,
+            and a floor transition is started only at one of them;
+            ``observed`` -- the former RGB-D support-surface discovery, which
+            mistook a raised bathroom floor for a staircase. The atlas itself
+            reads poses only in either mode; this is the coordinator's choice.
+        near_connector_m: How close (XY, metres) to a ground-truth connector's
+            polyline an unplanned height departure must be to count as being
+            on those stairs rather than on a step or a threshold.
+    """
+
     enabled: bool = True
+    stair_source: str = STAIR_SOURCE_GROUND_TRUTH
+    near_connector_m: float = 0.75
     departure_m: float = 0.45
     floor_match_m: float = 0.30
     min_floor_separation_m: float = 1.5
@@ -37,9 +59,11 @@ class MultiFloorParams:
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError("multifloor.enabled must be boolean")
+        if self.stair_source not in STAIR_SOURCES:
+            raise ValueError("multifloor.stair_source must be one of %s; no silent fallback" % (STAIR_SOURCES,))
         for name in ("departure_m", "floor_match_m", "min_floor_separation_m",
                      "min_floor_area_m2", "stable_height_m", "stable_distance_m", "max_step_m",
-                     "terrain_radius_m", "stair_min_rise_m", "exit_distance_m"):
+                     "terrain_radius_m", "stair_min_rise_m", "exit_distance_m", "near_connector_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)

@@ -222,3 +222,33 @@ def test_shards_partition_and_invalid_selection_refused():
         with pytest.raises(ValueError):
             select_episodes(ids, **kwargs)
 
+
+class StructuredLineSimulator(LineSimulator):
+    """The Habitat bridge's contract: the navmesh's storeys and stairs, read once per scene."""
+
+    STRUCTURE = {"stair_source": "navmesh",
+                 "floor_levels": [{"height_m": 0.0, "area_m2": 50.0}, {"height_m": 2.7, "area_m2": 40.0}],
+                 "stair_connectors": [{"id": 0, "bottom_xyz": [2.0, 0.0, 0.0], "top_xyz": [5.0, 0.0, 2.7],
+                                       "bottom_z": 0.0, "top_z": 2.7, "length_m": 4.0, "rise_m": 2.7,
+                                       "polyline_xyz": [[2.0, 0.0, 0.0], [3.5, 0.0, 1.35], [5.0, 0.0, 2.7]]}]}
+
+    def scene_structure(self):
+        return dict(self.STRUCTURE)
+
+
+def test_reset_attaches_the_navmesh_structure_when_the_simulator_provides_it(tmp_path, semantic):
+    from sparx_agency.tasks.planning.objnav_benchmark.env_contract import checked_reset
+    paths = write_dataset(tmp_path, semantic)
+    env = GibsonEnv(GibsonDataset(*paths, full=False), simulator=StructuredLineSimulator())
+    episode_id = env.episode_ids()[0]
+    episode, _ = env.reset(episode_id)
+    assert episode.metadata["stair_connectors"][0]["top_z"] == 2.7
+    assert [level["height_m"] for level in episode.metadata["floor_levels"]] == [0.0, 2.7]
+    assert not any(key in ("goal", "shortest", "geodesic") for key in json.dumps(episode.metadata))
+    checked_reset(env, episode_id)                           # the harness's privileged-key tripwire accepts it
+    plain = GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator())
+    assert plain.reset(episode_id)[0].metadata == {}, "a simulator without a navmesh reader attaches nothing"
+    env.close()
+    plain.close()
+
+

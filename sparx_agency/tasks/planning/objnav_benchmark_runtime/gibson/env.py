@@ -69,15 +69,26 @@ class GibsonEnv(ObjNavEnv):
         self._first_success_action = 0 if self._start_dtg == 0.0 else None
         tag = "%d/%s" % (self._seed, episode_id)
         seed = int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "big")
-        self._episode = ObjNavEpisode(episode_id, row.scene, self.protocol.benchmark, self.protocol.split,
-                                     row.category, self._camera, self._actions, self.protocol.max_steps)
         frame = self._simulator.reset(self._dataset.scenes_dir / (row.scene + ".glb"),
                                       self._dataset.scenes_dir / (row.scene + ".navmesh"),
                                       row.start_position, row.start_rotation, seed)
+        self._episode = ObjNavEpisode(episode_id, row.scene, self.protocol.benchmark, self.protocol.split,
+                                     row.category, self._camera, self._actions, self.protocol.max_steps,
+                                     metadata=self._scene_metadata())
         self._observation = self._observation_from(frame)
         if any(abs(a - b) > 1e-4 for a, b in zip(self._habitat_position(), row.start_position)):
             raise EnvContractError("Simulator changed the published episode start")
         return self._episode, self._observation
+
+    def _scene_metadata(self):
+        """Non-privileged scene structure for the policy: storeys and stair connectors.
+
+        Read from the simulator's navmesh when it can provide it (the Habitat
+        bridge); a simulator without ``scene_structure`` -- the synthetic ones
+        in tests -- yields empty metadata. Nothing about the goal is in it.
+        """
+        provider = getattr(self._simulator, "scene_structure", None)
+        return dict(provider()) if callable(provider) else {}
 
     def _observation_from(self, frame):
         rgb, depth, pose = frame

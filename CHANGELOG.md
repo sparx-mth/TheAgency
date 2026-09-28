@@ -6,6 +6,66 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- ObjectNav exploration fallback (`objnav_benchmark_runtime/methods/exploration_fallback.py`):
+  every failure of the decision pipeline -- an A* with no path, an RPT* instance that cannot
+  be built, a room LLM that times out or answers badly, a bug in the loop -- now ends in a
+  command that moves: the nearest reachable frontier anywhere on the floor (leaving the
+  current room if that is where it is), then the stairs, then a retired frontier, then a
+  relocation to the farthest reachable known cell; a hold only when the agent stands off the
+  passable map. `RPTSearchPolicy.plan` wraps the decision and routes any exception there, so
+  a model failure is no longer an agent error that ends the episode. Failed model services
+  (room LLM, detector) get a doubling back-off (25 → 200 actions) during which they are not
+  asked; failures are counted, kept with type/message/origin under `exploration_fallback` in
+  the episode record, and logged once per type. See `docs/progress/entries/012-*.md`.
+- Ground-truth stairs for the multi-story policy (`MultiFloorParams.stair_source`, default
+  `ground_truth`; `observed` keeps the RGB-D discovery for comparison). The evaluator reads
+  each scene's navmesh once (`gibson/stair_connectors.py`): area-supported storey heights and
+  every off-level surface cluster as a connector with floor anchors and the navmesh shortest
+  path, attached to the episode metadata (no goal, distance or target floor). The policy
+  (`methods/stair_ground_truth.py`, `floor_decision.py`, `ground_truth_traversal.py`) makes
+  each connector a portal, decides explicitly when to change floors -- eligible, reachable
+  on the observed map now, destination unvisited or with frontier left, nearest first; up or
+  down falls out of the connector -- with one recorded `floor_decision` event per distinct
+  verdict, and walks the connector's own polyline with a FOLLOW command on every action.
+  `configuration()["ground_truth_stairs"]` declares it. Verified on the real Ranchester
+  navmesh: two storeys, one 5.5 m connector, the flight the recordings climbed.
+- `objnav_benchmark_runtime/tests/{test_stair_ground_truth,test_ground_truth_floor_transitions,test_exploration_fallback}.py`
+  (38 tests) plus the metadata/tripwire and YOLO-default regressions.
+- `objnav_benchmark_runtime/QUICKSTART.md`: the end-to-end runbook for the Gibson ObjectNav
+  simulation -- the three environments, the licensed dataset and weight downloads, then the
+  services, frozen episodes, preflight, smoke run and campaign in strict order, with the
+  refusals a newcomer meets and their fixes. Linked from the root README and the runtime and
+  Gibson READMEs; its service and preflight steps were executed as written.
+- `provision_grounded_vlm --model none --include-yolo` provisions YOLO-World X-v2 + CLIP alone
+  (~0.5 GB) instead of forcing a Grounding DINO / BLIP-2 download for the YOLO-only default.
+
+### Changed
+- YOLO-World only is the default object-detection pipeline everywhere: `--detector-backend`
+  defaults to `yolo_world` in `gibson.run`, `run_development`, `distinct_buildings`,
+  `compare_explorers` and `stair_diagnostic` (`detector_options.DEFAULT_DETECTOR_BACKEND`),
+  and `scene_graph/serve/configs/gibson_perception.json` selects `yolo_world`. Grounding
+  DINO / BLIP-2 (`grounded_vlm`, `hybrid`) remain selectable but disabled until their stair
+  verification is revisited; stairs no longer depend on the detector at all.
+- In ground-truth stair mode the building coordinator runs no look-down inspections and
+  applies no depth veto on the committed route; an unplanned height departure starts a
+  transition only within 0.75 m of a known connector's polyline (`near_connector_m`) and
+  beyond `departure_m`, and any other departure is logged once (`height_departure_ignored`)
+  and left to the atlas. A spent retreat lets the atlas settle where the agent stands instead
+  of halting the episode (`SAFE_HALT` is observed-mode only).
+- `RoomSearchLoop._fallback` delegates to the exploration fallback; `_reason` turns a room-LLM
+  failure into a recorded, backed-off `RoomReasoningUnavailable` instead of raising out of
+  `plan`. `LoopSettings`/`RPTSettings` unchanged; `FallbackSettings` added to
+  `configuration()`.
+
+### Fixed
+- The multi-story policy no longer starts a "stair traversal" on a raised bathroom floor or on
+  a 12 cm height wobble at a real stair head and then turns in place "acquiring tread support"
+  -- 120 + 12 actions of the 500 in `runs/room_search_loop_ranchester_20260928T093541Z_transitfix`.
+  See LESSONS.
+- The room-search loop's "nothing to work in" answer is no longer an empty hold that the
+  headless agent spends as one idle `TURN_LEFT` per action until the step budget runs out.
+
+### Added (earlier, same branch)
 - ObjectNav frontier explorer now runs the room-search loop as specified
   (`objnav_benchmark_runtime/methods/room_search_loop.py`): bounded local exploration of the
   room in force -- `LoopSettings.local_steps` (10) actions or no frontier left -- with every

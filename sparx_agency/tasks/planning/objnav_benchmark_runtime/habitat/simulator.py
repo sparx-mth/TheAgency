@@ -67,6 +67,7 @@ class HabitatRGBDSimulator:
         self.gpu_device = gpu_device
         self._sim = None
         self._scene = None
+        self._structure = None  # per-scene navmesh storeys and stair connectors
         self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
@@ -81,6 +82,7 @@ class HabitatRGBDSimulator:
                 self.close()
                 raise EnvContractError("Unable to load published navmesh: %s" % navmesh_path)
             self._scene = str(scene_path)
+            self._structure = None
         self._sim.seed(seed)
         state = habitat_sim.AgentState()
         state.position = np.asarray(position, dtype=np.float32)
@@ -88,6 +90,20 @@ class HabitatRGBDSimulator:
         self._sim.get_agent(0).set_state(state, reset_sensors=True)
         self.last_collision = None
         return self._observe()
+
+    def scene_structure(self):
+        """Storeys and stair connectors of the loaded scene's navmesh, ENU.
+
+        Ground truth for the building's vertical structure -- never the goal.
+        Computed once per scene; see ``gibson/stair_connectors.py``.
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; no navmesh to read the building from")
+        if self._structure is None:
+            from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.stair_connectors import (
+                scene_structure_from_pathfinder)
+            self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
+        return self._structure
 
     def _configuration(self, scene_path):
         import habitat_sim
@@ -165,4 +181,5 @@ class HabitatRGBDSimulator:
             self._sim.close()
         self._sim = None
         self._scene = None
+        self._structure = None
 

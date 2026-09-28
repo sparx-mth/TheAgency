@@ -10,10 +10,12 @@ change confidence thresholds or add fusion/reasoning from the reviewed papers.
 
 ## Optional grounded visual verification
 
-The new [Grounding DINO + BLIP-2 runbook](GROUNDED_VLM.md) adds `grounded_vlm`
+The [Grounding DINO + BLIP-2 runbook](GROUNDED_VLM.md) adds `grounded_vlm`
 (DINO + BLIP-2, no YOLO) and `hybrid` (all three), with one `backend` field in
-[`configs/gibson_perception.json`](configs/gibson_perception.json). Set it to
-`yolo_world` for YOLO only. The no-config default above is unchanged.
+[`configs/gibson_perception.json`](configs/gibson_perception.json). That file, the
+no-config default above and every Gibson entrypoint's `--detector-backend` all
+select `yolo_world`: YOLO only is the object-detection pipeline for now, and the
+VLM modes are opt-in until their stair verification is revisited.
 Grounding DINO Base and BLIP-2 FLAN-T5 XL use pinned, verified local snapshots.
 Verification is experimental, defaults to all classes and never replaces depth,
 floor-transition or multi-view safety checks. Its evidence is recorded per frame.

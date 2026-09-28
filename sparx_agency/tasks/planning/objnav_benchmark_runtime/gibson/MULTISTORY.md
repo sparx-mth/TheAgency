@@ -1,8 +1,55 @@
-# Multi-story ZSON: persistent floor graphs and observed stair connections
+# Multi-story ZSON: persistent floor graphs and stair connections
 
 **Measured status:** [The complete 15-episode campaign](MULTISTORY_RESULTS.md)
 ran without runtime errors and produced all five recordings, but scored 0/15
 annotated-target successes. Multi-story search quality is not solved.
+
+## Where the stairs come from (`RPTSettings.multifloor.stair_source`)
+
+Two sources, one setting; the atlas, the per-floor contexts and the portal
+bookkeeping are the same under both.
+
+**`ground_truth` -- the default.** The evaluator reads the scene's navmesh once
+per scene (`gibson/stair_connectors.py`): the area-supported storey heights
+(the generator's own rule -- 8 m² within ±0.30 m, 1.5 m apart) and, between
+them, every cluster of off-level walkable surface as one **connector** -- its
+bottom and top floor anchors, the storey heights it joins and the navmesh
+shortest path along it. The block rides on the episode metadata
+(`stair_connectors`, `floor_levels`); it names no goal, no distance and no
+target floor, and the harness's privileged-key tripwire accepts it. The
+building coordinator then:
+
+- makes every connector touching the storey in force a portal on the first
+  action, oriented from that storey (`+1` up / `-1` down; `stair_ground_truth.py`);
+- **decides explicitly** when the floor is exhausted or its allowance is spent
+  (`floor_decision.py`): eligible = not cooling; reachable now = entry anchor
+  snaps onto the observed passable map within 1.5 m, else re-checked in 10
+  actions; worth it = the other storey is unvisited, or visited with frontier
+  left; order = unvisited first, then nearest entry. Up or down falls out of the
+  connector chosen. Every call is a `floor_decision` event naming the winner,
+  its direction and each loser's verdict -- one record per distinct verdict;
+- **walks the connector's own polyline** (`ground_truth_traversal.py`): a
+  FOLLOW command on every action, past the far anchor to step clear of the
+  stair head, or back down it on a stall/blockage; the atlas confirms the
+  storey only at the far anchor at the destination height. A spent retreat
+  never halts the episode -- it lets the atlas settle wherever the agent
+  stands and the search goes on;
+- **starts an unplanned transition only ON a connector**: a height departure
+  beyond `departure_m` (0.45 m) within `near_connector_m` (0.75 m) of a
+  polyline completes the climb in the direction already taken; any other
+  departure is logged once (`height_departure_ignored`) and left to the atlas.
+  The 13 cm raised bathroom floor and the 12 cm wobble at a stair head that
+  the observed mode took for first treads never reach the threshold;
+- runs **no look-down inspections** and applies **no depth veto** on the
+  committed route -- the stairs are known.
+
+`configuration()["ground_truth_stairs"]` is `True` for such a run; it is not an
+observed-only run, and its results must say so. RGB stair detections (YOLO
+`stairs`/`staircase`) are context labels only, as before.
+
+**`observed`** -- the former RGB-D discovery, kept for comparison
+(`{"multifloor": {"stair_source": "observed"}}`). Everything in the next
+section describes it.
 
 ## Architecture
 
@@ -15,32 +62,37 @@ Floor IDs are discovery IDs, not surveyed floor numbers.
 
 The detector, revisable room labels, RPT* objective, frontier/FALCON local search,
 weighted A*, route commitment and multi-view target confirmation are preserved.
-An observed-only building coordinator schedules stair portals after bounded
-floor search or local exhaustion. It uses the existing RPT* solver and observed
-travel-cost builder. Unknown floors retain explicit prior probability; a local
-room ranking does not assert the whole building has been searched.
+The building coordinator schedules stair portals after bounded floor search or
+local exhaustion -- in observed mode with the RPT* solver over observed travel
+costs, in ground-truth mode with the explicit rule above. Unknown floors retain
+explicit prior probability; a local room ranking does not assert the whole
+building has been searched.
 
 Floor changes require a translated, stable-height plateau. Turning on a stair
-or crossing successive treads does not allocate a floor. New floors also require
-at least 3 m² of connected, observed near-level support, excluding small stair
-landings. A return to an existing
-height restores the saved context and revalidates routes. Intermediate stair
-observations do not contaminate floor semantics. Room clocks pause off-floor;
-the episode action clock never pauses or refills.
+or crossing successive treads does not allocate a floor. In observed mode new
+floors also require at least 3 m² of connected, observed near-level support,
+excluding small stair landings; in ground-truth mode the storey heights are
+known and the 1.5 m separation rule alone keeps landings from becoming floors.
+A return to an existing height restores the saved context and revalidates
+routes. Intermediate stair observations do not contaminate floor semantics.
+Room clocks pause off-floor; the episode action clock never pauses or refills.
 
-Stairs are proposed from RGB-D support surfaces, with organized-depth normals,
-step-height-limited connectivity and body-height obstacle clearance. Traversal
-uses the same MOVE_FORWARD and TURN actions, optionally inspecting below the
-horizon with existing LOOK actions (up to 60 degrees down). Near-field support
-can reuse previously observed free space on the same floor, never unknown cells.
-The underfoot height is measured from depth rather than assuming a fixed offset
-between a smoothed navmesh base and a scanned tread. Steering checks legal
-discrete headings, and retreat commits to a fixed observed reverse trail.
-Failed proposals have bounded attempts and
-cooldowns. The policy never receives scene geometry, GT heights, goal maps,
-navmesh queries, evaluator distances or success-region entry signals.
+In observed mode stairs are proposed from RGB-D support surfaces, with
+organized-depth normals, step-height-limited connectivity and body-height
+obstacle clearance. Traversal uses the same MOVE_FORWARD and TURN actions,
+optionally inspecting below the horizon with existing LOOK actions (up to 60
+degrees down). Near-field support can reuse previously observed free space on
+the same floor, never unknown cells. The underfoot height is measured from depth
+rather than assuming a fixed offset between a smoothed navmesh base and a
+scanned tread. Steering checks legal discrete headings, and retreat commits to a
+fixed observed reverse trail. Failed proposals have bounded attempts and
+cooldowns. In that mode the policy never receives scene geometry, GT heights,
+goal maps, navmesh queries, evaluator distances or success-region entry signals;
+in ground-truth mode it receives the storey heights and stair connectors and
+nothing else.
 
-Configuration is under `RPTSettings.multifloor` (`enabled: true` by default).
+Configuration is under `RPTSettings.multifloor` (`enabled: true`,
+`stair_source: "ground_truth"` by default).
 `{"multifloor": {"enabled": false}}` explicitly selects the historical destructive
 floor-reset ablation. Both `--explorer frontier` and `--explorer falcon` support
 the building coordinator. The frontier mode remains the default; enabling
@@ -141,8 +193,17 @@ Run the normal ObjectNav/runtime regressions plus `tests/test_multifloor.py`.
 The latter covers height hysteresis, stair landings/turns, return edges,
 independent grids and target memory, paused floor clocks, coverage deduplication,
 step-connected terrain versus cliffs, height-safe scoring and selective recording.
+`tests/test_stair_ground_truth.py` covers the navmesh reading on a synthetic
+two-storey house and the policy's orientation of connectors;
+`tests/test_ground_truth_floor_transitions.py` covers the explicit decision, the
+polyline traversal, the raised-floor and accidental-descent cases and the
+arrival that settles a new floor. The observed-mode stair tests in
+`tests/test_multistory_repair.py` select `stair_source: "observed"` explicitly.
 Actual simulator smoke tests remain necessary: synthetic tests alone cannot
-establish scan-level stair detection or navigation success.
+establish navigation success. The connector reading itself was checked against
+the real Ranchester navmesh: storeys at 0.05 m and 2.64 m, one connector,
+bottom anchor (13.35, 1.56) to top anchor (15.21, 1.77) ENU, 5.5 m long -- the
+flight the recorded episodes climbed and descended.
 
 `gibson.stair_diagnostic` runs a bounded, recorded component test from a pose in
 an existing observation trajectory. Its optional `--spent-floor-budget` setting

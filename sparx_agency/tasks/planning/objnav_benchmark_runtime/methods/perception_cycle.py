@@ -8,6 +8,7 @@ import time
 import numpy as np
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import DETECTOR
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import deduplicate_detections
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import observed_objects, STAIR_LABELS
 
@@ -22,19 +23,40 @@ class PerceptionCycle:
         self.detector_evidence = {}
 
     def observe(self, obs):
-        """Exactly one synchronous prediction for this RGB/depth/pose tuple."""
+        """Exactly one synchronous prediction for this RGB/depth/pose tuple.
+
+        A detector that fails (HTTP timeout, dead service, malformed reply) is
+        recorded on the policy's exploration fallback, which arms a doubling
+        back-off; until it ends the frame carries no detections and the
+        search keeps moving instead of waiting a timeout per action. The
+        skipped frames are counted, never passed off as empty scenes.
+        """
         if self.step == obs.step:
             return
         p = self.policy
-        started = time.monotonic()
-        self.raw = tuple(p.detector.detect(obs.rgb))
-        self.detector_evidence = deepcopy(getattr(p.detector, "last_diagnostics", {}))
-        p.telemetry.latencies["detector_http"].append((time.monotonic() - started) * 1000)
         self.step = obs.step
-        self.detections = tuple(deduplicate_detections(self.raw))
-        p._duplicates_removed += len(self.raw) - len(self.detections)
         self.projections = []
         self.counts["raw_frames"] += 1
+        if p.fallback.service_unavailable(DETECTOR, obs.step):
+            self.raw = self.detections = ()
+            self.detector_evidence = {"skipped": "detector back-off until action %d" % p.fallback.retry_step[DETECTOR]}
+            self.counts["detector_skipped"] += 1
+            return
+        started = time.monotonic()
+        try:
+            self.raw = tuple(p.detector.detect(obs.rgb))
+        except Exception as exc:  # the detector service, not this frame's geometry
+            retry = p.fallback.note_service_failure(obs, DETECTOR, exc)
+            self.raw = self.detections = ()
+            self.detector_evidence = {"failed": "%s: %s" % (type(exc).__name__, exc), "retry_step": retry}
+            self.counts["detector_failures"] += 1
+            return
+        finally:
+            p.telemetry.latencies["detector_http"].append((time.monotonic() - started) * 1000)
+        p.fallback.note_service_success(DETECTOR)
+        self.detector_evidence = deepcopy(getattr(p.detector, "last_diagnostics", {}))
+        self.detections = tuple(deduplicate_detections(self.raw))
+        p._duplicates_removed += len(self.raw) - len(self.detections)
         if p.building:
             p.building.semantic_stair_hint = any(d.cls in STAIR_LABELS and d.conf >= p.settings.detection_confidence for d in self.raw)
 

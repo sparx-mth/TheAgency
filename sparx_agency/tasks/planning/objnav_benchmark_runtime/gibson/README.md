@@ -42,6 +42,10 @@ See [runtime architecture](../README.md), [FALCON mapping](BOUNDED_FALCON.md),
 
 ## Data and running
 
+End-to-end setup and the exact command sequence (environments, downloads, services,
+episodes, campaign) are in [../QUICKSTART.md](../QUICKSTART.md); this section holds the
+protocol detail behind them.
+
 Use licensed local Gibson meshes/navmeshes and the released ObjectNav episode
 annotations. `.glb.json.gz` rows in scene archives are dummy PointNav metadata,
 not the 1,000 ObjectNav validation episodes. On another workstation obtain assets
@@ -58,17 +62,21 @@ and room-language services run on CPU on this workstation.
 
 ### Detector setup
 
-Optional **hybrid** (YOLO + Grounding DINO + BLIP-2) and **grounded_vlm**
-(DINO + BLIP-2, no YOLO) modes are available through the same detector HTTP
-contract. Use the [configuration and provisioning runbook](../../../mapping/scene_graph/serve/GROUNDED_VLM.md)
-and change only `backend` in its JSON example; `yolo_world` restores YOLO only.
-The example uses a dedicated localhost:18100 service and verifies all labels by
-default. Match `--detector-backend` to the selected service, and set
-`--detector-timeout-s` explicitly for slower CPU verification. These options are
-forwarded through generated runs, frozen campaigns and stair diagnostics.
-Raw proposals, verification answers and rejection reasons are recorded under
-`method.perception.detector_evidence` in `steps.jsonl`. They do not create
-geometric portals, count as additional views or replace existing STOP safeguards.
+**YOLO-World only is the default object-detection pipeline**: every entrypoint's
+`--detector-backend` defaults to `yolo_world`, as does the service config
+`configs/gibson_perception.json`. The optional **hybrid** (YOLO + Grounding DINO +
+BLIP-2) and **grounded_vlm** (DINO + BLIP-2, no YOLO) modes stay available through
+the same detector HTTP contract but are disabled unless selected explicitly on both
+the service and the run. Use the [configuration and provisioning runbook](../../../mapping/scene_graph/serve/GROUNDED_VLM.md)
+and change only `backend` in its JSON example to opt in; its example service binds
+localhost:18100 and verifies all labels by default. Match `--detector-backend` to
+the selected service, and set `--detector-timeout-s` explicitly for slower CPU
+verification. These options are forwarded through generated runs, frozen campaigns
+and stair diagnostics. Raw proposals, verification answers and rejection reasons
+are recorded under `method.perception.detector_evidence` in `steps.jsonl`. They do
+not create geometric portals, count as additional views or replace existing STOP
+safeguards. Stairs no longer depend on the detector at all: see
+[MULTISTORY.md](MULTISTORY.md) for the ground-truth connectors.
 
 YOLO-World X-v2 remains the completed-integration default. LLMDet Swin-L remains
 selectable; S/L are explicit checkpoint overrides. Do not change another mission's

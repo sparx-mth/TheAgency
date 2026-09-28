@@ -116,9 +116,12 @@ def _verify_download(destination, entries):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path.home() / "models" / "objnav")
-    parser.add_argument("--model", choices=tuple(MODELS) + ("all",), default="all")
+    parser.add_argument("--model", choices=tuple(MODELS) + ("all", "none"), default="all",
+                        help="VLM snapshot(s) to provision; 'none' with --include-yolo provisions YOLO-World + CLIP only")
     parser.add_argument("--include-yolo", action="store_true", help="Also provision X-v2 and local CLIP")
     args = parser.parse_args(argv)
+    if args.model == "none" and not args.include_yolo:
+        parser.error("--model none provisions nothing without --include-yolo")
     for name, spec in MODELS.items():
         if args.model in (name, "all"):
             print("Provisioning %s ..." % spec["repo_id"], flush=True)

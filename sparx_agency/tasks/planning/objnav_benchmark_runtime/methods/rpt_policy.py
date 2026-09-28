@@ -1,4 +1,10 @@
-"""Observed-only ObjectNav with persistent floors and frontier or planar FALCON."""
+"""Observed-only ObjectNav with persistent floors and frontier or planar FALCON.
+
+Stairs are the one declared exception to "observed-only": with
+``RPTSettings.multifloor.stair_source == "ground_truth"`` (the default) the
+building coordinator takes the simulator's navmesh connectors from the
+episode metadata, and ``configuration()["ground_truth_stairs"]`` says so.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, replace
@@ -20,6 +26,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RoomLabelSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute, RouteSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidenceSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ExplorationFallback, FallbackSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context import FloorContextBank
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import FrontierSweep, SweepSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
@@ -48,6 +55,7 @@ class RPTSearchPolicy:
         self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings()
         self.route_settings, self.target_settings = RouteSettings(), TargetEvidenceSettings()
         self.sweep_settings = SweepSettings()
+        self.fallback_settings = FallbackSettings()
 
     def configuration(self):
         return {"method": self.name, "adaptation": asdict(self.settings),
@@ -56,13 +64,16 @@ class RPTSearchPolicy:
                 "room_labels": asdict(self.room_label_settings), "room_segmentation": asdict(DEFAULT_SEGMENTATION),
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
                 "frontier_sweep": asdict(self.sweep_settings), "room_search_loop": asdict(self.loop_settings),
+                "exploration_fallback": asdict(self.fallback_settings),
                 "reasoning_cadence": "room LLM at loop points only; scene-graph geometry every %d action(s)"
                                      % self.settings.graph_period_steps,
                 "camera_control": asdict(CameraControlSettings()), "perception_fusion": "coherent-depth/floor-qualified-v1",
                 "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
                 "falcon_running": self.settings.local_exploration == "falcon",
                 "falcon_source": dict(FALCON_SOURCE) if self.settings.local_exploration == "falcon" else None,
-                "ground_truth_semantics": False, "training_free": True,
+                "ground_truth_semantics": False,
+                "ground_truth_stairs": self.settings.multifloor.enabled and self.settings.multifloor.stair_source == "ground_truth",
+                "stair_source": self.settings.multifloor.stair_source, "training_free": True,
                 "non_metric": False, "clock": "global action ledger; room clock pauses off-floor"}
 
     def reset(self, episode, target):
@@ -72,6 +83,7 @@ class RPTSearchPolicy:
         self.solver = RptStarRoomSolver(rng=random.Random("%s/%s" % (s.seed, episode.episode_id)), max_rooms=s.max_rooms)
         self.planner = WeightedAStarPlanner2D(self.planner_params)
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
+        self.fallback = ExplorationFallback(self, self.fallback_settings)
         self.floors = FloorContextBank(self)
         self._reset_floor()
         self._last_plan_s = self._blocked_since = self._last_pose = None
@@ -165,6 +177,19 @@ class RPTSearchPolicy:
         if not self.building or not self.building.traversing:
             self.telemetry.observe(observation, world, self.mapping.floor_id)
         confirmed = self._perceive(observation)
+        try:
+            return self._decide(observation, world, confirmed)
+        except Exception as exc:  # A*, RPT*, the room LLM, or a bug in the decision: keep exploring, loudly
+            self.fallback.record_failure(observation, "decision", exc)
+            try:
+                return self.fallback.plan(observation, world, reason="decision failure: %s" % type(exc).__name__)
+            except Exception as inner:  # the fallback itself: one hold, recorded, never a dead episode
+                self.fallback.record_failure(observation, "fallback", inner)
+                return NavigationCommand.hold(info={"kind": "fallback_hold",
+                                                    "reason": "fallback failed: %s" % type(inner).__name__})
+
+    def _decide(self, observation, world, confirmed):
+        """The search decision proper; every exception out of here is a recorded fallback, not an idle spin."""
         if self.building and self.building.committed:
             command = self.building.plan(observation, world)
             if command is not None:
@@ -276,6 +301,7 @@ class RPTSearchPolicy:
                 "building": self.building.diagnostics() if self.building else None,
                 "frontier_sweep": self.sweep.diagnostics(),
                 "room_search_loop": self.loop.diagnostics(),
+                "exploration_fallback": self.fallback.diagnostics(),
                 "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,
                 "oracle_repair_successes": self.graph.oracle.repair_successes}

@@ -161,8 +161,12 @@ def test_three_dimensional_association_cannot_walk_a_landmark(monkeypatch):
     assert policy.perception.projections[0]["status"] == "inconsistent_3d_association"
 
 
+OBSERVED_STAIRS = {"multifloor": {"stair_source": "observed"}}
+"""The depth-based stair discovery and StairTraversal under test here; the default is ground truth."""
+
+
 def transition_fixture():
-    policy, episode = setup_policy("bed")
+    policy, episode = setup_policy("bed", **OBSERVED_STAIRS)
     obs = observation(episode, 0)
     policy.plan(obs)
     building = policy.building
@@ -229,7 +233,7 @@ def test_footprint_does_not_flatten_a_measured_next_tread():
 
 
 def test_retreat_includes_observed_platform_approach():
-    policy, episode = setup_policy("bed")
+    policy, episode = setup_policy("bed", **OBSERVED_STAIRS)
     obs = observation(episode, 0)
     policy.plan(obs)
     building = policy.building

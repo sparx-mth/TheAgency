@@ -221,6 +221,26 @@ def test_development_runner_import_and_first_recording_cli():
     assert args.record_first and args.limit == 1
 
 
+def test_yolo_only_is_the_default_detector_pipeline_everywhere():
+    """YOLO-World only; Grounding DINO / BLIP-2 stay selectable but must be asked for."""
+    import json
+    from pathlib import Path
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import compare_explorers, distinct_buildings, run, run_development
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import DEFAULT_DETECTOR_BACKEND, detector_flags
+    assert DEFAULT_DETECTOR_BACKEND == "yolo_world"
+    development = run_development.parser().parse_args(["--manifest", "e.json", "--scene", "A", "--output", "r",
+                                                       "--explorer", "frontier", "--detector-url", "http://localhost:18095"])
+    assert development.detector_backend == "yolo_world"
+    assert detector_flags(development)[-2:] == ["--detector-backend", "yolo_world"], "frozen jobs name it explicitly"
+    assert run.parser().parse_args([]).detector_backend == "yolo_world"
+    hybrid = run.parser().parse_args(["--detector-backend", "hybrid"])
+    assert hybrid.detector_backend == "hybrid", "the VLM modes remain an explicit choice"
+    service = json.loads((Path(distinct_buildings.__file__).resolve().parents[4] / "tasks" / "mapping" / "scene_graph"
+                          / "serve" / "configs" / "gibson_perception.json").read_text())
+    assert service["backend"] == "yolo_world"
+    assert compare_explorers is not None
+
+
 def test_observed_underfoot_height_handles_smoothed_navmesh_offset(monkeypatch):
     terrain = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)
     points = np.array([(x, y, -0.30) for x in np.arange(-0.3, 1.5, 0.03)

@@ -39,6 +39,13 @@ Steps 2-6 run on the SAME action a room's turn ends: a released room is
 replaced by a transit at once, never by a throwaway floor-wide route. The LLM
 is called at loop points only -- and once at the start, before any room has a
 probability -- which makes ``local_steps`` its cadence too.
+
+When the loop has nothing to work in -- no room in force, every transit
+refused, or the room LLM failed and is backing off -- the action goes to the
+policy's :class:`~sparx_agency.tasks.planning.objnav_benchmark_runtime.methods
+.exploration_fallback.ExplorationFallback`: the nearest reachable frontier
+anywhere on the floor, the stairs, a retired frontier, a relocation. Never an
+idle hold while a move exists.
 """
 from __future__ import annotations
 
@@ -53,8 +60,12 @@ from sparx_agency.core.planning.exploration.frontier_ranking import frontier_goa
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
     ALL_VERDICTS, BUDGET_SPENT, EXHAUSTED, MAPPED, SEARCH, SELECT, TRANSIT, ObjectSearchParams)
 from sparx_agency.core.planning.exploration.room_costs import build_instance
-from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ROOM_LLM
+
+
+class RoomReasoningUnavailable(Exception):
+    """The room LLM failed or is backing off: this action belongs to the exploration fallback."""
 
 
 @dataclass(frozen=True)
@@ -138,7 +149,7 @@ class RoomSearchLoop:
                       "budget_releases": 0, "exhausted_releases": 0, "skipped_in_transit": 0,
                       "arrivals": 0, "entry_frontier": 0, "entry_centroid": 0, "entry_reaimed": 0, "entry_lost": 0,
                       "confined_actions": 0, "unconfined_actions": 0, "plan_failures": 0,
-                      "supervisor_rounds": 0, "rounds_exhausted": 0}
+                      "supervisor_rounds": 0, "rounds_exhausted": 0, "llm_fallbacks": 0}
 
     # -- the action ledger --------------------------------------------------
     def charge(self):
@@ -148,22 +159,28 @@ class RoomSearchLoop:
 
     # -- one action ---------------------------------------------------------
     def plan(self, obs, world):
-        """The command for this action: in-room exploration, transit, or the floor-wide frontier."""
+        """The command for this action: in-room exploration, transit, or the exploration fallback."""
         p = self.policy
         cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
         flags = self._budget_flags()
-        for _ in range(self.settings.supervisor_rounds):
-            state = self._tick(obs, world, cost, **flags)
-            if state.state == TRANSIT and state.room_id is not None:
-                command, flags = self._transit(obs, world, cost, state)
-            elif state.state == SEARCH and state.room_id is not None:
-                command, flags = self._local(obs, world, cost, state)
-            else:
-                flags = {}
-                break
-            if command is not None:
-                return command
-            self.stats["supervisor_rounds"] += 1
+        try:
+            for _ in range(self.settings.supervisor_rounds):
+                state = self._tick(obs, world, cost, **flags)
+                if state.state == TRANSIT and state.room_id is not None:
+                    command, flags = self._transit(obs, world, cost, state)
+                elif state.state == SEARCH and state.room_id is not None:
+                    command, flags = self._local(obs, world, cost, state)
+                else:
+                    flags = {}
+                    break
+                if command is not None:
+                    return command
+                self.stats["supervisor_rounds"] += 1
+        except RoomReasoningUnavailable as exc:
+            # The loop point cannot run without the room LLM; the search does not
+            # wait for it. The fallback carries every action until the back-off ends.
+            self.stats["llm_fallbacks"] += 1
+            return self._fallback(obs, world, cost, reason="room LLM unavailable: %s" % exc)
         if flags:
             # The chain of same-action transitions outran the guard with a verdict
             # still pending. Visible, because the next action starts afresh and
@@ -251,8 +268,19 @@ class RoomSearchLoop:
         every ``graph_period_steps`` actions, and a loop point that fell
         between two of them would otherwise estimate rooms whose frontier
         counts and areas are up to a period old.
+
+        A model that fails -- timeout, malformed answer, a refused uniform
+        prior -- does not end the episode and does not get asked again on the
+        next action: the failure is recorded, a doubling back-off is armed on
+        the policy's exploration fallback, and :class:`RoomReasoningUnavailable`
+        hands this action to it.
+
+        Raises:
+            RoomReasoningUnavailable: When the room LLM is backing off or failed.
         """
         p = self.policy
+        if p.fallback.service_unavailable(ROOM_LLM, obs.step):
+            raise RoomReasoningUnavailable("back-off until action %d" % p.fallback.retry_step[ROOM_LLM])
         if p._last_graph_step != obs.step:
             started = time.monotonic()
             p.graph.update(world, p.landmarks.confirmed(), p.target, doors=p.doors.confirmed(),
@@ -262,8 +290,13 @@ class RoomSearchLoop:
         started = time.monotonic()
         try:
             p.graph.reason(world, p.target, obs.step)
+        except Exception as exc:  # the room LLM: timeout, bad JSON, refused uniform prior
+            retry = p.fallback.note_service_failure(obs, ROOM_LLM, exc)
+            self._log(obs, "llm_failure", error="%s: %s" % (type(exc).__name__, exc), retry_step=retry)
+            raise RoomReasoningUnavailable(str(exc)) from exc
         finally:
             p.telemetry.latencies["room_reasoning"].append((time.monotonic() - started) * 1000)
+        p.fallback.note_service_success(ROOM_LLM)
         self._needs_reason = False
         self.stats["llm_reasonings"] += 1
 
@@ -443,17 +476,10 @@ class RoomSearchLoop:
         return confined, confined_cost
 
     # -- nothing to work in -------------------------------------------------
-    def _fallback(self, obs, world, cost):
-        """No room in force: the floor-wide frontier, then the stairs, then hold for another view."""
-        p = self.policy
-        command = p.sweep.explore(obs, world, cost, np.ones(world.grid.shape, bool))
-        if command is not None:
-            return command
-        if p.building:
-            command = p.building.plan(obs, world, exhausted=True)
-            if command is not None:
-                return command
-        return NavigationCommand.hold(info={"reason": "no safe observed frontier; acquire another view"})
+    def _fallback(self, obs, world, cost, reason="no room in force"):
+        """No room in force: the policy's exploration fallback -- nearest floor-wide frontier,
+        the stairs, a retired frontier, a relocation -- never an idle hold while a move exists."""
+        return self.policy.fallback.plan(obs, world, cost, reason=reason)
 
     # -- helpers ------------------------------------------------------------
     @staticmethod

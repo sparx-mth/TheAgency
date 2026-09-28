@@ -15,11 +15,16 @@ Edit **`backend`** in [configs/gibson_perception.json](configs/gibson_perception
 | `grounded_vlm` | Grounding DINO Base + BLIP-2 FLAN-T5 XL | No YOLO dependency at runtime |
 | `hybrid` | All of the above | Independent YOLO and DINO proposals, then verification |
 
-The example selects `hybrid`; the **service's no-config default remains YOLO**.
-`grounding_dino` is also selectable for detector-only ablation, and `llmdet`
-remains available. CLI flags override JSON. Unused model paths are not loaded or
-required to exist. Unknown settings and explicitly blank paths fail. Relative
-paths in JSON resolve against its directory; `~` expands to the current user's home.
+The example selects **`yolo_world`** -- YOLO only is the default object-detection
+pipeline for now, in the JSON, in the service's no-config default and in every
+Gibson entrypoint's `--detector-backend`. Grounding DINO and BLIP-2 (`grounded_vlm`,
+`hybrid`) remain selectable but disabled by default; their stair verification is
+deferred work, and the multi-story policy now takes its stairs from the simulator's
+navmesh instead (`MultiFloorParams.stair_source`). `grounding_dino` is also
+selectable for detector-only ablation, and `llmdet` remains available. CLI flags
+override JSON. Unused model paths are not loaded or required to exist. Unknown
+settings and explicitly blank paths fail. Relative paths in JSON resolve against its
+directory; `~` expands to the current user's home.
 
 ## Setup and weights
 
@@ -51,7 +56,9 @@ missing shard is rejected by inference. `source.json` records the provenance.
 
 Weight size is **not peak memory**. The selected model versions are explicit
 integration choices; the OSG paper does not identify these exact revisions.
-YOLO and CLIP are optional provisioning with `--include-yolo`. All artifacts stay
+YOLO and CLIP are optional provisioning with `--include-yolo`; `--model none
+--include-yolo` provisions YOLO-World + CLIP alone (~0.5 GB) for the default
+YOLO-only pipeline. All artifacts stay
 under `~/models/objnav`, outside git. The example passes CLIP explicitly so that
 hybrid inference never downloads it or installs CLIP implicitly.
 
@@ -63,15 +70,17 @@ CUDA_VISIBLE_DEVICES="" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 YOLO_AUTOINSTALL
   --config sparx_agency/tasks/mapping/scene_graph/serve/configs/gibson_perception.json
 ```
 
-Add `--backend grounded_vlm` or `--backend yolo_world` to switch without editing
-the file. Start only one mode per service/port. The example binds localhost:18100
+Add `--backend grounded_vlm` or `--backend hybrid` to opt into the VLM modes
+without editing the file (the file and the service both default to `yolo_world`).
+Start only one mode per service/port. The example binds localhost:18100
 and uses the exact ordered Gibson vocabulary; other datasets must supply their
 own `--classes` from their adapter. Do not change another mission's service.
 
 The original one-scene GUI's automatic service launcher remains YOLO-specific;
 use these CLI-configured services and the evaluation CLIs for the new modes.
 
-For a normal Gibson run, append to the existing dataset/episode command:
+For a normal Gibson run nothing needs appending: `--detector-backend` defaults to
+`yolo_world`. To evaluate a VLM mode instead, append to the dataset/episode command:
 
 ```bash
 --detector-url http://127.0.0.1:18100 --detector-backend hybrid --detector-timeout-s 300

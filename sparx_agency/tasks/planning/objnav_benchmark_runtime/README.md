@@ -2,8 +2,14 @@
 
 Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order →
 local exploration and A*/WA* paths → existing discrete actions. Both explorers
-retain persistent floor contexts and observed stair connections. This is an
-experimental multi-story algorithm, **not a claim of solved navigation**.
+retain persistent floor contexts; stair connectors come from the simulator's
+navmesh by default (`RPTSettings.multifloor.stair_source`, see
+[MULTISTORY.md](gibson/MULTISTORY.md)), the one declared ground-truth input.
+This is an experimental multi-story algorithm, **not a claim of solved navigation**.
+
+**To set up and run it end to end, start with [QUICKSTART.md](QUICKSTART.md)**: environments,
+dataset and weight downloads, then the services, the frozen episodes and the campaign in
+order. This file is the architecture reference.
 
 ## Exploration selection
 
@@ -25,12 +31,15 @@ own frozen configurations; changed code does not relabel their outcomes.
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
 | `methods/room_search_loop.py` | The seven-step room-search loop: bounded, room-confined local exploration; re-classify → re-estimate → re-order at each loop point; transit to the chosen room's nearest frontier |
+| `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: nearest floor-wide frontier, the stairs, a retired frontier, a relocation -- a move, never an idle spin; failure records and service back-off |
 | `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around |
 | `methods/camera_control.py` | Sole pitch owner; bounded inspection, long unprompted cadence and safe restoration |
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
-| `methods/multifloor_policy.py`, `stair_traversal.py` | RPT* portal scheduling and committed transition lifecycle |
-| `methods/stair_terrain.py` | Measured support, step-connected paths and native-heading safety checks |
+| `methods/multifloor_policy.py` | The building coordinator: portals per floor, when to change floors, arrival bookkeeping, both stair sources |
+| `methods/stair_ground_truth.py`, `floor_decision.py`, `ground_truth_traversal.py` | Ground-truth stairs (default): the navmesh connectors as the policy reads them, the explicit up/down choice with its recorded verdicts, and the polyline traversal |
+| `methods/stair_traversal.py`, `stair_terrain.py` | Observed stairs (`stair_source: "observed"`): RGB-D support surfaces, step-connected paths, native-heading safety checks and the committed transition lifecycle |
+| `gibson/stair_connectors.py` | Evaluator side: storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
 | `methods/falcon_policy.py`, `falcon_regions.py` | Bounded hierarchy and persistent local region history |
 | `methods/falcon_motion.py`, `falcon_routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
 | `methods/object_evidence.py` | Alias/frame deduplication, separated-view target evidence and bounded rejection |
@@ -93,9 +102,42 @@ replaced by a transit at once -- never by a throwaway floor-wide route. A
 room whose budget ran out is **not** put on the visit cooldown (the fresh
 estimate may rightly send the agent straight back), while a room the live
 map says is finished (exhausted or mapped) is never repeated by the
-every-room-cooling escape hatch: the floor-wide frontier carries the search
+every-room-cooling escape hatch: the exploration fallback carries the search
 instead. `room_search_loop.events` in the episode record lists every
 transit, arrival and release with its verdict and local step count.
+
+## The exploration fallback: a failure is a move, not a spin
+
+Every way the decision pipeline can fail lands in one place,
+`methods/exploration_fallback.py`, and comes out as a command that moves:
+
+1. the **nearest reachable frontier anywhere on the floor** -- not confined to
+   the room in force, so a room whose routes all fail is left rather than
+   spun in;
+2. the **stairs** (the building coordinator's decision), when the floor is
+   exhausted or its allowance is spent;
+3. a **retired frontier** -- a goal dropped for a transient plan failure is
+   still unknown space;
+4. a **relocation** to the farthest reachable known cell, for a vantage point
+   the map may show a frontier from;
+5. a single hold only when the agent stands off the observed passable map,
+   where the idle turn is the one action that changes anything.
+
+It is reached from the loop whenever no room is in force, and from
+`RPTSearchPolicy.plan` whenever the decision itself raises -- an A* with no
+path, an RPT* instance that cannot be built, a bug. A **room LLM** failure
+(timeout, bad JSON, refused uniform prior) no longer ends the episode: the
+loop records it, arms a doubling back-off (25 → 50 → 100 → 200 actions,
+`FallbackSettings`) during which no model is asked, and the fallback carries
+every action until the model answers again, at which point the loop resumes
+its steps. A **detector** failure is handled the same way in
+`perception_cycle.py`: the frame carries no detections, is counted as
+skipped, and the service is left alone for the back-off. Every failure is
+counted, kept with its type, message and origin under
+`exploration_fallback.failures` in the episode record, and logged once per
+type. Before this, an empty hold cost one idle `TURN_LEFT` per action until
+the step budget ran out -- the "camera spinning in place" of the Ranchester
+recordings -- and a model failure was an agent error.
 
 ## Frontier sweep and the action economy
 

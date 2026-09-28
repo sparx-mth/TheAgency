@@ -174,6 +174,64 @@ back on an action timer to "smooth" the calls; the calls were a symptom.
 
 ---
 
+## 2026-09-28 — 132 actions "acquiring tread support" on a bathroom floor and a stair head: depth-found stairs are not stairs
+
+**Symptom:** In the confirmation recording of the room-search loop
+(`runs/room_search_loop_ranchester_20260928T093541Z_transitfix`, 000000, 500 actions,
+`toilet` not found) the phase timeline shows `TRAVERSE` with `reason=acquire connected tread
+support` twice: steps 187-306 (120 actions) at the top of the real staircase, ending in a
+`RETREAT`, and steps 488-499 (12 actions, to the step cap) after the agent walked into a
+bathroom on the ground floor. Both look on video like the camera spinning in place with the
+pitch pinned down. The episode ended 9 m from any stairs, "traversing".
+
+**Root cause:** Two, one per incident, both in the observed-only stair discovery:
+1. **A height departure of `stable_height_m` (12 cm) started a traversal.** `MultiFloorSearch
+   .prepare_observation` began a `StairTraversal` whenever `|z - floor| > 0.12` with no
+   committed portal -- the agent at the stair head dipped 12 cm onto the first tread, a
+   traversal began with a one-point "portal" at the agent's own feet, and `StairTraversal
+   ._surface_route` then needed depth-measured *connected* tread support to plan on. From the
+   top of a flight looking down, the treads' risers occlude their surfaces, the support graph
+   is empty, and the transition's answer to "no path" is a `hold(final_yaw=+30°)`: one turn per
+   action, twelve turns per `failure`, four failures before retreat. Checked against the navmesh
+   afterwards: the agent was 0.24 m from the real stair polyline -- these WERE the stairs, and
+   the observed mode still could not walk them from where it stood.
+2. **A 13 cm raised bathroom floor is indistinguishable from a first tread by height alone.**
+   The same rule fired at step 488 on a threshold 9.3 m from the staircase. `stair_min_rise_m`
+   (0.40) guards the *proposal* path (`StairTerrain._candidate_paths`), not the unplanned
+   departure path, which has no rise check at all.
+
+The YOLO `stairs`/`staircase` labels played no part in either -- they are context-only and
+were already correct in not creating portals. The loop's own fallback for "nothing to do" was a
+plain `hold()`, so wherever the transition did *not* own the action, the headless agent's idle
+`TURN_LEFT` produced the same spin from a different cause.
+
+**Fix / workaround:** `MultiFloorParams.stair_source = "ground_truth"` (default). The
+evaluator reads each scene's navmesh once (`gibson/stair_connectors.py`) and hands the policy
+the storeys and stair connectors through the episode metadata; a transition begins only ON a
+known connector (within 0.75 m of its polyline, beyond `departure_m` = 0.45 m), follows the
+connector's own polyline with a FOLLOW on every action, and never scans in place. The bathroom
+step never reaches 0.45 m; the stair-head wobble is on the polyline and now completes the climb.
+Separately, every "nothing to do" and every decision exception goes through
+`exploration_fallback.py` (nearest frontier anywhere → stairs → retired frontier → relocation),
+so an empty hold is issued only when the agent is off the passable map.
+
+**How to see it next time:** `timeline_room_search_loop.py` on `steps.jsonl`, then look for
+long runs of `TURN_*` under one `kind` with no `waypoints` in the command. `reason=acquire
+connected tread support` is the observed stair mode; `kind=fallback_hold` is the new fallback's
+last resort and should be rare -- if it is not, the agent is boxed in, not the planner.
+`building.events` now carries `height_departure_ignored` (with the height) and `floor_decision`
+(with every candidate's verdict), so "why did/didn't it take the stairs" reads straight off the
+record.
+
+**Don't:** Don't raise `stable_height_m` to stop the false starts -- the atlas uses it to
+decide when the agent is *off* a floor, and a larger value lets real stair treads read as level.
+Don't put a rise check on the unplanned path and call the observed mode fixed: it would still
+have spun at the real stair head, where the failure was tread support, not detection. Don't
+disable `multifloor` to avoid it all: the target floor in the multi-story protocol is by
+construction not the start floor.
+
+---
+
 ## 2026-09-22 — Grounding DINO shared-head loading can look clean but substitute tensors
 
 **Symptom:** Transformers 5.17.0 reported no missing/unexpected weights for the

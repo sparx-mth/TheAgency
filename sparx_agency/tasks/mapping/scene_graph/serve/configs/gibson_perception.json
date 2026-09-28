@@ -1,5 +1,5 @@
 {
-  "backend": "hybrid",
+  "backend": "yolo_world",
   "grounding_model": "~/models/objnav/grounding-dino-base",
   "blip2_model": "~/models/objnav/blip2-flan-t5-xl",
   "yolo_model": "~/models/objnav/yolov8x-worldv2.pt",

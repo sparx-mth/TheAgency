@@ -32,12 +32,14 @@ class FakeDetector:
         return [row, row] if self.duplicate else [row]
 
 
-def setup_policy(label="chair", duplicate=False):
+def setup_policy(label="chair", duplicate=False, **overrides):
+    """A policy on a 20 m synthetic map; ``overrides`` are RPTSettings fields
+    (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests)."""
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
-                            camera, PROTOCOL.actions(), 500)
+                            camera, PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
     policy = RPTSearchPolicy(FakeDetector(label, duplicate), FakeLLM(),
-                             RPTSettings(map_size_m=20.0))
+                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)))
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     return policy, episode
 
