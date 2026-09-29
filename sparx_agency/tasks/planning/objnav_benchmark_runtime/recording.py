@@ -287,6 +287,10 @@ class RecordingEnv(ObjNavEnv):
 	def episode_over(self):
 		return self.env.episode_over
 
+	def pose_confirmed_on_navmesh(self):
+		hook = getattr(self.env, "pose_confirmed_on_navmesh", None)
+		return bool(hook()) if hook is not None else False
+
 	def measure(self):
 		return self.env.measure()
 

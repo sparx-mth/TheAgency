@@ -216,7 +216,7 @@ def _check_look(action, motion, spec, tolerance) -> None:
     _check_heading_kept(action, motion, tolerance)
 
 
-def _check_forward(action, motion, spec, tolerance) -> None:
+def _check_forward(action, motion, spec, tolerance, ground_truth_verified: bool = False) -> None:
     reach = spec.forward_step_m + tolerance.forward_overshoot_m
     if motion.advanced_m > reach:
         raise _refuse(action, "advance at most %.3f m" % reach, motion,
@@ -226,7 +226,7 @@ def _check_forward(action, motion, spec, tolerance) -> None:
         raise _refuse(action, "advance along its heading (within %.1f deg)"
                       % tolerance.heading_deg, motion, _CAUSE_COURSE)
     climb = max(tolerance.climb_m, motion.advanced_m)
-    if abs(motion.climbed_m) > climb:
+    if abs(motion.climbed_m) > climb and not ground_truth_verified:
         raise _refuse(action, "change its height by at most %.3f m" % climb,
                       motion, _CAUSE_CLIMB)
     _check_heading_kept(action, motion, tolerance)
@@ -234,21 +234,12 @@ def _check_forward(action, motion, spec, tolerance) -> None:
 
 
 def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
-                 spec: DiscreteActionSpec, tolerance: KinematicTolerance) -> None:
-    """Refuse a realised motion that the episode's action spec cannot explain.
+                 spec: DiscreteActionSpec, tolerance: KinematicTolerance,
+                 ground_truth_verified: bool = False) -> None:
+    """Refuse a realised motion the episode's action spec cannot explain.
 
-    Args:
-        action: The action the simulator was sent.
-        before: The agent's pose before it: the previous observation's.
-        after: The pose after it.
-        spec: The episode's action spec, which the motion must match.
-        tolerance: How far the motion may stray from the spec's.
-
-    Raises:
-        TypeError: If an argument has the wrong type.
-        EnvContractError: When the motion is not the one ``spec`` describes;
-            the message names the action, the expected and the realised
-            motion, and the likely cause.
+    ``ground_truth_verified``: the navmesh confirms ``after`` is real (e.g.
+    an unregistered short stair) -- lets a MOVE_FORWARD climb through only.
     """
     for name, value, kind in (("action", action, DiscreteAction),
                               ("before", before, AgentPose),
@@ -264,7 +255,7 @@ def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
     elif action in _LOOK_SIGN:
         _check_look(action, motion, spec, tolerance)
     elif action == _A.MOVE_FORWARD:
-        _check_forward(action, motion, spec, tolerance)
+        _check_forward(action, motion, spec, tolerance, ground_truth_verified)
     else:
         _check_in_place(action, motion, tolerance, "leave the pose unchanged")
         _check_heading_kept(action, motion, tolerance)

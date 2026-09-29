@@ -34,6 +34,8 @@ from sparx_agency.core.planning.objnav.types.pose import AgentPose
 # Measured reconciliations were 0.021-0.050 m; past this it's a mismatched
 # navmesh, not a reconciliation -- refuse it instead of fixing it quietly.
 _MAX_RESET_SETTLE_M = 0.5
+#: A landing point this close to the navmesh's own answer is confirmed real.
+_NAVMESH_CONFIRM_M = 0.05
 
 
 def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
@@ -107,6 +109,9 @@ class HabitatRGBDSimulator:
         # Diagnostic only, never read by the policy: the navmesh-corrected
         # height's gap from the raw published one, set fresh each reset().
         self.last_reset_settle_gap_m = 0.0
+        #: Checker-only, refreshed every _observe(): is the current pose
+        #: within _NAVMESH_CONFIRM_M of the navmesh's own answer there.
+        self.last_pose_on_navmesh = False
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
         """Load the scene if needed, then place the agent at ``position``'s
@@ -274,6 +279,8 @@ class HabitatRGBDSimulator:
         self.last_sensor_alignment = {"rgb_pitch_rad": rgb_pose.camera_pitch, "depth_pitch_rad": pose.camera_pitch,
                                       "mount_error_m": float(np.linalg.norm(depth_sensor.position - expected_position)),
                                       "registered": True}
+        snapped = self._sim.pathfinder.snap_point(state.position)
+        self.last_pose_on_navmesh = bool(abs(float(snapped[1]) - float(state.position[1])) <= _NAVMESH_CONFIRM_M)
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
         return rgb, metric_depth(raw["depth"], self.camera), pose
 

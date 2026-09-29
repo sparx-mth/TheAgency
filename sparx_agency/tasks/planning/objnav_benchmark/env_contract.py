@@ -176,25 +176,12 @@ def check_run_identity(episode: ObjNavEpisode,
 
 def check_step(env: ObjNavEnv, episode: ObjNavEpisode, observation: Any,
                action: DiscreteAction, sent: int, *, before: AgentPose,
-               kinematics: Optional[KinematicTolerance]) -> None:
+               kinematics: Optional[KinematicTolerance],
+               ground_truth_verified: bool = False) -> None:
     """Refuse an observation, or an episode end, that breaks the contract after action ``sent``.
 
-    Args:
-        env: The environment, just stepped.
-        episode: Its episode.
-        observation: What ``env.step`` returned.
-        action: The action it was sent.
-        sent: Actions sent so far, this one included.
-        before: The agent's pose before the action: the previous
-            observation's.
-        kinematics: How far the realised motion may stray from the episode's
-            action spec (:func:`check_motion`); None skips that check.
-
-    Raises:
-        EnvContractError: If the observation is not an
-            :class:`ObjNavObservation` of this episode at step ``sent``, the
-            agent did not move as the action spec says, or the episode is
-            running after STOP or past its budget, or over before either.
+    ``ground_truth_verified`` lets a navmesh-confirmed climb (see
+    :func:`check_motion`) through where the tolerance alone would refuse it.
     """
     if not isinstance(observation, ObjNavObservation):
         raise EnvContractError("%s.step must return an ObjNavObservation, got %s"
@@ -208,7 +195,7 @@ def check_step(env: ObjNavEnv, episode: ObjNavEpisode, observation: Any,
     if kinematics is not None:
         try:
             check_motion(action, before, observation.pose, episode.action_spec,
-                         kinematics)
+                         kinematics, ground_truth_verified=ground_truth_verified)
         except EnvContractError as exc:
             raise EnvContractError("episode %r, action %d: %s"
                                    % (episode.episode_id, sent, exc)) from exc

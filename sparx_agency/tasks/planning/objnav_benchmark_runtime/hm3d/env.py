@@ -262,6 +262,13 @@ class HM3DEnv(ObjNavEnv):
                                   + (after.z - before.z) ** 2)
         return self._observation
 
+    def pose_confirmed_on_navmesh(self):
+        """Checker-only: is the pose the last step() returned genuinely on
+        this run's navmesh, per pathfinder.snap_point -- never seen by the
+        policy. See HabitatRGBDSimulator._observe.
+        """
+        return bool(getattr(self._simulator, "last_pose_on_navmesh", False))
+
     @property
     def episode_over(self):
         return self._episode is not None and (
