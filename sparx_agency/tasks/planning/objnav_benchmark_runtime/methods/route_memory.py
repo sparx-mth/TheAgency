@@ -61,9 +61,9 @@ class CommittedRoute:
             self.stats["cleared:" + str(reason)] = self.stats.get("cleared:" + str(reason), 0) + 1
         self.path = self.goal = self.kind = None
         self.progress = PathProgress()
-        # A replacement path is not evidence of movement. Keep the positional
-        # watchdog across safety replans, including a failed forward action.
-        if reason not in ("route_obstructed", "off_route", "forward_blocked"):
+        # A replacement path is not evidence of movement -- keep the
+        # watchdog across safety replans and goal changes alike.
+        if reason not in ("route_obstructed", "off_route", "forward_blocked", "goal_changed"):
             self._motion_xy = None
         self.reason = self.cleared = reason
 
