@@ -208,8 +208,12 @@ class HM3DEnv(ObjNavEnv):
             row.category, self._camera, self._actions, self._protocol.max_steps,
             metadata=self._scene_metadata())
         self._observation = self._observation_from(frame)
-        if any(abs(a - b) > 1e-4 for a, b in
-               zip(self._habitat_position(), row.start_position)):
+        # Height comes from the navmesh now (HabitatSimulator.reset), not
+        # index 1 here -- this run is 2.5-D, fixed once.
+        habitat_position = self._habitat_position()
+        published_position = row.start_position
+        if (abs(habitat_position[0] - published_position[0]) > 1e-4
+                or abs(habitat_position[2] - published_position[2]) > 1e-4):
             raise EnvContractError(
                 "Simulator changed the published start of %s; the navmesh does "
                 "not match the episodes" % episode_id)

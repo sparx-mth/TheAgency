@@ -31,6 +31,10 @@ from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 
+# Measured reconciliations were 0.021-0.050 m; past this it's a mismatched
+# navmesh, not a reconciliation -- refuse it instead of fixing it quietly.
+_MAX_RESET_SETTLE_M = 0.5
+
 
 def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
     """Habitat (+Y up, -Z forward) -> right-handed Z-up ENU.
@@ -100,15 +104,14 @@ class HabitatRGBDSimulator:
         self._structure = None  # per-scene navmesh storeys and stair connectors
         self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
         self.last_sensor_alignment = None
+        # Diagnostic only, never read by the policy: the navmesh-corrected
+        # height's gap from the raw published one, set fresh each reset().
+        self.last_reset_settle_gap_m = 0.0
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
-        """Load the scene if needed and teleport ONLY to the published start.
-
-        Under ``navmesh="agent"`` the constructor has already loaded the
-        sibling navmesh and recomputed it for this agent, so ``navmesh_path`` is
-        only checked to be the sibling habitat-sim would have found -- a
-        navmesh somewhere else would be silently ignored, and a run measured
-        against a mesh it never navigated is worse than a loud failure.
+        """Load the scene if needed, then place the agent at ``position``'s
+        (x, z) with height fixed once from this run's own navmesh -- the
+        episode's one working height under its 2.5-D contract, never revisited.
         """
         import habitat_sim
         import quaternion
@@ -137,8 +140,20 @@ class HabitatRGBDSimulator:
             self._scene = str(scene_path)
             self._structure = None
         self._sim.seed(seed)
+        raw_position = np.asarray(position, dtype=np.float32)
+        snapped = self._sim.pathfinder.snap_point(raw_position)
+        self.last_reset_settle_gap_m = float(snapped[1] - raw_position[1])
+        if abs(self.last_reset_settle_gap_m) > _MAX_RESET_SETTLE_M:
+            raise EnvContractError(
+                "Published start height is %.3f m from this navmesh's own height "
+                "at (x, z); too far to be the usual agent-radius navmesh-recompute "
+                "reconciliation (checked against %.2f m) -- the navmesh likely "
+                "doesn't match this episode at all" % (self.last_reset_settle_gap_m,
+                                                        _MAX_RESET_SETTLE_M))
+        fixed_position = np.array(
+            [raw_position[0], snapped[1], raw_position[2]], dtype=np.float32)
         state = habitat_sim.AgentState()
-        state.position = np.asarray(position, dtype=np.float32)
+        state.position = fixed_position
         state.rotation = quaternion.from_float_array(rotation_wxyz)
         self._sim.get_agent(0).set_state(state, reset_sensors=True)
         self.last_collision = None
