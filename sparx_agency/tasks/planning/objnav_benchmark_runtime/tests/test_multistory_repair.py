@@ -280,8 +280,10 @@ def test_unknown_panels_are_independent_gray_and_do_not_teach_policy(tmp_path):
     first = panels.slots[0]["grid"].copy()
     assert len(policy.mapping.maps) == 1 and len(policy.mapping.atlas.floors) == 1
     image = panels.render(0)
-    assert np.all(image[60:280, 600:800] == UNKNOWN_GRAY)
+    # Layout follows the house aspect ratio rather than fixed square panels.
+    assert np.count_nonzero(np.all(image == UNKNOWN_GRAY, axis=-1)) > image.shape[0] * image.shape[1] / 10
     assert np.all(panels.slots[1]["grid"] == -1)
+    assert not panels.slots[1]["room_labels"].any()
     policy.floors.activate(1)
     panels.capture(policy, obs)
     np.testing.assert_array_equal(panels.slots[0]["grid"], first)

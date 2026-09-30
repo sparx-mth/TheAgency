@@ -640,7 +640,9 @@ class RoomSearchLoop:
             self.stats["stairs_refused"] += 1
             return None, {"route_failed": True}
         entry = self._entry if self._entry is not None else (state.goal_xy, False)
-        building.commit(obs, portal, entry[0])
+        if not building.commit(obs, portal, entry[0]):
+            self.stats["stairs_refused"] += 1
+            return None, {"route_failed": True}
         command = building.plan(obs, world)
         if command is not None:
             return command, {}

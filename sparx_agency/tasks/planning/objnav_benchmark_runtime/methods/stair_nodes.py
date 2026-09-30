@@ -135,6 +135,8 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
     """
     if building is None or building.ground_truth is None:
         return []
+    if not building.can_leave_floor(obs):
+        return []
     held = getattr(building, "way_back_held", lambda step: False)(obs.step)
     portals = [q for q in building.portals if q["floor_id"] == building.floor_id
                and q.get("connector_id") is not None and obs.step >= q.get("cooldown_until", 0)

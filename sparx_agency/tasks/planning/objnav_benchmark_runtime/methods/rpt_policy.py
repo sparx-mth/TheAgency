@@ -68,6 +68,8 @@ class RPTSearchPolicy:
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
                 "frontier_sweep": asdict(self.sweep_settings), "room_search_loop": asdict(self.loop_settings),
                 "exploration_fallback": asdict(self.fallback_settings),
+                "floor_exit_gate": "all observed rooms entered and scanned through at least 180 degrees; "
+                                   "classification, failed attempts and doorway sightings do not count",
                 "node_oracle": {"nodes": "rooms of the floor in force + its staircases",
                                 "asks": "independent P(searching there finds target), without a fixed action horizon",
                                 "probability_model": "independent_search_success",
@@ -174,6 +176,10 @@ class RPTSearchPolicy:
     def filter_action(self, observation, action):
         if self.building and self.building.committed:
             return self.building.filter_action(observation, action)
+        if self.building:
+            guarded = self.building.departure.filter_action(observation, action)
+            if guarded != action:
+                return guarded
         if self._action_owner in SUSPENDED_PHASES:
             return action  # A* already qualified this route; do not apply the suspended FALCON room mask.
         return self.hierarchy.filter_action(observation, action) if self.hierarchy else action
@@ -242,6 +248,8 @@ class RPTSearchPolicy:
     def _decide(self, observation, world, confirmed):
         """The search decision proper; every exception out of here is a recorded fallback, not an idle spin."""
         if self.building and self.building.committed:
+            if not self.building.traversing:
+                self._refresh_graph(observation, world)
             self.peek.cancel(observation, "stairs_priority", restore=False)
             command = self.building.plan(observation, world)
             if command is not None:
@@ -260,19 +268,7 @@ class RPTSearchPolicy:
         if self.hierarchy is None and confirmed and self._target_xy is not None and math.dist((pose.x, pose.y), self._target_xy) <= s.stop_distance_m:
             self.peek.cancel(observation, "target_priority")
             return NavigationCommand.stop_here(info={"reason": "fresh multi-view-confirmed target", "target_confirmed": True})
-        cost = self.navigation_cost(world)
-        if observation.step - self._last_graph_step >= s.graph_period_steps or self.doors.revision != self._last_door_revision:
-            # The background process: geometry, object->room, doors, per-room time and
-            # frontier counts -- no LLM. Reasoning belongs to the loop point (room_search_loop)
-            # for the frontier explorer and to the burst boundary for FALCON.
-            started = time.monotonic()
-            self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(), step=observation.step,
-                              reason=False, cost=cost, here_xy=(pose.x, pose.y), yaw=pose.yaw,
-                              ranking=self.sweep.settings.ranking)
-            self.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
-            self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
-        else:
-            self.graph.refresh_accessibility(world, cost, (pose.x, pose.y), pose.yaw, self.sweep.settings.ranking)
+        cost = self._refresh_graph(observation, world)
         if self._target_xy is not None:
             self.peek.cancel(observation, "target_priority")
             if self.hierarchy is None and observation.step - self._target_step <= self.target_settings.max_unseen_steps:
@@ -295,6 +291,22 @@ class RPTSearchPolicy:
                 return self.building.plan(observation, world, exhausted=True) or command
             return command
         return self.loop.plan(observation, world)
+
+    def _refresh_graph(self, observation, world):
+        """Refresh geometry even on a stair approach, so new rooms revoke departure."""
+        pose = observation.pose
+        cost = self.navigation_cost(world)
+        if (observation.step - self._last_graph_step >= self.settings.graph_period_steps
+                or self.doors.revision != self._last_door_revision):
+            started = time.monotonic()
+            self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(),
+                              step=observation.step, reason=False, cost=cost, here_xy=(pose.x, pose.y),
+                              yaw=pose.yaw, ranking=self.sweep.settings.ranking)
+            self.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
+            self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
+        else:
+            self.graph.refresh_accessibility(world, cost, (pose.x, pose.y), pose.yaw, self.sweep.settings.ranking)
+        return cost
 
     def navigation_cost(self, world):
         """The common clearance-qualified map used by counts, entries and routes."""

@@ -27,9 +27,29 @@ class DoorwayPeek:
     def _record(self, pid, mask):
         floor = self.policy.mapping.floor_id
         return next((r for r in self.records if r["floor"] == floor
-                     and (r["room"] == pid or same_region(r["mask"], mask))), None)
+                     and same_region(r["mask"], mask)
+                     and (not r.get("scan_cell") or mask[tuple(r["scan_cell"])])), None)
+
+    def pending_rooms(self):
+        """Current-floor regions without a completed interior scan; labels are irrelevant.
+
+        A failed/cooling/unreachable attempt is still outstanding. IDs alone
+        never transfer a visit to a new region, nor does a parent room's scan
+        automatically inspect every child when the segmentation splits it.
+        """
+        pending = []
+        for pid, room in self.policy.graph.registry.rooms.items():
+            record = self._record(pid, room.mask)
+            if record is None or not record["done"]:
+                pending.append(pid)
+        return sorted(pending)
+
+    def floor_ready(self):
+        """No vacuous success on a newly arrived, not-yet-segmented storey."""
+        return bool(self.policy.graph.registry.rooms) and not self.pending_rooms() and self.active is None
 
     def _remember_start(self, obs, world):
+        """Remember entry for diagnostics, never mistake it for a completed peek."""
         p = self.policy
         floor = p.mapping.floor_id
         if self.active is not None:
@@ -37,29 +57,36 @@ class DoorwayPeek:
         pid = p.graph.room_at(world, (obs.pose.x, obs.pose.y))
         if pid is not None and self._record(pid, p.graph.registry.rooms[pid].mask) is None:
             self.records.append(dict(floor=floor, room=pid, mask=p.graph.registry.rooms[pid].mask.copy(),
-                                     done=True, attempts=0, retry=0,
-                                     reason="spawn_room" if floor not in self.initialized_floors else "already_entered"))
+                                     done=False, entered=True, attempts=0, retry=0,
+                                     reason="spawn_room" if floor not in self.initialized_floors else "entered_without_scan"))
             self.initialized_floors.add(floor)
 
-    def plan(self, obs, world):
-        if not self.settings.enabled:
+    def plan(self, obs, world, *, force=False):
+        """Inspect nearby rooms, or finish outstanding floor coverage when forced.
+
+        Disabling opportunistic peeks does not waive the floor-exit invariant.
+        The fallback can still request a mandatory visit, without an LLM.
+        """
+        if not self.settings.enabled and not force and self.active is None:
             return None
-        if self._step == obs.step:
+        if self._step == obs.step and (self._command is not None or not force):
             return self._command
         self._step, self._command = obs.step, None
         self._remember_start(obs, world)
         if self.active is None:
-            for _, pid, xy, heading, mask in doorway_candidates(self.policy, obs, world, self.settings):
+            candidates = doorway_candidates(self.policy, obs, world, self.settings, nearby=not force,
+                                             room_ids=set(self.pending_rooms()))
+            for distance, pid, xy, heading, mask in candidates:
                 record = self._record(pid, mask)
                 if record and (record["done"] or record["attempts"] >= self.settings.max_attempts or obs.step < record["retry"]):
                     continue
-                self._begin(obs, pid, xy, heading, mask, record)
+                self._begin(obs, pid, xy, heading, mask, record, distance)
                 break
         if self.active is not None:
             self._command = self._advance(obs, world)
         return self._command
 
-    def _begin(self, obs, pid, xy, heading, mask, record):
+    def _begin(self, obs, pid, xy, heading, mask, record, distance=0.0):
         p = self.policy
         if record is None:
             record = dict(floor=p.mapping.floor_id, room=pid, mask=mask.copy(), done=False, attempts=0, retry=0)
@@ -71,6 +98,8 @@ class DoorwayPeek:
         self.active = dict(room=pid, xy=xy, heading=heading, mask=mask.copy(), floor=p.mapping.floor_id,
                            start=obs.step, phase="approach", actions=0, scan_actions=0,
                            swept=0.0, last_yaw=None, record=record, saved=saved)
+        self.active["approach_limit"] = self.settings.approach_actions + int(math.ceil(
+            max(0.0, distance - self.settings.trigger_distance_m) / p.episode.action_spec.forward_step_m))
         self.active["resume_room"] = p.supervisor.room_id if p.hierarchy is None and p.supervisor.state == "search" else None
         if p.hierarchy is not None and p.hierarchy.machine.phase == "local_exploration":
             self.active["resume_room"] = p.hierarchy.regions.room_id
@@ -95,9 +124,10 @@ class DoorwayPeek:
         if active["phase"] == "approach":
             if inside and math.dist((obs.pose.x, obs.pose.y), active["xy"]) <= p.converter_params.goal_tolerance_m + world.resolution:
                 active["phase"] = "align"
-                p.route_memory.clear("peek_threshold_reached")
+                active["record"]["entered"] = True
+                p.route_memory.clear("peek_interior_reached")
                 p._route = p._goal = None
-            elif active["actions"] >= self.settings.approach_actions:
+            elif active["actions"] >= active["approach_limit"]:
                 self.cancel(obs, "approach_budget")
                 return None
             else:
@@ -122,9 +152,11 @@ class DoorwayPeek:
         active["swept"] = max(0.0, active["swept"] + delta)
         active["last_yaw"] = obs.pose.yaw
         if active["swept"] >= math.pi - 1e-6:
-            active["record"].update(done=True, reason="scanned", room=room.id, mask=room.mask.copy())
+            active["record"].update(done=True, reason="scanned", room=room.id, mask=room.mask.copy(),
+                                    scan_cell=[gy, gx], scan_xy=[obs.pose.x, obs.pose.y],
+                                    completed_step=obs.step, swept_degrees=math.degrees(active["swept"]))
             self.events.append(dict(step=obs.step, event="peek_completed", floor=active["floor"], room=room.id,
-                                    swept_degrees=math.degrees(active["swept"])))
+                                    scan_xy=[obs.pose.x, obs.pose.y], swept_degrees=math.degrees(active["swept"])))
             self._restore(obs)
             self.pending_reason = True
             return None
@@ -172,5 +204,7 @@ class DoorwayPeek:
         active = self.active
         return {"enabled": self.settings.enabled,
                 "active": None if active is None else {k: active[k] for k in ("room", "floor", "phase", "actions", "swept")},
+                "coverage": {"floor": self.policy.mapping.floor_id, "known_rooms": len(self.policy.graph.registry.rooms),
+                             "pending_rooms": self.pending_rooms(), "floor_ready": self.floor_ready()},
                 "records": [{k: v for k, v in r.items() if k != "mask"} for r in self.records],
                 "events": list(self.events)}

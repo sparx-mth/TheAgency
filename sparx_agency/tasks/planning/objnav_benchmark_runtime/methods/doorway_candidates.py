@@ -6,6 +6,7 @@ import math
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 from sparx_agency.core.planning.objnav.action_converter.ladder import reach_floor
+from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
 
 
 @dataclass(frozen=True)
@@ -15,7 +16,8 @@ class PeekSettings:
     enabled: bool = True
     trigger_distance_m: float = 3.0
     door_radius_m: float = 1.25
-    approach_actions: int = 24
+    inset_m: float = 1.0
+    approach_actions: int = 36
     return_actions: int = 60
     scan_actions: int = 24
     retry_actions: int = 50
@@ -24,7 +26,7 @@ class PeekSettings:
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError("doorway_peek.enabled must be boolean")
-        for name in ("trigger_distance_m", "door_radius_m"):
+        for name in ("trigger_distance_m", "door_radius_m", "inset_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
@@ -47,13 +49,14 @@ def threshold_cells(policy, world, room):
     return distance_transform_edt(room.mask) * world.resolution > margin
 
 
-def doorway_candidates(policy, observation, world, settings):
-    """Nearest reachable threshold in each nearby room, never a centroid detour.
+def doorway_candidates(policy, observation, world, settings, *, nearby=True, room_ids=None):
+    """Reachable interior viewpoints, including the room the robot starts in.
 
-    Confirmed doors constrain the entry to their neighbourhood. When a new
-    geometric room has no confirmed door yet, its nearest reachable boundary
-    is an observed opening, not an invented doorway behind an occupied wall.
-    The normal A* must still accept the route before a peek can move.
+    Door proximity and the local trigger constrain the THRESHOLD, not the
+    viewpoint. Move a further ``inset_m`` inward, allowing for early stopping
+    by the converter. Small rooms use the deepest safe point actually seen;
+    neither unknown nor unreachable cells are invented to meet the inset.
+    ``nearby=False`` lets the exhausted-floor fallback finish outstanding peeks.
     """
     graph = policy.graph
     inventory = graph.frontier_inventory
@@ -62,15 +65,15 @@ def doorway_candidates(policy, observation, world, settings):
     here = graph.room_at(world, (observation.pose.x, observation.pose.y))
     candidates = []
     for pid, room in graph.registry.rooms.items():
-        if pid == here:
+        if room_ids is not None and pid not in room_ids:
             continue
         ys, xs = np.nonzero(threshold_cells(policy, world, room) & np.isfinite(inventory.distance_m))
         if not len(xs):
             continue
         distances = inventory.distance_m[ys, xs]
         door_points = [door["xy"] for door in graph.doors if pid in door.get("rooms", ())]
-        allowed = distances <= settings.trigger_distance_m
-        if door_points:
+        allowed = distances <= settings.trigger_distance_m if nearby and pid != here else np.ones(len(xs), bool)
+        if door_points and pid != here:
             door_distance = np.full(len(xs), np.inf)
             for point in door_points:
                 gx, gy = world.world_to_grid(*point)
@@ -79,11 +82,30 @@ def doorway_candidates(policy, observation, world, settings):
         if not allowed.any():
             continue
         index = int(np.argmin(np.where(allowed, distances, np.inf)))
-        xy = tuple(float(v) for v in world.grid_to_world(int(xs[index]), int(ys[index])))
+        entry = tuple(float(v) for v in world.grid_to_world(int(xs[index]), int(ys[index])))
         local = np.hypot(xs - xs[index], ys - ys[index]) * world.resolution <= settings.door_radius_m
         inward = (float(xs[local].mean() - xs[index]), float(ys[local].mean() - ys[index]))
         if math.hypot(*inward) < 1e-6:
-            inward = (xy[0] - observation.pose.x, xy[1] - observation.pose.y)
+            inward = (room.centroid[0] - entry[0], room.centroid[1] - entry[1])
         heading = math.atan2(inward[1], inward[0])
+        margin = max(policy.converter_params.goal_tolerance_m, reach_floor(policy.episode.action_spec)) + world.resolution
+        if pid == here:
+            # Already inside is not already scanned. Avoid a needless trip to a
+            # door: stand well inside the observed region and scan from there.
+            depth = distance_transform_edt(room.mask)[ys, xs] * world.resolution
+            enough = depth >= min(settings.inset_m + margin, float(depth.max())) - 1e-6
+            index = int(np.argmin(np.where(enough, distances, np.inf)))
+        else:
+            depth = ((xs - xs[index]) * math.cos(heading) + (ys - ys[index]) * math.sin(heading)) * world.resolution
+            # Require a straight, room-contained connection to the threshold:
+            # a distant lobe across a wall is not a deeper doorway viewpoint.
+            # Try useful points first and stop at the first valid ray. Do not
+            # ray-cast every room cell, or allocate a whole grid per ray.
+            shortfall = np.maximum(0.0, settings.inset_m + margin - depth)
+            ranked = np.lexsort((distances, shortfall))
+            blocked = ~room.mask
+            index = next(int(i) for i in ranked if line_of_sight_clear(
+                blocked, int(xs[index]), int(ys[index]), int(xs[i]), int(ys[i])))
+        xy = tuple(float(v) for v in world.grid_to_world(int(xs[index]), int(ys[index])))
         candidates.append((float(distances[index]), pid, xy, heading, room.mask))
     return sorted(candidates, key=lambda row: (row[0], row[1]))

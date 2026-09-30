@@ -39,6 +39,7 @@ own frozen configurations; changed code does not relabel their outcomes.
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
 | `methods/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
+| `methods/floor_departure.py` | Mandatory room-peek coverage before any floor choice, approach revalidation, movement guard and safe recovery from accidental early stair entry |
 | `methods/stair_ground_truth.py`, `floor_decision.py`, `ground_truth_traversal.py` | Ground-truth stairs (default): the navmesh connectors as the policy reads them, the fallback rule's up/down choice (worth per metre of approach, flight and fixed change cost), and the committed polyline traversal |
 | `methods/stair_traversal.py`, `stair_terrain.py` | Observed stairs (`stair_source: "observed"`): RGB-D support surfaces, step-connected paths, native-heading safety checks and the committed transition lifecycle |
 | `gibson/stair_connectors.py` | Evaluator side: storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
@@ -67,17 +68,32 @@ take priority. Warm-up is episode-local, not repeated on each floor. Early peek
 actions count toward it; the first global room decision waits for its completion.
 
 **`RPTSettings.doorway_peek.enabled=true`** enables opportunistic inspection.
-Disable it with `"doorway_peek": {"enabled": false}` in the JSON passed through
+Disable opportunistic interruptions with `"doorway_peek": {"enabled": false}` in the JSON passed through
 `--policy-config`; `"warmup_steps": 10` sets the mandatory positive warm-up budget.
-These settings are included in the frozen method configuration.
+This does not waive mandatory peeks before leaving a floor. These settings
+and the floor-exit invariant are included in the frozen method configuration.
 
-For a new, unentered room within **3 m of reachable travel**, the policy plans
-to a clearance-safe threshold just inside its observed mask (inset by the action
-converter's arrival tolerance). Confirmed door landmarks constrain that entry;
-without a confirmed door, an observed reachable room boundary is used. It does
-not invent a route through a wall or unknown space. The robot aligns to one side
-of the room and sweeps **180 degrees of measured yaw** toward its interior.
+For a room with an entrance within **3 m of reachable travel**, the policy plans
+**a further metre inside** (`doorway_peek.inset_m=1.0`), beyond the safe threshold
+and allowing for the converter's early stopping tolerance. Door proximity
+constrains the entrance, not the deeper viewpoint. Small rooms use the deepest
+safe observed viewpoint available. A room-contained sightline and the normal
+clearance-qualified planner reject viewpoints through walls or unknown space.
+The robot aligns to one side and sweeps **at least 180 degrees of measured yaw**.
 Duplicate plan calls and back-and-forth yaw jitter do not complete a scan.
+The spawn room and a room merely walked through still need their first scan.
+
+**No floor change before every observed room has completed this peek.** Room
+type, target probability, exhausted frontiers, cooldown and failed entry attempts
+cannot substitute for a visit. The same gate covers RPT* stair nodes, fallback
+stairs and the observed-stair ablation. Newly discovered rooms revoke an approach
+before climbing. Floor-wide movement cannot bypass the gate by walking onto a
+seen flight; an accidental height departure returns along the existing safe
+retreat path. An exhausted search tries a distant outstanding peek before stairs,
+without needing an LLM. Zero known rooms is not a completed floor; inaccessible
+rooms stay pending and are reported rather than silently credited. This is an
+**observed-room guarantee**, not ground-truth proof that no undiscovered rooms
+remain, nor proof of object absence after a limited scan.
 
 The previous route is isolated, not destroyed. Its local budget and timeout clocks
 pause during inspection and any necessary return transit. After the scan, room
@@ -87,13 +103,16 @@ normal selection/arrival starts its local turn. New off-route rooms/object kinds
 also trigger synchronous reconsideration with peeks disabled. A retained task
 does not get a new ten-action allowance merely because evidence changed.
 
-Peeks are non-nesting and remembered per floor and geometric region, including
-modest room-ID changes and rooms already entered. Defaults: approach budget
-24 actions; return allowance 60 actions; scan budget at least 24 actions (scaled for small turn increments);
+Peeks are non-nesting and remembered per floor and geometric region. A completed
+scan survives modest ID changes, but does not transfer to an unrelated reused ID
+or a split-off region that does not contain the measured scan position. Defaults:
+approach budget 36 actions (extended by travel distance for mandatory distant
+visits); return allowance 60 actions; scan budget at least 24 actions (scaled for small turn increments);
 failed-peek retry after 50 actions, at most two attempts per region. Invalidated
 rooms, blocked entries and stalled scans resume the search rather than spin.
-Target approach cancels inspection immediately; committed stair motion is never
-overridden. `doorway_peek`, `warmup`, phase and event diagnostics are recorded.
+Target approach cancels inspection immediately; committed stair safety is never
+abandoned. `doorway_peek.coverage`, `floor_change_held`, completed scan positions
+and measured angles, warm-up, phase and event diagnostics are recorded.
 
 ObjectNav's optional FALCON local burst also defaults to 10 actions; an explicit
 `falcon.burst_actions` override remains supported. Its specialized local planner
@@ -103,8 +122,8 @@ and bounded region history remain distinct from the frontier explorer.
 robot clearance, connected reachability from the current pose, and safe frontier
 goal association. No distance horizon is mistaken for inaccessibility. The room
 LLM, room facts, entry selection, floor-wide discovery/fallback and dashboard use
-it. Unassigned frontiers remain exploration choices. Blue diamonds show all its
-goal representatives on the active floor. Retired/reached goals are a separate
+it. Unassigned frontiers remain exploration choices and their representatives
+remain in the recorded search snapshot, not cluttering the minimalist map. Retired/reached goals are a separate
 action-selection filter, not falsely declared geometrically inaccessible. Zero
 accessible frontiers does not prove complete semantic observation of a room.
 
@@ -197,8 +216,9 @@ refresh.
    objective must see. The local budget is folded in as per-node service
    time; the order is re-solved at every loop point
    (`ObjectSearchParams.resolve_on_release`) and on semantic discovery events,
-   not merely on a timer. Normal floor choices remain the LLM/RPT* decision;
-   the existing 40-action arrival-return guard and fallback rule still apply.
+    not merely on a timer. Floor choices become eligible only after all observed
+    rooms have completed their interior peeks, then remain the LLM/RPT* decision;
+    the existing 40-action arrival-return guard and fallback rule still apply.
    When the order puts a staircase first the loop commits it to the
    building coordinator, which approaches the foot of the flight and
    climbs; the node's turn ends `traversed` the action the climb begins,
@@ -292,10 +312,11 @@ stair inspections and heading recovery):
 - A committed frontier goal is kept while it is passable, still has unknown
   space near it and still lies near the room being swept. A re-segmented room
   mask alone does not drop it; a boundary the camera has resolved does.
-- The look-around after a swept room is off by default
+- The optional extra look-around after a swept room is off by default
   (`SweepSettings.room_scan_turns = 0`): the loop's termination rule is *N
   steps or nothing left*, and a swept room is released on the action its last
-  goal resolves. The supervisor's 30 s stall and 90 s budget clocks remain as
+  goal resolves. This is separate from the mandatory first-entry interior peek
+  and its measured 180-degree scan. The supervisor's 30 s stall and 90 s budget clocks remain as
   backstops behind the caller-driven exits.
 - Every adopted route records `route_replaced`: why the route before it was
   dropped (`goal_changed`, `route_obstructed`, `frontier_completed_or_invalid`,
@@ -340,18 +361,21 @@ Do not reconfigure another mission's service or place inference on Habitat's GPU
 
 The recorder reserves **one occupancy map for each of K configured storeys**,
 not K layers within every storey. All slots start UNKNOWN, gray; discovery IDs
-bind slots without surveyed floor numbering. Each retains its full grid, objects
-and trail. Panels use one fixed observed-origin viewport/scale; full arrays are
-saved in `floor_maps.npz`. Display counts remain recorder-only, never in policy
+bind slots without surveyed floor numbering. Each retains its full grid, room
+partition, objects and trail. A shared viewport grows with the observed house
+footprint in metre-sized increments; all floors use the same metric scale. Maps
+stack or sit side-by-side to fit the house aspect ratio. Full occupancy arrays
+are saved in `floor_maps.npz`, room labels in `room_partitions.npz`, without
+pickled state. Display counts remain recorder-only, never in policy
 settings or episode knowledge. Unvisited slots have no inferred elevation.
 
 The dashboard frame (`visualization.render_dashboard`) reads, left to right:
-the camera with the detector's boxes and the depth; the floor maps, with every
-room of the active floor named and valued at its centroid (`1:R3 kitchen
-0.41` -- its place in the RPT* order, its id, its type, the oracle's probability), the
-order drawn as a chain through the centroids, the room in force ringed amber
-and the next node ringed green, a node the oracle values at nothing red, a
-staircase a square at the foot of its flight; and the **search column**
+the camera with the detector's boxes and the depth; minimalist floor plans with
+thin logical room outlines on **every discovered floor**, short `R<n>` identifiers,
+the room in force ringed amber and the next node green, a compact square for a
+seen staircase, the robot, a subdued trail, the committed route and a scale bar.
+Object dots, semantic names, probabilities, frontier diamonds and the visit-order
+chain are deliberately absent from the maps. Those details remain in the **search column**
 (`search_panel.py`): the target and the oracle's split between the listed
 nodes and elsewhere, the RPT* visit order with its head (`S0` is a
 staircase), the room in force with its local step count or the node in

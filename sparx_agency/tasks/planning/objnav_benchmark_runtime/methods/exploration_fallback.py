@@ -97,7 +97,7 @@ class ExplorationFallback:
         self.settings = settings or FallbackSettings()
         self.failures = []
         self.stats = {"invocations": 0, "frontier": 0, "stairs": 0, "frontier_retired": 0,
-                      "relocation": 0, "hold": 0, "failures": 0,
+                      "room_peek": 0, "relocation": 0, "hold": 0, "failures": 0,
                       ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0}
         self._logged = set()
         self._consecutive = {}
@@ -155,6 +155,14 @@ class ExplorationFallback:
         if command is not None:
             return self._tag(command, "frontier", reason)
         if p.building is not None:
+            if not p.building.can_leave_floor(obs):
+                # No frontier does not prove a room was entered. Complete a
+                # reachable outstanding peek, even outside the local trigger
+                # radius or when opportunistic inspections were disabled.
+                command = p.peek.plan(obs, world, force=True)
+                if command is not None:
+                    p._action_owner = "doorway_peek"
+                    return self._tag(command, "room_peek", reason)
             command = p.building.plan(obs, world, exhausted=True)
             if command is not None:
                 return self._tag(command, "stairs", reason)

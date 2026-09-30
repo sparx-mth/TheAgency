@@ -97,12 +97,14 @@ def test_room_identity_change_does_not_repeat_a_completed_peek():
     assert p.peek.plan(obs, world) is None
 
 
-def test_a_room_entered_without_a_peek_is_not_inspected_on_a_later_pass():
+def test_a_room_entered_without_a_scan_still_needs_inspection():
     p, ep, world, _, _ = peek_rig()
     obs, _ = refresh(p, ep, world, 1, (9.0, 3.0))
     p.peek._remember_start(obs, world)
+    assert not p.peek.records[-1]["done"] and not p.peek.floor_ready()
     obs, _ = refresh(p, ep, world, 2, (5.0, 3.0))
-    assert p.peek.plan(obs, world) is None
+    assert p.peek.plan(obs, world) is not None
+    assert p.peek.active["room"] == 1
 
 
 def test_peek_actions_during_startup_count_once_towards_warmup():

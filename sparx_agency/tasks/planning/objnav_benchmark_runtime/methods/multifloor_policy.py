@@ -43,6 +43,7 @@ from sparx_agency.core.planning.exploration.room_search_policy import RoomCandid
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_decision import decide_floor_change
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_departure import FloorDepartureGuard
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_ground_truth import GroundTruthStairs
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_sightings import (
     GroundTruthStairDetector, StairSightings)
@@ -90,6 +91,7 @@ class MultiFloorSearch:
         self.arrived_step = None
         self._departure_ignored = False  # one event per off-level excursion, not one per action
         self._approach_failures = 0      # consecutive actions the approach to the active portal failed to plan
+        self.departure = FloorDepartureGuard(self)
 
     @property
     def phase(self):
@@ -115,6 +117,10 @@ class MultiFloorSearch:
         """The portal record with this id, or None."""
         return next((q for q in self.portals if q["id"] == portal_id), None)
 
+    def can_leave_floor(self, obs=None):
+        """Every observed room needs a completed peek before any floor choice."""
+        return self.departure.ready(obs)
+
     # -- the loop's decision --------------------------------------------------
     def commit(self, obs, portal, approach_xy):
         """The room-search loop's order put this staircase first: approach it and climb.
@@ -124,8 +130,10 @@ class MultiFloorSearch:
         -- the recording can then tell an RPT* floor change from a fallback
         one, and :meth:`_start` knows to end the node's turn in the loop.
         """
+        if not self.can_leave_floor(obs):
+            return False
         if self.active is portal and portal.get("selected_by") == SELECTED_BY_LOOP:
-            return
+            return True
         self.active = portal
         portal["approach_xy"] = list(approach_xy)
         portal["selected_by"] = SELECTED_BY_LOOP
@@ -134,6 +142,7 @@ class MultiFloorSearch:
         self.events.append({"action": obs.step, "event": "portal_selected", "portal_id": portal["id"],
                             "direction": "up" if portal["direction"] > 0 else "down",
                             "solver_source": SELECTED_BY_LOOP})
+        return True
 
     def prepare_observation(self, obs):
         """Current depth before atlas settlement; never previous-view support.
@@ -355,6 +364,11 @@ class MultiFloorSearch:
         """
         if self.traversing:
             return self.transition.plan(obs)
+        if self.active is not None and not self.can_leave_floor(obs):
+            # A room may be discovered while approaching a previously allowed
+            # staircase. Recheck before taking even the first tread.
+            self._abandon(obs, "new room needs a peek before floor departure")
+            return None
         if self.active is None:
             if self.ground_truth is not None:
                 if exhausted:
@@ -367,8 +381,7 @@ class MultiFloorSearch:
             kind = "portal/%d" % self.active["id"]
             arrived = self.policy.route_memory.kind == kind and self.policy.route_memory.arrived(obs)
             if math.dist(here, entry) <= 0.65:
-                self._start(obs)
-                return self.transition.plan(obs)
+                return self.transition.plan(obs) if self._start(obs) else None
             if arrived and self.ground_truth is not None:
                 # The approach ended short of the entry. The map has grown on the way here: if it
                 # now reaches nearer the entry, go on to that point; the flight is walked from as
@@ -381,11 +394,9 @@ class MultiFloorSearch:
                                             "entry_distance_m": round(before, 2),
                                             "approach_distance_m": round(math.dist(tuple(self.active["approach_xy"]), entry), 2)})
                         return command
-                self._start(obs)
-                return self.transition.plan(obs)
+                return self.transition.plan(obs) if self._start(obs) else None
             if arrived:
-                self._start(obs)
-                return self.transition.plan(obs)
+                return self.transition.plan(obs) if self._start(obs) else None
             approach = tuple(self.active.get("approach_xy", entry))
             command = self.policy._navigate(obs, world, approach, kind)
             if command is None and self.ground_truth is not None and self._reapproach(obs, world):
@@ -439,6 +450,8 @@ class MultiFloorSearch:
         the very stair head -- Pomaria's first climb was undone two actions
         after it was confirmed.
         """
+        if not self.can_leave_floor(obs):
+            return
         p = self.policy
         cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
         portals = [q for q in self.portals if q["floor_id"] == self.floor_id and q.get("connector_id") is not None]
@@ -503,6 +516,8 @@ class MultiFloorSearch:
         return camera.inspection_command(obs)
 
     def _select(self, obs, world):
+        if not self.can_leave_floor(obs):
+            return
         p = self.policy
         eligible = [q for q in self.portals if q["floor_id"] == self.floor_id
                     and q["observations"] >= 2 and obs.step >= q["cooldown_until"]]
@@ -531,18 +546,26 @@ class MultiFloorSearch:
 
     def _start(self, obs):
         if self.transition is not None:
-            return
+            return True
+        allowed = self.can_leave_floor(obs)
+        height = self.policy.mapping.atlas.elevation_m
+        if not allowed and abs(obs.pose.z - height) <= self.params.stable_height_m:
+            self._abandon(obs, "rooms still need interior peeks")
+            return False
         if self.ground_truth is not None:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.ground_truth_traversal import GroundTruthTraversal
             self.transition = GroundTruthTraversal(self, obs)
         else:
             self.transition = StairTraversal(self, obs)
+        if not allowed:
+            self.departure.recover_unplanned(obs)
         self.policy.route_memory.clear("stair traversal")
         self.events.append({"action": obs.step, "event": "traversal_started", "portal_id": self.active["id"],
                             "direction": self.active["direction"],
                             "stair_source": self.active.get("stair_source", "observed"),
-                            "selected_by": self.active.get("selected_by", "unplanned")})
-        if self.active.get("selected_by") == SELECTED_BY_LOOP:
+                            "selected_by": self.active.get("selected_by", "unplanned"),
+                            "room_coverage_complete": allowed})
+        if allowed and self.active.get("selected_by") == SELECTED_BY_LOOP:
             # The climb has begun: the stair node's turn in the room-search loop is
             # over, and the floor's supervisor is left in SELECT for the way back.
             loop = getattr(self.policy, "loop", None)
@@ -554,6 +577,7 @@ class MultiFloorSearch:
                 h.routes.suspend(h.regions.mask, h.current, self.policy, h.machine.actions)
             h.machine.end("floor_departure")
             h.machine.transition("TRAVERSE", "observed stair traversal; global allowance only")
+        return True
 
     def _abandon(self, obs, reason):
         if self.transition and not self.transition.arrival_allowed:
@@ -582,6 +606,9 @@ class MultiFloorSearch:
         self.terrain.blocked(obs.pose, self.policy.episode.action_spec.forward_step_m)
 
     def filter_action(self, obs, action):
+        guarded = self.departure.filter_action(obs, action)
+        if guarded != action:
+            return guarded
         if not self.traversing:
             h = self.policy.hierarchy
             if h is not None:
@@ -603,6 +630,8 @@ class MultiFloorSearch:
                 "atlas": self.policy.mapping.atlas.diagnostics(),
                 "transition": self.transition.diagnostics() if self.transition else None,
                 "completed_transitions": list(self.completed), "safety_vetoes": self.safety_vetoes,
+                "room_coverage": self.policy.peek.diagnostics()["coverage"],
+                "coverage_vetoes": self.departure.vetoes,
                 "floor_contexts": self.policy.floors.diagnostics(), "events": list(self.events),
                 "portals": [dict({k: v for k, v in q.items() if k not in ("path", "footprint")},
                                  footprint_points=len(q.get("footprint", ()))) for q in self.portals],

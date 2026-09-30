@@ -61,6 +61,9 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     if not discovery:
         policy.warmup_actions = policy.settings.warmup_steps  # this fixture isolates the existing room/target components
+        # Stair/solver unit fixtures start after mandatory discovery. Tests of
+        # the actual coverage gate use discovery=True or install a fresh peek.
+        policy.peek.floor_ready = lambda: True
     return policy, episode
 
 

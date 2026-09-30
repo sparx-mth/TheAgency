@@ -55,6 +55,10 @@ def peek_rig(order=(0, 1)):
     cost = p.navigation_cost(world)
     p.graph.refresh_accessibility(world, cost, IN_A)
     p.peek._remember_start(obs_at(ep, 0, IN_A), world)
+    # This rig starts during room A's local search, after its interior scan.
+    gx, gy = world.world_to_grid(*IN_A)
+    p.peek.records[0].update(done=True, reason="scanned", scan_cell=[gy, gx],
+                             scan_xy=list(IN_A), swept_degrees=180.0)
     return p, ep, world, rooms, reasoned
 
 
@@ -188,6 +192,8 @@ def test_peek_without_yaw_progress_is_bounded_and_does_not_claim_a_scan():
 
 @pytest.mark.parametrize("kwargs", [{"warmup_steps": 0}, {"warmup_steps": True},
                                      {"doorway_peek": {"enabled": "false"}},
+                                     {"doorway_peek": {"inset_m": 0}},
+                                     {"doorway_peek": {"inset_m": float("nan")}},
                                      {"doorway_peek": {"approach_actions": 0}}])
 def test_discovery_configuration_is_validated(kwargs):
     with pytest.raises(ValueError):

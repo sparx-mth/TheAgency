@@ -6,6 +6,11 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- ObjectNav room-coverage floor gate: every observed room, including the spawn room, needs a
+  completed interior peek and measured 180-degree scan before normal or fallback stair selection;
+  new rooms revoke an approach, failures remain pending, and accidental early stair entry retreats safely.
+- Regression coverage for real-converter interior scans, floor-local visit identity, failed and
+  split rooms, stair-choice bypasses, adaptive floor-map scaling and persistent room partitions.
 - **Stairs are known when they are SEEN** (`objnav_benchmark_runtime/methods/stair_sightings.py`):
   a perfect stair detector replaces the connector list the policy used to be handed at reset. Each
   navmesh connector's surface sample is projected into the current frame (`camera_geometry
@@ -39,6 +44,18 @@ future-you, not for a commit log.
   dropped rather than written over another; dark outline under every label; object dots smaller.
   Panel title counts the stairs.
 ### Changed
+- Doorway peeks go a further metre inside the room with stopping-tolerance compensation and a
+  deepest-safe-viewpoint fallback for small rooms; simply crossing a doorway no longer counts as scanned.
+- Floor maps now show thin logical room outlines, short IDs and minimal route/robot/stair markers;
+  object dots, probability text, frontier diamonds and visit-order chains stay off the map. A shared
+  observed-house viewport and scale bars replace the fixed 32 m crop; room partitions persist per floor
+  and are saved separately as numeric `room_partitions.npz`. Camera, depth and search column are unchanged.
+- Development check of the room-peek gate: four recorded seed-17 episodes across Ranchester and
+  Pomaria completed with no runtime failures, but **0/4 navigation successes**. Thirty measured
+  half-turn scans completed; room repartitioning caused 37 peek cancellations and repeated scans,
+  leaving rooms pending and preventing every floor change. The prior successful Ranchester couch
+  episode regressed to the action limit. The 368 passing runtime tests validate behavior, not a
+  performance gain; visit continuity across repartitioning remains an unresolved follow-up.
 - `GroundTruthTraversal` never skips a vertex: a tight aim blocked twice sends the agent BACK to the
   last vertex it reached (`traversal_recovery`, `recoveries` in the diagnostics) and the route is
   resumed from there; the route handed to the converter ends at the next bend (`BEND_RAD`, 35
