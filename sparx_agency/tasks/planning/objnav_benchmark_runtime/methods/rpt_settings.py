@@ -6,6 +6,7 @@ import math
 
 from sparx_agency.core.planning.exploration.falcon.params import FalconParams
 from sparx_agency.core.planning.exploration.floor_atlas import MultiFloorParams
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,9 @@ class RPTSettings:
     body_radius_m: float = 0.18
     preferred_clearance_m: float = 0.30
     local_exploration: str = "frontier"
-    falcon: FalconParams = field(default_factory=FalconParams)
+    warmup_steps: int = 10
+    doorway_peek: PeekSettings = field(default_factory=PeekSettings)
+    falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
     multifloor: MultiFloorParams = field(default_factory=MultiFloorParams)
 
     def __post_init__(self):
@@ -45,7 +48,7 @@ class RPTSettings:
             value = getattr(self, key)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)
-        for key in ("depth_stride", "graph_period_steps", "replan_steps", "target_memory_steps", "max_rooms"):
+        for key in ("depth_stride", "graph_period_steps", "replan_steps", "target_memory_steps", "max_rooms", "warmup_steps"):
             if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
                 raise ValueError("%s must be a positive integer" % key)
         if not 0 <= self.detection_confidence <= 1 or type(self.seed) is not int:
@@ -54,8 +57,12 @@ class RPTSettings:
             raise ValueError("Preferred clearance cannot be smaller than the robot radius")
         if self.local_exploration not in ("frontier", "falcon"):
             raise ValueError("local_exploration must be frontier or falcon; no silent fallback")
+        if isinstance(self.doorway_peek, dict):
+            object.__setattr__(self, "doorway_peek", PeekSettings(**self.doorway_peek))
+        if not isinstance(self.doorway_peek, PeekSettings):
+            raise ValueError("doorway_peek must be PeekSettings or parameter overrides")
         if isinstance(self.falcon, dict):
-            object.__setattr__(self, "falcon", FalconParams(**self.falcon))
+            object.__setattr__(self, "falcon", FalconParams(**dict({"burst_actions": 10}, **self.falcon)))
         if not isinstance(self.falcon, FalconParams):
             raise ValueError("falcon must be FalconParams or an object of parameter overrides")
         if isinstance(self.multifloor, dict):

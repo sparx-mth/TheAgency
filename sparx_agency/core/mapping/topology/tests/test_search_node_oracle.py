@@ -55,7 +55,7 @@ def test_the_prompt_lists_every_node_in_the_format_the_system_prompt_explains():
                                  "searched 2min; 1 room with frontier left)  the robot came up these stairs 10s ago "
                                  "(arrived_by=yes)")
     for rule in ("type=unknown means NOT", "HOME MISSING HERE", "NEVER use distance", "planner adds travel and climbing",
-                 "arrived_by=yes", "sum to 100", '"elsewhere"', 'STEP 1 -- "home"', 'STEP 2 -- "storey"',
+                 "arrived_by=yes", "Do NOT make the scores sum to 100", "independently", 'STEP 1 -- "home"', 'STEP 2 -- "storey"',
                  "never copy its numbers"):
         assert rule in SYSTEM_PROMPT
 
@@ -69,7 +69,7 @@ def test_coarse_seconds_keeps_an_unchanged_map_an_unchanged_prompt():
     assert format_prompt("bed", [KITCHEN]) == format_prompt("bed", [drifted]), "one more second changes nothing"
 
 
-def test_a_good_reply_becomes_an_unnormalised_distribution_that_sums_with_elsewhere_to_one():
+def test_a_good_reply_preserves_independent_node_probabilities():
     reply = {"nodes": [{"id": 0, "why": "kitchen, fully seen, no beds", "p": 0},
                        {"id": 1, "why": "beds are not in living rooms", "p": 3},
                        {"id": 2, "why": "large unexplored room", "p": 27},
@@ -84,18 +84,21 @@ def test_a_good_reply_becomes_an_unnormalised_distribution_that_sums_with_elsewh
     assert result.reading == {"home": "bedroom",
                               "storey": "ground floor (kitchen, living room); no bedroom here; bedrooms are upstairs"}
     assert result.probs == pytest.approx({0: 0.0, 1: 0.03, 2: 0.27, 100000: 0.62, 100001: 0.0})
-    assert result.elsewhere == pytest.approx(0.08) and result.p_present == pytest.approx(0.92)
+    assert result.elsewhere == pytest.approx(0.97 * 0.73 * 0.38)
+    assert result.p_present == pytest.approx(1.0 - result.elsewhere)
+    assert result.probability_model == "independent_search_success"
     assert 77 not in result.probs and result.reasons[100000] == "bedrooms upstairs"
     assert result.spread == pytest.approx(0.62)
 
 
-def test_bad_arithmetic_is_rescaled_and_omitted_nodes_get_a_small_share_not_zero():
+def test_percentages_are_not_rescaled_and_omitted_nodes_get_a_small_probability():
     reply = {"nodes": [{"id": 0, "p": 50}, {"id": 2, "p": 150}], "elsewhere": 50}     # sums to 250, three nodes missing
     scores, elsewhere, reasons, omitted = parse_reply(reply, NODES)
     assert omitted == (1, 100000, 100001) and all(scores[nid] == OMITTED_PERCENT for nid in omitted)
     assert scores[2] == 100.0, "clamped into 0-100 before anything else"
     probs, rest = normalise(scores, elsewhere)
-    assert sum(probs.values()) + rest == pytest.approx(1.0)
+    assert probs[0] == 0.5 and probs[2] == P_CEILING
+    assert rest == pytest.approx(0.5 * (1 - P_CEILING) * 0.99 ** 3)
     assert probs[2] > probs[0] > probs[1] > 0.0
     result = SearchNodeOracle.score(reply, NODES)
     assert result.omitted == (1, 100000, 100001) and result.reasons[1] == "(not scored by the model)"
@@ -116,9 +119,8 @@ def test_an_unusable_reply_is_none_never_a_made_up_distribution(reply):
     assert SearchNodeOracle.score(reply, NODES) is None
 
 
-def test_a_reply_that_rules_every_listed_node_out_is_unusable_when_nothing_is_left_to_carry_the_mass():
-    """Every node scored 0 and no elsewhere: the model said nothing the planner can use."""
-    assert parse_reply({"nodes": [{"id": 0, "p": 0}], "elsewhere": 0}, [KITCHEN]) is None
+def test_all_zero_is_a_valid_belief_that_all_listed_searches_fail():
+    assert parse_reply({"nodes": [{"id": 0, "p": 0}]}, [KITCHEN]) is not None
     scores, elsewhere, _, omitted = parse_reply({"nodes": [{"id": 0, "p": 0}], "elsewhere": 0}, [KITCHEN, LIVING])
     assert omitted == (1,) and scores[1] == OMITTED_PERCENT, "an omitted node is forgotten, not ruled out"
     all_out = SearchNodeOracle.score({"nodes": [{"id": 0, "p": 0}, {"id": 1, "p": 0}], "elsewhere": 100}, [KITCHEN, LIVING])
@@ -154,7 +156,7 @@ def test_model_trouble_degrades_to_a_uniform_the_caller_can_refuse():
     away = SearchNodeOracle(Scripted(raise_=True))
     result = away.probabilities("bed", NODES)
     assert result.source == "uniform_fallback" and result.raw_reply is None
-    assert sum(result.probs.values()) + result.elsewhere == pytest.approx(1.0)
+    assert result.p_present + result.elsewhere == pytest.approx(1.0)
     junk = SearchNodeOracle(Scripted({"rooms": []}))
     result = junk.probabilities("bed", NODES)
     assert result.source == "uniform_fallback" and result.raw_reply == {"rooms": []}
@@ -164,6 +166,14 @@ def test_model_trouble_degrades_to_a_uniform_the_caller_can_refuse():
 def test_search_node_refuses_an_unknown_kind():
     with pytest.raises(ValueError):
         SearchNode(0, "door", "door")
+
+
+def test_two_likely_rooms_are_not_diluted_into_categorical_shares():
+    result = SearchNodeOracle.score({"nodes": [{"id": 0, "p": 80}, {"id": 1, "p": 80}]}, [KITCHEN, LIVING])
+    assert result.probs == {0: 0.8, 1: 0.8}
+    assert result.elsewhere == pytest.approx(0.04)
+    assert result.p_present == pytest.approx(0.96)
+    assert "no fixed action or time horizon" in SYSTEM_PROMPT.replace("\n", " ")
 
 
 

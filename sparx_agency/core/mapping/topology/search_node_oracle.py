@@ -16,16 +16,16 @@ once, over every node the search could go to next:
   visited, what was found and how much was searched there; whether the
   robot arrived on this storey by it a moment ago.
 
-The reply is a distribution: for each node the probability, in percent, that
-going there NEXT finds the target, plus ``elsewhere`` -- the target is in none
-of them. The room-search loop hands the node probabilities, unnormalised, to
+The reply gives independent per-node search-success estimates, not mutually
+exclusive target-location shares and not probabilities limited to a burst.
+The room-search loop hands these probabilities without renormalisation to
 RPT*, whose objective (expected time-to-find) weighs them against the travel
 cost the planner computes -- for a staircase that cost includes the climb --
 which is why the model is told, twice, not to reason about distance.
 
 What stays in code is the contract, never the judgement: parse and clamp,
 drop invented ids, give an omitted node a small share rather than zero,
-rescale so the node shares and ``elsewhere`` make one, refuse a reply with no
+derive joint failure under RPT*'s independence approximation, refuse a reply with no
 usable node (the caller repairs the schema once, then backs off), and reuse
 the last reply when the prompt is byte-identical -- the effort numbers are
 shown in coarse steps so an unchanged map produces an unchanged prompt.
@@ -50,14 +50,14 @@ OMITTED_PERCENT = 1.0
 #: Object classes shown per room; a longer list is answered about the list, not the room.
 MAX_CLASSES_IN_PROMPT = 8
 
-SYSTEM_PROMPT = """You are the reasoning module of a robot searching ONE building for ONE \
-target object. The robot has partly mapped the building into NODES.
+SYSTEM_PROMPT = """You are the reasoning module of a robot searching ONE building for an \
+instance of ONE target category. The robot has partly mapped the building into NODES.
 ROOM nodes are regions the robot segmented on the storey it stands on. A room's \
 type was inferred from the objects seen inside it; type=unknown means NOT \
 IDENTIFIED YET -- never "empty"; a type ending in "?" was inferred from a single \
 kind of object and may be wrong (a sink alone reads as a kitchen until a toilet \
 shows). Each room line gives: size; frontier = the number of unexplored openings \
-or boundaries still inside it (0 = fully observed); searched = the time the robot \
+or boundaries still accessible inside it (0 is NOT proof of object absence); searched = the time the robot \
 has spent inside it; ago = the time since it was last inside (never = not entered \
 yet); seen = the objects confirmed in it; here=yes if the robot stands in it now.
 STAIRS nodes are staircases to another storey (up or down). Taking one means \
@@ -66,9 +66,11 @@ storey was visited before and, if so, what was found and how much was searched \
 there, and whether the robot arrived on this storey by these stairs a moment ago.
 For EACH node give the probability, in percent, that going there NEXT finds the \
 target: the target is there and the robot would see it by going and looking. \
-Also give "elsewhere": the chance the target is in none of the listed nodes (a \
-searched room where the detector missed it, or space no node leads to). All node \
-values plus elsewhere sum to 100.
+Estimate EACH node independently: these are search-success probabilities, NOT \
+shares of a categorical location distribution. Several rooms may contain an \
+instance of the target category. Do NOT make the scores sum to 100. There is no \
+fixed action or time horizon. The planner uses independent terminal probabilities \
+as an approximation and computes the chance of all listed searches failing itself.
 Work in this order, and write steps 1 and 2 into the reply before any number:
 STEP 1 -- "home": the room type(s) where this object normally lives, most likely \
 first (bed -> bedroom; frying pan -> kitchen; toilet -> bathroom; sofa -> living \
@@ -83,26 +85,26 @@ live in a house: kitchen, dining and living room downstairs; bedrooms upstairs; 
 the bathroom BESIDE the bedrooms, so upstairs too (a ground floor has at most a \
 small toilet room); an office or study on either.
 STEP 3 -- the numbers, by these rules:
- 1. HOME FOUND HERE with frontier left: it takes most of the mass.
- 2. HOME MISSING HERE: the mass goes to (a) UNKNOWN rooms whose SIZE fits the home \
+ 1. HOME FOUND HERE with frontier left: it has a high search-success probability.
+ 2. HOME MISSING HERE: independently consider (a) UNKNOWN rooms whose SIZE fits the home \
 type -- bathrooms ARE small, so a 3-8 m2 unknown room beside bedrooms is most \
 likely the bathroom (never "too small to be one"); a 10-20 m2 room is bedroom \
 sized; a 20 m2+ room on a ground floor is the living room -- and (b) the STAIRS \
-toward the storey where the home type usually is. Split between \
-them by how well the sizes fit and how much of each unknown room is unseen. When \
-the home type is not expected on this storey at all, the stairs take MOST of it.
+toward the storey where the home type usually is. Judge each by how well the sizes \
+fit and how much of each unknown room is unseen. When the home type is not expected \
+on this storey, the stairs can have a high probability without suppressing other nodes.
  3. A room of ANOTHER identified type gets 0-3, even if the object could \
-conceivably be there. Do not spread mass "just in case" -- elsewhere is for that.
+conceivably be there. Do not inflate a probability merely to avoid choosing.
  4. A room the target cannot be in by type (frying pan in a bathroom, toilet in a \
 bedroom) gets 0-1, whatever else its line says.
- 5. frontier=0 means fully observed: 0-2 unless the object is small enough to hide \
-from the views taken.
+ 5. frontier=0 means no accessible unexplored boundary, not full semantic coverage. \
+Lower the probability with search evidence, but allow missed or occluded objects.
  6. Searched long and recently -> low, not zero. Searched briefly, or long ago, \
-with frontier left -> keeps a share. Never entered, right type -> the best bet.
+with frontier left -> stays promising. Never entered, right type -> the best bet.
  7. A hallway or corridor rarely holds the target, but one with frontier LEADS to \
 unseen rooms: value it by what it may lead to.
  8. STAIRS to a visited storey: if a room of the home type was FOUND there and is \
-barely searched, that storey holds MOST of the mass -- a known kitchen beats an \
+barely searched, that storey can be highly promising -- a known kitchen beats an \
 unknown room up here that merely might be one. Searched thoroughly with little \
 frontier left -> low.
  9. arrived_by=yes: the robot has just come from there; unless it left that storey \
@@ -113,14 +115,12 @@ Always:
  11. NEVER use distance, travel time or here=yes as a reason. The planner accounts \
 for travel; the room the robot stands in is judged exactly like the others.
  12. Score EVERY node id given, and only those ids.
- 13. Integers 0-100; node values plus elsewhere sum to 100. Keep elsewhere for what \
-the nodes genuinely cannot cover (5-15 is typical); never park mass there to avoid \
-deciding.
+ 13. Integers 0-100 per node, independently; no normalisation across nodes.
  14. Per node write "why" first (at most 12 words, lower case, naming the room's \
 likely type and what decided it), then "p".
 Reply with ONLY this JSON, keys in this order:
 {"home":"<step 1, max 10 words>","storey":"<step 2, max 20 words>",
- "nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...],"elsewhere":<int>}
+ "nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
 Example of the FORMAT and the style of reasoning -- a different building every \
 time, so never copy its numbers. TARGET television, robot on an upper storey:
 id=4  ROOM  type=bedroom  size=13m2  frontier=0  searched=1min  ago=3min  seen: bed, lamp
@@ -132,7 +132,7 @@ id=100003  STAIRS down  to a storey NOT visited yet
  "nodes":[{"id":4,"why":"bedroom, fully seen, no television","p":2},
 {"id":9,"why":"bathroom-sized room, no television fits","p":1},
 {"id":11,"why":"large upstairs room, maybe a lounge","p":30},
-{"id":100003,"why":"unvisited ground floor holds the living room","p":60}],"elsewhere":7}"""
+{"id":100003,"why":"unvisited ground floor holds the living room","p":60}]}"""
 USER_PROMPT_TEMPLATE = """TARGET: {target}
 
 THIS STOREY: {storey}
@@ -141,7 +141,7 @@ OTHER STOREYS: {others}
 NODES ({n}):
 {nodes}
 
-Score all {n} nodes and elsewhere. JSON only."""
+Score all {n} nodes independently. JSON only."""
 
 
 @dataclass(frozen=True)
@@ -211,11 +211,10 @@ class NodeOracleResult:
     """The model's distribution, made safe for the planner.
 
     Attributes:
-        probs: ``{node_id: probability}`` in ``[0, P_CEILING]`` -- NOT
-            normalised over the nodes; they sum to :attr:`p_present`.
-        elsewhere: The share the model kept for "in none of these".
-        p_present: ``sum(probs)`` -- the chance the target is reachable
-            through some listed node.
+        probs: Independent per-node search-success estimates in ``[0, P_CEILING]``.
+        elsewhere: Legacy field name: product of node failure probabilities,
+            NOT a categorical estimate of an undiscovered room.
+        p_present: One minus ``elsewhere`` under the independence approximation.
         source: ``'llm'`` for a usable reply, ``'uniform_fallback'`` when the
             model failed and a flat distribution was substituted. The runtime
             refuses to fly on the latter.
@@ -242,6 +241,7 @@ class NodeOracleResult:
     reused: bool = False
     omitted: Tuple[int, ...] = ()
     reading: Dict[str, str] = field(default_factory=dict)
+    probability_model: str = "independent_search_success"
 
 
 # -- the prompt -------------------------------------------------------------
@@ -317,8 +317,8 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
 
     Invented ids are dropped. A listed node the model skipped is given
     :data:`OMITTED_PERCENT` -- forgotten, not ruled out. A reply that scores
-    no listed node at all is unusable, and so is one whose total mass is
-    zero with no ``elsewhere`` to carry it.
+    no listed node at all is unusable. An explicit all-zero belief is valid:
+    the runtime can explore geometrically rather than invent a semantic prior.
     """
     rows = reply.get("nodes") if isinstance(reply, dict) else None
     if not isinstance(rows, list):
@@ -353,17 +353,21 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
     for nid in omitted:
         scores[nid] = OMITTED_PERCENT
         reasons[nid] = "(not scored by the model)"
-    if sum(scores.values()) + elsewhere <= 0.0:
-        return None
     return scores, elsewhere, reasons, omitted
 
 
 def normalise(scores: Dict[int, float], elsewhere: float) -> Tuple[Dict[int, float], float]:
-    """Node shares and elsewhere as fractions of one, whatever the model's arithmetic did."""
-    total = sum(scores.values()) + elsewhere
-    scale = 1.0 / total if total > 0.0 else 0.0
-    probs = {nid: min(P_CEILING, max(0.0, value * scale)) for nid, value in scores.items()}
-    return probs, max(0.0, min(1.0, elsewhere * scale))
+    """Convert each percentage independently; retain the old function signature.
+
+    Old-model ``elsewhere`` is ignored: mixing categorical mass with RPT*'s
+    multiplicative survival objective was inconsistent. No visit horizon is
+    imposed. Dependencies between real rooms remain a modelling approximation.
+    """
+    probs = {nid: min(P_CEILING, max(0.0, value / 100.0)) for nid, value in scores.items()}
+    failure = 1.0
+    for value in probs.values():
+        failure *= 1.0 - value
+    return probs, failure
 
 
 # -- the oracle -------------------------------------------------------------
@@ -447,7 +451,8 @@ class SearchNodeOracle:
     @staticmethod
     def uniform(nodes: Sequence[SearchNode], raw_reply: Optional[Dict[str, Any]]) -> NodeOracleResult:
         share = 1.0 / (len(nodes) + 1)
-        return NodeOracleResult(probs={n.id: share for n in nodes}, elsewhere=share, p_present=1.0 - share,
+        failure = (1.0 - share) ** len(nodes)
+        return NodeOracleResult(probs={n.id: share for n in nodes}, elsewhere=failure, p_present=1.0 - failure,
                                 source="uniform_fallback", reasons={n.id: "" for n in nodes},
                                 raw_reply=raw_reply, spread=0.0)
 
@@ -462,7 +467,7 @@ class SearchNodeOracle:
         values = list(probs.values())
         reading = {key: str(reply[key])[:200] for key in ("home", "storey")
                    if isinstance(reply, dict) and isinstance(reply.get(key), str) and reply[key].strip()}
-        return NodeOracleResult(probs=probs, elsewhere=elsewhere, p_present=float(sum(values)),
+        return NodeOracleResult(probs=probs, elsewhere=elsewhere, p_present=1.0 - elsewhere,
                                 source="llm", reasons=reasons, raw_reply=reply if isinstance(reply, dict) else None,
                                 spread=float(max(values) - min(values)) if values else 0.0, omitted=omitted,
                                 reading=reading)

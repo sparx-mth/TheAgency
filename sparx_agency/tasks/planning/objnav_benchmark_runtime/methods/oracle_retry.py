@@ -25,9 +25,10 @@ class RepairingNodeOracle(SearchNodeOracle):
         self.repair_attempts += 1
         user = self.prompt(target, nodes, context)
         user += ('\nYour previous answer did not satisfy the schema. Return exactly '
-                 '{"nodes":[{"id":0,"why":"brief reason","p":50}, ...],"elsewhere":10} '
+                 '{"nodes":[{"id":0,"why":"brief reason","p":50}, ...]} '
                  'with one entry per actual node id from the input (not the example id), '
-                 'integer p values that sum with elsewhere to 100, and nothing outside the JSON object.')
+                 'independent integer p values in 0-100 (do not normalise across nodes), '
+                 'and nothing outside the JSON object.')
         reply, repaired = None, None
         try:
             reply = self.ask(user)

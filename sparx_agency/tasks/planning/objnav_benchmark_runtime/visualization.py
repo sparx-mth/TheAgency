@@ -10,6 +10,7 @@ import numpy as np
 from sparx_agency.tasks.mapping.scene_graph.viz_canvas import compute_extent, world_to_px
 from sparx_agency.tasks.mapping.scene_graph.viz_render import render_scene
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import render_search_panel
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES
 
 FRAME_SIZE = (1600, 900)
 #: The right-hand side of the frame: floor maps, then the search column.
@@ -71,6 +72,11 @@ def search_snapshot(policy):
                  "arrived_by": building.arrived_by, "active_portal": building.active["id"] if building.active else None,
                  "selected_by": building.active.get("selected_by") if building.active else None}
     return {"target": policy.target.query, "p_present": graph.p_present, "elsewhere": max(0.0, 1.0 - graph.p_present),
+            "probability_model": "independent_search_success",
+            "accessible_frontiers": [list(goal.xy) for goal in graph.frontier_inventory.goals]
+            if graph.frontier_inventory is not None else [],
+            "warmup": {"actions": getattr(policy, "warmup_actions", 0), "budget": policy.settings.warmup_steps},
+            "doorway_peek": policy.peek.diagnostics() if hasattr(policy, "peek") else {},
             "reading": dict(graph.last_reasoning.get("oracle", {}).get("reading", {})),
             "floor_id": policy.mapping.floor_id,
             "supervisor_state": supervisor.state if supervisor is not None else "?",
@@ -148,6 +154,8 @@ def method_snapshot(policy):
     stair_boxes = list(getattr(building, "last_sightings", ()) or ()) if building is not None else []
     atlas = building.policy.mapping.atlas.diagnostics() if building else {}
     state = hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting")
+    if getattr(policy, "_action_owner", None) in SUSPENDED_PHASES:
+        state = policy._action_owner
     if building and building.phase != "SEARCH":
         state = building.phase
     return {"state": state, "floor_id": getattr(getattr(policy, "mapping", None), "floor_id", 0),
@@ -222,6 +230,8 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
         state = visual_state(policy, observation, trail)
         panel = render_scene(state, size=MAP_PANEL, map_panel_w=MAP_PANEL[0])
         extent = compute_extent(state, None, MAP_PANEL)
+        for goal in search.get("accessible_frontiers", ()):
+            cv2.drawMarker(panel, world_to_px(extent, MAP_PANEL, *goal), (255, 120, 0), cv2.MARKER_DIAMOND, 7, 1)
         points = [world_to_px(extent, MAP_PANEL, *xy) for xy in snapshot.get("planned_path", ())]
         if len(points) >= 2:
             cv2.polylines(panel, [np.asarray(points, np.int32)], False, (255, 180, 0), 2, cv2.LINE_AA)

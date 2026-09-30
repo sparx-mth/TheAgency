@@ -44,9 +44,9 @@ class FalconObjectNav:
         self.recovery_phase = EXPLORE
         self.nonlocal_failures = {TRANSIT: 0, VERIFY: 0}
 
-    def plan(self, observation, world, confirmed):
+    def sync_floor(self, observation, world):
+        """Restore floor-local geometry before either discovery or local planning."""
         p, m = self.policy, self.machine
-        m.check_limits()
         if self._floor != p.mapping.floor_revision:
             m.end("floor_change")
             self._floor_states[self._floor_id] = (self.regions, self.explorer, self.routes)
@@ -63,6 +63,11 @@ class FalconObjectNav:
             m.resume_phase = None
             m.transition(TRANSIT, "settled floor entry; persistent geometry restored")
             self._begin(observation, world)
+
+    def plan(self, observation, world, confirmed):
+        p, m = self.policy, self.machine
+        m.check_limits()
+        self.sync_floor(observation, world)
         self.explorer.observe(world)
         self.cost = self.motion.update(observation, world)
         if self.regions.anchor is None and m.burst is None:
@@ -153,7 +158,9 @@ class FalconObjectNav:
             self._burst_recorded = m.burst.token
         started = time.monotonic()
         try:
-            p.graph.update(world, p.landmarks.confirmed(), p.target, doors=p.doors.confirmed(), step=obs.step, reason=False)
+            p.graph.update(world, p.landmarks.confirmed(), p.target, doors=p.doors.confirmed(), step=obs.step, reason=False,
+                           cost=p.navigation_cost(world), here_xy=(obs.pose.x, obs.pose.y), yaw=obs.pose.yaw,
+                           ranking=p.sweep.settings.ranking)
             p.graph.reason(world, p.target, obs.step)
         except Exception as exc:
             # Existing bounded HTTP retries/schema repair remain authoritative.
@@ -165,7 +172,36 @@ class FalconObjectNav:
             p.telemetry.latencies["room_reasoning"].append((time.monotonic() - started) * 1000)
         m.transition(SELECT, "accumulated room evidence refreshed")
 
-    def _select(self, obs, world):
+    def reconsider(self, obs, world):
+        """Synchronous event reasoning; retain an unchanged task and its burst."""
+        p, m = self.policy, self.machine
+        p.loop._reason(obs, world)
+        self.cost = self.motion.update(obs, world)
+        current = self.selected[0] if m.phase == TRANSIT and self.selected is not None else self.regions.room_id
+        goals, _ = self.regions.room_goals(world, self.cost, p.graph.registry.rooms, obs.pose, m.actions,
+                                          retain_room_id=current)
+        if not goals:
+            return
+        instance, _ = build_instance(world, self.cost, goals, p.graph.probs,
+                                     depot_xy=(obs.pose.x, obs.pose.y),
+                                     cruise_speed_mps=p.episode.action_spec.forward_step_m / p.settings.action_time_s)
+        total = sum(p.graph.probs.get(pid, 0.0) for pid in goals)
+        candidates = [RoomCandidate(room_id=pid, label="observed", prob=p.graph.probs.get(pid, 0.0),
+                                    prob_renorm=p.graph.probs.get(pid, 0.0) / total, xy=xy)
+                      for pid, xy in sorted(goals.items())] if total > 0 else []
+        order = p.solver(candidates, instance)
+        if order and order[0] == current:
+            data = asdict(p.solver.last)
+            p._solver_records.append({k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in data.items()})
+            return
+        m.end("semantic_replan")
+        if m.burst is not None and m.burst.token != self._burst_recorded:
+            self.regions.finish(m.burst.reason, m.actions, self.gain)
+            self._burst_recorded = m.burst.token
+        m.transition(SELECT, "doorway or off-route room evidence")
+        self._select(obs, world, order)
+
+    def _select(self, obs, world, preselected=None):
         p, m = self.policy, self.machine
         try:
             goals, histories = self.regions.room_goals(world, self.cost, p.graph.registry.rooms, obs.pose, m.actions)
@@ -179,7 +215,7 @@ class FalconObjectNav:
             candidates = [RoomCandidate(room_id=pid, label="observed", prob=p.graph.probs.get(pid, 0.0),
                                         prob_renorm=p.graph.probs.get(pid, 0.0) / total, xy=xy)
                           for pid, xy in sorted(goals.items())] if total > 0 else []
-            order = p.solver(candidates, instance)
+            order = p.solver(candidates, instance) if preselected is None else preselected
             if p.solver.last is not None:
                 data = asdict(p.solver.last)
                 p._solver_records.append({k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in data.items()})

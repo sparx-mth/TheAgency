@@ -1,8 +1,8 @@
 """The search panel of the ObjectNav dashboard: what the loop believes, and what it will do next.
 
 One column beside the floor maps that reads, top to bottom, like the loop's
-own reasoning: the target and how the oracle split its mass between the
-listed nodes and "elsewhere"; the RPT* visit order with the node it is
+own reasoning: independent node success estimates and their joint-failure
+approximation; the RPT* visit order with the node it is
 heading to; every room with its type, the oracle's probability and its
 reason, frontier left, time spent and the objects seen in it; every
 staircase offered with its probability, direction, the storey beyond and the
@@ -69,9 +69,16 @@ def _name(node):
 
 def _header(col, search):
     col.line("TARGET: %s" % search.get("target", "?"), CYAN, bold=True)
-    col.line("P(some node) %s | elsewhere %s | floor F%s | %s" % (
+    col.line("P(any success) %s | all fail %s | F%s | %s" % (
         _fmt(search.get("p_present"), 2, 4).strip(), _fmt(search.get("elsewhere"), 2, 4).strip(),
         search.get("floor_id", "?"), search.get("supervisor_state", "?")), GREY)
+    warmup = search.get("warmup") or {}
+    peek = (search.get("doorway_peek") or {}).get("active")
+    if warmup and warmup.get("actions", 0) < warmup.get("budget", 0):
+        col.line("WARM-UP %d/%d actions" % (warmup["actions"], warmup["budget"]), AMBER)
+    if peek:
+        col.line("PEEK R%d: %s" % (peek["room"], peek["phase"]), AMBER)
+    col.line("Accessible frontiers: %d (blue diamonds)" % len(search.get("accessible_frontiers", ())), GREY)
     floor = search.get("floor") or {}
     if floor:
         col.line("building: %s | arrived by stairs %s | active portal %s (%s)" % (
@@ -108,7 +115,7 @@ def _order(col, search):
 
 
 def _rooms(col, search):
-    col.line("ROOMS  id type            p     F   s  ago", CYAN, bold=True)
+    col.line("ROOMS  id type            p   F(access) s ago", CYAN, bold=True)
     for room in search.get("rooms", ())[:10]:
         label = (room.get("label") or "?")[:14]
         if room.get("strength") == "weak":

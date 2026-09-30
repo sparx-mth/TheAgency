@@ -56,10 +56,67 @@ The floor tracker remains ROS-free in `core/planning/exploration/floor_atlas.py`
 Host-side numpy/scipy terrain processing does not enter the Noetic exploration
 facade. No robot's flight controller is changed.
 
+## Episode discovery and doorway inspection
+
+Both explorers start with **`RPTSettings.warmup_steps=10`** emitted discovery
+actions before normal room selection. RGB-D, YOLO, object confirmation and
+scene-graph geometry remain synchronous on every frame. Warm-up uses reachable
+floor-wide frontier gain/geodesic/heading utility; with no usable frontier yet,
+a bounded turn acquires another view. Target pursuit and committed stair safety
+take priority. Warm-up is episode-local, not repeated on each floor. Early peek
+actions count toward it; the first global room decision waits for its completion.
+
+**`RPTSettings.doorway_peek.enabled=true`** enables opportunistic inspection.
+Disable it with `"doorway_peek": {"enabled": false}` in the JSON passed through
+`--policy-config`; `"warmup_steps": 10` sets the mandatory positive warm-up budget.
+These settings are included in the frozen method configuration.
+
+For a new, unentered room within **3 m of reachable travel**, the policy plans
+to a clearance-safe threshold just inside its observed mask (inset by the action
+converter's arrival tolerance). Confirmed door landmarks constrain that entry;
+without a confirmed door, an observed reachable room boundary is used. It does
+not invent a route through a wall or unknown space. The robot aligns to one side
+of the room and sweeps **180 degrees of measured yaw** toward its interior.
+Duplicate plan calls and back-and-forth yaw jitter do not complete a scan.
+
+The previous route is isolated, not destroyed. Its local budget and timeout clocks
+pause during inspection and any necessary return transit. After the scan, room
+classification, node probabilities and RPT* run synchronously. If the old room
+stays first, its **remaining** exploration budget resumes; if another room wins,
+normal selection/arrival starts its local turn. New off-route rooms/object kinds
+also trigger synchronous reconsideration with peeks disabled. A retained task
+does not get a new ten-action allowance merely because evidence changed.
+
+Peeks are non-nesting and remembered per floor and geometric region, including
+modest room-ID changes and rooms already entered. Defaults: approach budget
+24 actions; return allowance 60 actions; scan budget at least 24 actions (scaled for small turn increments);
+failed-peek retry after 50 actions, at most two attempts per region. Invalidated
+rooms, blocked entries and stalled scans resume the search rather than spin.
+Target approach cancels inspection immediately; committed stair motion is never
+overridden. `doorway_peek`, `warmup`, phase and event diagnostics are recorded.
+
+ObjectNav's optional FALCON local burst also defaults to 10 actions; an explicit
+`falcon.burst_actions` override remains supported. Its specialized local planner
+and bounded region history remain distinct from the frontier explorer.
+
+**Accessible frontiers are one shared inventory**: passable known free space,
+robot clearance, connected reachability from the current pose, and safe frontier
+goal association. No distance horizon is mistaken for inaccessibility. The room
+LLM, room facts, entry selection, floor-wide discovery/fallback and dashboard use
+it. Unassigned frontiers remain exploration choices. Blue diamonds show all its
+goal representatives on the active floor. Retired/reached goals are a separate
+action-selection filter, not falsely declared geometrically inaccessible. Zero
+accessible frontiers does not prove complete semantic observation of a room.
+
+CPU regressions in `tests/test_discovery.py` and `tests/test_doorway_actions.py`
+cover startup, real action-converter entry/scan/return, budget preservation,
+target preemption, reachability, map changes, retries and synchronous reassessment.
+They are not measurements of detector/LLM accuracy or Habitat navigation success.
+
 ## The room-search loop (frontier explorer)
 
 `--explorer frontier` runs one explicit loop, with the scene graph maintained
-in the background on every action (`RPTSettings.graph_period_steps`, default 1):
+synchronously on every action (`RPTSettings.graph_period_steps`, default 1):
 room geometry, object→room association, confirmed doors, cumulative search
 time and remaining frontier clusters per room. No LLM call is part of that
 refresh.
@@ -98,11 +155,16 @@ refresh.
    down, whether the other storey was visited and what was found and
    searched there, whether the robot arrived by it -- plus one line on this
    storey and each other storey known. It answers, for each node, the
-   probability in percent that **going there next finds the target**, and
-   `elsewhere` for the mass in none of them; the reply is rescaled so the
-   shares make one and clamped below 1 for RPT*. Everything the search
+   probability in percent that **going there and searching finds the target**.
+   These are independent search-success estimates, **not mutually exclusive
+   location shares**, and are not restricted to the ten-action burst. Each is
+   converted to a fraction and clamped below 1, without cross-node normalisation.
+   RPT* uses multiplicative survival; the legacy `elsewhere` diagnostic now means
+   the product of failure probabilities, and `p_present` its complement. This is
+   an explicit independence approximation, not proof that real rooms are independent.
+   The current room may remain the best choice for successive bursts. Everything the search
    needs weighed is the model's to weigh, and the system prompt says how:
-   a type that rules the object out or a fully observed room reads 0-2; a
+   a type that rules the object out has low probability; a
    room searched long and recently reads low; a never-entered room of the
    right type is the best bet; an `unknown` room is an **exploration node**
    valued by its size, its frontier and the room types the target needs
@@ -134,8 +196,9 @@ refresh.
    much further away, which is exactly what the expected-time-to-find
    objective must see. The local budget is folded in as per-node service
    time; the order is re-solved at every loop point
-   (`ObjectSearchParams.resolve_on_release`), never per action. **Nothing
-   else decides a floor change**: no allowance, no clock, no storey prior.
+   (`ObjectSearchParams.resolve_on_release`) and on semantic discovery events,
+   not merely on a timer. Normal floor choices remain the LLM/RPT* decision;
+   the existing 40-action arrival-return guard and fallback rule still apply.
    When the order puts a staircase first the loop commits it to the
    building coordinator, which approaches the foot of the flight and
    climbs; the node's turn ends `traversed` the action the climb begins,
@@ -175,7 +238,7 @@ from 22 classifier calls in 60 actions to 5 with identical decisions).
 Every way the decision pipeline can fail lands in one place,
 `methods/exploration_fallback.py`, and comes out as a command that moves:
 
-1. the **nearest reachable frontier anywhere on the floor** -- not confined to
+1. the **highest-utility reachable frontier anywhere on the floor** -- not confined to
    the room in force, so a room whose routes all fail is left rather than
    spun in;
 2. the **stairs** by the explicit fallback rule (`floor_decision.py`:

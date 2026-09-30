@@ -578,6 +578,31 @@ class ObjectSearchSupervisor:
                                  arrived, frontier_exhausted, room_reclassified)
         return self._search(now, frontier_exhausted, budget_spent, room_reclassified)
 
+    def pause(self, seconds):
+        """Exclude an explicit inspection from task deadlines, never visit cooldowns."""
+        for name in ("_goal_s", "_plan_s_at_goal", "_search_end_s", "_frontier_low_s"):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, value + seconds)
+
+    def reconsider(self, rooms, now, instance):
+        """Revalue a semantic event, retaining the active task if RPT* still prefers it.
+
+        A retained SEARCH keeps its arrival deadline and local-budget owner.
+        A new head releases neutrally; the next SELECT consumes this fresh order.
+        """
+        candidates = self._eligible(rooms, now)
+        solver = self._solver if self._solver is not None else self._draw
+        order = tuple(int(pid) for pid in (solver(candidates, instance) or ())) if candidates else ()
+        self.stats["solver_calls"] += bool(candidates)
+        changed = bool(self._room_id is not None and (not order or order[0] != self._room_id))
+        state = (self._end_room(RECLASSIFIED, "new room evidence: order reconsidered", now)
+                 if changed else self._snapshot(Hold("retained task after new room evidence"), now))
+        self._candidates = candidates
+        self._order, self._order_index = order, 0
+        self._order_rooms = tuple(sorted(c.room_id for c in candidates))
+        return self._snapshot(state.action, now, completed=state.completed)
+
     def finish(self, verdict, note, now):
         # type: (str, str, float) -> ObjectSearchState
         """End the turn of the room in force with ``verdict``, outside a tick.

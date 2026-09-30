@@ -172,6 +172,8 @@ class FloorPanels:
                         (0, 220, 255) if active else (230, 230, 230), 1, cv2.LINE_AA)
             caption = "UNKNOWN" if slot["floor_id"] is None else "observed %d cells | search %.0fs" % (
                 np.count_nonzero(slot["grid"] >= 0), slot["search_time_s"])
+            if active and search:
+                caption += " | accessible frontiers %d" % len(search.get("accessible_frontiers", ()))
             cv2.putText(image, caption, (left + 8, top + panel_h - 13), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (210, 210, 210), 1)
         return image
 
@@ -222,6 +224,8 @@ class FloorPanels:
         not visit is a small dot, and a label that finds no free side is
         dropped rather than written over another.
         """
+        for goal in search.get("accessible_frontiers", ()):
+            cv2.drawMarker(canvas, pixel(goal), (255, 120, 0), cv2.MARKER_DIAMOND, 7, 1)
         nodes = {node["id"]: node for node in list(search.get("rooms", ())) + list(search.get("stairs", ()))
                  if node.get("centroid")}
         order = [nid for nid in search.get("order", ()) if nid in nodes]

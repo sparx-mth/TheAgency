@@ -10,6 +10,7 @@ from sparx_agency.core.mapping.topology.room_registry import RoomRegistry
 from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters, link_doors, door_room_pairs
 from sparx_agency.core.mapping.topology.room_watershed import segment_rooms_watershed, WatershedRoomParams
 from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, SearchNode, SearchNodeOracle
+from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
 from sparx_agency.core.planning.exploration.object_search_supervisor import RoomFacts
 from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
@@ -31,13 +32,12 @@ class ObservedSceneGraph:
             action: to confine in-room routes to the room in force and to
             credit frontier clusters to rooms by the same majority vote
             :attr:`facts` counts them with.
-        probs: ``{pid: P(going there next finds the target)}`` for the ROOMS,
-            from the last oracle round; unnormalised, they sum with
-            :attr:`stair_probs` to :attr:`p_present`.
+        probs: Independent per-room search-success estimates from the last
+            oracle round, never renormalised across the candidate nodes.
         stair_probs: The same for the staircase nodes the loop handed the
             oracle beside the rooms, keyed by their node ids.
-        p_present: Probability the target is reachable through SOME listed
-            node; ``1 - p_present`` is the oracle's ``elsewhere``.
+        p_present: Chance of some node succeeding under the RPT* independence
+            approximation; ``1 - p_present`` is the legacy ``elsewhere`` field.
     """
 
     def __init__(self, client, segmentation=None, label_settings=None):
@@ -53,6 +53,7 @@ class ObservedSceneGraph:
         self.last_reasoning = {}
         self.doors = []
         self.labels = None
+        self.frontier_inventory = None
         self._partition = None
         self.partition_revision = 0
         self.max_rooms = 0
@@ -114,7 +115,8 @@ class ObservedSceneGraph:
             self.last_reasoning["labels"][str(pid)] = self.label_tracker.metadata.get(pid, {})
         return before is None or before.label != after.label
 
-    def update(self, world, landmarks, target, doors=(), step=0, reason=True):
+    def update(self, world, landmarks, target, doors=(), step=0, reason=True,
+               cost=None, here_xy=None, yaw=0.0, ranking=None):
         doors = tuple(doors)
         cells = [world.world_to_grid(*door.xy) for door in doors]
         _, _, stats = segment_rooms_watershed(
@@ -135,6 +137,9 @@ class ObservedSceneGraph:
         counts = count_frontier_clusters(world.grid, pid_labels, min_cluster_cells=4)
         self.facts = {pid: RoomFacts(pid, counts.get(pid + 1, 0), self.searched.get(pid, 0.0), room.n_cells)
                       for pid, room in rooms.items()}
+        self.frontier_inventory = None
+        if cost is not None and here_xy is not None:
+            self.refresh_accessibility(world, cost, here_xy, yaw, ranking)
         self._objects = self._room_objects(world, pid_labels, landmarks)
         if not rooms:
             self.label_tracker.update({}, step, changed)
@@ -148,6 +153,14 @@ class ObservedSceneGraph:
             self.options = [RoomOption(room_id=pid, label=labels[pid].label if pid in labels else "unknown",
                                        prob=self.probs.get(pid, 0.0), xy=room.centroid)
                             for pid, room in rooms.items()]
+
+    def refresh_accessibility(self, world, cost, here_xy, yaw=0.0, ranking=None):
+        """One source of truth for accessible counts, planning goals and map markers."""
+        if self.labels is None:
+            return
+        self.frontier_inventory = accessible_frontiers(world, cost, self.labels, here_xy, yaw, ranking)
+        self.facts = {pid: replace(fact, frontier_clusters=len(self.frontier_inventory.by_room.get(pid + 1, ())))
+                      for pid, fact in self.facts.items()}
 
     def reason(self, world, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0):
         """Value every node from the observations so far, without inventing a partition change.

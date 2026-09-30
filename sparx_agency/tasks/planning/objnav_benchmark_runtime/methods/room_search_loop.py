@@ -204,6 +204,42 @@ class RoomSearchLoop:
         if self.policy.supervisor.state == SEARCH and self.room_id is not None:
             self.local_steps += 1
 
+    def reconsider(self, obs, world):
+        """A completed peek or new off-route semantic clue warrants a fresh decision.
+
+        Reusing the selected room preserves its local action counter. Switching
+        releases it neutrally; no visit cooldown punishes a useful new clue.
+        """
+        p, pose = self.policy, obs.pose
+        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+        stairs = self._stair_options(obs, world, cost)
+        self._reason(obs, world, stairs)
+        options = self._options(obs, world, cost, stairs)
+        instance = None
+        if options:
+            values = dict(p.graph.probs)
+            values.update(p.graph.stair_probs)
+            instance, dropped = build_instance(
+                world, cost, {o.room_id: o.xy for o in options}, values, depot_xy=(pose.x, pose.y),
+                cruise_speed_mps=p.episode.action_spec.forward_step_m / p.settings.action_time_s,
+                search_time_s=self.settings.local_steps * p.settings.action_time_s,
+                leaves={o.node_id: o.leaf_m for o in stairs})
+            self._record(instance, dropped, options)
+            options = [o for o in options if o.room_id in instance.index_to_pid]
+        calls = p.solver.calls
+        state = p.supervisor.reconsider(options, p._floor_time, instance)
+        if p.solver.calls != calls:
+            data = asdict(p.solver.last)
+            p._solver_records.append({k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in data.items()})
+        if state.completed is not None:
+            self._log(obs, "semantic_switch", room=state.completed[0], local_steps=self.local_steps)
+            self.room_id = None
+            self._entry = None
+            p.route_memory.clear("semantic_switch")
+            p._route = p._goal = None
+        self.order, self.order_index = tuple(state.order), 0
+        self._log(obs, "semantic_replan", order=list(self.order), retained=state.completed is None)
+
     # -- one action ---------------------------------------------------------
     def plan(self, obs, world):
         """The command for this action: in-room exploration, transit, or the exploration fallback."""
@@ -307,6 +343,7 @@ class RoomSearchLoop:
                     search_time_s=self.settings.local_steps * s.action_time_s,
                     leaves={o.node_id: o.leaf_m for o in stairs})      # the climb, on every arc touching the stairs
                 self._record(instance, dropped, options)
+                options = [o for o in options if o.room_id in instance.index_to_pid]
                 p.telemetry.latencies["room_selection"].append((time.monotonic() - started) * 1000)
         calls = p.solver.calls
         state = p.supervisor.update(                        # step 4 in SELECT
@@ -365,7 +402,8 @@ class RoomSearchLoop:
         if p._last_graph_step != obs.step:
             started = time.monotonic()
             p.graph.update(world, p.landmarks.confirmed(), p.target, doors=p.doors.confirmed(),
-                           step=obs.step, reason=False)
+                           step=obs.step, reason=False, cost=p.navigation_cost(world),
+                           here_xy=(obs.pose.x, obs.pose.y), yaw=obs.pose.yaw, ranking=p.sweep.settings.ranking)
             p.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
             p._last_graph_step, p._last_door_revision = obs.step, p.doors.revision
         started = time.monotonic()
@@ -439,8 +477,10 @@ class RoomSearchLoop:
         p = self.policy
         by_room = {}
         if self.settings.entry_frontier and p.graph.labels is not None:
-            by_room = frontier_goals_by_room(world, cost, p.graph.labels, (obs.pose.x, obs.pose.y),
-                                             obs.pose.yaw, p.sweep.settings.ranking)
+            inventory = p.graph.frontier_inventory
+            by_room = (inventory.by_room if inventory is not None else
+                       frontier_goals_by_room(world, cost, p.graph.labels, (obs.pose.x, obs.pose.y),
+                                              obs.pose.yaw, p.sweep.settings.ranking))
         self._entries, options = {}, []
         for option in p.graph.options:
             goals = p.sweep.admissible(obs, world, by_room.get(option.room_id + 1, ()))

@@ -145,9 +145,11 @@ class ExplorationFallback:
         if cost is None:
             cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
         ids, graph = passable_graph(cost)                    # one graph for the ranking and the relocation
-        ranked = ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
-                                       (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
-                                       ids=ids, graph=graph)
+        inventory = p.graph.frontier_inventory
+        ranked = (list(inventory.goals) if inventory is not None else
+                  ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
+                                        (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
+                                        ids=ids, graph=graph))
         admissible = p.sweep.admissible(obs, world, ranked)
         command = self._try_goals(obs, world, [g.xy for g in admissible])
         if command is not None:
