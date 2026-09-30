@@ -296,7 +296,8 @@ def build_instance(world: OccupancyGrid2D,
                    search_time_s: float = 0.0,
                    frontier_weight: float = 0.0,
                    frontier_counts: Optional[Mapping[int, int]] = None,
-                   p_clamp: float = P_CLAMP_DEFAULT
+                   p_clamp: float = P_CLAMP_DEFAULT,
+                   leaves: Optional[Mapping[int, float]] = None
                    ) -> Tuple[HppPtInstance, List[int]]:
     """Assemble the complete, finite, metric instance RPT* takes.
 
@@ -304,7 +305,10 @@ def build_instance(world: OccupancyGrid2D,
         world: The BEV grid, wrapped with the BEV's own occupancy values.
         cost: ``WeightedAStarPlanner2D.cost_for(world)[0]`` -- passed in so
             the matrix and the flown transit share one passable set.
-        centroids: ``{pid: (x, y)}`` room centres from the scene graph.
+        centroids: ``{pid: (x, y)}`` room centres from the scene graph --
+            or, for a node that stands for something beyond the map (a
+            staircase), the passable point on THIS map it is reached
+            through.
         probs: ``{pid: probability}`` from the LLM oracle. A pid absent here
             scores 0.0 rather than being dropped -- an unranked room is a
             room worth visiting last, not one that does not exist.
@@ -332,6 +336,17 @@ def build_instance(world: OccupancyGrid2D,
             heuristic divides by ``1 - p(v)``, and a scene graph with one
             room hands a sum-to-1 oracle vector straight to a division by
             zero.
+        leaves: ``{pid: metres}`` -- a node that hangs off its map point by
+            a corridor of this length, walked in AND out. A staircase is the
+            case: its point on this map is the foot of the flight, and the
+            node itself -- the other storey -- lies a flight plus the fixed
+            cost of a storey change beyond it, so every arc into it AND
+            every arc out of it back to this storey's rooms carries that
+            length. Charging it on every incident arc is what makes RPT*
+            see that going upstairs puts every room down here that much
+            further away. A leaf is a graph edge, so the matrix stays
+            metric: ``c'(u,w) = c(u,w) + l_u + l_w <= c(u,v) + l_u + l_v +
+            c(v,w) + l_v + l_w = c'(u,v) + c'(v,w)``.
 
     Returns:
         ``(instance, dropped_pids)``. Dropped covers both rooms with no
@@ -390,6 +405,11 @@ def build_instance(world: OccupancyGrid2D,
 
     units = "metres"
     C = np.array(sub, dtype=np.float64, copy=True)
+    if leaves:
+        leaf = np.array([max(0.0, float(leaves.get(nd.pid, 0.0))) if nd.pid >= 0 else 0.0
+                         for nd in kept_nodes], dtype=np.float64)
+        C = C + leaf[:, None] + leaf[None, :]
+        np.fill_diagonal(C, 0.0)
     if cruise_speed_mps and cruise_speed_mps > 0.0:
         C = C / float(cruise_speed_mps)
         units = "seconds"

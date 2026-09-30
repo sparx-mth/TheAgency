@@ -9,8 +9,75 @@ import numpy as np
 
 from sparx_agency.tasks.mapping.scene_graph.viz_canvas import compute_extent, world_to_px
 from sparx_agency.tasks.mapping.scene_graph.viz_render import render_scene
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import render_search_panel
 
 FRAME_SIZE = (1600, 900)
+#: The right-hand side of the frame: floor maps, then the search column.
+MAP_PANEL = (640, 720)
+SEARCH_PANEL = (320, 720)
+
+
+def search_snapshot(policy):
+    """What the room-search loop believes and intends, JSON-ready, for the panel and the trace.
+
+    Every node the loop can go to -- the rooms of the floor with the oracle's
+    probability, type, frontier, time searched and objects, and the
+    staircases it offered with their probability, direction and the storey
+    beyond -- plus the RPT* order, the node in force or in transit, the
+    objects by room, the oracle's ``elsewhere`` and the loop's last events.
+    Built from policy state only, so a frame and its ``steps.jsonl`` row
+    cannot disagree.
+    """
+    loop, graph, supervisor = (getattr(policy, name, None) for name in ("loop", "graph", "supervisor"))
+    if loop is None or graph is None:
+        return {}
+    world = getattr(policy, "last_world", None)
+    now = float(getattr(policy, "_floor_time", 0.0))
+    cooling = {pid for pid in graph.registry.rooms if supervisor is not None and supervisor.is_cooling(pid, now)}
+    reasons = graph.last_reasoning.get("oracle", {}).get("reasons", {})
+    rooms = []
+    for pid, room in graph.registry.rooms.items():
+        estimate = dict(loop.estimates.get(pid, {}))
+        info = graph.label_info(pid) or {}
+        fact = graph.facts.get(pid)
+        rooms.append({"id": pid, "kind": "room", "label": estimate.get("label") or info.get("label", "unknown"),
+                      "strength": estimate.get("strength", info.get("strength")),
+                      "prob": estimate.get("prob", graph.probs.get(pid)),
+                      "why": estimate.get("why") or reasons.get(pid, reasons.get(str(pid), "")),
+                      "frontier_clusters": None if fact is None else fact.frontier_clusters,
+                      "searched_s": None if fact is None else fact.time_in_room_s,
+                      "last_inside_step": graph.last_inside.get(pid),
+                      "objects": graph.objects_in(pid), "distance_m": estimate.get("distance_m"),
+                      "entry": estimate.get("entry"), "cooling": pid in cooling,
+                      "centroid": [float(v) for v in room.centroid]})
+    rooms.sort(key=lambda r: -(r["prob"] or 0.0))
+    stairs = []
+    for nid, option in sorted(loop._stairs.items()):
+        estimate = dict(loop.estimates.get(nid, {}))
+        stairs.append({"id": nid, "kind": "stairs", "label": option.node.label, "direction": option.node.direction,
+                       "prob": estimate.get("prob", graph.stair_probs.get(nid)),
+                       "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
+                       "destination_visited": option.node.destination_visited, "destination": option.node.destination,
+                       "arrived_by": option.node.arrived_by, "leaf_m": round(option.leaf_m, 2),
+                       "approach_m": round(option.approach.distance_m, 2), "distance_m": estimate.get("distance_m"),
+                       "portal_id": option.portal["id"], "centroid": [float(v) for v in option.approach.xy]})
+    objects = [{"id": lm.id, "class": lm.class_name, "count": lm.count, "xy": list(lm.xy),
+                "room": graph.room_at(world, lm.xy) if world is not None else None}
+               for lm in policy.landmarks.confirmed()] if hasattr(policy, "landmarks") else []
+    building = getattr(policy, "building", None)
+    floor = {}
+    if building is not None and building.ground_truth is not None:
+        floor = {"phase": building.phase, "spent": int(round(now / max(1e-6, policy.settings.action_time_s))),
+                 "arrived_by": building.arrived_by, "active_portal": building.active["id"] if building.active else None,
+                 "selected_by": building.active.get("selected_by") if building.active else None}
+    return {"target": policy.target.query, "p_present": graph.p_present, "elsewhere": max(0.0, 1.0 - graph.p_present),
+            "reading": dict(graph.last_reasoning.get("oracle", {}).get("reading", {})),
+            "floor_id": policy.mapping.floor_id,
+            "supervisor_state": supervisor.state if supervisor is not None else "?",
+            "room_in_force": loop.room_id, "local_steps": loop.local_steps, "local_budget": loop.settings.local_steps,
+            "order": list(loop.order), "order_index": loop.order_index, "next_room": loop.next_room,
+            "rooms": rooms, "stairs": stairs, "objects": objects,
+            "floor": floor, "events": list(loop.events[-6:])}
 
 
 def visual_state(policy, observation, trail):
@@ -76,6 +143,9 @@ def method_snapshot(policy):
     supervisor = getattr(policy, "supervisor", None)
     burst = hierarchy.machine.burst if hierarchy is not None else None
     building = getattr(policy, "building", None)
+    # The perfect stair detector's boxes ride beside the object detector's: a staircase is
+    # "detected" only in the frames it is actually in, and the overlay shows exactly those.
+    stair_boxes = list(getattr(building, "last_sightings", ()) or ()) if building is not None else []
     atlas = building.policy.mapping.atlas.diagnostics() if building else {}
     state = hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting")
     if building and building.phase != "SEARCH":
@@ -89,13 +159,15 @@ def method_snapshot(policy):
             "explorer": getattr(getattr(policy, "settings", None), "local_exploration", "unknown"),
             "burst_actions_left": max(0, hierarchy.params.burst_actions - burst.actions) if burst is not None else None,
             "planned_path": [[float(p.x), float(p.y)] if hasattr(p, "x") else list(p[:2]) for p in points],
-            "detections": boxes, "detector_ms": getattr(detector, "last_inference_ms", None),
+            "detections": boxes + stair_boxes, "detector_ms": getattr(detector, "last_inference_ms", None),
+            "stairs_seen": building.sightings.diagnostics().get("seen", []) if building is not None and hasattr(building, "sightings") else [],
             "objects": [{"id": lm.id, "class": lm.class_name, "xy": list(lm.xy), "count": lm.count}
                         for lm in policy.landmarks.all_landmarks()] if hasattr(policy, "landmarks") else [],
             "reasoning": graph.last_reasoning if graph is not None else {},
             "doors": policy.doors.diagnostics() if hasattr(policy, "doors") else {},
             "rooms": len(graph.registry.rooms) if graph is not None else 0,
-            "solver": str(solver.last.reason) if solver is not None else "not called"}
+            "solver": str(solver.last.reason) if solver is not None else "not called",
+            "search": search_snapshot(policy)}
 
 
 def _text(image, value, origin, width=115, lines=4, color=(230, 230, 230)):
@@ -105,9 +177,18 @@ def _text(image, value, origin, width=115, lines=4, color=(230, 230, 230)):
 
 
 def render_dashboard(policy, observation, trail, decision, episode_id, snapshot, final=False, floor_panels=None):
-    """RGB predictions, depth, persistent observed floors and actual decision reasons."""
+    """RGB predictions, depth, persistent observed floors, the search column and actual decision reasons.
+
+    Layout, left to right: the camera and depth; the floor maps (rooms and
+    stair nodes named and valued, the RPT* order drawn through them, the
+    next node ringed); the search column -- target, the oracle's split
+    between the nodes and elsewhere, the visit order, every room's
+    probability and reason, the staircases with the climb's cost, the
+    objects, the loop's last events.
+    """
     frame = np.full((900, 1600, 3), 20, np.uint8)
     action = "TERMINAL" if final else str(decision.get("action", "waiting"))
+    search = snapshot.get("search") or {}
     _text(frame, "%s | %s | target: %s | step %d | %s | floor %s | z %.2fm | levels %d | links %d" %
           (episode_id, snapshot.get("explorer", "unknown"), observation.target_category,
            observation.step, action, snapshot.get("floor_id", 0), observation.pose.z,
@@ -116,9 +197,12 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
     rgb = np.ascontiguousarray(observation.rgb[..., ::-1])
     for detection in snapshot.get("detections", ()) if not final else ():
         x1, y1, x2, y2 = (int(v) for v in detection["xyxy"])
-        cv2.rectangle(rgb, (x1, y1), (x2, y2), (0, 220, 255), 2)
-        cv2.putText(rgb, "%s %.2f" % (detection["label"], detection["confidence"]),
-                    (x1, max(16, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 255), 1)
+        ground_truth = detection.get("source") == "ground_truth"
+        color = (60, 140, 255) if ground_truth else (0, 220, 255)        # orange for the perfect stair detector
+        cv2.rectangle(rgb, (x1, y1), (x2, y2), color, 2)
+        text = ("%s GT %.1fm" % (detection["label"], detection.get("distance_m", 0.0)) if ground_truth
+                else "%s %.2f" % (detection["label"], detection["confidence"]))
+        cv2.putText(rgb, text, (x1, max(16, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     frame[40:520, :640] = cv2.resize(rgb, (640, 480))
     depth = observation.depth_m
     finite = np.isfinite(depth) & (depth > 0)
@@ -132,15 +216,17 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
           (snapshot["state"], snapshot["room_id"], len(snapshot["detections"]), len(snapshot["objects"]),
            snapshot.get("rooms", 0), snapshot.get("doors", {}).get("confirmed", 0)), (332, 563), width=37, lines=6)
     if floor_panels is not None:
-        panel = floor_panels.render(snapshot.get("floor_id", 0), snapshot.get("planned_path", ()))
+        panel = floor_panels.render(snapshot.get("floor_id", 0), snapshot.get("planned_path", ()), size=MAP_PANEL,
+                                    search=search)
     else:
         state = visual_state(policy, observation, trail)
-        panel = render_scene(state, size=(960, 720), map_panel_w=640)
-        extent = compute_extent(state, None, (640, 720))
-        points = [world_to_px(extent, (640, 720), *xy) for xy in snapshot.get("planned_path", ())]
+        panel = render_scene(state, size=MAP_PANEL, map_panel_w=MAP_PANEL[0])
+        extent = compute_extent(state, None, MAP_PANEL)
+        points = [world_to_px(extent, MAP_PANEL, *xy) for xy in snapshot.get("planned_path", ())]
         if len(points) >= 2:
             cv2.polylines(panel, [np.asarray(points, np.int32)], False, (255, 180, 0), 2, cv2.LINE_AA)
-    frame[40:760, 640:] = panel
+    frame[40:40 + MAP_PANEL[1], 640:640 + MAP_PANEL[0]] = panel
+    frame[40:40 + SEARCH_PANEL[1], 640 + MAP_PANEL[0]:] = render_search_panel(search, SEARCH_PANEL)
     transition = snapshot.get("transition") or {}
     camera = snapshot.get("camera", {})
     _text(frame, "pitch %.0f deg down | %s | connector %s | %s" % (

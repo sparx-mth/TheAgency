@@ -45,11 +45,15 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import (
     EXHAUSTED,
     FOUND,
     MAPPED,
+    NEUTRAL,
+    PRODUCTIVE,
+    RECLASSIFIED,
     SEARCH,
     SELECT,
     STALLED,
     TRANSIT,
     TRANSIT_TIMEOUT,
+    TRAVERSED,
     UNREACHABLE,
     FlyTo,
     ObjectSearchParams,
@@ -604,6 +608,96 @@ def test_arrival_beats_frontier_exhausted_in_transit():
                      last_plan_s=0.9, frontier_exhausted=True)
     assert out.state == SEARCH
     assert sup.stats["exhausted_in_transit"] == 0
+
+
+# -- the caller's room_reclassified exit -----------------------------------
+def test_room_reclassified_ends_a_search_turn_neutrally_and_may_choose_the_room_straight_back():
+    """A new kind of object re-identified the room and every node was re-estimated: re-solve."""
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=1.0, last_plan_s=0.9)
+    assert sup.state == SEARCH
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+                     last_plan_s=0.9, room_reclassified=True)
+    assert isinstance(out.action, Release)
+    assert out.action.verdict == RECLASSIFIED and out.completed == (1, RECLASSIFIED)
+    assert "re-identified" in out.action.note and "re-solved" in out.action.note
+    assert out.rooms_done == 0, "neutral: not a visit, not a failure"
+    assert sup.stats["reclassified"] == 1 and sup.stats["reclassified_in_transit"] == 0
+    assert sup._attempts.get(1) is None, "no attempt charged"
+    assert sup._is_cooling(1, 2.5), "cooled under the default verdict set, which cools everything"
+    loop_params = ObjectSearchParams(resolve_on_release=True,
+                                     cooldown_verdicts=tuple(v for v in ALL_VERDICTS if v not in NEUTRAL))
+    sup = supervisor(params=loop_params, solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=1.0, last_plan_s=0.9)
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0, last_plan_s=0.9, room_reclassified=True)
+    nxt = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=3.0, last_plan_s=0.9)
+    assert nxt.state == TRANSIT and nxt.action.room_id == 1, (
+        "the loop's setting: not cooled and re-solved, so the fresh order may put the same room straight back")
+    assert sup.stats["solver_calls"] == 2
+
+
+def test_room_reclassified_in_transit_releases_before_arrival():
+    """Re-identified on the way in: the order is re-solved before the room is entered."""
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3, r2=2), HERE, now=0.0, last_plan_s=0.0)
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=1.0,       # standing at R1's centre
+                     last_plan_s=0.9, room_reclassified=True)
+    assert isinstance(out.action, Release) and out.action.verdict == RECLASSIFIED
+    assert sup.stats["reclassified_in_transit"] == 1 and sup.stats["arrivals"] == 0
+    assert out.completed == (1, RECLASSIFIED)
+
+
+def test_frontier_exhausted_beats_room_reclassified_which_beats_budget_spent():
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
+    sup.update(TWO_ROOMS, facts(r1=3), (10.0, 0.0), now=1.0, last_plan_s=0.9)
+    out = sup.update(TWO_ROOMS, facts(r1=0), (10.0, 0.0), now=2.0, last_plan_s=0.9,
+                     frontier_exhausted=True, room_reclassified=True, budget_spent=True)
+    assert out.action.verdict == EXHAUSTED and sup.stats["reclassified"] == 0
+
+    sup = supervisor(solver=fixed_solver(1, 2))
+    sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
+    sup.update(TWO_ROOMS, facts(r1=3), (10.0, 0.0), now=1.0, last_plan_s=0.9)
+    out = sup.update(TWO_ROOMS, facts(r1=3), (10.0, 0.0), now=2.0, last_plan_s=0.9,
+                     room_reclassified=True, budget_spent=True)
+    assert out.action.verdict == RECLASSIFIED and sup.stats["budget_spent"] == 0
+
+
+def test_room_reclassified_is_ignored_outside_transit_and_search():
+    sup = supervisor(solver=fixed_solver(1, 2))
+    out = sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0, room_reclassified=True)
+    assert out.state == TRANSIT and sup.stats["reclassified"] == 0, "SELECT: no room in force to judge"
+
+
+def test_the_verdict_sets_are_consistent():
+    assert RECLASSIFIED in ALL_VERDICTS and RECLASSIFIED in NEUTRAL and RECLASSIFIED not in PRODUCTIVE
+    assert TRAVERSED in ALL_VERDICTS and TRAVERSED in PRODUCTIVE
+    params = ObjectSearchParams(cooldown_verdicts=tuple(v for v in ALL_VERDICTS if v not in (TRAVERSED,) + NEUTRAL))
+    assert TRAVERSED not in params.cooldown_verdicts and RECLASSIFIED not in params.cooldown_verdicts
+
+
+# -- finishing a node's turn from outside the tick: the stairs --------------
+STAIRS = 100_000
+
+
+def test_finish_ends_the_turn_in_force_with_traversed_and_resolves_the_order():
+    """The order put a staircase first; the climb began; the machine is not ticked again on this floor."""
+    rooms_and_stairs = rooms((1, 0.2, (10.0, 0.0)), (STAIRS, 0.6, (5.0, 0.0)))
+    sup = supervisor(params=ObjectSearchParams(resolve_on_release=True), solver=fixed_solver(STAIRS, 1))
+    out = sup.update(rooms_and_stairs, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)
+    assert out.state == TRANSIT and out.action.room_id == STAIRS
+    done = sup.finish(TRAVERSED, "stairs taken", now=4.0)
+    assert isinstance(done.action, Release) and done.action.verdict == TRAVERSED
+    assert done.completed == (STAIRS, TRAVERSED) and done.rooms_done == 1
+    assert sup.state == SELECT and sup.stats["finished"] == 1
+    assert sup._order == (), "resolve_on_release: the next SELECT asks the solver again"
+    assert sup.history[-1][:2] == (STAIRS, TRAVERSED)
+    idle = sup.finish(TRAVERSED, "nothing in force", now=5.0)
+    assert isinstance(idle.action, Hold) and sup.stats["finished"] == 1
+    with pytest.raises(ValueError):
+        sup.finish("climbed", "no such verdict", now=6.0)
 
 
 def test_cooldown_verdicts_can_leave_a_budget_spent_room_selectable():

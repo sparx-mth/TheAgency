@@ -20,17 +20,29 @@ Four states, and the reason there are exactly four:
   caller reporting that the room has nothing left to look at before the
   aircraft even got there (``frontier_exhausted``).
 * :data:`SEARCH` -- inside the room, mapping it under a per-room budget. It
-  ends five ways, and all five are needed (see :attr:`ObjectSearchParams
-  .search_timeout_s`). Two are the caller's: ``frontier_exhausted`` says its
+  ends six ways, and all six are needed (see :attr:`ObjectSearchParams
+  .search_timeout_s`). Three are the caller's: ``frontier_exhausted`` says its
   own goal generator has nothing reachable left in the room and its
-  look-around is done, ``budget_spent`` says its own action counter is up.
-  Both fire at once, because the caller read the live map or its own ledger
-  rather than the stale cluster count and the clock the other three exits
-  wait on. Without the first a discrete-action agent spends the whole stall
-  clock turning in place -- 52 of 472 actions in one Gibson recording.
+  look-around is done, ``budget_spent`` says its own action counter is up,
+  and ``room_reclassified`` says a new kind of object re-identified the room
+  and every node was re-estimated, so the order is stale. All three fire at
+  once, because the caller read the live map, its own ledger or its own
+  reasoning rather than the stale cluster count and the clock the other
+  three exits wait on. Without the first a discrete-action agent spends the
+  whole stall clock turning in place -- 52 of 472 actions in one Gibson
+  recording; without the third it sweeps a bathroom for a frying pan until
+  the budget says stop.
 * :data:`FOUND` -- the detector saw the target. Terminal, deliberately: the
   ``/target_seen`` latch never un-latches, so a resume path would be dead code
   that nobody could ever exercise.
+
+A node need not be a room. The room-search loop hands this machine a
+STAIRCASE as an option too -- an id far above every room pid, a probability
+the oracle gave the storey beyond it, and the passable point at its foot as
+``xy`` -- and the solver orders it with the rooms, charged for the climb.
+When the climb begins the caller ends that turn with :meth:`ObjectSearchSupervisor
+.finish` (:data:`TRAVERSED`), because from then on the building coordinator
+owns every action and this machine is not ticked on that floor again.
 
 **The solver is injected, exactly as the random generator is.** It is called
 ``solver(candidates, instance) -> Sequence[int]`` and returns room ids in visit
@@ -85,6 +97,15 @@ EXHAUSTED = "exhausted"
 """The caller's own goal generator found nothing reachable left in the room and
 its look-around allowance is spent. Productive: the room was searched from where
 the aircraft stands, whatever the stale cluster count still says."""
+TRAVERSED = "traversed"
+"""The node was a staircase and the aircraft has started up (or down) it. The
+node's turn on THIS floor is over -- the search continues on the other one.
+Productive: the decision the node stood for was carried out."""
+RECLASSIFIED = "reclassified"
+"""The caller re-identified the room (a new kind of object named it) and
+re-estimated every node: the order the room came from is stale, so its turn
+ends for a fresh solve. Neither a success nor a failure -- the same room may
+be chosen straight back -- and so neither cooled nor counted as an attempt."""
 UNREACHABLE = "unreachable"
 """No route was ever produced to the room, or the planner refused the goal."""
 TRANSIT_TIMEOUT = "transit_timeout"
@@ -92,11 +113,14 @@ TRANSIT_TIMEOUT = "transit_timeout"
 BLOCKED = "blocked"
 """The follower reported itself blocked for too long on the way in."""
 
-PRODUCTIVE = (MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED)
-"""Verdicts that mean the room was actually visited and searched."""
+PRODUCTIVE = (MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED, TRAVERSED)
+"""Verdicts that mean the room was actually visited and searched, or the node's decision carried out."""
 
-ALL_VERDICTS = PRODUCTIVE + (UNREACHABLE, TRANSIT_TIMEOUT, BLOCKED)
-"""Every way a room's turn can end, productive or not."""
+NEUTRAL = (RECLASSIFIED,)
+"""Verdicts that end a turn for a re-plan: not a visit, not a failure, no attempt charged."""
+
+ALL_VERDICTS = PRODUCTIVE + NEUTRAL + (UNREACHABLE, TRANSIT_TIMEOUT, BLOCKED)
+"""Every way a room's turn can end, productive, neutral or not."""
 
 
 @dataclass(frozen=True)
@@ -420,7 +444,8 @@ class ObjectSearchSupervisor:
         self.history = []               # type: List[Tuple[int, str, float]]
         self.stats = dict(selections=0, transits=0, arrivals=0, mapped=0,
                           budget_spent=0, stalls=0, exhausted=0,
-                          exhausted_in_transit=0, plan_fails=0,
+                          exhausted_in_transit=0, reclassified=0,
+                          reclassified_in_transit=0, finished=0, plan_fails=0,
                           transit_timeouts=0, blocked=0, solver_calls=0)
 
     @property
@@ -456,12 +481,21 @@ class ObjectSearchSupervisor:
         self._order_index = 0
         self._order_rooms = ()
 
+    def is_cooling(self, room_id, now):
+        # type: (int, float) -> bool
+        """Whether ``room_id``'s turn ended too recently for it to be chosen again at ``now``.
+
+        Read-only, for an operator display that wants to say why a room is
+        not in the order; the machine's own selection uses the same test.
+        """
+        return self._is_cooling(room_id, now)
+
     # -- the tick ---------------------------------------------------------
     def update(self, rooms, facts=None, xy=None, now=0.0, last_plan_s=None,
                target_seen=False, instance=None, airborne=True,
                blocked_since=None, frontier_exhausted=False, route_failed=False,
-               arrived=False, budget_spent=False):
-        # type: (Sequence[RoomOption], Optional[Mapping[int, RoomFacts]], Optional[Tuple[float, float]], float, Optional[float], bool, Any, bool, Optional[float], bool, bool, bool, bool) -> ObjectSearchState
+               arrived=False, budget_spent=False, room_reclassified=False):
+        # type: (Sequence[RoomOption], Optional[Mapping[int, RoomFacts]], Optional[Tuple[float, float]], float, Optional[float], bool, Any, bool, Optional[float], bool, bool, bool, bool, bool) -> ObjectSearchState
         """Advance the search by one observation.
 
         Args:
@@ -503,6 +537,15 @@ class ObjectSearchSupervisor:
                 force is up -- its action counter, not this machine's clock.
                 Ends a :data:`SEARCH` turn at once with :data:`BUDGET_SPENT`;
                 ignored in every other state.
+            room_reclassified: The caller re-identified the room in force
+                (a new kind of object named it) and re-estimated every node
+                on the strength of it, so the order this room came from is
+                stale. Ends a :data:`SEARCH` turn at once with
+                :data:`RECLASSIFIED`, after ``frontier_exhausted`` (the truer
+                statement when both hold) and before ``budget_spent``; in
+                :data:`TRANSIT` it ends the turn BEFORE the arrival test. The
+                verdict is neutral: the next SELECT may choose the same room
+                straight back, and nothing is cooled or charged.
 
         Returns:
             The state, with the action to take on it.
@@ -532,8 +575,38 @@ class ObjectSearchSupervisor:
             return self._select(rooms, now, last_plan_s, instance)
         if self._state == TRANSIT:
             return self._transit(xy, now, last_plan_s, blocked_since, route_failed,
-                                 arrived, frontier_exhausted)
-        return self._search(now, frontier_exhausted, budget_spent)
+                                 arrived, frontier_exhausted, room_reclassified)
+        return self._search(now, frontier_exhausted, budget_spent, room_reclassified)
+
+    def finish(self, verdict, note, now):
+        # type: (str, str, float) -> ObjectSearchState
+        """End the turn of the room in force with ``verdict``, outside a tick.
+
+        For the one transition the tick cannot see: a staircase node whose
+        climb has BEGUN. From then on the building coordinator owns every
+        action and this machine is not ticked again on this floor, so the
+        caller ends the node's turn here with :data:`TRAVERSED` -- the turn
+        is over, the room set is re-solved on the next tick, and the floor's
+        saved state is clean when the aircraft comes back down.
+
+        Args:
+            verdict: One of :data:`ALL_VERDICTS`.
+            note: Human sentence, logged verbatim.
+            now: Monotonic seconds, the caller's clock.
+
+        Returns:
+            The state, with a :class:`Release` when a turn was in force and a
+            :class:`Hold` when nothing was.
+
+        Raises:
+            ValueError: On a verdict this machine does not know.
+        """
+        if verdict not in ALL_VERDICTS:
+            raise ValueError("no such verdict: %r" % (verdict,))
+        if self._room_id is None or self._state not in (TRANSIT, SEARCH):
+            return self._snapshot(Hold("nothing in force to finish"), now)
+        self.stats["finished"] += 1
+        return self._end_room(verdict, note, now)
 
     # -- the three working states -----------------------------------------
     def _select(self, rooms, now, last_plan_s, instance):
@@ -574,12 +647,20 @@ class ObjectSearchSupervisor:
             now, changed=True)
 
     def _transit(self, xy, now, last_plan_s, blocked_since, route_failed=False,
-                 arrived=False, frontier_exhausted=False):
-        # type: (Tuple[float, float], float, Optional[float], Optional[float], bool, bool, bool) -> ObjectSearchState
+                 arrived=False, frontier_exhausted=False, room_reclassified=False):
+        # type: (Tuple[float, float], float, Optional[float], Optional[float], bool, bool, bool, bool) -> ObjectSearchState
         """Hold the chosen room until arrival, a refused or dead planner, a clock or a wedge."""
         params = self.params
         distance = math.hypot(self._goal_xy[0] - xy[0], self._goal_xy[1] - xy[1])
         elapsed = now - self._goal_s
+        if room_reclassified:
+            # Re-identified on the way in, every node re-estimated: the order
+            # this room heads is stale. Re-solve before entering, not after.
+            self.stats["reclassified"] += 1
+            self.stats["reclassified_in_transit"] += 1
+            return self._end_room(
+                RECLASSIFIED, "R%d re-identified after %.1f s of transit -- the "
+                "order is re-solved" % (self._room_id, elapsed), now)
         if arrived or distance < params.arrival_tol_m:
             self._state = SEARCH
             self._search_end_s = now + params.search_timeout_s
@@ -632,8 +713,8 @@ class ObjectSearchSupervisor:
         return self._snapshot(
             Hold("flying to R%d, %.2f m to run" % (self._room_id, distance)), now)
 
-    def _search(self, now, frontier_exhausted=False, budget_spent=False):
-        # type: (float, bool, bool) -> ObjectSearchState
+    def _search(self, now, frontier_exhausted=False, budget_spent=False, room_reclassified=False):
+        # type: (float, bool, bool, bool) -> ObjectSearchState
         """Map the room under its budget, and decide when its turn is over."""
         params = self.params
         elapsed = now - self._goal_s if self._goal_s is not None else 0.0
@@ -656,11 +737,19 @@ class ObjectSearchSupervisor:
         # reason from a cluster count and a clock that lag the map. Exhausted
         # beats budget-spent because it is the truer statement: a room with
         # nothing left to look at is finished whatever the counter says.
+        # Reclassified sits between them: a room with nothing left is finished
+        # whatever it is called, and a room newly named is re-planned before
+        # its budget is spent on the old plan.
         if frontier_exhausted:
             self.stats["exhausted"] += 1
             return self._end_room(
                 EXHAUSTED, "R%d swept -- nothing reachable left to look at "
                 "after %.0f s" % (self._room_id, since_arrival), now)
+        if room_reclassified:
+            self.stats["reclassified"] += 1
+            return self._end_room(
+                RECLASSIFIED, "R%d re-identified after %.0f s -- the order is "
+                "re-solved" % (self._room_id, since_arrival), now)
         if budget_spent:
             self.stats["budget_spent"] += 1
             return self._end_room(
@@ -760,7 +849,7 @@ class ObjectSearchSupervisor:
             if verdict in PRODUCTIVE:
                 self._rooms_done += 1
                 self._attempts.pop(int(room_id), None)
-            else:
+            elif verdict not in NEUTRAL:
                 tries = self._attempts.get(int(room_id), 0) + 1
                 self._attempts[int(room_id)] = tries
                 if tries >= self.params.max_attempts:

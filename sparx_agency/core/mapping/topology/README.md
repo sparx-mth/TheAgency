@@ -79,7 +79,9 @@ decides whether to keep a stale label — nothing is cached on failure.
 - `room_classifier.py` — object list → room type via LLM.
   Legacy callers still cache by class set. Online callers can request
   `min_classes`, `count_sensitive=True` and `classify(..., refresh=True)` to
-  revise a label after more objects are observed or a region is resegmented.
+  revise a label after more objects are observed or a region is resegmented,
+  and `cached(classes)` to read a verdict already held for exactly that
+  evidence before deciding whether a call is worth buying.
   Refresh failures propagate without replacing the previous cache entry.
 - `search_oracle.py` — per-room target probabilities. The model is asked
   only when the prompt it would be shown has changed (room ids, labels,
@@ -88,6 +90,31 @@ decides whether to keep a stale label — nothing is cached on failure.
   reply against the fresh effort numbers instead of spending a call
   (`OracleResult.reused`, `SearchOracle.reuses`). A reply that fell back
   to uniform is never kept.
+- `search_node_oracle.py` — the successor of `search_oracle` for the
+  room-search loop, written for a capable model (the runtime routes it to
+  `LLMConfig.reasoning_model`). One call per loop point over every NODE the
+  search could go to next -- each room with its type (or `unknown`, an
+  exploration node; `kitchen?` when named from a single kind of object),
+  size, frontier left, time searched and how long ago, objects seen; each
+  staircase with its direction, whether the other storey was visited and
+  what was found there, whether the robot arrived by it -- asking for the
+  probability that going there NEXT finds the target, plus `elsewhere`. The
+  system prompt spells out the judgement (irrelevant type or fully observed
+  room → 0; searched long and recently → low; unknown rooms valued by size,
+  frontier and the room types still missing; a staircase by what this storey
+  turned out to be) and forbids reasoning about distance, which RPT*
+  charges. Code keeps only the contract: parse, drop invented ids, give an
+  omitted node a small share, rescale to one, clamp below 1, refuse a reply
+  with no usable node, reuse the reply when the prompt is byte-identical
+  (effort numbers are shown in coarse steps for that). `LLMClient.chat_json`
+  takes `reasoning=True` to select the reasoning model, its timeout, its
+  reply cap and its context window (`LLM_REASONING_MODEL`, default
+  `qwen2.5:14b-instruct`; `LLM_REASONING_TIMEOUT_S`; `LLM_REASONING_MAX_TOKENS`;
+  `LLM_REASONING_NUM_CTX` -- asked for explicitly because Ollama truncates an
+  outgrown window from the front, which would drop the system prompt).
+  `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
+  three scenarios against the live model and checks the reasoning, not just
+  the schema.
 - `target_matcher.py` — target-name matching: exact → cache → LLM →
   token-overlap fallback. The fallback rung is not implemented here: it
   delegates to `core/common/label_match.py`, which is the same rule the

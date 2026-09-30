@@ -13,8 +13,13 @@ raised, it produces a command that MOVES, in this order:
 
 1. the nearest reachable frontier anywhere on the floor -- not confined to
    the room in force, so the search leaves a room whose routes all failed;
-2. the building coordinator, when the floor is exhausted or its allowance
-   is spent: the ground-truth stairs (up or down, ``floor_decision``);
+2. the building coordinator, when the floor is exhausted: the ground-truth
+   stairs by the explicit fallback rule (up or down, ``floor_decision``).
+   The NORMAL way to the stairs is not this: the room-search loop offers
+   every staircase to the oracle and to RPT* as a node beside the rooms,
+   and climbs when the order says so. This rung is for the floor where that
+   machinery has nothing left -- the room LLM is away, or no node is worth
+   anything and the frontier is gone;
 3. frontiers already retired -- a goal retired for a transient plan failure
    is still unknown space;
 4. a relocation: the farthest reachable known cell, for a new vantage point

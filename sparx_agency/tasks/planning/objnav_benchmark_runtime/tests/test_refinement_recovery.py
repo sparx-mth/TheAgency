@@ -4,8 +4,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from sparx_agency.core.common.types import Pose2D
-from sparx_agency.core.mapping.topology.search_oracle import OracleRoom
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingSearchOracle
+from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, SearchNode
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingNodeOracle
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene import report
 
@@ -31,23 +31,23 @@ class Replies:
         self.items = iter(items)
         self.calls = 0
 
-    def chat_json(self, system, user):
+    def chat_json(self, system, user, **kwargs):
         self.calls += 1
         return next(self.items)
 
 
 def test_one_schema_repair_uses_existing_oracle_scoring():
-    client = Replies([{}, {"rooms": [{"id": 4, "score": 60, "why": "observed context"}]}])
-    oracle = RepairingSearchOracle(client)
-    result = oracle.probabilities("chair", [OracleRoom(4, "living_room")])
-    assert result.source == "llm" and result.probs == {4: 1.0}
+    client = Replies([{}, {"nodes": [{"id": 4, "p": 60, "why": "observed context"}], "elsewhere": 40}])
+    oracle = RepairingNodeOracle(client)
+    result = oracle.probabilities("chair", [SearchNode(4, ROOM, "living_room")])
+    assert result.source == "llm" and result.probs == {4: 0.6} and result.elsewhere == 0.4
     assert client.calls == 2 and oracle.repair_successes == 1
 
 
 def test_oracle_repair_is_bounded_and_does_not_invent_a_valid_answer():
     client = Replies([{}, {}])
-    oracle = RepairingSearchOracle(client)
-    assert oracle.probabilities("chair", [OracleRoom(4, "unknown")]).source != "llm"
+    oracle = RepairingNodeOracle(client)
+    assert oracle.probabilities("chair", [SearchNode(4, ROOM, "unknown")]).source != "llm"
     assert client.calls == 2 and oracle.repair_successes == 0
 
 

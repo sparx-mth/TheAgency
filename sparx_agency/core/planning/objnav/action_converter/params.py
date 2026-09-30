@@ -39,8 +39,16 @@ class ActionConverterParams:
             forever. One step by default: the policy places the last waypoint
             where it wants to stand, and 0.25 m is well inside every
             benchmark's success radius.
-        blocked_epsilon_m: A MOVE_FORWARD that moved the agent less than this
-            is reported as blocked.
+        blocked_epsilon_m: A MOVE_FORWARD that advanced the agent less than
+            this ALONG ITS HEADING is reported as blocked. Sideways skid does
+            not count: a simulator that slides the agent along a wall it
+            walked into (Habitat's ``allow_sliding``) moves it 4-9 cm along
+            the wall per step while it gains 1-3 cm forward, and a threshold
+            on total displacement never fires. A fifth of Habitat's step by
+            default: an unobstructed step advances the full 0.25 m, a graze
+            steeper than ~63 degrees off the wall's normal still advances
+            more than 5 cm and is progress, anything flatter is a blocked
+            step the policy must be told about.
 
     Raises:
         ObjNavError: If any value is not a positive finite number.
@@ -48,7 +56,7 @@ class ActionConverterParams:
 
     lookahead_m: float = 0.5
     goal_tolerance_m: float = 0.25
-    blocked_epsilon_m: float = 0.01
+    blocked_epsilon_m: float = 0.05
 
     def __post_init__(self) -> None:
         for name in ("lookahead_m", "goal_tolerance_m", "blocked_epsilon_m"):

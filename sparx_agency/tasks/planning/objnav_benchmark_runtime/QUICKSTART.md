@@ -104,12 +104,23 @@ Run the steps in this order. Steps 2.1–2.2 are long-running services: give eac
 
 ```bash
 CUDA_VISIBLE_DEVICES=-1 OLLAMA_HOST=127.0.0.1:11435 OLLAMA_MODELS="$MODELS/ollama" \
-OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_CONTEXT_LENGTH=4096 \
+OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_CONTEXT_LENGTH=8192 \
 OLLAMA_KEEP_ALIVE=30m OLLAMA_NO_CLOUD=1 ollama serve
 ```
-
-First time only, in another shell: `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`.
-Check: `curl -s http://127.0.0.1:11435/api/tags` lists the model.
+Two models serve the run -- `qwen2.5:3b-instruct` for the cheap, frequent room-type
+classification and `qwen2.5:14b-instruct` (9 GB, Q4_K_M) for the one node-oracle judgement
+per loop point -- so `OLLAMA_MAX_LOADED_MODELS=2` keeps both resident (~11 GB of RAM
+together) instead of reloading the 14B from disk at every loop point. First time only, in
+another shell:
+```bash
+OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct
+OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:14b-instruct
+```
+Check: `curl -s http://127.0.0.1:11435/api/tags` lists both. On a box where Ollama runs as
+the scene-graph stack's Docker container instead (`ollama-scene-graph`, CPU-only, port
+11434, models in a named volume -- the development laptop), the equivalents are
+`docker start ollama-scene-graph`, `docker exec ollama-scene-graph ollama pull
+qwen2.5:14b-instruct`, and `LLM_BASE_URL=http://127.0.0.1:11434` below.
 
 ### 2.2 Start the YOLO detector service (terminal 2, CPU only)
 
@@ -145,10 +156,23 @@ Omit `--multistory` for single-floor development starts (one episode per buildin
 
 ```bash
 export LLM_BACKEND=ollama LLM_BASE_URL=http://127.0.0.1:11435 LLM_MODEL=qwen2.5:3b-instruct LLM_TIMEOUT_S=120
+export LLM_REASONING_MODEL=qwen2.5:14b-instruct LLM_REASONING_TIMEOUT_S=600
 MANIFEST="$HOME/objnav_benchmark/multistory/episodes.json"
 RUN_FLAGS="--detector-url http://127.0.0.1:18095 --seed 17 --allow-sim-version-mismatch"
 ```
 
+`LLM_REASONING_MODEL`: the model the search's ONE judgement per loop point goes to
+-- the node oracle that values every room and staircase from the whole map (P(going
+there next finds the target) per node). A 3B model is not enough for it: it
+double-counts search effort into semantics and cannot weigh a staircase against an
+unknown room. `qwen2.5:14b-instruct` is the default and the one measured here: it
+follows the prompt's rules and answers a four-node prompt in about a minute on the
+laptop's CPU (32 threads, no GPU). `qwen2.5:32b-instruct` (~20 GB at Q4, several
+minutes per call) is better still but does not fit beside Habitat in 30 GB of RAM; use
+it on a box with more, or a hosted model via `LLM_BACKEND=openai`. Give the call a long
+`LLM_REASONING_TIMEOUT_S`: the search waits for the answer rather than running on a
+guess. Both models must be provisioned -- the health check looks for each and refuses
+to run otherwise; nothing falls back to the small model unannounced.
 `LLM_TIMEOUT_S=120`: the CPU model needs ~2 s per room in the prompt, and a building can have
 14 rooms. `--allow-sim-version-mismatch` acknowledges habitat-sim 0.2.4 against the protocol's
 reference 0.1.5. Add `--allow-shared-gpu` to `RUN_FLAGS` when GPU 0 also drives a desktop
@@ -221,6 +245,7 @@ Same services and flags; `gibson.run` reads the `val/` split and the original sc
 | `Reference habitat-sim is 0.1.5; installed '0.2.4'` | `--allow-sim-version-mismatch` |
 | `Requested LLM model ... is not provisioned` | `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`; check `LLM_BASE_URL` |
 | `Detector emission threshold hides door candidates` | restart the service with `--conf 0.05` |
+| `No working FFmpeg: set IMAGEIO_FFMPEG_EXE` (`--record`) | the resolver tries `PATH`, then `ffmpeg` beside the interpreter; a conda `ffmpeg` can be present yet unloadable (`libiconv.so.2` missing in `objnav-habitat`). Point `IMAGEIO_FFMPEG_EXE` at any ffmpeg with `libx264` (e.g. another conda env's) or `apt install ffmpeg` |
 | vocabulary / backend mismatch on `/health` | restart the service with `--classes "$VOCAB"` from `--print-vocabulary` and `--backend yolo_world` |
 | `Room oracle failed` in an episode | raise `LLM_TIMEOUT_S`; the run now keeps exploring through it (see `exploration_fallback` in the record) |
 

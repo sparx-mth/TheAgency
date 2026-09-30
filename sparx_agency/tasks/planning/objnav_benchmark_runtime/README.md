@@ -30,25 +30,27 @@ own frozen configurations; changed code does not relabel their outcomes.
 | Component | Responsibility |
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
-| `methods/room_search_loop.py` | The seven-step room-search loop: bounded, room-confined local exploration; re-classify → re-estimate → re-order at each loop point; transit to the chosen room's nearest frontier |
-| `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: nearest floor-wide frontier, the stairs, a retired frontier, a relocation -- a move, never an idle spin; failure records and service back-off |
+| `methods/room_search_loop.py` | The seven-step room-search loop: bounded, room-confined local exploration; re-classify → re-estimate → re-order at each loop point; transit to the chosen room's nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
+| `core/mapping/topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room and staircase -- P(going there next finds the target) per node plus "elsewhere" |
+| `methods/stair_nodes.py` | Staircases as nodes of the loop's RPT* instance: ids above every room pid, the facts the oracle values them by, the climb as a leaf charged on every arc |
+| `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: nearest floor-wide frontier, the stairs by the explicit fallback rule, a retired frontier, a relocation -- a move, never an idle spin; failure records and service back-off |
 | `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around |
 | `methods/camera_control.py` | Sole pitch owner; bounded inspection, long unprompted cadence and safe restoration |
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
-| `methods/multifloor_policy.py` | The building coordinator: portals per floor, when to change floors, arrival bookkeeping, both stair sources |
-| `methods/stair_ground_truth.py`, `floor_decision.py`, `ground_truth_traversal.py` | Ground-truth stairs (default): the navmesh connectors as the policy reads them, the explicit up/down choice with its recorded verdicts, and the polyline traversal |
+| `methods/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
+| `methods/stair_ground_truth.py`, `floor_decision.py`, `ground_truth_traversal.py` | Ground-truth stairs (default): the navmesh connectors as the policy reads them, the fallback rule's up/down choice (worth per metre of approach, flight and fixed change cost), and the committed polyline traversal |
 | `methods/stair_traversal.py`, `stair_terrain.py` | Observed stairs (`stair_source: "observed"`): RGB-D support surfaces, step-connected paths, native-heading safety checks and the committed transition lifecycle |
 | `gibson/stair_connectors.py` | Evaluator side: storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
 | `methods/falcon_policy.py`, `falcon_regions.py` | Bounded hierarchy and persistent local region history |
 | `methods/falcon_motion.py`, `falcon_routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
 | `methods/object_evidence.py` | Alias/frame deduplication, separated-view target evidence and bounded rejection |
-| `methods/scene_graph.py`, `room_labels.py`, `doors.py` | Observed rooms/doors, the room label image, and revisable accumulated room reasoning |
+| `methods/scene_graph.py`, `room_labels.py`, `doors.py` | Observed rooms/doors, the room label image, one-object (weak) and two-class (strong) room labels revised the action a new kind of object lands, the nodes handed to the oracle |
 | `methods/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
 | `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose |
-| `recording.py`, `floor_panels.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels, grids and video |
+| `recording.py`, `floor_panels.py`, `search_panel.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels with the rooms and visit order drawn on the active floor, the search column, grids and video |
 | `gibson/run.py`, `frozen_eval.py`, `run_development.py` | Protocol execution and frozen source/model/data checks |
-| `tests/trace_room_search_loop.py` | Development probe: the loop on the production map size with fake services and a crude route-following executor; not a test |
+| `tests/trace_room_search_loop.py` | Development probe: the loop on the production map size with fake services and the real action converter on a point agent; not a test |
 
 The floor tracker remains ROS-free in `core/planning/exploration/floor_atlas.py`.
 Host-side numpy/scipy terrain processing does not enter the Noetic exploration
@@ -71,22 +73,76 @@ refresh.
    crosses a door or takes the stairs (`LoopSettings.confine_routes`; lifted
    while the agent's own cell is outside the room, so a doorway or a moved
    mask cannot wall it out). The burst ends after `LoopSettings.local_steps`
-   actions (10) or when nothing reachable is left -- whichever first -- and
-   the supervisor is told so through its `budget_spent` / `frontier_exhausted`
-   exits on that same action.
+   actions (10), when nothing reachable is left, **or when the room is
+   re-identified** -- whichever first -- and the supervisor is told so
+   through its `budget_spent` / `frontier_exhausted` / `room_reclassified`
+   exits on that same action. The third exit is **the clue rule**: one
+   confirmed object names the room (`RoomLabelSettings.min_objects = 1`; a
+   single class is a *weak* label, shown to the oracle as `type=kitchen?`,
+   two or more confident classes a *strong* one), the classifier is re-asked
+   for the room in force or in transit **the action a new kind of object
+   lands in it** (`relabel` events; a second chair is not a clue, and a set
+   of kinds already judged is never bought twice), and a changed name ends
+   the room's turn as `reclassified` -- neutral: not cooled, no attempt
+   charged -- so that steps 2-4 run over the new fact. Whether a bathroom
+   is still worth sweeping for a frying pan is then the oracle's call, and
+   it says so with a probability of about zero; the sink first taken for a
+   kitchen is re-valued the action the toilet shows.
 2. **Global re-classification.** At the loop point `graph.reason` re-labels
    every known room from every confirmed object observed so far.
-3. **Per-room probability** -- the same call: the oracle's P(target in room ∧
-   search ends there) from remaining frontiers, cumulative search time and
-   room type. Distance enters through the RPT* objective, not the probability
-   (both would charge travel twice); the per-room record in
-   `room_search_loop.estimates` carries it. The oracle reuses the model's last
-   reply when the prompt it would show is byte-identical, re-applying the
-   code-side effort factors, so a loop point over an unchanged map costs no
-   call (`oracle_reuses` in the episode record).
-4. **Visit order** -- RPT* over the surviving rooms, with the local budget
-   folded in as per-room service time; the order is re-solved at every loop
-   point (`ObjectSearchParams.resolve_on_release`), never per action.
+3. **Probability per node** -- the same call, to
+   `core/mapping/topology/search_node_oracle.py`. The model is shown every
+   ROOM of the floor -- type or `unknown`, size, frontier clusters left,
+   time searched and how long ago it was last inside, objects seen, whether
+   the robot stands in it -- and every STAIRCASE off the floor -- up or
+   down, whether the other storey was visited and what was found and
+   searched there, whether the robot arrived by it -- plus one line on this
+   storey and each other storey known. It answers, for each node, the
+   probability in percent that **going there next finds the target**, and
+   `elsewhere` for the mass in none of them; the reply is rescaled so the
+   shares make one and clamped below 1 for RPT*. Everything the search
+   needs weighed is the model's to weigh, and the system prompt says how:
+   a type that rules the object out or a fully observed room reads 0-2; a
+   room searched long and recently reads low; a never-entered room of the
+   right type is the best bet; an `unknown` room is an **exploration node**
+   valued by its size, its frontier and the room types the target needs
+   that are still missing on this storey; a hallway with frontier is valued
+   by what it may lead to; a staircase is the whole set of rooms the other
+   storey may hold, read from what this storey turned out to be (a kitchen
+   and a living room make a ground floor, so the bedrooms are upstairs),
+   discounted when that storey was searched, and not taken straight back
+   when the robot has just come from it. It is told, twice, **never to
+   reason about distance**: travel is the planner's. This is the one
+   judgement per loop point the search cannot afford to get wrong, so the
+   runtime routes it to the LLM client's reasoning model
+   (`LLM_REASONING_MODEL`, default `qwen2.5:14b-instruct`, with its own
+   timeout and context window -- a 3B double-counts effort into semantics
+   and cannot weigh a staircase against an unknown room; the 14B follows
+   the rules and answers in ~25 s on the laptop's CPU once loaded) and
+   waits for it. The oracle
+   reuses the model's last reply when the prompt it would show is
+   byte-identical (effort numbers are shown in coarse steps for exactly
+   that), so a loop point over an unchanged map costs no call
+   (`oracle_reuses`). The per-node record in `room_search_loop.estimates`
+   carries the probability, the model's reason and the distance charged.
+4. **Visit order** -- RPT* over the surviving nodes, rooms and staircases
+   together (`methods/stair_nodes.py`). A room enters the instance at its
+   entry point; a staircase at the foot of the flight on this floor's map,
+   with a **leaf** as long as the flight plus `MultiFloorParams
+   .floor_change_cost_m` (8 m, about thirty actions) charged on every arc
+   into and out of it -- so going upstairs puts every room down here that
+   much further away, which is exactly what the expected-time-to-find
+   objective must see. The local budget is folded in as per-node service
+   time; the order is re-solved at every loop point
+   (`ObjectSearchParams.resolve_on_release`), never per action. **Nothing
+   else decides a floor change**: no allowance, no clock, no storey prior.
+   When the order puts a staircase first the loop commits it to the
+   building coordinator, which approaches the foot of the flight and
+   climbs; the node's turn ends `traversed` the action the climb begins,
+   and the floor's search resumes from a fresh estimate when the robot
+   comes back down -- with the way back up a node like any other, marked
+   `arrived_by`. The order and its head are kept on the loop (`order`,
+   `order_index`, `next_room`) for the recording and the dashboard.
 5. **A\*** -- the weighted planner behind `_navigate`.
 6. **Direct transit to the closest frontier inside the chosen room**
    (`LoopSettings.entry_frontier`); a room with no frontier left keeps a
@@ -100,12 +156,20 @@ refresh.
 Steps 2–6 run on the action a room's turn ends, so a released room is
 replaced by a transit at once -- never by a throwaway floor-wide route. A
 room whose budget ran out is **not** put on the visit cooldown (the fresh
-estimate may rightly send the agent straight back), while a room the live
-map says is finished (exhausted or mapped) is never repeated by the
-every-room-cooling escape hatch: the exploration fallback carries the search
-instead. `room_search_loop.events` in the episode record lists every
-transit, arrival and release with its verdict and local step count.
-
+estimate may rightly send the agent straight back), nor is a staircase
+whose climb began or a room released `reclassified`; a room the live map
+says is finished (exhausted or mapped) is never repeated by the
+every-room-cooling escape hatch: the exploration fallback carries the
+search instead. `room_search_loop.events` in the episode record lists every
+transit, arrival, relabel, release and `stairs_taken` with its verdict and
+local step count; `estimate_events` lists every oracle round with the nodes
+shown, `p_present`, `elsewhere` and whether the reply was reused.
+Runtime is not the constraint here, the judgement is: the oracle is asked
+once per loop point and the search waits for the answer. The cheaper calls
+stay bounded by construction: one classifier call per **new kind** of
+object per room, with a verdict for a set of kinds reused across the
+watershed's re-partitions rather than bought again (the trace probe went
+from 22 classifier calls in 60 actions to 5 with identical decisions).
 ## The exploration fallback: a failure is a move, not a spin
 
 Every way the decision pipeline can fail lands in one place,
@@ -114,8 +178,15 @@ Every way the decision pipeline can fail lands in one place,
 1. the **nearest reachable frontier anywhere on the floor** -- not confined to
    the room in force, so a room whose routes all fail is left rather than
    spun in;
-2. the **stairs** (the building coordinator's decision), when the floor is
-   exhausted or its allowance is spent;
+2. the **stairs** by the explicit fallback rule (`floor_decision.py`:
+   eligible, reachable now, storey worth visiting, worth per metre of
+   approach, flight and fixed change cost), when the floor is exhausted.
+   The normal way to the stairs is not this rung: the loop offers every
+   staircase to the oracle and to RPT* as a node beside the rooms and climbs
+   when the order says so. This is for the floor where that machinery has
+   nothing left -- the room LLM is away, or no node is worth anything and
+   the frontier is gone -- and a climb it makes is recorded
+   `rule: fallback`;
 3. a **retired frontier** -- a goal dropped for a transient plan failure is
    still unknown space;
 4. a **relocation** to the farthest reachable known cell, for a vantage point
@@ -210,6 +281,25 @@ bind slots without surveyed floor numbering. Each retains its full grid, objects
 and trail. Panels use one fixed observed-origin viewport/scale; full arrays are
 saved in `floor_maps.npz`. Display counts remain recorder-only, never in policy
 settings or episode knowledge. Unvisited slots have no inferred elevation.
+
+The dashboard frame (`visualization.render_dashboard`) reads, left to right:
+the camera with the detector's boxes and the depth; the floor maps, with every
+room of the active floor named and valued at its centroid (`1:R3 kitchen
+0.41` -- its place in the RPT* order, its id, its type, the oracle's probability), the
+order drawn as a chain through the centroids, the room in force ringed amber
+and the next node ringed green, a node the oracle values at nothing red, a
+staircase a square at the foot of its flight; and the **search column**
+(`search_panel.py`): the target and the oracle's split between the listed
+nodes and elsewhere, the RPT* visit order with its head (`S0` is a
+staircase), the room in force with its local step count or the node in
+transit, every room's type (a `?` marks a weak, one-object label), oracle
+probability and the model's reason, frontier left, time spent and when it
+was last inside, the objects seen in it, every staircase offered with its
+probability, direction, the climb's cost in metres and the storey beyond,
+the confirmed objects by room, and the loop's last events. All of it comes
+from `method_snapshot(policy)["search"]`, which is also written to every
+`steps.jsonl` row and, in short, to `live.json`, so the video and the trace
+cannot disagree.
 
 GT goals, topology, occupied cells, heights, distances and navmesh queries are
 evaluator-only. The policy gets RGB, metric depth, pose and public task/action

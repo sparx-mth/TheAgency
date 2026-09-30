@@ -6,6 +6,127 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **Stairs are known when they are SEEN** (`objnav_benchmark_runtime/methods/stair_sightings.py`):
+  a perfect stair detector replaces the connector list the policy used to be handed at reset. Each
+  navmesh connector's surface sample is projected into the current frame (`camera_geometry
+  .project_to_image`) and depth-tested against the depth image; six visible samples make a
+  sighting with a bounding box, drawn orange on the RGB overlay and carried in `detections` with
+  `source: ground_truth`, `distance_m`, `visible_points`. Only a seen staircase becomes a portal
+  (`portal_placed` with `seen_step`, `seen_from_m` and the sightings' `footprint`), an RPT* node
+  or the explanation of a height departure -- a raised bathroom floor is a bathroom floor, and a
+  staircase never in frame does not exist to the search (`height_departure_ignored: connector N
+  underfoot has never been seen`). `GroundTruthStairs.touching/nearest(..., among=seen)`,
+  `StairSightings` (first/last step, sightings, nearest distance, deduplicated footprint),
+  `building.stairs_seen` in the diagnostics.
+- Stair connectors rebuilt (`gibson/stair_connectors.py`): one connector per pair of ADJACENT
+  storeys (a stairwell serving three storeys is two connectors, not one 5.4 m flight through the
+  middle storey); the polyline is the flight's CENTRELINE -- one vertex per 0.2 m height band, the
+  band component that touches the previous band's -- with anchors on the flight's own line and a
+  verified flat EXIT point off each end (`bottom_exit_xyz`/`top_exit_xyz`); every leg is
+  stride-checked with `PathFinder.try_step` (the simulator's `move_forward`) and repaired through
+  the pathfinder only where a stride fails, legs under 0.3 m merged; `surface_xyz` (the detector's
+  sample), `walkability` counts and `traversable` (False when the flight joins two navmesh islands:
+  Hanson, Leonardo, Marstons, Shelbyville -- seen, never climbed) ride with each connector.
+- `tests/rollout_stairs_navmesh.py`: every connector of every scene climbed both ways on the real
+  navmesh by the real `GroundTruthTraversal` and `DiscreteActionConverter`, MOVE_FORWARD applied
+  with `try_step` and sliding. 29/29 traversable climbs complete, 25 with zero blocked steps;
+  island-split connectors reported SKIP. Exit 1 on any failed climb, so a campaign can gate on it.
+- `tests/test_stair_sightings.py`: the detector (in frame, hidden behind a nearer wall, half
+  hidden, behind the agent, beyond range, depth slack, polyline stand-in) and the sightings memory.
+- Floor maps (`floor_panels.py`): every SEEN staircase drawn where its treads were seen (footprint
+  dots, entry square, `S<n> up/down`); node labels only for the first six of the RPT* order plus the
+  node in force and the next, every other room a dot; labels placed on the first free side and
+  dropped rather than written over another; dark outline under every label; object dots smaller.
+  Panel title counts the stairs.
+### Changed
+- `GroundTruthTraversal` never skips a vertex: a tight aim blocked twice sends the agent BACK to the
+  last vertex it reached (`traversal_recovery`, `recoveries` in the diagnostics) and the route is
+  resumed from there; the route handed to the converter ends at the next bend (`BEND_RAD`, 35
+  degrees), so a landing corner is walked to, not cut by the half-metre lookahead; a vertex reached
+  from off to one side is led back THROUGH (`VIA_M`); reached means 0.26 m in plan view and 0.45 m
+  in height (`REACHED_XY_M`/`REACHED_Z_M`), replacing the 0.35 m sphere; the exit is the
+  connector's verified exit point, then a stub swung 45/90 degrees either side and never behind.
+  Pomaria's two flights: 40 actions each way, 0 blocked, in the probe and in the recorded run.
+- `MultiFloorParams.arrival_grace_actions` (40): the staircase the agent arrived by is withheld from
+  the loop's node list and from the fallback rule (`MultiFloorSearch.way_back_held`, `way_back_held`
+  event) until the new storey has been looked at -- the node oracle chose the way back on the
+  arrival action three times in one recording. Any other staircase is offered at once.
+- `floor_decision`/`stair_nodes` see only seen, traversable connectors; `test_room_search_loop
+  .stair_policy` marks the fixture's staircase seen.
+### Earlier in this cycle
+- ObjectNav node oracle (`core/mapping/topology/search_node_oracle.py`): the room LLM is now
+  asked ONE question per loop point over every node the search could go to next -- each room
+  (type or `unknown`, size, frontier left, time searched and how long ago, objects seen, whether
+  the robot stands in it) and each staircase (up/down, whether the other storey was visited and
+  what was found there, whether the robot arrived by it) -- for the probability, in percent,
+  that going there NEXT finds the target, plus `elsewhere`. The system prompt states the
+  judgement in full: an irrelevant type or a fully observed room reads ~0; a room searched long
+  and recently reads low; an `unknown` room is an exploration node valued by size, frontier and
+  the room types still missing; a hallway with frontier by what it leads to; a staircase by what
+  this storey turned out to be; and never by distance, which RPT* charges. Code keeps only the
+  contract (parse, drop invented ids, omitted nodes get a small share, rescale, clamp below 1,
+  refuse a reply with no usable node, reuse a byte-identical prompt's reply). `RepairingNodeOracle`
+  retries one malformed reply. `LLMClient` gains a REASONING route -- `LLM_REASONING_MODEL`
+  (default `qwen2.5:14b-instruct`, 9 GB at Q4, chosen to fit beside Habitat in 30 GB of RAM),
+  `LLM_REASONING_TIMEOUT_S` (600 s), `LLM_REASONING_MAX_TOKENS`, `LLM_REASONING_NUM_CTX` (8192,
+  requested explicitly because Ollama truncates an outgrown window from the front) -- for this
+  one call; the default model keeps the cheap, frequent ones; `VerifiedLLMClient` checks both are
+  provisioned. Runtime is not the constraint: the search waits for the answer. Measured on the
+  laptop's CPU container: ~25-30 s per call once loaded, ~75 s cold. `tests/probe_node_oracle.py`
+  runs three scenarios against the live model; the prompt was tightened on its first run (size
+  judged against the target's usual room -- a toilet's room is small; a known kitchen elsewhere
+  outweighs a room that might be one; an example that cannot be parroted).
+- Staircases as nodes of the RPT* order (`methods/stair_nodes.py`, `room_costs.build_instance
+  (leaves=...)`): every reachable, uncooled portal of the floor is a node beside the rooms, with
+  an id above every room pid, valued by the oracle, and sitting at the foot of its flight with a
+  LEAF of the flight's length plus `MultiFloorParams.floor_change_cost_m` (8 m) charged on every
+  arc into AND out of it -- so going upstairs puts every room down here that much further away
+  and the expected-time-to-find objective sees the cost of changing floors. When the order puts a
+  staircase first the loop commits it to the building coordinator (`MultiFloorSearch.commit`),
+  the climb begins at the foot and the node's turn ends `traversed` (`ObjectSearchSupervisor
+  .finish`); the way back down is a node like any other, marked `arrived_by`, with no cooldown.
+- The clue rule: one confirmed object names a room (`RoomLabelSettings` 1/1/1; a single class is
+  a *weak* label, shown to the oracle as `type=kitchen?`), the classifier is re-asked for the
+  room in force or in transit the action a NEW KIND of object lands in it (a verdict for a set of
+  kinds is reused across the watershed's re-partitions; 22 → 5 calls in the 60-action trace),
+  and a changed name ends the room's turn with the new neutral verdict `RECLASSIFIED`
+  (`room_reclassified` exit, in SEARCH or in TRANSIT before entering; not cooled, no attempt
+  charged) so the estimate and the order are redone over the new fact.
+- Committed ground-truth traversal (`methods/ground_truth_traversal.py`, `MultiFloorParams
+  .commit_failures/commit_stall_actions/confirm_actions`, `FloorAtlas.settle`): a blocked step
+  tightens the following to a straight line at the next vertex before any vertex is skipped;
+  turning back takes 12 blocked steps or 30 stalled actions; the transition budget no longer
+  turns the climb round; a storey the agent stands on at the far anchor is confirmed outright
+  after 24 actions when the plateau test cannot fire (`destination_forced`); a failed approach
+  is re-snapped and retried before the connector is deferred.
+- Dashboard search column (`objnav_benchmark_runtime/search_panel.py`, `visualization
+  .search_snapshot`, `floor_panels.render(search=...)`): the target and the oracle's split
+  between the nodes and elsewhere, the RPT* visit order with its head (`S0` a staircase), the
+  node in force or in transit, every room's type/probability/reason/frontier/time/objects, every
+  staircase's probability, direction, climb cost and storey beyond, the objects by room and the
+  loop's last events; rooms and stair nodes named and valued on the active floor map with the
+  order drawn through them and the next node ringed. The same block rides every `steps.jsonl`
+  row and `live.json`; `room_search_loop.estimate_events` records every oracle round.
+- Tests: `core/mapping/topology/tests/test_search_node_oracle.py`, the leaf test in
+  `test_room_costs.py`, `objnav_benchmark_runtime/tests/test_search_panel.py`, plus the
+  reclassify, stair-node, fallback-rule, commitment and forced-confirmation regressions in the
+  existing modules. `tests/trace_room_search_loop.py` drives the policy through the real
+  `DiscreteActionConverter` on a point agent.
+### Changed
+- **No step budget decides a floor change in ground-truth mode.** `floor_search_actions` is the
+  observed mode's allowance only; `floor_decision.py` is the exploration fallback's last resort
+  (`rule: fallback`), asked when the floor is exhausted and the loop has nothing to offer, and it
+  charges the climb through the same `stair_cost_m` as the RPT* leaf.
+- `ObjectSearchSupervisor`: `RECLASSIFIED` (neutral) and `TRAVERSED` (productive) verdicts,
+  `update(room_reclassified=...)`, `finish(verdict, note, now)`, `is_cooling()`; `NEUTRAL`
+  verdicts charge no attempt.
+- `ObservedSceneGraph.reason(..., extra_nodes, context, here_xy)`; `graph.probs` are the oracle's
+  find-probabilities unnormalised (they sum with `stair_probs` to `p_present`); `last_inside`
+  tracks when the agent was last in each room.
+- `RoomTypeClassifier.cached(classes)` reads a held verdict without a call.
+- `search_oracle.py` (the 3B-era per-room affinity oracle) is no longer used by the runtime; it
+  remains for the ROS scene-graph stack.
+### Earlier in this cycle
 - ObjectNav exploration fallback (`objnav_benchmark_runtime/methods/exploration_fallback.py`):
   every failure of the decision pipeline -- an A* with no path, an RPT* instance that cannot
   be built, a room LLM that times out or answers badly, a bug in the loop -- now ends in a

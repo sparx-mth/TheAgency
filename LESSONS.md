@@ -11,6 +11,131 @@ Format per entry:
 
 ---
 
+## 2026-09-30 — "Ground-truth stairs" meant a map of every staircase; it should have meant a perfect detector
+
+**Symptom:** With `stair_source=ground_truth` the Pomaria recording (`campaign-14b-20260929/campaign/
+frontier/Pomaria`, 000000, 500 actions) committed to the stairs at action 1 -- before the camera had
+ever had them in frame -- then paced 460 actions against a landing wall halfway up. Both Ranchester
+episodes committed to the only staircase within 16-43 actions and spent the rest of the episode
+"traversing" without ever standing on a tread. The user's brief was the opposite: stairs are known when
+they are SEEN, placed on the map where they are seen, and never assumed -- "not while I'm in the
+bathroom".
+
+**Root cause:** Four, layered:
+1. **The policy was handed the building's connector list at reset** and made every connector a portal
+   and an RPT* node on the first action. Knowledge of the stairs was a file, not a sighting.
+2. **One XY cluster per stairwell.** Pomaria's stairwell serves three storeys; the connector ran from
+   -2.66 m straight to +2.72 m, THROUGH the middle storey no connector touched. Its polyline was the
+   navmesh's string-pulled shortest path -- hugging the inner wall of every flight -- and the traversal's
+   "reached" test was a 0.35 m sphere, so at the first landing the cursor jumped from vertex 0 to 9 (the
+   flight above passes 0.3 m over the flight below) and the route aimed through the landing wall.
+3. **A blocked vertex was skipped.** On a staircase the polyline is the only way; skipping a vertex aimed
+   at the vertex after it through the same wall (Ranchester smoke: three skips, retreat, twice).
+4. **Anchors round a corner and hooks of 15 cm legs.** Where the floor meets the flight at an angle the
+   storey anchor sat round the stair-head corner; the pathfinder repair inserted a hook of 0.15-0.25 m
+   legs; the agent "reached" three of them at once from 0.3 m off and aimed at the fourth from beside the
+   centreline -- into the wall of a 0.5 m opening (Hanson, Coffeen).
+
+**Fix / workaround:** `methods/stair_sightings.py` -- a perfect detector: each connector's navmesh
+surface sample is projected into the frame (`project_to_image`) and depth-tested against the depth
+image; six visible samples make a sighting with a bounding box (drawn orange on the frame, carried in
+`detections` with `source: ground_truth`). Only a SEEN connector becomes a portal (`portal_placed`,
+with `seen_step` and the sightings' `footprint` the map draws), a node, or the explanation of a height
+departure (`height_departure_ignored: connector N underfoot has never been seen`). `gibson/
+stair_connectors.py` splits a stairwell at every storey (Pomaria: 2 connectors, 7.6 m each), walks the
+CENTRELINE (one vertex per 0.2 m band, the component chain that touches band to band), places anchors on
+the flight's own line, stride-checks every leg with `PathFinder.try_step` -- the simulator's own
+`move_forward` -- repairs through the pathfinder only where a stride fails, merges legs under 0.3 m, and
+finds a verified flat EXIT point off each end. `ground_truth_traversal.py` never skips: a blocked tight
+aim sends the agent back to the last vertex it reached; the route handed to the converter ends at the
+next bend (corner walked TO, not cut by the 0.5 m lookahead); a vertex reached from off to one side is
+led back THROUGH (`VIA_M`); `REACHED_XY_M` is 0.26 -- just over the converter's 0.25 m arrival, never
+wider. `tests/rollout_stairs_navmesh.py` climbs every connector of every scene both ways on the real
+navmesh with the real converter: 29/29 traversable climbs complete, 25 of them with zero blocked steps
+(Pomaria 4/4 in ~40 actions). In the real Pomaria run the flight was seen at action 7, committed at 9,
+climbed 25-69 with zero blocked steps and confirmed at 75.
+
+**How to see it next time:** `building.events` now reads as a story: `stairs_seen` (bbox, distance,
+`traversable`), `portal_placed` (`seen_step`, `footprint_points`), `traversal_recovery` (`back_to`),
+`way_back_held`. `rollout_stairs_navmesh.py --scene X --verbose` reproduces a climb headlessly in seconds;
+run it before any Habitat campaign that touches the stairs.
+
+**Don't:** Don't widen `REACHED_XY_M` to make vertices easier to reach -- the agent then leaves them from
+that far off, which is exactly the drift that hit the wall. Don't hand the converter the whole polyline
+past a bend. Don't let the observed map's A* replace the stride check: the navmesh IS the collision
+model. Don't treat an `unwalkable` leg as a tuning problem before checking `island_radius` at its ends.
+
+---
+
+## 2026-09-30 — Six "unwalkable" flights were navmesh islands, and two actions after arriving the agent went back down
+
+**Symptom:** After the centreline rewrite, `rollout_stairs_navmesh.py` still failed Hanson c0, Leonardo
+c0, Marstons c1/c2 and Shelbyville c0/c1 (12 blocked steps, retreat) although their treads were the
+middle of the flight. And in the first real Pomaria run with sightings, the agent confirmed the middle
+storey at action 75 and was descending the same flight at action 78.
+
+**Root cause:** (1) `PathFinder.island_radius` differs across the bad leg and `find_path` has no route:
+those storeys lie on DIFFERENT navmesh islands (0/40 random floor-to-floor paths in Hanson, Leonardo,
+Marstons, Shelbyville). `try_step` -- what Habitat applies to `move_forward` -- never crosses, so no agent
+can; they are mesh artifacts, not stairs. (2) On the new storey the map was two frames old: no rooms, no
+frontier; the exploration fallback read the floor as exhausted and its last resort -- the stairs -- had
+one candidate, whose entry the agent stood at (within the 0.65 m that starts a climb outright).
+
+**Fix / workaround:** A leg with no navmesh path between its ends marks the connector `traversable:
+False` (`walkability.disconnected`); it is still SEEN (bounding box, `stairs_seen` with `traversable:
+false`) but never a portal. The probe reports such connectors as SKIP, not FAIL. The staircase the agent
+arrived by is withheld from BOTH the loop's node list and the fallback rule for
+`MultiFloorParams.arrival_grace_actions` (40) after the arrival (`MultiFloorSearch.way_back_held`,
+`way_back_held` event): the second real Pomaria run showed the 14B node oracle -- told `arrived_by`,
+`arrived 0 s ago`, one tentative room -- choosing "stairs down" at 0.98 on the arrival action three times
+(78, 270, 493), each after a flawless climb, so 234 of 500 actions were spent on the stairs. A storey is
+looked at for the length of a climb before "not here" means anything; any OTHER staircase is offered at
+once, and walking onto the stairs by accident still completes the climb.
+
+**Don't:** Don't try to repair an island-split leg with a longer `path_between` or a wider snap -- there
+is no path. Don't make the grace a cooldown on the portal itself: `cooldown_until` is the failed-approach
+deferral and the arrival's own bookkeeping reads it. Don't make it long enough to trap the agent on a
+tiny storey either -- the fallback holds the way back too, and a floor that is genuinely exhausted at
+action 20 waits out the rest of the grace on `fallback_hold`; 40 is about one climb.
+
+---
+
+## 2026-09-29 — A per-action "relabel on new evidence" trigger asked the room LLM 22 times in 60 actions
+
+**Symptom:** The first clue-driven room relabel (re-ask the classifier for the room in force the
+moment its evidence changes) looked right in every unit test, and the headless trace probe showed
+identical navigation decisions -- and `label queries 22` in 60 actions, one classifier call every
+three actions. On the CPU service (1-2 s per call) that is half a second per action, silently.
+
+**Root cause:** Two multipliers, neither visible in a test that installs rooms by hand:
+1. The evidence signature is count-sensitive by design (`("bed", 3)` is not `("bed", 2)`: it once
+   told a bedroom from a living room), and the landmark map opens a NEW landmark whenever a
+   re-observed object projects more than the dedupe radius from its last centroid -- so the
+   count, and the signature, changed on most actions.
+2. The watershed re-partitions the floor as the map grows, and a re-partition clears every
+   per-room label cache on purpose (a cached label must not follow a pid onto a different
+   region). Every clear made every room "pending" again, and the classifier's own cache was
+   bypassed with `refresh=True` on every changed signature.
+
+**Fix / workaround:** The mid-visit clue is a new KIND of object, not a new count
+(`RevisableRoomLabels.pending`); a verdict for a set of kinds is kept and reused across
+re-partitions (`_kind_cache`), and a changed signature the classifier has already judged reads
+`RoomTypeClassifier.cached()` instead of buying it again -- the label is a function of the
+evidence, not of the region. Counts are still re-asked, at loop points, as before. 5 calls in the
+same 60 actions, identical decisions.
+
+**How to see it next time:** The trace probe prints `label queries`, `llm queries` and
+`affinity queries`; run it before and after any change that adds a model call to a per-action
+path, and read the counts, not just the decisions. `telemetry.latencies["room_relabel"]` carries
+the per-call cost in a real run.
+
+**Don't:** Don't judge an LLM trigger by unit tests with a fake model -- the fake answers in
+microseconds and the tests never re-partition. Don't clear the classifier's evidence→label
+cache with the per-room caches: the per-room cache is about WHICH region a label belongs to,
+the classifier's is about WHAT the evidence means, and only the first goes stale on a split.
+
+---
+
 ## 2026-09-22 — ObjectNav spent half its actions spinning, and the step log said why only once decoded
 
 **Symptom:** In the Ranchester Gibson recording (`runs/grounded_vlm_gibson_3x3_20260922T084950Z/

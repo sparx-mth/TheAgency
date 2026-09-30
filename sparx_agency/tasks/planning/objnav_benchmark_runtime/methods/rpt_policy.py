@@ -65,7 +65,17 @@ class RPTSearchPolicy:
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
                 "frontier_sweep": asdict(self.sweep_settings), "room_search_loop": asdict(self.loop_settings),
                 "exploration_fallback": asdict(self.fallback_settings),
-                "reasoning_cadence": "room LLM at loop points only; scene-graph geometry every %d action(s)"
+                "node_oracle": {"nodes": "rooms of the floor in force + its staircases",
+                                "asks": "P(going there next finds the target) per node, plus elsewhere",
+                                "route": "LLM_REASONING_MODEL", "cadence": "loop points; reused when the prompt is unchanged"},
+                "floor_change_decision": ("RPT* over rooms and stair nodes; a staircase is charged its flight plus "
+                                          "%.1f m on every arc; no allowance, no clock; the explicit floor_decision "
+                                          "rule is the exploration fallback's last resort"
+                                          % self.settings.multifloor.floor_change_cost_m)
+                if self.loop_settings.stairs_as_nodes and self.settings.multifloor.stair_source == "ground_truth"
+                else "exploration fallback only",
+                "reasoning_cadence": "room LLM at loop points only; scene-graph geometry every %d action(s); "
+                                     "one room re-labelled the action a new kind of object lands in it"
                                      % self.settings.graph_period_steps,
                 "camera_control": asdict(CameraControlSettings()), "perception_fusion": "coherent-depth/floor-qualified-v1",
                 "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
@@ -204,7 +214,7 @@ class RPTSearchPolicy:
         if self._last_pose is not None and math.dist((pose.x, pose.y), self._last_pose) > 0.05:
             self._blocked_since = None
         self._last_pose = (pose.x, pose.y)
-        self.graph.credit_time(world, pose, 0.0 if observation.step == 0 else s.action_time_s)
+        self.graph.credit_time(world, pose, 0.0 if observation.step == 0 else s.action_time_s, step=observation.step)
         if self.hierarchy is None and confirmed and self._target_xy is not None and math.dist((pose.x, pose.y), self._target_xy) <= s.stop_distance_m:
             return NavigationCommand.stop_here(info={"reason": "fresh multi-view-confirmed target", "target_confirmed": True})
         if observation.step - self._last_graph_step >= s.graph_period_steps or self.doors.revision != self._last_door_revision:

@@ -21,19 +21,75 @@ building coordinator then:
 
 - makes every connector touching the storey in force a portal on the first
   action, oriented from that storey (`+1` up / `-1` down; `stair_ground_truth.py`);
-- **decides explicitly** when the floor is exhausted or its allowance is spent
-  (`floor_decision.py`): eligible = not cooling; reachable now = entry anchor
-  snaps onto the observed passable map within 1.5 m, else re-checked in 10
-  actions; worth it = the other storey is unvisited, or visited with frontier
-  left; order = unvisited first, then nearest entry. Up or down falls out of the
-  connector chosen. Every call is a `floor_decision` event naming the winner,
-  its direction and each loser's verdict -- one record per distinct verdict;
+- **offers every portal to the room-search loop as a NODE** (`methods/stair_nodes.py`)
+  once its foot is on the observed passable map and it is not cooling after a
+  failed approach. The loop hands the staircase to the node oracle beside the
+  rooms -- up or down, whether the other storey was visited and what was found
+  and searched there, whether the robot arrived by it and how long ago -- and
+  the LLM answers the probability that going there next finds the target, in
+  the same distribution as the rooms. RPT* then orders rooms and staircases
+  together, the staircase sitting at the foot of its flight with a LEAF of the
+  flight's length plus `MultiFloorParams.floor_change_cost_m` (8 m, about
+  thirty actions -- the climb's turns, the settle and the exit stub) charged
+  on every arc into AND out of it, so going upstairs puts every room down
+  here that much further away. **Nothing decides a floor change by a clock:**
+  `floor_search_actions` is the observed mode's allowance only. When the order
+  puts a staircase first the loop calls `MultiFloorSearch.commit`; the
+  coordinator approaches the foot of the flight, starts the traversal there
+  and tells the loop (`stairs_taken`, verdict `traversed`), so the floor's
+  supervisor is clean when the robot comes back down and the way back up is
+  a node like any other (`arrived_by` in its facts, no cooldown). Events:
+  `portal_selected` with `solver_source: rpt_star`, `traversal_started` with
+  `selected_by`;
+- **keeps the explicit rule as the exploration fallback's last resort**
+  (`floor_decision.py`, `rule: fallback`): asked only when the loop has
+  nothing to offer -- the room LLM is away, or no node on the floor is worth
+  anything -- and the floor is exhausted. Eligible = not cooling; reachable
+  now = entry anchor snaps onto the observed passable map within 1.5 m
+  (`snap_entry`: the nearest passable cell with a clear Bresenham line to the
+  anchor through what the map knows -- unknown allowed, occupied not; the
+  Euclidean-nearest cell of a stair head is as likely in the room behind the
+  corridor's wall as in the corridor, and was, in the first recorded
+  campaign), else re-checked in 10 actions; worth it = the other storey is
+  unvisited, or visited with frontier left; score = worth per metre, worth 1.0
+  unvisited / 0.5 visited-with-frontier, cost = the walk to the entry plus the
+  same `stair_cost_m` the RPT* leaf uses. Every call is a `floor_decision`
+  event naming the winner, its direction, its score and each loser's verdict
+  -- one record per distinct verdict. A chosen connector whose approach cannot
+  be planned is re-snapped onto the passable map and retried
+  `approach_failures` (3) times before it is deferred; an approach that ENDS
+  short of the entry (more than 0.65 m from it) is re-snapped on the map as
+  it stands from there and extended while that brings the agent nearer
+  (`approach_extended` events), so the flight is walked from as close to its
+  foot as the observed map allows;
 - **walks the connector's own polyline** (`ground_truth_traversal.py`): a
-  FOLLOW command on every action, past the far anchor to step clear of the
-  stair head, or back down it on a stall/blockage; the atlas confirms the
-  storey only at the far anchor at the destination height. A spent retreat
-  never halts the episode -- it lets the atlas settle wherever the agent
-  stands and the search goes on;
+  FOLLOW command on every action, led in from where the agent stands -- the
+  first point of every command is the agent's position when its next vertex
+  was decided, held fixed until that vertex changes, so the converter's
+  forward-only progress runs along the lead-in first and can reach the far
+  leg of a folded flight (a U-shaped staircase's top anchor passes within a
+  metre of its bottom one in XY) only by walking there; past the far anchor
+  to step clear of the stair head; a vertex is reached within 0.35 m in three
+  dimensions (the flight above a switchback is a hand's breadth away in plan
+  view); the atlas confirms the storey only at the far anchor at the
+  destination height. **Once begun, a transition is finished**: a blocked
+  forward step first tightens the following to a straight line at the next
+  vertex (no lookahead to cut the corner into the banister the shortest path
+  grazes) and skips a vertex only when the tight aim fails twice; turning
+  back takes `commit_failures` (12) blocked steps or `commit_stall_actions`
+  (30) in which the distance still to walk along the route never shrank by
+  4 cm (displacement is not progress: an agent skidding along a wall moves
+  every action and gets nowhere), and the transition budget no longer turns
+  the agent round -- it lets the atlas settle wherever the agent stands while
+  the following goes on; at the destination height by the far anchor, the
+  storey is confirmed outright after `confirm_actions` (24) if the atlas's
+  translated-plateau test has not fired (`destination_forced` -- a landing
+  walled on three sides). A retreat goes back down the vertices walked and
+  then off the flight to where the approach ended -- or, when no vertex was
+  ever reached, straight to where the traversal began -- and the return is
+  settled the action it is reached rather than left to a plateau test an
+  agent turning on the spot never passes. A spent retreat never halts the
+  episode either;
 - **starts an unplanned transition only ON a connector**: a height departure
   beyond `departure_m` (0.45 m) within `near_connector_m` (0.75 m) of a
   polyline completes the climb in the direction already taken; any other
@@ -175,7 +231,10 @@ than mixing attempts. Runs are sequential and retain all episode outcomes.
 Outputs:
 
 - `index.html`: the five preselected episode videos (RGB detections, depth,
-  active-floor scene graph, route, executed floor trail, floor heights/links);
+  active-floor map with the rooms and stair nodes named and valued and the
+  RPT* order drawn through them, the search column -- visit order, next node,
+  per-node probability and the model's reason, the climb's cost, objects,
+  loop events -- route, executed floor trail, floor heights/links);
 - `RESULTS.md`, `statistics.json`: every outcome, SPL, action count, vertical
   range, observed floor/connection counts, native collisions and failures;
 - `campaign.json`, `locks/`: frozen job, source, model, sensor and data identities;
@@ -195,9 +254,17 @@ independent grids and target memory, paused floor clocks, coverage deduplication
 step-connected terrain versus cliffs, height-safe scoring and selective recording.
 `tests/test_stair_ground_truth.py` covers the navmesh reading on a synthetic
 two-storey house and the policy's orientation of connectors;
-`tests/test_ground_truth_floor_transitions.py` covers the explicit decision, the
-polyline traversal, the raised-floor and accidental-descent cases and the
-arrival that settles a new floor. The observed-mode stair tests in
+`tests/test_ground_truth_floor_transitions.py` covers the fallback rule (the
+climb charged, a dearer connector losing at equal worth, the approach sweep),
+the stair-node builder (ids, facts, leaf, the way back marked `arrived_by`,
+the storey summaries the prompt shows), the coordinator deciding nothing by a
+clock, `commit` and the climb ending the node's turn, the re-snapped approach,
+the polyline traversal and its commitment (tight following before a skip, many
+blocked steps before a retreat, the transition budget no longer turning the
+climb round, the forced confirmation at a boxed stair head), the raised-floor
+and accidental-descent cases and the arrival that settles a new floor;
+`tests/test_room_search_loop.py` covers the staircase as a node of the order
+end to end. The observed-mode stair tests in
 `tests/test_multistory_repair.py` select `stair_source: "observed"` explicitly.
 Actual simulator smoke tests remain necessary: synthetic tests alone cannot
 establish navigation success. The connector reading itself was checked against

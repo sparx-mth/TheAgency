@@ -141,20 +141,29 @@ class DiscreteActionConverter:
         self._recovering = False
 
     def forward_blocked(self, pose: AgentPose) -> bool:
-        """Whether the last MOVE_FORWARD failed to move the agent to ``pose``.
+        """Whether the last MOVE_FORWARD failed to advance the agent to ``pose``.
 
         The one definition of a blocked step: :meth:`step` reports it and
         recovers from it, and the headless agent tells the policy with it.
         Read-only, so asking before :meth:`step` changes nothing.
+
+        Progress is measured ALONG THE HEADING the step was emitted with, not
+        as total displacement: a simulator that slides the agent along a wall
+        (Habitat's ``allow_sliding``, the Gibson protocol's default) moves it
+        several centimetres sideways on a step that gained almost nothing
+        forward, and 285 such steps in a row once passed for progress against
+        a stair-well wall. Sideways skid is not progress; a step that gained
+        less than ``params.blocked_epsilon_m`` toward where it was aimed is
+        blocked.
 
         Args:
             pose: The agent's true pose now, before this step's decision.
 
         Returns:
             True when the last action this converter emitted was MOVE_FORWARD
-            and the agent is less than ``params.blocked_epsilon_m`` (3-D) from
-            the pose it was emitted at; False otherwise, and before the first
-            action.
+            and the agent advanced less than ``params.blocked_epsilon_m``
+            along the heading it had when the step was emitted; False
+            otherwise, and before the first action.
 
         Raises:
             TypeError: If ``pose`` is not an :class:`AgentPose`.
@@ -164,8 +173,9 @@ class DiscreteActionConverter:
         if self._last_action != DiscreteAction.MOVE_FORWARD:
             return False
         last = self._last_pose
-        moved = math.hypot(pose.x - last.x, pose.y - last.y, pose.z - last.z)
-        return moved < self._params.blocked_epsilon_m
+        advanced = ((pose.x - last.x) * math.cos(last.yaw)
+                    + (pose.y - last.y) * math.sin(last.yaw))
+        return advanced < self._params.blocked_epsilon_m
 
     def step(self, pose: AgentPose, command: NavigationCommand
              ) -> ConversionResult:

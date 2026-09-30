@@ -29,7 +29,7 @@ def test_a_failed_room_llm_hands_the_action_to_the_nearest_frontier_and_backs_of
     policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0))
     calls = []
 
-    def broken(world_, target, step):
+    def broken(world_, target, step, **kwargs):
         calls.append(step)
         raise RuntimeError("Room LLM failed: read timed out")
 
@@ -53,11 +53,11 @@ def test_a_recovered_room_llm_resets_the_back_off_and_the_loop_resumes_its_steps
     real = policy.graph.reason
     failures = {"left": 1}
 
-    def flaky(world_, target, step):
+    def flaky(world_, target, step, **kwargs):
         if failures["left"]:
             failures["left"] -= 1
             raise RuntimeError("once")
-        real(world_, target, step)
+        real(world_, target, step, **kwargs)
 
     policy.graph.reason = flaky
     policy.loop.plan(obs_at(episode, 0, IN_A), world)

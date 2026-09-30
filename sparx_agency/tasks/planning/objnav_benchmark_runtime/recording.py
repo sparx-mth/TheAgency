@@ -204,9 +204,15 @@ class EpisodeRecorder:
 		if not cv2.imwrite(str(temporary), frame):
 			raise HarnessError("Cannot write live preview")
 		temporary.replace(self.root / "latest.jpg")
+		search = snapshot.get("search") or {}
 		write_atomically(self.root / "live.json", strict_json({
 			"episode_id": self.episode.episode_id, "step": int(observation.step), "action": decision.get("action", "terminal"),
-			"state": snapshot["state"], "objects": len(snapshot["objects"]), "completed": False}, "live status"))
+			"state": snapshot["state"], "objects": len(snapshot["objects"]), "completed": False,
+			"room_in_force": search.get("room_in_force"), "next_room": search.get("next_room"),
+			"order": search.get("order", []), "elsewhere": search.get("elsewhere"),
+			"rooms": [{k: room.get(k) for k in ("id", "label", "prob")} for room in search.get("rooms", ())],
+			"stairs": [{k: node.get(k) for k in ("id", "label", "prob", "leaf_m")} for node in search.get("stairs", ())]},
+			"live status"))
 
 	def complete(self, record):
 		if self.episode_dir is not None:

@@ -16,11 +16,25 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy imp
 
 
 class FakeLLM:
-    def chat_json(self, system, user):
+    """Every model role at once: room classifier and node oracle -- all neutral.
+
+    The node oracle's prompt is answered with an equal share per node and a
+    small ``elsewhere``; ``reasoning=True`` (the runtime's route to the
+    reasoning model) is accepted and recorded.
+    """
+
+    def __init__(self):
+        self.reasoning_calls = 0
+
+    def chat_json(self, system, user, **kwargs):
+        if kwargs.get("reasoning"):
+            self.reasoning_calls += 1
         if "Room observed objects" in user:
             return {"label": "living_room", "confidence": 0.8, "reasoning": "objects"}
-        return {"rooms": [{"id": int(pid), "score": 50, "why": "unknown room"}
-                          for pid in re.findall(r"id=(\d+)", user)]}
+        ids = [int(nid) for nid in re.findall(r"^id=(\d+)", user, re.MULTILINE)]
+        share = max(1, int(round(90 / max(1, len(ids)))))
+        return {"nodes": [{"id": nid, "why": "no opinion", "p": share} for nid in ids],
+                "elsewhere": max(0, 100 - share * len(ids))}
 
 
 class FakeDetector:
@@ -32,13 +46,14 @@ class FakeDetector:
         return [row, row] if self.duplicate else [row]
 
 
-def setup_policy(label="chair", duplicate=False, **overrides):
+def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     """A policy on a 20 m synthetic map; ``overrides`` are RPTSettings fields
-    (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests)."""
+    (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests).
+    ``llm`` replaces the neutral :class:`FakeLLM` for every model role."""
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
                             camera, PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
-    policy = RPTSearchPolicy(FakeDetector(label, duplicate), FakeLLM(),
+    policy = RPTSearchPolicy(FakeDetector(label, duplicate), llm or FakeLLM(),
                              RPTSettings(**dict({"map_size_m": 20.0}, **overrides)))
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     return policy, episode

@@ -39,8 +39,8 @@ from .object_search_supervisor import (
     ObjectSearchParams, ObjectSearchSupervisor, ObjectSearchState, RoomFacts,
     FlyTo, SearchRoom, Release, StandDown, weighted_order,
     SELECT, TRANSIT, SEARCH, FOUND,
-    MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED, UNREACHABLE, TRANSIT_TIMEOUT,
-    BLOCKED, PRODUCTIVE,
+    MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED, TRAVERSED, RECLASSIFIED,
+    UNREACHABLE, TRANSIT_TIMEOUT, BLOCKED, PRODUCTIVE, NEUTRAL,
 )
 # ``room_costs`` and ``frontier_ranking`` are DELIBERATELY not re-exported.
 # They need numpy and scipy, and this facade is imported inside the Noetic
@@ -78,8 +78,8 @@ __all__ = [
     "ObjectSearchParams", "ObjectSearchSupervisor", "ObjectSearchState",
     "RoomFacts", "FlyTo", "SearchRoom", "Release", "StandDown",
     "weighted_order", "SELECT", "TRANSIT", "SEARCH", "FOUND",
-    "MAPPED", "BUDGET_SPENT", "STALLED", "EXHAUSTED", "UNREACHABLE",
-    "TRANSIT_TIMEOUT", "BLOCKED", "PRODUCTIVE",
+    "MAPPED", "BUDGET_SPENT", "STALLED", "EXHAUSTED", "TRAVERSED", "RECLASSIFIED",
+    "UNREACHABLE", "TRANSIT_TIMEOUT", "BLOCKED", "PRODUCTIVE", "NEUTRAL",
     "BriefingStyle", "brief",
     "load_survey", "save_survey",
     "RandomWalkParams",
