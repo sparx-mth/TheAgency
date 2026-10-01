@@ -76,7 +76,7 @@ def test_stop_never_carries_nonexecutable_camera_pitch(owner):
 
 
 def test_raw_perception_continues_on_stairs_without_fusing_or_stopping(monkeypatch):
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(label="bed")
     obs = observation(episode, 0)
     policy.plan(obs)
     before = len(policy.landmarks), policy.graph.queries
@@ -95,7 +95,7 @@ def test_raw_perception_continues_on_stairs_without_fusing_or_stopping(monkeypat
     assert building.active is not None
 
 
-def test_committed_approach_preempts_target_reasoning(monkeypatch):
+def test_verified_target_preempts_committed_stair_approach(monkeypatch):
     policy, episode = setup_policy()
     obs = observation(episode, 0)
     policy.plan(obs)
@@ -103,7 +103,8 @@ def test_committed_approach_preempts_target_reasoning(monkeypatch):
     building.active = building._portal(obs, -1, [(3, 0, 0), (4, 0, -0.6)])
     monkeypatch.setattr(policy, "_navigate", lambda *args: NavigationCommand.hold(info={"kind": "portal/0"}))
     command = policy.plan(observation(episode, 1))
-    assert command.info["phase"] == "APPROACH_STAIRS" and not command.stop
+    assert command.info["phase"] == "target_stop" and command.stop
+    assert policy.closing.active and policy.closing.locked
 
 
 def test_projection_uses_actual_supported_pixels_not_box_center_ray():
@@ -151,7 +152,7 @@ def test_wrong_floor_support_rejected_but_real_bed_not_blacklisted():
 
 
 def test_three_dimensional_association_cannot_walk_a_landmark(monkeypatch):
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(label="bed")
     policy.plan(observation(episode, 0))
     original = policy.landmarks.all_landmarks()[0]
     policy._object_geometry[original.id] = (original.xy[0], original.xy[1], -1.0)
@@ -280,8 +281,10 @@ def test_unknown_panels_are_independent_gray_and_do_not_teach_policy(tmp_path):
     first = panels.slots[0]["grid"].copy()
     assert len(policy.mapping.maps) == 1 and len(policy.mapping.atlas.floors) == 1
     image = panels.render(0)
-    assert np.all(image[60:280, 600:800] == UNKNOWN_GRAY)
+    # Layout follows the house aspect ratio rather than fixed square panels.
+    assert np.count_nonzero(np.all(image == UNKNOWN_GRAY, axis=-1)) > image.shape[0] * image.shape[1] / 10
     assert np.all(panels.slots[1]["grid"] == -1)
+    assert not panels.slots[1]["room_labels"].any()
     policy.floors.activate(1)
     panels.capture(policy, obs)
     np.testing.assert_array_equal(panels.slots[0]["grid"], first)

@@ -247,6 +247,27 @@ class HabitatRGBDSimulator:
                 "navigable_area_m2": float(pathfinder.navigable_area),
                 "islands": int(pathfinder.num_islands)}
 
+    def project_target(self, point):
+        """Project a requested ENU footpoint onto the local NavMesh.
+
+        This explicitly privileged geometry service reads neither semantic
+        annotations nor evaluator targets. Reject other floors, remote snaps
+        and invalid geometry; observed-map A* decides reachability.
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; cannot project a target approach")
+        point = np.asarray(point, dtype=float)
+        if point.shape != (3,) or not np.isfinite(point).all():
+            raise ValueError("Target approach projection needs a finite ENU xyz point")
+        native = np.array([-point[1], point[2], -point[0]], dtype=np.float32)
+        snapped = np.asarray(self._sim.pathfinder.snap_point(native), dtype=float)
+        if snapped.shape != (3,) or not np.isfinite(snapped).all():
+            return None
+        enu = np.array([-snapped[2], -snapped[0], snapped[1]])
+        if abs(enu[2] - point[2]) > 0.2 or np.linalg.norm(enu[:2] - point[:2]) > 0.5:
+            return None
+        return tuple(float(v) for v in enu)
+
     def step(self, action):
         """STOP preserves the final view; other actions use native collision tests."""
         if self._sim is None or not self.actions.allows(action):

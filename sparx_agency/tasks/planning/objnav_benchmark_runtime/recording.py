@@ -5,6 +5,7 @@ import csv
 from dataclasses import asdict
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -149,6 +150,7 @@ class EpisodeRecorder:
 		self._position(observation, telemetry)
 
 	def _position(self, observation, telemetry):
+		self.display_telemetry = dict(telemetry)
 		pose = observation.pose
 		snapshot = self.last_snapshot or {}
 		camera, transition = snapshot.get("camera", {}), snapshot.get("transition") or {}
@@ -201,6 +203,31 @@ class EpisodeRecorder:
 			self.panels.capture(self.policy, observation)
 		frame = render_dashboard(self.policy, observation, trail, decision, self.episode.episode_id, snapshot,
 			final=final, floor_panels=self.panels)
+		graph = getattr(self.policy, "graph", None)
+		world = getattr(self.policy, "last_world", None)
+		room = graph.room_at(world, (observation.pose.x, observation.pose.y)) if graph is not None and world is not None else None
+		label = (graph.label_info(room) or {}) if graph is not None and room is not None else {}
+		confidence = label.get("confidence")
+		confidence_text = "N/A" if confidence is None else "%.2f" % confidence
+		goal = getattr(self.policy, "_goal", None)
+		kind = getattr(getattr(self.policy, "route_memory", None), "kind", None)
+		frontier = ("F%s@%.2f,%.2f" % (floor_id, goal[0], goal[1])
+			if goal is not None and kind == "frontier" else "none")
+		text = "Scene: %s | DTG: %s m | Room: %s confidence: %s | Frontier ID: %s" % (
+			self.episode.scene_id, self.display_telemetry.get("distance_to_goal_m", "N/A"),
+			label.get("label", "unknown"), confidence_text, frontier)
+		cv2.rectangle(frame, (0, 839), (1599, 899), (20, 20, 20), -1)
+		cv2.putText(frame, text, (12, 866), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+			(230, 230, 230), 1, cv2.LINE_AA)
+		closing = snapshot.get("target_closing") or {}
+		xyz = closing.get("xyz")
+		range_text = "N/A" if xyz is None else "%.2f m" % math.hypot(xyz[0] - observation.pose.x, xyz[1] - observation.pose.y)
+		elapsed = max(time.monotonic() - self.started, 1e-6)
+		lock_text = "PERSISTENT LOCK: %s | visible: %s | %s | target range: %s | elapsed: %.1fs | FPS: %.2f" % (
+			closing.get("persistent_lock", False), closing.get("visible", False), closing.get("phase", "SEARCH"),
+			range_text, elapsed, observation.step / elapsed)
+		cv2.putText(frame, lock_text, (12, 891), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+			(80, 230, 255), 1, cv2.LINE_AA)
 		if self.video is None:
 			self.video = self.writer_factory(self.episode_dir / "video.mp4", self.fps)
 		self.video.write(frame)
@@ -209,14 +236,29 @@ class EpisodeRecorder:
 		if not cv2.imwrite(str(temporary), frame):
 			raise HarnessError("Cannot write live preview")
 		temporary.replace(self.root / "latest.jpg")
+		search = snapshot.get("search") or {}
 		write_atomically(self.root / "live.json", strict_json({
 			"episode_id": self.episode.episode_id, "step": int(observation.step), "action": decision.get("action", "terminal"),
-			"state": snapshot["state"], "objects": len(snapshot["objects"]), "completed": False}, "live status"))
+			"state": snapshot["state"], "objects": len(snapshot["objects"]), "completed": False,
+			"target_closing": closing,
+			"room_in_force": search.get("room_in_force"), "next_room": search.get("next_room"),
+			"order": search.get("order", []), "elsewhere": search.get("elsewhere"),
+			"rooms": [{k: room.get(k) for k in ("id", "label", "prob")} for room in search.get("rooms", ())],
+			"stairs": [{k: node.get(k) for k in ("id", "label", "prob", "leaf_m")} for node in search.get("stairs", ())]},
+			"live status"))
 
 	def complete(self, record):
 		if self.episode_dir is not None:
 			write_atomically(self.episode_dir / "metrics.json", strict_json(record.to_row(), "episode metrics", indent=2))
 			if self.last_frame is not None:
+				fps = record.steps / record.wall_s if record.wall_s > 0 else 0.0
+				text = "FINAL: SR=%d SPL=%.4f DTG=%s m | runtime=%.2fs FPS=%.2f | STOP=%s termination=%s" % (
+					record.success, record.spl, record.distance_to_goal_m, record.wall_s, fps, record.stop_called, record.termination)
+				cv2.rectangle(self.last_frame, (0, 790), (1599, 838), (20, 20, 20), -1)
+				cv2.putText(self.last_frame, text, (12, 819), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+					(80, 230, 255), 1, cv2.LINE_AA)
+				if self.video is not None:
+					self.video.write(self.last_frame)
 				cv2.imwrite(str(self.episode_dir / "final.jpg"), self.last_frame)
 		self.close()
 

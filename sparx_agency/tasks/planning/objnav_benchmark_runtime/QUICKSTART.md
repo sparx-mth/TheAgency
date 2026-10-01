@@ -104,12 +104,23 @@ Run the steps in this order. Steps 2.1–2.2 are long-running services: give eac
 
 ```bash
 CUDA_VISIBLE_DEVICES=-1 OLLAMA_HOST=127.0.0.1:11435 OLLAMA_MODELS="$MODELS/ollama" \
-OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_CONTEXT_LENGTH=4096 \
+OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_CONTEXT_LENGTH=8192 \
 OLLAMA_KEEP_ALIVE=30m OLLAMA_NO_CLOUD=1 ollama serve
 ```
-
-First time only, in another shell: `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`.
-Check: `curl -s http://127.0.0.1:11435/api/tags` lists the model.
+Two models serve the run -- `qwen2.5:3b-instruct` for the cheap, frequent room-type
+classification and `qwen2.5:14b-instruct` (9 GB, Q4_K_M) for the one node-oracle judgement
+per loop point -- so `OLLAMA_MAX_LOADED_MODELS=2` keeps both resident (~11 GB of RAM
+together) instead of reloading the 14B from disk at every loop point. First time only, in
+another shell:
+```bash
+OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct
+OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:14b-instruct
+```
+Check: `curl -s http://127.0.0.1:11435/api/tags` lists both. On a box where Ollama runs as
+the scene-graph stack's Docker container instead (`ollama-scene-graph`, CPU-only, port
+11434, models in a named volume -- the development laptop), the equivalents are
+`docker start ollama-scene-graph`, `docker exec ollama-scene-graph ollama pull
+qwen2.5:14b-instruct`, and `LLM_BASE_URL=http://127.0.0.1:11434` below.
 
 ### 2.2 Start the YOLO detector service (terminal 2, CPU only)
 
@@ -145,10 +156,23 @@ Omit `--multistory` for single-floor development starts (one episode per buildin
 
 ```bash
 export LLM_BACKEND=ollama LLM_BASE_URL=http://127.0.0.1:11435 LLM_MODEL=qwen2.5:3b-instruct LLM_TIMEOUT_S=120
+export LLM_REASONING_MODEL=qwen2.5:14b-instruct LLM_REASONING_TIMEOUT_S=600
 MANIFEST="$HOME/objnav_benchmark/multistory/episodes.json"
 RUN_FLAGS="--detector-url http://127.0.0.1:18095 --seed 17 --allow-sim-version-mismatch"
 ```
 
+`LLM_REASONING_MODEL`: the model the search's ONE judgement per loop point goes to
+-- the node oracle that values every room and staircase from the whole map (P(going
+there next finds the target) per node). A 3B model is not enough for it: it
+double-counts search effort into semantics and cannot weigh a staircase against an
+unknown room. `qwen2.5:14b-instruct` is the default and the one measured here: it
+follows the prompt's rules and answers a four-node prompt in about a minute on the
+laptop's CPU (32 threads, no GPU). `qwen2.5:32b-instruct` (~20 GB at Q4, several
+minutes per call) is better still but does not fit beside Habitat in 30 GB of RAM; use
+it on a box with more, or a hosted model via `LLM_BACKEND=openai`. Give the call a long
+`LLM_REASONING_TIMEOUT_S`: the search waits for the answer rather than running on a
+guess. Both models must be provisioned -- the health check looks for each and refuses
+to run otherwise; nothing falls back to the small model unannounced.
 `LLM_TIMEOUT_S=120`: the CPU model needs ~2 s per room in the prompt, and a building can have
 14 rooms. `--allow-sim-version-mismatch` acknowledges habitat-sim 0.2.4 against the protocol's
 reference 0.1.5. Add `--allow-shared-gpu` to `RUN_FLAGS` when GPU 0 also drives a desktop
@@ -179,6 +203,43 @@ It exits 0 after writing the JSON (`method.detector.metadata.backend` must read 
 
 One line per episode is printed (`success=`, `SPL=`, `steps=`); a 500-action episode takes
 ~10 minutes with CPU services. Watch it live in `$HOME/objnav_benchmark/smoke/live.html`.
+
+#### Office GPU visual verification
+
+Check `nvidia-smi` before sharing the GPU. On a sufficiently spacious office GPU,
+start the detector with `CUDA_VISIBLE_DEVICES=0`, `--device cuda:0`,
+`--clip-model "$MODELS/clip/ViT-B-32.pt"` and `--allow-shared-gpu` instead of the
+CPU settings above. Habitat uses `--gpu-device 0 --allow-shared-gpu`.
+The active RPT* policy uses Python/NumPy/SciPy, not ZSON embeddings or navigation
+PyTorch tensors; CLIP here is YOLO-World's text encoder. Do not change the policy
+just to claim every component is CUDA. Ollama may also use GPU 0 when sufficient
+VRAM remains for the renderer and detector.
+
+For two episodes in each of two buildings, run `run_development` once per scene
+with separate output directories, `--limit 2 --record --inspection-pause 60`.
+Do **not** use `--record-first`, which would omit the second video. The existing
+HUD includes episode/steps and detected boxes; the recorder adds scene, evaluator-only
+DTG, current-room type/confidence, and a floor/coordinate-based active frontier ID
+(`none` outside frontier routing). DTG never enters policy observations.
+The second footer line shows persistent target lock separately from current visibility,
+phase, target range (remembered during occlusion, distinct from evaluator DTG), elapsed
+time and FPS. The confirmed path continues through occlusion; terminal inspection
+stops translation at 1.0 m and requires fresh visual evidence for STOP. `steps.jsonl` includes
+`control_counters` for room LLM, room classifier, RPT* and A* calls, allowing an
+audit that global reasoning really freezes during closing.
+
+After video finalization, `EPISODE COMPLETE` immediately prints the absolute video
+path, SR, SPL, DTG, runtime and average execution FPS, then pauses for the requested
+seconds. `completion.jsonl` stores the same data; `performance_summary.json` stores
+scene aggregates. FPS is actions / episode wall time, **not** the video's playback
+rate. Episode wall time includes reset and per-step recording but excludes inspection
+pauses and final video flush. Normally completed videos contain every decision plus
+the terminal frame and a final metrics frame,
+played at `--video-fps` (default 6), not a wall-clock screen capture.
+Infrastructure exceptions can abort before the completion callback: retained video
+then covers emitted decisions only and must not be called a normally completed
+benchmark. Keep any post-hoc failure report or annotated review copy separate from
+the original recording and empty/incomplete benchmark ledger.
 
 ### 2.7 Full campaign: every building, every episode, frozen before the first frame
 
@@ -221,6 +282,7 @@ Same services and flags; `gibson.run` reads the `val/` split and the original sc
 | `Reference habitat-sim is 0.1.5; installed '0.2.4'` | `--allow-sim-version-mismatch` |
 | `Requested LLM model ... is not provisioned` | `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`; check `LLM_BASE_URL` |
 | `Detector emission threshold hides door candidates` | restart the service with `--conf 0.05` |
+| `No working FFmpeg: set IMAGEIO_FFMPEG_EXE` (`--record`) | the resolver tries `PATH`, then `ffmpeg` beside the interpreter; a conda `ffmpeg` can be present yet unloadable (`libiconv.so.2` missing in `objnav-habitat`). Point `IMAGEIO_FFMPEG_EXE` at any ffmpeg with `libx264` (e.g. another conda env's) or `apt install ffmpeg` |
 | vocabulary / backend mismatch on `/health` | restart the service with `--classes "$VOCAB"` from `--print-vocabulary` and `--backend yolo_world` |
 | `Room oracle failed` in an episode | raise `LLM_TIMEOUT_S`; the run now keeps exploring through it (see `exploration_fallback` in the record) |
 

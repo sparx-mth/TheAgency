@@ -5,7 +5,7 @@ from sparx_agency.core.mapping.objects.landmarks import ObjectLandmarkMap
 from sparx_agency.core.planning.exploration.object_search_supervisor import ObjectSearchSupervisor
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import ObservedDoors
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidence
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingSearchOracle
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingNodeOracle
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import RoomSearchLoop
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import ObservedSceneGraph
 
@@ -26,7 +26,7 @@ class FloorContextBank:
     def new(self):
         p = self.policy
         p.graph = ObservedSceneGraph(p.llm_client, label_settings=p.room_label_settings)
-        p.graph.oracle = RepairingSearchOracle(p.llm_client)
+        p.graph.oracle = RepairingNodeOracle(p.llm_client)
         p.doors = ObservedDoors(p.door_settings)
         p.landmarks = ObjectLandmarkMap(nearest_match=True)
         p.target_evidence = TargetEvidence(p.target_settings)

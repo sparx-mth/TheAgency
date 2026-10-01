@@ -30,6 +30,257 @@ revision mid-merge, use `git worktree add /tmp/wt <rev>` instead of stashing.
 
 **Don't:** don't stash mid-merge; don't trust "the files look right" as proof the merge
 state is right.
+## 2026-10-01 — a peek route across a stair head becomes a coverage-veto rotation loop
+
+**Symptom:** Sofa same-spawn run: a visible path near steps 297–303, then stationary
+left/right rotations. The agent never changed height or started a stair traversal.
+
+**Root cause:** At 293, `DoorwayPeek` replaced the room-7 transit with an interior
+peek route through the seen stair head. Steps 297/299/301/302 really emitted
+MOVE_FORWARD. At 303 the follower corrected a 17.19-degree heading error; at 304
+it requested forward with -12.81 degrees error (inside the 15-degree deadband),
+but `FloorDepartureGuard` vetoed it to TURN_LEFT because pending room scans still
+blocked departure. The guard cancelled the peek and cleared the path, but the
+supervisor kept room 7: subsequent `transit/7` replans hit the same veto. This was
+not the committed stair controller oscillating: `transition` stayed null.
+
+**Fix / workaround:** One peek attempt per floor-local room identity, consumed on
+start without refund on cancellation; scanned, initially classified (even weak),
+and previously peeked rooms are exempt from selection AND floor-exit requirements.
+The exemption follows substantial spatial overlap through renumber/split/merge
+without asserting that every child was scanned. Seen floor-local connector cells
+are excluded from peek goals and a peek-only A* map; active stair/atlas transitions
+preempt peeks. A gated room transit is released rather than replanned indefinitely.
+The generic converter retains its half-turn band and gains optional path-only
+hysteresis (ObjectNav 1 degree), never overriding collision recovery or safety vetoes.
+
+**Validation:** 1,206 core/runtime tests passed. CPU-only native-NavMesh Ranchester
+probe with production hysteresis: ascent 37 actions, descent 38, both zero blocked
+steps, recoveries or retreats. No new end-to-end benchmark was run.
+
+**Don't:** Do not call a planar `doorway_peek_approach` a committed stair descent,
+or weaken obstacle checks to fix a movement veto. Do not leave an exempt/attempted
+room pending in the floor gate: that demands a second peek the one-time rule forbids.
+
+---
+
+## 2026-10-01 — target closing can freeze search correctly and still steer away from the bbox
+
+**Symptom:** `runs/toilet_closing_verify_20261001`, Ranchester/000000, target toilet:
+takeover 169, confirmation 170, four forward steps, then target lost at 203. No
+LOOK_DOWN or STOP. The original video is complete through all 203 emitted actions.
+
+**Root cause:** The global latch worked (LLM/classifier/RPT counters never changed),
+but a centered bbox does not mean the A* route heading is centered. At steps 176/178
+the command was a follow path with bbox error inside the yaw dead band; the converter
+turned right toward its route, away from the target. The relative alternating
+reacquisition turns subsequently oscillated outside the last successful heading.
+Closest observed target range was 1.76 m, so the 1.2 m LOOK_DOWN trigger was never reached.
+Separately, `TargetClosing.fail()` raises `ObjNavInternalError`, which `agent_contract`
+explicitly treats as infrastructure failure even with `on_agent_error=record`.
+Thus ordinary failed-episode scoring/completion notification did not run.
+
+**Fix / workaround:** Unresolved navigation issues; this request authorized exactly
+one episode, not tuning/retries. Original traces are retained and a separate,
+clearly labeled post-hoc failure report was produced. Follow-up needs route/bbox
+heading arbitration, reacquisition referenced to a known target bearing, and a
+recordable method-failure contract. A runner-forced STOP must not be reported as
+a successful target-distance STOP.
+
+**Follow-up resolution (persistent-lock request, same date):** `target_path.py` now
+retains the selected NavMesh standoff and reuses collision-qualified A* while the
+target is occluded; bbox yaw no longer competes with path turns. Refinements over
+0.15 m reproject/replan, smaller updates leave the goal stable. Only terminal
+inspection at 1.0 m stops translation and requires a fresh bbox/depth confirmation.
+Pitch-dependent projection moved a synthetic target by 2 mm at the exact radius;
+a 0.05 m confirmation tolerance avoids a fully-satisfied hold deadlock without
+allowing STOP on remembered range. Expected failure is now `RuntimeError`, recordable
+by the harness, not `ObjNavInternalError`.
+
+The single authorized replay in `runs/toilet_persistent_lock_20261001` kept its path
+through occlusion at steps 177/178/180, including MOVE_FORWARD at 177, LOOK_DOWN at
+183 and actual policy STOP at 185 (0.874 m range, no agent error). Global counters
+stayed frozen. SR/SPL still zero and DTG 10.8924 m because the scored goal is on the
+reference floor downstairs; do not relabel that result as benchmark success.
+
+**Don't:** Do not infer live closing success from the obstacle-free synthetic rollout.
+Do not equate bbox range with evaluator DTG: this multistory manifest only scores
+reference-floor targets, whereas the detection here was upstairs. Do not backfill
+an aborted run's empty benchmark ledger as if normal scoring completed.
+
+---
+
+## 2026-09-30 — "Ground-truth stairs" meant a map of every staircase; it should have meant a perfect detector
+
+**Symptom:** With `stair_source=ground_truth` the Pomaria recording (`campaign-14b-20260929/campaign/
+frontier/Pomaria`, 000000, 500 actions) committed to the stairs at action 1 -- before the camera had
+ever had them in frame -- then paced 460 actions against a landing wall halfway up. Both Ranchester
+episodes committed to the only staircase within 16-43 actions and spent the rest of the episode
+"traversing" without ever standing on a tread. The user's brief was the opposite: stairs are known when
+they are SEEN, placed on the map where they are seen, and never assumed -- "not while I'm in the
+bathroom".
+
+**Root cause:** Four, layered:
+1. **The policy was handed the building's connector list at reset** and made every connector a portal
+   and an RPT* node on the first action. Knowledge of the stairs was a file, not a sighting.
+2. **One XY cluster per stairwell.** Pomaria's stairwell serves three storeys; the connector ran from
+   -2.66 m straight to +2.72 m, THROUGH the middle storey no connector touched. Its polyline was the
+   navmesh's string-pulled shortest path -- hugging the inner wall of every flight -- and the traversal's
+   "reached" test was a 0.35 m sphere, so at the first landing the cursor jumped from vertex 0 to 9 (the
+   flight above passes 0.3 m over the flight below) and the route aimed through the landing wall.
+3. **A blocked vertex was skipped.** On a staircase the polyline is the only way; skipping a vertex aimed
+   at the vertex after it through the same wall (Ranchester smoke: three skips, retreat, twice).
+4. **Anchors round a corner and hooks of 15 cm legs.** Where the floor meets the flight at an angle the
+   storey anchor sat round the stair-head corner; the pathfinder repair inserted a hook of 0.15-0.25 m
+   legs; the agent "reached" three of them at once from 0.3 m off and aimed at the fourth from beside the
+   centreline -- into the wall of a 0.5 m opening (Hanson, Coffeen).
+
+**Fix / workaround:** `methods/stair_sightings.py` -- a perfect detector: each connector's navmesh
+surface sample is projected into the frame (`project_to_image`) and depth-tested against the depth
+image; six visible samples make a sighting with a bounding box (drawn orange on the frame, carried in
+`detections` with `source: ground_truth`). Only a SEEN connector becomes a portal (`portal_placed`,
+with `seen_step` and the sightings' `footprint` the map draws), a node, or the explanation of a height
+departure (`height_departure_ignored: connector N underfoot has never been seen`). `gibson/
+stair_connectors.py` splits a stairwell at every storey (Pomaria: 2 connectors, 7.6 m each), walks the
+CENTRELINE (one vertex per 0.2 m band, the component chain that touches band to band), places anchors on
+the flight's own line, stride-checks every leg with `PathFinder.try_step` -- the simulator's own
+`move_forward` -- repairs through the pathfinder only where a stride fails, merges legs under 0.3 m, and
+finds a verified flat EXIT point off each end. `ground_truth_traversal.py` never skips: a blocked tight
+aim sends the agent back to the last vertex it reached; the route handed to the converter ends at the
+next bend (corner walked TO, not cut by the 0.5 m lookahead); a vertex reached from off to one side is
+led back THROUGH (`VIA_M`); `REACHED_XY_M` is 0.26 -- just over the converter's 0.25 m arrival, never
+wider. `tests/rollout_stairs_navmesh.py` climbs every connector of every scene both ways on the real
+navmesh with the real converter: 29/29 traversable climbs complete, 25 of them with zero blocked steps
+(Pomaria 4/4 in ~40 actions). In the real Pomaria run the flight was seen at action 7, committed at 9,
+climbed 25-69 with zero blocked steps and confirmed at 75.
+
+**How to see it next time:** `building.events` now reads as a story: `stairs_seen` (bbox, distance,
+`traversable`), `portal_placed` (`seen_step`, `footprint_points`), `traversal_recovery` (`back_to`),
+`way_back_held`. `rollout_stairs_navmesh.py --scene X --verbose` reproduces a climb headlessly in seconds;
+run it before any Habitat campaign that touches the stairs.
+
+**Don't:** Don't widen `REACHED_XY_M` to make vertices easier to reach -- the agent then leaves them from
+that far off, which is exactly the drift that hit the wall. Don't hand the converter the whole polyline
+past a bend. Don't let the observed map's A* replace the stride check: the navmesh IS the collision
+model. Don't treat an `unwalkable` leg as a tuning problem before checking `island_radius` at its ends.
+
+---
+
+## 2026-09-30 — Six "unwalkable" flights were navmesh islands, and two actions after arriving the agent went back down
+
+**Symptom:** After the centreline rewrite, `rollout_stairs_navmesh.py` still failed Hanson c0, Leonardo
+c0, Marstons c1/c2 and Shelbyville c0/c1 (12 blocked steps, retreat) although their treads were the
+middle of the flight. And in the first real Pomaria run with sightings, the agent confirmed the middle
+storey at action 75 and was descending the same flight at action 78.
+
+**Root cause:** (1) `PathFinder.island_radius` differs across the bad leg and `find_path` has no route:
+those storeys lie on DIFFERENT navmesh islands (0/40 random floor-to-floor paths in Hanson, Leonardo,
+Marstons, Shelbyville). `try_step` -- what Habitat applies to `move_forward` -- never crosses, so no agent
+can; they are mesh artifacts, not stairs. (2) On the new storey the map was two frames old: no rooms, no
+frontier; the exploration fallback read the floor as exhausted and its last resort -- the stairs -- had
+one candidate, whose entry the agent stood at (within the 0.65 m that starts a climb outright).
+
+**Fix / workaround:** A leg with no navmesh path between its ends marks the connector `traversable:
+False` (`walkability.disconnected`); it is still SEEN (bounding box, `stairs_seen` with `traversable:
+false`) but never a portal. The probe reports such connectors as SKIP, not FAIL. The staircase the agent
+arrived by is withheld from BOTH the loop's node list and the fallback rule for
+`MultiFloorParams.arrival_grace_actions` (40) after the arrival (`MultiFloorSearch.way_back_held`,
+`way_back_held` event): the second real Pomaria run showed the 14B node oracle -- told `arrived_by`,
+`arrived 0 s ago`, one tentative room -- choosing "stairs down" at 0.98 on the arrival action three times
+(78, 270, 493), each after a flawless climb, so 234 of 500 actions were spent on the stairs. A storey is
+looked at for the length of a climb before "not here" means anything; any OTHER staircase is offered at
+once, and walking onto the stairs by accident still completes the climb.
+
+**Don't:** Don't try to repair an island-split leg with a longer `path_between` or a wider snap -- there
+is no path. Don't make the grace a cooldown on the portal itself: `cooldown_until` is the failed-approach
+deferral and the arrival's own bookkeeping reads it. Don't make it long enough to trap the agent on a
+tiny storey either -- the fallback holds the way back too, and a floor that is genuinely exhausted at
+action 20 waits out the rest of the grace on `fallback_hold`; 40 is about one climb.
+
+---
+
+## 2026-09-29 — A per-action "relabel on new evidence" trigger asked the room LLM 22 times in 60 actions
+
+**Symptom:** The first clue-driven room relabel (re-ask the classifier for the room in force the
+moment its evidence changes) looked right in every unit test, and the headless trace probe showed
+identical navigation decisions -- and `label queries 22` in 60 actions, one classifier call every
+three actions. On the CPU service (1-2 s per call) that is half a second per action, silently.
+
+**Root cause:** Two multipliers, neither visible in a test that installs rooms by hand:
+1. The evidence signature is count-sensitive by design (`("bed", 3)` is not `("bed", 2)`: it once
+   told a bedroom from a living room), and the landmark map opens a NEW landmark whenever a
+   re-observed object projects more than the dedupe radius from its last centroid -- so the
+   count, and the signature, changed on most actions.
+2. The watershed re-partitions the floor as the map grows, and a re-partition clears every
+   per-room label cache on purpose (a cached label must not follow a pid onto a different
+   region). Every clear made every room "pending" again, and the classifier's own cache was
+   bypassed with `refresh=True` on every changed signature.
+
+**Fix / workaround:** The mid-visit clue is a new KIND of object, not a new count
+(`RevisableRoomLabels.pending`); a verdict for a set of kinds is kept and reused across
+re-partitions (`_kind_cache`), and a changed signature the classifier has already judged reads
+`RoomTypeClassifier.cached()` instead of buying it again -- the label is a function of the
+evidence, not of the region. Counts are still re-asked, at loop points, as before. 5 calls in the
+same 60 actions, identical decisions.
+
+**How to see it next time:** The trace probe prints `label queries`, `llm queries` and
+`affinity queries`; run it before and after any change that adds a model call to a per-action
+path, and read the counts, not just the decisions. `telemetry.latencies["room_relabel"]` carries
+the per-call cost in a real run.
+
+**Don't:** Don't judge an LLM trigger by unit tests with a fake model -- the fake answers in
+microseconds and the tests never re-partition. Don't clear the classifier's evidence→label
+cache with the per-room caches: the per-room cache is about WHICH region a label belongs to,
+the classifier's is about WHAT the evidence means, and only the first goes stale on a split.
+
+---
+
+## 2026-09-28 — Ground-truth stair RETREAT ate 60 % of the episode because "done" was gated on the atlas settling
+
+**Symptom:** Two recorded Ranchester episodes on 299c20a1
+(`runs/fallback_gtstairs_yolo_20260928T130941Z`, YOLO-only, seed 17): the room-search loop
+ran cleanly for ~140 actions, the ground-truth floor decision picked the real staircase, the
+agent descended 0.8 m — and then spent the remaining 316 / 293 actions in `RETREAT`,
+shuffling in a 0.2 × 0.3 m box at the top of the stairs, camera pinned 60° down, never
+re-entering SEARCH. Final DTG 7.2 / 7.6 m, no success. The previous commit (observed stairs)
+walked the same staircase down at action 324–369 of the same episode.
+
+**Root cause:** Two things, in order of impact.
+1. `GroundTruthTraversal.plan` expires the retreat budget (`retreat_actions = 80`) by setting
+   `completion_reason = ground_truth_retreat_budget_exhausted` and `arrival_allowed = True` —
+   but nothing *ends* the transition. `MultiFloorSearch.observe` only abandons when
+   `not atlas.in_transition`, and `FloorAtlas._settled()` needs 3 samples with height range
+   ≤ 0.12 m **and** net translation ≥ 0.35 m. An agent stuck on the top treads (z wobble
+   0.18 m, no net travel) never settles, so `in_transition` stays True forever and the
+   traversal keeps issuing a 0.43 m follow command it can't complete.
+2. The connector polyline from `stair_connectors` (7 points, top → bottom, 5.5 m) ends on the
+   intermediate landing at z 1.84, 1.8 m above the destination (`best_rise_m` 0.80 of 2.59).
+   `cursor` hit the last vertex with `at_height` false, forward was blocked 4× on the
+   landing → `retreat_started reason=blocked`. Same spot in both episodes, so it is the
+   geometry, not luck: either the navmesh shortest path between the two anchors is being
+   truncated to the first flight, or the follower cuts the U-turn.
+
+**Fix / workaround:** (1) give retreat a hard exit: when the budget is spent, call
+`_abandon()` (or hand the action to the exploration fallback's relocation rung) and let the
+atlas re-anchor by height alone, without waiting for `_settled()`. (2) Check
+`scene_structure_from_pathfinder` on Ranchester: compare the connector polyline against
+`pathfinder.find_path(top, bottom)` and make sure the full path, including the landing turn,
+is what the policy receives. Until both are in, `stair_source: "observed"` is the better
+default on this building.
+
+**Don't:** don't read `idle_steps = 0` and `exploration_fallback.failures = 0` as "the
+episode went well" — the retreat shuffle is forward/turn actions, so it is invisible to both
+counters. Look at the `traversal_state` column of `trajectory.csv` or the timeline tool.
+
+**Status (2026-09-30, remote line):** both root causes are addressed in e217f8f1. A spent
+retreat within `floor_match_m` of a measured storey now confirms that storey through
+`FloorAtlas.settle` and the coordinator abandons the transition. The connector is
+re-extracted along the flight centreline, the follower never skips a vertex, and
+`tests/rollout_stairs_navmesh.py` walks every connector both ways. Still open: a
+retreat spent more than `floor_match_m` from every known storey (stuck on the treads)
+still waits for the plateau test. The office fix for this (`FloorAtlas.cancel_transition`,
+commit 4adf14c0, never pushed) was not carried over. Under the departure gate it would
+restart the retreat in a cycle.
 
 ---
 

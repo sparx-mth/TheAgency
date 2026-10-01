@@ -13,8 +13,13 @@ raised, it produces a command that MOVES, in this order:
 
 1. the nearest reachable frontier anywhere on the floor -- not confined to
    the room in force, so the search leaves a room whose routes all failed;
-2. the building coordinator, when the floor is exhausted or its allowance
-   is spent: the ground-truth stairs (up or down, ``floor_decision``);
+2. the building coordinator, when the floor is exhausted: the ground-truth
+   stairs by the explicit fallback rule (up or down, ``floor_decision``).
+   The NORMAL way to the stairs is not this: the room-search loop offers
+   every staircase to the oracle and to RPT* as a node beside the rooms,
+   and climbs when the order says so. This rung is for the floor where that
+   machinery has nothing left -- the room LLM is away, or no node is worth
+   anything and the frontier is gone;
 3. frontiers already retired -- a goal retired for a transient plan failure
    is still unknown space;
 4. a relocation: the farthest reachable known cell, for a new vantage point
@@ -92,7 +97,7 @@ class ExplorationFallback:
         self.settings = settings or FallbackSettings()
         self.failures = []
         self.stats = {"invocations": 0, "frontier": 0, "stairs": 0, "frontier_retired": 0,
-                      "relocation": 0, "hold": 0, "failures": 0,
+                      "room_peek": 0, "relocation": 0, "hold": 0, "failures": 0,
                       ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0}
         self._logged = set()
         self._consecutive = {}
@@ -140,14 +145,24 @@ class ExplorationFallback:
         if cost is None:
             cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
         ids, graph = passable_graph(cost)                    # one graph for the ranking and the relocation
-        ranked = ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
-                                       (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
-                                       ids=ids, graph=graph)
+        inventory = p.graph.frontier_inventory
+        ranked = (list(inventory.goals) if inventory is not None else
+                  ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
+                                        (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
+                                        ids=ids, graph=graph))
         admissible = p.sweep.admissible(obs, world, ranked)
         command = self._try_goals(obs, world, [g.xy for g in admissible])
         if command is not None:
             return self._tag(command, "frontier", reason)
         if p.building is not None:
+            if not p.building.can_leave_floor(obs):
+                # No frontier does not prove a room was entered. Complete a
+                # reachable outstanding peek, even outside the local trigger
+                # radius or when opportunistic inspections were disabled.
+                command = p.peek.plan(obs, world, force=True)
+                if command is not None:
+                    p._action_owner = "doorway_peek"
+                    return self._tag(command, "room_peek", reason)
             command = p.building.plan(obs, world, exhausted=True)
             if command is not None:
                 return self._tag(command, "stairs", reason)

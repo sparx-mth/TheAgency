@@ -107,7 +107,11 @@ class CameraController:
     def apply(self, obs, command, owner="SEARCH", direction=0, close_support=False):
         """The only policy function that writes command.camera_pitch."""
         s = self.settings
-        if owner in ("TRAVERSE", "CONFIRM_DESTINATION", "RETREAT", "SAFE_HALT"):
+        if owner == "TARGET_CLOSING":
+            self.inspection = None
+            self.terrain_pitch = None
+            desired = math.degrees(command.camera_pitch if command.camera_pitch is not None else obs.pose.camera_pitch)
+        elif owner in ("TRAVERSE", "CONFIRM_DESTINATION", "RETREAT", "SAFE_HALT"):
             self.inspection = None
             looking_down = direction < 0 or close_support or owner == "RETREAT"
             desired = s.inspection_pitch_deg if looking_down else s.ascent_pitch_deg

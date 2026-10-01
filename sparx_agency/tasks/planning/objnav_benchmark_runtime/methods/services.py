@@ -17,9 +17,11 @@ def public_service_url(url):
 
 
 class VerifiedLLMClient:
-    """Check the requested model, not merely a live port or an HTTP 401.
+    """Check the requested models, not merely a live port or an HTTP 401.
 
-    Ollama exposes a digest, which is pinned for the run. OpenAI-compatible
+    Every model the config names -- the default one for the cheap calls and
+    the reasoning one for the node oracle -- must be provisioned. Ollama
+    exposes a digest per model, pinned for the run. OpenAI-compatible
     providers often expose only model ids: that limitation is recorded rather
     than claiming immutable remote weights. GET requests never start inference.
     """
@@ -39,16 +41,21 @@ class VerifiedLLMClient:
         response.raise_for_status()
         payload = response.json()
         models = payload.get("models" if ollama else "data", [])
-        names = {cfg.model}
-        if ollama and ":" not in cfg.model:
-            names.add(cfg.model + ":latest")
-        matches = [item for item in models if isinstance(item, dict)
-                   and item.get("name" if ollama else "id") in names]
-        if not matches:
-            raise ObjNavInternalError("Requested LLM model %r is not provisioned" % cfg.model)
-        item = matches[0]
-        identity = {"model": cfg.model, "digest": item.get("digest"),
-                    "immutable_revision_exposed": bool(item.get("digest"))}
+        wanted = tuple(getattr(cfg, "models", lambda: (cfg.model,))())
+        identity = {"models": {}}
+        for model in wanted:
+            names = {model}
+            if ollama and ":" not in model:
+                names.add(model + ":latest")
+            matches = [item for item in models if isinstance(item, dict)
+                       and item.get("name" if ollama else "id") in names]
+            if not matches:
+                raise ObjNavInternalError("Requested LLM model %r is not provisioned" % model)
+            identity["models"][model] = {"digest": matches[0].get("digest"),
+                                         "immutable_revision_exposed": bool(matches[0].get("digest"))}
+        identity.update(model=cfg.model, reasoning_model=getattr(cfg, "reasoning_model", cfg.model),
+                        digest=identity["models"][cfg.model]["digest"],
+                        immutable_revision_exposed=identity["models"][cfg.model]["immutable_revision_exposed"])
         if self.identity is not None and identity != self.identity:
             raise ObjNavInternalError("LLM model revision changed during evaluation")
         self.identity = identity

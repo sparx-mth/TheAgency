@@ -33,7 +33,7 @@ import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.exploration.frontier_ranking import (
-    FrontierRankingParams, frontier_goals_by_room, ranked_frontier_goals)
+    FrontierRankingParams, accessible_frontiers, ranked_frontier_goals)
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 
 
@@ -130,8 +130,11 @@ class FrontierSweep:
     def _ranked(self, obs, world, cost, mask, labels=None, label=None):
         """The room's ranked frontier goals, by label vote when labels are given, else by mask."""
         xy, yaw, ranking = (obs.pose.x, obs.pose.y), obs.pose.yaw, self.settings.ranking
+        inventory = self.policy.graph.frontier_inventory
+        if labels is None and inventory is not None and np.asarray(mask).all():
+            return list(inventory.goals)
         if labels is not None and label is not None:
-            return frontier_goals_by_room(world, cost, labels, xy, yaw, ranking).get(int(label), [])
+            return accessible_frontiers(world, cost, labels, xy, yaw, ranking).by_room.get(int(label), [])
         return ranked_frontier_goals(world, cost, mask, xy, yaw, ranking)
 
     def admissible(self, obs, world, goals):

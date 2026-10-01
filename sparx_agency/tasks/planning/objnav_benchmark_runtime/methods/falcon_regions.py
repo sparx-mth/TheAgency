@@ -75,7 +75,7 @@ class ObservedRegions:
                 result.append(visit)
         return result
 
-    def room_goals(self, world, cost, rooms, pose, action):
+    def room_goals(self, world, cost, rooms, pose, action, retain_room_id=None):
         """Reachable representative *inside* each room, not an obstructed centroid."""
         routes = GridRoutes(cost, world.resolution, self.params.max_grid_nodes)
         start = world.world_to_grid(pose.x, pose.y)
@@ -88,9 +88,9 @@ class ObservedRegions:
         for pid, room in sorted(rooms.items()):
             history = self.history_for(room.mask)
             histories[pid] = history
-            if len(history) >= self.params.max_region_bursts:
+            if pid != retain_room_id and len(history) >= self.params.max_region_bursts:
                 continue
-            cooling = history and action - max(v["end_action"] for v in history) < self.params.revisit_cooldown_actions
+            cooling = pid != retain_room_id and history and action - max(v["end_action"] for v in history) < self.params.revisit_cooldown_actions
             eligible = room.mask & np.isfinite(distance)
             # The discrete converter stops within an arrival band. A goal on
             # the first room cell can therefore leave the body outside forever.

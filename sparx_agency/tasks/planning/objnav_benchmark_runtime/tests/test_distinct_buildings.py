@@ -127,8 +127,8 @@ def test_falcon_recording_shows_actual_phase_and_renders():
     obs = observation(episode, 0, depth=3)
     command = policy.plan(obs)
     snapshot = method_snapshot(policy)
-    assert snapshot["state"] == policy.hierarchy.machine.phase
-    assert snapshot["explorer"] == "falcon" and snapshot["burst_actions_left"] == 48
+    assert snapshot["state"] == "warmup"
+    assert snapshot["explorer"] == "falcon" and snapshot["burst_actions_left"] is None
     frame = render_dashboard(policy, obs, [(0, 0)], {"action": "TURN_LEFT", "info": command.info}, episode.episode_id, snapshot)
     assert frame.shape == (900, 1600, 3)
 

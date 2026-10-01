@@ -12,6 +12,22 @@ from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows
 
 
+def _metres(value):
+    """A distance cell: an episode that ended with no reachable goal has none."""
+    return "n/a" if value is None else "%.2f" % value
+
+
+def _overall_row(backend, overall):
+    """One Markdown row of the group summary ``aggregate.summarise`` computed."""
+    dtg = _metres(overall["distance_to_goal_m"])
+    if overall["n_unreachable_end"]:
+        dtg += " (%d unreachable end)" % overall["n_unreachable_end"]
+    return "| %s | %d | %.3f | %.3f-%.3f | %.4f | %.4f-%.4f | %s | %.4f | %.1f |" % (
+        backend, overall["n_episodes"], overall["success_rate"], overall["success_rate_ci"][0],
+        overall["success_rate_ci"][1], overall["spl"], overall["spl_ci"][0], overall["spl_ci"][1],
+        dtg, overall["soft_spl"], overall["mean_steps"])
+
+
 def write_multifloor_report(root, data):
     root = Path(root)
     campaign = json.loads((root / "campaign.json").read_text())
@@ -67,10 +83,19 @@ def write_multifloor_report(root, data):
              "**Not published Gibson validation.** The native metric is 3D geodesic travel to annotated reference-floor success regions. "
              "Camera inspection uses the existing LOOK actions; the limit is still 500 actions. "
              "Upper-floor target annotations are incomplete, so this is a cross-floor integration test, not a full-building ObjectNav accuracy claim.", "",
-             "| Explorer | Environment / episode | Target | Success | SPL | Actions | Floors / links | Cross-floor action |",
-             "|---|---|---|---:|---:|---:|---:|---:|"]
+             "## Overall", "",
+             "SR and SPL are means over every episode (a failure counts 0 SPL); DTG is the mean final "
+             "geodesic distance to the nearest goal over the episodes that ended where a goal was reachable.", "",
+             "| Explorer | Episodes | SR | SR 95% CI | SPL | SPL 95% CI | DTG (m) | SoftSPL | Mean actions |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for backend in backends:
+        lines.append(_overall_row(backend, statistics[backend]["overall"]))
+    lines += ["", "## Episodes", "",
+              "| Explorer | Environment / episode | Target | Success | SPL | DTG (m) | Actions | Floors / links | Cross-floor action |",
+              "|---|---|---|---:|---:|---:|---:|---:|---:|"]
     for row in details:
-        lines.append("| {explorer} | {episode_id} | {target} | {success} | {spl:.4f} | {actions} | {observed_floors} / {observed_connections} | {first_cross_floor_action} |".format(**row))
+        lines.append("| {explorer} | {episode_id} | {target} | {success} | {spl:.4f} | {dtg} | {actions} | {observed_floors} / {observed_connections} | {first_cross_floor_action} |"
+                     .format(dtg=_metres(row["distance_to_goal_m"]), **row))
     lines += ["", "Agent errors: %d. Recorded episodes: %d (selected before evaluation)." % (len(errors), len(videos)),
               "", "Open index.html for the videos; statistics.json includes all metrics and evaluator diagnostics."]
     (root / "RESULTS.md").write_text("\n".join(lines) + "\n")
@@ -82,7 +107,8 @@ def write_multifloor_report(root, data):
             "<p><a href='RESULTS.md'>All episode results</a> · <a href='statistics.json'>Metrics and diagnostics</a> · <a href='campaign.json'>Frozen campaign</a></p>"]
     for video in videos:
         row = next(r for r in details if r["episode_id"] == video["episode_id"] and r["explorer"] == video["explorer"])
-        title = "%s — %s — %s — success %s — SPL %.3f" % (video["scene"], video["explorer"], row["target"], row["success"], row["spl"])
+        title = "%s — %s — %s — success %s — SPL %.3f — DTG %s m" % (
+            video["scene"], video["explorer"], row["target"], row["success"], row["spl"], _metres(row["distance_to_goal_m"]))
         page.append("<section><h2>%s</h2><video controls preload='metadata' src='%s'></video></section>" % (html.escape(title), html.escape(video["path"], quote=True)))
     (root / "index.html").write_text("\n".join(page) + "\n")
     if errors:

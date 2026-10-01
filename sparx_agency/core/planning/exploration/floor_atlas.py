@@ -34,6 +34,46 @@ class MultiFloorParams:
         near_connector_m: How close (XY, metres) to a ground-truth connector's
             polyline an unplanned height departure must be to count as being
             on those stairs rather than on a step or a threshold.
+        floor_search_actions: OBSERVED mode only -- actions to search a floor
+            before its portals are considered. In ground-truth mode nothing
+            decides a floor change by a clock: a staircase is a node of the
+            room-search loop's RPT* instance, valued by the LLM and charged
+            for the climb, and taken when the order says so.
+        floor_change_cost_m: Ground truth -- the fixed cost of a storey
+            change in metres of walking, added to the flight's own length on
+            every arc into or out of a staircase node: the climb's turns, the
+            settle at the top and the exit stub, whatever the flight's
+            length. Eight metres is about thirty actions at the benchmark's
+            step -- what the Ranchester recordings spent per completed
+            flight. A cost, not a budget: it makes RPT* prefer a room here
+            to a storey there at equal probability; it never forbids the
+            stairs, and nothing counts actions against it.
+        commit_failures: Ground truth only. Blocked forward steps a committed
+            traversal absorbs -- tightening its following, then skipping a
+            grazed vertex -- before it turns back. Generous on purpose: the
+            connector is walkable by construction, and a retreat spends the
+            climb twice and the search once more on the same decision.
+        commit_stall_actions: Ground truth only. Actions with neither XY
+            progress nor a polyline vertex reached before a traversal turns
+            back -- a stuck-agent bound, not a budget for the climb.
+        confirm_actions: Ground truth only. Actions at the destination
+            height near the far anchor after which the storey is confirmed
+            outright when the atlas's translated-plateau test has not fired
+            -- a landing walled on three sides, an exit stub blocked at every
+            heading. The traversal has done its part; the transition ends.
+        approach_failures: Consecutive actions the approach to a chosen
+            connector may fail to plan (the entry re-snapped each time)
+            before the connector is deferred.
+        arrival_grace_actions: Ground truth only. Actions after arriving on a
+            storey before the staircase just climbed is offered again as a
+            node or a fallback candidate. A storey entered two frames ago has
+            one tentative room and no frontier on its map, and the node
+            oracle -- told the agent had just arrived -- sent it straight
+            back down three times in one Pomaria episode (78, 270, 493): half
+            the episode on a flawless staircase. The decision to change
+            floors, once executed, is given at least this long to pay for
+            itself; walking onto the stairs by accident still completes the
+            climb, and any OTHER staircase is offered at once.
     """
 
     enabled: bool = True
@@ -55,6 +95,12 @@ class MultiFloorParams:
     terrain_radius_m: float = 6.0
     stair_min_rise_m: float = 0.40
     max_failures: int = 4
+    floor_change_cost_m: float = 8.0
+    commit_failures: int = 12
+    commit_stall_actions: int = 30
+    confirm_actions: int = 24
+    approach_failures: int = 3
+    arrival_grace_actions: int = 40
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
@@ -67,8 +113,13 @@ class MultiFloorParams:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
+        if (isinstance(self.floor_change_cost_m, bool) or not isinstance(self.floor_change_cost_m, (int, float))
+                or not math.isfinite(self.floor_change_cost_m) or self.floor_change_cost_m < 0):
+            raise ValueError("floor_change_cost_m must be finite and non-negative")
         for name in ("stable_samples", "floor_search_actions", "transition_actions",
-                     "retreat_actions", "portal_cooldown_actions", "max_failures"):
+                     "retreat_actions", "portal_cooldown_actions", "max_failures",
+                     "commit_failures", "commit_stall_actions", "confirm_actions", "approach_failures",
+                     "arrival_grace_actions"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
         if not self.stable_height_m < self.floor_match_m < self.departure_m < self.min_floor_separation_m:
@@ -196,6 +247,48 @@ class FloorAtlas:
         distance = math.hypot(self._samples[-1][0] - self._samples[0][0],
                               self._samples[-1][1] - self._samples[0][1])
         return max(heights) - min(heights) <= self.params.stable_height_m and distance >= self.params.stable_distance_m
+
+    def settle(self, pose, height):
+        """Confirm arrival at the storey of ``height`` now, without the plateau test.
+
+        For a caller that KNOWS the agent stands on a storey -- the
+        ground-truth traversal at a connector's far anchor, at the
+        destination height the navmesh reported -- and has waited long
+        enough for the translated-plateau test to be evidently not going to
+        fire: a landing walled on three sides, an exit stub blocked at every
+        heading. Poses only, still: the height is the caller's, but the
+        storey it becomes is matched against the floors this atlas has
+        measured, or created at the separation rule every other floor obeys.
+
+        Args:
+            pose: The agent's pose, whose XY ends the measured stair edge.
+            height: The storey height to confirm.
+
+        Returns:
+            True when a floor was matched or created and arrival recorded;
+            False when ``height`` is neither an existing floor nor far enough
+            from every floor to be a new one -- a landing, refused.
+        """
+        if not self.floors:
+            self.update(pose)
+        xyz = (float(pose.x), float(pose.y), float(pose.z))
+        if not self.in_transition:
+            self.in_transition = True
+            self._trail = list(self._approach) or [xyz]
+        if not self._trail or self._trail[-1] != xyz:
+            self._trail.append(xyz)
+        matches = [f for f in self.floors.values()
+                   if abs(f.elevation_m - float(height)) <= self.params.floor_match_m]
+        if matches:
+            destination = min(matches, key=lambda f: abs(f.elevation_m - float(height))).id
+        elif min(abs(f.elevation_m - float(height)) for f in self.floors.values()) >= self.params.min_floor_separation_m:
+            destination = len(self.floors)
+            self.floors[destination] = ObservedFloor(destination, float(height), visits=0)
+        else:
+            return False
+        self.destination_height_m = float(height)
+        self._arrive(destination)
+        return True
 
     def _arrive(self, destination):
         self.completion_reason = "destination_platform_confirmed" if destination != self.active_id else "source_platform_returned"

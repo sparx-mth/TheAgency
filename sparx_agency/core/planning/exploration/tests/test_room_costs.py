@@ -270,6 +270,29 @@ def test_the_budgeted_matrix_is_still_metric():
                 assert C[i, j] <= C[i, k] + C[k, j] + 1e-9
 
 
+def test_a_leaf_hangs_a_node_off_its_map_point_and_is_charged_both_ways():
+    """A staircase: its point on this map is the foot of the flight; the node itself lies a flight plus
+    the fixed cost of a storey change beyond it, so every arc into AND out of it carries that length."""
+    plain, _ = three_room_instance(cruise_speed_mps=0.0)
+    stairs, _ = three_room_instance(cruise_speed_mps=0.0, leaves={3: 12.0})
+    index = {pid: i for i, pid in enumerate(stairs.index_to_pid)}
+    a, b, s = index[1], index[2], index[3]
+    assert stairs.C[a, s] == pytest.approx(plain.C[a, s] + 12.0) and stairs.C[s, a] == pytest.approx(plain.C[s, a] + 12.0)
+    assert stairs.C[b, s] == pytest.approx(plain.C[b, s] + 12.0), "going upstairs puts every room here 12 m further away"
+    assert stairs.C[a, b] == pytest.approx(plain.C[a, b]), "arcs between rooms are untouched"
+    assert np.allclose(np.diag(stairs.C), 0.0) and np.allclose(stairs.C, stairs.C.T)
+    for i in range(stairs.n):
+        for j in range(stairs.n):
+            for k in range(stairs.n):
+                assert stairs.C[i, j] <= stairs.C[i, k] + stairs.C[k, j] + 1e-9, "a leaf is a graph edge: still metric"
+    seconds, _ = three_room_instance(cruise_speed_mps=0.5, search_time_s=30.0, leaves={3: 12.0})
+    assert seconds.C[a, s] == pytest.approx((plain.C[a, s] + 12.0) / 0.5 + 30.0), "the leaf is walked, then the room searched"
+    assert seconds.C[s, b] == pytest.approx((plain.C[s, b] + 12.0) / 0.5 + 30.0)
+    assert seconds.C[s, a] == pytest.approx((plain.C[s, a] + 12.0) / 0.5), "room A is the depot: entered, never searched"
+    ignored, _ = three_room_instance(cruise_speed_mps=0.0, leaves={3: -4.0, 9: 5.0})
+    assert np.allclose(ignored.C, plain.C), "a negative leaf reads as none; a leaf for an absent node is dropped"
+
+
 def test_an_unreachable_room_is_dropped_not_given_a_fake_weight():
     world = corridor_world()
     g = world.grid.copy()

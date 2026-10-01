@@ -40,14 +40,16 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy.ndimage import label as connected_components
 from scipy.sparse.csgraph import dijkstra
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.environment import OccupancyGrid2D
+from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
 from sparx_agency.core.planning.exploration.room_costs import (
     FrontierCluster, frontier_clusters, passable_graph, snap_cell)
 
@@ -116,6 +118,73 @@ class FrontierGoal:
     geodesic_m: float
     heading_error_rad: float
     utility: float
+
+
+@dataclass(frozen=True)
+class FrontierInventory:
+    """Reachable frontier goals, room ownership, and display cells on one map.
+
+    Counts describe accessibility, not whether a goal was recently retired.
+    Unassigned frontiers remain available to floor-wide exploration. Distances
+    are metres from the current pose; infinity means not currently accessible.
+    """
+
+    goals: Tuple[FrontierGoal, ...]
+    by_room: Dict[int, List[FrontierGoal]]
+    cells: np.ndarray
+    distance_m: np.ndarray
+
+
+def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None):
+    """Build the inventory without confusing a planning horizon with reachability.
+
+    Uses the planner's clearance-qualified passable graph. A goal snapped across
+    a disconnected wall is rejected rather than credited to an unseen room.
+    """
+    params = replace(params or FrontierRankingParams(),
+                     max_geodesic_m=max(1.0, world.grid.size * world.resolution * math.sqrt(2.0)))
+    labels = np.asarray(room_labels)
+    if labels.shape != world.grid.shape:
+        raise ValueError("Room labels must match the occupancy grid")
+    distances = np.full(world.grid.shape, np.inf, dtype=float)
+    cells = np.zeros(world.grid.shape, dtype=bool)
+    components, _ = connected_components(world.grid == world.values.free, structure=np.ones((3, 3)))
+    ox, oy = world.world_to_grid(*origin_xy)
+    if not world.in_bounds(ox, oy) or components[oy, ox] == 0:
+        return FrontierInventory((), {}, cells, distances)
+    source_component = components == components[oy, ox]
+    qualified_cost = np.where(source_component, cost, np.inf)
+    ids, graph = _graph(qualified_cost, None, None, origin_xy, yaw)
+    dist = _distances(world, ids, graph, origin_xy, params)
+    if dist is None:
+        return FrontierInventory((), {}, cells, distances)
+    on_graph = ids >= 0
+    distances[on_graph] = dist[ids[on_graph]] * world.resolution
+    clusters = frontier_clusters(world, source_component, ids)
+    blocked = world.grid != world.values.free
+    goals, by_room = [], {}
+    for cluster in clusters:
+        gx, gy = cluster.cell
+        members = distances[cluster.rows, cluster.cols]
+        if not math.isfinite(distances[gy, gx]):
+            if not np.isfinite(members).any():
+                continue
+            nearest = int(np.argmin(members))
+            gx, gy = int(cluster.cols[nearest]), int(cluster.rows[nearest])
+            cluster = replace(cluster, cell=(gx, gy))
+        nearest = int(np.argmin((cluster.cols - gx) ** 2 + (cluster.rows - gy) ** 2))
+        if not line_of_sight_clear(blocked, gx, gy, int(cluster.cols[nearest]), int(cluster.rows[nearest])):
+            continue
+        goal = _rank(world, [cluster], dist, ids, origin_xy, yaw, params)[0]
+        goals.append(goal)
+        cells[cluster.rows, cluster.cols] = True
+        room = _room_of(labels, cluster)
+        if room is not None:
+            by_room.setdefault(room, []).append(goal)
+    goals.sort(key=lambda g: (-g.utility, g.geodesic_m))
+    for members in by_room.values():
+        members.sort(key=lambda g: (-g.utility, g.geodesic_m))
+    return FrontierInventory(tuple(goals), by_room, cells, distances)
 
 
 def ranked_frontier_goals(world: OccupancyGrid2D,
