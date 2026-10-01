@@ -108,21 +108,50 @@ proper re-run.
   Add `export LLM_REASONING_MODEL=qwen2.5:3b-instruct` only for a quick check;
   omit it (use the real 14B default) for anything meant to be a real signal.
 
-## Recommended order of work next session
+## Decision (end of 2026-10-01): priority changes for next week
 
-1. **Re-run `00800-TEEsavR23oF/000000` with the proper `qwen2.5:14b-instruct`**
-   reasoning model (now pulled) for a clean signal before concluding anything
-   further about the remaining freezes.
-2. **The `RETREAT`-never-exits gap is the clearest remaining target**: it's
-   documented, reproducible, and the fix direction is already named
-   (`FloorAtlas.cancel_transition`-style hard exit when stuck far from every
-   known storey) — just never landed anywhere. This is probably the single
-   highest-value fix available right now.
-3. Separately check whether the early `doorway_peek_approach` freeze
-   (steps 7–141) reproduces with the 14B model — if it's a 3B-reasoning
-   artifact it may not be worth chasing.
-4. Only after both are resolved: re-run the deep 5-scene or full 36-scene
-   campaign. Numbers before that aren't representative.
-5. Worth flagging the `RETREAT` gap to Nadav regardless of who fixes it first —
-   it's shared `methods/` code, used by Gibson too, and he already knows about
-   and named the missing fix.
+**Do not keep chasing the `RETREAT` bug** unless it turns out to be a tiny,
+contained fix (worth a quick look first, see below) — it is **not** next
+week's task. The actual priority is to **bring FALCON into the algorithm**,
+with two specific design asks:
+
+1. **Multi-resolution FALCON**: plan high-level (coarse) first, then refine
+   at finer resolution — not a single fixed `cell_size_m` as today.
+2. **2.5D, not 3D** — already true of the module that would be wired in (see
+   below); confirm this is the intended target before building anything new.
+
+### What already exists (found today, not yet validated for this)
+
+- `core/planning/exploration/falcon/` is **already** "the FALCON 2D/2.5D
+  adaptation (not the ROS/UAV binary)" — its own module docstring says so
+  explicitly (`params.py:1`). The real 3D, ROS-based FALCON lives elsewhere
+  entirely: `TheAgency_moshe/sparx_agency/tasks/planning/falcon/adapter/`
+  (drone/sim adapter nodes) and `TheAgency/sparx_agency/tasks/planning/
+  falcon_pegasus/` (viz/memwatch, a different thing again). **Don't confuse
+  the three** — "insert FALCON" almost certainly means wiring up the
+  2D/2.5D planar one that's already in `methods/falcon_policy.py` and
+  already reachable via `hm3d.run --explorer falcon`, not porting the ROS one.
+- **No multi-resolution exists yet.** `FalconParams` (`falcon/params.py`) has
+  one `cell_size_m` (4.0) and one `scope_radius_m` (4.0) — a single fixed
+  decomposition. Building a coarse-then-fine pass is new work, not a toggle.
+- FALCON was only ever validated on **Gibson**, not HM3D (`gibson/
+  FALCON_HANDOFF.md`, `FALCON_RESULTS.md`), with a mixed, undecided result
+  (frontier 2/2 vs FALCON 1/2 on the small development pair) — "keep frontier
+  default" was the explicit conclusion. Treat that as the baseline to beat,
+  not as proof FALCON already works here.
+
+### Recommended order of work next session
+
+1. Quick triage only: if the `RETREAT`-never-exits gap (see above) looks like
+   a genuinely small, contained fix, take it — otherwise leave it and move on.
+2. Confirm with Nadav/Moshe which FALCON is meant ("2D/2.5D `methods/falcon_*`"
+   vs the ROS one) before designing anything, given how easy the three
+   same-named things are to conflate.
+3. Design the coarse-to-fine resolution scheme for `FalconPlanner`
+   (`falcon/planner.py`) / `FalconParams` — likely a sequence of decreasing
+   `cell_size_m` passes feeding progressively narrower `scope_radius_m`,
+   but this needs a real design pass, not just parameter sweeps.
+4. Re-run `00800-TEEsavR23oF/000000` with the proper `qwen2.5:14b-instruct`
+   reasoning model (now pulled) at some point for a clean signal on where the
+   frontier baseline currently stands — useful context before comparing a new
+   FALCON variant against it.
