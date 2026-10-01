@@ -1,37 +1,102 @@
-# Handoff — HM3D ObjectNav benchmark, 2026-09-29
+# Handoff — HM3D ObjectNav benchmark, 2026-10-01
 
 Branch: `feat/objnav-habitat-hm3d-daphna` (tracks `origin/feat/objnav-habitat-hm3d-nadav`).
 Everything below is committed on this branch unless marked otherwise.
 
 ## The actual goal
 
-Moshe (email, "Research alternatives" thread) asked for a larger, more diverse
-ObjectNav evaluation than the 15-building Gibson pilot before drawing
-conclusions. Nadav's `objnav_benchmark_runtime/hm3d/` package is that harness —
-your team's real method (`sparx-rpt-llm-host-sweep`: scene graph → LLM room
-prior → RPT\* room order → weighted A\*), run on HM3D-v2 (36 scenes, 1000
-episodes). This session got that harness fully working end to end, found and
-fixed two crash bugs, and is mid-way through a third, more interesting one
-(an exploration bug, not a crash).
+Moshe asked for a larger, more diverse ObjectNav evaluation than the 15-building
+Gibson pilot before drawing conclusions. Nadav's `objnav_benchmark_runtime/hm3d/`
+package is that harness — the team's real method (scene graph → LLM room prior →
+RPT\* room order → weighted A\*), run on HM3D-v2 (36 scenes, 1000 episodes).
 
-Kiril's later email proposes connecting RPT\*'s problem to a classical OR
-literature ("expanding search" / Alpern & Lidbetter 2013, and a 2026 follow-up
-on search with unreliable predictions) as a sharper novelty angle than "a
-better planner" — worth a read if picking the research-framing thread back up
-rather than the engineering one.
+Previous session (2026-09-29) found and partially fixed an exploration-freeze bug
+(see `LESSONS.md` 2026-09-28/09-22 entries). Today's session merged in Nadav's
+parallel work on the same bug class from `feat/objnav-habitat-gibson-nadav`.
 
-## Environment (all local to this machine, not portable)
+## What happened today
 
-- `hm3d_bench` → renamed to **`objnav-habitat`** conda env (python 3.9,
-  `habitat-sim==0.2.4` — required exactly, not 0.2.1).
-- **`detector_bench`** conda env — YOLO-World-X (`yolov8x-worldv2.pt` in
-  `~/models/objnav/`), GPU (`cuda:0`), served on `127.0.0.1:18092`.
-- **Ollama**, dedicated instance on port **11435** (not the system default
-  11434), model `qwen2.5:3b-instruct`, models dir `~/models/objnav/ollama`.
-- Data: `~/datasets/objectnav/hm3d/v2/val/` (episodes) +
-  `~/datasets/scene_datasets/hm3d_v0.2/val/` (scenes, 36/36 present).
-  v1 data was also set up earlier (`hm3d/val`, `objectnav/hm3d/v1`) but not
-  used since — v2 is the active split.
+1. **Merged `origin/feat/objnav-habitat-gibson-nadav` into this branch**
+   (`a6fde50c`, plus a follow-up fix commit `f223becd` — see "Mistake" below).
+   Nadav's branch had moved well past the fork point (`299c20a1`, 2026-09-28)
+   with two more commits: `e217f8f1` (ground-truth stairs rewrite: seen-only
+   detection, centreline traversal, never skip a vertex, withhold the
+   just-climbed staircase from RPT\*) and `48f8f395` (today, 2026-10-01: one-time
+   room peeks, floor-departure guard fixes, target-closing rewrite).
+2. **Resolved 5 real conflicts**: `CHANGELOG.md`, `LESSONS.md`,
+   `objnav_benchmark_runtime/README.md` (additive, kept both sides),
+   `gibson/stair_connectors.py` (structural — see below), `habitat/simulator.py`
+   (two unrelated new methods added at the same spot, kept both).
+3. **Structural conflict**: this branch had already refactored
+   `gibson/stair_connectors.py` into a thin re-export shim pointing at
+   `habitat/stair_connectors.py` (done in the 2026-09-28 shared-core merge,
+   `5a3d270f`), while Nadav's branch never did that rename and kept developing
+   the real 650-line implementation directly in the old `gibson/` path. Resolved
+   by keeping our shim and porting Nadav's rewritten implementation into
+   `habitat/stair_connectors.py`, then fixing the shim's explicit re-export list
+   (`_nearest_level`/`_polyline` no longer exist under the new design;
+   nothing outside the shim imported them).
+4. **Fixed 4 of Nadav's new tests** (`test_target_closing.py`): they called
+   `HabitatRGBDSimulator(...)` without the `height_m` keyword this branch already
+   requires (an HM3D-side requirement from the earlier shared-core merge that his
+   branch never had). Added `height_m=0.88` to match the convention used
+   elsewhere in the test suite.
+5. **Verified no regressions**: full `tests/` + `core/planning/objnav` +
+   `objnav_benchmark` + `core/mapping/topology` suite — 2093 passed, same 10
+   pre-existing failures as on the unmerged branch (all `skfmm` not installed in
+   `.venv`, confirmed by running the identical tests in a throwaway worktree at
+   the pre-merge commit — not a merge regression).
+6. **Mistake caught and fixed (`f223becd`)**: when first resolving the
+   `gibson/stair_connectors.py` conflict, copied Nadav's new implementation into
+   `habitat/stair_connectors.py` on disk but never `git add`ed it before
+   committing the merge — `a6fde50c` landed the shim pointing at the *old*
+   237-line implementation. Tests still passed because pytest reads the
+   (unstaged) working tree, not the commit. Caught by checking `git status`
+   before writing this handoff. **Lesson for next time: after resolving a
+   conflict by replacing a file's content outright (not editing the conflicted
+   copy in place), always `git add` it explicitly — don't rely on `git add -A`
+   with a narrow pathspec to catch it.**
+
+## Verification run: the exploration-freeze bug is IMPROVED, not fixed
+
+Re-ran the known reproduction case, `00800-TEEsavR23oF/000000`
+(`~/objnav_benchmark/hm3d_v2/postmerge_test_00800/`), same seed (17), same
+`--explorer frontier`. **Used `qwen2.5:3b-instruct` for both LLM routes**
+(including `LLM_REASONING_MODEL`, which defaults to `qwen2.5:14b-instruct` and
+wasn't pulled yet at the time) — treat this run as a directional check, not a
+clean/scorable result. `qwen2.5:14b-instruct` is now pulled and ready for a
+proper re-run.
+
+- **Before** (pre-merge, `stairfix_test_00800_v2`): 375 of 500 steps frozen in
+  one continuous block.
+- **After** (post-merge): ~236 of 500 steps frozen, split across four shorter
+  windows instead of one. Real improvement, not noise.
+- **Still broken — the episode's last 101 steps are unbroken `RETREAT`**, never
+  exits for the rest of the episode. This matches the gap Nadav documented
+  himself in `LESSONS.md` (2026-09-28 entry, "Status" note): a retreat stuck
+  more than `floor_match_m` from every known storey never satisfies
+  `FloorAtlas._settled()`'s plateau test, and the real fix for that
+  (`FloorAtlas.cancel_transition`, commit `4adf14c0`) was **never pushed to any
+  branch** — confirmed again today (`git cat-file -e 4adf14c0` fails in this
+  repo).
+- **Earlier freeze (steps 7–141)** centers on `doorway_peek_approach` near a
+  stair head — looks related to *today's* newest lesson ("a peek route across a
+  stair head becomes a coverage-veto rotation loop", `48f8f395`), whose own
+  validation note says only "a CPU-only native-NavMesh probe... no new
+  end-to-end benchmark was run." Plausibly not fully shaken out in a real run
+  yet; could also be an artifact of using the 3B model for room reasoning
+  instead of 14B.
+
+## Environment (unchanged from last session, all local to this machine)
+
+- `objnav-habitat` conda env (python 3.9, `habitat-sim==0.2.4`).
+- `detector_bench` conda env — YOLO-World-X, GPU (`cuda:0`), `127.0.0.1:18092`.
+  **Already running**; health-checked today, serving 29 classes correctly.
+- Ollama, port **11435**, `~/models/objnav/ollama`. **Already running.**
+  `qwen2.5:3b-instruct` was there already; `qwen2.5:14b-instruct` (~9 GB, Q4)
+  pulled today and ready.
+- Data: `~/datasets/objectnav/hm3d/v2/val/` + `~/datasets/scene_datasets/hm3d_v0.2/val/`
+  (36/36 scenes present, verified today).
 - Standard run env vars:
   ```bash
   source ~/miniconda3/etc/profile.d/conda.sh && conda activate objnav-habitat
@@ -40,122 +105,24 @@ rather than the engineering one.
   export HM3D_EPISODES_DIR="$HOME/datasets/objectnav/hm3d/v2/val"
   export HM3D_SCENES_DIR="$HOME/datasets/scene_datasets"
   ```
-  Detector and Ollama must already be running in their own terminals before
-  any `hm3d.run`/`hm3d.campaign` invocation. `--allow-shared-gpu` is required
-  (desktop compositor overhead alone exceeds the harness's 512MiB gate).
-
-## Fixes made this session (all committed)
-
-1. **`b59dbffc`** — `reset()` teleported to the *raw* published height with no
-   navmesh check; the first real action of an episode was the first time
-   habitat-sim's native collision test reconciled that height against the
-   recomputed (`navmesh="agent"`) navmesh, and the harness's kinematics
-   checker read that reconciliation as an illegal move during a turn.
-   Fixed by having `reset()` ask `pathfinder.snap_point()` for the real
-   height and place the agent there directly — one working height per
-   episode, decided once (Nadav's framing: "2.5-D").
-
-2. **`7e081c2b`** — Same class of bug, different action: `MOVE_FORWARD`'s
-   climb tolerance assumes at most a 45° slope; short real stairs (2-3 steps
-   to a sunken room) can exceed that on one action, and never register as a
-   ground-truth stair connector at all (`floor_levels()` only recognizes
-   storeys ≥1.5m apart, so a ~0.4m level change gets absorbed into the main
-   floor's bucket). Fixed by checking, after every step, whether the landing
-   pose is confirmed on the real navmesh (`snap_point` again) — if so, trust
-   it over the naive slope-cap tolerance. Required also patching
-   `RecordingEnv` (the `--record` wrapper), which doesn't forward arbitrary
-   new env methods — the first attempt at this fix silently did nothing
-   under `--record`, which is how every run in this session was invoked.
-
-3. **`ec88f935`** — **Partial**, see below.
-
-Both scenes that crashed on these bugs (`00810-CrMo8WxCyVb`, `00800-TEEsavR23oF`,
-`00827-BAbdmeyTvMZ`, `00869-MHPLjHsuG27`) now run clean; the always-good scene
-(`00877-4ok3usBNeis`) reproduces bit-identical results, confirming neither fix
-changes actual search behavior.
-
-## In progress: the exploration-freeze bug (NOT solved)
-
-Found by inspecting a recording the user flagged by hand:
-`stairfix_test_00800_v2/recordings/d6a925c60b5b` (episode
-`00800-TEEsavR23oF/000000`). The agent froze — zero net position change —
-for **373 of the episode's 500 steps** (plus an earlier 82-step freeze). This
-single failure mode plausibly explains a large share of the low SPL/high
-step-count numbers seen everywhere this session (the campaign's aggregate
-`mean_steps` was 372.7 — suspiciously close to 373).
-
-**Two distinct sub-mechanisms found inside that one freeze, confirmed by
-reading `steps.jsonl`'s `command.info`/`decision.info` fields directly:**
-
-**(a) Turn oscillation, steps ~134-153.** Two frontier candidates roughly
-symmetric on either side of the agent scored as tied; the goal flip-flopped
-between them every tick (`route_replaced: "goal_changed"` every step,
-`heading_error_rad` alternating sign), so the agent kept re-turning to face
-whichever won that tick's ranking, never finishing a turn, never starting to
-walk. Root cause: `CommittedRoute.clear()` resets its 30-step no-progress
-watchdog (`_motion_xy = None`) for `"goal_changed"`, but *not* for
-`route_obstructed`/`off_route`/`forward_blocked` — so a goal that changes
-every tick resets the very watchdog meant to catch "stuck", every tick,
-before it can ever reach 30. **Fixed in `ec88f935`** — added `"goal_changed"`
-to the exclusion list. Verified in isolation (`_motion_xy` now survives a
-`clear("goal_changed")` call) and confirmed this specific 20-step
-oscillation window no longer reproduces in principle — but see below.
-
-**(b) A second, larger freeze, steps ~156-499 — UNFIXED, dominates the
-episode.** `route=committed_safe_route` → immediately
-`replaced=forward_blocked` on the very next tick, repeating for the rest of
-the episode. `action=MOVE_FORWARD` every tick, `distance_to_goal_m`
-completely static (e.g. exactly `4.681` for 5+ consecutive logged ticks).
-Re-ran the exact same episode after the (a) fix: **byte-identical freeze
-windows, zero change** — (a)'s fix is correct but doesn't touch this second
-mechanism, which is doing essentially all of the damage (343 of the 373
-frozen steps).
-
-**Where I got to on root-causing (b), not yet confirmed:**
-- `notify_blocked()` (`rpt_policy.py:113`) fires on a collided `MOVE_FORWARD`,
-  calls `route_memory.clear("forward_blocked")` (already excluded from
-  resetting `_motion_xy`, both before and after this session's fix) **and
-  separately** does `self._route, self._goal = None, None` directly —
-  wiping the policy's own goal state outside of `route_memory` entirely.
-- `reusable()` (the only place the no-progress timeout is actually checked)
-  **is** called every tick via `_navigate()` (`rpt_policy.py:234`), with
-  whatever `goal` was just selected — so it's not simply "never called",
-  contradicting my first hypothesis.
-- Not yet checked: whether `_motion_step` (as opposed to `_motion_xy`) is
-  being reset by something else in this specific path — e.g. `_reset_floor()`
-  calls `route_memory.clear("floor_reset")`, and `"floor_reset"` is *not* in
-  the exclusion list. Step 154 of this exact freeze shows
-  `replaced="ground-truth floor decision"` right before this second freeze
-  begins — i.e. the multi-floor coordinator did something right at the
-  boundary between sub-freeze (a) and (b). Worth checking whether the
-  agent is stuck trying to approach/traverse a stair connector it can't
-  actually reach, and whether floor-related clears are repeatedly re-arming
-  (or re-wiping) state in a way that keeps defeating the watchdog.
-- **Next concrete step**: instrument or re-read `notify_blocked()`'s full
-  body and whatever calls `_navigate()` around a blocked step, to see
-  exactly what `goal`/`kind` gets passed to `reusable()` on the tick right
-  after a block — confirm whether `_motion_step` truly survives, and if not,
-  find what's resetting it.
-
-## Background runs
-
-Nothing is currently running — the last background campaign
-(`deep_5scenes_fixed`, 5 scenes × ~28 episodes) was stopped deliberately to
-prioritize this bug. Partial results exist at
-`~/objnav_benchmark/hm3d_v2/deep_5scenes_fixed/` for whichever scenes
-finished before it was stopped (check for `index.html` per scene folder).
-**Do not resume it as-is** — it predates fix (a) and entirely lacks a fix for
-(b), so its numbers aren't representative of the current code.
+  Add `export LLM_REASONING_MODEL=qwen2.5:3b-instruct` only for a quick check;
+  omit it (use the real 14B default) for anything meant to be a real signal.
 
 ## Recommended order of work next session
 
-1. Finish root-causing (b) — the bigger freeze — using the concrete next
-   step above.
-2. Re-verify both (a) and (b) are fixed on `00800-TEEsavR23oF/000000`
-   specifically (the reproduction case), then spot-check 2-3 other scenes.
-3. Only then re-run the deep 5-scene (or full 36-scene) campaign — numbers
-   before (b) is fixed aren't worth collecting.
-4. Consider whether this exploration-freeze class of bug is worth reporting
-   to Nadav now (it's shared `methods/` code, used by Gibson too) even before
-   fully solved — the turn-oscillation half alone (fix `ec88f935`) is a real,
-   self-contained, already-fixed defect worth landing independently of (b).
+1. **Re-run `00800-TEEsavR23oF/000000` with the proper `qwen2.5:14b-instruct`**
+   reasoning model (now pulled) for a clean signal before concluding anything
+   further about the remaining freezes.
+2. **The `RETREAT`-never-exits gap is the clearest remaining target**: it's
+   documented, reproducible, and the fix direction is already named
+   (`FloorAtlas.cancel_transition`-style hard exit when stuck far from every
+   known storey) — just never landed anywhere. This is probably the single
+   highest-value fix available right now.
+3. Separately check whether the early `doorway_peek_approach` freeze
+   (steps 7–141) reproduces with the 14B model — if it's a 3B-reasoning
+   artifact it may not be worth chasing.
+4. Only after both are resolved: re-run the deep 5-scene or full 36-scene
+   campaign. Numbers before that aren't representative.
+5. Worth flagging the `RETREAT` gap to Nadav regardless of who fixes it first —
+   it's shared `methods/` code, used by Gibson too, and he already knows about
+   and named the missing fix.
