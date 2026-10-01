@@ -83,7 +83,7 @@ Three things the confirmation recording of the room-search loop
       `run_development --preflight-output` step passed as written against the frozen
       Ranchester manifest and the CPU Ollama. `provision_grounded_vlm --model none
       --include-yolo` added so YOLO-only weights can be provisioned without the VLMs.
-- [ ] Re-run Ranchester 000000 with YOLO only and ground-truth stairs; read the
+- [x] Re-run Ranchester 000000 with YOLO only and ground-truth stairs; read the
       `floor_decision` events and the fallback stats against this entry (user
       decides when; needs the detector service restarted on `yolo_world`).
 
@@ -120,8 +120,32 @@ Three things the confirmation recording of the room-search loop
   the atlas has no floors when discovery first runs; ground-truth discovery now
   reads the pose height in that case, as the observed path always did.
 
+- 2026-09-28: **Flown.** `runs/fallback_gtstairs_yolo_20260928T130941Z` -- Ranchester
+  000000 (toilet) and 000001 (couch), YOLO-World on CPU, both recorded. Fallback and
+  YOLO default verified (0 idle actions, 0 fallback invocations, backend `yolo_world`
+  in `run.json`, ~2x faster per episode than the GPU grounded-VLM reference). Ground
+  truth stairs: the decision fired correctly on the real staircase in both episodes,
+  but the traversal reached the end of the 7-point connector polyline on the landing
+  at z 1.84 (0.80 of 2.59 m descended), was blocked there, and the retreat then held
+  the agent in `RETREAT` for the remaining 316 / 293 actions because ending a
+  transition is gated on `FloorAtlas._settled()`, which a shuffling agent never
+  satisfies. Neither episode reached the ground floor; the observed-stairs reference
+  did (action 369). See `RESULTS.md` in the run dir and LESSONS 2026-09-28.
+
 ## Result
 
-Implemented; unit-tested; not yet flown. The connector reading is validated
-against the real scene. The Ranchester re-run is the next step.
+Implemented, unit-tested and flown on two recorded Ranchester episodes. Fallback and
+YOLO-only default: verified. Ground-truth stairs: decision verified, traversal
+regressed versus observed stairs. Both follow-ups were closed on the remote line (entry 013):
+- [x] Hard exit from `RETREAT` when `retreat_actions` is spent: e217f8f1 confirms a
+      spent retreat on a measured storey through `FloorAtlas.settle`, and the coordinator
+      abandons. A retreat spent more than `floor_match_m` from every storey still waits
+      for the plateau test (LESSONS 2026-09-28).
+- [x] Connector polyline vs. `pathfinder.find_path(top, bottom)` on Ranchester: the
+      policy's route ends on the intermediate landing; make sure the full path with
+      the landing turn is what `stair_connectors` hands over, and that the follower
+      does not cut it.
+      Done in e217f8f1 (superseded): connectors are centreline polylines whose strides
+      are checked with `try_step`, the follower never skips a vertex, and
+      `tests/rollout_stairs_navmesh.py` walks every connector. See entry 013.
 

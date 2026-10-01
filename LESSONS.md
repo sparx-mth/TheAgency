@@ -136,6 +136,55 @@ the classifier's is about WHAT the evidence means, and only the first goes stale
 
 ---
 
+## 2026-09-28 — Ground-truth stair RETREAT ate 60 % of the episode because "done" was gated on the atlas settling
+
+**Symptom:** Two recorded Ranchester episodes on 299c20a1
+(`runs/fallback_gtstairs_yolo_20260928T130941Z`, YOLO-only, seed 17): the room-search loop
+ran cleanly for ~140 actions, the ground-truth floor decision picked the real staircase, the
+agent descended 0.8 m — and then spent the remaining 316 / 293 actions in `RETREAT`,
+shuffling in a 0.2 × 0.3 m box at the top of the stairs, camera pinned 60° down, never
+re-entering SEARCH. Final DTG 7.2 / 7.6 m, no success. The previous commit (observed stairs)
+walked the same staircase down at action 324–369 of the same episode.
+
+**Root cause:** Two things, in order of impact.
+1. `GroundTruthTraversal.plan` expires the retreat budget (`retreat_actions = 80`) by setting
+   `completion_reason = ground_truth_retreat_budget_exhausted` and `arrival_allowed = True` —
+   but nothing *ends* the transition. `MultiFloorSearch.observe` only abandons when
+   `not atlas.in_transition`, and `FloorAtlas._settled()` needs 3 samples with height range
+   ≤ 0.12 m **and** net translation ≥ 0.35 m. An agent stuck on the top treads (z wobble
+   0.18 m, no net travel) never settles, so `in_transition` stays True forever and the
+   traversal keeps issuing a 0.43 m follow command it can't complete.
+2. The connector polyline from `stair_connectors` (7 points, top → bottom, 5.5 m) ends on the
+   intermediate landing at z 1.84, 1.8 m above the destination (`best_rise_m` 0.80 of 2.59).
+   `cursor` hit the last vertex with `at_height` false, forward was blocked 4× on the
+   landing → `retreat_started reason=blocked`. Same spot in both episodes, so it is the
+   geometry, not luck: either the navmesh shortest path between the two anchors is being
+   truncated to the first flight, or the follower cuts the U-turn.
+
+**Fix / workaround:** (1) give retreat a hard exit: when the budget is spent, call
+`_abandon()` (or hand the action to the exploration fallback's relocation rung) and let the
+atlas re-anchor by height alone, without waiting for `_settled()`. (2) Check
+`scene_structure_from_pathfinder` on Ranchester: compare the connector polyline against
+`pathfinder.find_path(top, bottom)` and make sure the full path, including the landing turn,
+is what the policy receives. Until both are in, `stair_source: "observed"` is the better
+default on this building.
+
+**Don't:** don't read `idle_steps = 0` and `exploration_fallback.failures = 0` as "the
+episode went well" — the retreat shuffle is forward/turn actions, so it is invisible to both
+counters. Look at the `traversal_state` column of `trajectory.csv` or the timeline tool.
+
+**Status (2026-09-30, remote line):** both root causes are addressed in e217f8f1. A spent
+retreat within `floor_match_m` of a measured storey now confirms that storey through
+`FloorAtlas.settle` and the coordinator abandons the transition. The connector is
+re-extracted along the flight centreline, the follower never skips a vertex, and
+`tests/rollout_stairs_navmesh.py` walks every connector both ways. Still open: a
+retreat spent more than `floor_match_m` from every known storey (stuck on the treads)
+still waits for the plateau test. The office fix for this (`FloorAtlas.cancel_transition`,
+commit 4adf14c0, never pushed) was not carried over. Under the departure gate it would
+restart the retreat in a cycle.
+
+---
+
 ## 2026-09-22 — ObjectNav spent half its actions spinning, and the step log said why only once decoded
 
 **Symptom:** In the Ranchester Gibson recording (`runs/grounded_vlm_gibson_3x3_20260922T084950Z/
