@@ -2,18 +2,20 @@
 from __future__ import annotations
 
 import math
+import numpy as np
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import doorway_candidates, same_region
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import doorway_candidates, same_region, threshold_cells
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import peek_planning_world, stair_peek_mask
 
 
 class DoorwayPeek:
     """Approach a nearby new room, scan its inward semicircle, then reconsider.
 
-    No nested peeks. Actual measured yaw, not plan-call count, completes the
-    scan. Failed routes/scans are bounded and cooled; completed regions are
-    remembered across floor revisits and modest room-ID changes.
+    No nested/repeated peeks. The allowance is consumed on start, even on
+    cancellation. Actual measured yaw still distinguishes a completed scan
+    from a mere attempt; both attempts and initial labels exempt future peeks.
     """
 
     def __init__(self, policy):
@@ -26,21 +28,50 @@ class DoorwayPeek:
 
     def _record(self, pid, mask):
         floor = self.policy.mapping.floor_id
-        return next((r for r in self.records if r["floor"] == floor
-                     and same_region(r["mask"], mask)
-                     and (not r.get("scan_cell") or mask[tuple(r["scan_cell"])])), None)
+        for record in self.records:
+            if record["floor"] != floor or record["mask"].shape != mask.shape:
+                continue
+            overlap = int(np.count_nonzero(record["mask"] & mask))
+            ids = record.get("room_ids", [record["room"]])
+            consumed = record.get("room_peeked", False) or record["done"] or record.get("classified", False) or record["attempts"] > 0
+            # Registry IDs never recycle. Keep their history through modest
+            # drift; a retired-ID region or split child must overlap spatially.
+            if ((pid in ids and overlap > 0) or same_region(record["mask"], mask)
+                    or (consumed and overlap >= 0.6 * max(1, min(int(record["mask"].sum()), int(mask.sum()))))):
+                record["room_ids"] = sorted(set(ids) | {pid})
+                return record
+        return None
+
+    def _exemption(self, pid, room):
+        record = self._record(pid, room.mask)
+        if record is not None:
+            if record["done"]:
+                return "scanned"
+            if record.get("room_peeked", False) or record["attempts"] > 0:
+                return "already_peeked"
+            if record.get("classified", False):
+                return "classified"
+        info = self.policy.graph.label_info(pid) or {}
+        if info.get("label") not in (None, "", "unknown"):
+            if record is None:
+                record = dict(floor=self.policy.mapping.floor_id, room=pid, mask=room.mask.copy(),
+                              done=False, attempts=0, retry=0, room_peeked=False)
+                self.records.append(record)
+            record.update(classified=True, initial_label=info["label"], reason="classified")
+            return "classified"
+        return None
 
     def pending_rooms(self):
-        """Current-floor regions without a completed interior scan; labels are irrelevant.
-
-        A failed/cooling/unreachable attempt is still outstanding. IDs alone
-        never transfer a visit to a new region, nor does a parent room's scan
-        automatically inspect every child when the segmentation splits it.
-        """
+        """Unknown regions still eligible for their single peek; never demand repeats."""
         pending = []
+        world = getattr(self.policy, "last_world", None)
+        excluded = stair_peek_mask(self.policy, world) if world is not None else None
         for pid, room in self.policy.graph.registry.rooms.items():
-            record = self._record(pid, room.mask)
-            if record is None or not record["done"]:
+            if excluded is not None and (room.mask & excluded).any():
+                interior = threshold_cells(self.policy, world, room)
+                if interior.any() and not (interior & ~excluded).any():
+                    continue  # a stair connector is not an unexplored room doorway
+            if self._exemption(pid, room) is None:
                 pending.append(pid)
         return sorted(pending)
 
@@ -62,23 +93,33 @@ class DoorwayPeek:
             self.initialized_floors.add(floor)
 
     def plan(self, obs, world, *, force=False):
-        """Inspect nearby rooms, or finish outstanding floor coverage when forced.
-
-        Disabling opportunistic peeks does not waive the floor-exit invariant.
-        The fallback can still request a mandatory visit, without an LLM.
-        """
+        """One unknown-room peek; force never bypasses exemptions or stair safety."""
+        p = self.policy
+        if ((p.building is not None and p.building.committed) or p.mapping.atlas.in_transition
+                or getattr(getattr(p, "closing", None), "active", False)):
+            self.cancel(obs, "exclusive_navigation", restore=False)
+            return None
         if not self.settings.enabled and not force and self.active is None:
             return None
         if self._step == obs.step and (self._command is not None or not force):
             return self._command
         self._step, self._command = obs.step, None
+        excluded = stair_peek_mask(p, world)
+        gx, gy = world.world_to_grid(obs.pose.x, obs.pose.y)
+        if world.in_bounds(gx, gy) and excluded[gy, gx]:
+            self.cancel(obs, "stair_exclusion")
+            return None
         self._remember_start(obs, world)
         if self.active is None:
+            # A single confirmed-object clue may supply the initial label
+            # before a peek steals control from the normal reasoning cadence.
+            for pid in self.pending_rooms():
+                p.loop._reclassify(obs, pid, "peek_candidate")
             candidates = doorway_candidates(self.policy, obs, world, self.settings, nearby=not force,
                                              room_ids=set(self.pending_rooms()))
             for distance, pid, xy, heading, mask in candidates:
                 record = self._record(pid, mask)
-                if record and (record["done"] or record["attempts"] >= self.settings.max_attempts or obs.step < record["retry"]):
+                if record and (record["done"] or record.get("room_peeked", False) or record["attempts"] >= 1):
                     continue
                 self._begin(obs, pid, xy, heading, mask, record, distance)
                 break
@@ -92,6 +133,8 @@ class DoorwayPeek:
             record = dict(floor=p.mapping.floor_id, room=pid, mask=mask.copy(), done=False, attempts=0, retry=0)
             self.records.append(record)
         record["attempts"] += 1
+        record["room_peeked"] = True
+        record["peek_started_step"] = obs.step
         saved = (p.route_memory, p._route, p._goal, p._last_plan_s, p._blocked_since)
         p.route_memory = CommittedRoute(p.episode.action_spec, p.converter_params, p.route_settings)
         p._route = p._goal = None
@@ -119,6 +162,18 @@ class DoorwayPeek:
             self.cancel(obs, "room_disappeared")
             return None
         active["room"] = room.id
+        p.loop._reclassify(obs, room.id, "peek_active")
+        info = p.graph.label_info(room.id) or {}
+        if info.get("label") not in (None, "", "unknown"):
+            active["record"].update(classified=True, initial_label=info["label"])
+            self.cancel(obs, "classified")
+            self.pending_reason = True
+            return None
+        excluded = stair_peek_mask(p, world)
+        ex, ey = world.world_to_grid(*active["xy"])
+        if world.in_bounds(ex, ey) and excluded[ey, ex]:
+            self.cancel(obs, "stair_exclusion")
+            return None
         gx, gy = world.world_to_grid(obs.pose.x, obs.pose.y)
         inside = world.in_bounds(gx, gy) and room.mask[gy, gx]
         if active["phase"] == "approach":
@@ -131,7 +186,7 @@ class DoorwayPeek:
                 self.cancel(obs, "approach_budget")
                 return None
             else:
-                command = p._navigate(obs, world, active["xy"], "doorway_peek_approach")
+                command = p._navigate(obs, peek_planning_world(p, world, excluded), active["xy"], "doorway_peek_approach")
                 if command is None:
                     self.cancel(obs, "entry_unreachable")
                 return command
@@ -190,8 +245,7 @@ class DoorwayPeek:
             return
         active = self.active
         active["record"].update(retry=obs.step + self.settings.retry_actions, reason=reason)
-        if reason == "target_priority":
-            active["record"]["attempts"] = max(0, active["record"]["attempts"] - 1)
+        # No cancellation refunds the one-time allowance, including target or stair takeover.
         self.events.append(dict(step=obs.step, event="peek_cancelled", floor=active["floor"],
                                 room=active["room"], reason=reason))
         if restore and active["floor"] == self.policy.mapping.floor_id:

@@ -4,14 +4,15 @@ from __future__ import annotations
 import math
 
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+from sparx_agency.core.planning.exploration.object_search_supervisor import TRANSIT, UNREACHABLE
 
 
 class FloorDepartureGuard:
-    """Read the peek ledger, never substitute a label, timeout or failed attempt.
+    """Read the one-time peek eligibility ledger, including explicit exemptions.
 
     Only observed rooms and seen stair portals are used. A floor with no room
-    geometry yet is not complete. Unreachable rooms remain pending, visibly;
-    this guard cannot certify rooms that the sensors have not discovered.
+    geometry yet is not complete. Classified/scanned/previously attempted rooms
+    do not demand a forbidden repeat. Eligibility is not a semantic coverage claim.
     """
 
     def __init__(self, building):
@@ -31,7 +32,7 @@ class FloorDepartureGuard:
             self.building.events.append(dict(
                 action=obs.step, event="floor_change_held", floor_id=p.mapping.floor_id,
                 pending_rooms=pending, known_rooms=len(p.graph.registry.rooms),
-                reason="every observed room needs an interior peek and a measured 180-degree scan"))
+                reason="unclassified rooms still eligible for their one-time peek remain"))
         return False
 
     def filter_action(self, obs, action):
@@ -69,6 +70,12 @@ class FloorDepartureGuard:
                     p.peek.cancel(obs, "floor_coverage_guard")
                     p.route_memory.clear("floor_coverage_guard")
                     p._route = p._goal = None
+                    if p.hierarchy is None and p.supervisor.state == TRANSIT:
+                        # The old code immediately replanned the same room route
+                        # through this tread, alternating a path turn and a veto.
+                        p.supervisor.finish(UNREACHABLE, "room transit crosses gated stairs", p._floor_time)
+                        p.loop.room_id = None
+                        p.loop._needs_reason = True
                     return DiscreteAction.TURN_LEFT
         return action
 

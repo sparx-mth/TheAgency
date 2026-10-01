@@ -6,6 +6,21 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- Target-closing recording HUD shows active/confirmed lock, phase, observed target range,
+  elapsed time and FPS; per-frame LLM/classifier/RPT/A* counters permit freeze verification,
+  and normally completed videos end with SR/SPL/DTG/runtime metrics.
+- Single live toilet verification retained with failure evidence: takeover/lock worked, but
+  route steering and reacquisition lost the target before LOOK_DOWN or STOP. No retry was run;
+  the aborted run has a separately labeled diagnostic report, not a completed benchmark row.
+- Irreversible ObjectNav target takeover: configurable confidence, two consecutive depth-consistent
+  frames, bbox yaw centering, close low-target LOOK_DOWN and fresh verified explicit STOP; room/LLM/RPT*
+  exploration cannot resume after takeover, including through failures or detection loss.
+- Geometry-only local Habitat NavMesh projection for observed target standoff goals, followed by
+  collision-qualified A*; availability is declared in run provenance, with no evaluator target/DTG access.
+- Development evaluation now prints finalized video paths and SR/SPL/DTG/runtime/FPS immediately
+  after each episode, supports timed inspection pauses, and saves completion and throughput summaries.
+- Recorded HUD now includes evaluator-only DTG, scene, current room type/confidence and a
+  coordinate-based active frontier ID, without exposing goal distance to the navigation policy.
 - ObjectNav room-coverage floor gate: every observed room, including the spawn room, needs a
   completed interior peek and measured 180-degree scan before normal or fallback stair selection;
   new rooms revoke an approach, failures remain pending, and accidental early stair entry retreats safely.
@@ -44,6 +59,30 @@ future-you, not for a commit log.
   dropped rather than written over another; dark outline under every label; object dots smaller.
   Panel title counts the stairs.
 ### Changed
+- Room peeks are now strictly one attempt per episode-local room: initial classifications,
+  completed scans and consumed attempts bypass both repeat peeks and impossible floor-exit
+  requirements. No cancellation refunds an attempt; overlap preserves the allowance through
+  segmentation renumbering/splits/expansion without claiming a scan completed.
+- Seen, current-floor stair connectors are excluded from peek viewpoints and peek-only A*
+  routes; committed stair/atlas transitions cannot be interrupted by peeks. A coverage-vetoed
+  room transit is released instead of repeatedly replanning into the same left/right loop.
+- ObjectNav enables a bounded 1-degree path-heading hysteresis margin to prefer safe forward
+  progress over reversing-turn chatter; generic converter behavior remains unchanged by default.
+  1,206 core/runtime tests pass; headless Ranchester ascent/descent complete without blocked steps.
+- Same-spawn Sofa verification (one Ranchester episode, unchanged policy/source) reached 500
+  actions with SR=0/SPL=0/DTG=12.5852 m. Stairs were seen at 135, but 62 room-coverage vetoes
+  kept the agent upstairs; descent, lower-floor target closing and STOP were not exercised.
+  Full HUD video, exact-spawn proof and official metrics retained in `runs/sofa_same_spawn_20261001`.
+- Target closing now retains its confirmed 3D target and NavMesh standoff path through occlusion;
+  A* owns transit heading, fresh observations refine the goal, and stationary terminal inspection
+  at 1.0 m (0.05 m confirmation tolerance) owns pitch/bbox servo and explicit STOP.
+- Expected closing failures are recordable method errors rather than infrastructure aborts;
+  the HUD distinguishes persistent lock from live visibility. Added occlusion/refinement/corner
+  regressions; 645 runtime and converter tests pass.
+- One recorded Ranchester toilet check verified unchanged LLM/RPT* counters, path continuation
+  across three occluded decisions, LOOK_DOWN and policy STOP at 0.874 m, with no agent error.
+  Official SR=0/SPL=0/DTG=10.8924 m remain: this manifest scores downstairs reference-floor targets,
+  not the upstairs detection. This is closing-control verification, not benchmark success.
 - Doorway peeks go a further metre inside the room with stopping-tolerance compensation and a
   deepest-safe-viewpoint fallback for small rooms; simply crossing a doorway no longer counts as scanned.
 - Floor maps now show thin logical room outlines, short IDs and minimal route/robot/stair markers;

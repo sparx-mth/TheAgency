@@ -4,7 +4,8 @@ Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order
 local exploration and A*/WA* paths → existing discrete actions. Both explorers
 retain persistent floor contexts; stair connectors come from the simulator's
 navmesh by default (`RPTSettings.multifloor.stair_source`, see
-[MULTISTORY.md](gibson/MULTISTORY.md)), the one declared ground-truth input.
+[MULTISTORY.md](gibson/MULTISTORY.md)). Habitat target closing additionally uses
+declared local NavMesh projection (`target_navmesh_projection` in run configuration).
 This is an experimental multi-story algorithm, **not a claim of solved navigation**.
 
 **To set up and run it end to end, start with [QUICKSTART.md](QUICKSTART.md)**: environments,
@@ -12,6 +13,58 @@ dataset and weight downloads, then the services, the frozen episodes and the cam
 order. This file is the architecture reference.
 
 ## Exploration selection
+
+### High-priority target closing
+
+Both explorers yield **before any room/LLM/RPT* decision** when a target-category
+YOLO detection reaches `target_closing.confidence` (default **0.50**). The first
+candidate latches ownership in `VERIFY`; at least **two consecutive distinct
+frames** with coherent depth and the same fixed 3D association anchor (0.50 m
+tolerance) are required to lock `CLOSE`. Duplicate boxes and repeated calls for
+the same frame do not count. Context detections below this threshold cannot enter
+legacy target pursuit. Neither a timeout nor a rejected route can release ownership;
+**only episode reset clears it**. Room reasoning, stair decisions, doorway peeks,
+FALCON masks and exploration fallback remain suspended.
+
+The closing sub-policy reuses coherent RGB-D backprojection with the actual camera
+pitch. It samples standoff footpoints around the observed target, projects them
+onto Habitat's local NavMesh when bound, and uses existing collision-qualified
+observed-grid A* to approach. **The selected 3D footpoint and route persist through
+occlusion**: missing detections neither cancel the path nor invoke a scan. Fresh
+associated observations refine the stored target with a 50/50 update; an XY shift
+over `refine_distance_m` (0.15 m) since the goal was selected triggers replanning.
+Small refinements do not move the endpoint every frame. Collision, blockage and
+progress validation remain active; persistence is not permission to cross obstacles.
+Remote or other-floor snaps and unreachable paths
+are rejected. The optional simulator callback contains no target annotations,
+success flag or evaluator DTG; NavMesh geometry is nevertheless privileged and
+is declared in the frozen configuration. Non-Habitat callers use observed-grid A*
+without NavMesh projection, explicitly reported as such.
+
+A* owns heading during transit, including doorway/corner turns that put the target
+outside the FOV. Bbox yaw servoing is confined to terminal inspection so it cannot
+fight the route. At `terminal_distance_m` (**1.0 m**), forward motion stops and
+inspection remains stationary. Low objects request LOOK_DOWN; missed detections
+trigger bounded pitch-up/down and yaw views referenced to the stored target bearing,
+not accumulating turns from the current yaw. The camera owner is `TARGET_CLOSING`,
+so level-view restoration cannot override inspection. The original no-tilt Gibson
+protocol cannot emit LOOK_DOWN; multi-story development has tilt-enabled actions.
+Turns retain the protocol's fixed increments (30 degrees in Habitat) and its
+half-turn dead band, not arbitrary micro-turns.
+
+STOP requires a **fresh**, associated detection, completed verification, centered
+yaw, satisfied pitch and both filtered and freshly measured horizontal range
+within the terminal radius plus `range_tolerance_m` (**0.05 m**, for pitch-dependent
+projection noise). No STOP from remembered distance alone is allowed. This terminal
+radius replaces legacy `stop_distance_m` for the closing sub-policy. Verification
+is bounded at 12 actions, terminal inspection at 24 (`max_reacquire_steps`), and
+total closing at 160 by default. Occlusion during transit has no separate timeout.
+Exhaustion raises a recordable method error, **not** `ObjNavInternalError`: the harness
+can finalize failed metrics. Its forced STOP is not a successful policy STOP and
+appears as `termination=agent_error`. Global exploration never resumes.
+All thresholds are configurable under `RPTSettings.target_closing`; the phase,
+persistent lock, visibility, target xyz, projected goal, refinements, occluded path
+steps, bbox and failures are included in episode/frame diagnostics and the HUD.
 
 - `--explorer frontier`: the existing observed-frontier baseline (default).
 - `--explorer falcon`: bounded FALCON 2D/2.5D adaptation, not the unchanged ROS
@@ -30,11 +83,14 @@ own frozen configurations; changed code does not relabel their outcomes.
 | Component | Responsibility |
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
+| `methods/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
+| `methods/target_path.py` | Persistent NavMesh standoff goal, meaningful target refinement and continuous collision-qualified A* execution through occlusion |
 | `methods/room_search_loop.py` | The seven-step room-search loop: bounded, room-confined local exploration; re-classify → re-estimate → re-order at each loop point; transit to the chosen room's nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
 | `core/mapping/topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room and staircase -- P(going there next finds the target) per node plus "elsewhere" |
 | `methods/stair_nodes.py` | Staircases as nodes of the loop's RPT* instance: ids above every room pid, the facts the oracle values them by, the climb as a leaf charged on every arc |
 | `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: nearest floor-wide frontier, the stairs by the explicit fallback rule, a retired frontier, a relocation -- a move, never an idle spin; failure records and service back-off |
 | `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around |
+| `methods/peek_stairs.py` | Floor-local seen-connector exclusion for peek viewpoints and A* routes; ordinary stair navigation is unchanged |
 | `methods/camera_control.py` | Sole pitch owner; bounded inspection, long unprompted cadence and safe restoration |
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
@@ -81,19 +137,35 @@ safe observed viewpoint available. A room-contained sightline and the normal
 clearance-qualified planner reject viewpoints through walls or unknown space.
 The robot aligns to one side and sweeps **at least 180 degrees of measured yaw**.
 Duplicate plan calls and back-and-forth yaw jitter do not complete a scan.
-The spawn room and a room merely walked through still need their first scan.
+The spawn room and a room merely walked through can receive their first peek
+only when still unclassified and never previously peeked.
 
-**No floor change before every observed room has completed this peek.** Room
-type, target probability, exhausted frontiers, cooldown and failed entry attempts
-cannot substitute for a visit. The same gate covers RPT* stair nodes, fallback
-stairs and the observed-stair ablation. Newly discovered rooms revoke an approach
-before climbing. Floor-wide movement cannot bypass the gate by walking onto a
-seen flight; an accidental height departure returns along the existing safe
-retreat path. An exhausted search tries a distant outstanding peek before stairs,
-without needing an LLM. Zero known rooms is not a completed floor; inaccessible
-rooms stay pending and are reported rather than silently credited. This is an
-**observed-room guarantee**, not ground-truth proof that no undiscovered rooms
-remain, nor proof of object absence after a limited scan.
+**At most ONE peek attempt per room per episode.** `room_peeked=True` is latched
+when the attempt starts, not only after a successful scan. Cancellation, a failed
+entry, a scan budget or target/stair preemption never refunds it. A room already
+scanned, initially classified (including a single-object weak/provisional label,
+with no extra confidence threshold), or previously peeked is exempt. Available
+confirmed-object clues are classified before choosing a peek; a label obtained
+during a peek cancels the rest of that inspection. `unknown` alone is not a label
+exemption. `done=True` still means an actual measured scan completed, not simply
+that the one-time allowance was consumed.
+
+The floor-exit gate now asks whether any **eligible unclassified non-stair rooms**
+still lack their one-time attempt, not whether exempt rooms completed a scan.
+This is an eligibility policy, not a full semantic-coverage guarantee. Zero known
+rooms remains incomplete. A genuinely new unknown room can revoke a stair approach;
+classified/scanned/attempted rooms cannot force forbidden repeat peeks. A vetoed
+ordinary room transit is released as unreachable rather than repeatedly replanned
+through the same gated tread. Native collision checks and committed-traversal
+safety remain in force.
+
+Peeks cannot start or continue during a committed stair approach, traversal, atlas
+transition, or target takeover. Seen connector geometry near the current elevation
+is excluded from peek viewpoints and from a peek-only A* occupancy copy. A path
+crossing the stair corridor is refused even if its endpoint lies in a room beyond
+it; overhead/other-floor connector segments do not erase ordinary room space.
+Stair-only regions are exempt from the peek gate. No scene geometry is added to
+the normal map and unseen connectors do not create exclusions.
 
 The previous route is isolated, not destroyed. Its local budget and timeout clocks
 pause during inspection and any necessary return transit. After the scan, room
@@ -103,12 +175,15 @@ normal selection/arrival starts its local turn. New off-route rooms/object kinds
 also trigger synchronous reconsideration with peeks disabled. A retained task
 does not get a new ten-action allowance merely because evidence changed.
 
-Peeks are non-nesting and remembered per floor and geometric region. A completed
-scan survives modest ID changes, but does not transfer to an unrelated reused ID
-or a split-off region that does not contain the measured scan position. Defaults:
+Peeks are non-nesting and remembered per floor and geometric region. Consumed
+allowances follow overlapping persistent IDs and substantially overlapping
+renumbered/split/expanded regions (60% of the smaller region), but never disjoint
+rooms or another floor. This conservatively avoids repeating inspections after
+segmentation changes; it does not certify each split child was physically scanned. Defaults:
 approach budget 36 actions (extended by travel distance for mandatory distant
 visits); return allowance 60 actions; scan budget at least 24 actions (scaled for small turn increments);
-failed-peek retry after 50 actions, at most two attempts per region. Invalidated
+at most one attempt per region (`max_attempts` cannot exceed 1; legacy retry
+timestamps remain diagnostic only). Invalidated
 rooms, blocked entries and stalled scans resume the search rather than spin.
 Target approach cancels inspection immediately; committed stair safety is never
 abandoned. `doorway_peek.coverage`, `floor_change_held`, completed scan positions
@@ -129,7 +204,12 @@ accessible frontiers does not prove complete semantic observation of a room.
 
 CPU regressions in `tests/test_discovery.py` and `tests/test_doorway_actions.py`
 cover startup, real action-converter entry/scan/return, budget preservation,
-target preemption, reachability, map changes, retries and synchronous reassessment.
+target preemption, reachability, map changes and synchronous reassessment.
+`tests/test_one_time_peeks.py` covers exemptions, no-refund cancellations and stair
+isolation. ObjectNav enables a 1-degree path-only angular hysteresis margin: after
+forward progress or an opposite turn on the same path, prefer a distance-reducing
+forward step within half a turn plus this margin. The generic converter defaults
+to zero; STOP, pitch, final facing, blocked recovery and safety vetoes retain priority.
 They are not measurements of detector/LLM accuracy or Habitat navigation success.
 
 ## The room-search loop (frontier explorer)
@@ -340,7 +420,8 @@ the last sweep (`periodic`). The last two wait until no route is committed --
 an inspection mid-route costs its own actions plus the turns to recover the
 heading it leaves behind. STOP carries no camera action. Raw detection runs on
 every observation; committed transitions and inspection views are quarantined
-from room/object fusion and target confirmation. Coherent depth pixels are
+from global room/object fusion. Target closing has its own pitch-aware evidence
+and takes priority even over committed stair tasks. Coherent depth pixels are
 projected at their actual image coordinates, with frame/floor/association
 rejection reasons recorded. No bed/sofa proximity blacklist is used.
 

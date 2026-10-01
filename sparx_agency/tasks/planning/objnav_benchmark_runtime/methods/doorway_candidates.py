@@ -7,6 +7,7 @@ import numpy as np
 from scipy.ndimage import distance_transform_edt
 from sparx_agency.core.planning.objnav.action_converter.ladder import reach_floor
 from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,7 @@ class PeekSettings:
     return_actions: int = 60
     scan_actions: int = 24
     retry_actions: int = 50
-    max_attempts: int = 2
+    max_attempts: int = 1
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
@@ -33,6 +34,8 @@ class PeekSettings:
         for name in ("approach_actions", "return_actions", "scan_actions", "retry_actions", "max_attempts"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive action count" % name)
+        if self.max_attempts != 1:
+            raise ValueError("Each room may be peeked at most once per episode")
 
 
 def same_region(left, right):
@@ -64,10 +67,11 @@ def doorway_candidates(policy, observation, world, settings, *, nearby=True, roo
         return []
     here = graph.room_at(world, (observation.pose.x, observation.pose.y))
     candidates = []
+    excluded = stair_peek_mask(policy, world)
     for pid, room in graph.registry.rooms.items():
         if room_ids is not None and pid not in room_ids:
             continue
-        ys, xs = np.nonzero(threshold_cells(policy, world, room) & np.isfinite(inventory.distance_m))
+        ys, xs = np.nonzero(threshold_cells(policy, world, room) & ~excluded & np.isfinite(inventory.distance_m))
         if not len(xs):
             continue
         distances = inventory.distance_m[ys, xs]
@@ -103,9 +107,11 @@ def doorway_candidates(policy, observation, world, settings, *, nearby=True, roo
             # ray-cast every room cell, or allocate a whole grid per ray.
             shortfall = np.maximum(0.0, settings.inset_m + margin - depth)
             ranked = np.lexsort((distances, shortfall))
-            blocked = ~room.mask
-            index = next(int(i) for i in ranked if line_of_sight_clear(
-                blocked, int(xs[index]), int(ys[index]), int(xs[i]), int(ys[i])))
+            blocked = ~room.mask | excluded
+            index = next((int(i) for i in ranked if line_of_sight_clear(
+                blocked, int(xs[index]), int(ys[index]), int(xs[i]), int(ys[i]))), None)
+            if index is None:
+                continue
         xy = tuple(float(v) for v in world.grid_to_world(int(xs[index]), int(ys[index])))
         candidates.append((float(distances[index]), pid, xy, heading, room.mask))
     return sorted(candidates, key=lambda row: (row[0], row[1]))

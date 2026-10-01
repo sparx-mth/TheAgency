@@ -77,8 +77,13 @@ def test_target_and_floor_preemptions_do_not_resume_an_old_floor_route():
     p._discover(obs, world, cost)
     p.peek.cancel(obs_at(ep, 2, (5.0, 3.0)), "target_priority")
     assert p.route_memory is original and p.peek.active is None
-    assert p.peek.records[-1]["attempts"] == 0
+    assert p.peek.records[-1]["attempts"] == 1 and p.peek.records[-1]["room_peeked"]
     p.peek.records[-1]["retry"] = 0
+    obs, cost = refresh(p, ep, world, 3, (5.0, 3.0))
+    p._discover(obs, world, cost)
+    assert p.peek.active is None
+    p, ep, world, _, _ = peek_rig()
+    original = p.route_memory
     obs, cost = refresh(p, ep, world, 3, (5.0, 3.0))
     p._discover(obs, world, cost)
     assert p.peek.active is not None

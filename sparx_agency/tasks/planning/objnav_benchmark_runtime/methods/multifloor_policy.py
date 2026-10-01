@@ -118,7 +118,7 @@ class MultiFloorSearch:
         return next((q for q in self.portals if q["id"] == portal_id), None)
 
     def can_leave_floor(self, obs=None):
-        """Every observed room needs a completed peek before any floor choice."""
+        """Pending unknown rooms block departure; classified or attempted rooms do not."""
         return self.departure.ready(obs)
 
     # -- the loop's decision --------------------------------------------------

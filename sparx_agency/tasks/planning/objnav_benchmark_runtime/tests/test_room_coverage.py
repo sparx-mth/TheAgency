@@ -1,4 +1,4 @@
-"""Mandatory interior peeks gate every way off a floor, independently of semantics."""
+"""One-time unknown-room peek eligibility gates floor choices without demanding retries."""
 from dataclasses import replace
 import math
 
@@ -51,16 +51,17 @@ def test_high_stair_probability_and_no_frontiers_do_not_waive_room_visits():
     assert p.building.commit(obs, p.building.portals[0], (4.0, 1.0))
 
 
-def test_floor_without_room_geometry_is_not_complete_and_failed_rooms_remain_pending():
+def test_floor_without_geometry_is_incomplete_but_attempted_rooms_are_exempt():
     p, ep, world, rooms = coverage_rig()
     p.graph.registry.rooms = {}
     assert not p.peek.floor_ready()
     p.graph.registry.rooms = rooms
     scanned(p, world, 0, IN_A)
     p.peek.records.append(dict(floor=0, room=1, mask=rooms[1].mask.copy(), done=False,
-                               attempts=2, retry=999, reason="entry_unreachable"))
-    assert p.peek.pending_rooms() == [1]
-    assert not p.building.can_leave_floor(obs_at(ep, 500, IN_A))
+                               attempts=1, room_peeked=True, retry=999, reason="entry_unreachable"))
+    assert p.peek.pending_rooms() == []
+    assert p.building.can_leave_floor(obs_at(ep, 500, IN_A))
+    assert not p.peek.records[-1]["done"], "exempt does not mean falsely certified scanned"
 
 
 def test_a_new_room_revokes_an_already_selected_stair_approach():
@@ -69,8 +70,8 @@ def test_a_new_room_revokes_an_already_selected_stair_approach():
         scanned(p, world, pid, xy)
     obs = obs_at(ep, 1, IN_A)
     assert p.building.commit(obs, p.building.portals[0], (4.0, 1.0))
-    mask = rooms[1].mask.copy()
-    mask[:, :95] = False
+    mask = np.zeros_like(rooms[1].mask)
+    mask[2:20, 1:10] = True  # new region, not a resegmented child of a consumed room
     p.graph.registry.rooms[7] = replace(rooms[1], id=7, mask=mask, n_cells=int(mask.sum()))
     assert p.building.plan(obs_at(ep, 2, (4.0, 1.0)), world) is None
     assert p.building.active is None and p.building.transition is None
@@ -89,7 +90,7 @@ def test_visit_evidence_does_not_leak_across_floors_or_reused_room_ids():
     assert p.peek.pending_rooms() == [0, 1], "same ID, different region is not a visit"
 
 
-def test_split_off_unentered_room_does_not_inherit_parent_scan():
+def test_repartition_does_not_grant_another_peek_to_a_consumed_room():
     p, ep, world, rooms = coverage_rig()
     scanned(p, world, 1, (9.0, 3.0))
     # Most of the parent's mask survives, but it does not contain the scan pose.
@@ -97,7 +98,7 @@ def test_split_off_unentered_room_does_not_inherit_parent_scan():
     gx, gy = world.world_to_grid(9.0, 3.0)
     mask[gy - 3:gy + 4, gx - 3:gx + 4] = False
     p.graph.registry.rooms[1] = replace(rooms[1], mask=mask)
-    assert 1 in p.peek.pending_rooms()
+    assert 1 not in p.peek.pending_rooms()
 
 
 def test_real_converter_goes_deeper_and_finishes_a_semicircle_before_floor_ready():

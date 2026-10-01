@@ -78,14 +78,14 @@ def test_target_confirmation_uses_distinct_frames_and_reset_clears_memory():
     policy, episode = setup_policy(duplicate=True)
     first = policy.plan(observation(episode, 0))
     assert not first.stop
-    assert len(policy.landmarks) == 1
-    assert policy.landmarks.all_landmarks()[0].count == 1
-    assert not policy.plan(observation(episode, 1)).stop
-    from dataclasses import replace
-    distinct_view = replace(observation(episode, 2), pose=AgentPose(0, 0.25, 0, 0))
-    assert policy.plan(distinct_view).stop
+    assert policy.closing.count == 1
+    assert policy.plan(observation(episode, 0)) is first
+    assert policy.closing.count == 1
+    assert policy.plan(observation(episode, 1)).stop
+    assert policy.closing.locked
     policy.reset(episode, policy.target)
     assert len(policy.landmarks) == 0
+    assert not policy.closing.active
     assert not policy.plan(observation(episode, 0)).stop
 
 

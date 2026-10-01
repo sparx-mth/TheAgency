@@ -460,7 +460,8 @@ class RoomSearchLoop:
         info = p.graph.label_info(pid) or {}
         self._log(obs, "relabel", room=pid, where=where, label=info.get("label"), strength=info.get("strength"),
                   objects=p.graph.objects_in(pid))
-        self.stats["reclassified_releases"] += 1
+        if where in ("search", "transit"):
+            self.stats["reclassified_releases"] += 1
         if where == "transit":
             self.stats["reclassified_in_transit"] += 1
         self._needs_reason = True

@@ -7,6 +7,8 @@ because they follow from the geometry and a separate knob could only make them
 wrong: the heading dead band is half a turn, and the pitch dead band is half a
 tilt. A dead band narrower than half a turn would make the agent turn left,
 overshoot, turn right, forever.
+An optional bounded hysteresis margin may widen the path-following band after
+forward progress or an opposite turn; it never narrows the geometric band.
 
 Python 3.8 syntax, standard library only.
 """
@@ -49,6 +51,9 @@ class ActionConverterParams:
             steeper than ~63 degrees off the wall's normal still advances
             more than 5 cm and is progress, anything flatter is a blocked
             step the policy must be told about.
+        heading_hysteresis_deg: Extra path-only deadband after forward progress
+            or a reversing turn on the same path. Zero preserves legacy behavior;
+            bounded to two degrees, never applied to final facing or recovery.
 
     Raises:
         ObjNavError: If any value is not a positive finite number.
@@ -57,6 +62,7 @@ class ActionConverterParams:
     lookahead_m: float = 0.5
     goal_tolerance_m: float = 0.25
     blocked_epsilon_m: float = 0.05
+    heading_hysteresis_deg: float = 0.0
 
     def __post_init__(self) -> None:
         for name in ("lookahead_m", "goal_tolerance_m", "blocked_epsilon_m"):
@@ -66,3 +72,7 @@ class ActionConverterParams:
                 raise ObjNavError(
                     "ActionConverterParams.%s must be a positive finite "
                     "number, got %r" % (name, value))
+        value = self.heading_hysteresis_deg
+        if (not isinstance(value, numbers.Real) or isinstance(value, bool)
+                or not math.isfinite(value) or not 0.0 <= value <= 2.0):
+            raise ObjNavError("heading_hysteresis_deg must be finite and between 0 and 2")

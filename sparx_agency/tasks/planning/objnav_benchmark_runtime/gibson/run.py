@@ -190,6 +190,9 @@ def prepare(args):
             issues.append("Dataset/scorer: %s" % exc)
     try:
         policy, method = _method(args)
+        if args.agent == "rpt":
+            policy.target_projector = getattr(env, "target_projector", None)
+            method["target_navmesh_projection"] = policy.target_projector is not None
     except Exception as exc:
         issues.append("Method services/configuration: %s" % exc)
     config = {"protocol": asdict(PROTOCOL), "runtime": runtime, "source_sha256": source_fingerprint(),

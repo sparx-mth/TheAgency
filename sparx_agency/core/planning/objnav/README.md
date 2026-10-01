@@ -60,6 +60,13 @@ while that brings the agent closer → face the requested heading at the end.
 
 How it follows a path, and why:
 
+- **Optional heading hysteresis never narrows the geometric deadband.**
+  `ActionConverterParams.heading_hysteresis_deg` defaults to 0, with a validated
+  range of 0–2 degrees. After forward progress or an opposite turn on an unchanged
+  path, this margin can favor a forward step that reduces distance to the aim
+  over an immediate reversing turn. It never overrides blocked recovery, a new
+  path, pitch, final facing, STOP or downstream safety filters. The ObjectNav
+  runtime enables 1 degree; other callers keep the legacy behavior by default.
 - **Progress only moves forward, and stays on the leg being walked.** It is a
   high-water mark in arc length, kept on the first leg within
   `parallel_offset` (0.134 m for Habitat) of the agent, so a later leg that

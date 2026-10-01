@@ -143,7 +143,7 @@ def test_boxed_in_the_hold_names_itself():
 
 # -- the decision and the detector ------------------------------------------------------
 def test_an_exception_in_the_decision_is_recorded_and_the_agent_keeps_exploring():
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(label="bed")
     policy._search = lambda *args: (_ for _ in ()).throw(KeyError("a bug in the loop"))
     command = policy.plan(observation(episode, 0, depth=3))
     assert moving(command) and command.info["fallback"].startswith("decision failure: KeyError")
@@ -154,7 +154,7 @@ def test_an_exception_in_the_decision_is_recorded_and_the_agent_keeps_exploring(
 
 
 def test_a_failing_fallback_is_one_recorded_hold_never_a_dead_episode():
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(label="bed")
     policy._search = lambda *args: (_ for _ in ()).throw(RuntimeError("decision"))
     policy.fallback.plan = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fallback too"))
     command = policy.plan(observation(episode, 0, depth=3))

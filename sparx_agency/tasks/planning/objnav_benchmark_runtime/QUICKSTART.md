@@ -204,6 +204,43 @@ It exits 0 after writing the JSON (`method.detector.metadata.backend` must read 
 One line per episode is printed (`success=`, `SPL=`, `steps=`); a 500-action episode takes
 ~10 minutes with CPU services. Watch it live in `$HOME/objnav_benchmark/smoke/live.html`.
 
+#### Office GPU visual verification
+
+Check `nvidia-smi` before sharing the GPU. On a sufficiently spacious office GPU,
+start the detector with `CUDA_VISIBLE_DEVICES=0`, `--device cuda:0`,
+`--clip-model "$MODELS/clip/ViT-B-32.pt"` and `--allow-shared-gpu` instead of the
+CPU settings above. Habitat uses `--gpu-device 0 --allow-shared-gpu`.
+The active RPT* policy uses Python/NumPy/SciPy, not ZSON embeddings or navigation
+PyTorch tensors; CLIP here is YOLO-World's text encoder. Do not change the policy
+just to claim every component is CUDA. Ollama may also use GPU 0 when sufficient
+VRAM remains for the renderer and detector.
+
+For two episodes in each of two buildings, run `run_development` once per scene
+with separate output directories, `--limit 2 --record --inspection-pause 60`.
+Do **not** use `--record-first`, which would omit the second video. The existing
+HUD includes episode/steps and detected boxes; the recorder adds scene, evaluator-only
+DTG, current-room type/confidence, and a floor/coordinate-based active frontier ID
+(`none` outside frontier routing). DTG never enters policy observations.
+The second footer line shows persistent target lock separately from current visibility,
+phase, target range (remembered during occlusion, distinct from evaluator DTG), elapsed
+time and FPS. The confirmed path continues through occlusion; terminal inspection
+stops translation at 1.0 m and requires fresh visual evidence for STOP. `steps.jsonl` includes
+`control_counters` for room LLM, room classifier, RPT* and A* calls, allowing an
+audit that global reasoning really freezes during closing.
+
+After video finalization, `EPISODE COMPLETE` immediately prints the absolute video
+path, SR, SPL, DTG, runtime and average execution FPS, then pauses for the requested
+seconds. `completion.jsonl` stores the same data; `performance_summary.json` stores
+scene aggregates. FPS is actions / episode wall time, **not** the video's playback
+rate. Episode wall time includes reset and per-step recording but excludes inspection
+pauses and final video flush. Normally completed videos contain every decision plus
+the terminal frame and a final metrics frame,
+played at `--video-fps` (default 6), not a wall-clock screen capture.
+Infrastructure exceptions can abort before the completion callback: retained video
+then covers emitted decisions only and must not be called a normally completed
+benchmark. Keep any post-hoc failure report or annotated review copy separate from
+the original recording and empty/incomplete benchmark ledger.
+
 ### 2.7 Full campaign: every building, every episode, frozen before the first frame
 
 ```bash

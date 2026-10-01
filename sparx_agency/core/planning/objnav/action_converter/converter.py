@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import math
 import numbers
+from dataclasses import replace
 from typing import Optional
 
 from sparx_agency.core.planning.objnav.action_converter.ladder import (
@@ -289,6 +290,7 @@ class DiscreteActionConverter:
         if command.stop:
             return ConversionResult(DiscreteAction.STOP, STATUS_STOP,
                                     forward_blocked=blocked)
+        same_path = bool(command.waypoints) and command.waypoints == self._path_progress.path
         self._path_progress.adopt(command.waypoints)
         # Projected before the pitch decision only so that a pitch step
         # reports the path geometry too. A LOOK does not move the agent, so
@@ -301,8 +303,21 @@ class DiscreteActionConverter:
             sample = self._path_progress.advance(
                 pose, lookahead, self._spec.forward_step_m / 2.0,
                 parallel_offset(self._spec, self._params.lookahead_m))
-        return choose_action(pose, command, sample, blocked, self._spec,
-                             self._params)
+        result = choose_action(pose, command, sample, blocked, self._spec, self._params)
+        reversing = (self._last_action, result.action) in (
+            (DiscreteAction.TURN_LEFT, DiscreteAction.TURN_RIGHT),
+            (DiscreteAction.TURN_RIGHT, DiscreteAction.TURN_LEFT))
+        margin = math.radians(self._params.heading_hysteresis_deg)
+        if (margin > 0 and same_path and not self._recovering and result.status == "turn" and result.target_xy is not None
+                and (self._last_action == DiscreteAction.MOVE_FORWARD or reversing)
+                and abs(result.heading_error_rad) <= self._spec.turn_angle_rad / 2 + margin):
+            tx, ty = result.target_xy
+            along = (tx - pose.x) * math.cos(pose.yaw) + (ty - pose.y) * math.sin(pose.yaw)
+            if along > self._spec.forward_step_m / 2:
+                # This step reduces distance to the aim; blocked recovery,
+                # pitch/STOP/final yaw and policy safety vetoes still win.
+                result = replace(result, action=DiscreteAction.MOVE_FORWARD, status="forward")
+        return result
 
 
 def _check_fit(spec: DiscreteActionSpec,

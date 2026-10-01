@@ -97,7 +97,8 @@ class PerceptionCycle:
             p._object_geometry.setdefault(landmark.id, tuple(float(v) for v in xyz))
             used.add(landmark.id)
             row.update(status="fused", floor_id=p.mapping.floor_id, landmark_id=landmark.id)
-            if p.target.accepts(label) and not p.target_evidence.is_suppressed(landmark.id, obs.step):
+            if (p.target.accepts(label) and row["confidence"] >= p.settings.target_closing.confidence
+                    and not p.target_evidence.is_suppressed(landmark.id, obs.step)):
                 supported = p.target_evidence.observe(landmark, obs.pose, obs.step)
                 if p._target_id in (None, landmark.id):
                     p._target_id, p._target_xy, p._target_step = landmark.id, landmark.xy, obs.step

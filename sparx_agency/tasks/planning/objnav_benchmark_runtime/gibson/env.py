@@ -32,6 +32,11 @@ class GibsonEnv(ObjNavEnv):
     def episode_ids(self):
         return tuple(self._dataset.episodes)
 
+    @property
+    def target_projector(self):
+        """Optional local NavMesh geometry service, separate from evaluator data."""
+        return getattr(self._simulator, "project_target", None)
+
     @lru_cache(maxsize=4)
     def _field(self, scene, floor_id, category_index):
         episode = next(e for e in self._dataset.episodes.values()

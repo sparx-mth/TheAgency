@@ -158,7 +158,15 @@ def method_snapshot(policy):
         state = policy._action_owner
     if building and building.phase != "SEARCH":
         state = building.phase
+    closing = getattr(policy, "closing", None)
+    if closing is not None and closing.active:
+        state = "TARGET_" + closing.phase
     return {"state": state, "floor_id": getattr(getattr(policy, "mapping", None), "floor_id", 0),
+            "target_closing": closing.diagnostics() if closing is not None else {},
+            "control_counters": {"room_llm": getattr(graph, "queries", 0),
+                                 "room_classifier": getattr(getattr(graph, "label_tracker", None), "queries", 0),
+                                 "rpt": getattr(solver, "calls", 0),
+                                 "astar": getattr(policy, "_plan_calls", 0)},
             "floor_atlas": atlas, "transition": building.transition.diagnostics() if building and building.transition else None,
             "completion_reason": atlas.get("completion_reason"),
             "camera": dict(policy.camera_control.last) if hasattr(policy, "camera_control") else {},

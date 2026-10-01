@@ -7,6 +7,7 @@ import math
 from sparx_agency.core.planning.exploration.falcon.params import FalconParams
 from sparx_agency.core.planning.exploration.floor_atlas import MultiFloorParams
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosingSettings
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class RPTSettings:
     preferred_clearance_m: float = 0.30
     local_exploration: str = "frontier"
     warmup_steps: int = 10
+    target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
     doorway_peek: PeekSettings = field(default_factory=PeekSettings)
     falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
     multifloor: MultiFloorParams = field(default_factory=MultiFloorParams)
@@ -57,6 +59,10 @@ class RPTSettings:
             raise ValueError("Preferred clearance cannot be smaller than the robot radius")
         if self.local_exploration not in ("frontier", "falcon"):
             raise ValueError("local_exploration must be frontier or falcon; no silent fallback")
+        if isinstance(self.target_closing, dict):
+            object.__setattr__(self, "target_closing", TargetClosingSettings(**self.target_closing))
+        if not isinstance(self.target_closing, TargetClosingSettings):
+            raise ValueError("target_closing must be TargetClosingSettings or parameter overrides")
         if isinstance(self.doorway_peek, dict):
             object.__setattr__(self, "doorway_peek", PeekSettings(**self.doorway_peek))
         if not isinstance(self.doorway_peek, PeekSettings):

@@ -11,6 +11,86 @@ Format per entry:
 
 ---
 
+## 2026-10-01 — a peek route across a stair head becomes a coverage-veto rotation loop
+
+**Symptom:** Sofa same-spawn run: a visible path near steps 297–303, then stationary
+left/right rotations. The agent never changed height or started a stair traversal.
+
+**Root cause:** At 293, `DoorwayPeek` replaced the room-7 transit with an interior
+peek route through the seen stair head. Steps 297/299/301/302 really emitted
+MOVE_FORWARD. At 303 the follower corrected a 17.19-degree heading error; at 304
+it requested forward with -12.81 degrees error (inside the 15-degree deadband),
+but `FloorDepartureGuard` vetoed it to TURN_LEFT because pending room scans still
+blocked departure. The guard cancelled the peek and cleared the path, but the
+supervisor kept room 7: subsequent `transit/7` replans hit the same veto. This was
+not the committed stair controller oscillating: `transition` stayed null.
+
+**Fix / workaround:** One peek attempt per floor-local room identity, consumed on
+start without refund on cancellation; scanned, initially classified (even weak),
+and previously peeked rooms are exempt from selection AND floor-exit requirements.
+The exemption follows substantial spatial overlap through renumber/split/merge
+without asserting that every child was scanned. Seen floor-local connector cells
+are excluded from peek goals and a peek-only A* map; active stair/atlas transitions
+preempt peeks. A gated room transit is released rather than replanned indefinitely.
+The generic converter retains its half-turn band and gains optional path-only
+hysteresis (ObjectNav 1 degree), never overriding collision recovery or safety vetoes.
+
+**Validation:** 1,206 core/runtime tests passed. CPU-only native-NavMesh Ranchester
+probe with production hysteresis: ascent 37 actions, descent 38, both zero blocked
+steps, recoveries or retreats. No new end-to-end benchmark was run.
+
+**Don't:** Do not call a planar `doorway_peek_approach` a committed stair descent,
+or weaken obstacle checks to fix a movement veto. Do not leave an exempt/attempted
+room pending in the floor gate: that demands a second peek the one-time rule forbids.
+
+---
+
+## 2026-10-01 — target closing can freeze search correctly and still steer away from the bbox
+
+**Symptom:** `runs/toilet_closing_verify_20261001`, Ranchester/000000, target toilet:
+takeover 169, confirmation 170, four forward steps, then target lost at 203. No
+LOOK_DOWN or STOP. The original video is complete through all 203 emitted actions.
+
+**Root cause:** The global latch worked (LLM/classifier/RPT counters never changed),
+but a centered bbox does not mean the A* route heading is centered. At steps 176/178
+the command was a follow path with bbox error inside the yaw dead band; the converter
+turned right toward its route, away from the target. The relative alternating
+reacquisition turns subsequently oscillated outside the last successful heading.
+Closest observed target range was 1.76 m, so the 1.2 m LOOK_DOWN trigger was never reached.
+Separately, `TargetClosing.fail()` raises `ObjNavInternalError`, which `agent_contract`
+explicitly treats as infrastructure failure even with `on_agent_error=record`.
+Thus ordinary failed-episode scoring/completion notification did not run.
+
+**Fix / workaround:** Unresolved navigation issues; this request authorized exactly
+one episode, not tuning/retries. Original traces are retained and a separate,
+clearly labeled post-hoc failure report was produced. Follow-up needs route/bbox
+heading arbitration, reacquisition referenced to a known target bearing, and a
+recordable method-failure contract. A runner-forced STOP must not be reported as
+a successful target-distance STOP.
+
+**Follow-up resolution (persistent-lock request, same date):** `target_path.py` now
+retains the selected NavMesh standoff and reuses collision-qualified A* while the
+target is occluded; bbox yaw no longer competes with path turns. Refinements over
+0.15 m reproject/replan, smaller updates leave the goal stable. Only terminal
+inspection at 1.0 m stops translation and requires a fresh bbox/depth confirmation.
+Pitch-dependent projection moved a synthetic target by 2 mm at the exact radius;
+a 0.05 m confirmation tolerance avoids a fully-satisfied hold deadlock without
+allowing STOP on remembered range. Expected failure is now `RuntimeError`, recordable
+by the harness, not `ObjNavInternalError`.
+
+The single authorized replay in `runs/toilet_persistent_lock_20261001` kept its path
+through occlusion at steps 177/178/180, including MOVE_FORWARD at 177, LOOK_DOWN at
+183 and actual policy STOP at 185 (0.874 m range, no agent error). Global counters
+stayed frozen. SR/SPL still zero and DTG 10.8924 m because the scored goal is on the
+reference floor downstairs; do not relabel that result as benchmark success.
+
+**Don't:** Do not infer live closing success from the obstacle-free synthetic rollout.
+Do not equate bbox range with evaluator DTG: this multistory manifest only scores
+reference-floor targets, whereas the detection here was upstairs. Do not backfill
+an aborted run's empty benchmark ledger as if normal scoring completed.
+
+---
+
 ## 2026-09-30 — "Ground-truth stairs" meant a map of every staircase; it should have meant a perfect detector
 
 **Symptom:** With `stair_source=ground_truth` the Pomaria recording (`campaign-14b-20260929/campaign/
