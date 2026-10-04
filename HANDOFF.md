@@ -108,19 +108,28 @@ proper re-run.
   Add `export LLM_REASONING_MODEL=qwen2.5:3b-instruct` only for a quick check;
   omit it (use the real 14B default) for anything meant to be a real signal.
 
-## Decision (end of 2026-10-01): priority changes for next week
+## Decision (confirmed with Moshe, 2026-10-04): priority for next week
 
 **Do not keep chasing the `RETREAT` bug** unless it turns out to be a tiny,
 contained fix (worth a quick look first, see below) — it is **not** next
 week's task. The actual priority is to **bring FALCON into the algorithm**,
 with two specific design asks:
 
-1. **Multi-resolution FALCON**: plan high-level (coarse) first, then refine
-   at finer resolution — not a single fixed `cell_size_m` as today.
+1. **Multi-resolution FALCON — confirmed new work, not in the paper.**
+   Checked the actual FALCON paper (arXiv 2407.00577): its own "hierarchical"
+   structure is two levels of planning *abstraction* at one fixed resolution —
+   a coarse-cell connectivity decomposition produces global coverage-path
+   guidance, and local frontier/viewpoint optimization refines *within* that
+   guidance. It is **not** multiple grid resolutions. What we actually want —
+   literally re-running the grid decomposition at two different `cell_size_m`
+   values, coarse pass first, then a finer pass — is confirmed (Moshe,
+   2026-10-04) as an intentional extension beyond the paper, not a
+   misunderstanding of it. Don't let `BOUNDED_FALCON.md`'s "hierarchical" talk
+   create false confidence that this already exists — it doesn't; see below.
 2. **2.5D, not 3D** — already true of the module that would be wired in (see
-   below); confirm this is the intended target before building anything new.
+   below); this part needs no new work, only confirming it's the right module.
 
-### What already exists (found today, not yet validated for this)
+### What already exists (found 2026-10-01, not yet validated for this)
 
 - `core/planning/exploration/falcon/` is **already** "the FALCON 2D/2.5D
   adaptation (not the ROS/UAV binary)" — its own module docstring says so
@@ -144,13 +153,16 @@ with two specific design asks:
 
 1. Quick triage only: if the `RETREAT`-never-exits gap (see above) looks like
    a genuinely small, contained fix, take it — otherwise leave it and move on.
-2. Confirm with Nadav/Moshe which FALCON is meant ("2D/2.5D `methods/falcon_*`"
-   vs the ROS one) before designing anything, given how easy the three
-   same-named things are to conflate.
-3. Design the coarse-to-fine resolution scheme for `FalconPlanner`
-   (`falcon/planner.py`) / `FalconParams` — likely a sequence of decreasing
-   `cell_size_m` passes feeding progressively narrower `scope_radius_m`,
-   but this needs a real design pass, not just parameter sweeps.
+2. Confirm which FALCON module is meant is already settled: the 2D/2.5D
+   `core/planning/exploration/falcon/` + `methods/falcon_*.py` one, reachable
+   via `hm3d.run --explorer falcon` — not the ROS/UAV one under
+   `TheAgency_moshe/.../falcon/adapter/`, nor `falcon_pegasus/`.
+3. Design and build the actual coarse-then-fine multi-resolution pass for
+   `FalconPlanner` (`falcon/planner.py`) / `FalconParams` (`falcon/params.py`):
+   run the connectivity-aware decomposition at a coarse `cell_size_m` first for
+   a high-level plan, then again at a finer `cell_size_m` for local refinement.
+   This is new design work with no existing precedent in the paper or the
+   current port — don't look for a flag to flip.
 4. Re-run `00800-TEEsavR23oF/000000` with the proper `qwen2.5:14b-instruct`
    reasoning model (now pulled) at some point for a clean signal on where the
    frontier baseline currently stands — useful context before comparing a new
