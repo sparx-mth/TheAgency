@@ -73,6 +73,7 @@ class RPTSearchPolicy:
                 "frontier_sweep": asdict(self.sweep_settings), "room_search_loop": asdict(self.loop_settings),
                 "exploration_fallback": asdict(self.fallback_settings),
                 "target_closing": asdict(self.settings.target_closing),
+                "target_closing_enabled": self.settings.target_closing_enabled,
                 "target_navmesh_projection": self.target_projector is not None,
                 "floor_exit_gate": "unknown non-stair rooms get at most one peek attempt per episode; "
                                    "initially classified, scanned and previously peeked rooms are exempt",
@@ -232,7 +233,8 @@ class RPTSearchPolicy:
 
     def _plan(self, observation):
         self.perception.observe(observation)
-        self.closing.observe(observation)
+        if self.settings.target_closing_enabled:
+            self.closing.observe(observation)
         if self.closing.active:
             self._action_owner = "target_closing"
             # No global decision/fallback try block may catch closing failures.

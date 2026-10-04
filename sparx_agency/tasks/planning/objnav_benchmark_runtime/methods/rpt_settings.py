@@ -40,6 +40,7 @@ class RPTSettings:
     preferred_clearance_m: float = 0.30
     local_exploration: str = "frontier"
     warmup_steps: int = 10
+    target_closing_enabled: bool = True
     target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
     doorway_peek: PeekSettings = field(default_factory=PeekSettings)
     falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
