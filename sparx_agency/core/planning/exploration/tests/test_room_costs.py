@@ -293,6 +293,29 @@ def test_a_leaf_hangs_a_node_off_its_map_point_and_is_charged_both_ways():
     assert np.allclose(ignored.C, plain.C), "a negative leaf reads as none; a leaf for an absent node is dropped"
 
 
+def test_a_nodes_own_service_time_replaces_the_search_budget_on_its_entering_arcs():
+    """An opening is looked into from the threshold, not searched: it costs a peek's few seconds, not a
+    room's scan, on every arc into it -- and the matrix stays metric because the fold is per column."""
+    plain, _ = three_room_instance(cruise_speed_mps=0.5)
+    priced, _ = three_room_instance(cruise_speed_mps=0.5, search_time_s=30.0, service_s={3: 4.0})
+    index = {pid: i for i, pid in enumerate(priced.index_to_pid)}
+    a, b, o = index[1], index[2], index[3]
+    assert priced.C[a, o] == pytest.approx(plain.C[a, o] + 4.0) and priced.C[b, o] == pytest.approx(plain.C[b, o] + 4.0)
+    assert priced.C[a, b] == pytest.approx(plain.C[a, b] + 30.0), "the rooms keep the search budget"
+    assert priced.C[o, b] == pytest.approx(plain.C[o, b] + 30.0), "... on arcs INTO them, whatever they come from"
+    assert priced.C[o, a] == pytest.approx(plain.C[o, a]), "room A is the depot: never charged"
+    assert np.allclose(np.diag(priced.C), 0.0)
+    for i in range(priced.n):
+        for j in range(priced.n):
+            for k in range(priced.n):
+                assert priced.C[i, j] <= priced.C[i, k] + priced.C[k, j] + 1e-9
+    alone, _ = three_room_instance(cruise_speed_mps=0.5, service_s={3: 4.0})
+    assert alone.C[a, o] == pytest.approx(plain.C[a, o] + 4.0), "a service time without a search budget still charges"
+    assert alone.C[a, b] == pytest.approx(plain.C[a, b]), "... and the rooms nothing"
+    unpriced, _ = three_room_instance(cruise_speed_mps=0.5, service_s={9: 4.0})
+    assert np.allclose(unpriced.C, plain.C), "a service time for an absent node is dropped"
+
+
 def test_an_unreachable_room_is_dropped_not_given_a_fake_weight():
     world = corridor_world()
     g = world.grid.copy()

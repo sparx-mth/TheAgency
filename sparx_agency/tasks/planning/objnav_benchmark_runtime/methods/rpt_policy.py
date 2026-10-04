@@ -32,6 +32,9 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidenc
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ExplorationFallback, FallbackSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context import FloorContextBank
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import FrontierSweep, SweepSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OpeningRegistry
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import RoomScanLedger
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_peek import DoorwayPeek
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES, discover
@@ -74,9 +77,26 @@ class RPTSearchPolicy:
                 "exploration_fallback": asdict(self.fallback_settings),
                 "target_closing": asdict(self.settings.target_closing),
                 "target_navmesh_projection": self.target_projector is not None,
-                "floor_exit_gate": "unknown non-stair rooms get at most one peek attempt per episode; "
-                                   "initially classified, scanned and previously peeked rooms are exempt",
-                "node_oracle": {"nodes": "rooms of the floor in force + its staircases",
+                "room_visit": ("vantage point + full rotation; a scanned room (or one a scan saw more than half of) "
+                               "is finished for the episode; rooms whose type cannot hold the target are not nodes"
+                               if self.loop_settings.scanning else "bounded frontier sweep of %d actions" % self.loop_settings.local_steps),
+                "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
+                                  "room numbers are unique across the building",
+                "openings": ("doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs, "
+                             "visited by a peek (threshold, face the unknown, one look to each side) priced at %d actions; "
+                             "a weak type label does not rule out a room with more than %d such openings"
+                             % (self.loop_settings.openings.service_steps, self.loop_settings.weak_type_max_openings)
+                             + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
+                                "visited by the same peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
+                                                                            self.loop_settings.openings.landmark_standoff_m)
+                                if self.loop_settings.openings.landmarks_enabled else "")
+                             if self.loop_settings.openings.enabled else "none: openings are the exploration fallback's alone"),
+                "floor_exit_gate": ("unknown non-stair rooms get at most one peek attempt per episode before a floor change; "
+                                    "initially classified, scanned and previously peeked rooms are exempt"
+                                    if self.settings.doorway_peek.gate_floor_departure else
+                                    "none: a floor change is the RPT* order's or the fallback rule's to take at any time"),
+                "node_oracle": {"nodes": "rooms of the floor in force + its staircases" + (
+                                    " + its openings" if self.loop_settings.openings.enabled else ""),
                                 "asks": "independent P(searching there finds target), without a fixed action horizon",
                                 "probability_model": "independent_search_success",
                                 "route": "LLM_REASONING_MODEL", "cadence": "loop points and semantic discovery; unchanged prompts reused"},
@@ -87,7 +107,8 @@ class RPTSearchPolicy:
                 if self.loop_settings.stairs_as_nodes and self.settings.multifloor.stair_source == "ground_truth"
                 else "exploration fallback only",
                 "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s); "
-                                     "synchronous frame processing, warm-up before room selection"
+                                     "synchronous frame processing, one full rotation (warm-up scan) before room selection "
+                                     "on every storey first entered"
                                      % self.settings.graph_period_steps,
                 "camera_control": asdict(CameraControlSettings()), "perception_fusion": "coherent-depth/floor-qualified-v1",
                 "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
@@ -106,6 +127,13 @@ class RPTSearchPolicy:
         self.planner = WeightedAStarPlanner2D(self.planner_params)
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
         self.fallback = ExplorationFallback(self, self.fallback_settings)
+        # Where every completed look-around stood, on every floor: the one memory
+        # of "this room is finished" that survives the watershed renumbering rooms.
+        self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction)
+        # Sticky ids for the floor's openings and the ones already peeked into,
+        # building-wide like the room numbers: "O3" names one doorway in the recording.
+        self.openings = OpeningRegistry(match_m=self.loop_settings.openings.match_m,
+                                        done_m=self.loop_settings.openings.done_m)
         self.floors = FloorContextBank(self)
         self._reset_floor()
         self._last_plan_s = self._blocked_since = self._last_pose = None
@@ -129,6 +157,7 @@ class RPTSearchPolicy:
         self.peek = DoorwayPeek(self)
         self.closing = TargetClosing(self)
         self.warmup_actions = 0
+        self._warmup_pending = True       # the warm-up rotation's scan has not been recorded yet
         self._action_owner = "search"
         self._notified_step = self._decision_step = -1
         self._decision_command = None
@@ -258,7 +287,13 @@ class RPTSearchPolicy:
         if self.mapping.floor_revision != floor_revision:
             self.peek.cancel(observation, "floor_changed", restore=False)
             if self.building:
+                fresh = self.mapping.floor_id not in self.floors.contexts and self.mapping.floor_id != self.floors.active
                 self.floors.activate(self.mapping.floor_id)
+                if fresh:
+                    # A storey never stood on: one full rotation at the stair head before any
+                    # room is chosen -- the map gets its first rooms, the ledger its first scan.
+                    self.warmup_actions = 0
+                    self._warmup_pending = True
             else:
                 self._reset_floor()
         self.last_world = world
@@ -336,12 +371,25 @@ class RPTSearchPolicy:
             started = time.monotonic()
             self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(),
                               step=observation.step, reason=False, cost=cost, here_xy=(pose.x, pose.y),
-                              yaw=pose.yaw, ranking=self.sweep.settings.ranking)
+                              yaw=pose.yaw, ranking=self.sweep.settings.ranking, exclude=self.room_exclusion(world))
             self.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
             self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
         else:
             self.graph.refresh_accessibility(world, cost, (pose.x, pose.y), pose.yaw, self.sweep.settings.ranking)
         return cost
+
+    def room_exclusion(self, world):
+        """Cells that are never room floor: the footprint of every seen staircase near this storey's level.
+
+        A staircase is a connector between storeys, not a room. Left in the
+        free mask, the watershed carved a "room" on the landing that the
+        search valued, peeked and waited on. None when the building knows
+        no stairs here.
+        """
+        if self.building is None:
+            return None
+        mask = stair_peek_mask(self, world)
+        return mask if mask.any() else None
 
     def navigation_cost(self, world):
         """The common clearance-qualified map used by counts, entries and routes."""
@@ -423,6 +471,8 @@ class RPTSearchPolicy:
                 "building": self.building.diagnostics() if self.building else None,
                 "frontier_sweep": self.sweep.diagnostics(),
                 "room_search_loop": self.loop.diagnostics(),
+                "room_scans": self.scans.diagnostics(),
+                "openings": self.openings.diagnostics(),
                 "exploration_fallback": self.fallback.diagnostics(),
                 "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,

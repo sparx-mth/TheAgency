@@ -17,7 +17,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search
 
 def coverage_rig():
     p, ep, world, rooms, _ = stair_policy(order=(STAIRS, 1, 0), stair_prob=0.99)
-    p.settings = replace(p.settings, doorway_peek=PeekSettings())
+    # The gate is an opt-in ablation since 2026-10-04; these are its own regressions.
+    p.settings = replace(p.settings, doorway_peek=PeekSettings(gate_floor_departure=True))
     p.peek = DoorwayPeek(p)  # the real, initially empty ledger; no fixture readiness shortcut
     p.graph.refresh_accessibility(world, p.navigation_cost(world), IN_A)
     return p, ep, world, rooms
@@ -149,7 +150,7 @@ def test_small_room_uses_its_deepest_observed_safe_viewpoint():
 
 
 def test_fallback_finishes_distant_peeks_even_when_opportunistic_peeks_are_disabled(monkeypatch):
-    p, ep, world, _, _ = peek_rig()
+    p, ep, world, _, _ = peek_rig(gate=True)
     p.peek.settings = replace(p.peek.settings, enabled=False)
     obs, cost = refresh(p, ep, world, 1, IN_A)
     assert p.peek.plan(obs, world) is None

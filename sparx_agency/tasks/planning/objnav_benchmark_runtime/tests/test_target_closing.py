@@ -59,12 +59,68 @@ def test_confidence_threshold_does_not_enter_legacy_pursuit():
 
 
 @pytest.mark.parametrize("depth", [float("nan"), float("inf"), 0.0])
-def test_invalid_depth_never_confirms_or_moves_forward(monkeypatch, depth):
+def test_invalid_depth_never_starts_a_takeover(depth):
+    """A confident box without depth support has nothing a second frame can be
+    checked against: it must not suspend exploration, let alone lock."""
     p, ep = setup_policy()
-    freeze_global(monkeypatch, p)
     for step in range(3):
         command = p.plan(observation(ep, step, depth=depth))
-        assert not command.stop and not command.waypoints and not p.closing.locked
+        assert not command.stop and not p.closing.active and not p.closing.locked
+        assert p.closing.phase == "SEARCH" and p.closing.count == 0
+    assert p.closing.releases == 0
+
+
+def test_depth_arrives_later_and_only_then_takes_over(monkeypatch):
+    """Exploration keeps ownership through depthless frames; the first projected
+    frame starts the takeover and the second consecutive one locks it."""
+    p, ep = setup_policy()
+    assert not p.plan(observation(ep, 0, depth=float("nan"))).stop and not p.closing.active
+    p.plan(observation(ep, 1, depth=2))
+    assert p.closing.active and p.closing.count == 1 and not p.closing.locked
+    freeze_global(monkeypatch, p)
+    p.plan(observation(ep, 2, depth=2))
+    assert p.closing.locked and p.closing.count == 2
+
+
+# -- detect high, associate low (Ranchester 2026-10-04: 0.68 at one heading, 0.42 centred) ----
+def test_a_weak_resighting_on_the_anchor_completes_the_lock(monkeypatch):
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .68, (280, 200, 360, 280))]
+    p.plan(observation(ep, 0, depth=3.8))
+    assert p.closing.active and p.closing.count == 1 and not p.closing.locked
+    freeze_global(monkeypatch, p)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .42, (280, 200, 360, 280))]   # same object, under 0.50
+    p.plan(observation(ep, 1, depth=3.8))
+    assert p.closing.locked and p.closing.count == 2
+    assert p.closing.weak_resightings == 1
+    assert p.episode_info()["target_closing"]["weak_resightings"] == 1
+
+
+def test_a_weak_box_elsewhere_is_not_a_resighting_and_resets_the_run():
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .68, (280, 200, 360, 280))]
+    p.plan(observation(ep, 0, depth=3))
+    assert p.closing.active and p.closing.count == 1
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .42, (40, 200, 120, 280))]     # 1.7 m to the side
+    p.plan(observation(ep, 1, depth=3))
+    assert p.closing.active and not p.closing.locked and p.closing.count == 0
+    assert p.closing.weak_resightings == 0
+
+
+def test_a_weak_box_never_starts_a_takeover():
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .42, (280, 200, 360, 280))]
+    for step in range(3):
+        p.plan(observation(ep, step, depth=3))
+        assert not p.closing.active and p.closing.count == 0
+    assert p._target_xy is None
+
+
+@pytest.mark.parametrize("kwargs", [{"track_confidence": 0.0}, {"track_confidence": 0.6},
+                                    {"track_confidence": float("nan")}, {"track_confidence": True}])
+def test_track_confidence_is_validated(kwargs):
+    with pytest.raises(ValueError, match="track_confidence"):
+        TargetClosingSettings(**kwargs)
 
 
 def test_nonconsecutive_and_different_objects_do_not_confirm(monkeypatch):
@@ -107,6 +163,16 @@ def test_terminal_loss_does_not_move_or_stop_on_stale_evidence(monkeypatch):
     for step in (2, 3):
         command = p.plan(replace(near, step=step))
         assert not command.stop and not command.waypoints
+    command = p.plan(replace(near, step=4))
+    assert not command.stop, "never a STOP on remembered range alone"
+    assert not p.closing.locked and p.closing.phase == "RELEASED", "... and the lost lock is given back, the spot remembered"
+    p, ep = setup_policy(target_closing={"max_reacquire_steps": 2, "release_on_failed_inspection": False})
+    freeze_global(monkeypatch, p)
+    p.plan(observation(ep, 0, depth=2))
+    p.plan(observation(ep, 1, depth=2))
+    p.detector.detect = lambda rgb: []
+    for step in (2, 3):
+        p.plan(replace(near, step=step))
     with pytest.raises(RuntimeError, match="terminal visual confirmation"):
         p.plan(replace(near, step=4))
     assert p.closing.locked and p.closing.phase == "FAILED"
@@ -198,7 +264,7 @@ def test_actual_converter_closes_low_target_looks_down_and_stops(monkeypatch, oc
     assert DiscreteAction.MOVE_FORWARD in actions and DiscreteAction.LOOK_DOWN in actions
     assert projections and p.graph.queries == 0
     if occlusion:
-        assert p.closing.occluded_path_steps >= 4
+        assert p.closing.occluded_path_steps >= 3, "the four hidden frames land in transit (one is spent reaching terminal range)"
 
 
 def test_bbox_servo_does_not_interrupt_astar_corner_heading(monkeypatch):
@@ -233,7 +299,338 @@ def test_navmesh_round_trip_enu_native_coordinates():
 
 
 @pytest.mark.parametrize("kwargs", [{"confirmation_frames": 1}, {"confirmation_frames": True},
-                                    {"confidence": float("nan")}, {"confidence": 0}, {"max_verify_steps": 0}])
+                                    {"confidence": float("nan")}, {"confidence": 0}, {"max_verify_steps": 0},
+                                    {"border_margin_px": -1}, {"border_margin_px": 2.0},
+                                    {"release_unverified": 1}, {"rejection_radius_m": 0}])
 def test_invalid_closing_settings(kwargs):
     with pytest.raises(ValueError):
         TargetClosingSettings(**kwargs)
+
+
+@pytest.mark.parametrize("box", [(0, 269, 84, 479), (300, 0, 360, 80), (560, 200, 640, 280), (300, 400, 360, 480)])
+def test_border_clipped_box_does_not_start_takeover(box):
+    """The Ranchester sofa: an 84 px sliver on the left/bottom edge of a bed."""
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .87, box)]
+    p.plan(observation(ep, 0, depth=3))
+    assert not p.closing.active and p.closing.border_rejections >= 1
+    assert p.plan(observation(ep, 1, depth=3)) is not None and not p.closing.active
+
+
+def test_locked_target_tolerates_border_spill(monkeypatch):
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (260, 120, 380, 480))]
+    p.plan(observation(ep, 2, depth=2))
+    assert p.closing.last_seen == 2 and p.closing.phase == "CLOSE"
+
+
+def test_unverified_candidate_releases_to_exploration_and_is_not_retried():
+    p, ep = setup_policy(target_closing={"max_verify_steps": 3})
+    calls = []
+    original = p.loop.plan
+    p.loop.plan = lambda *a, **kw: calls.append(a[0].step) or original(*a, **kw)
+    p.plan(observation(ep, 0, depth=3))
+    assert p.closing.active and not p.closing.locked
+    anchor = p.closing.anchor
+    p.detector.detect = lambda rgb: []
+    for step in (1, 2):
+        command = p.plan(observation(ep, step, depth=3))
+        assert p.closing.active and not command.stop
+    assert calls == [0] or calls == []  # takeover owned steps 0-2
+    released_at = len(calls)
+    command = p.plan(observation(ep, 3, depth=3))
+    assert not p.closing.active and p.closing.phase == "RELEASED" and p.closing.releases == 1
+    assert p._target_xy is None and not command.stop
+    assert command.info.get("kind") != "target_closing"
+    assert len(calls) > released_at  # global exploration resumed on the release step
+    assert p.episode_info()["target_closing"]["rejected"][0]["xyz"] == list(anchor)
+    # The same spot flickering again must not start a second takeover...
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.plan(observation(ep, 4, depth=3))
+    assert not p.closing.active
+    # ...but a confident, depth-projected object elsewhere still does (1.5 m away
+    # from the rejected spot, and close enough to be exempt from the cooldown).
+    p.plan(observation(ep, 5, depth=1.5))
+    assert p.closing.active
+    # A box the depth sensor cannot place never starts one at all.
+    p.closing._release(observation(ep, 5, depth=1.5))
+    p.plan(observation(ep, 6, depth=6))
+    assert not p.closing.active
+
+
+def test_release_disabled_keeps_episode_ending_error(monkeypatch):
+    p, ep = setup_policy(target_closing={"max_verify_steps": 2, "release_unverified": False})
+    freeze_global(monkeypatch, p)
+    p.plan(observation(ep, 0, depth=3))
+    p.detector.detect = lambda rgb: []
+    p.plan(observation(ep, 1, depth=3))
+    with pytest.raises(RuntimeError, match="consecutive depth-consistent"):
+        p.plan(observation(ep, 2, depth=3))
+    assert p.closing.phase == "FAILED"
+
+
+def test_a_target_box_on_a_confirmed_other_object_is_outvoted_and_starts_nothing():
+    """Five frames of a bed where the box now says chair: the map says bed, the takeover stays off."""
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("bed", .9, (280, 200, 360, 280))]
+    for step in range(5):
+        p.plan(observation(ep, step, depth=3))
+    [bed] = p.landmarks.confirmed()
+    assert bed.class_name == "bed" and bed.votes == {"bed": 5}
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.plan(observation(ep, 5, depth=3))
+    assert not p.closing.active and p.closing.map_rejections >= 1
+    assert p.landmarks.confirmed()[0].votes == {"bed": 5, "chair": 1}, "the box voted, and lost"
+    assert p._target_xy is None, "no target evidence from an outvoted box"
+    assert p.perception.counts["outvoted_detections"] == 1
+
+
+# -- the terminal inspection on a big object at close range (Ranchester couch, 2026-10-04) ----
+def locked_at_two_metres(monkeypatch, **closing):
+    """A chair locked two metres ahead on an empty map; the agent then stands 1.1 m from it."""
+    p, ep = setup_policy(target_closing=closing) if closing else setup_policy()
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1 and abs(p.closing.xyz[1]) < 0.1
+    near = replace(observation(ep, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0))
+    return p, ep, near
+
+
+def test_a_fresh_box_spanning_the_image_centre_is_aligned_whatever_its_centre_says(monkeypatch):
+    """The Ranchester box: clipped at the left edge, centre 124 px left of the image centre, the
+    couch filling the frame. Centring it meant turning off the couch; spanning the centre column
+    is alignment enough, and the near edge of the upholstery is the range that counts."""
+    p, ep, near = locked_at_two_metres(monkeypatch)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    command = p.plan(near)
+    assert command.stop and p.closing.phase == "STOP"
+    assert command.info["box_spans_centre"] is True and command.info["bbox_yaw_error_rad"] == 0.0
+    assert command.info["measured_m"] <= 1.05 and command.info["reason"] == "fresh terminal target confirmation"
+    assert p.closing.observed_near_m is not None and p.closing.observed_near_m <= command.info["measured_m"] + 1e-9
+
+
+def test_an_exhausted_inspection_stops_when_the_target_was_seen_fresh_in_terminal_range(monkeypatch):
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=3)
+    # A box that does NOT span the centre: its centre says "turn", so the inspection turns, but the
+    # target was fresh and within range from this spot -- that sighting is remembered.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (40, 25, 300, 404))]
+    turning = p.plan(near)
+    assert not turning.stop and turning.info["target_visible"] and turning.info["measured_m"] <= 1.05
+    assert p.closing.inspection_sighting == 2 and p.closing.inspection_started == 2
+    p.detector.detect = lambda rgb: []
+    for step in (3, 4):
+        held = p.plan(replace(near, step=step))
+        assert not held.stop and not held.waypoints
+    final = p.plan(replace(near, step=5))
+    assert final.stop and p.closing.phase == "STOP"
+    assert final.info["reason"].startswith("inspection exhausted") and "action 2" in final.info["reason"]
+
+
+def test_an_exhausted_inspection_without_any_in_range_sighting_releases_the_lock_and_remembers_the_spot(monkeypatch):
+    """Ranchester same-storey run: a sofa from four metres that was nothing from one. The lock was wrong;
+    the episode must not end on it with the real couch 2.85 m away."""
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=2)
+    p.detector.detect = lambda rgb: []
+    anchor = p.closing.anchor
+    for step in (2, 3):
+        assert not p.plan(replace(near, step=step)).stop
+    command = p.plan(replace(near, step=4))
+    assert not command.stop and command.info["kind"] == "target_released" and command.final_yaw is not None
+    assert not command.waypoints, "one turn in place: the closing never explores, the next action is the search's"
+    assert p.closing.inspection_sighting is None and not p.closing.active and not p.closing.locked
+    assert p.closing.phase == "RELEASED" and p.closing.inspection_releases == 1 and p.closing.releases == 1
+    assert p.closing.last_release == "inspection saw nothing"
+    [(spot, floor, step, radius)] = p.closing.rejected
+    assert spot == anchor and step == 4 and radius == pytest.approx(2.0 * p.settings.target_closing.rejection_radius_m)
+    assert p.closing.rejected_near(anchor[:2], floor), "a landmark there is not worth another look"
+    assert p.closing.rejected_near((anchor[0] + 1.5, anchor[1]), floor), "... within twice the plain radius"
+    assert not p.closing.rejected_near((anchor[0] + 2.5, anchor[1]), floor)
+    assert p._target_xy is None, "the legacy latch is cleared with the lock"
+    assert p.closing.diagnostics()["rejected"][0]["radius_m"] == radius
+
+
+def test_the_failed_inspection_release_can_be_switched_off(monkeypatch):
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=2, release_on_failed_inspection=False)
+    p.detector.detect = lambda rgb: []
+    for step in (2, 3):
+        assert not p.plan(replace(near, step=step)).stop
+    with pytest.raises(RuntimeError, match="terminal visual confirmation"):
+        p.plan(replace(near, step=4))
+    assert p.closing.inspection_sighting is None and p.closing.phase == "FAILED"
+    with pytest.raises(ValueError):
+        TargetClosingSettings(release_on_failed_inspection="yes")
+    with pytest.raises(ValueError):
+        TargetClosingSettings(failed_inspection_radius_factor=0.0)
+
+
+def test_an_inspection_that_tried_every_view_and_saw_nothing_releases_before_its_budget(monkeypatch):
+    """The same-storey run spent 24 actions turning in place at a phantom. Three yaws (x pitches) once
+    each is the whole inspection; nothing in any of them means nothing is there."""
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=40)
+    p.detector.detect = lambda rgb: []
+    views = len(p.closing._inspection_views(p.closing._pitch(near, 0.9)))
+    assert 3 <= views <= 9
+    released_at, pose = None, near.pose
+    for step in range(2, 40):
+        command = p.plan(replace(near, step=step, pose=pose))
+        assert not command.stop
+        if p.closing.phase == "RELEASED":
+            released_at = step
+            break
+        # The agent obeys: the commanded heading and pitch are the next frame's pose.
+        pose = AgentPose(pose.x, pose.y, pose.z,
+                         pose.yaw if command.final_yaw is None else float(command.final_yaw),
+                         pose.camera_pitch if command.camera_pitch is None else float(command.camera_pitch))
+    assert released_at is not None and released_at - 2 < 40, "released well inside the budget"
+    assert released_at - 2 <= 2 * views + 1, "one or two actions per view: the turn and the tilt"
+    assert p.closing.last_release == "inspection saw nothing in any view" and p.closing.inspection_releases == 1
+    assert command.info["kind"] == "target_released"
+
+
+def test_a_lock_the_map_outvotes_is_released_at_once(monkeypatch):
+    """A sofa from four metres, confirmed as a bed by the map's vote from two: the lock goes, the spot is
+    remembered, and no inspection is spent on it."""
+    p, ep, near = locked_at_two_metres(monkeypatch)
+    anchor = p.closing.anchor
+    for frame in range(10, 14):                                     # the map confirms a bed where the sofa was
+        p.landmarks.observe("bed", anchor[:2], frame_id=frame, radius_m=0.8)
+    bed = next(lm for lm in p.landmarks.confirmed() if lm.class_name == "bed")
+    assert p.landmarks.is_confirmed(bed) and not p.target.accepts("bed")
+    p.detector.detect = lambda rgb: []
+    obs = replace(near, step=2)
+    p.perception.observe(obs)
+    p.closing.observe(obs)                                          # the policy's own order: perceive, then the closing
+    assert not p.closing.active and p.closing.phase == "RELEASED", "released before any plan: this action is the search's"
+    assert p.closing.map_releases == 1 and p.closing.last_release == "contradicted by the map"
+    assert p.closing.rejected[0][3] == pytest.approx(2.0 * p.settings.target_closing.rejection_radius_m)
+    assert p.closing.inspection_releases == 0 and p._target_xy is None
+
+
+def test_the_exhausted_inspection_stop_can_be_switched_off(monkeypatch):
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=3, stop_on_exhausted_inspection=False,
+                                       release_on_failed_inspection=False)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (40, 25, 300, 404))]
+    assert not p.plan(near).stop and p.closing.inspection_sighting == 2
+    p.detector.detect = lambda rgb: []
+    p.plan(replace(near, step=3))
+    p.plan(replace(near, step=4))
+    with pytest.raises(RuntimeError, match="terminal visual confirmation"):
+        p.plan(replace(near, step=5))
+    with pytest.raises(ValueError):
+        TargetClosingSettings(stop_on_exhausted_inspection="yes")
+    # With the release on, an in-range sighting still ends in a release rather than an error when STOP is off:
+    # the target WAS seen from here, so the spot is remembered and the search goes on.
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=3, stop_on_exhausted_inspection=False)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (40, 25, 300, 404))]
+    assert not p.plan(near).stop
+    p.detector.detect = lambda rgb: []
+    p.plan(replace(near, step=3))
+    p.plan(replace(near, step=4))
+    assert not p.plan(replace(near, step=5)).stop and p.closing.phase == "RELEASED"
+
+
+def test_a_border_clipped_box_feeds_no_legacy_target_evidence_either():
+    """The Ranchester upstairs run: a 48 px sliver at the left edge the takeover refused, which the
+    older target-evidence path then pursued for nine actions. One gate for both."""
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 273, 48, 479))]
+    for step in range(3):
+        command = p.plan(observation(ep, step, depth=3))
+        assert not command.stop and command.info.get("kind") != "target"
+    assert not p.closing.active and p._target_xy is None and p._target_id is None
+    assert p.perception.counts["border_clipped_evidence"] >= 1
+    assert [row["target_evidence"] for row in p.perception.projections if row.get("status") == "fused"] == ["border_clipped"]
+    assert p.landmarks.all_landmarks(), "the object is still mapped -- it is only not pursued"
+
+
+def test_a_released_spot_does_not_block_a_close_view_of_the_same_object():
+    """Ranchester attempt 3: the couch released at 3.8 m from the stair head was never re-verified
+    from 1 m, twice, and the episode was lost on that. A close view is new evidence."""
+    p, ep = setup_policy(target_closing={"max_verify_steps": 2})
+    p.plan(observation(ep, 0, depth=3.5))                              # a far candidate, 3.5 m ahead
+    assert p.closing.active and not p.closing.locked
+    p.detector.detect = lambda rgb: []
+    p.plan(observation(ep, 1, depth=3.5))
+    p.plan(observation(ep, 2, depth=3.5))
+    assert not p.closing.active and p.closing.releases == 1
+    spot = p.closing.rejected[0][0]
+    # Seen again from the same place: the memory holds.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.plan(observation(ep, 3, depth=3.5))
+    assert not p.closing.active
+    # Seen from 1.2 m, standing 2.3 m closer: the same spot, a new view -- the takeover starts.
+    near = replace(observation(ep, 4, depth=1.2), pose=AgentPose(2.3, 0, 0, 0))
+    p.plan(near)
+    assert p.closing.active and math.dist(p.closing.anchor[:2], spot[:2]) < p.settings.target_closing.rejection_radius_m
+
+
+def test_the_association_radius_grows_with_range_for_a_far_object():
+    p, ep = setup_policy()
+    s = p.settings.target_closing
+    p.plan(observation(ep, 0, depth=4.0))                              # anchor 4 m ahead
+    assert p.closing.active and p.closing.anchor is not None
+    # Next frame the visible part of the long object is 0.7 m to the side: beyond the plain radius,
+    # within the range-grown one (0.5 + 0.15 * 2 = 0.8 m).
+    shifted_column = 320 + int(0.7 / 4.0 * ep.camera.intrinsics.fx)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (shifted_column - 40, 200, shifted_column + 40, 280))]
+    p.plan(observation(ep, 1, depth=4.0))
+    assert p.closing.locked, "two consecutive frames of one long object at four metres"
+    assert 0.5 < math.dist(p.closing.anchor[:2], p.closing.observed_xyz[:2]) < 0.8
+    with pytest.raises(ValueError):
+        TargetClosingSettings(association_range_gain=-0.1)
+    with pytest.raises(ValueError):
+        TargetClosingSettings(rejection_min_range_m=0.0)
+    assert s.rejection_min_range_m == 2.0 and s.association_range_gain == 0.15
+
+
+def test_verification_faces_a_visible_candidate_and_steps_towards_it_instead_of_sweeping():
+    """Ranchester attempt 4: the +-30-degree sweep put a candidate three metres away at the frame's edge
+    on every other frame, the consecutive count never reached two, and twelve-step verifications
+    repeated from one spot six times. A visible candidate is faced; a centred one is approached."""
+    p, ep = setup_policy()
+    # Off-centre to the left and far: the first action turns to face the box, nothing else.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (150, 200, 230, 280))]
+    turning = p.plan(observation(ep, 0, depth=3.5))
+    assert p.closing.active and not p.closing.locked and turning.info["target_visible"]
+    assert turning.waypoints == () and turning.final_yaw is not None and turning.final_yaw > 0.1
+    # Centred and far: one step towards it, no sweep away from it.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p2, _ = setup_policy()
+    stepping = p2.plan(observation(ep, 0, depth=3.5))
+    assert stepping.info.get("verify_step") == "towards the candidate" and stepping.waypoints
+    assert math.dist(stepping.waypoints[-1], (0.0, 0.0)) == pytest.approx(2 * ep.action_spec.forward_step_m)
+    assert DiscreteActionConverter(ep.action_spec).step(AgentPose(0, 0, 0, 0), stepping).action == DiscreteAction.MOVE_FORWARD
+    # Out of view: the sweep around the bearing, as before.
+    p2.detector.detect = lambda rgb: []
+    sweeping = p2.plan(observation(ep, 1, depth=3.5))
+    assert sweeping.info["target_visible"] is False and sweeping.waypoints == () and sweeping.final_yaw is not None
+
+
+def test_a_release_cools_far_candidates_but_not_close_ones():
+    p, ep = setup_policy(target_closing={"max_verify_steps": 2, "release_cooldown_actions": 10})
+    p.plan(observation(ep, 0, depth=3.5))
+    p.detector.detect = lambda rgb: []
+    p.plan(observation(ep, 1, depth=3.5))
+    p.plan(observation(ep, 2, depth=3.5))
+    assert not p.closing.active and p.closing.released_step == 2
+    # A DIFFERENT far object two actions later: cooling, no takeover.
+    far_elsewhere = replace(observation(ep, 4, depth=3.5), pose=AgentPose(0, 0, 0, math.pi / 2))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.plan(far_elsewhere)
+    assert not p.closing.active, "the search moves before it spends two more frames on a far candidate"
+    # A close object during the cooldown: taken.
+    close = replace(observation(ep, 5, depth=1.2), pose=AgentPose(0, 0, 0, math.pi))
+    p.plan(close)
+    assert p.closing.active
+    with pytest.raises(ValueError):
+        TargetClosingSettings(release_cooldown_actions=-1)
+

@@ -297,7 +297,8 @@ def build_instance(world: OccupancyGrid2D,
                    frontier_weight: float = 0.0,
                    frontier_counts: Optional[Mapping[int, int]] = None,
                    p_clamp: float = P_CLAMP_DEFAULT,
-                   leaves: Optional[Mapping[int, float]] = None
+                   leaves: Optional[Mapping[int, float]] = None,
+                   service_s: Optional[Mapping[int, float]] = None
                    ) -> Tuple[HppPtInstance, List[int]]:
     """Assemble the complete, finite, metric instance RPT* takes.
 
@@ -347,6 +348,12 @@ def build_instance(world: OccupancyGrid2D,
             further away. A leaf is a graph edge, so the matrix stays
             metric: ``c'(u,w) = c(u,w) + l_u + l_w <= c(u,v) + l_u + l_v +
             c(v,w) + l_v + l_w = c'(u,v) + c'(v,w)``.
+        service_s: ``{pid: seconds}`` -- a node whose visit costs a
+            different time than ``search_time_s``: an opening the search
+            only looks into from the threshold is a few actions, not a
+            room's scan. Folded into the node's entering arcs exactly as
+            ``search_time_s`` is, so the same triangle-inequality argument
+            holds. Nodes absent here keep ``search_time_s``.
 
     Returns:
         ``(instance, dropped_pids)``. Dropped covers both rooms with no
@@ -413,8 +420,12 @@ def build_instance(world: OccupancyGrid2D,
     if cruise_speed_mps and cruise_speed_mps > 0.0:
         C = C / float(cruise_speed_mps)
         units = "seconds"
-        if search_time_s and search_time_s > 0.0:
-            budget = np.full(C.shape[1], float(search_time_s))
+        if (search_time_s and search_time_s > 0.0) or service_s:
+            budget = np.full(C.shape[1], max(0.0, float(search_time_s or 0.0)))
+            if service_s:
+                for i, nd in enumerate(kept_nodes):
+                    if nd.pid >= 0 and nd.pid in service_s:
+                        budget[i] = max(0.0, float(service_s[nd.pid]))
             budget[depot_idx] = 0.0
             C = C + budget[None, :]
             np.fill_diagonal(C, 0.0)

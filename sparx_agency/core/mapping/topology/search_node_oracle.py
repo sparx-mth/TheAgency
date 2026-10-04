@@ -41,7 +41,8 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 ROOM = "room"
 STAIRS = "stairs"
-KINDS = (ROOM, STAIRS)
+OPENING = "opening"
+KINDS = (ROOM, STAIRS, OPENING)
 
 #: Largest node probability handed on: RPT*'s heuristic divides by ``1 - p``.
 P_CEILING = 1.0 - 1e-6
@@ -64,6 +65,16 @@ STAIRS nodes are staircases to another storey (up or down). Taking one means \
 leaving this storey and searching the other one. The line says whether that \
 storey was visited before and, if so, what was found and how much was searched \
 there, and whether the robot arrived on this storey by these stairs a moment ago.
+OPENING nodes are doorways or gaps at the edge of the mapped floor that lead to \
+space NOT seen yet -- a room the robot has not entered, on THIS storey. Going \
+there means a quick look in from the threshold, far cheaper than searching a \
+room. The line says which mapped room it opens from, whether a door frame was \
+seen, and the objects glimpsed through it so far. Value an opening by the room \
+likely BEHIND it: glimpsed objects name that room's type (a toilet -> a \
+bathroom; a bed -> a bedroom); nothing glimpsed -> an unknown room on this \
+storey, judged by STEP 2 -- if the home type is still MISSING on a storey where \
+it belongs, an opening with nothing glimpsed is where it would be found; if the \
+home type does not belong on this storey, an opening is worth little.
 For EACH node give the probability, in percent, that going there NEXT finds the \
 target: the target is there and the robot would see it by going and looking. \
 Estimate EACH node independently: these are search-success probabilities, NOT \
@@ -127,12 +138,16 @@ id=4  ROOM  type=bedroom  size=13m2  frontier=0  searched=1min  ago=3min  seen: 
 id=9  ROOM  type=unknown  size=6m2  frontier=1  searched=0s  ago=never  seen: nothing yet
 id=11  ROOM  type=unknown  size=22m2  frontier=2  searched=0s  ago=never  seen: nothing yet
 id=100003  STAIRS down  to a storey NOT visited yet
+id=200001  OPENING  doorway off room 11 (type=unknown)  to space NOT seen yet  glimpsed through it: toilet
+id=200002  OPENING  gap off room 11 (type=unknown)  to space NOT seen yet  glimpsed through it: nothing yet
 {"home":"living room, sometimes a bedroom",
  "storey":"upper floor (bedroom found); no living room here; living rooms are downstairs",
  "nodes":[{"id":4,"why":"bedroom, fully seen, no television","p":2},
 {"id":9,"why":"bathroom-sized room, no television fits","p":1},
 {"id":11,"why":"large upstairs room, maybe a lounge","p":30},
-{"id":100003,"why":"unvisited ground floor holds the living room","p":60}]}"""
+{"id":100003,"why":"unvisited ground floor holds the living room","p":60},
+{"id":200001,"why":"toilet glimpsed: a bathroom, no television","p":1},
+{"id":200002,"why":"unseen upstairs room, a bedroom most likely","p":8}]}"""
 USER_PROMPT_TEMPLATE = """TARGET: {target}
 
 THIS STOREY: {storey}
@@ -151,9 +166,9 @@ class SearchNode:
     Attributes:
         id: The loop's node id -- a room pid, or a staircase id offset far
             above every pid. The model echoes it; nothing else about it matters.
-        kind: :data:`ROOM` or :data:`STAIRS`.
-        label: Room type (``unknown`` while unidentified) or ``stairs up`` /
-            ``stairs down``.
+        kind: :data:`ROOM`, :data:`STAIRS` or :data:`OPENING`.
+        label: Room type (``unknown`` while unidentified), ``stairs up`` /
+            ``stairs down``, or ``doorway`` / ``gap`` for an opening.
         tentative: The room type rests on a single kind of object (a weak
             label); rendered as ``type=kitchen?`` so the model can weigh it.
         area_m2: Room floor area; 0 when unknown or for stairs.
@@ -161,13 +176,16 @@ class SearchNode:
         searched_s: Seconds the robot has spent inside the room.
         last_inside_ago_s: Seconds since it was last inside; None = never.
         here: The robot stands in this room now.
-        objects: Object classes confirmed in the room.
+        objects: Object classes confirmed in the room; for an opening, the
+            classes glimpsed through it.
         direction: ``+1`` up / ``-1`` down for stairs, 0 for rooms.
         destination_visited: Stairs: the other storey has been stood on.
         destination: Stairs: one-line summary of that storey -- rooms found,
             time searched, frontier left -- or None when unvisited.
         arrived_by: Stairs: the robot came onto this storey by them.
         arrived_ago_s: Stairs: seconds since that arrival, when ``arrived_by``.
+        via: Opening: the mapped room it opens from, in prompt words --
+            ``room 6 (type=bathroom?)`` -- or None when unknown.
     """
 
     id: int
@@ -185,6 +203,7 @@ class SearchNode:
     destination: Optional[str] = None
     arrived_by: bool = False
     arrived_ago_s: Optional[float] = None
+    via: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -272,6 +291,12 @@ def format_node(node: SearchNode) -> str:
             parts.append("the robot came %s these stairs %s ago (arrived_by=yes)" % (
                 "down" if node.direction > 0 else "up", coarse_seconds(node.arrived_ago_s)))
         return "  ".join(parts)
+    if node.kind == OPENING:
+        names = sorted({str(c).strip().lower() for c in node.objects if str(c).strip()})
+        glimpsed = ", ".join(names[:MAX_CLASSES_IN_PROMPT]) if names else "nothing yet"
+        origin = "off %s" % node.via if node.via else "off the mapped floor"
+        return "  ".join(["id=%d" % node.id, "OPENING", "%s %s" % (node.label or "gap", origin),
+                          "to space NOT seen yet", "glimpsed through it: %s" % glimpsed])
     names = sorted({str(c).strip().lower() for c in node.objects if str(c).strip()})
     seen = ", ".join(names[:MAX_CLASSES_IN_PROMPT]) if names else "nothing yet"
     size = "%dm2" % int(round(float(node.area_m2))) if float(node.area_m2) > 0.0 else "unknown size"

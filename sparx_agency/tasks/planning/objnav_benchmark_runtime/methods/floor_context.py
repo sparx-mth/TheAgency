@@ -25,10 +25,18 @@ class FloorContextBank:
 
     def new(self):
         p = self.policy
-        p.graph = ObservedSceneGraph(p.llm_client, label_settings=p.room_label_settings)
+        # Room numbers are unique across the building: a new storey's registry
+        # starts after the highest pid any storey (including the one just left,
+        # saved by ``activate``) has handed out, so "R0" names one room.
+        first_pid = max([0] + [state["graph"].registry.next_pid for state in self.contexts.values()
+                               if getattr(state.get("graph"), "registry", None) is not None])
+        p.graph = ObservedSceneGraph(p.llm_client, label_settings=p.room_label_settings, first_pid=first_pid)
         p.graph.oracle = RepairingNodeOracle(p.llm_client)
         p.doors = ObservedDoors(p.door_settings)
-        p.landmarks = ObjectLandmarkMap(nearest_match=True)
+        # Co-located detections vote on one object's class (a sofa box on a
+        # five-times-confirmed bed is the misidentification); the plurality
+        # is what the rooms, the LLM and the target evidence see.
+        p.landmarks = ObjectLandmarkMap(nearest_match=True, class_votes=True)
         p.target_evidence = TargetEvidence(p.target_settings)
         p.supervisor = ObjectSearchSupervisor(p.supervisor_params, solver=p.solver)
         # The loop mirrors the supervisor: the room in force and the local
@@ -66,10 +74,16 @@ class FloorContextBank:
         p._last_graph_step = -p.settings.graph_period_steps
 
     def diagnostics(self):
-        return [{"floor_id": floor_id, "rooms": len(state["graph"].registry.rooms),
-                 "landmarks": len(state["landmarks"]), "llm_queries": state["graph"].queries,
-                 "search_time_s": state["_floor_time"], "supervisor": dict(state["supervisor"].stats),
-                 "target_evidence": state["target_evidence"].diagnostics(),
-                 "room_ids": ["f%d/r%d" % (floor_id, pid) for pid in state["graph"].registry.rooms]}
-                for floor_id, state in self.save().items()]
+        out = []
+        for floor_id, state in self.save().items():
+            loop = state["loop"].diagnostics()
+            out.append({"floor_id": floor_id, "rooms": len(state["graph"].registry.rooms),
+                        "landmarks": len(state["landmarks"]), "llm_queries": state["graph"].queries,
+                        "search_time_s": state["_floor_time"], "supervisor": dict(state["supervisor"].stats),
+                        "target_evidence": state["target_evidence"].diagnostics(),
+                        "room_ids": ["f%d/r%d" % (floor_id, pid) for pid in state["graph"].registry.rooms],
+                        # The loop is floor-local; without this the storey the agent left
+                        # keeps no record of what it decided there.
+                        "room_search_loop": {k: loop[k] for k in ("stats", "events", "estimate_events", "excluded")}})
+        return out
 

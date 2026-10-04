@@ -10,7 +10,47 @@ import numpy as np
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import DETECTOR
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import deduplicate_detections
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import observed_objects, STAIR_LABELS
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box, observed_objects, STAIR_LABELS
+
+
+#: Two observations more than this apart in height are different objects
+#: stacked in plan view (a television on a cabinet), never one vote.
+HEIGHT_TOLERANCE_M = 0.35
+
+
+def associate_landmark(policy, xyz, radius_m=None, exclude=(), class_name=None):
+    """The map landmark an observation at ``xyz`` belongs to, or None.
+
+    The landmark map associates in plan view (centroid radius or footprint
+    overlap, any class under voting; ``class_name`` alone without it); this
+    adds the one check it cannot make -- the object's height against the
+    landmark's first measured height -- and takes the first candidate that
+    passes. Returns ``(landmark, co_located)``: ``co_located`` says whether
+    some landmark shared the footprint at another height.
+    """
+    p = policy
+    candidates = p.landmarks.matches(tuple(float(v) for v in xyz[:2]), radius_m, class_name=class_name, exclude=exclude)
+    for landmark in candidates:
+        anchor = p._object_geometry.get(landmark.id)
+        if anchor is None or abs(anchor[2] - xyz[2]) <= HEIGHT_TOLERANCE_M:
+            return landmark, bool(candidates)
+    return None, bool(candidates)
+
+
+def contradicted_by_map(policy, label, xyz, radius_m=None):
+    """A confirmed landmark here whose plurality class the target does not accept.
+
+    The map's answer to a lone misidentification: a ``sofa`` box projecting
+    onto a bed the map has confirmed five times is a vote the bed outweighs,
+    not a sofa. Returns that landmark, or None when the map does not object.
+    """
+    p = policy
+    landmark, _ = associate_landmark(p, xyz, radius_m, class_name=label)
+    if landmark is None or not p.landmarks.is_confirmed(landmark):
+        return None
+    if p.target.accepts(landmark.class_name) or landmark.class_name == label:
+        return None
+    return landmark
 
 
 class PerceptionCycle:
@@ -82,23 +122,39 @@ class PerceptionCycle:
             if reason is not None:
                 row["status"] = reason
                 continue
-            # The existing nearest/radius map remains the association owner.
-            # Reject a drift chain or inconsistent height BEFORE mutating it.
-            nearby = [lm for lm in p.landmarks.all_landmarks() if lm.class_name == label and math.dist(lm.xy, xyz[:2]) <= 0.70]
-            nearest = min(nearby, key=lambda lm: math.dist(lm.xy, xyz[:2])) if nearby else None
-            anchor = p._object_geometry.get(nearest.id) if nearest else None
-            if anchor is not None and (math.dist(anchor[:2], xyz[:2]) > 0.5 or abs(anchor[2] - xyz[2]) > 0.35):
-                row["status"] = "inconsistent_3d_association"
+            # The landmark map owns the plan-view association; the height
+            # check here keeps a television off the cabinet it stands on.
+            radius = row.get("radius_m")
+            landmark, co_located = associate_landmark(p, xyz, radius, exclude=used, class_name=label)
+            if landmark is None and co_located:
+                row["status"] = "inconsistent_3d_association"      # co-located in plan view, another height
                 continue
-            if nearest is not None and nearest.id in used:
-                row["status"] = "same_frame_association"
+            if landmark is None and p.landmarks.matches(tuple(float(v) for v in xyz[:2]), radius, class_name=label):
+                row["status"] = "same_frame_association"           # only landmarks this frame already fed
                 continue
-            landmark = p.landmarks.observe(label, tuple(float(v) for v in xyz[:2]), frame_id=obs.step)
+            before = landmark.class_name if landmark is not None else None
+            landmark = p.landmarks.observe(label, tuple(float(v) for v in xyz[:2]), frame_id=obs.step,
+                                           radius_m=radius, landmark=landmark)
             p._object_geometry.setdefault(landmark.id, tuple(float(v) for v in xyz))
             used.add(landmark.id)
-            row.update(status="fused", floor_id=p.mapping.floor_id, landmark_id=landmark.id)
-            if (p.target.accepts(label) and row["confidence"] >= p.settings.target_closing.confidence
+            row.update(status="fused", floor_id=p.mapping.floor_id, landmark_id=landmark.id,
+                       landmark_class=landmark.class_name, votes=dict(landmark.votes))
+            if before is not None and landmark.class_name != before:
+                self.counts["landmark_relabels"] += 1
+            if landmark.class_name != label:
+                self.counts["outvoted_detections"] += 1
+            # Evidence for the target is the map's class, not the box's: a sofa
+            # box on a confirmed bed is the misidentification, not a sofa. And a
+            # box clipped at the image edge is a partial view (the same gate the
+            # takeover applies): the Ranchester upstairs run spent nine actions
+            # pursuing a 48 px sliver the takeover had rightly refused.
+            if (p.target.accepts(label) and p.target.accepts(landmark.class_name)
+                    and row["confidence"] >= p.settings.target_closing.confidence
                     and not p.target_evidence.is_suppressed(landmark.id, obs.step)):
+                if clipped_box(row["xyxy"], obs.camera.intrinsics, p.settings.target_closing.border_margin_px):
+                    row["target_evidence"] = "border_clipped"
+                    self.counts["border_clipped_evidence"] += 1
+                    continue
                 supported = p.target_evidence.observe(landmark, obs.pose, obs.step)
                 if p._target_id in (None, landmark.id):
                     p._target_id, p._target_xy, p._target_step = landmark.id, landmark.xy, obs.step

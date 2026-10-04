@@ -17,7 +17,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fa
     DETECTOR, ROOM_LLM, FallbackSettings)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
-    IN_A, RES, VALUES, loop_policy, obs_at)
+    FREE, IN_A, OCC, RES, UNK, VALUES, loop_policy, obs_at)
 
 
 def moving(command):
@@ -185,7 +185,9 @@ def test_a_failed_detector_frame_is_skipped_and_backed_off_not_waited_on_every_a
 
 
 @pytest.mark.parametrize("kwargs", [{"frontier_attempts": 0}, {"relocation_min_m": -1.0},
-                                    {"service_backoff_actions": 50, "service_backoff_max_actions": 10}])
+                                    {"service_backoff_actions": 50, "service_backoff_max_actions": 10},
+                                    {"exits_first": 1}, {"shadow_margin_m": 0.0}, {"shadow_length_factor": -1.0},
+                                    {"near_blind_m": 0.0}, {"goal_switch_gain": 0.5}, {"goal_match_m": float("inf")}])
 def test_fallback_settings_are_validated(kwargs):
     with pytest.raises(ValueError):
         FallbackSettings(**kwargs)
@@ -194,7 +196,158 @@ def test_fallback_settings_are_validated(kwargs):
 def test_the_configuration_and_the_episode_record_carry_the_fallback():
     policy, episode = setup_policy()
     assert policy.configuration()["exploration_fallback"]["frontier_attempts"] == 6
+    assert policy.configuration()["exploration_fallback"]["exits_first"] is True
     policy.plan(observation(episode, 0, depth=3))
     record = policy.episode_info()["exploration_fallback"]
-    assert set(record) == {"settings", "stats", "failures", "retry_step"}
+    assert set(record) == {"settings", "stats", "failures", "retry_step", "last_demoted"}
+
+
+# -- exits before shadows (Ranchester 2026-10-04, actions 61-102) -----------------------
+def shadow_world():
+    """One finished room, 6 x 6 m, with a bed whose shadow is a 1.6 m strip of unknown
+    behind it, and a 1 m doorway in the east wall with the next room unknown beyond."""
+    h, w = 60, 90
+    g = np.full((h, w), FREE, np.int8)
+    g[0, :] = g[-1, :] = g[:, 0] = OCC
+    g[:, 60] = OCC                        # the east wall of the room, at x = 6.0
+    g[25:35, 60] = FREE                   # the doorway: y 2.5 .. 3.5
+    g[:, 61:] = UNK                       # the next room: unknown beyond the wall
+    g[25:35, 61:66] = FREE                # ...except the half-metre the camera saw through the door
+    g[22:38, 36:42] = OCC                 # the bed: 1.6 x 0.6 m, centred at (3.9, 3.0)
+    g[22:38, 42:46] = UNK                 # its shadow: the strip the camera never saw behind it
+    world = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    return world
+
+
+def bed_landmark(xy=(3.9, 3.0), radius=0.8):
+    from sparx_agency.core.mapping.objects.landmarks import ObjectLandmark
+    return ObjectLandmark(id=0, class_name="bed", xy=xy, count=9, votes={"bed": 9}, radius_m=radius)
+
+
+def test_a_beds_shadow_is_not_an_exit_and_the_doorway_beyond_it_is_chosen():
+    policy, episode, _, rooms, _ = loop_policy(order=(1, 0))
+    world = shadow_world()
+    no_rooms(policy)
+    policy.landmarks.confirmed = lambda: [bed_landmark()]
+    here = (3.0, 3.0)                                       # the strip is 1.2 m away, the door 3 m
+    command = policy.loop.plan(obs_at(episode, 0, here), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier"
+    assert command.waypoints[-1][0] > 5.0, "the doorway in the east wall, not the strip behind the bed"
+    demoted = policy.fallback.last_demoted
+    assert demoted and all(d["why"].startswith("shadow of bed 0") for d in demoted)
+    assert all(4.0 < d["xy"][0] < 5.0 for d in demoted), "the demoted goals sit beside the bed"
+    assert policy.fallback.stats["shadows_demoted"] >= 1
+    assert policy.episode_info()["exploration_fallback"]["last_demoted"] == demoted
+
+
+def test_without_exits_first_the_nearer_shadow_wins_as_before():
+    policy, episode, _, rooms, _ = loop_policy(order=(1, 0))
+    policy.fallback.settings = FallbackSettings(exits_first=False)
+    world = shadow_world()
+    no_rooms(policy)
+    policy.landmarks.confirmed = lambda: [bed_landmark()]
+    command = policy.loop.plan(obs_at(episode, 0, (3.0, 3.0)), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier"
+    assert 4.0 < command.waypoints[-1][0] < 5.0 and not policy.fallback.last_demoted
+
+
+def test_a_long_frontier_passing_an_object_is_an_opening_not_its_shadow():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    # Room A's whole west end is unknown: a 5.8 m frontier. A plant standing beside it does not own it.
+    policy.landmarks.confirmed = lambda: [bed_landmark(xy=(1.4, 3.0), radius=0.3)]
+    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier"
+    assert command.waypoints[-1][0] < 2.0 and not policy.fallback.last_demoted
+
+
+def test_a_frontier_of_a_room_the_target_cannot_be_in_waits_behind_the_exits():
+    from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
+    from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    labels = policy.graph.labels.copy()
+    no_rooms(policy)
+    cost = assemble_cost_grid(policy.planner.fields_for(world), policy.planner_params, policy.settings.body_radius_m)[0]
+    policy.graph.frontier_inventory = accessible_frontiers(world, cost, labels, IN_A, 0.0, policy.sweep.settings.ranking)
+    assert 1 in policy.graph.frontier_inventory.by_room, "room A's west frontier is credited to label 1 = pid 0"
+    policy.loop._excluded = {0: "type:bathroom"}            # room A (pid 0) cannot hold the target
+    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier"
+    assert command.waypoints[-1][0] > 6.0, "room B's frontier through the door, not the nearer bathroom's"
+    assert policy.fallback.last_demoted and policy.fallback.last_demoted[0]["why"] == "room 0 is type:bathroom"
+    assert policy.fallback.stats["type_demoted"] >= 1
+
+
+def test_demoted_frontiers_are_still_unknown_space_once_the_exits_are_spent():
+    policy, episode, _, rooms, _ = loop_policy(order=(1, 0))
+    world = shadow_world()
+    world.grid[25:35, 60:66] = OCC                           # brick up the doorway: the shadow is all that is left
+    no_rooms(policy)
+    policy.landmarks.confirmed = lambda: [bed_landmark()]
+    command = policy.loop.plan(obs_at(episode, 0, (3.0, 3.0)), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier_demoted"
+    assert 4.0 < command.waypoints[-1][0] < 5.0
+    assert policy.fallback.stats["frontier_demoted"] == 1
+
+
+def test_a_frontier_inside_the_cameras_blind_radius_is_demoted():
+    policy, episode, _, rooms, _ = loop_policy(order=(1, 0))
+    world = shadow_world()
+    world.grid[22:38, 36:46] = FREE                          # no bed, no shadow...
+    world.grid[28:32, 26:28] = UNK                           # ...but a speck of unknown 0.4 m from the agent
+    no_rooms(policy)
+    command = policy.loop.plan(obs_at(episode, 0, (3.0, 3.0)), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier"
+    assert command.waypoints[-1][0] > 5.0, "the doorway, not the speck under the agent's feet"
+    assert any("blind radius" in d["why"] for d in policy.fallback.last_demoted)
+    assert policy.fallback.stats["blind_demoted"] >= 1
+
+
+# -- commitment: the goal in force is kept until gone, refused or clearly outranked ---------
+def test_the_goal_in_force_is_kept_while_the_agent_turns_toward_it():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    first = policy.loop.plan(obs_at(episode, 0, IN_A, yaw=0.0), world)
+    goal = first.waypoints[-1]
+    assert policy.fallback.goal is not None and policy.fallback.goal_stage == "frontier"
+    # Facing the other way now: the greedy order would discount this goal and may prefer another;
+    # the commitment keeps it, and the route is not replaced.
+    second = policy.loop.plan(obs_at(episode, 1, IN_A, yaw=math.pi), world)
+    assert second.waypoints[-1] == goal
+    assert second.info.get("route_replaced") is None
+    assert policy.fallback.stats["goal_kept"] == 1 and policy.fallback.stats["goal_switched"] == 0
+
+
+def test_a_commitment_does_not_survive_an_action_the_loop_owned():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.fallback.goal_step == 0
+    policy.loop.plan(obs_at(episode, 5, IN_A), world)       # four actions elsewhere in between
+    assert policy.fallback.goal_step == 5 and policy.fallback.stats["goal_switched"] == 0, "a fresh choice, not a switch"
+
+
+def test_a_goal_worth_twice_as_much_takes_over_a_lesser_one_in_force():
+    from sparx_agency.core.planning.exploration.frontier_ranking import FrontierGoal
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    fallback = policy.fallback
+    weak = FrontierGoal(xy=(1.0, 1.0), cell=(10, 10), size_cells=4, geodesic_m=2.0, heading_error_rad=0.0, utility=1.0)
+    strong = FrontierGoal(xy=(5.0, 5.0), cell=(50, 50), size_cells=64, geodesic_m=2.0, heading_error_rad=0.0, utility=2.5)
+    fallback.goal, fallback.goal_stage = (1.0, 1.0), "frontier"
+    assert fallback._committed([strong, weak], "frontier") == [weak, strong] or fallback.stats["goal_outranked"] == 1
+    # 2.5 >= 2 x 1.0: the strong goal outranks the one in force; 1.5 would not.
+    assert fallback._committed([strong, weak], "frontier")[0] is strong
+    middling = FrontierGoal(xy=(5.0, 5.0), cell=(50, 50), size_cells=16, geodesic_m=2.0, heading_error_rad=0.0, utility=1.5)
+    assert fallback._committed([middling, weak], "frontier")[0] is weak
+    assert fallback._committed([middling, weak], "frontier_demoted")[0] is middling, "another rung: no goal in force"
+
+
+def test_the_step_record_carries_the_fallback_snapshot():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    snap = policy.fallback.snapshot()
+    assert snap["stage"] == "frontier" and snap["goal_stage"] == "frontier" and snap["goal_step"] == 0
+    assert len(snap["goal"]) == 2 and isinstance(snap["demoted"], list)
+    assert {"frontier", "goal_kept", "blind_demoted"} <= set(snap["stats"])
 

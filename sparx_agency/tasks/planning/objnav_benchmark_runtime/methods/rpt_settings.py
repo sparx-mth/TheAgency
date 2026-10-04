@@ -22,6 +22,19 @@ class RPTSettings:
             and a ten-action-old mask confines routes to a room that has
             since moved. This is not the LLM cadence; the room LLM runs at
             the loop's own points (see ``room_search_loop.LoopSettings``).
+        warmup_steps: Actions of the warm-up rotation taken in place where
+            the agent stands before any room is chosen (and again on every
+            storey first entered). Twelve is one full circle at the
+            benchmark's 30-degree turn; the position is then recorded as a
+            completed scan, so the spawn room is finished before the search
+            begins.
+        doorway_peek: The one-shot doorway inspections. OFF by default since
+            2026-10-04: under the scan visit a peek -- approach, a half
+            turn from the threshold, the walk back -- costs as much as a
+            room's own scan and finishes nothing, and the four peeks of the
+            last Ranchester recording were all cancelled. ``{"enabled":
+            True}`` restores them; the floor-departure gate they fed is a
+            further option of their own (``gate_floor_departure``).
     """
 
     map_size_m: float = 80.0
@@ -39,9 +52,9 @@ class RPTSettings:
     body_radius_m: float = 0.18
     preferred_clearance_m: float = 0.30
     local_exploration: str = "frontier"
-    warmup_steps: int = 10
+    warmup_steps: int = 12
     target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
-    doorway_peek: PeekSettings = field(default_factory=PeekSettings)
+    doorway_peek: PeekSettings = field(default_factory=lambda: PeekSettings(enabled=False))
     falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
     multifloor: MultiFloorParams = field(default_factory=MultiFloorParams)
 

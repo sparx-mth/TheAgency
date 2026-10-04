@@ -13,10 +13,16 @@ import math
 import cv2
 import numpy as np
 
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OPENING_NODE_BASE
+
 UNKNOWN_GRAY = 128
 LABEL_SCALE = 0.38
 #: Colour of a seen staircase's entry marker (BGR).
 STAIRS_COLOR = (60, 140, 255)
+#: Colour of an opening offered as a node: its threshold and the way the unknown lies (BGR).
+OPENING_COLOR = (200, 90, 200)
+#: Colour of a target landmark offered as a node: the standoff point and the way the landmark lies (BGR).
+LANDMARK_COLOR = (0, 200, 220)
 
 
 class FloorPanels:
@@ -252,10 +258,26 @@ class FloorPanels:
                 row, col = np.unravel_index(int(depth.argmax()), depth.shape)
                 cls._label(canvas, "R%d" % (int(value) - 1), (int(col), int(row)), (65, 70, 75), placed)
 
-    @staticmethod
-    def _draw_search(canvas, pixel, search):
-        """Only current/next-room emphasis; verbose search facts stay off the map."""
-        nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("stairs", ())) if n.get("centroid")}
+    @classmethod
+    def _draw_search(cls, canvas, pixel, search):
+        """Current/next-node emphasis and the openings offered as nodes; verbose search facts stay off the map."""
+        placed = []
+        for opening in search.get("openings", ()):
+            if not opening.get("centroid"):
+                continue
+            at = pixel(opening["centroid"])
+            heading = math.radians(float(opening.get("heading_deg") or 0.0))
+            landmark = opening.get("kind") == "landmark"
+            color = LANDMARK_COLOR if landmark else OPENING_COLOR
+            tip = (int(at[0] + 9 * math.cos(heading)), int(at[1] - 9 * math.sin(heading)))
+            cv2.arrowedLine(canvas, at, tip, color, 1, cv2.LINE_AA, tipLength=0.5)
+            cv2.circle(canvas, at, 3, color, -1, cv2.LINE_AA)
+            index = int(opening["id"]) - OPENING_NODE_BASE
+            name = ("T%d" % int(opening["landmark_id"]) if landmark and opening.get("landmark_id") is not None
+                    else "O%d" % index)
+            cls._label(canvas, name, at, color, placed)
+        nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("stairs", ()))
+                 + list(search.get("openings", ())) if n.get("centroid")}
         for key, color in (("room_in_force", (40, 170, 235)), ("next_room", (75, 160, 75))):
             node = nodes.get(search.get(key))
             if node is not None:

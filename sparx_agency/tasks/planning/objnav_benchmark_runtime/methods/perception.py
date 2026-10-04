@@ -135,5 +135,48 @@ def _supported_centroid(observation, box, transform, row):
     optical = np.stack(((left + u * stride - k.cx) * d / k.fx, (top + v * stride - k.cy) * d / k.fy, d), axis=1)
     points = optical @ transform[:3, :3].T + transform[:3, 3]
     xyz = np.median(points, axis=0)
-    row.update(status="projected", xyz=xyz.tolist(), height_range_m=[float(np.min(points[:, 2])), float(np.max(points[:, 2]))])
+    # The range to the object's NEAR surface, not to its middle: a 10th-percentile
+    # horizontal distance of the supported points, robust to a few stray pixels.
+    # The benchmark's success radius is measured to the object, so the terminal
+    # test of the target closing reads this beside the centroid.
+    pose = observation.pose
+    near = float(np.percentile(np.hypot(points[:, 0] - pose.x, points[:, 1] - pose.y), 10))
+    row.update(status="projected", xyz=xyz.tolist(), height_range_m=[float(np.min(points[:, 2])), float(np.max(points[:, 2]))],
+               radius_m=footprint_radius_m(box, float(depth), k.fx), range_near_m=near)
     return xyz
+
+
+def clipped_box(box, intrinsics, margin_px, min_fraction=0.3):
+    """Whether ``box`` is a SLIVER at an image edge: touching it within ``margin_px`` AND narrow.
+
+    The one test behind both target gates -- the takeover's start and the
+    legacy target evidence -- so a sliver the one refuses the other cannot
+    pursue. A clipped box's depth centroid is the centroid of what is in
+    frame, not of the object, and the clipped end of a bed reads as a sofa
+    (the Ranchester bed: 84 x 210 px on the left edge of a 640 x 480 frame).
+    A box that touches an edge but spans at least ``min_fraction`` of the
+    frame in both dimensions is the opposite case -- a big object close up,
+    filling the view (the Ranchester couch from 0.7 m: 392 x 379 px) -- and
+    is not clipped in this sense: refusing it meant the takeover never
+    started from beside the couch.
+    """
+    m = int(margin_px)
+    x1, y1, x2, y2 = box
+    touches = bool(x1 < m or y1 < m or x2 > intrinsics.width - m or y2 > intrinsics.height - m)
+    narrow = (x2 - x1) < min_fraction * intrinsics.width or (y2 - y1) < min_fraction * intrinsics.height
+    return touches and narrow
+
+
+def footprint_radius_m(box, depth_m, fx, floor_m=0.15, ceiling_m=1.5):
+    """Half the box's width at its depth, as the object's footprint half-extent.
+
+    A disc, not a box: the detector's box is an image-plane extent and the
+    agent sees the object from one side, so the plan-view shape is unknown;
+    the half-width at the measured depth is the one footprint figure the
+    frame supports. Clamped so a sliver and a wall-to-wall box both stay
+    inside the range of indoor furniture.
+    """
+    x1, _, x2, _ = box
+    radius = 0.5 * max(0.0, float(x2) - float(x1)) * float(depth_m) / float(fx)
+    return float(min(ceiling_m, max(floor_m, radius)))
+

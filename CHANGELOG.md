@@ -6,6 +6,106 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **The room visit is a scan** (`objnav_benchmark_runtime/methods/room_search_loop.py`,
+  `LoopSettings.visit="scan"`, 2026-10-04): transit to the room's vantage point -- the reachable
+  interior cell of greatest clearance (`room_vantage.py`) -- turn a full circle on measured yaw,
+  and leave; the room is finished for the episode. The **scan ledger** (`room_scans.py`) remembers
+  where every rotation stood, not which room id it was credited to, and finishes a room when a scan
+  point lies inside it or a scan saw more than half of it through observed free space; the verdict
+  is sticky per `(floor, pid)`. Finished rooms and rooms whose identified type cannot hold the
+  target (`room_priors.py`; a confirmed target object in the room outranks the prior) are **not
+  nodes**: not shown to the oracle, not solved, not entered (`excluded` events/estimates/HUD).
+  A clue mid-visit is deferred to the loop point; a relabel ends the visit only when the new type
+  rules the room out. The former bounded sweep is kept as `visit="sweep"`.
+- **The warm-up is one full rotation** (12 x 30 deg), recorded as the storey's first scan so the
+  spawn room is finished before any room is chosen; repeated on every storey first entered.
+- **Stairs are never a room**: seen stair footprints are removed from the free mask before the
+  watershed (`ObservedSceneGraph.update(exclude=policy.room_exclusion(world))`).
+- **Object identity is a per-frame vote** (`core/mapping/objects/landmarks.py` `class_votes=True`,
+  wired in `floor_context.py`/`perception_cycle.py`): detections associate by position (dedupe
+  radius or footprint-disc IoU >= 0.15, `perception.footprint_radius_m`) with a 0.35 m height
+  check; each landmark tallies `votes` per class, one per frame; its class is the plurality,
+  relabels are recorded, confirmation needs a clear plurality; target evidence is judged on the
+  map's class (`contradicted_by_map`), so a `sofa` box on a five-times-confirmed bed is outvoted.
+- Target closing on a big object at close range: a fresh box spanning the image centre column is
+  aligned whatever its centre says; the terminal range is the near edge of the measured surface
+  (`range_near_m`); an exhausted inspection after an in-range sighting STOPs
+  (`stop_on_exhausted_inspection`) instead of raising. The border gate is shared with the legacy
+  target-evidence path (`perception.clipped_box`). The rejection memory of a released candidate
+  does not block a view from within `rejection_min_range_m` (2 m), and the lock's association
+  radius grows with range (`association_range_gain`).
+- Under `scan`, the staircase the agent arrived by is withheld while the storey still has a room
+  that is neither finished nor ruled out (`way_back_held` loop events); a warm-up moved more than
+  0.5 m mid-rotation starts its circle again.
+- **Target closing starts only on a depth-projected candidate** and **tracks low once active**
+  (`target_closing.track_confidence`, 0.30): a confident box the depth sensor cannot place no longer
+  buys a twelve-step verification ("waiting for valid target depth", Ranchester attempts 4-5), and a
+  re-sighting of the active candidate on its anchor counts from the lower threshold -- the agent's own
+  centring turn dropped the Ranchester couch from 0.68 to 0.42 and reset the consecutive-frame run on
+  every cycle (24 frames in view, two releases). `weak_resightings` in the diagnostics.
+- **The exploration fallback ranks exits first** (`exploration_fallback.py`, `FallbackSettings.exits_first`):
+  a frontier that is an object's shadow (beside a confirmed landmark's footprint, no longer than it
+  could cast; `object_shadow`) or belongs to a room the loop ruled out by type waits in a new
+  `frontier_demoted` rung behind every genuine opening and the stairs. The Ranchester recording's
+  actions 61-102 chased ten strips of unknown between the beds while the passage to the stairs stood
+  two metres away. `last_demoted` in the fallback record; `RoomSearchLoop.excluded` is public.
+- **The fallback commits to its goal** (`goal_switch_gain` 2.0, `goal_match_m` 0.6): the frontier in
+  force is driven until it is gone or refused unless another of its rung is worth twice as much; the
+  greedy per-action order, re-ranked by the agent's own turning, produced a 180-degree turn toward one
+  goal and a 210-degree turn back (Ranchester attempt 6, actions 42-55). Frontiers inside the camera's
+  blind radius (`near_blind_m` 1.2) -- the floor under the agent that no step toward resolves -- are
+  demoted with the shadows. The per-step record carries `method.fallback` (stage, goal, demotions).
+- Per-storey loop events/stats/exclusions in `building.floor_contexts`; HUD shows the visit budget,
+  scan phase and the rooms that are not nodes. Progress entry 019.
+- **Openings are nodes** (`objnav_benchmark_runtime/methods/opening_nodes.py`, `LoopSettings.openings`,
+  2026-10-04): every genuine exit of the mapped floor -- a frontier that is not an object's shadow,
+  not under the agent, at least 0.8 m wide after merging within 1.5 m, not at the foot of a seen
+  staircase -- is offered to the oracle and to RPT* beside the rooms and the stairs, with a sticky
+  building-wide id (`O<n>`), the room it opens from, `doorway`/`gap` by a confirmed door frame, and
+  the objects glimpsed through it; priced at a peek's 4 actions (`build_instance(service_s=...)`).
+  Its visit is a **peek**: walk to the threshold (bound: the distance's worth of steps x 1.6 + 6, at
+  least 20; one re-aim when the cell goes occupied), face the unknown, one look to each side, and the
+  opening is retired for the storey (`peek_look`/`peek_complete`/`peek_abandoned`/`peek_reaimed`
+  events, `OpeningRegistry` in the episode record). The heading into the unknown is from the known
+  floor around the frontier cell toward the unknown; a glimpse is a landmark 0.3-3 m beyond the
+  threshold inside a 35-degree cone (attempt 8 read the stair passage as a bedroom door from a
+  hallway bed). A new opening while nothing is in force buys an oracle call at most every 6 actions.
+  The oracle's prompt explains OPENING nodes and
+  shows one in its worked example. Ranchester attempt 7, action 75: a toilet glimpsed through a door
+  named the hallway a bathroom and every door off it was demoted with it.
+- **A weak type label does not rule out a room with more than `weak_type_max_openings` (1) openings**
+  (`weak_type_kept` events): the one object that named it may belong to the room behind a door. Openings
+  count as "rooms left" for the way-back hold.
+- **Room numbers are unique across the building**: a storey first entered numbers its rooms after the
+  highest pid any storey has used (`RoomRegistry(first_pid=...)`, `FloorContextBank.new`), so `R0`
+  names one room in a recording. Stair node ids are now a band (100 000-199 999); openings start at
+  200 000. HUD: `OPENINGS (nodes)` section, `O<n>` markers with the heading into the unknown on the
+  active floor map, the peek in force. Progress entry 020.
+- **A confirmed landmark of the target's class is a node** (`opening_nodes.landmark_openings`,
+  `OpeningSettings.landmarks_enabled` / `landmark_prob` 0.85 / `landmark_standoff_m` 1.5; `T<n>` on the
+  HUD): offered to RPT* at a fixed probability without an oracle call, at a standoff on the agent's side,
+  visited by the same peek (walk facing it, one look to each side); inspected landmarks and spots in the
+  takeover's rejection memory are not offered again (`TargetClosing.rejected_near`). Ranchester attempt
+  9 walked forty actions away from a confirmed `sofa` 3.8 m from the stair foot.
+- **A locked target whose terminal inspection never saw it is released, not an episode error**
+  (`target_closing.release_on_failed_inspection`, default on; `failed_inspection_radius_factor` 2.0): the
+  anchor joins the rejection memory with twice the radius, the release action is one turn in place, and
+  the search resumes. The Ranchester same-storey run ended as `agent_error` on a sofa-from-four-metres
+  that was nothing from one, the real couch 2.85 m away. The release comes as soon as every inspection
+  view has been tried once with nothing seen (not after the 24-action budget), and at once when the
+  map's class vote at the anchor outvotes the lock (`map_releases`; the sofa from four metres is the bed
+  from two). The rejection memory now records a radius per spot (`rejected[].radius_m`);
+  `inspection_releases`, `map_releases` and `last_release` in the diagnostics.
+
+### Changed
+- `doorway_peek.enabled` and the room-coverage floor gate (`doorway_peek.gate_floor_departure`)
+  default to **off**: a peek costs a scan and finishes nothing, and the gate held the Ranchester
+  descent 14 times. Both remain available as ablations.
+- Development runs use `qwen2.5:3b-instruct` as the reasoning model; the 14B stays the benchmark model.
+- The Ranchester couch-downstairs development episode (`runs/zson-couch-downstairs-20261004-scan`)
+  now succeeds in **150 actions (SR 1, SPL 0.71)** where the 2026-10-04 morning runs failed at 28 and
+  500; the seven attempts of the day (185 / 215 / 167 / 150 actions on the successful ones) are kept
+  under `attempt-*` with the diff each ran.
 - Target-closing recording HUD shows active/confirmed lock, phase, observed target range,
   elapsed time and FPS; per-frame LLM/classifier/RPT/A* counters permit freeze verification,
   and normally completed videos end with SR/SPL/DTG/runtime metrics.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from sparx_agency.core.mapping.topology.room_registry import RoomRegistry
 from sparx_agency.core.mapping.topology.room_segmentation import RoomStats
@@ -99,3 +100,17 @@ def test_shape_change_never_matches():
                       centroid_cells=(4.5, 4.5))
     rooms = reg.update([stats], identity_c2w)
     assert list(rooms.keys()) == [1]
+def test_a_registry_can_start_after_another_storeys_pids_so_room_numbers_are_unique_across_a_building():
+    """One registry per storey; the second storey's starts after the first's highest pid, so "R0"
+    names one room in the recording and the hallway upstairs is not a second R0."""
+    upstairs = RoomRegistry(iou_threshold=0.25)
+    upstairs.update([make_stats(1, 0, 10, 0, 10), make_stats(2, 20, 30, 20, 30)], identity_c2w)   # pids 0, 1
+    assert upstairs.next_pid == 2
+    downstairs = RoomRegistry(iou_threshold=0.25, first_pid=upstairs.next_pid)
+    rooms = downstairs.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)
+    assert list(rooms.keys()) == [2], "the same mask on another storey is another room with its own number"
+    assert downstairs.next_pid == 3
+    rooms = downstairs.update([make_stats(1, 0, 10, 0, 10), make_stats(2, 20, 30, 20, 30)], identity_c2w)
+    assert list(rooms.keys()) == [2, 3]
+    with pytest.raises(ValueError):
+        RoomRegistry(first_pid=-1)

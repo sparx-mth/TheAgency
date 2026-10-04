@@ -62,6 +62,20 @@ def search_snapshot(policy):
                        "arrived_by": option.node.arrived_by, "leaf_m": round(option.leaf_m, 2),
                        "approach_m": round(option.approach.distance_m, 2), "distance_m": estimate.get("distance_m"),
                        "portal_id": option.portal["id"], "centroid": [float(v) for v in option.approach.xy]})
+    openings = []
+    for nid, option in sorted(getattr(loop, "_openings", {}).items()):
+        estimate = dict(loop.estimates.get(nid, {}))
+        o = option.opening
+        landmark = o.kind == "landmark"
+        openings.append({"id": nid, "kind": "landmark" if landmark else "opening", "label": option.node.label,
+                         "via": option.node.via, "room_pid": o.room_pid, "door_id": o.door_id, "glimpsed": list(o.glimpsed),
+                         "landmark_id": o.landmark_id,
+                         "landmark_xy": None if o.landmark_xy is None else [float(v) for v in o.landmark_xy],
+                         "size_cells": int(o.size_cells), "heading_deg": round(math.degrees(o.heading), 1),
+                         "prob": estimate.get("prob", loop.settings.openings.landmark_prob if landmark
+                                              else graph.stair_probs.get(nid)),
+                         "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
+                         "distance_m": estimate.get("distance_m"), "centroid": [float(v) for v in o.xy]})
     objects = [{"id": lm.id, "class": lm.class_name, "count": lm.count, "xy": list(lm.xy),
                 "room": graph.room_at(world, lm.xy) if world is not None else None}
                for lm in policy.landmarks.confirmed()] if hasattr(policy, "landmarks") else []
@@ -80,9 +94,12 @@ def search_snapshot(policy):
             "reading": dict(graph.last_reasoning.get("oracle", {}).get("reading", {})),
             "floor_id": policy.mapping.floor_id,
             "supervisor_state": supervisor.state if supervisor is not None else "?",
-            "room_in_force": loop.room_id, "local_steps": loop.local_steps, "local_budget": loop.settings.local_steps,
+            "room_in_force": loop.room_id, "local_steps": loop.local_steps, "local_budget": loop.visit_budget(),
+            "visit": loop.settings.visit, "scan": None if loop._scan is None else dict(loop._scan),
+            "peek": loop.peek_state() if hasattr(loop, "peek_state") else None,
+            "excluded": {str(pid): why for pid, why in sorted(loop._excluded.items())},
             "order": list(loop.order), "order_index": loop.order_index, "next_room": loop.next_room,
-            "rooms": rooms, "stairs": stairs, "objects": objects,
+            "rooms": rooms, "stairs": stairs, "openings": openings, "objects": objects,
             "floor": floor, "events": list(loop.events[-6:])}
 
 
@@ -183,6 +200,7 @@ def method_snapshot(policy):
             "doors": policy.doors.diagnostics() if hasattr(policy, "doors") else {},
             "rooms": len(graph.registry.rooms) if graph is not None else 0,
             "solver": str(solver.last.reason) if solver is not None else "not called",
+            "fallback": policy.fallback.snapshot() if hasattr(policy, "fallback") and hasattr(policy.fallback, "snapshot") else {},
             "search": search_snapshot(policy)}
 
 

@@ -54,15 +54,27 @@ class RoomRegistry:
             keyed by pid, replaced wholesale on every update.
     """
 
-    def __init__(self, iou_threshold: float = 0.25) -> None:
+    def __init__(self, iou_threshold: float = 0.25, first_pid: int = 0) -> None:
         """Initialize an empty registry.
 
         Args:
             iou_threshold: Minimum IoU to keep a pid across ticks.
+            first_pid: The first pid this registry hands out. A building
+                keeps one registry per storey; starting each new storey's
+                registry after the highest pid any storey has used keeps a
+                room number unique across the building, so "R0" names one
+                room in the recording, not one per floor.
         """
         self.iou_threshold = float(iou_threshold)
         self.rooms = OrderedDict()  # type: "OrderedDict[int, TrackedRoom]"
-        self._next = 0
+        if int(first_pid) < 0:
+            raise ValueError("first_pid must be non-negative, got %r" % (first_pid,))
+        self._next = int(first_pid)
+
+    @property
+    def next_pid(self) -> int:
+        """The pid the next unmatched room will receive; every pid below it is used or retired."""
+        return self._next
 
     def update(
         self,

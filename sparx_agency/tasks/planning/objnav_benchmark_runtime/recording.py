@@ -239,7 +239,8 @@ class EpisodeRecorder:
 			"room_in_force": search.get("room_in_force"), "next_room": search.get("next_room"),
 			"order": search.get("order", []), "elsewhere": search.get("elsewhere"),
 			"rooms": [{k: room.get(k) for k in ("id", "label", "prob")} for room in search.get("rooms", ())],
-			"stairs": [{k: node.get(k) for k in ("id", "label", "prob", "leaf_m")} for node in search.get("stairs", ())]},
+			"stairs": [{k: node.get(k) for k in ("id", "label", "prob", "leaf_m")} for node in search.get("stairs", ())],
+			"openings": [{k: node.get(k) for k in ("id", "label", "prob", "via", "glimpsed")} for node in search.get("openings", ())]},
 			"live status"))
 
 	def complete(self, record):

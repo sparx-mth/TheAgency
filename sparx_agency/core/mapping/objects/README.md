@@ -11,6 +11,17 @@ not privileged scene annotations.
   observation-confirmation threshold. Existing defaults retain the original
   first-in-radius behavior. `nearest_match=True` chooses the closest eligible
   same-class landmark instead; it does not merge different semantic classes.
+- `class_votes=True` turns association positional: an observation on an
+  existing landmark's footprint (centroid within the dedupe radius, or
+  footprint discs with `disc_iou` ≥ `footprint_iou`, default 0.15 ≈ equal
+  discs up to 1.25 radii apart) is folded into it *as a vote for its class*.
+  `ObjectLandmark.votes` is the per-class tally; `class_name` is the plurality
+  (a tie keeps the current class), relabels are listed in `map.relabels`, and
+  `confirmed()` needs the leader to hold `min_observations` votes and beat the
+  runner-up. `observe(..., radius_m=...)` carries the measured footprint
+  half-extent; `matches()`/`match()` expose the association so a caller with
+  information this 2-D map lacks (object height) can pick the landmark and
+  pass it back as `observe(..., landmark=...)`.
 - `observe(..., frame_id=step)` counts at most one observation for a landmark
   in that frame. Repeated prompt boxes must not manufacture confirmation.
   Omitting `frame_id` preserves the old behavior. Create/reset the map per

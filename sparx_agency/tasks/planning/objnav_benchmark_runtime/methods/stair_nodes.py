@@ -32,8 +32,10 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_decision
     Approach, approach_points, floor_at, stair_cost_m)
 
 #: Room pids count up from zero; stair node ids start here. A registry would
-#: need a hundred thousand rooms before the two could meet.
+#: need a hundred thousand rooms before the two could meet. The band above
+#: (``opening_nodes.OPENING_NODE_BASE``) belongs to the floor's openings.
 STAIR_NODE_BASE = 100_000
+STAIR_NODE_LIMIT = 200_000
 
 
 def stair_node_id(portal_id: int) -> int:
@@ -42,8 +44,8 @@ def stair_node_id(portal_id: int) -> int:
 
 
 def is_stair_node(node_id) -> bool:
-    """Whether a supervisor room id names a staircase rather than a room."""
-    return node_id is not None and int(node_id) >= STAIR_NODE_BASE
+    """Whether a supervisor room id names a staircase rather than a room or an opening."""
+    return node_id is not None and STAIR_NODE_BASE <= int(node_id) < STAIR_NODE_LIMIT
 
 
 def portal_id_of(node_id: int) -> int:
@@ -110,19 +112,26 @@ def _coarse(seconds: float) -> str:
     return "%dmin" % int(round(seconds / 60.0))
 
 
-def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: float = 1.0) -> List[StairOption]:
+def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: float = 1.0,
+                  rooms_left: bool = False) -> List[StairOption]:
     """Every eligible staircase on the floor in force, as a node the loop can offer.
 
     Eligible: a ground-truth connector's portal on this floor -- a SEEN
     staircase, the coordinator makes portals of no other -- that is not
     cooling (a failed approach defers it for a while), whose entry the
     observed passable map has reached, and that is not the staircase the
-    agent arrived by while :meth:`~multifloor_policy.MultiFloorSearch
-    .way_back_held`: a storey is looked at for ``arrival_grace_actions``
-    before the way back is a choice again (Pomaria: offered on the arrival
-    action, it was taken three times in a row on one room's evidence).
-    Nothing else here is a clock: a portal the map cannot reach yet simply
-    is not a node this action and comes back when the map grows to it.
+    agent arrived by while the way back is held: for
+    ``arrival_grace_actions`` after the arrival
+    (:meth:`~multifloor_policy.MultiFloorSearch.way_back_held`; Pomaria:
+    offered on the arrival action, it was taken three times in a row on one
+    room's evidence), and -- since 2026-10-04 -- while ``rooms_left`` says
+    this storey still has a room that is neither finished nor ruled out. A
+    storey is looked at before "not here" means anything: the 3B oracle sent
+    the Ranchester agent straight back up twice with "living room found; no
+    couch here", three unscanned rooms on the list each time. Any OTHER
+    staircase is offered at once. Nothing else here is a clock: a portal the
+    map cannot reach yet simply is not a node this action and comes back when
+    the map grows to it.
 
     Args:
         building: The :class:`~multifloor_policy.MultiFloorSearch`.
@@ -132,12 +141,13 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
         contexts: Saved per-floor policy state, keyed by atlas floor id
             (``policy.floors.save()``), for the destination summaries.
         action_time_s: Seconds per action, to phrase "arrived N ago".
+        rooms_left: Whether a room of this storey is still a node of the search.
     """
     if building is None or building.ground_truth is None:
         return []
     if not building.can_leave_floor(obs):
         return []
-    held = getattr(building, "way_back_held", lambda step: False)(obs.step)
+    held = getattr(building, "way_back_held", lambda step: False)(obs.step) or bool(rooms_left)
     portals = [q for q in building.portals if q["floor_id"] == building.floor_id
                and q.get("connector_id") is not None and obs.step >= q.get("cooldown_until", 0)
                and not (held and q.get("connector_id") == building.arrived_by)]

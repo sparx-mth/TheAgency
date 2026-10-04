@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    OMITTED_PERCENT, P_CEILING, ROOM, STAIRS, SYSTEM_PROMPT, SearchContext, SearchNode, SearchNodeOracle,
+    OMITTED_PERCENT, OPENING, P_CEILING, ROOM, STAIRS, SYSTEM_PROMPT, SearchContext, SearchNode, SearchNodeOracle,
     coarse_seconds, format_node, format_prompt, normalise, parse_reply)
 
 
@@ -58,6 +58,22 @@ def test_the_prompt_lists_every_node_in_the_format_the_system_prompt_explains():
                  "arrived_by=yes", "Do NOT make the scores sum to 100", "independently", 'STEP 1 -- "home"', 'STEP 2 -- "storey"',
                  "never copy its numbers"):
         assert rule in SYSTEM_PROMPT
+
+
+def test_an_opening_is_a_node_named_by_the_room_it_opens_from_and_what_was_glimpsed_through_it():
+    """A doorway off the hallway with a toilet seen through it is the bathroom behind the door, not
+    the hallway: the prompt says which mapped room it opens from and what the glimpse showed."""
+    door = SearchNode(200001, OPENING, "doorway", objects=("toilet", "Toilet", "sink"), via="room 11 (type=unknown)")
+    gap = SearchNode(200002, OPENING, "gap")
+    assert format_node(door) == ("id=200001  OPENING  doorway off room 11 (type=unknown)  to space NOT seen yet  "
+                                 "glimpsed through it: sink, toilet")
+    assert format_node(gap) == "id=200002  OPENING  gap off the mapped floor  to space NOT seen yet  glimpsed through it: nothing yet"
+    text = format_prompt("couch", NODES + [door, gap], SearchContext("upper floor", ()))
+    assert "NODES (7)" in text and "id=200001  OPENING" in text
+    for rule in ("OPENING nodes are doorways or gaps", "quick look in from the threshold", "room likely BEHIND it",
+                 "an opening with nothing glimpsed is where it would be found"):
+        assert rule in SYSTEM_PROMPT
+    assert "id=200001  OPENING  doorway off room 11" in SYSTEM_PROMPT, "the worked example shows an opening valued by its glimpse"
 
 
 def test_coarse_seconds_keeps_an_unchanged_map_an_unchanged_prompt():

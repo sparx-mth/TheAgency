@@ -90,7 +90,8 @@ class RecordingSupervisor:
         return getattr(self.inner, name)
 
 
-def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None, stair_prob=0.3, metadata=None):
+def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None, stair_prob=0.3, metadata=None,
+                visit="sweep", **loop_overrides):
     """A policy on the two-room world, with a counting LLM and a fixed room order.
 
     The background process is stubbed: rooms and labels are installed by hand,
@@ -100,17 +101,26 @@ def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None,
     and recording the nodes and context it was handed. ``llm`` replaces the
     neutral fake for the classifier (the oracle is stubbed either way);
     ``metadata`` is the episode's scene structure (the ground-truth stairs).
+    ``visit`` is the loop's visit mode: these regressions were written for
+    the bounded ``sweep`` and keep running it; the scan-mode tests ask for
+    ``visit="scan"``.
     """
     policy, episode = setup_policy(llm=llm, metadata=metadata or {})
+    policy.loop_settings = LoopSettings(visit=visit, **loop_overrides)
+    policy.supervisor_params = policy.loop_settings.supervisor_params(policy.settings.seed)
+    policy.loop.settings = policy.loop_settings
     world, labels = two_room_world(room_b_resolved)
     rooms = install_rooms(policy, world, labels, probs)
     reasoned, refreshed = [], []
 
-    def reason(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0):
+    def reason(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=()):
         reasoned.append(step)
-        policy.reasoned_with.append({"stairs": [n.id for n in extra_nodes], "context": context, "here": here_xy})
+        policy.reasoned_with.append({"stairs": [n.id for n in extra_nodes], "context": context, "here": here_xy,
+                                     "exclude": tuple(exclude)})
         for pid in policy.graph.registry.rooms:             # like the real one: every room gets a probability
             policy.graph.probs.setdefault(pid, 0.05)
+        for pid in exclude:
+            policy.graph.probs[pid] = 0.0
         policy.graph.stair_probs = {n.id: stair_prob for n in extra_nodes}
         policy.graph.p_present = min(1.0, sum(policy.graph.probs.values()) + sum(policy.graph.stair_probs.values()))
 
@@ -172,7 +182,7 @@ def test_the_estimate_record_carries_probability_frontiers_time_and_the_distance
 
 def test_without_entry_frontier_the_transit_aims_at_the_centroid_and_arrives_anywhere_in_the_room():
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
-    policy.loop.settings = LoopSettings(entry_frontier=False)
+    policy.loop.settings = LoopSettings(visit="sweep", entry_frontier=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.route_memory.goal == rooms[1].centroid
     assert policy.loop.stats["entry_centroid"] == 1
@@ -262,7 +272,7 @@ def test_confinement_is_lifted_while_the_agent_stands_outside_the_room(monkeypat
 
 def test_confine_routes_off_plans_on_the_observed_map(monkeypatch):
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
-    policy.loop.settings = LoopSettings(confine_routes=False)
+    policy.loop.settings = LoopSettings(visit="sweep", confine_routes=False)
     here = in_room(policy, episode, world)
     planned = []
     monkeypatch.setattr(policy, "_navigate", lambda obs, w, goal, kind, final_yaw=None: planned.append(w) or
@@ -347,7 +357,7 @@ def test_the_round_guard_fits_the_longest_chain_and_an_overrun_is_visible_not_si
     assert policy.loop.stats["rounds_exhausted"] == 0
 
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
-    policy.loop.settings = LoopSettings(supervisor_rounds=2)
+    policy.loop.settings = LoopSettings(visit="sweep", supervisor_rounds=2)
     in_room(policy, episode, world)
     for _ in range(policy.loop.settings.local_steps):
         policy.loop.charge()
@@ -604,7 +614,7 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
     oracle has not valued. The turn ends on the action the clue lands, the estimate and the order are
     redone, and -- the stub oracle unmoved -- the same room is chosen straight back, uncooled."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
     see(policy, {1: ["toilet"]}, step=1)
@@ -624,9 +634,9 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
 def test_the_oracle_decides_what_the_new_name_is_worth():
     """The same clue, with an oracle that gives a bathroom nothing for a chair: the order goes elsewhere."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    def oracle(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0):
+    def oracle(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=()):
         reasoned.append(step)
         info = policy.graph.label_info(1) or {}
         policy.graph.probs = {0: 0.6, 1: 0.0 if info.get("label") == "bathroom" else 0.4}
@@ -641,7 +651,7 @@ def test_the_oracle_decides_what_the_new_name_is_worth():
         policy.loop.plan(obs_at(episode, step, IN_A), world)
     assert policy.supervisor.room_id == 0 and llm.calls == 1, "the bathroom is not chosen again, and not re-asked"
 def test_a_room_in_force_re_identified_by_a_new_kind_of_object_ends_its_turn_on_that_action():
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=NamingLLM())
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=NamingLLM(), type_prior=False)
     in_room(policy, episode, world)                             # sweeping room B
     policy.loop.charge()
     see(policy, {1: ["sink"]}, step=2)
@@ -657,7 +667,7 @@ def test_a_room_in_force_re_identified_by_a_new_kind_of_object_ends_its_turn_on_
     assert TRAVERSED not in policy.supervisor_params.cooldown_verdicts and EXHAUSTED in policy.supervisor_params.cooldown_verdicts
 def test_a_second_object_of_a_kind_already_seen_is_not_a_clue():
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     see(policy, {1: ["toilet"]}, step=1)
     policy.loop.plan(obs_at(episode, 1, IN_A), world)
@@ -672,7 +682,7 @@ def test_a_second_object_of_a_kind_already_seen_is_not_a_clue():
     assert policy.graph.label_info(1)["strength"] == "strong"
 def test_a_room_llm_in_back_off_leaves_the_name_standing_and_the_turn_running():
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
     obs = obs_at(episode, 0, IN_A)
     policy.loop.plan(obs, world)
     policy.fallback.note_service_failure(obs, ROOM_LLM, RuntimeError("away"))
@@ -688,7 +698,7 @@ STRUCTURE = {"stair_source": "navmesh",
                                    "top_z": 2.7, "polyline_xyz": FLIGHT, "length_m": 4.0, "rise_m": 2.7}]}
 STAIRS = stair_node_id(0)
 FLIGHT_M = 3 * math.hypot(1.0, 0.9)
-def stair_policy(order, stair_prob=0.3, probs=(0.6, 0.4), structure=STRUCTURE):
+def stair_policy(order, stair_prob=0.3, probs=(0.6, 0.4), structure=STRUCTURE, **loop_overrides):
     """The two-room world with one ground-truth staircase whose foot stands in room A -- and has been SEEN.
 
     The coordinator knows only the stairs its perfect detector has had in
@@ -696,7 +706,7 @@ def stair_policy(order, stair_prob=0.3, probs=(0.6, 0.4), structure=STRUCTURE):
     a portal of this floor when the building observes.
     """
     policy, episode, world, rooms, reasoned = loop_policy(order=order, probs=probs, stair_prob=stair_prob,
-                                                          metadata=structure)
+                                                          metadata=structure, **loop_overrides)
     obs = obs_at(episode, 0, IN_A)
     policy.mapping.atlas.update(obs.pose)                      # floor 0 at z=0, as the first mapping update does
     for connector in policy.building.ground_truth.connectors:
@@ -793,7 +803,7 @@ def test_a_cooling_staircase_is_not_offered_and_a_chosen_one_that_cooled_is_rele
     assert policy.loop.stats["stairs_refused"] == 1 and command.info["kind"] == "transit/1"
 def test_stairs_as_nodes_off_is_the_ablation_where_the_stairs_are_the_fallbacks_alone():
     policy, episode, world, rooms, reasoned = stair_policy(order=(STAIRS, 1, 0), stair_prob=0.9)
-    policy.loop_settings = policy.loop.settings = LoopSettings(stairs_as_nodes=False)
+    policy.loop_settings = policy.loop.settings = LoopSettings(visit="sweep", stairs_as_nodes=False)
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.reasoned_with[0]["stairs"] == [] and policy.loop._stairs == {}
     assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1"

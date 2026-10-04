@@ -16,23 +16,37 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import s
 
 
 @pytest.mark.parametrize("explorer", ["frontier", "falcon"])
-def test_first_ten_emitted_actions_are_discovery_not_llm_decisions(explorer):
+def test_the_warmup_is_one_full_rotation_of_discovery_not_llm_decisions(explorer):
     p, episode = setup_policy("bed", discovery=True, local_exploration=explorer, doorway_peek={"enabled": False})
-    for step in range(10):
+    budget = p.settings.warmup_steps
+    assert budget == 12, "one full circle at the benchmark's 30-degree turn"
+    for step in range(budget):
         obs = observation(episode, step, depth=3)
         command = p.plan(obs)
         assert command.info["kind"] == "warmup"
+        assert command.waypoints == () and command.final_yaw is not None, "a turn in place, never a walk"
         assert p.graph.queries == 0 and p.solver.calls == 0
         assert p.plan(obs) is command  # repeated reads neither infer nor spend actions
         p.notify_action(obs, DiscreteAction.TURN_LEFT)
         p.notify_action(obs, DiscreteAction.TURN_LEFT)
         assert p.warmup_actions == step + 1 and p.loop.local_steps == 0
-    p.plan(observation(episode, 10, depth=3))
-    assert p.warmup_actions == 10
+    assert p.scans.records == [], "the warm-up's scan is recorded when the rotation is over"
+    after = p.plan(observation(episode, budget, depth=3))
+    assert p.warmup_actions == budget
+    assert len(p.scans.records) == 1 and p.scans.records[0]["source"] == "warmup"
     if explorer == "frontier":
-        assert p.graph.queries == 1 and p.solver.calls == 1
+        # The rotation mapped one room: the one the agent stands in, which its own scan has
+        # just finished. Nothing is left to ask the model about, and the search moves on
+        # the floor-wide frontier until a room worth valuing appears.
+        assert p.graph.registry.rooms and p.scans.finished(p.last_world, p.graph) == {
+            pid: "scan_point_inside" for pid in p.graph.registry.rooms}
+        # In this synthetic world every frontier lies at the uniform 3 m depth, where the one
+        # confirmed object stands: the fallback reads it as that object's shadow and takes it
+        # from the demoted rung -- a frontier either way, and no model was asked.
+        assert p.graph.queries == 0 and after.info.get("fallback_stage") in ("frontier", "frontier_demoted")
+        assert set(p.loop._excluded) == set(p.graph.registry.rooms)
     else:
-        assert p.hierarchy.machine.actions == 10
+        assert p.hierarchy.machine.actions == budget
         assert p.hierarchy.machine.burst.actions == 0
 
 
@@ -46,11 +60,11 @@ def test_confirmed_target_preempts_warmup_without_waiting_ten_steps():
     assert p.warmup_actions == 0
 
 
-def peek_rig(order=(0, 1)):
+def peek_rig(order=(0, 1), gate=False):
     p, ep, world, rooms, reasoned = loop_policy(order=order)
-    p.settings = replace(p.settings, doorway_peek=PeekSettings())
+    p.settings = replace(p.settings, doorway_peek=PeekSettings(gate_floor_departure=gate))
     p.peek = DoorwayPeek(p)
-    p.loop.settings = LoopSettings(entry_frontier=False)
+    p.loop.settings = LoopSettings(visit="sweep", entry_frontier=False)
     p.loop.plan(obs_at(ep, 0, IN_A), world)
     cost = p.navigation_cost(world)
     p.graph.refresh_accessibility(world, cost, IN_A)
