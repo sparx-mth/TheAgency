@@ -126,9 +126,15 @@ def main(argv=None):
     parser.add_argument("--categories", default=None,
                         help="Multistory only: comma-separated Gibson goal categories to restrict the episodes to "
                              "(e.g. 'couch'); buildings without one annotated on the reference floor are skipped.")
+    parser.add_argument("--start-storey", choices=("other", "same"), default="other",
+                        help="Multistory only: 'other' (the default) starts every episode on a storey other than the "
+                             "goals' -- the cross-floor protocol; 'same' starts it on the annotated reference storey, "
+                             "so a STOP at an annotated instance scores (SemExp-style same-floor starts, 4-60 m away).")
     args = parser.parse_args(argv)
     if args.categories and not args.multistory:
         raise ValueError("--categories requires --multistory")
+    if args.start_storey != "other" and not args.multistory:
+        raise ValueError("--start-storey requires --multistory")
     if args.output.exists():
         raise FileExistsError("Not overwriting an existing episode manifest")
     maps = load_training_maps(args.train_info)

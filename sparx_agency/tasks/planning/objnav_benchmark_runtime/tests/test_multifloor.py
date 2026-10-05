@@ -155,6 +155,25 @@ def test_upstairs_xy_overlap_cannot_succeed_downstairs():
     assert not field.start_uses_sentinel((1, 3, 1))
 
 
+def test_a_split_level_reference_floor_scores_a_goal_on_either_of_its_levels():
+    """Klickitat (2026-10-05): chair samples at +0.18 m and -0.41 m; a STOP beside the lower chair was
+    4 cm from the region and read as a failure under a gate on the region's median height."""
+    semantic = np.zeros((7, 80, 80), np.uint8)
+    semantic[0] = 1
+    semantic[1, 20, 20] = semantic[1, 60, 60] = 1
+    def find_path(path):
+        path.geodesic_distance = 8.0
+        return True
+    goals = [[1.0, 0.18, 1.0]] * 3 + [[3.0, -0.41, 3.0]] * 2          # the median level is the upper one
+    field = MultiFloorDistance(SimpleNamespace(find_path=find_path), goals, semantic, (0, 0), 0, 0.18,
+                               path_factory=SimpleNamespace)
+    assert field.success((1.0, 0.2, 1.0)), "on the median level"
+    assert field.success((3.0, -0.4, 3.0)), "on the lower level, beside its own goal samples"
+    assert field.distance((3.0, -0.4, 3.0)) == 0.0
+    assert not field.success((3.0, 2.3, 3.0)), "a storey above: XY overlap never counts"
+    assert not field.success((1.0, 1.0, 1.0)), "0.8 m above the upper level is no level of this floor"
+
+
 def test_protocol_is_separate_and_permits_bounded_camera_inspection():
     assert MULTIFLOOR_PROTOCOL.path_length_dimension == "3d"
     assert MULTIFLOOR_PROTOCOL.max_steps == 500

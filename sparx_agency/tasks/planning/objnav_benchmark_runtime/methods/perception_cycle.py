@@ -6,7 +6,9 @@ from copy import deepcopy
 import math
 import time
 import numpy as np
+import requests
 
+from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import DETECTOR
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import deduplicate_detections
@@ -86,6 +88,10 @@ class PerceptionCycle:
         try:
             self.raw = tuple(p.detector.detect(obs.rgb))
         except Exception as exc:  # the detector service, not this frame's geometry
+            if isinstance(exc, ObjNavInternalError) and not isinstance(exc.__cause__, requests.RequestException):
+                # Not a transport failure: the service's vocabulary, model or configuration
+                # changed under the evaluation. That ends the run; a back-off would fly on.
+                raise
             retry = p.fallback.note_service_failure(obs, DETECTOR, exc)
             self.raw = self.detections = ()
             self.detector_evidence = {"failed": "%s: %s" % (type(exc).__name__, exc), "retry_step": retry}
@@ -148,6 +154,12 @@ class PerceptionCycle:
             # box clipped at the image edge is a partial view (the same gate the
             # takeover applies): the Ranchester upstairs run spent nine actions
             # pursuing a 48 px sliver the takeover had rightly refused.
+            closing = getattr(p, "closing", None)
+            if closing is not None and closing.active:
+                # The takeover owns the target while it is active; the map keeps voting
+                # (so it can outvote the lock) but the legacy pursuit records nothing.
+                row["target_evidence"] = "takeover_active"
+                continue
             if (p.target.accepts(label) and p.target.accepts(landmark.class_name)
                     and row["confidence"] >= p.settings.target_closing.confidence
                     and not p.target_evidence.is_suppressed(landmark.id, obs.step)):
@@ -158,7 +170,6 @@ class PerceptionCycle:
                 # What the takeover refuses to start on, the legacy pursuit does not walk
                 # after either: a released far candidate, one seen during the release
                 # cooldown, one seen from a spot given up for want of a path.
-                closing = getattr(p, "closing", None)
                 if closing is not None and closing.refuses_far_candidate(obs, landmark.xy):
                     row["target_evidence"] = "refused_by_takeover"
                     self.counts["refused_evidence"] += 1
@@ -176,6 +187,8 @@ class PerceptionCycle:
         if p.building is None:
             return None
         height = p.mapping._anchor
+        if height is None:
+            return None                       # no frame integrated yet: nothing to judge the floor by
         if not height - 0.30 <= xyz[2] <= height + 2.2:
             return "wrong_floor_height"
         terrain = p.building.terrain

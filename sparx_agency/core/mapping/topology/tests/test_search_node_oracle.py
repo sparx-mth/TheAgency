@@ -266,7 +266,11 @@ def test_when_the_model_says_the_home_type_is_elsewhere_unexplored_places_read_a
 def test_the_home_here_verdict_is_read_from_the_words_a_model_drifts_to():
     for text, verdict in (("found", "found"), ("Elsewhere", "elsewhere"), ("missing", "missing"),
                           ("not found yet", "missing"), ("not here, downstairs", "elsewhere"),
-                          ("on this storey", "found"), ("another floor", "elsewhere"), ("", None), (7, None)):
+                          ("on this storey", "found"), ("another floor", "elsewhere"), ("", None), (7, None),
+                          # A negated "found" is missing, and a bare "no" is the conservative verdict.
+                          ("none found", "missing"), ("no room of the home type found", "missing"),
+                          ("nothing found yet", "missing"), ("no", "missing"), ("not found here", "missing"),
+                          ("found elsewhere", "elsewhere"), ("yes", "found"), ("another level", "elsewhere")):
         assert parse_home_here({"home_here": text}) == verdict, text
     assert parse_home_here({}) is None and parse_home_here("nonsense") is None
 
@@ -275,6 +279,11 @@ def test_the_prompt_asks_for_home_here_and_the_example_applies_rule_2b():
     assert '"home_here":"found|missing|elsewhere"' in SYSTEM_PROMPT
     assert '"home_here":"elsewhere"' in SYSTEM_PROMPT, "the worked example is an upper storey for a television"
     assert '"p":10}' in SYSTEM_PROMPT and 'about 10 when home_here is "elsewhere"' in SYSTEM_PROMPT
+    # STEP 2 reads the storey's position in the building, and an opening with a home-type glimpse is rule 1.
+    assert "The rooms decide" in SYSTEM_PROMPT and "the lowest is usually" in SYSTEM_PROMPT, "rank and rooms, rooms decisive"
+    assert "the highest of 2 known storeys, 1 above the lowest" in SYSTEM_PROMPT, "the example shows the rank line"
+    assert "glimpsed objects name the HOME type" in SYSTEM_PROMPT
+    assert "Had the TARGET been a toilet" in SYSTEM_PROMPT, "the counter-example keeps a small model from copying"
     oracle = SearchNodeOracle(Scripted({"nodes": []}), unexplored_floor=0.25, unexplored_elsewhere=0.1)
     assert oracle.unexplored_elsewhere == 0.1
     with pytest.raises(ValueError):

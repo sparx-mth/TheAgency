@@ -653,3 +653,23 @@ def test_the_snapshot_and_the_panels_carry_the_openings():
 
 
 
+
+
+def test_an_opening_released_blocked_is_retired_rather_than_re_chosen():
+    """Leonardo toilet (2026-10-05): the agent wedged on the walk to an opening, the supervisor released it
+    BLOCKED, the escape hatch re-chose the only candidate the next action, and every release bought a
+    reasoning call. A node the agent could not get to is done with for the storey."""
+    from sparx_agency.core.planning.exploration.object_search_supervisor import BLOCKED
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0))
+    gap = west_gap(openings_of(policy, episode, world))
+    policy.supervisor.inner._solver = lambda candidates, instance=None: [gap.node_id, 1, 0]
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.supervisor.room_id == gap.node_id and not policy.openings.peeked(0, gap.xy)
+    # The follower has been reporting itself blocked for longer than the supervisor tolerates.
+    policy._blocked_since = policy._floor_time - policy.supervisor_params.blocked_abandon_s - 1.0
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
+    assert policy.supervisor.history[-1][:2] == (gap.node_id, BLOCKED)
+    assert policy.openings.peeked(0, gap.xy), "retired for the storey"
+    assert policy.loop.stats["peeks_abandoned"] == 1
+    assert [e for e in policy.loop.events if e["event"] == "peek_abandoned"][-1]["reason"] == "released blocked"
+    assert policy.supervisor.room_id != gap.node_id and gap.node_id not in policy.loop._openings, "not chosen again"

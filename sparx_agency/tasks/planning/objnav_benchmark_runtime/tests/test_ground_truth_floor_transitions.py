@@ -27,7 +27,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_decision
     DecisionSettings, approach_points, decide_floor_change, floor_at, floor_worth_visiting, stair_cost_m)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_nodes import (
-    STAIR_NODE_BASE, is_stair_node, portal_id_of, search_context, stair_node_id, stair_options, summarise_floor)
+    STAIR_NODE_BASE, is_stair_node, portal_id_of, search_context, stair_node_id, stair_options, storey_position,
+    summarise_floor)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 
 RES = 0.1
@@ -101,7 +102,9 @@ def test_the_decision_prefers_an_unvisited_storey_defers_a_swept_one_and_recheck
     verdicts = {row["portal_id"]: row["verdict"] for row in record["candidates"]}
     assert verdicts[0] == "candidate" and "re-check" in verdicts[1] and "searched out" in verdicts[2]
     assert portals[1]["cooldown_until"] == 50 + DecisionSettings().recheck_actions
-    assert portals[2]["cooldown_until"] == 150
+    # A searched-out destination is the fallback rule's verdict, re-checked soon: the long deferral hid
+    # the stairs node from the oracle and RPT* for a hundred actions (2026-10-05).
+    assert portals[2]["cooldown_until"] == 50 + DecisionSettings().recheck_actions
     assert record["chosen"] == 0 and record["direction"] == "up" and "unvisited" in record["reason"]
 
 
@@ -261,6 +264,28 @@ def test_summarise_floor_reads_a_saved_context_in_the_prompts_words():
     assert line == "storey F1: rooms found: kitchen, living_room; 2 unknown; searched 2min; 2 rooms with frontier left"
     empty = SimpleNamespace(registry=SimpleNamespace(rooms={}), label_tracker=SimpleNamespace(labels={}), facts={})
     assert summarise_floor({"graph": empty, "_floor_time": 0.0}) == "rooms found: none yet; searched 0s; 0 rooms with frontier left"
+    # A weak label is marked as the node lines mark it: a cabinet's "kitchen?" is not a kitchen found.
+    weak = SimpleNamespace(registry=SimpleNamespace(rooms={0: 1, 2: 1}),
+                           label_tracker=SimpleNamespace(labels=labels, metadata={0: {"strength": "weak"}, 2: {"strength": "strong"}}),
+                           facts={})
+    assert summarise_floor({"graph": weak, "_floor_time": 0.0}).startswith("rooms found: kitchen?, living_room;")
+
+
+def test_storey_position_is_geometry_in_the_prompts_words():
+    """2026-10-05: given only '(this one at +3.1 m)' the 14B model read an upper storey as a ground floor."""
+    building = SimpleNamespace(ground_truth=SimpleNamespace(levels=(0.0, 3.1)), params=SimpleNamespace(floor_match_m=1.0))
+    assert storey_position(building, 3.1) == "this storey is the highest of 2 known storeys, 1 above the lowest"
+    assert storey_position(building, 0.2) == "this storey is the lowest of 2 known storeys"
+    # Newfields (2026-10-05): the lowest storey is a basement, so "1 above the lowest" is the ground floor --
+    # the line gives the rank from both ends and names no floor; STEP 2 reads the rooms.
+    three = SimpleNamespace(ground_truth=SimpleNamespace(levels=(-2.8, 0.0, 3.0)), params=SimpleNamespace(floor_match_m=1.0))
+    assert storey_position(three, 0.0) == "this storey is 1 above the lowest and 1 below the highest of 3 known storeys"
+    assert storey_position(three, 3.0) == "this storey is the highest of 3 known storeys, 2 above the lowest"
+    assert storey_position(three, -2.8) == "this storey is the lowest of 3 known storeys"
+    assert "floor" not in storey_position(three, 0.0), "geometry only: no floor name"
+    one = SimpleNamespace(ground_truth=SimpleNamespace(levels=(0.0,)), params=SimpleNamespace(floor_match_m=1.0))
+    assert storey_position(one, 0.0) == "this storey is the only one known"
+    assert storey_position(SimpleNamespace(ground_truth=SimpleNamespace(levels=()), params=None), 0.0) == ""
 def test_stair_options_offer_every_reachable_uncooled_connector_with_its_facts_and_leaf():
     policy, episode = gt_policy()
     world = hall()
@@ -294,6 +319,7 @@ def test_stair_options_offer_every_reachable_uncooled_connector_with_its_facts_a
     assert visited.node.destination_visited and visited.node.destination.startswith("storey F1: rooms found: none yet")
     context = search_context(building, policy, policy.floors.save())
     assert "2 storeys known" in context.storey and context.others == (visited.node.destination,)
+    assert "this storey is the lowest of 2 known storeys" in context.storey, "the rank line is geometry, for STEP 2"
 def test_the_coordinator_decides_nothing_by_a_clock_in_ground_truth_mode():
     """No allowance, no timer: without ``exhausted`` the building never chooses a portal on its own."""
     policy, episode = gt_policy()
@@ -427,6 +453,33 @@ def test_arrival_at_the_top_anchor_settles_the_new_floor_and_offers_the_way_back
     assert building.arrived_by == 0 and building.arrived_step == arrival[0]["action"]
     assert policy.mapping.floor_id == 1 and policy.floors.active == 1
     assert policy.loop is not None and policy.loop.room_id is None, "a fresh loop for the new floor"
+
+
+def test_a_storey_first_reached_by_a_traversal_takes_the_connectors_navmesh_height():
+    """Hanson 2026-10-05: the atlas measured the upper storey at 0.277 m from three poses on the eased last
+    treads where the navmesh says 0.108 m; 218 of 300 poses on that storey then read 0.10 m -- never
+    "at the storey's height", so no staircase seen up there ever became a portal. The source portal of
+    a ground-truth traversal gets no arrival cooldown either: the grace and the rooms left hold the way back."""
+    policy, episode = gt_policy()
+    policy.plan(at(episode, 0, 4.0, 3.0))
+    building = policy.building
+    policy.plan(at(episode, 1, 6.0, 3.0, z=0.9))
+    policy.plan(at(episode, 2, 7.0, 3.0, z=1.8))
+    policy.plan(at(episode, 3, 8.1, 3.0, z=2.9))                 # the last treads: 0.2 m above the storey
+    step = 4
+    for x in (8.5, 8.9, 9.3):
+        policy.plan(at(episode, step, x, 3.0, z=2.9))
+        step += 1
+    atlas = policy.mapping.atlas
+    assert atlas.active_id == 1 and building.floor_id == 1 and building.transition is None
+    assert atlas.floors[1].elevation_m == pytest.approx(2.7), "pinned to the navmesh height, not the 2.9 m measured"
+    assert policy.mapping._anchor == pytest.approx(2.7)
+    pinned = [e for e in building.events if e["event"] == "storey_height_pinned"]
+    assert pinned == [{"action": pinned[0]["action"], "event": "storey_height_pinned", "floor_id": 1,
+                       "measured_m": pytest.approx(2.9, abs=0.01), "navmesh_m": 2.7}]
+    source = [p for p in building.portals if p["floor_id"] == 0]
+    assert source and source[0]["cooldown_until"] == 0, "no arrival cooldown on the source portal in ground-truth mode"
+    assert storey_position(building, atlas.elevation_m) == "this storey is the highest of 2 known storeys, 1 above the lowest"
 
 
 def test_the_stairs_just_climbed_are_not_the_fallbacks_answer_on_the_new_floor():

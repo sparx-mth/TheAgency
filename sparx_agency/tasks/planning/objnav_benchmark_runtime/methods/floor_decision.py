@@ -257,8 +257,13 @@ def decide_floor_change(portals: Sequence[Dict], obs, world, cost: np.ndarray, a
         destination = floor_at(atlas, float(portal["destination_z"]), floor_match_m)
         visited = destination is not None
         if visited and not floor_worth_visiting(contexts.get(destination)):
-            portal["cooldown_until"] = step + deferral_actions
-            verdict["verdict"] = "destination floor %d already searched out" % destination
+            # The fallback rule's own verdict, not the loop's: the long deferral hid the
+            # stairs NODE from the oracle and RPT* for a hundred actions (``stair_options``
+            # reads the same cooldown), where rule 8 of the prompt may still value a barely
+            # searched storey where the home type was found. Re-check soon instead.
+            portal["cooldown_until"] = step + settings.recheck_actions
+            verdict["verdict"] = ("destination floor %d already searched out; re-check in %d actions"
+                                  % (destination, settings.recheck_actions))
             record["candidates"].append(verdict)
             continue
         worth = settings.visited_value if visited else 1.0

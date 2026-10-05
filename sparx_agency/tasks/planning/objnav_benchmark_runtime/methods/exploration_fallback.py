@@ -71,6 +71,7 @@ from sparx_agency.core.planning.exploration.frontier_ranking import ranked_front
 from sparx_agency.core.planning.exploration.room_costs import passable_graph, snap_cell
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import peek_planning_world
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import unknown_around
 
 LOG = logging.getLogger(__name__)
@@ -108,9 +109,13 @@ class FallbackSettings:
             the plant's shadow.
         near_blind_m: A frontier nearer than this along the floor is inside
             the camera's blind radius (a level camera 0.88 m up sees the floor
-            from about 1.2 m out): walking to it resolves nothing, and it is
-            demoted with the shadows. Such frontiers appear under the agent
-            wherever it stops.
+            from about 1.4 m out; 1.2 m leaves a step's worth of margin for
+            the geodesic's snap): walking to it resolves nothing, and it is
+            demoted with the shadows -- and retired (since 2026-10-05): a
+            goal demoted on the step that brought it under the radius and
+            promoted again by the step toward the next one made the fallback
+            turn between two exits for ever. Such frontiers appear under the
+            agent wherever it stops.
         goal_switch_gain: The goal in force is kept, action after action,
             until it is gone or refused -- unless another goal of the same
             rung is worth at least this many times its current utility. The
@@ -240,6 +245,7 @@ class ExplorationFallback:
         self._consecutive = {}
         self.retry_step = {}
         self._last_relocation = None
+        self._relocation_step = None      # the action the relocation target was last driven on
         self.last_demoted = []            # [{"xy", "why"}] of the last action's demoted frontiers, for the record
         self.goal = None                  # the frontier goal in force: xy, its rung, the action it was last driven
         self.goal_stage = None
@@ -284,6 +290,7 @@ class ExplorationFallback:
         """A command that moves the agent, by the order in the module docstring."""
         p = self.policy
         self.stats["invocations"] += 1
+        self.last_stage = None                                 # this action's rung, not the last invocation's
         if cost is None:
             cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
         ids, graph = passable_graph(cost)                    # one graph for the ranking and the relocation
@@ -295,8 +302,13 @@ class ExplorationFallback:
         admissible = p.sweep.admissible(obs, world, ranked)
         if self.goal is not None and obs.step - self.goal_step > 1:
             self.goal = self.goal_stage = None                # the loop had the action in between: no stale pull
+        # Routes are planned with every seen staircase written occupied: a floor-wide
+        # frontier beyond a stairwell walked the Pomaria agent down a flight it had not
+        # chosen (2026-10-04, actions 262-316), and the first treads into the storey's map.
+        # Taking the stairs is the coordinator's rung below, on the plain world.
+        planning = peek_planning_world(p, world) if p.building is not None else world
         exits, demoted = self._exits(world, admissible, inventory)
-        command = self._frontiers(obs, world, exits, "frontier")
+        command = self._frontiers(obs, planning, exits, "frontier")
         if command is not None:
             return self._tag(command, "frontier", reason)
         if p.building is not None:
@@ -311,17 +323,17 @@ class ExplorationFallback:
             command = p.building.plan(obs, world, exhausted=True)
             if command is not None:
                 return self._tag(command, "stairs", reason)
-        command = self._frontiers(obs, world, demoted, "frontier_demoted")
+        command = self._frontiers(obs, planning, demoted, "frontier_demoted")
         if command is not None:
             return self._tag(command, "frontier_demoted", reason)
         # A goal under the agent's feet is not retired, it is unreachable by construction:
         # the converter has no action for a waypoint inside its arrival tolerance.
         arrival = p.converter_params.goal_tolerance_m + world.resolution
         retired = [g.xy for g in ranked if g not in admissible and math.dist((obs.pose.x, obs.pose.y), g.xy) > arrival]
-        command, _ = self._try_goals(obs, world, retired)
+        command, _ = self._try_goals(obs, planning, retired)
         if command is not None:
             return self._tag(command, "frontier_retired", reason)
-        command = self._relocate(obs, world, ids, graph)
+        command = self._relocate(obs, planning, ids, graph)
         if command is not None:
             return self._tag(command, "relocation", reason)
         # Nothing reachable on the observed map: the floor under the camera's blind
@@ -336,6 +348,7 @@ class ExplorationFallback:
             if command is not None:
                 return self._tag(command, "footing", reason)
         self.stats["hold"] += 1
+        self.last_stage = "hold"
         return NavigationCommand.hold(info={"kind": "fallback_hold", "fallback": reason,
                                             "reason": "off the observed passable map; the idle turn is the only move"})
 
@@ -404,6 +417,13 @@ class ExplorationFallback:
         for goal, why in demoted:
             if why.startswith("inside the camera"):
                 self.stats["blind_demoted"] += 1
+                # Sticky: a blind-radius demotion retires the goal, so the step toward
+                # the next exit cannot promote it back (the retired rung still tries it).
+                visited = getattr(p, "_visited_frontiers", None)
+                if visited is not None and not any(math.dist(goal.xy, xy) <= s.goal_match_m for xy in visited):
+                    visited.append(tuple(float(v) for v in goal.xy))
+                if self.goal is not None and math.dist(goal.xy, self.goal) <= s.goal_match_m:
+                    self.goal = self.goal_stage = None
             elif why.startswith("room "):
                 self.stats["type_demoted"] += 1
             else:
@@ -414,7 +434,21 @@ class ExplorationFallback:
 
 
     def _relocate(self, obs, world, ids, graph):
-        """Walk to the farthest reachable known cell: a new vantage point, never the last one."""
+        """Walk to the farthest reachable known cell: a new vantage point, never the last one again.
+
+        The target is kept while it is being walked to (the fallback had the
+        previous action too and the agent is not there yet): the farthest
+        cell from a moving agent flips between the two ends of a hall, and
+        re-choosing it every action shuffled the agent a quarter metre back
+        and forth between them. Once reached, the next target is another.
+        """
+        here = (obs.pose.x, obs.pose.y)
+        last, last_step = self._last_relocation, self._relocation_step
+        if last is not None and last_step is not None and obs.step - last_step <= 1 and math.dist(here, last) >= 1.0:
+            command = self.policy._navigate(obs, world, last, "relocate")
+            if command is not None:
+                self._relocation_step = int(obs.step)
+                return command
         gx, gy = world.world_to_grid(obs.pose.x, obs.pose.y)
         snap = max(1, int(round(self.policy.sweep.settings.ranking.snap_radius_m / world.resolution)))
         source = snap_cell(ids, gx, gy, snap)
@@ -433,12 +467,12 @@ class ExplorationFallback:
             if not reachable[node]:
                 break
             x, y = (float(v) for v in world.grid_to_world(int(node_cells[node][0]), int(node_cells[node][1])))
-            if self._last_relocation is not None and math.dist((x, y), self._last_relocation) < 1.0:
-                continue
+            if last is not None and math.dist((x, y), last) < 1.0:
+                continue                                   # never the last vantage point again
             command = self.policy._navigate(obs, world, (x, y), "relocate")
             tried += 1
             if command is not None:
-                self._last_relocation = (x, y)
+                self._last_relocation, self._relocation_step = (x, y), int(obs.step)
                 return command
             if tried >= self.settings.relocation_candidates:
                 break

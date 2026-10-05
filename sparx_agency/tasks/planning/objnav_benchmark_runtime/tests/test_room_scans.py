@@ -148,6 +148,37 @@ def test_the_ledger_rejects_a_nonsense_seen_fraction(fraction):
         RoomScanLedger(policy, seen_fraction=fraction)
 
 
+def test_a_verdict_is_re_judged_when_the_room_grows_well_past_what_it_was_reached_on():
+    """The registry keeps a room's number when the new mask contains the old one, so the sliver of a
+    room seen through its door -- finished as a fragment -- can grow into the whole room under the
+    same pid. A verdict reached on 1 m2 does not finish 4 m2 unseen; a scan point still inside does."""
+    policy, episode = setup_policy()
+    world, _ = open_hall()
+    ledger = RoomScanLedger(policy)
+
+    def room(x0, x1, y0, y1):
+        mask = np.zeros(world.grid.shape, bool)
+        mask[y0:y1, x0:x1] = True
+        return TrackedRoom(id=7, mask=mask, n_cells=int(mask.sum()), centroid=world.grid_to_world((x0 + x1) // 2, (y0 + y1) // 2))
+
+    sliver = room(20, 30, 20, 30)                                   # 100 cells: 1 m2, no frontier, no door
+    assert ledger.status(world, 7, sliver, frontier=0, doored=False) == "fragment"
+    grown = room(20, 40, 20, 40)                                    # 400 cells: four times the size
+    assert ledger.status(world, 7, grown, frontier=1, doored=True) is None, "the walked-into room is re-judged"
+    assert ledger.diagnostics()["regrown"] == [{"floor": 0, "room": 7, "reason": "fragment", "cells_then": 100, "cells_now": 400}]
+    assert ledger.status(world, 7, room(20, 30, 20, 30), frontier=0, doored=False) == "fragment", "and judged afresh"
+    scanned = RoomScanLedger(policy)
+    scanned.record(obs_at(episode, 5, world.grid_to_world(25, 25)), sliver)
+    assert scanned.status(world, 7, sliver) == SCAN_POINT_INSIDE
+    assert scanned.status(world, 7, grown) == SCAN_POINT_INSIDE, "the scan point lies in the grown room: finished again"
+    assert scanned.status(world, 7, room(20, 32, 20, 32)) == SCAN_POINT_INSIDE, "edge wobble is read sticky"
+    sticky = RoomScanLedger(policy, regrow_factor=0.0)
+    assert sticky.status(world, 7, sliver, frontier=0, doored=False) == "fragment"
+    assert sticky.status(world, 7, grown, frontier=1, doored=True) == "fragment", "0 keeps every verdict sticky"
+    with pytest.raises(ValueError):
+        RoomScanLedger(policy, regrow_factor=0.5)
+
+
 # -- the visit ----------------------------------------------------------------------
 def test_the_transit_aims_at_the_vantage_point_not_a_frontier():
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0))

@@ -11,6 +11,89 @@ Format per entry:
 
 ---
 
+## 2026-10-05 — The 5x3 same-storey benchmark: eight failures, five mechanisms, none of them the reasoning
+
+**Symptom:** `runs/zson-benchmark-5x3-20261005`: SR 7/15, SPL 0.27, DTG 3.6 m. Every success was a
+STOP at an annotated instance in 59-299 actions. The failures: two STOPs at a kitchen counter front
+read as `bed` from 0.55 m (one at action 2, the real bed in view behind it); 160 actions of
+MOVE_FORWARD into an obstacle the map did not show, locked on a real sofa, until the closing's
+160-action bound raised an agent error; 350 actions wedged on a transit, the pose jittering 5-10 cm;
+a loop transit that walked down an unseen staircase into the basement; two Klickitat episodes in a
+split-level house standing on a half-level the floor band did not recognise (361 idle turns; 319
+relocations); two large floors that ran out of budget peeking openings.
+
+**Root causes and fixes:** (a) the STOP rule takes two frames of a target-class box at terminal range
+and the map had no other landmark at the counter to outvote it -- a detector limit, left as the
+user's design call (a VLM look, or a first sighting from farther away); (b) the closing had no
+stall clock -- added (`approach_stall_actions`); (c) the policy's blocked clock was reset by any
+5 cm displacement, which a collision slide provides -- now 60 % of a forward step; and a BLOCKED
+opening was re-chosen by the supervisor's escape hatch at one oracle call per seven actions -- now
+retired; (d) the stair-blocked planning world covers seen stairs on fallback routes only; (e) the
+floor band is anchored to one storey height, so a half-level 0.5 m down is neither floor nor obstacle.
+
+**Don't:** read "an upper floor" off a storey's rank alone -- the first launch of this campaign said
+so for every storey above the lowest and had the 14B send the couch search upstairs from a ground
+floor with a living room found on it; Newfields, Leonardo and Klickitat all have a basement. Give
+the rank from both ends and let the rooms decide. Don't poll a wedged episode by its oracle calls:
+with the 14B each costs 40 s, and 34 of them made a 500-action episode take 58 minutes.
+
+## 2026-10-05 — End-to-end review before the 5x3 benchmark: the room numbers churned because a snapped door did not cut the floor
+
+**Symptom:** Ranchester couch recording (`runs/zson-couch-crossfloor-3x-20261005-b`): the room behind
+one door was numbered R23, R26, R28 and R52 across ticks; pids reached 56 for ~10 rooms;
+`partition_revision` 86 in 290 actions. Earlier, Hanson renumbered one bedroom R11 -> R14 -> R16
+while the agent stood in it, and a corridor swallowed a room for a tick and spat out a new one.
+
+**Root cause (two layers, found by replaying the watershed on the saved map along the trajectory):**
+`door_carve_mask` snaps a detected door to the nearest medial-axis choke and carves a disk sized to
+the clearance there. Near the frontier the clearance at a skeleton cell is the distance to an
+UNKNOWN cell, so the disk is narrower than the passage and does not sever the floor -- 47 % of the
+snapped disks in the replay. Such a disk is not in the merge barrier (the design relied on the two
+rooms lying on different sides of the carved mask), so the room behind the door merged into the
+hallway on the ticks the snap found a choke (`depth 0.00 < 0.2`) and split off again on the ticks it
+did not (the skeleton changes every action; one door toggled 44 times). Then the registry: it
+compares fresh rooms to the PREVIOUS tick only, so a room absent for one tick is retired for good,
+and when it re-separates the only containment candidate -- the hallway -- is already consumed by its
+IoU match, so a new pid is issued. Replay: 36 pids for 10 rooms, 26 deaths.
+
+**Fix:** a snapped disk that leaves the floor around it in one 4-connected piece falls back to the
+plain barring disk (`_severs`); the registry keeps a vanished room's mask for ten updates and a fresh
+room nobody claims re-adopts its pid (`RoomRegistry(memory_ticks=10)`), ties broken by overlap.
+Replay: 11 pids for 11 rooms, 3 deaths. The scan ledger re-judges a sticky verdict when the room
+grows past 1.5x the size it was reached on (a sliver finished as a fragment, walked into under the
+same number).
+
+**Don't:** diagnose churn from `room_partitions.npz` -- it holds only the final partition per storey;
+replay the segmentation along `trajectory.csv` on `floor_maps.npz` instead (the reviewer's scripts
+grew a 3 m disc of the final map along the path -- a proxy, but it reproduced the numbers).
+Don't make the choke sticky per door first: it treats the symptom; the non-severing disk is the cause.
+
+## 2026-10-05 — Three more from the same review: a storey measured on the stairs, a tilt that never turned, an evaluator gate on the median height
+
+**Symptom / cause / fix, briefly:**
+- The atlas created Hanson's upper storey at 0.277 m (navmesh 0.108 m) from the three poses it settled
+  on -- the eased last treads -- and 218 of 300 later poses read 0.10 m, outside `stable_height_m`
+  (0.12): no staircase seen up there ever became a portal, the map's floor-clear mask never fired, and
+  the oracle's storey line said rank 2 of 3. A storey first reached by a ground-truth traversal is now
+  pinned to the connector's navmesh height when within `floor_match_m` (`storey_height_pinned`).
+- A fresh, in-range sighting 20 degrees off the centre column at a pitch other than the one the
+  target's height predicted produced LOOK_DOWN/LOOK_UP for the whole 24-action inspection budget: the
+  converter tilts before it faces, so asking for the predicted pitch never let the centring turn
+  happen. A fresh off-centre sighting is centred at the pitch it was seen at (`camera_pitch=None`).
+- `MultiFloorDistance.success` gated on the goal region's MEDIAN height; Klickitat's chair samples
+  lie at +0.18 m and -0.41 m (a split-level floor), so a STOP beside the lower chair scored 0 four
+  centimetres from the region. The gate is the nearest goal sample's height now. Signature in any
+  finished run: `success: false` with `distance_to_goal_m < 1.0`.
+- The 3B oracle copies the worked example's words as well as its numbers ("home: living room,
+  sometimes a bedroom" for a CHAIR). The 14B does not, and it is the model the prompt was written
+  for; on this CPU it answers in ~40 s (generation-bound, ~6 tok/s; the system prompt is prefix-cached).
+  Given only "(this one at +3.1 m)" it read an upper storey as the ground floor: tell it the storey's
+  rank in words (`storey_position`), not its height.
+
+**Don't:** run a review of this size serially -- five read-only reviewers over disjoint layers,
+each with the records to confirm against, took an hour and found eleven real defects; reading the
+same 25k lines alone would not have.
+
 ## 2026-10-05 — Ranchester couch from upstairs: the model said "downstairs" sixteen times and the agent peeked thirteen doors instead
 
 **Symptom:** `runs/zson-couch-crossfloor-3x-20261005`, Ranchester, couch, start on the upper storey.

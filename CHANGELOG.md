@@ -56,6 +56,71 @@ future-you, not for a commit log.
   `stuffed animal`) and `bathtub`: Hanson/000001 stopped at action 14 on a child's ride-on horse
   read as `chair` 0.9. A running detector service must be restarted with the new vocabulary.
 ### Changed
+- **End-to-end review before the 5x3 benchmark (2026-10-05, evening)** -- small fixes only, found by
+  reading every layer and replaying the Ranchester recording:
+  - *Room ids* (`room_watershed.door_carve_mask`, `RoomRegistry(memory_ticks=10)`): a door snapped to a
+    choke whose disk did not actually sever the floor had no separating power (the medial axis was
+    parted, the floor was not; 47 % of the snapped disks in the Ranchester replay), so the room behind
+    it merged into the hallway on the ticks the snap found a choke and split off under a new number on
+    the ticks it did not -- R23, R26, R28, R52 for one room. Such a disk now falls back to the plain
+    barring disk; and the registry keeps a vanished room's mask for ten updates, so a room absorbed
+    for a tick re-adopts its own pid (ties broken by overlap, not raster order). The replay goes from
+    36 pids for 10 rooms (26 deaths) to 11 pids for 11 rooms (3).
+  - *Finished rooms re-judged on growth* (`RoomScanLedger(regrow_factor=1.5)`, `regrown` in the
+    diagnostics): a sticky `fragment` / `seen_through` verdict reached on a sliver no longer finishes
+    the room that grows out of it under the same number; a scan point still inside finishes it again.
+  - *Generic objects alone classify nothing* (`RoomLabelSettings.generic_evidence_gate`): one cabinet
+    made a "kitchen" at 0.9 on Ranchester's upper storey and the storey summary showed the oracle a
+    kitchen found; weak labels are marked `kitchen?` in that summary as they are on the node lines.
+  - *The node oracle prompt*: STEP 2 reads the storey from the rooms found AND its RANK in the building
+    (`stair_nodes.storey_position`: "this storey is the highest of 2 known storeys, 1 above the lowest"
+    instead of "(this one at +3.1 m)", which the 14B read as a ground floor; the rooms decide, and the
+    line names no floor -- a first version that called every storey above the lowest "an upper floor"
+    had the 14B say the living room lives elsewhere on Newfields' ground floor, whose lowest storey is
+    a basement, with a living room found on it); an opening whose glimpsed objects
+    name the home type is rule 1 (60 or more -- the 14B valued a sink-glimpsed gap at 0.20 for a
+    toilet, "a bathroom, no toilet"); the worked example carries a toilet counter-example so a small
+    model cannot copy its `elsewhere`; `parse_home_here` reads a negated "found" and a bare "no" as
+    `missing`, never `elsewhere`.
+  - *The room classifier* reads "Living Room" / "living-room" as `living_room` instead of `unknown`.
+  - *The evaluator* (`MultiFloorDistance.success`): the height gate is the nearest goal sample's, not
+    the region's median -- Klickitat's chair samples lie at +0.18 m and -0.41 m (a split-level floor),
+    and a STOP beside the lower chair scored 0 four centimetres from the region. The campaign report
+    writes `statistics.json` and `RESULTS.md` before it raises on a missing video (`missing_recordings`).
+  - *Generation*: `generate_development --multistory --start-storey same` samples the start on the
+    annotated storey (SemExp-style same-floor starts on the multistory harness, so SR is measurable),
+    and a building with fewer annotated categories than episodes is ineligible (`distinct_categories`;
+    Onaga's three episodes would all have been the couch).
+  - *Target closing*: a fresh, off-centre sighting at a pitch other than the predicted one is centred
+    at the pitch it was seen at (the converter tilts before it faces, so the predicted pitch LOOKed
+    away from a target in view for the whole 24-action budget); an inspection the filtered estimate
+    entered while every fresh frame measures the surface beyond the limit is ended and the approach
+    resumed (`inspection_resumptions`) instead of releasing a target in plain view as "saw nothing";
+    a glance in force is aborted the action a takeover starts; the landmark map keeps voting during
+    the takeover so the documented map release can fire (the legacy target evidence stands down,
+    `takeover_active`); the closing's own release turn is not charged to the room loop; a cue glance
+    skips a box perception placed on another storey, outside the map or on a refused candidate; a
+    detector whose vocabulary, model or configuration changed under the evaluation ends the run
+    instead of entering the transport back-off.
+  - *Exploration fallback*: a blind-radius demotion is sticky (the goal is retired and the goal in
+    force cleared -- the step toward the next exit promoted it back and the fallback turned between
+    two exits for ever, 0.25 m a step so no watchdog fired); the relocation target is kept until
+    reached (the farthest cell from a moving agent flips between the two ends of a hall); routes are
+    planned with every seen staircase written occupied (Pomaria 2026-10-04 walked down a flight it had
+    not chosen behind a floor-wide frontier); the per-step record names this action's rung.
+  - *After the 5x3 benchmark (same evening; not in its numbers)*: the closing releases a lock whose
+    approach went nowhere -- `approach_stall_actions` (20) CLOSE actions inside `approach_stall_m`
+    (0.20 m) -- with a rejection (`stall_releases`; Leonardo pushed into an unseen obstacle for 160
+    actions and raised the closing bound); the search's blocked clock is reset by 60 % of a forward
+    step, not a collision slide (Leonardo wedged for 350 actions); an opening released BLOCKED,
+    UNREACHABLE or TRANSIT_TIMEOUT is retired for the storey instead of re-chosen by the escape hatch.
+  - *Stairs*: a storey first reached by a ground-truth traversal is pinned to the connector's navmesh
+    height (`storey_height_pinned`; the atlas had measured Hanson's upper storey 0.17 m high from
+    poses on the eased last treads, so no staircase seen up there ever became a portal and the map's
+    floor-clear mask never fired); `storey_position` uses the atlas's match tolerance; the fallback
+    rule's "destination already searched out" verdict re-checks in 10 actions instead of hiding the
+    stairs node from the oracle for 100; `_reapproach` re-snaps the entry by geometry alone; no arrival
+    cooldown on the source portal in ground-truth mode (the grace and the rooms left hold the way back).
 - **A strong room label needs a distinctive kind of object** (`RoomLabelSettings.distinctive_required`,
   `room_priors.GENERIC_OBJECTS`): a cabinet and a potted plant no longer make a strong "living_room".
 - **The oracle's STEP 2 is a structured verdict** (`search_node_oracle.parse_home_here`, `home_here` in the

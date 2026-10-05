@@ -40,8 +40,15 @@ Four tests say whether a room is finished, in order:
 
 A verdict is sticky: a room once finished stays finished for the episode
 (registry ids never recycle), whatever the watershed does to its edges
-afterwards. The warm-up's own rotation is a scan too: the spawn room is
-finished before the first room is ever chosen.
+afterwards -- unless the room GROWS past :attr:`regrow_factor` times the
+size the verdict was reached on (since 2026-10-05). The registry keeps a
+room's number when its mask mostly contains the old one, so the sliver of
+a room seen through its door can be finished as a fragment, or as seen
+through, and then walked into: the room that grows out of it under the same
+number is re-judged on the live map, and a scan point still inside it, or
+a scan that still saw most of it, finishes it again at once. The warm-up's
+own rotation is a scan too: the spawn room is finished before the first
+room is ever chosen.
 """
 from __future__ import annotations
 
@@ -106,14 +113,22 @@ class RoomScanLedger:
         pose_batch: Most recorded poses the ``seen_through`` test evaluates
             per room per call; the rest wait for the next call, so one
             action never pays for the whole history.
+        regrow_factor: A finished room whose mask grows to more than this
+            many times the size its verdict was reached on is re-judged
+            rather than read sticky (see the module docstring); 0 keeps
+            every verdict sticky whatever the growth.
     """
 
-    def __init__(self, policy, seen_fraction=0.5, fragment_max_m2=3.0, walkthrough_clearance_m=0.9, pose_batch=8):
+    def __init__(self, policy, seen_fraction=0.5, fragment_max_m2=3.0, walkthrough_clearance_m=0.9, pose_batch=8,
+                 regrow_factor=1.5):
         if not 0.0 < float(seen_fraction) <= 1.0:
             raise ValueError("seen_fraction must lie in (0, 1], got %r" % (seen_fraction,))
-        for name, value in (("fragment_max_m2", fragment_max_m2), ("walkthrough_clearance_m", walkthrough_clearance_m)):
+        for name, value in (("fragment_max_m2", fragment_max_m2), ("walkthrough_clearance_m", walkthrough_clearance_m),
+                            ("regrow_factor", regrow_factor)):
             if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError("%s must be finite and non-negative, got %r" % (name, value))
+        if 0.0 < float(regrow_factor) < 1.0:
+            raise ValueError("regrow_factor must be 0 or at least 1, got %r" % (regrow_factor,))
         if type(pose_batch) is not int or pose_batch < 1:
             raise ValueError("pose_batch must be a positive integer, got %r" % (pose_batch,))
         self.policy = policy
@@ -121,10 +136,13 @@ class RoomScanLedger:
         self.fragment_max_m2 = float(fragment_max_m2)
         self.walkthrough_clearance_m = float(walkthrough_clearance_m)
         self.pose_batch = int(pose_batch)
+        self.regrow_factor = float(regrow_factor)
         self.records = []
         self._finished = {}       # (floor, pid) -> reason, sticky for the episode
+        self._finished_cells = {} # (floor, pid) -> the room's size the verdict was reached on (None: unknown)
         self._cache = {}          # (floor, pid, n_cells, len(records)) -> reason or None
         self._pose_progress = {}  # (floor, pid) -> (n_cells, poses evaluated) for the cone test
+        self.regrown = []         # (floor, pid, reason, cells then, cells now) of every verdict re-judged
 
     # -- recording ----------------------------------------------------------
     def record(self, obs, room=None, source="room_scan"):
@@ -150,19 +168,28 @@ class RoomScanLedger:
                 None is read as "no door known".
         """
         floor = self.policy.mapping.floor_id
-        sticky = self._finished.get((floor, int(pid)))
+        key = (floor, int(pid))
+        sticky = self._finished.get(key)
         if sticky is not None:
-            return sticky
-        key = (floor, int(pid), int(room.n_cells), len(self.records))
-        if key in self._cache:
-            result = self._cache[key]
+            then = self._finished_cells.get(key)
+            if not (self.regrow_factor > 0.0 and then and int(room.n_cells) > self.regrow_factor * then):
+                return sticky
+            # The room has grown well past what the verdict was reached on -- the
+            # sliver seen through a door, walked into under the same number.
+            self.regrown.append((floor, int(pid), sticky, int(then), int(room.n_cells)))
+            del self._finished[key]
+            del self._finished_cells[key]
+        cache_key = (floor, int(pid), int(room.n_cells), len(self.records))
+        if cache_key in self._cache:
+            result = self._cache[cache_key]
         else:
             result = self._status(world, room)
-            self._cache[key] = result
+            self._cache[cache_key] = result
         if result is None and frontier is not None and int(frontier) == 0:
             result = self._status_without_frontier(world, pid, room, bool(doored))
         if result is not None:
-            self._finished[(floor, int(pid))] = result
+            self._finished[key] = result
+            self._finished_cells[key] = int(room.n_cells)
         return result
 
     def _status(self, world, room):
@@ -244,9 +271,10 @@ class RoomScanLedger:
         return False
 
     def mark(self, pid, reason, floor_id=None):
-        """Finish a room by a verdict reached elsewhere (sticky, like the ledger's own)."""
+        """Finish a room by a verdict reached elsewhere (sticky, like the ledger's own; no size is known to re-judge it by)."""
         floor = self.policy.mapping.floor_id if floor_id is None else floor_id
         self._finished[(floor, int(pid))] = str(reason)
+        self._finished_cells[(floor, int(pid))] = None
 
     def finished(self, world, graph):
         """``{pid: reason}`` for every finished room of ``graph`` on this floor."""
@@ -263,7 +291,9 @@ class RoomScanLedger:
     def diagnostics(self):
         floor = getattr(getattr(self.policy, "mapping", None), "floor_id", None)
         return {"seen_fraction": self.seen_fraction, "fragment_max_m2": self.fragment_max_m2,
-                "walkthrough_clearance_m": self.walkthrough_clearance_m,
+                "walkthrough_clearance_m": self.walkthrough_clearance_m, "regrow_factor": self.regrow_factor,
                 "records": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in r.items()} for r in self.records],
                 "finished": sorted("f%d/r%d:%s" % (f, pid, reason) for (f, pid), reason in self._finished.items()),
-                "finished_here": sorted(pid for (f, pid) in self._finished if f == floor)}
+                "finished_here": sorted(pid for (f, pid) in self._finished if f == floor),
+                "regrown": [{"floor": f, "room": pid, "reason": reason, "cells_then": then, "cells_now": now}
+                            for f, pid, reason, then, now in self.regrown]}

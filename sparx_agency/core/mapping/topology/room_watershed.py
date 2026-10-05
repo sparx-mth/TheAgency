@@ -104,6 +104,8 @@ from sparx_agency.core.mapping.topology.room_segmentation import (
 
 # 8-connectivity for merging touching clearance peaks into one seed.
 _EIGHT = np.ones((3, 3), np.uint8)
+#: Four-connectivity, the flood's and the basin sides'.
+_FOUR = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], np.uint8)
 
 
 @dataclass(frozen=True)
@@ -283,8 +285,17 @@ def door_carve_mask(
     nothing to the mask barrier -- the two rooms it parts lie on different
     sides of the carved mask, which :func:`segment_rooms_watershed` passes
     to the merge as ``basin_sides``, and the disk's protrusion into the
-    rooms must not stop two basins of one room from merging. A door with
-    no choke within reach keeps its plain disk for both.
+    rooms must not stop two basins of one room from merging. That holds
+    only when the disk actually SEVERS the healed mask; since 2026-10-05 a
+    snapped disk that leaves the floor around it in one piece (the medial
+    axis is parted, the floor is not -- the clearance at a skeleton cell
+    near the frontier is the distance to an unknown cell, so the disk is
+    narrower than the passage) is replaced by the plain disk, barrier and
+    all. Before, such a door had no separating power at all: the room
+    behind it merged into the hallway on the ticks the snap found a choke
+    and split off again under a new number on the ticks it did not -- the
+    Ranchester door of 2026-10-05 whose room read R23, R26, R28 and R52.
+    A door with no choke within reach keeps its plain disk for both.
 
     Args:
         healed: (H, W) bool healed free mask.
@@ -312,14 +323,29 @@ def door_carve_mask(
     barrier = np.zeros(shape, bool)
     for cell in cells:
         choke = snap_door_to_choke(skeleton, dt, cell, params, resolution)
-        if choke is None:
-            plain = door_disk_mask(shape, [cell], plain_radius)
-            carve |= plain
-            barrier |= plain
-            continue
-        (cx, cy), half_width = choke
-        carve |= door_disk_mask(shape, [(cx, cy)], int(np.ceil(half_width / resolution)) + 1)
+        if choke is not None:
+            (cx, cy), half_width = choke
+            disk = door_disk_mask(shape, [(cx, cy)], int(np.ceil(half_width / resolution)) + 1)
+            if _severs(healed, disk, (cx, cy), int(np.ceil(half_width / resolution)) + 1):
+                carve |= disk
+                continue
+        plain = door_disk_mask(shape, [cell], plain_radius)
+        carve |= plain
+        barrier |= plain
     return carve, barrier
+
+
+def _severs(healed: np.ndarray, disk: np.ndarray, cell: Tuple[int, int], radius: int) -> bool:
+    """Whether carving ``disk`` out of ``healed`` leaves the floor just around it in two or more pieces.
+
+    Four-connected like the flood: the ring two cells beyond the disk is
+    read for the components of ``healed & ~disk`` it touches, and a disk
+    whose ring lies in one component parts nothing by side.
+    """
+    components, _ = cc_label(healed & ~disk, structure=_FOUR)
+    ring = door_disk_mask(healed.shape, [cell], radius + 2) & ~disk & healed
+    touched = np.unique(components[ring])
+    return int(np.count_nonzero(touched > 0)) >= 2
 
 
 def _basin_sides(labels: np.ndarray, wmask: np.ndarray) -> np.ndarray:
@@ -328,7 +354,7 @@ def _basin_sides(labels: np.ndarray, wmask: np.ndarray) -> np.ndarray:
     Four-connected like the flood itself, so a basin never straddles two
     components; entry 0 is meaningless.
     """
-    components, _ = cc_label(wmask, structure=np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], np.uint8))
+    components, _ = cc_label(wmask, structure=_FOUR)
     n = int(labels.max()) if labels.size else 0
     sides = np.zeros(n + 1, np.int64)
     inside = (labels > 0) & wmask
@@ -480,11 +506,16 @@ def _clearance_markers(
 
 
 def _reclaim_carved(labels: np.ndarray, healed: np.ndarray) -> np.ndarray:
-    """Give the door-carved cells back to their nearest labelled room.
+    """Give every unlabelled healed free cell -- the door carve, and any seedless floor -- to its nearest labelled room.
 
     The carve is a fence, not a hole: leaving it unlabelled would strand
     every doorway cell outside any room, and the node's ``room_at_cell``
     lookup would then lose the drone exactly while it flies a doorway.
+    The same assignment takes in floor no marker seeded -- the sliver of a
+    room glimpsed through its door, with no clearance peak of its own --
+    which therefore reads as part of the room across the door until it is
+    big enough to seed a marker (the openings module values such a sliver
+    as the room BEHIND the door, by the objects glimpsed through it).
 
     Args:
         labels: (H, W) int watershed labels, 0 in the carve and outside

@@ -42,7 +42,7 @@ from sparx_agency.core.planning.exploration.room_costs import build_instance
 from sparx_agency.core.planning.exploration.room_search_policy import RoomCandidate
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_decision import decide_floor_change
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_decision import approach_points, decide_floor_change
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_departure import FloorDepartureGuard
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_ground_truth import GroundTruthStairs
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_sightings import (
@@ -227,6 +227,34 @@ class MultiFloorSearch:
             self.active = self._portal_for(obs, connector, height)
         self._start(obs)
 
+    def _pin_storey_height(self, obs, atlas):
+        """A storey first reached by a ground-truth traversal takes the connector's navmesh height.
+
+        The atlas measures a new storey's elevation as the mean of the first
+        settled poses after the climb, which lie on the eased last treads,
+        not on the storey: Hanson 2026-10-05 created its upper storey at
+        0.277 m where the navmesh says 0.108 m and 218 of 300 poses read
+        0.10 m. The ground-truth discovery then never saw the agent "at the
+        storey's height" (``stable_height_m`` 0.12), so no staircase seen on
+        that storey ever became a portal, the floor-clear mask of the map
+        never fired, and the oracle was told the wrong storey rank. The
+        traversal knows the height the navmesh reported; a freshly created
+        storey within ``floor_match_m`` of it is pinned to it. A storey
+        matched to an existing floor keeps that floor's elevation.
+        """
+        transition = self.transition
+        expected = getattr(transition, "destination_height", None)
+        floor = atlas.floors.get(self.floor_id) if atlas.floors else None
+        if expected is None or floor is None or floor.visits != 1:
+            return
+        measured, expected = float(floor.elevation_m), float(expected)
+        if abs(measured - expected) > self.params.floor_match_m or abs(measured - expected) <= 1e-6:
+            return
+        floor.elevation_m = expected
+        self.policy.mapping._anchor = expected
+        self.events.append({"action": obs.step, "event": "storey_height_pinned", "floor_id": self.floor_id,
+                            "measured_m": round(measured, 3), "navmesh_m": round(expected, 3)})
+
     def observe(self, obs):
         atlas = self.policy.mapping.atlas
         if atlas.active_id != self.floor_id:
@@ -235,9 +263,15 @@ class MultiFloorSearch:
             reason = self.transition.completion_reason if self.transition else atlas.completion_reason
             self.events.append({"action": obs.step, "event": "floor_arrival", "source": old,
                                 "destination": self.floor_id, "reason": reason})
+            self._pin_storey_height(obs, atlas)
             if self.active is not None:
                 self.active["destination"] = self.floor_id
-                self.active["cooldown_until"] = obs.step + self.params.portal_cooldown_actions
+                if self.ground_truth is None:
+                    # Observed mode's rest for a portal just walked. In ground-truth mode the
+                    # way back is held by the arrival grace and the rooms left on this storey
+                    # (``stair_options``); a 100-action cooldown on top hid the stairs from the
+                    # loop AND the fallback on a round trip shorter than that.
+                    self.active["cooldown_until"] = obs.step + self.params.portal_cooldown_actions
                 self.active["edge_id"] = atlas.last_connection
                 self.active.pop("selected_by", None)
                 self.arrived_by, self.arrived_step = self.active.get("connector_id"), obs.step
@@ -415,18 +449,21 @@ class MultiFloorSearch:
         return self._inspect(obs, exhausted)
 
     def _reapproach(self, obs, world):
-        """Re-snap the active connector's approach point onto the observed passable map. True if it landed."""
+        """Re-snap the active connector's approach point onto the observed passable map. True if it landed.
+
+        Geometry only: the connector was chosen already (by the loop's order
+        or the fallback rule), so the fallback rule's worth-it verdict is not
+        re-asked here -- it refused to re-snap a loop-chosen return to a
+        storey it deemed searched out, and the approach was abandoned.
+        """
         p = self.policy
         cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
-        cooldown = self.active.get("cooldown_until", 0)
-        choice, _ = decide_floor_change([self.active], obs, world, cost, p.mapping.atlas, p.floors.save(), obs.step,
-                                        self.params.floor_match_m, self.params.portal_cooldown_actions,
-                                        floor_change_cost_m=self.params.floor_change_cost_m)
-        self.active["cooldown_until"] = cooldown          # a re-snap is not a new verdict on the connector
-        if choice is None:
+        approaches = approach_points([self.active], obs, world, cost)
+        approach = None if approaches is None else approaches.get(int(self.active["id"]))
+        if approach is None:
             return False
-        moved = math.dist(tuple(self.active.get("approach_xy", self.active["entry"][:2])), choice.approach_xy) > 1e-6
-        self.active["approach_xy"] = list(choice.approach_xy)
+        moved = math.dist(tuple(self.active.get("approach_xy", self.active["entry"][:2])), approach.xy) > 1e-6
+        self.active["approach_xy"] = list(approach.xy)
         return moved
 
     def way_back_held(self, step) -> bool:

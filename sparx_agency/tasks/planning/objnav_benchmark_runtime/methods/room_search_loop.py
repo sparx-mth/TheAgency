@@ -98,7 +98,8 @@ from sparx_agency.core.mapping.topology.search_node_oracle import UNEXPLORED_ELS
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import frontier_goals_by_room
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
-    ALL_VERDICTS, BUDGET_SPENT, EXHAUSTED, MAPPED, NEUTRAL, SEARCH, SELECT, TRANSIT, TRAVERSED, ObjectSearchParams)
+    ALL_VERDICTS, BLOCKED, BUDGET_SPENT, EXHAUSTED, MAPPED, NEUTRAL, SEARCH, SELECT, TRANSIT, TRANSIT_TIMEOUT,
+    TRAVERSED, UNREACHABLE, ObjectSearchParams)
 from sparx_agency.core.planning.exploration.room_costs import build_instance
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
@@ -503,6 +504,15 @@ class RoomSearchLoop:
         state = self._update(obs, world, cost, **flags)
         if state.completed is not None:
             room_id, verdict = state.completed
+            if is_opening_node(room_id) and verdict in (BLOCKED, UNREACHABLE, TRANSIT_TIMEOUT):
+                # An opening the agent could not get to is not offered again: left a node, the
+                # supervisor's escape hatch re-chose the only candidate the action after each
+                # release, and a wedged agent bought one oracle call per seven actions.
+                option = self._openings.get(room_id)
+                opening = (self._peek or {}).get("opening") if self._peek and self._peek.get("node") == room_id else None
+                opening = opening or (option.opening if option is not None else None)
+                if opening is not None and not self._retired(opening):     # the transit may have retired it already
+                    self._retire_peek(obs, opening, "released %s" % verdict)
             p._route = p._goal = None
             p.route_memory.clear("room_completed")
             self._entry = None
@@ -1334,6 +1344,13 @@ class RoomSearchLoop:
                 if best is None or off < best[0]:
                     best = (off, xy)
         return None if best is None else best[1]
+
+    def _retired(self, opening):
+        """Whether ``opening`` is already done with for the storey (peeked, abandoned, or inspected for a landmark)."""
+        p = self.policy
+        if opening.kind == LANDMARK:
+            return opening.landmark_id in self._inspected
+        return p.openings.peeked(p.mapping.floor_id, opening.xy)
 
     def _retire_peek(self, obs, opening, why):
         """The opening is done with for the storey: looked into, or not worth another try.

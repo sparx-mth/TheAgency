@@ -276,9 +276,12 @@ class RPTSearchPolicy:
             self.telemetry.emitted(observation, action, self.telemetry.phase)
             return
         external = self._action_owner in SUSPENDED_PHASES
+        # The closing's own release turn: decided inside ``closing.plan`` with ``active``
+        # already False by now; the search did not take it, so the loop is not charged.
+        released = self._action_owner == "target_closing"
         if not self.building or not self.building.committed:
             self._floor_time += self.settings.action_time_s
-            if external:
+            if external or released:
                 self.supervisor.pause(self.settings.action_time_s)
             elif self.hierarchy is None:
                 self.loop.charge()
@@ -307,6 +310,11 @@ class RPTSearchPolicy:
                 world = self.mapping.update(observation, arrival_allowed=False)
                 self.last_world = world
                 self.sight.observe(observation, world)
+                # The landmark map keeps voting while the takeover walks in (the legacy
+                # target evidence stands down, see ``PerceptionCycle.fuse``): the map
+                # release -- the sofa from four metres that is the bed from two -- needs
+                # the closer frames on the map, and until 2026-10-05 nothing fed them.
+                self._perceive(observation)
                 return self.closing.plan(observation, world)
             except Exception as exc:
                 self.closing.phase = "FAILED"
@@ -369,7 +377,10 @@ class RPTSearchPolicy:
 
     def _search(self, observation, world, confirmed):
         s, pose = self.settings, observation.pose
-        if self._last_pose is not None and math.dist((pose.x, pose.y), self._last_pose) > 0.05:
+        # Progress is a forward step's worth of displacement, not the slide a collision
+        # leaves (Leonardo 2026-10-05: wedged for 350 actions, every blocked MOVE_FORWARD
+        # shifted the agent 5-10 cm and that reset the clock the BLOCKED verdict waits on).
+        if self._last_pose is not None and math.dist((pose.x, pose.y), self._last_pose) > 0.6 * self.episode.action_spec.forward_step_m:
             self._blocked_since = None
         self._last_pose = (pose.x, pose.y)
         self.graph.credit_time(world, pose, 0.0 if observation.step == 0 else s.action_time_s, step=observation.step)

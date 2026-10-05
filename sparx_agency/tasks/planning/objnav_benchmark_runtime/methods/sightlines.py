@@ -46,10 +46,12 @@ watershed hands out and takes back.
 The far limit is conservative on purpose. The depth image is sampled at
 a stride, and the floor samples thin out with range: at ``depth_stride``
 8 on a 640 x 480 frame from 0.88 m, successive floor rows are 0.09 m
-apart at 2 m, 0.21 m at 3 m and 0.29 m at 3.5 m -- past about 2.5 m an
-unknown cell between two seen rows is a sampling hole, not a railing, and
-would be "looked through" wrongly. Within 2.5 m the floor is sampled
-denser than the grid.
+apart at 2 m, 0.15 m at 2.5 m, 0.21 m at 3 m and 0.29 m at 3.5 m -- past
+about 2.5 m an unknown cell between two seen rows is a sampling hole, not
+a railing, and would be "looked through" wrongly. Up to about 2 m the
+floor is sampled denser than the 0.1 m grid; between 2 and 2.5 m a hole
+is at most one cell, which ``min_looks`` from two poses and the pocket
+rule absorb.
 """
 from __future__ import annotations
 
@@ -81,10 +83,11 @@ class SightSettings:
             the visible band.
         far_m: Farthest ground distance a looked-through cell is credited
             at (see the module docstring for why 2.5 m).
-        depth_cells: How many consecutive unknown cells past the boundary a
-            ray marks: the free cell on the boundary is a frontier cell
-            while ANY of its unknown neighbours is unresolved, so the mark
-            is a band, not a line.
+        depth_cells: How many consecutive unknown samples past the boundary a
+            ray marks -- samples lie every half cell, so 3 is about a cell and
+            a half of unknown behind the boundary: the free cell on the
+            boundary is a frontier cell while ANY of its unknown neighbours is
+            unresolved, so the mark is a band, not a line.
         pocket_max_m2: Largest enclosed unknown region that is a pocket. A
             toilet, a bed or a sofa does not fit in 3 m2 behind a wardrobe;
             a cup would, and this is the trade the setting makes.

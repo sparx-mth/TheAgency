@@ -65,3 +65,20 @@ def test_report_carries_dtg_beside_sr_and_spl(tmp_path):
 
 
 
+
+
+def test_a_missing_recording_is_reported_after_the_metrics_are_written(tmp_path):
+    """One failed encoder run must not cost the campaign its RESULTS.md: the rows are valid without the video."""
+    records = [_record(0, success=True, spl=0.8, dtg=0.4, steps=120),
+               _record(1, success=False, spl=0.0, dtg=3.0, steps=500)]
+    data = _campaign(tmp_path, records)
+    lost = tmp_path / "frontier" / SCENE / "recordings" / hashlib.sha256(records[1].episode_id.encode()).hexdigest()[:12] / "video.mp4"
+    lost.unlink()
+    with pytest.raises(RuntimeError, match="Missing predeclared recording"):
+        write_multifloor_report(tmp_path, data)
+    report = json.loads((tmp_path / "statistics.json").read_text())
+    assert report["statistics"]["frontier"]["overall"]["success_rate"] == pytest.approx(0.5)
+    assert report["missing_recordings"] == [str(lost.relative_to(tmp_path))] and not report["complete"]
+    assert len(report["recordings"]) == 1
+    text = (tmp_path / "RESULTS.md").read_text()
+    assert "| frontier | 2 | 0.500 |" in text and "missing recordings: 1" in text

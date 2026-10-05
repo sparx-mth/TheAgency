@@ -13,14 +13,19 @@ bookkeeping are the same under both.
 per scene (`gibson/stair_connectors.py`): the area-supported storey heights
 (the generator's own rule -- 8 m² within ±0.30 m, 1.5 m apart) and, between
 them, every cluster of off-level walkable surface as one **connector** -- its
-bottom and top floor anchors, the storey heights it joins and the navmesh
-shortest path along it. The block rides on the episode metadata
+bottom and top floor anchors, the storey heights it joins and the polyline
+walked along it (the band's centreline; the navmesh shortest path repairs it
+where the centreline is not walkable). The block rides on the episode metadata
 (`stair_connectors`, `floor_levels`); it names no goal, no distance and no
 target floor, and the harness's privileged-key tripwire accepts it. The
 building coordinator then:
 
-- makes every connector touching the storey in force a portal on the first
-  action, oriented from that storey (`+1` up / `-1` down; `stair_ground_truth.py`);
+- makes every connector touching the storey in force a portal once the camera
+  has SEEN it (`stair_sightings.py`; a flight just walked is seen from both
+  ends), oriented from that storey (`+1` up / `-1` down; `stair_ground_truth.py`).
+  What the oracle is told before any flight is seen is the building's storey
+  count and this storey's rank among them (`stair_nodes.storey_position`),
+  which comes from the same metadata and is disclosed under `ground_truth_stairs`;
 - **offers every portal to the room-search loop as a NODE** (`methods/stair_nodes.py`)
   once its foot is on the observed passable map and it is not cooling after a
   failed approach. The loop hands the staircase to the node oracle beside the
@@ -69,13 +74,17 @@ building coordinator then:
   forward-only progress runs along the lead-in first and can reach the far
   leg of a folded flight (a U-shaped staircase's top anchor passes within a
   metre of its bottom one in XY) only by walking there; past the far anchor
-  to step clear of the stair head; a vertex is reached within 0.35 m in three
-  dimensions (the flight above a switchback is a hand's breadth away in plan
-  view); the atlas confirms the storey only at the far anchor at the
-  destination height. **Once begun, a transition is finished**: a blocked
-  forward step first tightens the following to a straight line at the next
-  vertex (no lookahead to cut the corner into the banister the shortest path
-  grazes) and skips a vertex only when the tight aim fails twice; turning
+  to step clear of the stair head; a vertex is reached within 0.26 m in plan
+  view and 0.45 m in height (`REACHED_XY_M` / `REACHED_Z_M`; the flight above a
+  switchback is a hand's breadth away in plan view); the atlas confirms the
+  storey only at the far anchor at the destination height, and a storey first
+  reached this way is pinned to the connector's navmesh height (since
+  2026-10-05: the poses the atlas settled on lay on the eased last treads, 0.17 m
+  above the storey in Hanson, and no staircase seen up there ever became a
+  portal). **Once begun, a transition is finished**: a blocked forward step
+  first tightens the following to a straight line at the next vertex (no
+  lookahead to cut the corner into the banister the shortest path grazes) and
+  otherwise falls back to the last vertex reached rather than skipping; turning
   back takes `commit_failures` (12) blocked steps or `commit_stall_actions`
   (30) in which the distance still to walk along the route never shrank by
   4 cm (displacement is not progress: an agent skidding along a wall moves
@@ -222,6 +231,16 @@ couch-only cross-floor campaign makes the storey change the test rather than a
 coincidence of the annotation (the Hanson toilet, chair and plant episodes of
 2026-10-05 all ended at real upstairs instances the reference-floor annotation does
 not know, SR=0 by construction). Recorded as `generation.goal_categories`.
+
+`--start-storey same` (since 2026-10-05) puts every start on the annotated
+reference storey instead of another one -- the SemExp-style same-floor protocol
+on this harness, whose 3D geodesic region metrics then score a STOP at an
+annotated instance. The 4-60 m geodesic band, the 2 m separation between a
+building's starts, the 0.35 m start clearance and the different category per
+episode are unchanged; a single-storey building is eligible, and the agent may
+still change storeys on its own. Recorded as `generation.start_storey` and in
+the run manifest as `start_storey` / `cross_floor_required=false`. The default,
+`other`, is the cross-floor protocol above.
 
 After the [detector and CPU LLM setup](README.md#data-and-running), run the
 existing frozen campaign runner with one explorer and one preselected recording

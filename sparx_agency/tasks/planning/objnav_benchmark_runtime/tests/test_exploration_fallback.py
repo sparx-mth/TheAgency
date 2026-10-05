@@ -386,3 +386,58 @@ def test_the_step_record_carries_the_fallback_snapshot():
     assert len(snap["goal"]) == 2 and isinstance(snap["demoted"], list)
     assert {"frontier", "goal_kept", "blind_demoted"} <= set(snap["stats"])
 
+
+
+# -- the end-to-end review of 2026-10-05 (evening): the fallback over consecutive actions with motion ------
+def walk(policy, episode, world, start, steps, yaw=0.0):
+    """Drive the fallback ``steps`` actions, moving 0.25 m along the returned route each time; return the goals taken."""
+    here, goals = tuple(start), []
+    for step in range(steps):
+        command = policy.loop.plan(obs_at(episode, step, here, yaw=yaw), world)
+        assert moving(command) or command.info.get("kind") == "fallback_hold", command.info
+        if command.waypoints:
+            goal = tuple(round(float(v), 2) for v in command.waypoints[-1])
+            goals.append(goal)
+            dx, dy = goal[0] - here[0], goal[1] - here[1]
+            span = math.hypot(dx, dy)
+            if span > 1e-6:
+                here = (here[0] + 0.25 * dx / span, here[1] + 0.25 * dy / span)
+    return goals
+
+
+def test_a_blind_radius_demotion_is_sticky_so_the_fallback_does_not_turn_between_two_exits_for_ever():
+    """Approaching exit A, the step that brings it under 1.2 m demotes it; the step toward exit B puts A at
+    1.2 m again and, nearer, it out-utilities B -- two actions a cycle, indefinitely, 0.25 m each so the
+    route watchdog never fires. A demoted goal is retired and the goal in force cleared."""
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    goals = walk(policy, episode, world, (2.6, 3.0), 12)
+    switches = sum(1 for a, b in zip(goals, goals[1:]) if math.dist(a, b) > policy.fallback.settings.goal_match_m)
+    assert switches <= 2, "a goal chosen, driven and resolved -- not alternated: %r" % (goals,)
+    assert policy.fallback.stats["blind_demoted"] >= 1, "the near frontier was under the blind radius at some point"
+    assert policy._visited_frontiers, "the demoted goal was retired, not left to be promoted again"
+
+
+def test_the_relocation_target_is_kept_until_reached():
+    """The farthest reachable cell was excluded while still being walked to, so the next action took the
+    opposite far cell, and the agent shuffled a quarter metre back and forth between the two."""
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    world.grid[:, :] = FREE                                  # an empty hall: no frontier anywhere, relocation only
+    world.grid[0, :] = world.grid[-1, :] = world.grid[:, 0] = world.grid[:, -1] = OCC
+    no_rooms(policy)
+    goals = walk(policy, episode, world, (6.0, 3.0), 8)
+    assert len({g for g in goals}) == 1, "one far cell, walked to action after action: %r" % (goals,)
+    assert policy.fallback.stats["relocation"] == 8
+
+
+def test_the_snapshot_names_this_actions_rung_including_a_hold():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.fallback.snapshot()["stage"] == "frontier"
+    boxed = OccupancyGrid2D(np.full(world.grid.shape, UNK, np.int8), world.params, values=world.values)
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), boxed)
+    if command.info.get("kind") == "fallback_hold":
+        assert policy.fallback.snapshot()["stage"] == "hold"
+    else:
+        assert policy.fallback.snapshot()["stage"] == "footing"

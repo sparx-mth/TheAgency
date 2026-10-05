@@ -177,3 +177,60 @@ def test_cross_floor_starts_can_be_restricted_to_one_goal_category(monkeypatch):
         mf.cross_floor_starts("Fake", floors, object(), seed=3, count=1, categories=[4])
     with pytest.raises(ValueError, match="requires --multistory"):
         generation.main(["--train-info", "x", "--archive", "y", "--scenes-dir", "z", "--output", "w", "--categories", "couch"])
+
+
+def test_same_storey_starts_lie_on_the_goals_storey_with_a_different_category_per_episode(monkeypatch):
+    """The same-floor protocol on the multistory harness (2026-10-05): a STOP at an annotated instance scores."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import multifloor_generation as mf
+    semantic = np.zeros((7, 8, 8), np.uint8)
+    semantic[0] = 1
+    semantic[1, 1, 1] = semantic[2, 6, 6] = semantic[5, 3, 3] = 1          # chair, couch, toilet
+    floors = {0: {"sem_map": semantic, "floor_height": 0.0, "origin": [0, 0]}}
+    levels = [{"height_m": 0.0, "sample_count": 100, "estimated_area_m2": 40.0}]   # a single-storey house
+    rng = np.random.RandomState(1)
+    samples = np.column_stack([rng.uniform(0, 40, 600), np.zeros(600), rng.uniform(0, 40, 600)])
+    monkeypatch.setattr(mf, "sampled_levels", lambda pathfinder, seed, **kw: (levels, samples))
+    monkeypatch.setattr(mf, "goal_region_points", lambda pathfinder, floor, category: [[1.0, 0.0, 1.0]])
+
+    class Field:
+        def __init__(self, pathfinder, goals, semantic, origin, category, goal_height):
+            self.category, self.goal_height = category, goal_height
+        def distance(self, position, start=False):
+            return 10.0
+    monkeypatch.setattr(mf, "MultiFloorDistance", Field)
+    monkeypatch.setattr(mf, "start_clearance", lambda pathfinder, position: 1.0)
+    with pytest.raises(ValueError, match="Fewer than two"):
+        mf.cross_floor_starts("Fake", floors, object(), seed=3, count=1)
+    rows, regions, audit = mf.cross_floor_starts("Fake", floors, object(), seed=3, count=3, same_storey=True)
+    assert len(rows) == 3 and len({row["object_category"] for row in rows}) == 3, "three episodes, three categories"
+    assert all(row["start_position"][1] == 0.0 for row in rows), "every start on the goals' storey"
+    assert all(entry["start_storey"] == "same" and not entry["connected_cross_floor"] for entry in audit["episodes"])
+    starts = [np.asarray(row["start_position"])[[0, 2]] for row in rows]
+    assert all(np.linalg.norm(a - b) >= 2.0 for i, a in enumerate(starts) for b in starts[i + 1:]), "starts 2 m apart"
+    with pytest.raises(ValueError, match="requires --multistory"):
+        generation.main(["--train-info", "x", "--archive", "y", "--scenes-dir", "z", "--output", "w", "--start-storey", "same"])
+
+
+def test_a_building_with_fewer_categories_than_episodes_is_ineligible(monkeypatch):
+    """Onaga (2026-10-05) has one annotated category: three couch episodes are not three different objects."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import multifloor_generation as mf
+    semantic = np.zeros((7, 8, 8), np.uint8)
+    semantic[0] = 1
+    semantic[2, 6, 6] = 1                                                   # a couch, nothing else
+    floors = {0: {"sem_map": semantic, "floor_height": 0.0, "origin": [0, 0]}}
+    levels = [{"height_m": 0.0, "sample_count": 100, "estimated_area_m2": 40.0}]
+    samples = np.column_stack([np.linspace(0, 40, 300), np.zeros(300), np.linspace(0, 40, 300)])
+    monkeypatch.setattr(mf, "sampled_levels", lambda pathfinder, seed, **kw: (levels, samples))
+    monkeypatch.setattr(mf, "goal_region_points", lambda pathfinder, floor, category: [[1.0, 0.0, 1.0]])
+
+    class Field:
+        def __init__(self, pathfinder, goals, semantic, origin, category, goal_height):
+            self.category, self.goal_height = category, goal_height
+        def distance(self, position, start=False):
+            return 10.0
+    monkeypatch.setattr(mf, "MultiFloorDistance", Field)
+    monkeypatch.setattr(mf, "start_clearance", lambda pathfinder, position: 1.0)
+    with pytest.raises(ValueError, match="Only 1 category annotated"):
+        mf.cross_floor_starts("Onaga", floors, object(), seed=3, count=3, same_storey=True)
+    rows, _, _ = mf.cross_floor_starts("Onaga", floors, object(), seed=3, count=3, same_storey=True, distinct_categories=False)
+    assert [row["object_category"] for row in rows] == ["couch"] * 3, "the former rotation, one knob away"

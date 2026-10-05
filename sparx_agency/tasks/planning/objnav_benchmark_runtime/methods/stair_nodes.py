@@ -88,9 +88,15 @@ def summarise_floor(context: Optional[Dict], floor_id: Optional[int] = None) -> 
         return "unvisited"
     graph = context.get("graph")
     rooms = getattr(getattr(graph, "registry", None), "rooms", {}) or {}
-    labels = getattr(getattr(graph, "label_tracker", None), "labels", {}) or {}
+    tracker = getattr(graph, "label_tracker", None)
+    labels = getattr(tracker, "labels", {}) or {}
+    metadata = getattr(tracker, "metadata", {}) or {}
     facts = getattr(graph, "facts", {}) or {}
-    named = sorted(label.label for pid, label in labels.items() if pid in rooms and label.label != "unknown")
+    # A weak label (one kind of object) is marked as the node lines mark it,
+    # ``kitchen?``: a cabinet alone made a "kitchen" on an upper storey and the
+    # oracle's STEP 2 read a ground floor off the summary (Ranchester 2026-10-05).
+    named = sorted(label.label + ("?" if (metadata.get(pid) or {}).get("strength") == "weak" else "")
+                   for pid, label in labels.items() if pid in rooms and label.label != "unknown")
     unknown = sum(1 for pid in rooms if pid not in labels or labels[pid].label == "unknown")
     parts: List[str] = []
     if named:
@@ -178,6 +184,38 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
     return options
 
 
+def storey_position(building, elevation_m: float) -> str:
+    """Where this storey lies in the building, in the prompt's words -- geometry, not judgement.
+
+    The storey's rank from both ends: ``the lowest of 2 known storeys``,
+    ``the highest of 3 known storeys, 2 above the lowest``, ``1 above the
+    lowest and 1 below the highest of 3 known storeys``. No floor name:
+    the node oracle's STEP 2 reads the storey from this rank AND the rooms
+    found, with the rooms decisive. On 2026-10-05 the 14B model read a
+    storey given only as ``(this one at +3.1 m)`` as a ground floor and kept
+    the couch's living room "here"; the same evening a line that called
+    every storey above the lowest "an upper floor" had it say the living
+    room lives elsewhere on the Newfields ground floor -- whose lowest
+    storey is a basement -- with a living room found on it. Which storeys
+    exist is the building's ground-truth stair data; the match tolerance
+    is the atlas's.
+    """
+    levels = sorted(float(z) for z in building.ground_truth.levels)
+    if not levels:
+        return ""
+    tolerance = float(getattr(building.params, "floor_match_m", 1.0) or 1.0)   # storeys lie 1.5 m or more apart
+    below = sum(1 for z in levels if z < elevation_m - tolerance)
+    above = sum(1 for z in levels if z > elevation_m + tolerance)
+    n = len(levels)
+    if n == 1:
+        return "this storey is the only one known"
+    if below == 0:
+        return "this storey is the lowest of %d known storeys" % n
+    if above == 0:
+        return "this storey is the highest of %d known storeys, %d above the lowest" % (n, below)
+    return "this storey is %d above the lowest and %d below the highest of %d known storeys" % (below, above, n)
+
+
 def search_context(building, policy, contexts: Dict) -> SearchContext:
     """What the prompt says about this storey and the others."""
     here = {key: getattr(policy, key) for key in ("graph", "_floor_time")}
@@ -187,7 +225,9 @@ def search_context(building, policy, contexts: Dict) -> SearchContext:
         elevation = policy.mapping.atlas.elevation_m if policy.mapping.atlas.floors else 0.0
         storey += "; %d storey%s known to the building" % (
             len(building.ground_truth.levels), "" if len(building.ground_truth.levels) == 1 else "s")
-        storey += " (this one at %+.1f m)" % (elevation - min(building.ground_truth.levels)) if building.ground_truth.levels else ""
+        position = storey_position(building, elevation)
+        if position:
+            storey += "; " + position
     others = tuple(summarise_floor(context, other) for other, context in sorted(contexts.items()) if other != floor_id)
     return SearchContext(storey=storey, others=others)
 

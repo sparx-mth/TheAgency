@@ -111,7 +111,11 @@ likely BEHIND it: glimpsed objects name that room's type (a toilet -> a \
 bathroom; a bed -> a bedroom); nothing glimpsed -> an unknown room on this \
 storey, judged by STEP 2 -- if the home type is still MISSING on a storey where \
 it belongs, an opening with nothing glimpsed is where it would be found; if the \
-home type does not belong on this storey, an opening is worth little.
+home type does not belong on this storey, an opening is worth little. An opening \
+whose glimpsed objects name the HOME type itself (a sink or a shower for a toilet; \
+a sofa or a television for a couch; a stove for a frying pan) is the home room \
+seen from its door: the best node there is, 60 or more, even though the target \
+itself has not been glimpsed yet.
 For EACH node give the probability, in percent, that going there NEXT finds the \
 target: the target is there and the robot would see it by going and looking. \
 Estimate EACH node independently: these are search-success probabilities, NOT \
@@ -124,9 +128,14 @@ STEP 1 -- "home": the room type(s) where this object normally lives, most likely
 first (bed -> bedroom; frying pan -> kitchen; toilet -> bathroom; sofa -> living \
 room; washing machine -> laundry room or kitchen). Small objects that travel \
 (cup, book, phone) have a home too, only a weaker one.
-STEP 2 -- "storey": read THIS storey from the types found on it. A storey with a \
-kitchen, dining or living room is a GROUND floor; a storey of bedrooms and \
-bathrooms is an UPPER floor; laundry, storage and garages are basements. Then say \
+STEP 2 -- "storey": read THIS storey from the types found on it AND from its rank \
+in the building, given in the THIS STOREY line (the lowest of N known storeys, the \
+highest, or how many lie below and above it). The rooms decide: a storey where a \
+kitchen, dining or living room has been FOUND is the ground floor whatever its \
+rank. Where none has, the rank says what to expect: of two storeys the lowest is \
+the ground floor and the highest the bedroom floor; of three, the lowest is usually \
+a basement (laundry, storage, a garage), the middle the ground floor and the highest \
+the bedroom floor; the highest storey of a house is never the ground floor. Then say \
 whether a room of the home type has been FOUND on this storey or is still MISSING, \
 and, if missing, whether the home type belongs on this storey at all. Where rooms \
 live in a house: kitchen, dining and living room downstairs; bedrooms upstairs; \
@@ -134,9 +143,12 @@ the bathroom BESIDE the bedrooms, so upstairs too (a ground floor has at most a 
 small toilet room); an office or study on either. Write the verdict as "home_here": \
 "found" (a room of the home type is on this storey), "missing" (none found yet, but \
 the home type belongs on this storey) or "elsewhere" (the home type does not belong \
-on this storey; it lives on another one).
+on this storey; it lives on another one). Write about THIS building: the example \
+below shows the format and the style of reasoning, not the answer.
 STEP 3 -- the numbers, by these rules:
- 1. HOME FOUND HERE with frontier left: it has a high search-success probability.
+ 1. HOME FOUND HERE with frontier left -- or an OPENING whose glimpsed objects name \
+the home type (a sink for a toilet; a sofa for a couch) -- has a high search-success \
+probability, 60 or more.
  2. HOME MISSING HERE: independently consider (a) UNKNOWN rooms whose SIZE fits the home \
 type -- bathrooms ARE small, so a 3-8 m2 unknown room beside bedrooms is most \
 likely the bathroom (never "too small to be one"); a 10-20 m2 room is bedroom \
@@ -185,7 +197,9 @@ Reply with ONLY this JSON, keys in this order:
 {"home":"<step 1, max 10 words>","storey":"<step 2, max 20 words>","home_here":"found|missing|elsewhere",
  "nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
 Example of the FORMAT and the style of reasoning -- a different building every \
-time, so never copy its numbers. TARGET television, robot on an upper storey:
+time, so never copy its numbers or its words. TARGET television; THIS STOREY: rooms \
+found: bedroom; 2 unknown; searched 1min; 3 rooms with frontier left; 2 storeys \
+known to the building; this storey is the highest of 2 known storeys, 1 above the lowest:
 id=4  ROOM  type=bedroom  size=13m2  frontier=0  searched=1min  ago=3min  seen: bed, lamp
 id=9  ROOM  type=unknown  size=6m2  frontier=1  searched=0s  entered=no  seen: nothing yet
 id=11  ROOM  type=unknown  size=22m2  frontier=2  searched=0s  entered=no  seen: nothing yet
@@ -193,14 +207,17 @@ id=100003  STAIRS down  to a storey NOT visited yet
 id=200001  OPENING  doorway off room 11 (type=unknown)  to space NOT seen yet  glimpsed through it: toilet
 id=200002  OPENING  gap off room 11 (type=unknown)  to space NOT seen yet  glimpsed through it: nothing yet
 {"home":"living room, sometimes a bedroom",
- "storey":"upper floor (bedroom found); no living room here; living rooms are downstairs",
+ "storey":"upper floor (the highest of 2; bedroom found); no living room here; living rooms are downstairs",
  "home_here":"elsewhere",
  "nodes":[{"id":4,"why":"bedroom, fully seen, no television","p":2},
 {"id":9,"why":"small unexplored room, never entered, a bathroom perhaps","p":10},
 {"id":11,"why":"large unexplored upstairs room, maybe a lounge","p":20},
 {"id":100003,"why":"unvisited ground floor holds the living room","p":70},
 {"id":200001,"why":"toilet glimpsed: a bathroom, no television","p":2},
-{"id":200002,"why":"unseen upstairs room, nothing known of it yet","p":10}]}"""
+{"id":200002,"why":"unseen upstairs room, nothing known of it yet","p":10}]}
+Had the TARGET been a toilet in the same building, the bathroom belongs up here \
+(home_here "missing"): id=200001 with the toilet glimpsed would be 90, id=9 \
+(small, beside the bedroom) 45, id=200002 35, id=11 15, and the stairs 15."""
 USER_PROMPT_TEMPLATE = """TARGET: {target}
 
 THIS STOREY: {storey}
@@ -466,9 +483,10 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
 
 _HOME_HERE_WORDS = {
     HOME_FOUND: ("found", "present", "here", "yes", "on this storey", "on this floor"),
-    HOME_MISSING: ("missing", "not found", "not yet", "unseen", "expected"),
+    HOME_MISSING: ("missing", "not found", "none found", "not yet", "not yet found", "nothing found", "no room",
+                   "unseen", "expected", "no"),
     HOME_ELSEWHERE: ("elsewhere", "not here", "another storey", "other storey", "another floor", "other floor",
-                     "downstairs", "upstairs", "does not belong", "no"),
+                     "downstairs", "upstairs", "does not belong", "other level", "another level"),
 }
 
 
@@ -477,7 +495,10 @@ def parse_home_here(reply: Any) -> Optional[str]:
 
     The three words are what the prompt asks for; a few phrasings a model
     drifts to are accepted, the longest match first so "not found" is
-    ``missing`` and not ``found``.
+    ``missing`` and not ``found``. A negated "found" ("none found", "no
+    room ... found") is ``missing``; a bare "no" is ``missing`` too -- the
+    conservative verdict, which keeps the uncertainty floor -- never
+    ``elsewhere``, which lowers every unexplored place on the storey.
     """
     if not isinstance(reply, dict):
         return None
@@ -493,7 +514,11 @@ def parse_home_here(reply: Any) -> Optional[str]:
         for word in words:
             if word in text and (best is None or len(word) > len(best[1])):
                 best = (verdict, word)
-    return None if best is None else best[0]
+    if best is None:
+        return None
+    if best[0] == HOME_FOUND and any(negation in text for negation in ("not ", "no ", "none", "never", "n't")):
+        return HOME_MISSING
+    return best[0]
 
 
 def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unexplored_floor: float,

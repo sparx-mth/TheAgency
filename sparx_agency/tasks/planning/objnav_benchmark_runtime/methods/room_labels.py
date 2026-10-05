@@ -53,6 +53,12 @@ class RoomLabelSettings:
             a cabinet, a plant, a book ...), since 2026-10-05 -- a cabinet
             and a potted plant made an upstairs room a strong "living_room".
             ``False`` counts every kind.
+        generic_evidence_gate: A room whose only evidence is generic objects
+            is not classified at all -- it stays ``unknown`` and the model
+            is not asked (since 2026-10-05: one cabinet made a "kitchen" at
+            0.9 on an upper storey, which the storey summary then showed the
+            node oracle as a kitchen found). The objects are still shown to
+            the oracle on the room's line. ``False`` asks the model.
     """
 
     min_objects: int = 1
@@ -63,6 +69,7 @@ class RoomLabelSettings:
     strong_confidence: float = 0.65
     signature_objects: bool = True
     distinctive_required: bool = True
+    generic_evidence_gate: bool = True
 
     def __post_init__(self):
         for name in ("min_objects", "min_classes", "min_evidence_updates", "refresh_steps", "strong_classes"):
@@ -70,7 +77,7 @@ class RoomLabelSettings:
                 raise ValueError("%s must be a positive integer" % name)
         if not 0.0 <= float(self.strong_confidence) <= 1.0:
             raise ValueError("strong_confidence must lie in [0, 1]")
-        for name in ("signature_objects", "distinctive_required"):
+        for name in ("signature_objects", "distinctive_required", "generic_evidence_gate"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError("%s must be a bool" % name)
 
@@ -173,6 +180,8 @@ class RevisableRoomLabels:
 
     def _ready(self, pid, classes):
         s = self.settings
+        if s.generic_evidence_gate and classes and all(generic_object(name) for name in classes):
+            return False
         return (len(classes) >= s.min_objects and len(set(classes)) >= s.min_classes
                 and self._evidence_updates.get(pid, 0) >= s.min_evidence_updates)
 

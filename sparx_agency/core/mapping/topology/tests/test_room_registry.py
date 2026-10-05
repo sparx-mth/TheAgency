@@ -51,14 +51,43 @@ def test_moved_room_below_iou_gets_new_pid():
     assert list(rooms.keys()) == [1]
 
 
-def test_vanished_room_pid_is_not_reused():
-    reg = RoomRegistry(iou_threshold=0.25)
+def test_vanished_room_is_readopted_within_the_memory_and_retired_after_it():
+    """A room absorbed into its neighbour for a tick comes back under its own number (Ranchester R23/R26/R28/R52)."""
+    reg = RoomRegistry(iou_threshold=0.25, memory_ticks=3)
     reg.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)  # pid 0
     reg.update([], identity_c2w)                             # room vanishes
-    assert reg.rooms == {}
+    assert reg.rooms == {} and reg.remembered == (0,)
     rooms = reg.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)
-    # Same mask as pid 0 had, but pid 0 is retired: a fresh pid is issued.
-    assert list(rooms.keys()) == [1]
+    assert list(rooms.keys()) == [0] and reg.readopted == 1 and reg.remembered == ()
+    # A different room where the old one stood is not the old room: no overlap, no re-adoption.
+    reg.update([], identity_c2w)
+    rooms = reg.update([make_stats(1, 20, 30, 20, 30)], identity_c2w)
+    assert list(rooms.keys()) == [1] and reg.remembered == (0,)
+    # The memory is short: after memory_ticks absent updates the pid is retired for good.
+    reg.update([], identity_c2w)
+    reg.update([], identity_c2w)
+    reg.update([], identity_c2w)
+    assert reg.remembered == (1,), "pid 0 left the memory; pid 1 vanished later and is still in it"
+    rooms = reg.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)
+    assert list(rooms.keys()) == [2], "the same mask as pid 0 had, but pid 0 left the memory: a fresh pid"
+
+
+def test_the_memory_fills_only_what_the_live_rooms_left_and_can_be_turned_off():
+    """The merge-and-split case: the hallway keeps its pid by IoU, the room that re-separates gets its own back."""
+    reg = RoomRegistry(iou_threshold=0.25)
+    hall, room = make_stats(1, 0, 40, 0, 20), make_stats(2, 0, 40, 22, 40)
+    reg.update([hall, room], identity_c2w)                   # hall 0, room 1
+    merged = make_stats(1, 0, 40, 0, 40)
+    assert list(reg.update([merged], identity_c2w)) == [0], "the merged region is the hallway, by IoU"
+    rooms = reg.update([hall, room], identity_c2w)
+    assert list(rooms) == [0, 1], "the room re-separates under its old number, not a new one"
+    off = RoomRegistry(iou_threshold=0.25, memory_ticks=0)
+    off.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)
+    off.update([], identity_c2w)
+    assert off.remembered == ()
+    assert list(off.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)) == [1], "the historical behaviour, one knob away"
+    with pytest.raises(ValueError):
+        RoomRegistry(memory_ticks=-1)
 
 
 def test_two_rooms_keep_pids_when_stats_order_swaps():

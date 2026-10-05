@@ -218,7 +218,8 @@ class GlanceScheduler:
         self.candidates: Tuple[GlanceCandidate, ...] = ()
         self.events: List[Dict] = []
         self.stats = {"evaluations": 0, "scheduled": 0, "started": 0, "completed": 0, "aborted": 0,
-                      "turns": 0, "gain_m2": 0.0, "cues": 0, "cues_repeated": 0, "cues_without_gain": 0}
+                      "turns": 0, "gain_m2": 0.0, "cues": 0, "cues_repeated": 0, "cues_without_gain": 0,
+                      "cues_placed_elsewhere": 0}
         self._last_eval_step = -10 ** 9
         self._last_glance_step = -10 ** 9
         self._route_key = None
@@ -391,6 +392,9 @@ class GlanceScheduler:
         return nearest > target
 
     # -- cues: an object cut off at the edge of the frame ----------------------------
+    #: Projection verdicts that put a box somewhere a glance toward it cannot help.
+    _CUE_EXCLUDED_STATUSES = frozenset(("wrong_floor_height", "unsupported_floor_association", "outside_observed_map"))
+
     def _cue(self, obs, world):
         """The best cue in this frame -- ``(side, class, conf, turns, gain_m2)`` -- or None.
 
@@ -411,6 +415,14 @@ class GlanceScheduler:
         detections = getattr(getattr(p, "perception", None), "detections", None) or ()
         if not detections:
             return None
+        # This frame's projection verdicts, by box: a box perception placed on another
+        # storey, outside the map or on a candidate the takeover refuses is no cue
+        # (Ranchester 2026-10-05, actions 53-59: a sofa on the storey below at the right
+        # edge of a landing, three cue turns and three back, every two metres).
+        placed_elsewhere = set()
+        for row in getattr(getattr(p, "perception", None), "projections", None) or ():
+            if (row.get("status") in self._CUE_EXCLUDED_STATUSES or row.get("target_evidence") == "refused_by_takeover"):
+                placed_elsewhere.add(tuple(round(float(v), 3) for v in row.get("xyxy", ())))
         k = obs.camera.intrinsics
         turn = float(p.episode.action_spec.turn_angle_rad)
         here = (float(obs.pose.x), float(obs.pose.y))
@@ -424,6 +436,9 @@ class GlanceScheduler:
             cls = str(getattr(detection, "cls", "") or "")
             x1, y1, x2, y2 = (float(v) for v in detection.xyxy)
             if (y2 - y1) < s.cue_min_box_frac * float(k.height):
+                continue
+            if tuple(round(float(v), 3) for v in detection.xyxy) in placed_elsewhere:
+                self.stats["cues_placed_elsewhere"] += 1
                 continue
             if x1 <= s.cue_border_px:
                 side = LEFT

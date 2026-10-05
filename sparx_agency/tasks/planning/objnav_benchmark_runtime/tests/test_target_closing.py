@@ -655,7 +655,8 @@ def drive(p, ep, converter, pose, step, boxes):
     p.detector.detect = lambda rgb: boxes
     obs = replace(observation(ep, step, depth=3.0), pose=pose)
     command = p.plan(obs)
-    action = converter.step(pose, command).action or DiscreteAction.TURN_LEFT
+    result = converter.step(pose, command)
+    action = DiscreteAction.TURN_LEFT if result.idle else result.action      # STOP is 0: never read it as idle
     if p.closing.active:                                       # after a release the action is the frozen search's
         p.notify_action(obs, action)
     return command, action, apply_action(pose, action, ep.action_spec)
@@ -852,3 +853,165 @@ def test_the_legacy_target_evidence_does_not_walk_after_what_the_takeover_refuse
     assert p.perception.counts["refused_evidence"] >= 1
     assert any(row.get("target_evidence") == "refused_by_takeover" for row in p.perception.projections)
     assert not p.closing.active, "and the takeover itself still refuses it from here"
+
+
+# -- the end-to-end review of 2026-10-05 (evening) ------------------------------------------------
+def test_a_fresh_off_centre_sighting_at_another_pitch_is_centred_not_tilted_away(monkeypatch):
+    """A toilet in view at 0 degrees, 20 degrees left of the centre column, where its height predicts a
+    30-degree look-down: the converter tilts before it faces, so asking for the predicted pitch LOOKed
+    away from the target and never turned -- LOOK_DOWN / LOOK_UP for the whole 24-action budget."""
+    p, original = setup_policy()
+    ep = replace(tilt_episode(p, original), target_category="toilet")
+    p.reset(ep, gibson_label_mapper().target_labels("toilet"))
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.detector.detect = lambda rgb: [DetectionWire("toilet", .9, (280, 200, 360, 280))]
+    p.plan(replace(observation(ep, 0, depth=2), target_category="toilet"))
+    p.plan(replace(observation(ep, 1, depth=2), target_category="toilet"))
+    assert p.closing.locked
+    p.closing.xyz = p.closing.anchor = (1.9, 0.0, 0.3)                 # low: the prediction says 30 down
+    converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(1.1, 0, 0, 0)
+    k = ep.camera.intrinsics
+    bearing = math.radians(20)                                          # the toilet 20 degrees left of the agent's heading
+
+    row = k.cy + k.fy * (ep.camera.height_m - 0.3) / 0.8                 # a 0.3 m high object 0.8 m away, level camera
+
+    def boxes(pose):
+        """The box where a level camera at ``pose`` sees the toilet; nothing when the camera is pitched."""
+        if abs(pose.camera_pitch) > 1e-6:
+            return []
+        column = k.cx - k.fx * math.tan(bearing - pose.yaw)
+        return [DetectionWire("toilet", .9, (column - 40, min(row, k.height - 1) - 30, column + 40, min(row, k.height - 1)))]
+    actions = []
+    for step in range(2, 8):
+        p.detector.detect = lambda rgb, pose=pose: boxes(pose)
+        obs = replace(observation(ep, step, depth=0.8), pose=pose, target_category="toilet")
+        command = p.plan(obs)
+        if command.stop:
+            break
+        action = converter.step(pose, command).action
+        actions.append(action)
+        p.notify_action(obs, action)
+        pose = apply_action(pose, action, ep.action_spec)
+    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert DiscreteAction.TURN_LEFT in actions[:2], "the first move centres the target at the pitch it was seen at"
+    assert DiscreteAction.LOOK_DOWN not in actions, "no LOOK away from a target in view"
+
+
+def test_a_glance_in_force_is_aborted_when_a_takeover_starts(monkeypatch):
+    """A cue glance toward a box at the frame edge is often what un-clips it; left in force it resumed,
+    stale, after the release -- turns toward a yaw the cleared route no longer has."""
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    p.glances.active = {"kind": "cue", "target": 1.0, "turns": 0, "started": 0, "class": "chair", "side": "right"}
+    p.plan(observation(ep, 0, depth=2))
+    assert p.closing.active
+    assert p.glances.active is None and p.glances.stats["aborted"] == 1
+
+
+def test_an_inspection_entered_early_steps_closer_when_the_fresh_range_is_beyond_the_limit(monkeypatch):
+    """The filtered estimate read 1.0 m (an older, nearer reading averaged in) while every fresh frame
+    measured the surface at 1.3 m: the agent stood still through the budget and released a target in
+    plain view as 'inspection saw nothing'. Out of range and seen fresh means walk, not look."""
+    p, ep = setup_policy(target_closing={"max_reacquire_steps": 4})
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked
+    p.closing.xyz = (1.6, 0.0, p.closing.xyz[2])                       # the filtered estimate: 0.5 m ahead of the agent at x=1.1
+    here = AgentPose(1.1, 0, 0, 0)
+    p.detector.detect = lambda rgb: []
+    first = p.plan(replace(observation(ep, 2, depth=1.3), pose=here))
+    assert p.closing.inspection_started == 2 and not first.stop, "the filtered estimate entered the inspection, unseen"
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    second = p.plan(replace(observation(ep, 3, depth=1.3), pose=here))   # the fresh surface: 1.3 m ahead
+    assert p.closing.inspection_started is None and p.closing.inspection_resumptions == 1
+    assert second.waypoints, "the approach resumed: a route toward the target, not another look"
+    assert p.closing.active and p.closing.locked and not p.closing.rejected, "nothing was released"
+    third = p.plan(replace(observation(ep, 4, depth=1.3), pose=here))
+    assert p.closing.inspection_started is None and third.waypoints, "and a fresh out-of-range frame does not re-enter it"
+
+
+def test_the_map_keeps_voting_during_a_takeover_so_it_can_outvote_the_lock(monkeypatch):
+    """Until 2026-10-05 nothing fed the landmark map while the takeover walked in, so the documented map
+    release (the sofa from four metres that is the bed from two) could never fire in flight."""
+    p, ep = setup_policy(target_closing={"failed_inspection_radius_factor": 2.0})
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and p.landmarks.all_landmarks(), "the chair is on the map from the takeover's own frames"
+    assert all(row.get("target_evidence") == "takeover_active" for row in p.perception.projections
+               if row["status"] == "fused"), "the legacy evidence stands down while the takeover owns the target"
+    assert p._target_id is None
+    p.detector.detect = lambda rgb: [DetectionWire("bed", .95, (280, 200, 360, 280))]
+    for step in range(2, 8):
+        try:
+            p.plan(observation(ep, step, depth=2))
+        except AssertionError:
+            pass                                   # the frozen search was handed the action after the release
+        if not p.closing.active:
+            break
+    assert not p.closing.active and p.closing.map_releases == 1 and p.closing.last_release == "contradicted by the map"
+
+
+def test_the_closings_own_release_turn_is_not_charged_to_the_room_loop(monkeypatch):
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=2)
+    p.detector.detect = lambda rgb: []
+    for step in (2, 3):
+        p.plan(replace(near, step=step))
+    released = p.plan(replace(near, step=4))
+    assert not p.closing.active and released.info["kind"] == "target_released"
+    charged = []
+    monkeypatch.setattr(p.loop, "charge", lambda: charged.append(1))
+    paused = []
+    monkeypatch.setattr(p.supervisor, "pause", lambda seconds: paused.append(seconds))
+    p.notify_action(replace(near, step=4), DiscreteAction.TURN_LEFT)
+    assert charged == [] and paused == [p.settings.action_time_s]
+
+
+def test_an_approach_that_goes_nowhere_releases_the_lock_before_the_closing_bound(monkeypatch):
+    """Leonardo couch (2026-10-05): locked on a real sofa 4.6 m away, A* found a path every action and the
+    follower pushed into an obstacle the map did not show for 160 actions, until the closing bound
+    raised an agent error. Twenty CLOSE actions inside a 20 cm circle release the lock with a rejection."""
+    p, ep = setup_policy(target_closing={"approach_stall_actions": 6})
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=3.5))
+    p.plan(observation(ep, 1, depth=3.5))
+    assert p.closing.locked and p.closing.phase in ("CLOSE", "VERIFY")
+    jitter = [(0.00, 0.00), (0.05, 0.02), (-0.03, 0.05), (0.06, -0.04), (0.02, 0.06), (-0.05, 0.01), (0.04, 0.03), (0.0, -0.05)]
+    released = None
+    for step, (dx, dy) in enumerate(jitter, 2):
+        command = p.plan(replace(observation(ep, step, depth=3.5), pose=AgentPose(dx, dy, 0, 0)))
+        if not p.closing.active:
+            released = command
+            break
+    assert released is not None, "the lock was released by the stall clock"
+    assert released.info["kind"] == "target_released" and "went nowhere" in released.info["reason"]
+    assert p.closing.stall_releases == 1 and p.closing.last_release.startswith("approach stalled")
+    assert p.closing.rejected, "a rejection: the same far candidate is not taken again from here"
+    assert p.closing.failure is None, "no agent error"
+    with pytest.raises(ValueError):
+        TargetClosingSettings(approach_stall_actions=-1)
+    with pytest.raises(ValueError):
+        TargetClosingSettings(approach_stall_m=0.0)
+
+
+def test_the_blocked_clock_survives_collision_jitter():
+    """Leonardo toilet (2026-10-05): every blocked MOVE_FORWARD slid the agent 5-10 cm, and that reset the
+    clock the BLOCKED verdict waits on; the agent jittered in a wedge for 350 actions."""
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: []                                              # no takeover: the search owns the action
+    p.plan(observation(ep, 0))
+    p._blocked_since = 3.0
+    p._last_pose = (0.0, 0.0)
+    p.plan(replace(observation(ep, 1), pose=AgentPose(0.08, 0.05, 0, 0)))          # a collision slide
+    assert p._blocked_since == 3.0, "a slide is not progress"
+    p.plan(replace(observation(ep, 2), pose=AgentPose(0.30, 0.05, 0, 0)))          # a forward step's worth
+    assert p._blocked_since is None, "a step clears the clock"

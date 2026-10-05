@@ -70,22 +70,42 @@ def test_a_strong_label_needs_a_distinctive_kind_and_one_signature_object_is_eno
     """Ranchester couch, 2026-10-05: a cabinet and a potted plant made an upstairs room a strong
     'living_room' at 0.95 and put a living room on the storey summary the node oracle reads."""
     client = ScriptedClassifier()
-    tracker = RevisableRoomLabels(client)
+    tracker = RevisableRoomLabels(client, RoomLabelSettings(generic_evidence_gate=False))
     tracker.update({1: ["cabinet", "potted plant"]}, 0)
     assert tracker.metadata[1]["strength"] == "weak", "two generic kinds describe no room"
     tracker.update({1: ["cabinet", "potted plant", "sofa"]}, 5)
     assert tracker.metadata[1]["strength"] == "strong", "a sofa is distinctive"
-    counted = RevisableRoomLabels(ScriptedClassifier(), RoomLabelSettings(distinctive_required=False))
+    counted = RevisableRoomLabels(ScriptedClassifier(),
+                                  RoomLabelSettings(distinctive_required=False, generic_evidence_gate=False))
     counted.update({1: ["cabinet", "potted plant"]}, 0)
     assert counted.metadata[1]["strength"] == "strong", "the former rule, one knob away"
     # One signature object (a bed) with the model agreeing is strong on its own; a cabinet is not.
-    signed = RevisableRoomLabels(ScriptedClassifier(bedroom_for=("bed",)))
+    signed = RevisableRoomLabels(ScriptedClassifier(bedroom_for=("bed",)), RoomLabelSettings(generic_evidence_gate=False))
     signed.update({1: ["bed"]}, 0)
     assert signed.metadata[1]["strength"] == "strong" and signed.metadata[1]["signature"]
     signed.update({2: ["cabinet"]}, 0)
     assert signed.metadata[2]["strength"] == "weak" and not signed.metadata[2]["signature"]
     with pytest.raises(ValueError):
         RoomLabelSettings(distinctive_required="yes")
+
+
+def test_generic_only_evidence_is_not_classified():
+    """Ranchester couch, 2026-10-05, action 34: one cabinet made a 'kitchen' at 0.9 on the upper storey,
+    and the storey summary showed the node oracle a kitchen found. Generic objects alone stay unknown
+    without a model call; one distinctive object beside them buys the call."""
+    client = ScriptedClassifier()
+    tracker = RevisableRoomLabels(client)
+    labels = tracker.update({1: ["cabinet"], 2: ["cabinet", "potted plant", "book"]}, 0)
+    assert labels[1].label == "unknown" and labels[2].label == "unknown"
+    assert client.calls == 0, "the model is not asked about generic furniture alone"
+    assert tracker.metadata[1]["trigger"] == "evidence_gate"
+    assert not tracker.pending(1), "nothing to re-ask about either"
+    labels = tracker.update({1: ["cabinet", "sofa"]}, 5)
+    assert labels[1].label != "unknown" and client.calls == 1, "a distinctive kind makes the room classifiable"
+    asked = RevisableRoomLabels(ScriptedClassifier(), RoomLabelSettings(generic_evidence_gate=False))
+    assert asked.update({1: ["cabinet"]}, 0)[1].label != "unknown", "the former behaviour, one knob away"
+    with pytest.raises(ValueError):
+        RoomLabelSettings(generic_evidence_gate="no")
 
 
 def test_pending_evidence_is_classified_on_request_for_one_room_only():

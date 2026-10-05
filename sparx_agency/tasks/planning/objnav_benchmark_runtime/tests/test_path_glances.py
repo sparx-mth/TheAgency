@@ -382,6 +382,27 @@ def test_a_cue_needs_unknown_floor_on_its_side_unless_it_is_the_target_or_a_home
     assert scheduler.apply(obs_at(camera, 0, here), world, command) is command
 
 
+def test_a_box_perception_placed_on_another_storey_or_refused_is_no_cue():
+    """Ranchester 2026-10-05, actions 53-59: a sofa on the storey below at the right edge of a landing --
+    projection 'unsupported_floor_association' -- bought three cue turns and three back, every two metres."""
+    route = route_east()
+    command = follow(route)
+    here = (2.0, 2.5)
+    box = Box("toilet", 0.6, (560.0, 120.0, 640.0, 400.0))
+    for status, evidence in (("unsupported_floor_association", None), ("wrong_floor_height", None),
+                             ("outside_observed_map", None), ("fused", "refused_by_takeover")):
+        policy, camera, actions = cue_policy(route, [box])
+        policy.perception.projections = [{"xyxy": list(box.xyxy), "status": status, "target_evidence": evidence}]
+        scheduler = GlanceScheduler(policy)
+        assert scheduler.apply(obs_at(camera, 0, here), corridor_world(), command) is command, status
+        assert scheduler.active is None and scheduler.stats["cues_placed_elsewhere"] == 1
+    policy, camera, actions = cue_policy(route, [box])
+    policy.perception.projections = [{"xyxy": list(box.xyxy), "status": "fused", "target_evidence": "border_clipped"}]
+    scheduler = GlanceScheduler(policy)
+    scheduler.apply(obs_at(camera, 0, here), corridor_world(), command)
+    assert scheduler.active is not None and scheduler.active["cue"] == "toilet", "a clipped box on this storey is the cue itself"
+
+
 def test_cue_settings_reject_nonsense():
     for kwargs in (dict(cue_enabled="yes"), dict(cue_confidence=0.0), dict(cue_border_px=-1), dict(cue_max_turns=0),
                    dict(cue_min_gain_m2=0.0), dict(cue_min_box_frac=1.5)):

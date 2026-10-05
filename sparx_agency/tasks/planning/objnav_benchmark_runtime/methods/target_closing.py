@@ -102,6 +102,14 @@ class TargetClosingSettings:
     # at least this share of the cells within ``footing_radius_m`` of the agent.
     footing_radius_m: float = 1.2
     footing_unknown_fraction: float = 0.25
+    # An approach that goes nowhere -- the agent's position has not left a circle of
+    # ``approach_stall_m`` in ``approach_stall_actions`` consecutive CLOSE actions --
+    # releases the lock with a rejection. A* finds a path every action; the follower
+    # pushes into something the map does not show (Leonardo 2026-10-05: 160 actions
+    # of MOVE_FORWARD against an unseen obstacle 4.6 m from a real sofa, until the
+    # closing bound raised an agent error). 0 disables the clock.
+    approach_stall_actions: int = 20
+    approach_stall_m: float = 0.20
 
     def __post_init__(self):
         if isinstance(self.confidence, bool) or not math.isfinite(self.confidence) or not 0 < self.confidence <= 1:
@@ -131,6 +139,10 @@ class TargetClosingSettings:
         for key in ("footing_after_steps", "release_after_footing_steps"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
+        if type(self.approach_stall_actions) is not int or self.approach_stall_actions < 0:
+            raise ValueError("approach_stall_actions must be a non-negative int")
+        if isinstance(self.approach_stall_m, bool) or not math.isfinite(self.approach_stall_m) or self.approach_stall_m <= 0:
+            raise ValueError("approach_stall_m must be positive and finite")
         for key in ("boxed_in_radius_m", "footing_radius_m"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -158,6 +170,8 @@ class TargetClosing:
         self.rejected = []                 # (anchor xyz, floor id, action, radius m) per released candidate
         self.releases = 0
         self.inspection_releases = 0
+        self.inspection_resumptions = 0    # inspections ended to step closer: seen fresh, measured out of range
+        self.stall_releases = 0            # locks released because the approach went nowhere
         self.map_releases = 0              # locks the map outvoted after the fact
         self.last_release = None           # why the last candidate was released
         self.released_step = None          # the action of the last release; the cooldown counts from it
@@ -190,6 +204,7 @@ class TargetClosing:
         self.no_path_steps = 0             # consecutive actions the LOCKED target had no safe path
         self.footing_done = False          # a footing sweep was asked for by this lock
         self.pathless_after_footing = 0    # pathless actions since the sweep ended
+        self.close_trail = []              # (x, y) per consecutive CLOSE action, for the stall clock
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -279,6 +294,12 @@ class TargetClosing:
             p._route = p._goal = None
             p.peek.cancel(obs, "target_takeover", restore=False)
             p.camera_control.inspection = None
+            glances = getattr(p, "glances", None)
+            if glances is not None and glances.active is not None:
+                # A cue glance toward the box is often what un-clipped it; left in
+                # force it resumed, stale, after the release (turns toward a yaw the
+                # route no longer has).
+                glances.abort(obs, "target_takeover")
         if not self.active:
             return
         if projected:
@@ -423,7 +444,16 @@ class TargetClosing:
         command = self._continue_footing(obs, world, distance)
         if command is not None:
             return command
-        if self.inspection_started is not None or distance <= s.terminal_distance_m:
+        measured = self._fresh_measured(obs)
+        out_of_range = measured is not None and measured > s.terminal_distance_m + s.range_tolerance_m
+        if self.inspection_started is not None and self.inspection_sighting is None and out_of_range:
+            # Seen fresh from here, aligned or not, but the measured surface lies beyond
+            # the terminal range: the filtered estimate entered the inspection early (an
+            # older, nearer reading averaged in). Standing still would spend the budget
+            # on a target in plain view and release it as "saw nothing"; step closer.
+            self.inspection_started = None
+            self.inspection_resumptions += 1
+        if self.inspection_started is not None or (distance <= s.terminal_distance_m and not out_of_range):
             command = self._inspect(obs, distance)
             if command is None:
                 # The lock was wrong: released, the spot remembered. This action is one
@@ -442,6 +472,15 @@ class TargetClosing:
             return self._no_path(obs, world, distance)
         self.no_path_steps = 0
         self.pathless_after_footing = 0
+        if self._approach_stalled(obs):
+            self.stall_releases += 1
+            self._release(obs, why="approach stalled: no progress in %d actions" % s.approach_stall_actions)
+            turn = p.episode.action_spec.turn_angle_rad
+            return NavigationCommand.hold(
+                final_yaw=normalize_angle(obs.pose.yaw + turn),
+                info={"kind": "target_released", "phase": "RELEASED",
+                      "reason": "the approach from %.1f m went nowhere for %d actions; the search resumes"
+                      % (distance, s.approach_stall_actions)})
         visible = self.last_seen == obs.step
         self.phase = "CLOSE" if visible else "CLOSE_OCCLUDED"
         self.occluded_path_steps += int(not visible)
@@ -594,13 +633,9 @@ class TargetClosing:
         tilting = pitch is not None and pitch_action(obs.pose.camera_pitch, pitch, actions.tilt_angle_rad,
                                                      actions.min_pitch_rad, actions.max_pitch_rad) is not None
         limit = s.terminal_distance_m + s.range_tolerance_m
-        measured = None
-        if fresh:
-            measured = math.dist((obs.pose.x, obs.pose.y), self.observed_xyz[:2])
-            if self.observed_near_m is not None:
-                measured = min(measured, self.observed_near_m)
-            if measured <= limit:
-                self.inspection_sighting = obs.step
+        measured = self._fresh_measured(obs)
+        if measured is not None and measured <= limit:
+            self.inspection_sighting = obs.step
         info = {"kind": "target_closing", "target_confirmed": True, "persistent_lock": True,
                 "target_visible": fresh, "range_m": distance, "measured_m": measured, "bbox_yaw_error_rad": error,
                 "box_spans_centre": spans_centre, "phase": self.phase}
@@ -630,7 +665,33 @@ class TargetClosing:
             self.fail("terminal visual confirmation unavailable")
         if not fresh or (not turning and not tilting):
             yaw, pitch = self._inspection_view(obs, bearing, pitch)
+        elif turning:
+            # The converter tilts before it faces: asking for the predicted pitch here
+            # would LOOK away from a target in view and never turn (LOOK_DOWN/LOOK_UP
+            # for the whole budget). Centre it at the pitch it was seen at.
+            pitch = None
         return NavigationCommand.hold(camera_pitch=pitch, final_yaw=yaw, info=info)
+
+    def _approach_stalled(self, obs):
+        """Whether the last ``approach_stall_actions`` CLOSE actions left the agent inside a circle of ``approach_stall_m``."""
+        s = self.settings
+        if s.approach_stall_actions <= 0:
+            return False
+        self.close_trail.append((float(obs.pose.x), float(obs.pose.y)))
+        if len(self.close_trail) <= s.approach_stall_actions:
+            return False
+        del self.close_trail[:-s.approach_stall_actions - 1]
+        x0, y0 = self.close_trail[0]
+        return all(math.dist((x, y), (x0, y0)) <= s.approach_stall_m for x, y in self.close_trail[1:])
+
+    def _fresh_measured(self, obs):
+        """The freshly measured range to the target this action -- the near edge of its surface -- or None when not seen."""
+        if self.last_seen != obs.step or self.observed_xyz is None:
+            return None
+        measured = math.dist((obs.pose.x, obs.pose.y), self.observed_xyz[:2])
+        if self.observed_near_m is not None:
+            measured = min(measured, self.observed_near_m)
+        return measured
 
     def _inspection_views(self, pitch):
         """The bounded yaw/pitch views an inspection cycles through, centred on the stored bearing."""
@@ -666,7 +727,8 @@ class TargetClosing:
                 "last_seen_step": self.last_seen, "xyz": self.xyz, "bbox": self.box,
                 "floor_id": self.floor_id, "label": self.label, "failure": self.failure,
                 "releases": self.releases, "inspection_releases": self.inspection_releases,
-                "map_releases": self.map_releases,
+                "inspection_resumptions": self.inspection_resumptions, "map_releases": self.map_releases,
+                "stall_releases": self.stall_releases,
                 "last_release": self.last_release, "border_rejections": self.border_rejections,
                 "map_rejections": self.map_rejections, "weak_resightings": self.weak_resightings,
                 "no_path_steps": self.no_path_steps, "footing_sweeps": self.footing_sweeps,

@@ -39,7 +39,9 @@ counts for nothing (`weak_resightings` in the diagnostics).
 **What may start a takeover.** A box within `border_margin_px` (**8 px**) of any
 image edge is a partial view — its depth centroid is unreliable, and the clipped
 end of a bed reads as a sofa (the Ranchester couch-downstairs run of 2026-10-04
-ended on exactly such an 84 px sliver). Clipped boxes cannot start or count
+ended on exactly such an 84 px sliver) — unless it fills 30 % of the frame in
+either dimension, the big object at terminal range that no frame holds whole
+(`clipped_box`). Clipped boxes cannot start or count
 towards a lock; once locked, the approach tolerates spill-over. A box projecting
 within `rejection_radius_m` (**1.0 m**) of a spot already released as unverified
 on the same floor is ignored before a lock -- **unless it is seen from within
@@ -67,11 +69,17 @@ cooldown, or one seen from a spot given up for want of a path, sets no legacy
 target hint (`refused_by_takeover` on the projection row) -- the second Hanson
 fly walked nine actions toward a chair the takeover had released a frame
 earlier, and the move restarted the warm-up where it ended. `release_unverified: false` restores the historical behaviour, where
-the exhausted verification raises the recordable method error. **After the lock
-nothing releases ownership**: neither a timeout nor a rejected route;
-**only episode reset clears it**. Room reasoning, stair decisions, doorway peeks,
-FALCON masks and exploration fallback remain suspended while the takeover owns
-the action.
+the exhausted verification raises the recordable method error. **After the lock**
+neither a timeout nor a rejected route releases ownership; the four releases a
+locked target does have are the ones below -- an inspection that saw nothing from
+close, a map whose class vote at the anchor outvotes the lock, a spot with no
+path out of it, and an approach that goes nowhere (`approach_stall_actions` CLOSE
+actions inside `approach_stall_m`: A* finds a path, the follower pushes into
+something the map does not show) -- and episode reset. Room reasoning, stair decisions, doorway peeks,
+glances, FALCON masks and exploration fallback remain suspended while the takeover
+owns the action (a glance in force is aborted the action it starts); the landmark
+map keeps voting on the frames the takeover sees, so the map release can fire,
+while the legacy target evidence stands down.
 
 The closing sub-policy reuses coherent RGB-D backprojection with the actual camera
 pitch. It samples standoff footpoints around the observed target, projects them
@@ -107,13 +115,19 @@ protocol cannot emit LOOK_DOWN; multi-story development has tilt-enabled actions
 Turns retain the protocol's fixed increments (30 degrees in Habitat) and its
 half-turn dead band, not arbitrary micro-turns.
 
-STOP requires a **fresh**, associated detection, completed verification, centered
-yaw, satisfied pitch and both filtered and freshly measured horizontal range
-within the terminal radius plus `range_tolerance_m` (**0.05 m**, for pitch-dependent
-projection noise). No STOP from remembered distance alone is allowed. This terminal
-radius replaces legacy `stop_distance_m` for the closing sub-policy. Verification
-is bounded at 12 actions (`max_verify_steps`, released as above), terminal
-inspection at 24 (`max_reacquire_steps`), and total closing at 160 by default.
+STOP requires a **fresh**, associated detection, completed verification, an aligned
+box (its centre within half a turn, or a box that spans the image's centre column)
+and a **freshly measured** horizontal range -- the near edge of the detected
+surface -- within the terminal radius plus `range_tolerance_m` (**0.05 m**, for
+pitch-dependent projection noise), at whatever pitch the sighting came. No STOP
+from remembered distance alone is allowed. The pitch the target's height predicts
+is where the inspection LOOKS for it when it is not in view; a fresh off-centre
+sighting is centred at the pitch it was seen at. An inspection the filtered
+estimate entered while every fresh frame measures the surface beyond the limit is
+ended and the approach resumed (`inspection_resumptions`). This terminal radius
+replaces legacy `stop_distance_m` for the closing sub-policy. Verification is
+bounded at 12 actions (`max_verify_steps`, released as above), terminal inspection
+at 24 (`max_reacquire_steps`), and total closing at 160 by default.
 Occlusion during transit has no separate timeout. **The terminal inspection on a
 big object at close range** (the Ranchester couch, 2026-10-04, actions 172-196):
 a fresh box that *spans the image centre column* counts as aligned whatever its
@@ -888,9 +902,9 @@ are not worth a step:
   hole) -- is a cell the depth should have resolved and did not: a balcony
   railing with the garden below, a window, a glass door, a hole in the
   mesh. Looked through from `min_looks` (2) distinct poses (binned by
-  `pose_bin_m` / `pose_bin_deg`) it is **settled**; a few cells behind it
-  (`depth_cells`, 3) with it, so the free cell on the boundary stops being
-  a frontier cell. The Hanson re-fly walked to both ends of a balcony it
+  `pose_bin_m` / `pose_bin_deg`) it is **settled**; about a cell and a half
+  behind it (`depth_cells`, 3 half-cell samples) with it, so the free cell on
+  the boundary stops being a frontier cell. The Hanson re-fly walked to both ends of a balcony it
   had seen whole from its threshold (actions 25-51, two openings, two
   peeks).
 - **Pockets.** A connected component of unknown of at most `pocket_max_m2`

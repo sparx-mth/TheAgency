@@ -33,7 +33,10 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   by merging adjacent basins whose *dynamics* — the clearance lost from
   the shallower peak down to the saddle between them — fall below a
   threshold. Union-find on a region adjacency graph built in one pass;
-  a door border is a hard barrier and never merges.
+  a door border is a hard barrier and never merges (a door snapped to a
+  choke is a barrier by the carved mask's sides instead -- and, since
+  2026-10-05, falls back to the plain barring disk when its disk does
+  not actually sever the floor).
 - `room_adjacency.py` — `room_adjacency()`: which rooms genuinely touch,
   and `iter_label_borders()`, the single border scan both it and
   `room_merge` use. This is the room-to-room edge rule for the scene
