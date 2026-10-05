@@ -50,6 +50,51 @@ HOME_OBJECTS = {
 }
 
 
+#: Object class -> the one room type it names on its own. A bed is a bedroom and a toilet
+#: a bathroom with no second kind of object needed: the label a classifier gives a room
+#: holding one is STRONG when it agrees with this table (``room_labels.RevisableRoomLabels``),
+#: so the type prior may rule the room out at once -- the Hanson recording of 2026-10-05
+#: walked into a bedroom it had seen the bed of through the door (actions 270-289), because
+#: one kind of object was by rule a weak label. A chair, a cabinet, a desk or a plant names
+#: nothing on its own and is not listed. The merge guards of :func:`ruled_out` still hold:
+#: a home object of the target, or the target itself, keeps the room a node.
+SIGNATURE_OBJECTS = {
+    "bed": "bedroom",
+    "toilet": "bathroom",
+    "shower": "bathroom",
+    "bathtub": "bathroom",
+    "oven": "kitchen",
+    "stove": "kitchen",
+    "refrigerator": "kitchen",
+}
+
+
+#: Object classes that stand in every kind of room and name none: two of them together are
+#: not a STRONG label (``room_labels.RevisableRoomLabels``). The Ranchester couch search of
+#: 2026-10-05 had a cabinet and a potted plant make an upstairs room a "living_room" at 0.95,
+#: strong, which put a living room on the storey summary the node oracle reads and wobbled its
+#: verdict on where living rooms are; under the type prior the same label would have ruled the
+#: room out for a bed or a toilet. A chair, a desk, a table, a sofa or a television is not
+#: generic: with a second kind they do describe a room.
+GENERIC_OBJECTS = frozenset(("cabinet", "potted plant", "book", "vase", "clock", "cup", "bottle"))
+
+
+def generic_object(class_name):
+    """Whether ``class_name`` is an object that stands in any room and names none (:data:`GENERIC_OBJECTS`)."""
+    if not class_name:
+        return False
+    name = _ALIASES.get(str(class_name).strip().lower(), str(class_name).strip().lower())
+    return name in GENERIC_OBJECTS
+
+
+def signature_type(class_name):
+    """The room type ``class_name`` names on its own (:data:`SIGNATURE_OBJECTS`), or None."""
+    if not class_name:
+        return None
+    name = _ALIASES.get(str(class_name).strip().lower(), str(class_name).strip().lower())
+    return SIGNATURE_OBJECTS.get(name)
+
+
 def home_object(target, class_name):
     """Whether an object of ``class_name`` marks the room ``target`` lives in."""
     key = target_key(target)

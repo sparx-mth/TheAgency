@@ -597,14 +597,20 @@ def test_verification_faces_a_visible_candidate_and_steps_towards_it_instead_of_
     on every other frame, the consecutive count never reached two, and twelve-step verifications
     repeated from one spot six times. A visible candidate is faced; a centred one is approached."""
     p, ep = setup_policy()
-    # Off-centre to the left and far: the first action turns to face the box, nothing else.
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (150, 200, 230, 280))]
+    # Well off-centre to the left (34 degrees, beyond one turn) and far: the first action turns to face the box.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (20, 200, 100, 280))]
     turning = p.plan(observation(ep, 0, depth=3.5))
     assert p.closing.active and not p.closing.locked and turning.info["target_visible"]
     assert turning.waypoints == () and turning.final_yaw is not None and turning.final_yaw > 0.1
+    # Within one turn of the centre (18 degrees; Hanson 2026-10-05, a chair seen at one yaw only): a step,
+    # not a turn -- the box stays in the frame and the next frame can be the consecutive one.
+    p1, _ = setup_policy()
+    p1.detector.detect = lambda rgb: [DetectionWire("chair", .9, (150, 200, 230, 280))]
+    nudging = p1.plan(observation(ep, 0, depth=3.5))
+    assert nudging.info.get("verify_step") == "towards the candidate" and nudging.waypoints
     # Centred and far: one step towards it, no sweep away from it.
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
     p2, _ = setup_policy()
+    p2.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
     stepping = p2.plan(observation(ep, 0, depth=3.5))
     assert stepping.info.get("verify_step") == "towards the candidate" and stepping.waypoints
     assert math.dist(stepping.waypoints[-1], (0.0, 0.0)) == pytest.approx(2 * ep.action_spec.forward_step_m)
@@ -634,3 +640,215 @@ def test_a_release_cools_far_candidates_but_not_close_ones():
     with pytest.raises(ValueError):
         TargetClosingSettings(release_cooldown_actions=-1)
 
+
+
+# -- a lock with no safe path: the footing sweep, then the spot is given up (2026-10-05) ----------
+def tilt_episode(p, original):
+    ep = replace(original, action_spec=MULTIFLOOR_PROTOCOL.actions())
+    p.reset(ep, p.target)
+    return ep
+
+
+def drive(p, ep, converter, pose, step, boxes):
+    """One action through the real converter (an idle step is the headless agent's TURN_LEFT); returns
+    ``(command, action, pose after it)``."""
+    p.detector.detect = lambda rgb: boxes
+    obs = replace(observation(ep, step, depth=3.0), pose=pose)
+    command = p.plan(obs)
+    action = converter.step(pose, command).action or DiscreteAction.TURN_LEFT
+    if p.closing.active:                                       # after a release the action is the frozen search's
+        p.notify_action(obs, action)
+    return command, action, apply_action(pose, action, ep.action_spec)
+
+
+def test_a_locked_target_with_no_safe_path_maps_its_footing_then_gives_the_spot_up_without_a_rejection(monkeypatch):
+    """Hanson/000002: spawned beside a bed with the plant in view 4.4 m away, 159 actions turning on
+    'no safe target path'. The floor under the camera was unknown, and unknown is impassable."""
+    p, original = setup_policy()
+    ep = tilt_episode(p, original)
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.full((200, 200), -1, np.int8), OccupancyGrid2DParams(.1, -10, -10))   # the blind disk: unknown
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.target_projector = lambda point: None                     # no standoff goal exists from here: no path
+    converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
+    box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    actions, phases = [], []
+    for step in range(60):
+        command, action, pose = drive(p, ep, converter, pose, step, box)
+        actions.append(action)
+        phases.append(p.closing.phase)
+        if not p.closing.active:
+            break
+    assert p.closing.locked is False and p.closing.phase == "RELEASED"
+    assert p.closing.footing_sweeps == 1 and "FOOTING" in phases
+    assert actions.count(DiscreteAction.LOOK_DOWN) == 1 and actions.count(DiscreteAction.LOOK_UP) == 1
+    turns = sum(1 for a in actions if a in (DiscreteAction.TURN_LEFT, DiscreteAction.TURN_RIGHT))
+    assert turns >= 12, "a full circle at the footing pitch"
+    assert pose.camera_pitch == pytest.approx(0.0), "the camera is level again when the lock is given up"
+    assert len(actions) < 40, "not the 160-action closing bound"
+    assert p.closing.boxed_releases == 1 and p.closing.rejected == [], "the target was not disproved, the spot was"
+    assert p.closing.last_release == "no safe path from here"
+    assert command.info["kind"] == "target_released" and "no safe path" in command.info["reason"]
+    [spot] = p.closing.boxed_in
+    assert math.dist(spot[0], (pose.x, pose.y)) < 0.5 and spot[1] == 0
+    assert p.closing.diagnostics()["boxed_releases"] == 1 and p.closing.diagnostics()["boxed_in"][0]["floor_id"] == 0
+    # From the same spot the same far candidate starts no new takeover; a metre away, past the cooldown, it does.
+    step += 1
+    for later in range(step, step + 20):
+        p.closing.observe(replace(observation(ep, later, depth=3.0), pose=pose))
+        assert not p.closing.active
+    moved = replace(pose, x=pose.x + 1.5, y=pose.y + 1.5)
+    p.closing.observe(replace(observation(ep, step + 25, depth=3.0), pose=moved))
+    assert p.closing.active
+    # On a floor already known around the feet there is nothing to sweep: the spot is given up without one.
+    p, original = setup_policy()
+    ep = tilt_episode(p, original)
+    freeze_global(monkeypatch, p)
+    known = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: known)
+    p.target_projector = lambda point: None
+    converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
+    for step in range(30):
+        command, action, pose = drive(p, ep, converter, pose, step, box)
+        if not p.closing.active:
+            break
+    assert p.closing.footing_sweeps == 0 and p.closing.boxed_releases == 1 and step <= 10
+
+
+def test_without_the_footing_sweep_a_pathless_lock_is_still_given_up_after_its_bound(monkeypatch):
+    """``footing_sweep=False`` drops the sweep alone; the spot is given up after
+    ``release_after_footing_steps`` pathless actions all the same. The no-tilt Gibson protocol
+    (no LOOK actions) takes this path by construction."""
+    p, original = setup_policy(target_closing={"footing_sweep": False})
+    ep = tilt_episode(p, original)
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.target_projector = lambda point: None
+    converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
+    box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    actions = []
+    for step in range(30):
+        command, action, pose = drive(p, ep, converter, pose, step, box)
+        actions.append(action)
+        if not p.closing.active:
+            break
+    assert DiscreteAction.LOOK_DOWN not in actions and p.closing.footing_sweeps == 0
+    assert not p.closing.active and p.closing.boxed_releases == 1 and len(actions) <= 10
+    # The Gibson protocol has no LOOK actions: the same release, no sweep asked for.
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.target_projector = lambda point: None
+    converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
+    for step in range(30):
+        command, action, pose = drive(p, ep, converter, pose, step, box)
+        if not p.closing.active:
+            break
+    assert p.closing.boxed_releases == 1 and p.closing.footing_sweeps == 0 and step <= 10
+
+
+@pytest.mark.parametrize("kwargs", [{"footing_after_steps": 0}, {"release_after_footing_steps": 0},
+                                    {"boxed_in_radius_m": 0.0}, {"footing_sweep": "yes"},
+                                    {"footing_unknown_fraction": 1.5}, {"footing_radius_m": 0.0}])
+def test_footing_settings_are_validated(kwargs):
+    with pytest.raises(ValueError):
+        TargetClosingSettings(**kwargs)
+
+
+# -- the sweep ends when a path appears; the pitch is the height's; a sighting STOPs at any pitch (2026-10-05) ------
+def test_the_footing_sweep_is_cut_short_the_action_a_path_exists_and_the_approach_is_level(monkeypatch):
+    """Hanson/000002, second fly: the sweep found the path at its third turn, but its pitch stood for the
+    whole approach and the first inspection (owner FOOTING, 30 degrees down, actions 5-63)."""
+    p, original = setup_policy()
+    ep = tilt_episode(p, original)
+    freeze_global(monkeypatch, p)
+    unknown = OccupancyGrid2D(np.full((200, 200), -1, np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    known = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    state = {"world": unknown, "path": False}
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: state["world"])
+    p.target_projector = lambda point: point if state["path"] else None
+    converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
+    box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    actions, owners = [], []
+    for step in range(40):
+        command, action, pose = drive(p, ep, converter, pose, step, box)
+        actions.append(action)
+        owners.append(command.info.get("camera", {}).get("owner"))
+        if p.closing.phase == "FOOTING" and step >= 5 and not state["path"]:
+            state["world"], state["path"] = known, True          # the floor is mapped and a standoff exists now
+        if p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED") and actions.count(DiscreteAction.MOVE_FORWARD) >= 2:
+            break
+    assert p.closing.footing_sweeps == 1 and p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED")
+    assert actions.count(DiscreteAction.LOOK_UP) == 1, "restored the action the path appeared, not after the circle"
+    assert actions.count(DiscreteAction.TURN_LEFT) < 12, "the circle was cut short"
+    assert pose.camera_pitch == pytest.approx(0.0) and owners[-1] == "TARGET_CLOSING", "the approach is level"
+    assert not p.camera_control.footing and p.camera_control.inspection is None
+
+
+def test_the_inspection_pitch_follows_the_targets_height_not_its_label(monkeypatch):
+    """A potted plant in a metre-tall planter is at camera height; the camera stays level."""
+    p, original = setup_policy()
+    ep = replace(tilt_episode(p, original), target_category="potted plant")
+    p.reset(ep, gibson_label_mapper().target_labels("potted plant"))
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.detector.detect = lambda rgb: [DetectionWire("potted plant", .9, (280, 200, 360, 280))]
+    p.plan(replace(observation(ep, 0, depth=2), target_category="potted plant"))
+    p.plan(replace(observation(ep, 1, depth=2), target_category="potted plant"))
+    assert p.closing.locked and abs(p.closing.xyz[2] - ep.camera.height_m) < 0.2, "a box at the image centre is at camera height"
+    near = replace(observation(ep, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0), target_category="potted plant")
+    command = p.plan(near)
+    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert p.closing._pitch(near, 0.9) == pytest.approx(0.0), "no look-down for an object at eye level"
+    # A toilet 0.45 m up with the camera at 0.88 m is low by its height: the look-down stands.
+    p, original = setup_policy()
+    ep = replace(tilt_episode(p, original), target_category="toilet")
+    p.reset(ep, gibson_label_mapper().target_labels("toilet"))
+    p.closing.xyz = (1.0, 0.0, 0.45)
+    assert p.closing._pitch(replace(observation(ep, 0), target_category="toilet"), 0.9) == pytest.approx(ep.action_spec.tilt_angle_rad)
+
+
+def test_a_fresh_centred_in_range_sighting_stops_at_whatever_pitch_it_came(monkeypatch):
+    """The Hanson toilet projected at 60 degrees down where its height predicted 30: twenty actions of
+    LOOK_UP / LOOK_DOWN after a fresh, centred sighting at 0.91 m, until the budget STOPped."""
+    p, original = setup_policy()
+    ep = replace(tilt_episode(p, original), target_category="toilet")
+    p.reset(ep, gibson_label_mapper().target_labels("toilet"))
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.detector.detect = lambda rgb: [DetectionWire("toilet", .9, (280, 200, 360, 280))]
+    p.plan(replace(observation(ep, 0, depth=2), target_category="toilet"))
+    p.plan(replace(observation(ep, 1, depth=2), target_category="toilet"))
+    assert p.closing.locked
+    # A low target 0.8 m ahead: its height predicts 30 degrees down. The camera stands at 60, and a flat
+    # 0.8 m depth along a ray pitched 60 degrees lands 0.42 m from the anchor: associated, fresh, in range.
+    p.closing.xyz = p.closing.anchor = (1.9, 0.0, 0.3)
+    pitched = replace(observation(ep, 2, depth=0.8), pose=AgentPose(1.1, 0, 0, 0, camera_pitch=2 * ep.action_spec.tilt_angle_rad),
+                      target_category="toilet")
+    assert p.closing._pitch(pitched, 0.8) == pytest.approx(ep.action_spec.tilt_angle_rad), "the prediction says 30"
+    command = p.plan(pitched)
+    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert command.info["target_visible"] and command.info["measured_m"] <= 1.05
+
+
+def test_the_legacy_target_evidence_does_not_walk_after_what_the_takeover_refused(monkeypatch):
+    """Hanson/000001, second fly: the takeover released a far chair as unverified at action 18 and the
+    legacy pursuit walked nine actions toward the same landmark, moving the agent off its warm-up spot."""
+    p, ep = setup_policy(target_closing={"max_verify_steps": 2})
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.plan(observation(ep, 0, depth=3.5))
+    assert p.closing.active and not p.closing.locked
+    p.detector.detect = lambda rgb: []
+    p.plan(observation(ep, 1, depth=3.5))
+    p.plan(observation(ep, 2, depth=3.5))
+    assert not p.closing.active and p.closing.last_release == "unverified" and p.closing.rejected
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    for step in (3, 4, 5):
+        p.plan(observation(ep, step, depth=3.5))
+    assert p._target_xy is None, "the released spot is not a legacy target either"
+    assert p.perception.counts["refused_evidence"] >= 1
+    assert any(row.get("target_evidence") == "refused_by_takeover" for row in p.perception.projections)
+    assert not p.closing.active, "and the takeover itself still refuses it from here"

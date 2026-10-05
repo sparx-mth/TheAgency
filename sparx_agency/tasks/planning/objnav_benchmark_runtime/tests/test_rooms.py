@@ -22,11 +22,14 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method impo
 
 
 class ScriptedClassifier:
-    def __init__(self):
+    def __init__(self, bedroom_for=()):
         self.calls = 0
+        self.bedroom_for = tuple(bedroom_for)
 
     def chat_json(self, system, user):
         self.calls += 1
+        if any(name in user for name in self.bedroom_for):
+            return {"label": "bedroom", "confidence": 0.9, "reasoning": "a signature object"}
         return {"label": "living_room" if self.calls == 1 else "bedroom",
                 "confidence": 0.8, "reasoning": "current observed objects"}
 
@@ -61,6 +64,28 @@ def test_one_confirmed_object_is_a_weak_clue_and_two_classes_a_strong_one():
     assert labels[1].label == "bedroom" and client.calls == 2, "the label is revised on the new evidence"
     assert tracker.metadata[1]["strength"] == "strong", "two classes, confident model"
     assert tracker.history[-1]["previous"] == "living_room" and tracker.history[-1]["label"] == "bedroom"
+
+
+def test_a_strong_label_needs_a_distinctive_kind_and_one_signature_object_is_enough():
+    """Ranchester couch, 2026-10-05: a cabinet and a potted plant made an upstairs room a strong
+    'living_room' at 0.95 and put a living room on the storey summary the node oracle reads."""
+    client = ScriptedClassifier()
+    tracker = RevisableRoomLabels(client)
+    tracker.update({1: ["cabinet", "potted plant"]}, 0)
+    assert tracker.metadata[1]["strength"] == "weak", "two generic kinds describe no room"
+    tracker.update({1: ["cabinet", "potted plant", "sofa"]}, 5)
+    assert tracker.metadata[1]["strength"] == "strong", "a sofa is distinctive"
+    counted = RevisableRoomLabels(ScriptedClassifier(), RoomLabelSettings(distinctive_required=False))
+    counted.update({1: ["cabinet", "potted plant"]}, 0)
+    assert counted.metadata[1]["strength"] == "strong", "the former rule, one knob away"
+    # One signature object (a bed) with the model agreeing is strong on its own; a cabinet is not.
+    signed = RevisableRoomLabels(ScriptedClassifier(bedroom_for=("bed",)))
+    signed.update({1: ["bed"]}, 0)
+    assert signed.metadata[1]["strength"] == "strong" and signed.metadata[1]["signature"]
+    signed.update({2: ["cabinet"]}, 0)
+    assert signed.metadata[2]["strength"] == "weak" and not signed.metadata[2]["signature"]
+    with pytest.raises(ValueError):
+        RoomLabelSettings(distinctive_required="yes")
 
 
 def test_pending_evidence_is_classified_on_request_for_one_room_only():

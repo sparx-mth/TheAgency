@@ -610,14 +610,15 @@ def see(policy, objects, step):
     policy.graph._objects = {pid: list(names) for pid, names in objects.items()}
     policy.graph.label_tracker.update(objects, step, allow_query=False)
 def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_solved_before_it_is_entered():
-    """A toilet seen through room B's doorway while walking to it: room B is a bathroom now, a fact the
-    oracle has not valued. The turn ends on the action the clue lands, the estimate and the order are
-    redone, and -- the stub oracle unmoved -- the same room is chosen straight back, uncooled."""
+    """A sink seen through room B's doorway while walking to it: room B is a bathroom now (weakly: a sink
+    alone could be a kitchen's), a fact the oracle has not valued. The turn ends on the action the clue
+    lands, the estimate and the order are redone, and -- the stub oracle unmoved -- the same room is
+    chosen straight back, uncooled."""
     llm = NamingLLM()
     policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
-    see(policy, {1: ["toilet"]}, step=1)
+    see(policy, {1: ["sink"]}, step=1)
     assert llm.calls == 0, "the background refresh records evidence without a call"
     command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
     assert llm.calls == 1, "the room in transit is re-labelled the action a new kind of object lands in it"
@@ -630,7 +631,7 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
     assert [e["event"] for e in policy.loop.events[-3:]] == ["relabel", "release", "transit"]
     assert policy.loop.events[-3]["where"] == "transit" and policy.loop.events[-3]["label"] == "bathroom"
     assert not policy.supervisor.is_cooling(1, policy._floor_time), "neutral: not cooled, not charged an attempt"
-    assert policy.loop.estimates[1]["label"] == "bathroom" and policy.loop.estimates[1]["objects"] == ["toilet"]
+    assert policy.loop.estimates[1]["label"] == "bathroom" and policy.loop.estimates[1]["objects"] == ["sink"]
 def test_the_oracle_decides_what_the_new_name_is_worth():
     """The same clue, with an oracle that gives a bathroom nothing for a chair: the order goes elsewhere."""
     llm = NamingLLM()

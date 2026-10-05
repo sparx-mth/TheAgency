@@ -43,6 +43,17 @@ into. The floor is the ``entered``/``identified`` flags made binding: the
 model still ranks the unexplored places against each other and against the
 stairs, but it cannot write any of them off.
 
+The floor has one condition, since the Ranchester couch search of the same
+day: the model's own STEP 2. Asked for it as a structured verdict
+(``home_here``: ``found`` / ``missing`` / ``elsewhere``), a small model
+answers reliably -- "living rooms are downstairs" at every loop point -- and
+then writes the worked example's 25 on every upstairs gap all the same, so
+thirteen peeks outranked the staircase the agent stood beside. With
+``home_here="elsewhere"`` an unexplored place is read at
+``unexplored_elsewhere`` (0.10) exactly, rule 2b's "less" applied by the
+code: a look into it comes after the storey the target lives on, and the
+stairs at 0.6 come first. ``found`` and ``missing`` keep the 0.25 floor.
+
 Python 3.8 syntax, standard library only.
 """
 from __future__ import annotations
@@ -66,6 +77,15 @@ MAX_CLASSES_IN_PROMPT = 8
 #: Default probability floor for an unexplored node (a never-entered, unidentified room;
 #: an opening with nothing glimpsed through it). See the module docstring.
 UNEXPLORED_FLOOR = 0.25
+#: What an unexplored node is read at when the model's STEP 2 says the target's home type does
+#: not belong on this storey (``home_here="elsewhere"``) -- rule 2b's "less", applied by the code
+#: because a small model does not apply it: the Ranchester couch search of 2026-10-05 had the 3B
+#: model write "living rooms are downstairs" at every loop point and 25 on every upstairs gap all
+#: the same (the worked example's number), so thirteen peeks outranked the stairs it stood beside.
+UNEXPLORED_ELSEWHERE = 0.10
+#: The three answers to "is a room of the home type on this storey?".
+HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE = "found", "missing", "elsewhere"
+HOME_HERE = (HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE)
 
 SYSTEM_PROMPT = """You are the reasoning module of a robot searching ONE building for an \
 instance of ONE target category. The robot has partly mapped the building into NODES.
@@ -111,7 +131,10 @@ whether a room of the home type has been FOUND on this storey or is still MISSIN
 and, if missing, whether the home type belongs on this storey at all. Where rooms \
 live in a house: kitchen, dining and living room downstairs; bedrooms upstairs; \
 the bathroom BESIDE the bedrooms, so upstairs too (a ground floor has at most a \
-small toilet room); an office or study on either.
+small toilet room); an office or study on either. Write the verdict as "home_here": \
+"found" (a room of the home type is on this storey), "missing" (none found yet, but \
+the home type belongs on this storey) or "elsewhere" (the home type does not belong \
+on this storey; it lives on another one).
 STEP 3 -- the numbers, by these rules:
  1. HOME FOUND HERE with frontier left: it has a high search-success probability.
  2. HOME MISSING HERE: independently consider (a) UNKNOWN rooms whose SIZE fits the home \
@@ -123,9 +146,10 @@ fit and how much of each unknown room is unseen. When the home type is not expec
 on this storey, the stairs can have a high probability without suppressing other nodes.
  2b. UNEXPLORED places: an UNKNOWN room with entered=no, and an OPENING with nothing \
 glimpsed, are places the robot knows NOTHING about. It owes each of them at least a \
-look before "not here" means anything, so each gets at least 25 -- more when the home \
-type is still missing on a storey where it belongs, less (10-20) only when STEP 2 says \
-the home type does not belong on this storey at all. Never write one off for its size.
+look before "not here" means anything, so each gets at least 25 when home_here is \
+"found" or "missing" -- more when the home type is still missing on a storey where it \
+belongs -- and about 10 when home_here is "elsewhere": a look into them comes after the \
+storey the target lives on. Never write one off for its size.
  2c. An object of the home type's kind seen in a room of ANOTHER type -- a sink or a \
 shower in a "living room", a bed in a "kitchen", a stove in a "bedroom" -- means the \
 map merged two rooms into one: value that room like an unknown room of the home \
@@ -158,7 +182,7 @@ for travel; the room the robot stands in is judged exactly like the others.
  14. Per node write "why" first (at most 12 words, lower case, naming the room's \
 likely type and what decided it), then "p".
 Reply with ONLY this JSON, keys in this order:
-{"home":"<step 1, max 10 words>","storey":"<step 2, max 20 words>",
+{"home":"<step 1, max 10 words>","storey":"<step 2, max 20 words>","home_here":"found|missing|elsewhere",
  "nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
 Example of the FORMAT and the style of reasoning -- a different building every \
 time, so never copy its numbers. TARGET television, robot on an upper storey:
@@ -170,12 +194,13 @@ id=200001  OPENING  doorway off room 11 (type=unknown)  to space NOT seen yet  g
 id=200002  OPENING  gap off room 11 (type=unknown)  to space NOT seen yet  glimpsed through it: nothing yet
 {"home":"living room, sometimes a bedroom",
  "storey":"upper floor (bedroom found); no living room here; living rooms are downstairs",
+ "home_here":"elsewhere",
  "nodes":[{"id":4,"why":"bedroom, fully seen, no television","p":2},
-{"id":9,"why":"small unexplored room, never entered, a bathroom perhaps","p":25},
-{"id":11,"why":"large unexplored upstairs room, maybe a lounge","p":40},
-{"id":100003,"why":"unvisited ground floor holds the living room","p":60},
+{"id":9,"why":"small unexplored room, never entered, a bathroom perhaps","p":10},
+{"id":11,"why":"large unexplored upstairs room, maybe a lounge","p":20},
+{"id":100003,"why":"unvisited ground floor holds the living room","p":70},
 {"id":200001,"why":"toilet glimpsed: a bathroom, no television","p":2},
-{"id":200002,"why":"unseen upstairs room, nothing known of it yet","p":25}]}"""
+{"id":200002,"why":"unseen upstairs room, nothing known of it yet","p":10}]}"""
 USER_PROMPT_TEMPLATE = """TARGET: {target}
 
 THIS STOREY: {storey}
@@ -289,11 +314,18 @@ class NodeOracleResult:
         omitted: Node ids the model did not score (given :data:`OMITTED_PERCENT`).
         floored: Node ids read at the uncertainty floor because the model
             valued an unexplored place below it (see the module docstring).
+        capped: Node ids read DOWN to :data:`UNEXPLORED_ELSEWHERE` because the
+            model's own STEP 2 said the home type lives on another storey
+            (``home_here="elsewhere"``) and it valued an unexplored place on
+            this one above that all the same.
+        home_here: The model's structured STEP 2 verdict -- ``found``,
+            ``missing`` or ``elsewhere`` -- or None when it gave none.
         reading: The model's steps 1 and 2 in its own words -- ``home`` (where
-            the target normally lives) and ``storey`` (what this storey is and
-            whether the home type was found or is missing here). Written
-            before the numbers so a mid-size model applies its own reading;
-            kept so the recording shows the judgement behind the distribution.
+            the target normally lives), ``storey`` (what this storey is and
+            whether the home type was found or is missing here) and
+            ``home_here``. Written before the numbers so a mid-size model
+            applies its own reading; kept so the recording shows the
+            judgement behind the distribution.
     """
 
     probs: Dict[int, float]
@@ -309,6 +341,9 @@ class NodeOracleResult:
     probability_model: str = "independent_search_success"
     #: Node ids whose probability was raised to the uncertainty floor (``unexplored_floor``).
     floored: Tuple[int, ...] = ()
+    #: Node ids whose probability was lowered to ``unexplored_elsewhere`` (see ``home_here``).
+    capped: Tuple[int, ...] = ()
+    home_here: Optional[str] = None
 
 
 # -- the prompt -------------------------------------------------------------
@@ -429,26 +464,74 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
     return scores, elsewhere, reasons, omitted
 
 
-def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode],
-                     unexplored_floor: float) -> Tuple[Dict[int, float], Tuple[int, ...]]:
-    """Raise every unexplored node's percentage to the floor; return the new scores and the ids raised.
+_HOME_HERE_WORDS = {
+    HOME_FOUND: ("found", "present", "here", "yes", "on this storey", "on this floor"),
+    HOME_MISSING: ("missing", "not found", "not yet", "unseen", "expected"),
+    HOME_ELSEWHERE: ("elsewhere", "not here", "another storey", "other storey", "another floor", "other floor",
+                     "downstairs", "upstairs", "does not belong", "no"),
+}
 
-    The floor is a fraction in ``[0, 1)``; the scores are percentages. A
-    node the model scored at or above the floor is left alone, so the
-    model's ranking among the unexplored places survives wherever it
-    valued them seriously.
+
+def parse_home_here(reply: Any) -> Optional[str]:
+    """The model's ``home_here`` verdict as one of :data:`HOME_HERE`, or None when absent or unreadable.
+
+    The three words are what the prompt asks for; a few phrasings a model
+    drifts to are accepted, the longest match first so "not found" is
+    ``missing`` and not ``found``.
     """
-    if not unexplored_floor > 0.0:
-        return scores, ()
-    percent = 100.0 * float(unexplored_floor)
+    if not isinstance(reply, dict):
+        return None
+    value = reply.get("home_here")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().lower()
+    for verdict in HOME_HERE:
+        if text == verdict:
+            return verdict
+    best = None
+    for verdict, words in _HOME_HERE_WORDS.items():
+        for word in words:
+            if word in text and (best is None or len(word) > len(best[1])):
+                best = (verdict, word)
+    return None if best is None else best[0]
+
+
+def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unexplored_floor: float,
+                     home_here: Optional[str] = None, unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE,
+                     ) -> Tuple[Dict[int, float], Tuple[int, ...], Tuple[int, ...]]:
+    """Apply rule 2b's arithmetic to the unexplored nodes; return the new scores, the ids raised and the ids lowered.
+
+    The floor and the elsewhere value are fractions in ``[0, 1)``; the
+    scores are percentages. With ``home_here`` ``found`` or ``missing`` (or
+    unknown) every unexplored node is raised to ``unexplored_floor`` and a
+    node the model scored above it is left alone, so the model's ranking
+    among the unexplored places survives wherever it valued them seriously.
+    With ``home_here="elsewhere"`` -- the model's own reading that the
+    target's home type lives on another storey -- every unexplored node is
+    read at ``unexplored_elsewhere`` exactly: there is nothing the model can
+    know about an unexplored place on this storey beyond that reading, and
+    the 3B model writes the worked example's 25 on each of them regardless.
+    0 disables the respective value.
+    """
     out = dict(scores)
-    floored = []
+    floored, capped = [], []
+    if home_here == HOME_ELSEWHERE and unexplored_elsewhere > 0.0:
+        percent = 100.0 * float(unexplored_elsewhere)
+        for node in nodes:
+            nid = int(node.id)
+            if nid in out and node.unexplored and abs(out[nid] - percent) > 1e-9:
+                (floored if out[nid] < percent else capped).append(nid)
+                out[nid] = percent
+        return out, tuple(sorted(floored)), tuple(sorted(capped))
+    if not unexplored_floor > 0.0:
+        return out, (), ()
+    percent = 100.0 * float(unexplored_floor)
     for node in nodes:
         nid = int(node.id)
         if nid in out and node.unexplored and out[nid] < percent - 1e-9:
             out[nid] = percent
             floored.append(nid)
-    return out, tuple(sorted(floored))
+    return out, tuple(sorted(floored)), ()
 
 
 def normalise(scores: Dict[int, float], elsewhere: float) -> Tuple[Dict[int, float], float]:
@@ -490,21 +573,29 @@ class SearchNodeOracle:
             reasoning model; a plainer client is called without it.
         unexplored_floor: The least probability an unexplored node
             (:attr:`SearchNode.unexplored`) is read at, whatever the model
-            wrote; 0 disables the floor. See the module docstring.
+            wrote, when its STEP 2 says the home type is found or missing on
+            this storey; 0 disables the floor. See the module docstring.
+        unexplored_elsewhere: What an unexplored node is read at when the
+            model's STEP 2 says the home type lives on another storey
+            (``home_here="elsewhere"``); 0 leaves the model's numbers.
 
     Attributes:
         reuses: Queries answered from the kept reply.
         queries: Calls actually made.
         unexplored_floor: As given.
+        unexplored_elsewhere: As given.
     """
 
-    def __init__(self, client, unexplored_floor: float = UNEXPLORED_FLOOR) -> None:
-        if not (0.0 <= float(unexplored_floor) < 1.0) or not math.isfinite(float(unexplored_floor)):
-            raise ValueError("unexplored_floor must lie in [0, 1), got %r" % (unexplored_floor,))
+    def __init__(self, client, unexplored_floor: float = UNEXPLORED_FLOOR,
+                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE) -> None:
+        for name, value in (("unexplored_floor", unexplored_floor), ("unexplored_elsewhere", unexplored_elsewhere)):
+            if not (0.0 <= float(value) < 1.0) or not math.isfinite(float(value)):
+                raise ValueError("%s must lie in [0, 1), got %r" % (name, value))
         self._client = client
         self._last_prompt = None  # type: Optional[str]
         self._last_reply = None   # type: Optional[Dict[str, Any]]
         self.unexplored_floor = float(unexplored_floor)
+        self.unexplored_elsewhere = float(unexplored_elsewhere)
         self.reuses = 0
         self.queries = 0
 
@@ -535,7 +626,7 @@ class SearchNodeOracle:
             raise ValueError("SearchNodeOracle needs at least one node")
         user = self.prompt(target, nodes, context)
         if user == self._last_prompt and self._last_reply is not None:
-            kept = self.score(self._last_reply, nodes, self.unexplored_floor)
+            kept = self.score(self._last_reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
             if kept is not None:
                 self.reuses += 1
                 return replace(kept, reused=True)
@@ -543,7 +634,7 @@ class SearchNodeOracle:
             reply = self.ask(user)
         except Exception:
             return self.uniform(nodes, raw_reply=None)
-        result = self.score(reply, nodes, self.unexplored_floor)
+        result = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
         if result is None:
             return self.uniform(nodes, raw_reply=reply if isinstance(reply, dict) else None)
         self.remember(user, reply)
@@ -559,21 +650,23 @@ class SearchNodeOracle:
                                 raw_reply=raw_reply, spread=0.0)
 
     @staticmethod
-    def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0) -> Optional[NodeOracleResult]:
-        """Parse, fill the omitted, floor the unexplored, normalise, clamp."""
+    def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0,
+              unexplored_elsewhere: float = 0.0) -> Optional[NodeOracleResult]:
+        """Parse, fill the omitted, apply rule 2b to the unexplored (floor, or the elsewhere value), normalise, clamp."""
         parsed = parse_reply(reply, nodes)
         if parsed is None:
             return None
         scores, elsewhere, reasons, omitted = parsed
-        scores, floored = floor_unexplored(scores, nodes, unexplored_floor)
+        home_here = parse_home_here(reply)
+        scores, floored, capped = floor_unexplored(scores, nodes, unexplored_floor, home_here, unexplored_elsewhere)
         probs, elsewhere = normalise(scores, elsewhere)
         values = list(probs.values())
-        reading = {key: str(reply[key])[:200] for key in ("home", "storey")
+        reading = {key: str(reply[key])[:200] for key in ("home", "storey", "home_here")
                    if isinstance(reply, dict) and isinstance(reply.get(key), str) and reply[key].strip()}
         return NodeOracleResult(probs=probs, elsewhere=elsewhere, p_present=1.0 - elsewhere,
                                 source="llm", reasons=reasons, raw_reply=reply if isinstance(reply, dict) else None,
                                 spread=float(max(values) - min(values)) if values else 0.0, omitted=omitted,
-                                reading=reading, floored=floored)
+                                reading=reading, floored=floored, capped=capped, home_here=home_here)
 
 
 

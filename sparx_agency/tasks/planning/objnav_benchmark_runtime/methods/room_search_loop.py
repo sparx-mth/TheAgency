@@ -94,7 +94,7 @@ import time
 import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
-from sparx_agency.core.mapping.topology.search_node_oracle import UNEXPLORED_FLOOR
+from sparx_agency.core.mapping.topology.search_node_oracle import UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import frontier_goals_by_room
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
@@ -176,6 +176,15 @@ class LoopSettings:
             above ``min_prob`` -- and RPT* weighs them against the stairs
             by distance, which is where the user's "peek before you
             descend" lives: not as a rule, as a probability. 0 disables.
+        unexplored_elsewhere: What an unexplored node is read at instead
+            when the oracle's own STEP 2 says the target's home type lives
+            on ANOTHER storey (``home_here="elsewhere"``): rule 2b's "less",
+            applied by the code. The Ranchester couch search of 2026-10-05
+            had the 3B model write "living rooms are downstairs" at every
+            loop point and 25 on every upstairs gap all the same, and
+            thirteen peeks outranked the staircase it stood 0.9 m from.
+            At 0.10 the stairs at 0.6 come first and a door beside the
+            route is still a cheap peek. 0 leaves the model's numbers.
         supervisor_rounds: Supervisor rounds allowed on one action before the
             loop falls back to the floor-wide frontier. A guard against a
             transition loop nobody has found yet, not a budget: the longest
@@ -206,6 +215,14 @@ class LoopSettings:
             hallway a bathroom and every door off it was demoted with it);
             since then a weak label never rules a room out, whatever its
             openings, so this bound is not consulted.
+        fragment_max_m2: ``scan`` -- a room under this area with no live
+            frontier and no confirmed door is a fragment of another room
+            (the strip behind a bed), finished without a visit
+            (:class:`~room_scans.RoomScanLedger`); 0 disables.
+        walkthrough_clearance_m: ``scan`` -- a room whose widest point has
+            no more clearance than this (a corridor, a balcony) is finished
+            once the agent has stood in it and no live frontier is left:
+            the camera's cone spans it as the agent walks it; 0 disables.
     """
 
     visit: str = "scan"
@@ -218,12 +235,15 @@ class LoopSettings:
     type_prior: bool = True
     min_prob: float = 0.05
     unexplored_floor: float = UNEXPLORED_FLOOR
+    unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE
     supervisor_rounds: int = 5
     confine_routes: bool = True
     entry_frontier: bool = True
     stairs_as_nodes: bool = True
     openings: OpeningSettings = field(default_factory=OpeningSettings)
     weak_type_max_openings: int = 1
+    fragment_max_m2: float = 3.0
+    walkthrough_clearance_m: float = 0.9
 
     def __post_init__(self):
         if self.visit not in ("scan", "sweep"):
@@ -242,9 +262,10 @@ class LoopSettings:
                 raise ValueError("%s must be positive and finite" % name)
         if isinstance(self.min_prob, bool) or not math.isfinite(self.min_prob) or not 0 <= self.min_prob < 1:
             raise ValueError("min_prob must lie in [0, 1)")
-        if (isinstance(self.unexplored_floor, bool) or not math.isfinite(self.unexplored_floor)
-                or not 0 <= self.unexplored_floor < 1):
-            raise ValueError("unexplored_floor must lie in [0, 1)")
+        for name in ("unexplored_floor", "unexplored_elsewhere"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value < 1:
+                raise ValueError("%s must lie in [0, 1)" % name)
         if isinstance(self.scan_seen_fraction, bool) or not math.isfinite(self.scan_seen_fraction) or not 0 < self.scan_seen_fraction <= 1:
             raise ValueError("scan_seen_fraction must lie in (0, 1]")
         if isinstance(self.openings, dict):
@@ -253,6 +274,10 @@ class LoopSettings:
             raise ValueError("openings must be an OpeningSettings (or its dict)")
         if type(self.weak_type_max_openings) is not int or self.weak_type_max_openings < 0:
             raise ValueError("weak_type_max_openings must be a non-negative integer")
+        for name in ("fragment_max_m2", "walkthrough_clearance_m"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError("%s must be finite and non-negative" % name)
 
     @property
     def scanning(self):
@@ -349,7 +374,7 @@ class RoomSearchLoop:
                       "arrivals": 0, "entry_frontier": 0, "entry_centroid": 0, "entry_vantage": 0, "entry_peek": 0,
                       "entry_reaimed": 0, "entry_lost": 0,
                       "scans_completed": 0, "scans_in_place": 0, "scan_approach_actions": 0,
-                      "scan_unreachable": 0, "excluded_scanned": 0, "excluded_type": 0,
+                      "scan_unreachable": 0, "excluded_scanned": 0, "excluded_type": 0, "finished_in_transit": 0,
                       "reconsiders_deferred": 0,
                       "confined_actions": 0, "unconfined_actions": 0, "plan_failures": 0,
                       "supervisor_rounds": 0, "rounds_exhausted": 0, "llm_fallbacks": 0}
@@ -687,6 +712,19 @@ class RoomSearchLoop:
                            exclude=p.room_exclusion(world) if hasattr(p, "room_exclusion") else None)
             p.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
             p._last_graph_step, p._last_door_revision = obs.step, p.doors.revision
+        # The labels are read from the evidence BEFORE the nodes are chosen, so a
+        # room that became a strong bedroom on this action is excluded on this
+        # action, not shown to the oracle and kept in the order for one more
+        # loop point (Hanson 2026-10-05, action 150).
+        if self.settings.type_prior and callable(getattr(p.graph, "refresh_labels", None)):
+            try:
+                p.graph.refresh_labels(obs.step)
+            except Exception as exc:  # the classifier is the room LLM: same back-off, held labels stand
+                retry = p.fallback.note_service_failure(obs, ROOM_LLM, exc)
+                self._log(obs, "llm_failure", error="%s: %s" % (type(exc).__name__, exc), retry_step=retry,
+                          where="refresh_labels")
+                raise RoomReasoningUnavailable(str(exc)) from exc
+            self._exclusions(obs, world, openings)
         started = time.monotonic()
         shown = [o for o in openings if o.opening.kind != LANDMARK]        # a target landmark's probability is fixed
         try:
@@ -715,6 +753,8 @@ class RoomSearchLoop:
             p_present=round(float(oracle.get("p_present", 0.0)), 3),
             elsewhere=round(float(oracle.get("elsewhere", 0.0)), 3), reused=bool(oracle.get("reused")),
             omitted=list(oracle.get("omitted", ())), reading=dict(oracle.get("reading", {})),
+            home_here=oracle.get("home_here"), floored=list(oracle.get("floored", ())),
+            capped=list(oracle.get("capped", ())),
             excluded={str(pid): why for pid, why in sorted(self._excluded.items())}))
 
     # -- what is not a node: finished rooms and rooms the target cannot be in ----
@@ -724,9 +764,13 @@ class RoomSearchLoop:
         Two tests, both read off the live map:
 
         * ``scanned:<how>`` -- the :class:`~room_scans.RoomScanLedger` says a
-          completed look-around stood in the room or saw most of it. Under
-          ``sweep`` this test stands down: the sweep's own termination rule
-          (N steps or no frontier) decides when a room is done.
+          completed look-around stood in the room or saw most of it
+          (``scan_point_inside``, ``seen_from_scan``); or, with no live
+          frontier left in it, that the camera looked into it or walked it
+          through (``seen_through``), or that it is a doorless fragment
+          under 3 m2 (``fragment``). Under ``sweep`` this test stands down:
+          the sweep's own termination rule (N steps or no frontier) decides
+          when a room is done.
         * ``type:<label>`` -- the room's identified type cannot hold the
           target (:func:`room_priors.ruled_out`): the label is STRONG, and
           neither an object of the target's own class nor a home object of
@@ -743,16 +787,15 @@ class RoomSearchLoop:
         p = self.policy
         excluded = {}
         ledger = getattr(p, "scans", None)
-        exits = {}
-        for option in openings:
-            pid = option.opening.room_pid
-            if pid is not None and option.opening.kind != LANDMARK:
-                exits[pid] = exits.get(pid, 0) + 1
+        exits = self._exits_by_room(openings)
+        doored = set()
+        for door in getattr(p.graph, "doors", ()) or ():
+            doored.update(int(pid) for pid in door.get("rooms", ()))
         for pid, room in p.graph.registry.rooms.items():
             if pid == self.room_id and p.supervisor.state in (TRANSIT, SEARCH):
                 continue
             if self.settings.scanning and ledger is not None:
-                how = ledger.status(world, pid, room)
+                how = ledger.status(world, pid, room, frontier=self._live_frontier(pid), doored=pid in doored)
                 if how is not None:
                     excluded[pid] = "scanned:%s" % how
                     continue
@@ -768,6 +811,28 @@ class RoomSearchLoop:
                 self._log(obs, "excluded", rooms={str(pid): excluded[pid] for pid in newly})
         self._excluded = excluded
         return excluded
+
+    @staticmethod
+    def _exits_by_room(openings):
+        """``{pid: n}`` -- how many exits (not landmarks) the offered openings put on each room."""
+        exits = {}
+        for option in openings:
+            pid = option.opening.room_pid
+            if pid is not None and option.opening.kind != LANDMARK:
+                exits[pid] = exits.get(pid, 0) + 1
+        return exits
+
+    def _live_frontier(self, pid):
+        """Accessible, unresolved frontier clusters the scene graph credits to room ``pid``, or None when unknown.
+
+        The count behind the oracle's ``frontier=`` and the ledger's
+        ``seen_through`` test: read off the frontier inventory, which is
+        built on the map with the settled unknown written occupied
+        (:class:`~sightlines.SightLedger`), so a railing looked through or
+        a pocket behind a bed is not a boundary left to explore.
+        """
+        fact = self.policy.graph.facts.get(pid) if getattr(self.policy.graph, "facts", None) else None
+        return None if fact is None else int(fact.frontier_clusters)
 
     def _ruled_out(self, obs, pid, exits=0):
         """``type:<label>`` when the type prior rules room ``pid`` out, else None -- logging what kept it a node.
@@ -1021,6 +1086,8 @@ class RoomSearchLoop:
             return None, {"route_failed": True}
         if self._reclassify(obs, state.room_id, "transit") and self._relabel_ends_turn(obs, state.room_id):
             return None, {"room_reclassified": True}
+        if self._finished_on_the_way(obs, world, state.room_id, room):
+            return None, {"frontier_exhausted": True}
         entry = self._entry if self._entry is not None else (state.goal_xy, False)
         xy_goal, from_frontier = entry
         arrival = p.converter_params.goal_tolerance_m + world.resolution
@@ -1067,6 +1134,30 @@ class RoomSearchLoop:
             return command, {}
         self.stats["plan_failures"] += 1
         return None, {"route_failed": True}
+
+    def _finished_on_the_way(self, obs, world, pid, room):
+        """Whether the room in transit was finished by what the walk showed: nothing left in it to look at.
+
+        Under ``scan`` only. The ledger's ``seen_through`` and ``fragment``
+        verdicts need the room's live frontier count, read from the scene
+        graph's facts (refreshed every action); a room finished so is
+        released ``exhausted`` before it is entered, and the order is
+        re-solved without it. The scan tests themselves (a rotation stood
+        in it, or saw it) are judged here too, so a room another room's
+        scan has since seen is not walked to either.
+        """
+        p = self.policy
+        ledger = getattr(p, "scans", None)
+        if not self.settings.scanning or ledger is None:
+            return False
+        frontier = self._live_frontier(pid)
+        doored = any(int(pid) in (door.get("rooms") or ()) for door in getattr(p.graph, "doors", ()) or ())
+        how = ledger.status(world, pid, room, frontier=frontier, doored=doored)
+        if how is None:
+            return False
+        self.stats["finished_in_transit"] += 1
+        self._log(obs, "finished_in_transit", room=pid, how=how, frontier=frontier)
+        return True
 
     def _entry_goal(self, obs, world, cost, room, xy_goal, from_frontier):
         """The committed entry point while it is worth reaching; else the room's nearest frontier; else None."""

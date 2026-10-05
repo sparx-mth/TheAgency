@@ -284,14 +284,23 @@ def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_targe
     assert policy.graph.label_info(1)["label"] == "bathroom"
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._excluded == {} and policy.supervisor.room_id == 1
-    # A weak label -- one kind of object -- is the oracle's to value, never an exclusion (2026-10-05).
+    # A weak label -- one kind of object that names no room on its own -- is the oracle's to value,
+    # never an exclusion (2026-10-05): a sink alone may be a kitchen's.
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
-    see(policy, {1: ["toilet"]}, step=0)
+    see(policy, {1: ["sink"]}, step=0)
     policy.graph.relabel(1, 0)
     assert policy.graph.label_info(1)["strength"] == "weak"
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._excluded == {} and policy.loop.stats["weak_type_kept"] == 1
-    assert ruled_out(policy.target, "bathroom", "weak", ["toilet"]) is None
+    # One SIGNATURE object names its room on its own (2026-10-05): a toilet is a bathroom, and the
+    # bathroom is ruled out for a chair with no second kind of object needed.
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    see(policy, {1: ["toilet"]}, step=0)
+    policy.graph.relabel(1, 0)
+    assert policy.graph.label_info(1)["strength"] == "strong" and policy.graph.label_info(1)["signature"]
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {1: "type:bathroom"} and policy.supervisor.room_id == 0
+    assert ruled_out(policy.target, "bathroom", "weak", ["sink"]) is None
     assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink"]) == "type:bathroom"
     assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink", "chair"]) is None, "the target itself"
     assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink", "desk"]) is None, "a desk is where chairs live"
@@ -305,6 +314,24 @@ def test_the_type_prior_table_is_exclusions_not_permissions():
     assert implausible_room("toilet", "bedroom") and not implausible_room("toilet", "bathroom")
     assert not implausible_room("frying pan", "bathroom"), "a target the table does not know is never excluded"
     assert target_key("tv") == "television" and target_key("plant") == "potted plant"
+
+
+def test_a_room_whose_evidence_rules_it_out_on_this_action_is_excluded_on_this_action():
+    """Hanson 2026-10-05, action 150: the bedroom's label became strong at the loop point's own
+    re-classification, AFTER the nodes had been chosen; the oracle was shown it and valued it at 0.10
+    ("bedroom, fully seen, no toilet"), and it stayed in the order until the next loop point. The
+    labels are read from the evidence before the nodes are chosen now."""
+    llm = NamingLLM()
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm)
+    see(policy, {1: ["toilet"]}, step=0)             # the background refresh: evidence recorded, no label yet
+    assert policy.graph.label_info(1) is None
+    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert llm.calls == 1, "one classifier call for the one room with a new kind of object"
+    assert policy.graph.label_info(1)["label"] == "bathroom" and policy.graph.label_info(1)["strength"] == "strong"
+    assert policy.loop._excluded == {1: "type:bathroom"}
+    assert policy.reasoned_with[-1]["exclude"] == (1,), "withheld from the oracle on the same action"
+    assert policy.supervisor.room_id == 0 and command.info["kind"] in ("vantage", "room_scan")
+    assert policy.loop.estimates[1]["excluded"] == "type:bathroom"
 
 
 def test_the_room_in_force_is_never_excluded_mid_visit():

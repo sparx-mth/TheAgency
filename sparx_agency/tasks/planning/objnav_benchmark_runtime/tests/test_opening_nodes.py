@@ -9,6 +9,7 @@ node gets ``stair_prob``), the solver is fixed, and A* is real.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import numpy as np
@@ -29,8 +30,14 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import s
 
 
 def opening_policy(order=(1, 0), llm=None, **overrides):
-    """The scan-mode fixture with a live frontier inventory, so the floor's openings can be read."""
+    """The scan-mode fixture with a live frontier inventory, so the floor's openings can be read.
+
+    Room B's small unknown patch stands in for an opening here; the sight
+    ledger would settle it as an enclosed pocket (``test_sightlines`` covers
+    that), so the ledger is off in this fixture.
+    """
     policy, episode, world, rooms, reasoned = loop_policy(order=order, visit="scan", llm=llm, **overrides)
+    policy.sight.settings = replace(policy.sight.settings, enabled=False)
     refresh(policy, world, IN_A)
     return policy, episode, world, rooms, reasoned
 
@@ -386,6 +393,7 @@ def test_the_unknown_at_the_foot_of_a_seen_staircase_is_not_an_opening():
     """The stairs are a node of their own; the unknown beyond a flight is the other storey."""
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import stair_policy
     policy, episode, world, rooms, _ = stair_policy(order=(1, 0), visit="scan")
+    policy.sight.settings = replace(policy.sight.settings, enabled=False)   # the unknown strip is enclosed: a pocket otherwise
     stairs = OpeningRegistry()
     g = world.grid.copy()
     foot = policy.building.portals[0]["entry"]
@@ -432,23 +440,25 @@ def test_a_new_opening_while_nothing_is_in_force_buys_the_oracle_a_call_at_most_
 def test_a_weak_type_label_never_rules_a_room_out():
     """Ranchester step 75: a toilet glimpsed through a door named the hallway a bathroom and every door
     off it was demoted with it. Hanson step 321: a sofa made the room with the sink a 'living room' and
-    ruled it out for the toilet. One kind of object is a guess the oracle sees as `type=bathroom?`."""
+    ruled it out for the toilet. One kind of object that names no room on its own (a sink: kitchen or
+    bathroom) is a guess the oracle sees as `type=bathroom?`; a signature object (a toilet) is not weak,
+    see test_room_scans."""
     policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
     assert policy.target.query == "chair"
-    see(policy, {1: ["toilet"]}, step=0)
+    see(policy, {1: ["sink"]}, step=0)
     policy.graph.relabel(1, 0)
     info = policy.graph.label_info(1)
     assert info["label"] == "bathroom" and info["strength"] == "weak"
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert 1 not in policy.loop._excluded and policy.loop.stats["weak_type_kept"] == 1
     kept = [e for e in policy.loop.events if e["event"] == "weak_type_kept"][0]
-    assert kept["room"] == 1 and kept["label"] == "bathroom" and kept["openings"] == 2 and kept["objects"] == ["toilet"]
+    assert kept["room"] == 1 and kept["label"] == "bathroom" and kept["openings"] == 2 and kept["objects"] == ["sink"]
     assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "still a node, still chosen by the order"
     policy.loop.plan(obs_at(episode, 1, IN_A), world)
     assert policy.loop.stats["weak_type_kept"] == 1, "logged once per room"
     # The former openings allowance is not consulted any more: kept whatever the bound says.
     policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), weak_type_max_openings=2)
-    see(policy, {1: ["toilet"]}, step=0)
+    see(policy, {1: ["sink"]}, step=0)
     policy.graph.relabel(1, 0)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert 1 not in policy.loop._excluded and policy.loop.stats["weak_type_kept"] == 1

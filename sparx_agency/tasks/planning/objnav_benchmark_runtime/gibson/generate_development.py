@@ -35,9 +35,28 @@ def select_buildings(names, count, seed):
     return sorted(names, key=lambda name: hashlib.sha256((str(seed) + "/" + name).encode()).hexdigest())[:count]
 
 
+#: Least navmesh clearance of a start, metres: the agent's radius plus a body's width of
+#: room to turn and step. The navmesh admits a point 0.18 m from a bed; an agent spawned
+#: there sees nothing but the bed and cannot plan a step across the unknown under its own
+#: camera (Hanson/000002, 2026-10-05: 159 actions turning in place beside a bed).
+MIN_START_CLEARANCE_M = 0.35
+#: How far ``distance_to_closest_obstacle`` searches before reporting "nothing within".
+CLEARANCE_SEARCH_RADIUS_M = 2.0
+
+
+def start_clearance(pathfinder, position, max_search_radius_m=CLEARANCE_SEARCH_RADIUS_M):
+    """Distance from ``position`` to the nearest navmesh boundary, capped at the search radius."""
+    return float(pathfinder.distance_to_closest_obstacle(np.asarray(position, dtype=np.float32),
+                                                         max_search_radius=float(max_search_radius_m)))
+
+
 def generate_start(scene, floors, pathfinder, seed, min_distance=1.5, max_distance=100.0,
-                   floor_tolerance=0.5, attempts=20000):
-    """Bounded reference-style evaluator-only sampling; never a nav-policy oracle."""
+                   floor_tolerance=0.5, attempts=20000, min_clearance_m=MIN_START_CLEARANCE_M):
+    """Bounded reference-style evaluator-only sampling; never a nav-policy oracle.
+
+    ``min_clearance_m`` rejects a start boxed in by furniture (see
+    :data:`MIN_START_CLEARANCE_M`); 0 restores the plain reference sampler.
+    """
     rng = np.random.RandomState(seed)
     pathfinder.seed(seed)
     floor_ids = sorted(floors)
@@ -67,12 +86,16 @@ def generate_start(scene, floors, pathfinder, seed, min_distance=1.5, max_distan
                     continue
                 if not valid[cell] or not pathfinder.is_navigable(position):
                     continue
+                clearance = start_clearance(pathfinder, position) if min_clearance_m > 0 else None
+                if clearance is not None and clearance < min_clearance_m:
+                    continue
                 yaw = float(rng.uniform(0.0, 2 * math.pi))
                 row = {"scene": scene, "object_category": CATEGORIES[category], "object_id": int(category),
                        "floor_id": int(floor_id), "start_position": position.tolist(),
                        "start_rotation": [math.cos(yaw / 2), 0.0, math.sin(yaw / 2), 0.0]}
                 audit = {"scene": scene, "seed": seed, "samples_tried": tried,
                          "reference_start_distance_m": float(distances[cell]),
+                         "start_clearance_m": clearance, "min_start_clearance_m": float(min_clearance_m),
                          "floor_height_m": float(floor["floor_height"]), "unreachable": False}
                 return row, audit
     raise RuntimeError("No valid ObjectNav start found in selected building %s; no replacement building selected" % scene)
@@ -100,7 +123,12 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--multistory", action="store_true")
     parser.add_argument("--episodes-per-building", type=int, default=1)
+    parser.add_argument("--categories", default=None,
+                        help="Multistory only: comma-separated Gibson goal categories to restrict the episodes to "
+                             "(e.g. 'couch'); buildings without one annotated on the reference floor are skipped.")
     args = parser.parse_args(argv)
+    if args.categories and not args.multistory:
+        raise ValueError("--categories requires --multistory")
     if args.output.exists():
         raise FileExistsError("Not overwriting an existing episode manifest")
     maps = load_training_maps(args.train_info)

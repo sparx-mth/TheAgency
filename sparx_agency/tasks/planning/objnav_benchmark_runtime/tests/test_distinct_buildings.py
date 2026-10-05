@@ -37,12 +37,15 @@ def test_sampler_is_bounded_and_deterministic(monkeypatch):
         def map_cell(self, point):
             return (0, 0)
     class Pathfinder:
+        clearance = 1.0
         def seed(self, seed):
             self.seed_value = seed
         def get_random_navigable_point(self):
             return (0.0, 0.18, 0.0)
         def is_navigable(self, point):
             return True
+        def distance_to_closest_obstacle(self, point, max_search_radius=2.0):
+            return min(self.clearance, max_search_radius)
     monkeypatch.setattr(generation, "GibsonDistanceField", Field)
     semantic = np.zeros((7, 4, 4), np.uint8)
     semantic[0] = 1
@@ -52,10 +55,19 @@ def test_sampler_is_bounded_and_deterministic(monkeypatch):
     second = generation.generate_start("TrainA", floors, Pathfinder(), 7, attempts=2)
     assert first == second and first[0]["object_category"] == "chair"
     assert np.linalg.norm(first[0]["start_rotation"]) == pytest.approx(1.0)
+    assert first[1]["start_clearance_m"] == 1.0 and first[1]["min_start_clearance_m"] == generation.MIN_START_CLEARANCE_M
     bad = Pathfinder()
     bad.get_random_navigable_point = lambda: (0.0, 9.0, 0.0)
     with pytest.raises(RuntimeError, match="No valid ObjectNav start"):
         generation.generate_start("TrainA", floors, bad, 7, attempts=2)
+    # A navigable point 0.2 m from the nearest obstacle is a start beside a bed: boxed in, not a start
+    # (Hanson/000002, 2026-10-05). The plain reference sampler is one knob away.
+    boxed = Pathfinder()
+    boxed.clearance = 0.2
+    with pytest.raises(RuntimeError, match="No valid ObjectNav start"):
+        generation.generate_start("TrainA", floors, boxed, 7, attempts=2)
+    row, audit = generation.generate_start("TrainA", floors, boxed, 7, attempts=2, min_clearance_m=0.0)
+    assert row == first[0] and audit["start_clearance_m"] is None
 
 
 def development_manifest(tmp_path):
@@ -132,3 +144,36 @@ def test_falcon_recording_shows_actual_phase_and_renders():
     frame = render_dashboard(policy, obs, [(0, 0)], {"action": "TURN_LEFT", "info": command.info}, episode.episode_id, snapshot)
     assert frame.shape == (900, 1600, 3)
 
+
+
+def test_cross_floor_starts_can_be_restricted_to_one_goal_category(monkeypatch):
+    """A couch-only cross-floor campaign (2026-10-05): the one category never upstairs in a house."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import multifloor_generation as mf
+    semantic = np.zeros((7, 8, 8), np.uint8)
+    semantic[0] = 1
+    semantic[1, 1, 1] = 1                     # chair
+    semantic[2, 6, 6] = 1                     # couch
+    floors = {0: {"sem_map": semantic, "floor_height": 0.0, "origin": [0, 0]}}
+    levels = [{"height_m": 0.0, "sample_count": 100, "estimated_area_m2": 40.0},
+              {"height_m": 2.7, "sample_count": 80, "estimated_area_m2": 30.0}]
+    rng = np.random.RandomState(0)
+    samples = np.column_stack([rng.uniform(0, 8, 400), np.where(rng.rand(400) < 0.5, 0.0, 2.7), rng.uniform(0, 8, 400)])
+    monkeypatch.setattr(mf, "sampled_levels", lambda pathfinder, seed, **kw: (levels, samples))
+    monkeypatch.setattr(mf, "goal_region_points", lambda pathfinder, floor, category: [[1.0, 0.0, 1.0], [1.2, 0.0, 1.0]])
+
+    class Field:
+        def __init__(self, pathfinder, goals, semantic, origin, category, goal_height):
+            self.category, self.goal_height = category, goal_height
+        def distance(self, position, start=False):
+            return 10.0
+    monkeypatch.setattr(mf, "MultiFloorDistance", Field)
+    monkeypatch.setattr(mf, "start_clearance", lambda pathfinder, position: 1.0)
+    rows, regions, audit = mf.cross_floor_starts("Fake", floors, object(), seed=3, count=1, categories=[1])
+    assert [row["object_category"] for row in rows] == ["couch"] and list(regions) == ["1"]
+    assert audit["episodes"][0]["start_height_m"] == pytest.approx(2.7), "the start is on the other storey"
+    rows, _, _ = mf.cross_floor_starts("Fake", floors, object(), seed=3, count=2)
+    assert len(rows) == 2 and {row["object_category"] for row in rows} <= {"chair", "couch"}, "unrestricted: every annotated category"
+    with pytest.raises(ValueError, match="None of toilet annotated"):
+        mf.cross_floor_starts("Fake", floors, object(), seed=3, count=1, categories=[4])
+    with pytest.raises(ValueError, match="requires --multistory"):
+        generation.main(["--train-info", "x", "--archive", "y", "--scenes-dir", "z", "--output", "w", "--categories", "couch"])

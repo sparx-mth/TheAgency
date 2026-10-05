@@ -155,6 +155,14 @@ class PerceptionCycle:
                     row["target_evidence"] = "border_clipped"
                     self.counts["border_clipped_evidence"] += 1
                     continue
+                # What the takeover refuses to start on, the legacy pursuit does not walk
+                # after either: a released far candidate, one seen during the release
+                # cooldown, one seen from a spot given up for want of a path.
+                closing = getattr(p, "closing", None)
+                if closing is not None and closing.refuses_far_candidate(obs, landmark.xy):
+                    row["target_evidence"] = "refused_by_takeover"
+                    self.counts["refused_evidence"] += 1
+                    continue
                 supported = p.target_evidence.observe(landmark, obs.pose, obs.step)
                 if p._target_id in (None, landmark.id):
                     p._target_id, p._target_xy, p._target_step = landmark.id, landmark.xy, obs.step

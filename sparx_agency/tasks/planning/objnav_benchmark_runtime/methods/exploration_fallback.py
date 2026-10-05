@@ -43,8 +43,13 @@ raised, it produces a command that MOVES, in this order:
    is still unknown space;
 5. a relocation: the farthest reachable known cell, for a new vantage point
    from which the map may show a frontier it does not show from here;
-6. only when the agent stands off the passable map altogether, one hold --
-   the idle turn is then the only action that changes anything.
+6. a **footing sweep** (since 2026-10-05): when nothing on the observed map
+   is reachable, the likeliest reason is the floor under the camera's blind
+   radius -- an agent that has not moved stands on a disk of unknown, and
+   unknown is impassable. One LOOK_DOWN, a circle and a LOOK_UP map it
+   (``camera_control.begin_inspection(reason="footing")``), once per spot;
+7. only when even that has been done here, one hold -- the idle turn is
+   then the only action that changes anything.
 
 A failure is never silent: each one is counted, its type, message and origin
 recorded in the episode diagnostics, and logged once per type per episode.
@@ -66,6 +71,7 @@ from sparx_agency.core.planning.exploration.frontier_ranking import ranked_front
 from sparx_agency.core.planning.exploration.room_costs import passable_graph, snap_cell
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import unknown_around
 
 LOG = logging.getLogger(__name__)
 
@@ -115,6 +121,11 @@ class FallbackSettings:
         goal_match_m: The goal in force is "still there" when a current goal
             of its rung lies within this distance -- clusters re-snap as the
             frontier shrinks.
+        footing_radius_m: The footing sweep is taken only where at least
+            ``footing_unknown_fraction`` of the cells within this of the
+            agent are unknown -- the blind disk under a camera that has not
+            moved; an agent that walked here knows its footing.
+        footing_unknown_fraction: See ``footing_radius_m``.
     """
 
     frontier_attempts: int = 6
@@ -129,6 +140,8 @@ class FallbackSettings:
     near_blind_m: float = 1.2
     goal_switch_gain: float = 2.0
     goal_match_m: float = 0.6
+    footing_radius_m: float = 1.2
+    footing_unknown_fraction: float = 0.25
 
     def __post_init__(self):
         for name in ("frontier_attempts", "relocation_candidates", "service_backoff_actions",
@@ -142,10 +155,13 @@ class FallbackSettings:
         if type(self.exits_first) is not bool:
             raise ValueError("exits_first must be a bool")
         for name in ("shadow_margin_m", "shadow_default_radius_m", "shadow_length_factor", "near_blind_m",
-                     "goal_match_m"):
+                     "goal_match_m", "footing_radius_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
+        if (isinstance(self.footing_unknown_fraction, bool) or not math.isfinite(self.footing_unknown_fraction)
+                or not 0 <= self.footing_unknown_fraction <= 1):
+            raise ValueError("footing_unknown_fraction must lie in [0, 1]")
         if isinstance(self.goal_switch_gain, bool) or not math.isfinite(self.goal_switch_gain) or self.goal_switch_gain < 1.0:
             raise ValueError("goal_switch_gain must be finite and at least 1 (1 = no commitment)")
 
@@ -216,7 +232,7 @@ class ExplorationFallback:
         self.settings = settings or FallbackSettings()
         self.failures = []
         self.stats = {"invocations": 0, "frontier": 0, "stairs": 0, "frontier_demoted": 0, "frontier_retired": 0,
-                      "room_peek": 0, "relocation": 0, "hold": 0, "failures": 0,
+                      "room_peek": 0, "relocation": 0, "footing": 0, "hold": 0, "failures": 0,
                       "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0,
                       "goal_kept": 0, "goal_switched": 0, "goal_outranked": 0,
                       ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0}
@@ -298,13 +314,27 @@ class ExplorationFallback:
         command = self._frontiers(obs, world, demoted, "frontier_demoted")
         if command is not None:
             return self._tag(command, "frontier_demoted", reason)
-        retired = [g.xy for g in ranked if g not in admissible]
+        # A goal under the agent's feet is not retired, it is unreachable by construction:
+        # the converter has no action for a waypoint inside its arrival tolerance.
+        arrival = p.converter_params.goal_tolerance_m + world.resolution
+        retired = [g.xy for g in ranked if g not in admissible and math.dist((obs.pose.x, obs.pose.y), g.xy) > arrival]
         command, _ = self._try_goals(obs, world, retired)
         if command is not None:
             return self._tag(command, "frontier_retired", reason)
         command = self._relocate(obs, world, ids, graph)
         if command is not None:
             return self._tag(command, "relocation", reason)
+        # Nothing reachable on the observed map: the floor under the camera's blind
+        # radius is the likeliest reason (an agent that has not moved yet stands on
+        # a disk of unknown). One footing sweep here maps it; the idle turn is for
+        # when even that has been done.
+        camera = getattr(p, "camera_control", None)
+        blind = (unknown_around(world, (obs.pose.x, obs.pose.y), self.settings.footing_radius_m)
+                 >= self.settings.footing_unknown_fraction)
+        if blind and camera is not None and camera.begin_inspection(obs, p.mapping.floor_id, reason="footing"):
+            command = camera.inspection_command(obs)
+            if command is not None:
+                return self._tag(command, "footing", reason)
         self.stats["hold"] += 1
         return NavigationCommand.hold(info={"kind": "fallback_hold", "fallback": reason,
                                             "reason": "off the observed passable map; the idle turn is the only move"})

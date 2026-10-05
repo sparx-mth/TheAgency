@@ -135,7 +135,8 @@ class FrontierInventory:
     distance_m: np.ndarray
 
 
-def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, preferred_cost=None):
+def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, preferred_cost=None,
+                         frontier_world=None):
     """Build the inventory without confusing a planning horizon with reachability.
 
     Uses the planner's clearance-qualified passable graph. A goal snapped across
@@ -152,6 +153,12 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
             there and at the body radius otherwise. Without it a threshold
             3.5 m away through a 0.5 m squeeze read as 3.5 m while the
             route around the squeeze was 12.5 m (Hanson 2026-10-04).
+        frontier_world: Optional grid of the same shape the FRONTIER is
+            read from instead of ``world`` -- the same map with the unknown
+            cells the search has settled (looked through without a return,
+            enclosed pockets) written OCCUPIED, so no boundary toward them
+            is a goal. Reachability, distances and line of sight stay on
+            ``world``: the planner never sees the overlay.
     """
     params = replace(params or FrontierRankingParams(),
                      max_geodesic_m=max(1.0, world.grid.size * world.resolution * math.sqrt(2.0)))
@@ -178,7 +185,9 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
             raise ValueError("preferred_cost %s is not shaped like cost %s" % (preferred.shape, cost.shape))
         distances = _prefer_distances(world, np.where(source_component, preferred, np.inf), origin_xy, yaw,
                                       params, distances)
-    clusters = frontier_clusters(world, source_component, ids)
+    if frontier_world is not None and frontier_world.grid.shape != world.grid.shape:
+        raise ValueError("frontier_world %s is not shaped like world %s" % (frontier_world.grid.shape, world.grid.shape))
+    clusters = frontier_clusters(world if frontier_world is None else frontier_world, source_component, ids)
     blocked = world.grid != world.values.free
     goals, by_room = [], {}
     for cluster in clusters:

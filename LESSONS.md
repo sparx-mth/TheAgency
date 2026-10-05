@@ -11,6 +11,110 @@ Format per entry:
 
 ---
 
+## 2026-10-05 — Ranchester couch from upstairs: the model said "downstairs" sixteen times and the agent peeked thirteen doors instead
+
+**Symptom:** `runs/zson-couch-crossfloor-3x-20261005`, Ranchester, couch, start on the upper storey.
+The oracle's STEP 2 read "upper floor (bedroom found); no living room here; living rooms are
+downstairs" at all sixteen loop points; the staircase, once seen (action 166), was valued 0.60 with
+"unvisited ground floor holds the living room"; the agent stood 0.9 m from its foot at action 171
+and walked away. Every RPT* order put the stairs LAST behind 0.25-valued gaps; thirteen peeks at
+~25 actions each (one 85, a 13 m walk to a gap); 500 actions, never downstairs. Also: "Source
+changed during the frozen comparison" aborted the campaign after the first episode.
+
+**Root cause:** The 3B model copies the worked example's numbers -- 25 on every unexplored node,
+60 on the stairs -- whatever its own STEP 2 says, so rule 2b's "less (10-20) when the home type does
+not belong on this storey" was never applied, and the code's uncertainty floor (0.25) could not tell
+the two cases apart. Under RPT*'s expected-time objective five cheap nodes at 0.25 beat one far node
+at 0.60 every time (and rightly, for those numbers). The campaign abort: the runner fingerprints
+every `.py` under `sparx_agency/` at start and per episode; I edited the generator and its tests
+while the campaign flew.
+
+**Fix / workaround:** Ask for the STEP 2 verdict as a field (`home_here`: found / missing /
+elsewhere) -- small models answer it reliably in words -- and let the code apply rule 2b's
+arithmetic: `elsewhere` reads every unexplored node at `unexplored_elsewhere` (0.10) exactly;
+`found` / `missing` keep the 0.25 floor. Documented in `search_node_oracle.py`, `LoopSettings`,
+the README and progress entry 022. Do not edit Python under `sparx_agency/` while a frozen
+campaign runs; Markdown is not fingerprinted.
+
+**Don't:**
+- Don't lower the floor globally to fix this: the 0.25 floor exists because the same model wrote
+  0-1 on every door of the Hanson toilet storey (bathrooms DO belong upstairs) and left at action 27.
+- Don't parse the free-text `storey` line for "downstairs": it is right in words and the numbers
+  still disagree with it; the structured field is what the code can act on.
+- Don't make the stairs cheaper (the 8 m floor-change leaf) to win the order: the leaf is what a
+  storey change costs, and the problem was the gaps' worth, not the stairs' price.
+
+---
+
+## 2026-10-05 — Hanson re-fly: a railing is not an exit, a pocket is not a room, and a spawn beside a bed is a 160-action spin
+
+**Symptom:** `runs/zson-hanson-3x-20261005` (the three Hanson episodes after the door-cut /
+floor / glance changes). The toilet episode reached its toilet at action 359 but spent most of
+them on places a person would not have gone: the two ends of a balcony it had seen whole from
+the threshold (O2 and O6, actions 25-51), an island of unknown between the spawn point and the
+bed in front of it (O4, "GAP", actions 51-82 -- back to within a metre of where it started), a
+strip behind a bed segmented as its own room (R13/O9, actions 150-192), the balcony again
+(R5, offered at 0.25 as "never entered" at action 206, 158 actions after the agent had stood
+at its far end), and a bedroom it had seen the bed and the television of through the door
+(R10, actions 270-289). At action 101 a bathroom vanity (`cabinet 0.84`) was cut off at the left
+edge of the frame and the scheduler glanced right. At action 150 a room labelled `bedroom
+strong` was still valued by the oracle at 0.10. Room numbers churned (R11 -> R14 -> R16 for one
+bedroom) and each new number read `entered=no`. The potted-plant episode spawned beside a bed
+with the plant in view 4.4 m away and spun 159 actions on "no safe target path" to an agent
+error. The chair episode stopped at action 14 on a child's ride-on horse read as `chair` 0.9.
+
+**Root cause:**
+1. The frontier is "free beside unknown", and every unknown cell counted. A balcony railing
+   (the depth returns nothing at floor height beyond it), a window and a mesh hole are frontier
+   for ever; so is an unknown island enclosed by known cells. Nothing in the method said
+   "I looked there and there is nothing to resolve".
+2. A room was finished only by a full rotation inside it (or a scan point that saw half of
+   it). Standing at the end of a balcony after walking its length finishes nothing; a 3-step
+   peek is not a scan.
+3. The watershed carved the strip behind the bed into a room; nothing recognised a doorless
+   2 m2 region with no unknown boundary as a fragment.
+4. The loop computed the exclusions, THEN re-classified the rooms inside the oracle call: a
+   label that became strong on that action was excluded one loop point late.
+5. One kind of object was by rule a weak label (the 2026-10-05 merge guard). A bed is not a
+   guess.
+6. The glance scorer values unknown floor only; a small room beside the route shows it little,
+   and optimistic rays through a window value the garden.
+7. `RoomRegistry` matched by IoU >= 0.15; a room seen through its door grows tenfold as the
+   agent walks in and loses its number -- and with it `last_inside` and `searched`.
+8. A level camera 0.88 m up sees the floor from 1.4 m; the spawn footprint is the only known
+   free around an agent that has not moved; unknown is impassable; the locked target waited for
+   A* for ever. Nothing ever looked down.
+9. YOLO-World lands on the nearest prompt it was given; there was no toy in the vocabulary.
+
+**Fix / workaround:** The sight ledger (`methods/sightlines.py`: looked-through unknown within
+2.5 m from two poses, pockets under 3 m2, written OCCUPIED for the frontier logic only); the
+`seen_through` and `fragment` verdicts in `room_scans.py` (no live frontier, and looked into /
+walked through if narrow, or doorless and under 3 m2); `ObservedSceneGraph.refresh_labels`
+before the exclusions; `SIGNATURE_OBJECTS` making a bed/toilet/oven label strong on its own;
+cue glances toward a confident box cut off by the frame's edge; containment matching in the
+registry; the footing sweep (LOOK_DOWN 30 degrees, a circle, LOOK_UP) for a pathless lock and
+for the fallback's boxed-in case, with a no-rejection release of the lock after six more
+pathless actions; a 0.35 m start-clearance rule in the samplers; `toy` / `rocking horse` /
+`stuffed animal` / `bathtub` in the vocabulary. Progress entry 022.
+
+**Don't:**
+- Don't resolve unknown by range alone: beyond ~2.5 m the floor samples of a stride-8 depth
+  image are 0.2-0.3 m apart, and an unknown cell between two seen rows is a sampling hole, not
+  a railing. The looked-through band stops at 2.5 m for that reason.
+- Don't write settled unknown into the planner's map: occupied is inflated by the body radius,
+  unknown is not, and a settled railing would shrink the balcony the agent can still stand on.
+- Don't finish a wide room because the agent stepped into it: the walls beside its door are
+  behind the camera. Narrow rooms (clearance under 0.9 m) are walked through; wide ones need a
+  pose that saw half of them, or the scan.
+- Don't read a per-pixel "no return" as a settled cell in Gibson: the meshes have holes, and a
+  ray through a hole in a wall lands in the next room's floor and would settle it from the
+  wrong side. The 2-D cast through known free cells stops at the wall.
+- Don't make the one-signature-object rule general: a chair, a cabinet, a desk, a plant names
+  nothing on its own; the Ranchester hallway named "bathroom" by a toilet glimpsed through a
+  door is still the reason weak labels never exclude.
+
+---
+
 ## 2026-10-05 — Hanson/000000: a bedroom in two halves, furniture in no room, every door valued at zero, a peek cancelled on its own route
 
 **Symptom:** Nine-episode campaign of 2026-10-04 (`runs/zson-campaign-3x3-20261004`). In the

@@ -37,6 +37,21 @@ start one. The candidates are re-scored every ``revalue_actions`` and
 whenever the route changes, and the map's growth as the agent walks moves
 the best point with it -- the glance is taken where it is worth most *now*,
 not where it was worth most three actions ago.
+
+**Cue glances** (since 2026-10-05) are the second kind: the geometric
+scorer values unknown floor, and a small room beside the route shows it
+little, but the detector sees the room's furniture at the edge of the
+frame. A confident box cut off by the frame's left or right edge is a
+cue to turn that way -- enough turns to centre the object and one more,
+not a right angle (:meth:`GlanceScheduler._cue`). The target's own class
+and its home objects (a sink, for a toilet) are cues outright; any other
+class only while that side still holds unknown floor. Hanson 2026-10-05,
+action 101: a bathroom vanity read as ``cabinet 0.84`` on the left edge,
+two right glances were taken toward a larger unknown, and the toilet
+beside the vanity was reached 250 actions later. The unknown the scorer
+counts excludes what the sight ledger has settled
+(:class:`~sightlines.SightLedger`): a window is no longer worth a look
+for the garden behind it.
 """
 from __future__ import annotations
 
@@ -49,6 +64,7 @@ import numpy as np
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_from_camera, glance_gains
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object
 
 LEFT, RIGHT, FULL = "left", "right", "full"
 
@@ -83,6 +99,26 @@ class GlanceSettings:
             warm-up, a room scan -- the scan ledger): whatever is still
             unknown from there is beyond range or behind furniture, and a
             second look from the same spot reveals none of it.
+        cue_enabled: Take a **cue glance** toward a confident detection cut
+            off by the frame's left or right edge (since 2026-10-05). The
+            geometric scorer values unknown floor, and a small room beside
+            the route shows little of it; the eye catches the object at the
+            edge of vision and turns to it. Hanson action 101: a bathroom
+            vanity read as ``cabinet 0.84`` at the left edge of the frame,
+            the scheduler glanced right twice (toward a larger unknown),
+            and the toilet beside the vanity was found 250 actions later.
+        cue_confidence: Least detector confidence of a box that is a cue.
+        cue_border_px: A box within this of the frame's edge is cut off.
+        cue_min_box_frac: Least share of the frame's height the box must
+            span: a close, substantial object (the vanity at action 101
+            spanned 40 %), not a speck at the end of a corridor.
+        cue_min_gain_m2: Unknown floor the cue's side must still hold for
+            a cue of an ordinary class; the target's own class and its
+            home objects (:data:`room_priors.HOME_OBJECTS`) need none.
+        cue_max_turns: Most turns a cue glance makes: enough to centre the
+            object and see what stands beside it, not a right angle.
+        cue_repeat_m: No second cue glance for the same class and side
+            within this of one already taken.
     """
 
     enabled: bool = True
@@ -97,18 +133,31 @@ class GlanceSettings:
     max_range_m: Optional[float] = 5.0
     blind_m: float = 0.6
     scanned_m: float = 1.0
+    cue_enabled: bool = True
+    cue_confidence: float = 0.4
+    cue_border_px: int = 8
+    cue_min_box_frac: float = 0.3
+    cue_min_gain_m2: float = 1.5
+    cue_max_turns: int = 3
+    cue_repeat_m: float = 2.0
 
     def __post_init__(self):
-        if type(self.enabled) is not bool:
-            raise ValueError("glances.enabled must be a bool")
+        if type(self.enabled) is not bool or type(self.cue_enabled) is not bool:
+            raise ValueError("glances.enabled and glances.cue_enabled must be bools")
         for name in ("horizon_m", "stride_m", "arrival_m", "min_gain_m2", "min_gain_per_action_m2", "side_rad", "blind_m",
-                     "scanned_m"):
+                     "scanned_m", "cue_min_gain_m2", "cue_repeat_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("glances.%s must be positive and finite" % name)
-        for name in ("cooldown_actions", "revalue_actions"):
+        for name in ("cooldown_actions", "revalue_actions", "cue_max_turns"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("glances.%s must be a positive integer" % name)
+        if type(self.cue_border_px) is not int or self.cue_border_px < 0:
+            raise ValueError("glances.cue_border_px must be a non-negative integer")
+        for name in ("cue_confidence", "cue_min_box_frac"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or not 0 < value <= 1:
+                raise ValueError("glances.%s must lie in (0, 1]" % name)
         if self.max_range_m is not None and (not math.isfinite(self.max_range_m) or self.max_range_m <= self.blind_m):
             raise ValueError("glances.max_range_m must exceed blind_m")
         if self.side_rad > math.pi:
@@ -169,10 +218,11 @@ class GlanceScheduler:
         self.candidates: Tuple[GlanceCandidate, ...] = ()
         self.events: List[Dict] = []
         self.stats = {"evaluations": 0, "scheduled": 0, "started": 0, "completed": 0, "aborted": 0,
-                      "turns": 0, "gain_m2": 0.0}
+                      "turns": 0, "gain_m2": 0.0, "cues": 0, "cues_repeated": 0, "cues_without_gain": 0}
         self._last_eval_step = -10 ** 9
         self._last_glance_step = -10 ** 9
         self._route_key = None
+        self._cues_taken: List[Tuple[str, str, Tuple[float, float]]] = []
 
     # -- the wrapper ----------------------------------------------------------
     def apply(self, obs, world, command):
@@ -185,6 +235,9 @@ class GlanceScheduler:
             return command
         if not self._may_glance(obs):
             return command
+        cue = self._cue(obs, world)
+        if cue is not None:
+            return self._start_cue(obs, cue)
         route = self._route_points()
         if route is None:
             return command
@@ -252,7 +305,9 @@ class GlanceScheduler:
         if max_range is None or not math.isfinite(max_range):
             max_range = float(camera.max_depth_m)
         max_range = min(max_range, float(camera.max_depth_m)) if math.isfinite(camera.max_depth_m) else max_range
-        return UnknownView(world, cone_from_camera(k.width, k.fx, max_range, self.settings.blind_m))
+        sight = getattr(self.policy, "sight", None)
+        resolved = sight.resolved(world) if sight is not None else None
+        return UnknownView(world, cone_from_camera(k.width, k.fx, max_range, self.settings.blind_m), resolved=resolved)
 
     def _resample(self, obs, route):
         """Candidate points: the agent's position, then one every ``stride_m`` along the route ahead."""
@@ -335,6 +390,89 @@ class GlanceScheduler:
         target = min(range(len(route)), key=lambda i: math.dist(route[i], plan.candidate.xy))
         return nearest > target
 
+    # -- cues: an object cut off at the edge of the frame ----------------------------
+    def _cue(self, obs, world):
+        """The best cue in this frame -- ``(side, class, conf, turns, gain_m2)`` -- or None.
+
+        A detection at least ``cue_confidence`` confident, spanning at least
+        ``cue_min_box_frac`` of the frame's height, whose box is cut by the
+        frame's left or right edge; the target's own class and its
+        home objects qualify outright, any other class only while the side
+        still holds ``cue_min_gain_m2`` of unknown floor (a chair at the
+        edge of a room already mapped is not worth two turns). The glance
+        turns enough to centre the object and one turn more, at most
+        ``cue_max_turns``; a class already glanced at on that side within
+        ``cue_repeat_m`` is not a cue again.
+        """
+        s = self.settings
+        if not s.cue_enabled:
+            return None
+        p = self.policy
+        detections = getattr(getattr(p, "perception", None), "detections", None) or ()
+        if not detections:
+            return None
+        k = obs.camera.intrinsics
+        turn = float(p.episode.action_spec.turn_angle_rad)
+        here = (float(obs.pose.x), float(obs.pose.y))
+        target = getattr(p, "target", None)
+        view = None
+        best = None
+        for detection in detections:
+            conf = float(getattr(detection, "conf", 0.0))
+            if conf < s.cue_confidence:
+                continue
+            cls = str(getattr(detection, "cls", "") or "")
+            x1, y1, x2, y2 = (float(v) for v in detection.xyxy)
+            if (y2 - y1) < s.cue_min_box_frac * float(k.height):
+                continue
+            if x1 <= s.cue_border_px:
+                side = LEFT
+            elif x2 >= float(k.width) - s.cue_border_px:
+                side = RIGHT
+            else:
+                continue
+            if any(c == cls and sd == side and math.dist(xy, here) <= s.cue_repeat_m for c, sd, xy in self._cues_taken):
+                self.stats["cues_repeated"] += 1
+                continue
+            u = 0.5 * (x1 + x2)
+            bearing = abs(math.atan2(-(u - k.cx) / k.fx, 1.0))
+            turns = max(1, min(s.cue_max_turns, int(math.ceil(bearing / turn - 1e-9)) + 1))
+            own = bool(target is not None and (
+                (callable(getattr(target, "accepts", None)) and target.accepts(cls)) or home_object(target, cls)))
+            gain = None
+            if not own:
+                if view is None:
+                    view = self._view(obs, world)
+                gains = glance_gains(view, here, float(obs.pose.yaw), turns * turn)
+                gain = gains.left_m2 if side == LEFT else gains.right_m2
+                if gain < s.cue_min_gain_m2:
+                    self.stats["cues_without_gain"] += 1
+                    continue
+            rank = (1 if own else 0, conf)
+            if best is None or rank > best[0]:
+                best = (rank, (side, cls, conf, turns, gain))
+        return None if best is None else best[1]
+
+    def _start_cue(self, obs, cue):
+        side, cls, conf, turns, gain = cue
+        p = self.policy
+        turn = float(p.episode.action_spec.turn_angle_rad)
+        yaw = float(obs.pose.yaw)
+        direction = 1.0 if side == LEFT else -1.0
+        here = (float(obs.pose.x), float(obs.pose.y))
+        self.active = dict(kind=side, direction=direction, target=float(normalize_angle(yaw + direction * turns * turn)),
+                           started=int(obs.step), turns=0, swept=0.0, last_yaw=yaw,
+                           gain_m2=0.0 if gain is None else float(gain), xy=[round(v, 2) for v in here],
+                           cue=cls, cue_turns=int(turns))
+        self._cues_taken.append((cls, side, here))
+        self.stats["started"] += 1
+        self.stats["cues"] += 1
+        self.plan_in_force = None
+        self._log(obs, "glance_started", kind=side, cue=cls, cue_conf=round(float(conf), 2), actions=int(turns),
+                  gain_m2=None if gain is None else round(float(gain), 2), xy=self.active["xy"],
+                  heading_deg=round(math.degrees(yaw), 1))
+        return self._turn(obs)
+
     # -- the look -------------------------------------------------------------
     def _start(self, obs, plan):
         p = self.policy
@@ -366,7 +504,7 @@ class GlanceScheduler:
             full_circle = int(math.ceil(2 * math.pi / turn - 1e-9))
             done = active["swept"] >= 2 * math.pi - 0.5 * turn or active["turns"] >= full_circle + 2
         else:
-            side_turns = int(math.ceil(self.settings.side_rad / turn - 1e-9))
+            side_turns = int(active.get("cue_turns") or math.ceil(self.settings.side_rad / turn - 1e-9))
             done = (abs(normalize_angle(active["target"] - yaw)) <= 0.5 * turn + 1e-6
                     or active["turns"] >= side_turns + 2)
         if not done:
@@ -393,10 +531,11 @@ class GlanceScheduler:
         active["turns"] += 1
         self.stats["turns"] += 1
         p._action_owner = "glance"
-        return NavigationCommand.hold(
-            final_yaw=float(normalize_angle(yaw + step)),
-            info={"kind": "glance", "glance": active["kind"], "turn": active["turns"],
-                  "gain_m2": round(float(active["gain_m2"]), 2), "xy": list(active["xy"])})
+        info = {"kind": "glance", "glance": active["kind"], "turn": active["turns"],
+                "gain_m2": round(float(active["gain_m2"]), 2), "xy": list(active["xy"])}
+        if active.get("cue"):
+            info["cue"] = active["cue"]
+        return NavigationCommand.hold(final_yaw=float(normalize_angle(yaw + step)), info=info)
 
     def _finish_pause(self, turns):
         memory = getattr(self.policy, "route_memory", None)

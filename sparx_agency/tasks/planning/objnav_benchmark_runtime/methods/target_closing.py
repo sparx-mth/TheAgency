@@ -9,6 +9,7 @@ from sparx_agency.core.planning.objnav.action_converter.action_choice import pit
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box, observed_objects
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import contradicted_by_map
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import unknown_around
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_path import TargetApproachPath
 
 
@@ -79,6 +80,28 @@ class TargetClosingSettings:
     # historical episode-ending error.
     release_on_failed_inspection: bool = True
     failed_inspection_radius_factor: float = 2.0
+    # A LOCKED target with no safe path used to wait for A* for ever: the agent
+    # that spawned beside a bed with the plant in view 4.4 m away (Hanson
+    # 2026-10-05) spun 159 actions on "no safe target path" because the floor
+    # under the camera's blind radius was unknown and unknown is impassable.
+    # After ``footing_after_steps`` such actions the closing asks the camera
+    # for a FOOTING sweep (one LOOK_DOWN, a circle, one LOOK_UP: the floor
+    # around the feet becomes known, and a path either appears or is shown
+    # not to exist from here); if ``release_after_footing_steps`` more
+    # pathless actions follow, the lock is released WITHOUT a rejection -- the
+    # target was never disproved, the spot was -- and the search moves on,
+    # refusing a new takeover on a far candidate until the agent has left the
+    # spot (``boxed_in_radius_m``). ``footing_sweep=False`` drops the sweep
+    # alone (a protocol without LOOK actions never has it); the release after
+    # the bound stands either way.
+    footing_sweep: bool = True
+    footing_after_steps: int = 2
+    release_after_footing_steps: int = 6
+    boxed_in_radius_m: float = 1.0
+    # The sweep is asked for only where the floor around the feet is still unknown:
+    # at least this share of the cells within ``footing_radius_m`` of the agent.
+    footing_radius_m: float = 1.2
+    footing_unknown_fraction: float = 0.25
 
     def __post_init__(self):
         if isinstance(self.confidence, bool) or not math.isfinite(self.confidence) or not 0 < self.confidence <= 1:
@@ -102,9 +125,19 @@ class TargetClosingSettings:
                 raise ValueError("Invalid target-closing action/frame bound: %s" % key)
         if type(self.border_margin_px) is not int or self.border_margin_px < 0:
             raise ValueError("border_margin_px must be a non-negative int")
-        for key in ("release_unverified", "stop_on_exhausted_inspection", "release_on_failed_inspection"):
+        for key in ("release_unverified", "stop_on_exhausted_inspection", "release_on_failed_inspection", "footing_sweep"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
+        for key in ("footing_after_steps", "release_after_footing_steps"):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 1:
+                raise ValueError("%s must be a positive int" % key)
+        for key in ("boxed_in_radius_m", "footing_radius_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError("%s must be positive and finite" % key)
+        if (isinstance(self.footing_unknown_fraction, bool) or not math.isfinite(self.footing_unknown_fraction)
+                or not 0 <= self.footing_unknown_fraction <= 1):
+            raise ValueError("footing_unknown_fraction must lie in [0, 1]")
 
 
 class TargetClosing:
@@ -131,6 +164,9 @@ class TargetClosing:
         self.border_rejections = 0
         self.map_rejections = 0
         self.weak_resightings = 0          # frames that counted on ``track_confidence`` alone
+        self.footing_sweeps = 0            # footing sweeps asked for by a lock with no safe path
+        self.boxed_releases = 0            # locks released because no path existed from where the agent stood
+        self.boxed_in = []                 # (robot xy, floor id, action) per boxed-in release
         self._clear()
 
     def _clear(self):
@@ -151,6 +187,9 @@ class TargetClosing:
         self.inspection_sighting = None    # the last action of the inspection that saw the target in terminal range
         self.occluded_path_steps = 0
         self.verification_yaw = 0.0
+        self.no_path_steps = 0             # consecutive actions the LOCKED target had no safe path
+        self.footing_done = False          # a footing sweep was asked for by this lock
+        self.pathless_after_footing = 0    # pathless actions since the sweep ended
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -208,7 +247,7 @@ class TargetClosing:
             if not self.locked and range_m > s.rejection_min_range_m:
                 cooling = (not self.active and self.released_step is not None
                            and obs.step - self.released_step < s.release_cooldown_actions)
-                if cooling or self._rejected_nearby(xyz, p.mapping.floor_id):
+                if cooling or self._rejected_nearby(xyz, p.mapping.floor_id) or self._boxed_in_here(obs):
                     continue
             if not self.locked and contradicted_by_map(p, label, xyz, rows[-1].get("radius_m")) is not None:
                 self.map_rejections += 1                       # a confirmed non-target object stands here
@@ -265,10 +304,20 @@ class TargetClosing:
             self.map_releases += 1
             self._release(obs, radius_factor=s.failed_inspection_radius_factor, why="contradicted by the map")
 
-    def _release(self, obs, radius_factor=1.0, why="unverified"):
-        """Give a candidate back to exploration and remember the spot (``radius_factor`` times the rejection radius)."""
+    def _boxed_in_here(self, obs):
+        """Whether the agent still stands where a lock was released for want of a path (``boxed_in_radius_m``)."""
+        here = (obs.pose.x, obs.pose.y)
+        floor = self.policy.mapping.floor_id
+        return any(f == floor and math.dist(xy, here) <= self.settings.boxed_in_radius_m for xy, f, _ in self.boxed_in)
+
+    def _release(self, obs, radius_factor=1.0, why="unverified", remember=True):
+        """Give a candidate back to exploration and remember the spot (``radius_factor`` times the rejection radius).
+
+        ``remember=False`` leaves the anchor out of the rejection memory: the
+        candidate was not disproved, the place the agent stood was.
+        """
         p = self.policy
-        if self.anchor is not None:
+        if self.anchor is not None and remember:
             self.rejected.append((self.anchor, self.floor_id, obs.step,
                                   float(radius_factor) * self.settings.rejection_radius_m))
         self.releases += 1
@@ -291,11 +340,15 @@ class TargetClosing:
         actions = self.policy.episode.action_spec
         if not actions.has_camera_tilt:
             return None
-        desired = math.atan2(obs.pose.z + obs.camera.height_m - self.xyz[2], max(distance, 1e-6))
-        low = self.label in ("toilet", "potted plant") or self.xyz[2] < obs.pose.z + obs.camera.height_m - 0.15
+        # The pitch is the target's measured height's, never its label's: "a potted
+        # plant is low" sent the camera 30 degrees down at a plant standing in a metre-
+        # tall planter, where its foliage never projected, for 24 actions (Hanson
+        # 2026-10-05); a plant on the floor is low by this geometry anyway.
+        camera_z = obs.pose.z + obs.camera.height_m
+        desired = math.atan2(camera_z - self.xyz[2], max(distance, 1e-6))
+        low = self.xyz[2] < camera_z - 0.15
         if low and distance < self.settings.look_down_distance_m:
-            desired = max(actions.tilt_angle_rad, math.atan2(
-                obs.pose.z + obs.camera.height_m - self.xyz[2], max(distance, 1e-6)))
+            desired = max(actions.tilt_angle_rad, desired)
         desired = round(desired / actions.tilt_angle_rad) * actions.tilt_angle_rad
         if actions.min_pitch_rad is not None:
             desired = max(actions.min_pitch_rad, desired)
@@ -329,10 +382,14 @@ class TargetClosing:
             error = self._bbox_error(obs)
             info = {"kind": "target_closing", "reason": reason, "target_visible": True}
             distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2]) if self.xyz is not None else float("inf")
-            if (not self.locked and turn_action(error, offset) is None
+            if (not self.locked and abs(error) <= offset + 1e-6
                     and distance > self.settings.terminal_distance_m + actions.forward_step_m):
                 # Two steps ahead: a one-step waypoint sits inside the converter's arrival
                 # tolerance and yields no action at all. One MOVE_FORWARD results either way.
+                # Within one turn of the centre the box stays in the frame after a step,
+                # and a step is what makes the next frame a consecutive one; the centring
+                # turn moved the box across the image and the detector dropped it on the
+                # other side -- four times in a row at a chair 3.5 m off (Hanson 2026-10-05).
                 # Never for a LOCKED target without a safe path: that one waits for A*.
                 reach = 2.0 * actions.forward_step_m
                 ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
@@ -363,6 +420,9 @@ class TargetClosing:
         distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2])
         if not self.locked:
             return self._scan(obs, None, "consecutive depth-consistent frames required")
+        command = self._continue_footing(obs, world, distance)
+        if command is not None:
+            return command
         if self.inspection_started is not None or distance <= s.terminal_distance_m:
             command = self._inspect(obs, distance)
             if command is None:
@@ -379,13 +439,112 @@ class TargetClosing:
         # a collision-qualified path with a centering hold or a reacquisition spin.
         command = self.path.command(self, obs, world)
         if command is None:
-            return self._scan(obs, None, "no safe target path; exploration remains suspended")
+            return self._no_path(obs, world, distance)
+        self.no_path_steps = 0
+        self.pathless_after_footing = 0
         visible = self.last_seen == obs.step
         self.phase = "CLOSE" if visible else "CLOSE_OCCLUDED"
         self.occluded_path_steps += int(not visible)
         return replace(command, camera_pitch=0.0 if p.episode.action_spec.has_camera_tilt else None,
                        info=dict(command.info, target_confirmed=True, persistent_lock=True,
                                  target_visible=visible, range_m=distance, phase=self.phase))
+
+    def _no_path(self, obs, world, distance):
+        """A LOCKED target A* cannot reach from here: look at the floor around, then give the spot up.
+
+        First the footing sweep (``footing_sweep``; the camera controller
+        owns it and its turns come back here one per action, tagged
+        ``FOOTING``): the blind disk under the camera is the usual reason a
+        path does not exist from where the agent has not moved, so the
+        sweep is asked for only while ``footing_unknown_fraction`` of the
+        cells within ``footing_radius_m`` are still unknown. Then, if the
+        sweep bought no path either -- or there was nothing to sweep -- the
+        lock is released without a rejection after
+        ``release_after_footing_steps`` pathless actions, the spot is
+        remembered as boxed in, and the search -- which can walk -- carries
+        on; a new takeover from within ``boxed_in_radius_m`` of here is
+        refused. Between those, the centring hold as before: the target
+        stays in view.
+        """
+        p, s = self.policy, self.settings
+        camera = p.camera_control
+        self.no_path_steps += 1
+        if (s.footing_sweep and not self.footing_done and p.episode.action_spec.has_camera_tilt
+                and self.no_path_steps >= s.footing_after_steps):
+            self.footing_done = True
+            blind = unknown_around(world, (obs.pose.x, obs.pose.y), s.footing_radius_m) >= s.footing_unknown_fraction
+            if blind and camera.begin_inspection(obs, p.mapping.floor_id, reason="footing"):
+                self.footing_sweeps += 1
+                sweep = camera.inspection_command(obs)
+                if sweep is not None:
+                    return self._footing_command(obs, sweep)
+        if self.footing_done or not s.footing_sweep or not p.episode.action_spec.has_camera_tilt:
+            self.pathless_after_footing += 1
+            if self.pathless_after_footing >= s.release_after_footing_steps:
+                self.boxed_releases += 1
+                self.boxed_in.append(((float(obs.pose.x), float(obs.pose.y)), p.mapping.floor_id, int(obs.step)))
+                self._release(obs, why="no safe path from here", remember=False)
+                turn = p.episode.action_spec.turn_angle_rad
+                return NavigationCommand.hold(
+                    final_yaw=normalize_angle(obs.pose.yaw + turn),
+                    info={"kind": "target_released", "phase": "RELEASED",
+                          "reason": "no safe path to the target %.1f m away from here; the search moves on" % distance})
+        return self._scan(obs, None, "no safe target path; exploration remains suspended")
+
+    def _continue_footing(self, obs, world, distance):
+        """The footing sweep in force, one action at a time -- cut short the moment a path exists.
+
+        The sweep was asked for because A* had no path from here; its turns
+        come back through here (``FOOTING``), and once the floor it mapped
+        connects the agent to the target's standoff the rest of the circle
+        is not worth its actions: the camera is told to restore (one
+        LOOK_UP) and the approach begins level. Without this the sweep's
+        pitch stood for the whole approach and the first inspection (Hanson
+        2026-10-05, actions 5-63: 30 degrees down, the plant's foliage never
+        projected, the lock released as "saw nothing").
+        """
+        camera = self.policy.camera_control
+        if not camera.footing:
+            return None
+        sweep = camera.inspection_command(obs)
+        if sweep is None:
+            return None
+        if (not camera.inspection["restoring"] and self.inspection_started is None
+                and distance > self.settings.terminal_distance_m
+                and self.path.command(self, obs, world) is not None):
+            camera.inspection["restoring"] = True
+            sweep = camera.inspection_command(obs)
+            if sweep is None:
+                return None
+        return self._footing_command(obs, sweep)
+
+    def refuses_far_candidate(self, obs, xy):
+        """Whether a target seen at ``xy`` is one the takeover would not start on from here.
+
+        Far candidates only (beyond ``rejection_min_range_m``; a close view is
+        new evidence): one within the rejection memory, one seen during the
+        cooldown after a release, or one seen from a spot the lock was given
+        up at for want of a path. The legacy target evidence asks the same
+        question, so the search does not walk after what the takeover has
+        just refused (Hanson 2026-10-05, actions 18-26: nine actions toward
+        a released chair, and the warm-up begun again where they ended).
+        """
+        s = self.settings
+        if self.locked:
+            return False
+        range_m = math.dist((obs.pose.x, obs.pose.y), (float(xy[0]), float(xy[1])))
+        if range_m <= s.rejection_min_range_m:
+            return False
+        cooling = (not self.active and self.released_step is not None
+                   and obs.step - self.released_step < s.release_cooldown_actions)
+        return (cooling or self._rejected_nearby((float(xy[0]), float(xy[1]), 0.0), self.policy.mapping.floor_id)
+                or self._boxed_in_here(obs))
+
+    def _footing_command(self, obs, sweep):
+        self.phase = "FOOTING"
+        return replace(sweep, info=dict(sweep.info, kind="target_closing", phase=self.phase, persistent_lock=True,
+                                        target_visible=self.last_seen == obs.step,
+                                        reason="no safe target path; mapping the floor around the feet"))
 
     def _bbox_error(self, obs):
         # Optical x points right whereas positive ENU yaw turns left. At a
@@ -408,6 +567,9 @@ class TargetClosing:
         * its centroid is not its range -- the terminal test reads the near
           edge of the freshly measured surface beside the centroid, which is
           what the benchmark's success radius is measured to;
+        * the pitch its height predicts is where to look for it when it is
+          NOT in view; a fresh, aligned sighting within range STOPs at
+          whatever pitch it came at;
         * when the inspection budget runs out after the target WAS seen
           fresh in terminal range from this very spot, a STOP is the right
           verdict and an error is not (``stop_on_exhausted_inspection``);
@@ -442,7 +604,11 @@ class TargetClosing:
         info = {"kind": "target_closing", "target_confirmed": True, "persistent_lock": True,
                 "target_visible": fresh, "range_m": distance, "measured_m": measured, "bbox_yaw_error_rad": error,
                 "box_spans_centre": spans_centre, "phase": self.phase}
-        if fresh and not turning and not tilting and measured <= limit:
+        # The pitch the geometry predicts is where to LOOK for the target, not a
+        # condition on having seen it: the Hanson toilet projected only at 60 degrees
+        # down where the prediction said 30, and twenty actions of LOOK_UP/LOOK_DOWN
+        # followed a fresh, centred, in-range sighting before the budget STOPped.
+        if fresh and not turning and measured <= limit:
             self.phase = "STOP"
             return NavigationCommand.stop_here(info=dict(info, phase="STOP", reason="fresh terminal target confirmation"))
         views = self._inspection_views(pitch)
@@ -503,5 +669,9 @@ class TargetClosing:
                 "map_releases": self.map_releases,
                 "last_release": self.last_release, "border_rejections": self.border_rejections,
                 "map_rejections": self.map_rejections, "weak_resightings": self.weak_resightings,
+                "no_path_steps": self.no_path_steps, "footing_sweeps": self.footing_sweeps,
+                "boxed_releases": self.boxed_releases,
+                "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}
+                             for xy, floor, step in self.boxed_in],
                 "rejected": [{"xyz": list(spot), "floor_id": floor, "step": step, "radius_m": radius}
                              for spot, floor, step, radius in self.rejected]}

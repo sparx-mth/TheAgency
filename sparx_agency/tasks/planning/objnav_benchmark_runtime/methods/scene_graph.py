@@ -10,6 +10,7 @@ from sparx_agency.core.mapping.topology.room_registry import RoomRegistry
 from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters, link_doors, door_room_pairs
 from sparx_agency.core.mapping.topology.room_watershed import segment_rooms_watershed, WatershedRoomParams
 from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, SearchNode, SearchNodeOracle
+from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
 from sparx_agency.core.planning.exploration.object_search_supervisor import RoomFacts
 from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
@@ -89,6 +90,23 @@ class ObservedSceneGraph:
         self.p_present = 0.0
         #: ``{pid: step}`` -- the last action the agent's cell lay in the room.
         self.last_inside = {}
+        #: Optional ``world -> (H, W) bool`` naming the unknown cells the search has
+        #: settled (:class:`~sightlines.SightLedger.resolved`): looked through without
+        #: a return, or enclosed pockets. The frontier is read with them written
+        #: OCCUPIED, so no room counts a boundary toward them and no goal is made of
+        #: it. None reads the frontier off the map as it is.
+        self.resolved_provider = None
+
+    def frontier_world(self, world):
+        """The map the frontier is read from: ``world`` with the settled unknown written OCCUPIED, or ``world``."""
+        if self.resolved_provider is None:
+            return world
+        resolved = self.resolved_provider(world)
+        if resolved is None or not np.any(resolved):
+            return world
+        data = world.grid.copy()
+        data[np.asarray(resolved, dtype=bool)] = world.values.occupied
+        return OccupancyGrid2D(data, world.params, values=world.values)
 
     def credit_time(self, world, pose, seconds, step=None):
         gx, gy = world.world_to_grid(pose.x, pose.y)
@@ -191,12 +209,13 @@ class ObservedSceneGraph:
             pid_labels[room.mask] = pid + 1
         self.labels = pid_labels
         self._door_links(world, pid_labels, doors, cells)
-        counts = count_frontier_clusters(world.grid, pid_labels, min_cluster_cells=4)
+        frontier_world = self.frontier_world(world)
+        counts = count_frontier_clusters(frontier_world.grid, pid_labels, min_cluster_cells=4)
         self.facts = {pid: RoomFacts(pid, counts.get(pid + 1, 0), self.searched.get(pid, 0.0), room.n_cells)
                       for pid, room in rooms.items()}
         self.frontier_inventory = None
         if cost is not None and here_xy is not None:
-            self.refresh_accessibility(world, cost, here_xy, yaw, ranking, preferred_cost)
+            self.refresh_accessibility(world, cost, here_xy, yaw, ranking, preferred_cost, frontier_world=frontier_world)
         self._objects = self._room_objects(world, pid_labels, landmarks)
         if not rooms:
             self.label_tracker.update({}, step, changed)
@@ -211,14 +230,36 @@ class ObservedSceneGraph:
                                        prob=self.probs.get(pid, 0.0), xy=room.centroid)
                             for pid, room in rooms.items()]
 
-    def refresh_accessibility(self, world, cost, here_xy, yaw=0.0, ranking=None, preferred_cost=None):
+    def refresh_accessibility(self, world, cost, here_xy, yaw=0.0, ranking=None, preferred_cost=None,
+                              frontier_world=None):
         """One source of truth for accessible counts, planning goals and map markers."""
         if self.labels is None:
             return
+        if frontier_world is None:
+            frontier_world = self.frontier_world(world)
         self.frontier_inventory = accessible_frontiers(world, cost, self.labels, here_xy, yaw, ranking,
-                                                       preferred_cost=preferred_cost)
+                                                       preferred_cost=preferred_cost,
+                                                       frontier_world=None if frontier_world is world else frontier_world)
         self.facts = {pid: replace(fact, frontier_clusters=len(self.frontier_inventory.by_room.get(pid + 1, ())))
                       for pid, fact in self.facts.items()}
+
+    def refresh_labels(self, step):
+        """Re-read every room's label from its evidence now, before the nodes are chosen.
+
+        The label tracker is otherwise updated inside :meth:`reason`, AFTER
+        the loop has decided which rooms are nodes: a room whose evidence
+        made it a strong bedroom on this very action was shown to the
+        oracle and kept in the order for one more loop point (Hanson
+        2026-10-05, action 150: a "bedroom, fully seen, no toilet" valued
+        at 0.10 instead of excluded). One bounded classifier call per room
+        with a new kind of object, as the mid-visit clue rule spends.
+        """
+        if not self.registry.rooms or not self._objects:
+            return dict(self.label_tracker.labels)
+        labels = self.label_tracker.update(self._objects, step, False)
+        self.options = [replace(o, label=labels[o.room_id].label if o.room_id in labels else o.label)
+                        for o in self.options]
+        return labels
 
     def reason(self, world, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0,
                exclude=()):

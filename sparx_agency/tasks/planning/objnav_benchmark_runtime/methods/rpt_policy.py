@@ -36,6 +36,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.path_glances import GlanceScheduler, GlanceSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import RoomScanLedger
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import SightLedger, SightSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_peek import DoorwayPeek
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES, discover
@@ -67,6 +68,7 @@ class RPTSearchPolicy:
         self.sweep_settings = SweepSettings()
         self.fallback_settings = FallbackSettings()
         self.glance_settings = GlanceSettings()
+        self.sight_settings = SightSettings()
         self.target_projector = None  # optional simulator-local geometry, never goal annotations
 
     def configuration(self):
@@ -81,12 +83,24 @@ class RPTSearchPolicy:
                                 rule="at most one in-place glance per route, where along the route a left, right or full "
                                      "look reveals the most unknown floor the walk itself will not, if that clears the "
                                      "gain and gain-per-action floors; a suspended phase (no loop charge, clocks paused)"
+                                     + ("; a confident detection cut off by the frame's edge is a cue to turn toward it"
+                                        if self.glance_settings.cue_enabled else "")
                                 if self.glance_settings.enabled else "none"),
+                "sight": dict(asdict(self.sight_settings),
+                              rule="unknown looked through from %d poses within %.1f m without a depth return, and "
+                                   "enclosed unknown pockets under %.1f m2, are settled: not frontier, not openings, "
+                                   "not glance gain; the planner and the display keep the real map"
+                                   % (self.sight_settings.min_looks, self.sight_settings.far_m,
+                                      self.sight_settings.pocket_max_m2)
+                              if self.sight_settings.enabled else "none: every unknown cell is an exit"),
                 "target_closing": asdict(self.settings.target_closing),
                 "target_navmesh_projection": self.target_projector is not None,
                 "room_visit": ("vantage point + full rotation; a scanned room (or one a scan saw more than half of) "
-                               "is finished for the episode; rooms whose STRONG type label cannot hold the target -- "
-                               "with no home object of the target inside -- are not nodes"
+                               "is finished for the episode, and so is a room with no live frontier that the camera "
+                               "looked into or walked through, or that is a doorless fragment under %.1f m2; rooms whose "
+                               "STRONG type label cannot hold the target -- with no home object of the target inside -- "
+                               "are not nodes; one signature object (a bed, a toilet, an oven) makes a label strong"
+                               % self.loop_settings.fragment_max_m2
                                if self.loop_settings.scanning else "bounded frontier sweep of %d actions" % self.loop_settings.local_steps),
                 "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
                                   "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
@@ -95,8 +109,10 @@ class RPTSearchPolicy:
                 "openings": ("doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs, "
                              "visited by a peek (threshold, face the unknown, one look to each side) priced at %d actions; "
                              "an opening nothing was glimpsed through, like a never-entered unknown room, is read at no "
-                             "less than p=%.2f (the uncertainty floor)"
-                             % (self.loop_settings.openings.service_steps, self.loop_settings.unexplored_floor)
+                             "less than p=%.2f (the uncertainty floor) while the oracle's home_here is found or missing, "
+                             "and at p=%.2f exactly when it says the home type lives on another storey"
+                             % (self.loop_settings.openings.service_steps, self.loop_settings.unexplored_floor,
+                                self.loop_settings.unexplored_elsewhere)
                              + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
                                 "visited by the same peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
                                                                             self.loop_settings.openings.landmark_standoff_m)
@@ -138,9 +154,15 @@ class RPTSearchPolicy:
         self.planner = WeightedAStarPlanner2D(self.planner_params)
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
         self.fallback = ExplorationFallback(self, self.fallback_settings)
+        # Where the camera has looked and what it looked through without a
+        # return, per floor: settled unknown is not frontier, and the poses say
+        # which rooms were walked through or looked into.
+        self.sight = SightLedger(self, self.sight_settings)
         # Where every completed look-around stood, on every floor: the one memory
         # of "this room is finished" that survives the watershed renumbering rooms.
-        self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction)
+        self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction,
+                                    fragment_max_m2=self.loop_settings.fragment_max_m2,
+                                    walkthrough_clearance_m=self.loop_settings.walkthrough_clearance_m)
         # Sticky ids for the floor's openings and the ones already peeked into,
         # building-wide like the room numbers: "O3" names one doorway in the recording.
         self.openings = OpeningRegistry(match_m=self.loop_settings.openings.match_m,
@@ -284,6 +306,7 @@ class RPTSearchPolicy:
             try:
                 world = self.mapping.update(observation, arrival_allowed=False)
                 self.last_world = world
+                self.sight.observe(observation, world)
                 return self.closing.plan(observation, world)
             except Exception as exc:
                 self.closing.phase = "FAILED"
@@ -315,6 +338,7 @@ class RPTSearchPolicy:
             self.building.observe(observation)
         if not self.building or not self.building.traversing:
             self.telemetry.observe(observation, world, self.mapping.floor_id)
+            self.sight.observe(observation, world)
         confirmed = self._perceive(observation)
         try:
             return self._decide(observation, world, confirmed)
@@ -508,6 +532,7 @@ class RPTSearchPolicy:
                 "frontier_sweep": self.sweep.diagnostics(),
                 "room_search_loop": self.loop.diagnostics(),
                 "room_scans": self.scans.diagnostics(),
+                "sight": self.sight.diagnostics(),
                 "openings": self.openings.diagnostics(),
                 "glances": self.glances.diagnostics(),
                 "exploration_fallback": self.fallback.diagnostics(),

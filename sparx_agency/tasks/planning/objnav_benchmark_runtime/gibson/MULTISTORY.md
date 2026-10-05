@@ -165,6 +165,12 @@ The separate `sparx-gibson-multistory-development/2` protocol therefore:
 
 - selects training buildings with at least two area-supported levels, separated
   by at least 1.5 m, and verifies connected cross-floor starts;
+- rejects a start with less than 0.35 m of navmesh clearance
+  (`generate_development.MIN_START_CLEARANCE_M`, since 2026-10-05; recorded as
+  `start_clearance_m` in the generation audit): the navmesh admits a point
+  0.18 m from a bed, and Hanson/000002 spawned there -- the camera saw nothing
+  but the bed and the agent could not plan a step out. Manifests frozen before
+  this keep their starts; a new manifest is a new frozen set;
 - generates all episodes deterministically before the policy runs (no replacing
   difficult buildings based on success);
 - starts on another storey from the annotated category's success region;
@@ -208,6 +214,14 @@ python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.generate_d
   --output "$HOME/objnav_benchmark/multistory/episodes.json" \
   --multistory --buildings 5 --episodes-per-building 3 --seed 17
 ```
+
+`--categories couch` (since 2026-10-05) restricts the goals to the categories named
+(comma-separated Gibson goal names) and skips a building without one annotated on
+its reference floor: a couch is the one category never upstairs in a house, so a
+couch-only cross-floor campaign makes the storey change the test rather than a
+coincidence of the annotation (the Hanson toilet, chair and plant episodes of
+2026-10-05 all ended at real upstairs instances the reference-floor annotation does
+not know, SR=0 by construction). Recorded as `generation.goal_categories`.
 
 After the [detector and CPU LLM setup](README.md#data-and-running), run the
 existing frozen campaign runner with one explorer and one preselected recording

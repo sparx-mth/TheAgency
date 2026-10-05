@@ -83,12 +83,23 @@ class UnknownView:
     Args:
         world: The occupancy grid; its values name FREE, OCCUPIED and UNKNOWN.
         cone: The camera, for the range band and the ray density.
+        resolved: Optional ``(H, W)`` bool of unknown cells the search has
+            settled -- looked through without a depth return (a railing, a
+            window), or enclosed pockets. They block a ray as a wall does
+            and are not counted: a glance toward a window would otherwise
+            be valued by the whole garden behind it.
     """
 
-    def __init__(self, world: OccupancyGrid2D, cone: ViewCone) -> None:
+    def __init__(self, world: OccupancyGrid2D, cone: ViewCone, resolved: Optional[np.ndarray] = None) -> None:
         grid = world.grid
         self._blocking = grid == world.values.occupied
         self._unknown = grid == world.values.unknown
+        if resolved is not None:
+            settled = np.asarray(resolved, dtype=bool)
+            if settled.shape != grid.shape:
+                raise ValueError("resolved %s is not shaped like the grid %s" % (settled.shape, grid.shape))
+            self._blocking = self._blocking | settled
+            self._unknown = self._unknown & ~settled
         self._height, self._width = grid.shape
         self._resolution = float(world.resolution)
         self._origin_x = float(world.origin_x)

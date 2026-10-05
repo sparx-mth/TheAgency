@@ -116,6 +116,10 @@ def _header(col, search):
         col.line("LLM: home = %s" % reading["home"], GREY)
     if reading.get("storey"):
         col.line("LLM: storey = %s" % reading["storey"], GREY)
+    if reading.get("home_here"):
+        col.line("LLM: home type %s on this storey%s" % (
+            {"found": "FOUND", "missing": "MISSING", "elsewhere": "ELSEWHERE"}.get(reading["home_here"], reading["home_here"]),
+            " -- unexplored places read at the elsewhere value" if reading["home_here"] == "elsewhere" else ""), GREY)
     col.gap()
 
 

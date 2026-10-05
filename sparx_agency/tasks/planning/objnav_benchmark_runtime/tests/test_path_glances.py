@@ -287,3 +287,103 @@ def test_the_policy_wraps_the_loops_transit_in_a_glance_and_resumes_the_search_w
     assert policy.glances.active is None and 12 <= turns <= 14
     assert nxt.waypoints and nxt.info["kind"] == "transit/1", "the look is over: this very action is the transit's"
     assert policy.glances.stats["completed"] == 1 and policy.route_memory.stats["kept"] >= 1
+
+
+# -- cue glances (2026-10-05): the object cut off at the edge of the frame -------------------
+class Box:
+    def __init__(self, cls, conf, xyxy):
+        self.cls, self.conf, self.xyxy = cls, conf, xyxy
+
+
+class Target:
+    def accepts(self, cls):
+        return cls == "toilet"
+
+    query = "toilet"
+
+
+def cue_policy(route, detections, target=None):
+    policy, camera, actions = fake_policy(route)
+    policy.perception = SimpleNamespace(detections=tuple(detections))
+    policy.target = target or Target()
+    return policy, camera, actions
+
+
+def test_a_confident_box_cut_by_the_left_edge_turns_the_agent_toward_it_when_unknown_floor_lies_that_side():
+    """Hanson action 101: 'cabinet 0.84' on the left edge of the frame -- a bathroom vanity -- and the
+    scheduler glanced right. The box is a cue; two turns centre it and show what stands beside it."""
+    route = route_east()
+    world = corridor_world()                                        # the unknown room is NORTH = left of an eastward walk
+    policy, camera, actions = cue_policy(route, [Box("cabinet", 0.84, (0.0, 120.0, 90.0, 400.0))])
+    scheduler = GlanceScheduler(policy)
+    command = follow(route)
+    out = scheduler.apply(obs_at(camera, 0, (5.4, 2.5)), world, command)
+    assert out is not command and out.info["kind"] == "glance" and out.info["glance"] == LEFT and out.info["cue"] == "cabinet"
+    assert scheduler.active["cue"] == "cabinet" and scheduler.active["cue_turns"] == 3, "the box centre is 36 degrees off: two turns, plus one"
+    assert scheduler.stats["cues"] == 1 and scheduler.stats["started"] == 1
+    started = [e for e in scheduler.events if e["event"] == "glance_started"][0]
+    assert started["cue"] == "cabinet" and started["cue_conf"] == 0.84 and started["gain_m2"] > 0
+    # The look: one turn per action to the left, done when the target heading is reached; the route resumes.
+    yaw, step = 0.0, 1
+    while scheduler.active is not None:
+        yaw = float(out.final_yaw)
+        out = scheduler.apply(obs_at(camera, step, (5.4, 2.5), yaw), world, command)
+        step += 1
+    assert yaw == pytest.approx(3 * actions.turn_angle_rad, abs=1e-6) and out is command
+    assert scheduler.stats["completed"] == 1
+    # The same cue on the same side within cue_repeat_m is not taken twice (the policy resets the
+    # action owner every action; the stand-in does it by hand).
+    policy._action_owner = "search"
+    scheduler._last_glance_step = -100
+    scheduler.apply(obs_at(camera, 20, (2.0, 2.5)), world, command)
+    assert scheduler.stats["cues_repeated"] == 0, "2 m is the bar: from 3.4 m away it is a cue again"
+    policy._action_owner = "search"
+    scheduler.abort(obs_at(camera, 21, (2.0, 2.5)), "test")
+    scheduler._last_glance_step = -100
+    scheduler.apply(obs_at(camera, 30, (5.6, 2.5)), world, command)
+    assert scheduler.stats["cues_repeated"] == 1 and (scheduler.active is None or scheduler.active.get("cue") is None)
+
+
+def test_a_cue_needs_unknown_floor_on_its_side_unless_it_is_the_target_or_a_home_object():
+    route = route_east()
+    command = follow(route)
+    # From x = 2 the scorer's own glance point (abreast of the door) is still ahead: only a cue starts a look here.
+    here = (2.0, 2.5)
+    # A cabinet on the RIGHT edge: the south wall is solid, nothing to see there.
+    policy, camera, actions = cue_policy(route, [Box("cabinet", 0.9, (560.0, 120.0, 640.0, 400.0))])
+    scheduler = GlanceScheduler(policy)
+    world = corridor_world()
+    assert scheduler.apply(obs_at(camera, 0, here), world, command) is command
+    assert scheduler.active is None and scheduler.stats["cues_without_gain"] == 1
+    # The target's own class there: a cue outright (the takeover refuses a border box, so turning is how it starts).
+    policy, camera, actions = cue_policy(route, [Box("toilet", 0.6, (560.0, 120.0, 640.0, 400.0))])
+    scheduler = GlanceScheduler(policy)
+    out = scheduler.apply(obs_at(camera, 0, here), world, command)
+    assert scheduler.active is not None and scheduler.active["kind"] == RIGHT and scheduler.active["cue"] == "toilet"
+    assert scheduler.active["gain_m2"] == 0.0 and out.info["cue"] == "toilet"
+    # A home object of the target (a sink, for a toilet) too; a box in the middle of the frame is no cue; a weak one neither.
+    policy, camera, actions = cue_policy(route, [Box("sink", 0.5, (560.0, 120.0, 640.0, 400.0))])
+    scheduler = GlanceScheduler(policy)
+    scheduler.apply(obs_at(camera, 0, here), world, command)
+    assert scheduler.active is not None and scheduler.active["cue"] == "sink"
+    policy, camera, actions = cue_policy(route, [Box("sink", 0.9, (200.0, 120.0, 400.0, 400.0)),
+                                                 Box("toilet", 0.2, (0.0, 120.0, 90.0, 400.0)),
+                                                 Box("toilet", 0.9, (600.0, 200.0, 640.0, 260.0))])   # a speck: 60 px tall
+    scheduler = GlanceScheduler(policy)
+    assert scheduler.apply(obs_at(camera, 0, here), world, command) is command and scheduler.active is None
+    # Off by its own switch; and never during a suspended phase.
+    policy, camera, actions = cue_policy(route, [Box("toilet", 0.6, (560.0, 120.0, 640.0, 400.0))])
+    scheduler = GlanceScheduler(policy, GlanceSettings(cue_enabled=False))
+    scheduler.apply(obs_at(camera, 0, here), world, command)
+    assert scheduler.active is None
+    policy, camera, actions = cue_policy(route, [Box("toilet", 0.6, (560.0, 120.0, 640.0, 400.0))])
+    policy._action_owner = "warmup"
+    scheduler = GlanceScheduler(policy)
+    assert scheduler.apply(obs_at(camera, 0, here), world, command) is command
+
+
+def test_cue_settings_reject_nonsense():
+    for kwargs in (dict(cue_enabled="yes"), dict(cue_confidence=0.0), dict(cue_border_px=-1), dict(cue_max_turns=0),
+                   dict(cue_min_gain_m2=0.0), dict(cue_min_box_frac=1.5)):
+        with pytest.raises(ValueError):
+            GlanceSettings(**kwargs)

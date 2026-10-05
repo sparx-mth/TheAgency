@@ -114,3 +114,43 @@ def test_a_registry_can_start_after_another_storeys_pids_so_room_numbers_are_uni
     assert list(rooms.keys()) == [2, 3]
     with pytest.raises(ValueError):
         RoomRegistry(first_pid=-1)
+
+
+# -- containment (2026-10-05) -------------------------------------------------------
+def test_a_room_that_grows_tenfold_keeps_its_pid_by_containment():
+    """A room seen through its door is a sliver; walking in grows it past any IoU threshold
+    (the Hanson ObjectNav recording renumbered one bedroom three times while standing in it)."""
+    reg = RoomRegistry(iou_threshold=0.25)
+    reg.update([make_stats(1, 10, 12, 10, 20)], identity_c2w)            # 2 x 10 cells: the sliver
+    rooms = reg.update([make_stats(1, 5, 30, 5, 30)], identity_c2w)      # 25 x 25: the room (IoU 0.03)
+    assert list(rooms.keys()) == [0]
+    strict = RoomRegistry(iou_threshold=0.25, containment_threshold=1.5)   # the historical matcher
+    strict.update([make_stats(1, 10, 12, 10, 20)], identity_c2w)
+    assert list(strict.update([make_stats(1, 5, 30, 5, 30)], identity_c2w).keys()) == [1]
+
+
+def test_containment_matches_fill_only_what_iou_left_so_splits_and_merges_keep_the_larger_overlap():
+    reg = RoomRegistry(iou_threshold=0.25)
+    reg.update([make_stats(1, 0, 20, 0, 30)], identity_c2w)               # pid 0: 20 x 30
+    # A split: the larger half keeps the pid (IoU 0.67), the smaller half is new, though it is fully
+    # contained in the old room.
+    rooms = reg.update([make_stats(1, 0, 20, 0, 20), make_stats(2, 0, 20, 20, 30)], identity_c2w)
+    assert list(rooms.keys()) == [0, 1]
+    # A merge: the survivor is the old room with the larger overlap; the other pid retires.
+    rooms = reg.update([make_stats(1, 0, 20, 0, 30)], identity_c2w)
+    assert list(rooms.keys()) == [0]
+    # A tiny room inside a big fresh one does not steal the big one's pid from its IoU match.
+    reg = RoomRegistry(iou_threshold=0.25)
+    reg.update([make_stats(1, 0, 20, 0, 20), make_stats(2, 25, 27, 25, 30)], identity_c2w)   # pids 0 (big), 1 (tiny)
+    rooms = reg.update([make_stats(1, 0, 30, 0, 32)], identity_c2w)                            # one fresh room holding both
+    assert list(rooms.keys()) == [0]
+    # Two fresh pieces each holding half of a vanished sliver: half is under the containment bar.
+    reg = RoomRegistry(iou_threshold=0.25, containment_threshold=0.6)
+    reg.update([make_stats(1, 10, 12, 10, 20)], identity_c2w)
+    rooms = reg.update([make_stats(1, 0, 30, 0, 15), make_stats(2, 0, 30, 15, 30)], identity_c2w)
+    assert list(rooms.keys()) == [1, 2]
+
+
+def test_containment_threshold_is_validated():
+    with pytest.raises(ValueError):
+        RoomRegistry(containment_threshold=0.0)

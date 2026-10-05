@@ -131,6 +131,7 @@ def test_a_retired_frontier_is_still_unknown_space_when_nothing_else_is_left():
 
 
 def test_boxed_in_the_hold_names_itself():
+    """The Gibson protocol has no LOOK actions: boxed in, the hold is the one move left."""
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
     g = np.full((60, 120), 100, np.int8)
     g[29:32, 29:32] = 0
@@ -139,6 +140,40 @@ def test_boxed_in_the_hold_names_itself():
     command = policy.loop.plan(obs_at(episode, 0, IN_A), boxed)
     assert not command.waypoints and command.info["kind"] == "fallback_hold"
     assert "passable map" in command.info["reason"]
+    assert policy.fallback.stats["footing"] == 0
+
+
+def test_boxed_in_with_a_camera_that_tilts_the_fallback_maps_its_footing_before_it_holds():
+    """An agent that has not moved stands on a disk of unknown under the camera's blind radius
+    (Hanson/000002, 2026-10-05); one footing sweep maps it, and only then is the hold the last move."""
+    from dataclasses import replace
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    episode = replace(episode, action_spec=MULTIFLOOR_PROTOCOL.actions())
+    policy.episode = episode
+    policy.camera_control.actions = episode.action_spec
+    g = np.full((60, 120), -1, np.int8)                  # the spawn: the footprint known, everything around it unknown
+    g[29:32, 29:32] = 0
+    boxed = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    no_rooms(policy)
+    command = policy.loop.plan(obs_at(episode, 0, IN_A), boxed)
+    assert not command.waypoints and command.info["kind"] == "footing_sweep" and command.info["fallback_stage"] == "footing"
+    assert policy.fallback.stats["footing"] == 1 and policy.fallback.stats["hold"] == 0
+    assert policy.camera_control.footing, "the camera controller carries the sweep from here, one action at a time"
+    # The sweep done at this spot, the hold is what is left.
+    policy.camera_control.inspection = None
+    command = policy.loop.plan(obs_at(episode, 20, IN_A), boxed)
+    assert command.info["kind"] == "fallback_hold" and policy.fallback.stats["hold"] == 1
+    # Walled in by KNOWN cells there is nothing a sweep would map: the hold at once.
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    episode = replace(episode, action_spec=MULTIFLOOR_PROTOCOL.actions())
+    policy.episode = episode
+    policy.camera_control.actions = episode.action_spec
+    g = np.full((60, 120), 100, np.int8)
+    g[29:32, 29:32] = 0
+    no_rooms(policy)
+    command = policy.loop.plan(obs_at(episode, 0, IN_A), OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES))
+    assert command.info["kind"] == "fallback_hold" and policy.fallback.stats["footing"] == 0
 
 
 # -- the decision and the detector ------------------------------------------------------

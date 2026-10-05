@@ -346,3 +346,57 @@ def test_source_floor_slab_does_not_rise_with_base_and_reblock_treads():
     assert not terrain.permits(pose, 0.25)
 
 
+
+
+# -- the footing sweep (2026-10-05) -----------------------------------------------------------
+def test_a_footing_sweep_is_a_full_circle_at_a_shallow_pitch_that_the_target_takeover_does_not_clear():
+    actions = MULTIFLOOR_PROTOCOL.actions()
+    camera, converter = CameraController(actions), DiscreteActionConverter(actions)
+    pose = AgentPose(0, 0, 0, 0)
+    obs = SimpleNamespace(pose=pose, step=1)
+    assert camera.begin_inspection(obs, 0, reason="footing"), "allowed before action 6 and under any cooldown"
+    assert camera.footing and not camera.begin_inspection(obs, 0, reason="footing"), "one at a time"
+    emitted, owners = [], set()
+    for step in range(1, 40):
+        obs = SimpleNamespace(pose=pose, step=step)
+        command = camera.inspection_command(obs)
+        if command is None:
+            break
+        assert command.info["kind"] == "footing_sweep"
+        command = camera.apply(obs, command, "TARGET_CLOSING")          # the takeover owns the camera, the sweep survives
+        owners.add(command.info["camera"]["owner"])
+        action = converter.step(pose, command).action
+        emitted.append(action)
+        if action == DiscreteAction.LOOK_DOWN:
+            pose = replace(pose, camera_pitch=pose.camera_pitch + actions.tilt_angle_rad)
+        elif action == DiscreteAction.LOOK_UP:
+            pose = replace(pose, camera_pitch=pose.camera_pitch - actions.tilt_angle_rad)
+        elif action == DiscreteAction.TURN_LEFT:
+            pose = replace(pose, yaw=pose.yaw + actions.turn_angle_rad)
+        elif action == DiscreteAction.TURN_RIGHT:
+            pose = replace(pose, yaw=pose.yaw - actions.turn_angle_rad)
+    assert emitted.count(DiscreteAction.LOOK_DOWN) == 1 and emitted.count(DiscreteAction.LOOK_UP) == 1, "30 degrees: one tilt"
+    assert emitted.count(DiscreteAction.TURN_LEFT) == 12, "a full circle"
+    assert owners == {"FOOTING", "RESTORE"} and camera.inspection is None and pose.camera_pitch == pytest.approx(0)
+    assert not camera.begin_inspection(SimpleNamespace(pose=pose, step=40), 0, reason="footing"), "once per spot"
+    assert camera.begin_inspection(SimpleNamespace(pose=replace(pose, x=2.0), step=41), 0, reason="footing")
+    # A stair inspection is still cleared by the takeover's camera ownership.
+    camera = CameraController(actions)
+    assert camera.begin_inspection(SimpleNamespace(pose=pose, step=10), 0)
+    camera.apply(SimpleNamespace(pose=pose, step=10), NavigationCommand.hold(), "TARGET_CLOSING")
+    assert camera.inspection is None
+
+
+def test_distractor_classes_are_in_the_vocabulary_and_never_a_goal_nor_a_home_object():
+    """Hanson/000001 (2026-10-05): a child's ride-on horse read as 'chair' at 0.9 and the episode
+    stopped on it 11.7 m from the nearest chair. An open-vocabulary detector lands on the nearest
+    prompt it was given; a toy prompt gives the wrong match somewhere else to go."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object, signature_type
+    mapper = gibson_label_mapper()
+    vocabulary = set(mapper.vocabulary())
+    assert {"toy", "rocking horse", "stuffed animal", "bathtub"} <= vocabulary
+    for cls in ("toy", "rocking horse", "stuffed animal"):
+        assert all(not mapper.target_labels(c).accepts(cls) for c in ("chair", "couch", "bed", "toilet", "tv", "potted plant"))
+        assert not any(home_object(target, cls) for target in ("chair", "sofa", "bed", "toilet", "television", "potted plant"))
+        assert signature_type(cls) is None
+    assert home_object("toilet", "bathtub") and signature_type("bathtub") == "bathroom"

@@ -4,8 +4,9 @@ from __future__ import annotations
 import pytest
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    OMITTED_PERCENT, OPENING, P_CEILING, ROOM, STAIRS, SYSTEM_PROMPT, UNEXPLORED_FLOOR, SearchContext, SearchNode,
-    SearchNodeOracle, coarse_seconds, floor_unexplored, format_node, format_prompt, normalise, parse_reply)
+    OMITTED_PERCENT, OPENING, P_CEILING, ROOM, STAIRS, SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR,
+    SearchContext, SearchNode, SearchNodeOracle, coarse_seconds, floor_unexplored, format_node, format_prompt,
+    normalise, parse_home_here, parse_reply)
 
 
 class Scripted:
@@ -218,8 +219,8 @@ def test_the_floor_raises_what_the_model_wrote_off_and_leaves_the_rest_alone():
     reply = {"nodes": [{"id": 0, "p": 0}, {"id": 2, "why": "small unknown room, no toilet fits", "p": 1},
                        {"id": 100000, "p": 60}, {"id": 200002, "why": "no toilet glimpsed through gap", "p": 0},
                        {"id": 200001, "p": 1}, {"id": 4, "why": "bedroom, no toilet", "p": 2}]}
-    scores, floored = floor_unexplored(parse_reply(reply, nodes)[0], nodes, UNEXPLORED_FLOOR)
-    assert floored == (2, 200002)
+    scores, floored, capped = floor_unexplored(parse_reply(reply, nodes)[0], nodes, UNEXPLORED_FLOOR)
+    assert floored == (2, 200002) and capped == ()
     assert scores[2] == scores[200002] == pytest.approx(25.0)
     assert scores[0] == 0 and scores[100000] == 60 and scores[200001] == 1 and scores[4] == 2
     result = SearchNodeOracle.score(reply, nodes, UNEXPLORED_FLOOR)
@@ -229,6 +230,55 @@ def test_the_floor_raises_what_the_model_wrote_off_and_leaves_the_rest_alone():
     assert above.floored == () and above.probs[2] == pytest.approx(0.40), "a serious valuation stands"
     off = SearchNodeOracle.score(reply, nodes, 0.0)
     assert off.floored == () and off.probs[2] == pytest.approx(0.01), "0 disables the floor"
+
+
+# -- home_here: the model's STEP 2 as a structured verdict (2026-10-05, the Ranchester couch) -----
+def test_when_the_model_says_the_home_type_is_elsewhere_unexplored_places_read_at_the_elsewhere_value():
+    """Ranchester couch: 'living rooms are downstairs' at every loop point, 25 on every upstairs gap all
+    the same (the example's number), 60 on the stairs -- and thirteen peeks before the stairs. Rule 2b's
+    'less' is the code's to apply from the model's own verdict."""
+    nodes = [KITCHEN, UNKNOWN, UP, GAP, DOORWAY_WITH_TOILET, WEAK_BEDROOM_UNENTERED]
+    reply = {"home": "living room", "storey": "upper floor (bedroom found); living rooms are downstairs",
+             "home_here": "elsewhere",
+             "nodes": [{"id": 0, "p": 0}, {"id": 2, "why": "small unknown room, never entered", "p": 25},
+                       {"id": 100000, "p": 60}, {"id": 200002, "why": "unseen room, nothing known", "p": 25},
+                       {"id": 200001, "why": "toilet glimpsed: a bathroom", "p": 1}, {"id": 4, "why": "bedroom", "p": 2}]}
+    result = SearchNodeOracle.score(reply, nodes, UNEXPLORED_FLOOR, UNEXPLORED_ELSEWHERE)
+    assert result.home_here == "elsewhere" and result.reading["home_here"] == "elsewhere"
+    assert result.capped == (2, 200002) and result.floored == ()
+    assert result.probs[2] == result.probs[200002] == pytest.approx(0.10), "the unexplored upstairs places"
+    assert result.probs[100000] == pytest.approx(0.60) and result.probs[200001] == pytest.approx(0.01) and result.probs[4] == pytest.approx(0.02), (
+        "the stairs, a glimpsed opening and a typed room keep the model's numbers")
+    # Written off instead (the 2026-10-04 failure): raised to the elsewhere value, not to the 0.25 floor.
+    low = dict(reply, nodes=[{"id": 2, "p": 0}, {"id": 200002, "p": 1}, {"id": 100000, "p": 60}])
+    result = SearchNodeOracle.score(low, [UNKNOWN, GAP, UP], UNEXPLORED_FLOOR, UNEXPLORED_ELSEWHERE)
+    assert result.floored == (2, 200002) and result.capped == () and result.probs[2] == pytest.approx(0.10)
+    # 'found' and 'missing' keep the floor; so does a reply without the field (an older model's).
+    for verdict in ("found", "missing", None):
+        same = dict(low, home_here=verdict) if verdict else {k: v for k, v in low.items() if k != "home_here"}
+        result = SearchNodeOracle.score(same, [UNKNOWN, GAP, UP], UNEXPLORED_FLOOR, UNEXPLORED_ELSEWHERE)
+        assert result.home_here == verdict and result.probs[2] == pytest.approx(0.25) and result.capped == ()
+    # 0 leaves the model's numbers alone in the elsewhere case.
+    kept = SearchNodeOracle.score(reply, nodes, UNEXPLORED_FLOOR, 0.0)
+    assert kept.probs[2] == pytest.approx(0.25) and kept.capped == () and kept.floored == ()
+
+
+def test_the_home_here_verdict_is_read_from_the_words_a_model_drifts_to():
+    for text, verdict in (("found", "found"), ("Elsewhere", "elsewhere"), ("missing", "missing"),
+                          ("not found yet", "missing"), ("not here, downstairs", "elsewhere"),
+                          ("on this storey", "found"), ("another floor", "elsewhere"), ("", None), (7, None)):
+        assert parse_home_here({"home_here": text}) == verdict, text
+    assert parse_home_here({}) is None and parse_home_here("nonsense") is None
+
+
+def test_the_prompt_asks_for_home_here_and_the_example_applies_rule_2b():
+    assert '"home_here":"found|missing|elsewhere"' in SYSTEM_PROMPT
+    assert '"home_here":"elsewhere"' in SYSTEM_PROMPT, "the worked example is an upper storey for a television"
+    assert '"p":10}' in SYSTEM_PROMPT and 'about 10 when home_here is "elsewhere"' in SYSTEM_PROMPT
+    oracle = SearchNodeOracle(Scripted({"nodes": []}), unexplored_floor=0.25, unexplored_elsewhere=0.1)
+    assert oracle.unexplored_elsewhere == 0.1
+    with pytest.raises(ValueError):
+        SearchNodeOracle(Scripted({}), unexplored_elsewhere=1.0)
 
 
 def test_the_oracle_applies_its_floor_to_fresh_and_reused_replies():

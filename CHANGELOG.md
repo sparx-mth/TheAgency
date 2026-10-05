@@ -6,6 +6,88 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **The sight ledger** (`objnav_benchmark_runtime/methods/sightlines.py`, `SightSettings`,
+  2026-10-05): every action the camera's cone is cast over the map it has just updated; an
+  unknown cell a ray ends at inside the floor's visible band (beyond the blind radius, within
+  2.5 m) from two distinct poses is **looked through** -- a railing, a window, a mesh hole -- and
+  a connected unknown region under 3 m2 enclosed by known cells is a **pocket**. Both are
+  settled: written OCCUPIED on the map the frontier logic reads (`ObservedSceneGraph.
+  frontier_world` via `resolved_provider`; `accessible_frontiers(frontier_world=)`;
+  `UnknownView(resolved=)`), so they are no frontier, no opening, no fallback exit and no
+  glance gain; the planner and the display keep the real map (the panels draw settled unknown
+  darker, `settled_cells`). Hanson 2026-10-05 walked to both ends of a balcony seen whole from
+  its threshold, back to an island between the spawn point and the bed (O4, 31 actions) and
+  behind a bed (O9, 42 actions). `sight` in the configuration and the episode record.
+- **Two more finished-room verdicts** (`room_scans.py`, `LoopSettings.walkthrough_clearance_m`
+  0.9 m / `fragment_max_m2` 3 m2): with no live frontier left, a room is `seen_through` when one
+  recorded pose had half of it in the camera's cone with clear sight, or the agent stood in it
+  and it is narrow (a corridor, a balcony); and a `fragment` when it is under 3 m2 with no door
+  on it (the strip behind a bed). A room finished by what the walk to it showed is released
+  before it is entered (`finished_in_transit`). The Hanson balcony was offered again at 0.25,
+  "never entered", 158 actions after the agent had stood at its far end.
+- **Cue glances** (`path_glances.py`, `GlanceSettings.cue_*`): a confident detection spanning
+  30 % of the frame's height and cut off by its left or right edge turns the agent toward it -- enough turns to centre it and one
+  more; the target's class and its home objects outright, any other class while that side still
+  holds unknown floor; once per class and side within 2 m. Hanson action 101: a bathroom vanity
+  (`cabinet 0.84`) on the left edge, two right glances taken, the toilet 250 actions later.
+- **The footing sweep** (`camera_control.begin_inspection(reason="footing")`,
+  `TargetClosingSettings.footing_*`, the exploration fallback's sixth rung): one LOOK_DOWN to 30
+  degrees, a full circle and a LOOK_UP map the floor under the camera's blind radius, which an
+  agent that has not moved cannot plan across (unknown is impassable); taken only while a quarter
+  of the cells within 1.2 m are unknown. A LOCKED target with no
+  safe path asks for it after two pathless actions and, six pathless actions after it, releases
+  the lock **without a rejection** (`boxed_releases`; no far takeover from within 1 m of the
+  spot) so the search can walk; the fallback takes it before its last-resort hold. Hanson/000002
+  spawned beside a bed with the plant in view 4.4 m away and spun 159 actions on "no safe target
+  path" to an agent error.
+- **Signature objects** (`room_priors.SIGNATURE_OBJECTS`, `RoomLabelSettings.signature_objects`):
+  a bed, a toilet, a shower, a bathtub, an oven, a stove or a refrigerator makes the classifier's
+  agreeing label STRONG on its own, so the type prior rules the room out at once; the home-object
+  and target-seen guards still hold. Hanson action 270: a bed and a television through the door,
+  the "bedroom?" kept weak, the room entered and scanned for a toilet.
+- **A start-clearance rule in the episode samplers** (`generate_development.
+  MIN_START_CLEARANCE_M` 0.35 m, `start_clearance`; both `generate_start` and
+  `cross_floor_starts`; `start_clearance_m` in the audits): no start within 0.35 m of the navmesh
+  boundary. Frozen manifests keep their starts.
+- **`generate_development --multistory --categories couch`** (`multifloor_generation.
+  cross_floor_starts(categories=)`): a cross-floor campaign restricted to the goal categories named,
+  skipping buildings without one on the reference floor; `generation.goal_categories` in the manifest.
+- **Distractor prompts** in the Gibson context vocabulary (`toy`, `rocking horse`,
+  `stuffed animal`) and `bathtub`: Hanson/000001 stopped at action 14 on a child's ride-on horse
+  read as `chair` 0.9. A running detector service must be restarted with the new vocabulary.
+### Changed
+- **A strong room label needs a distinctive kind of object** (`RoomLabelSettings.distinctive_required`,
+  `room_priors.GENERIC_OBJECTS`): a cabinet and a potted plant no longer make a strong "living_room".
+- **The oracle's STEP 2 is a structured verdict** (`search_node_oracle.parse_home_here`, `home_here` in the
+  reply schema and the worked example; `SearchNodeOracle(unexplored_elsewhere=)`, `LoopSettings.
+  unexplored_elsewhere` 0.10, `NodeOracleResult.capped` / `home_here`): with `home_here="elsewhere"`
+  every unexplored node is read at 0.10 exactly instead of the 0.25 floor. The Ranchester cross-floor
+  couch episode (`runs/zson-couch-crossfloor-3x-20261005`) had the 3B model say "living rooms are
+  downstairs" sixteen times and 25 on every upstairs gap sixteen times, and spent its 500 actions on
+  thirteen peeks with the stairs (0.60) last in every order -- standing 0.9 m from them at action 171.
+- **Target closing, after the second Hanson fly of 2026-10-05**: the footing sweep is cut short the
+  action a path exists (the sweep's 30 degrees had stood for the whole approach); the inspection
+  pitch follows the target's measured height, not its label (a plant in a tall planter is at eye
+  level); a fresh, aligned, in-range sighting STOPs at whatever pitch it came at (the toilet
+  projected at 60 degrees where its height predicted 30: 20 actions of LOOK_UP/LOOK_DOWN); a fresh
+  unlocked candidate within one turn of the centre is stepped toward rather than centred (the
+  centring turn dropped a far chair four cycles running); and the legacy target evidence refuses
+  what the takeover refuses (`refuses_far_candidate`; nine actions walked toward a just-released
+  chair, and the move restarted the warm-up).
+- **Labels are read before the nodes are chosen** (`ObservedSceneGraph.refresh_labels`, called
+  by the loop's `_reason` before the exclusions and the oracle): a room that became a strong
+  bedroom on the loop point's own re-classification was shown to the oracle, valued 0.10 and
+  kept in the order for one more loop point (Hanson action 150).
+- **Room ids survive growth** (`RoomRegistry(containment_threshold=0.6)`): a pair under the IoU
+  threshold matches when 60 % of the smaller mask lies in the larger; IoU matches are consumed
+  first. One Hanson bedroom was R11 -> R14 -> R16 while the agent stood in it, and each number
+  lost the record of having been entered.
+- The exploration fallback's retired-frontier rung no longer retries a goal under the agent's
+  feet (the converter has no action for it: an idle turn per action).
+- The oracle's per-room `frontier=` counts, the openings and the fallback's exits are read off
+  the sight ledger's overlay; `test_opening_nodes` turns the ledger off in its fixture because its
+  two-room world's "patch by the door" is exactly the pocket the ledger settles.
+### Added (2026-10-05, earlier the same day)
 - **Informative glances along a route** (`objnav_benchmark_runtime/methods/path_glances.py`,
   `core/planning/exploration/view_gain.py`, 2026-10-05): the route in force is scored every few
   actions for the one point where a look to the left, to the right or all round would reveal the
