@@ -11,6 +11,58 @@ Format per entry:
 
 ---
 
+## 2026-10-05 — Hanson/000000: a bedroom in two halves, furniture in no room, every door valued at zero, a peek cancelled on its own route
+
+**Symptom:** Nine-episode campaign of 2026-10-04 (`runs/zson-campaign-3x3-20261004`). In the
+Hanson toilet episode the HUD showed R0 and R6 as separate rooms for one bedroom while R7 and
+the corridor were split correctly at a door; the bed, the desks and the wardrobe appeared in no
+room's object list (the bedroom was "living room?" from its one chair); at action 27 the agent
+walked to the stairs with two never-entered rooms and six doorways still unlooked-into
+(`order: [stairs]`); at 164 it stood in front of a doorway with a sink through it and the oracle
+had not even been asked about the room; and the one peek it did commit to (166) was cancelled at
+196, "approach budget of 30 spent 5.8 m short", while the route it was following was fine.
+
+**Root cause:** Four unrelated ones, all visible in `steps.jsonl` once decoded:
+1. The door cut is a 0.75 m disk at the *detected* door position. YOLO's door landmark sat
+   0.6 m off its doorway, in the bedroom's own floor at a junction; the disk severed the room
+   around its bed (every border through the disk was "barred", so the merge could not repair
+   it) and missed nothing it should have cut.
+2. `_room_objects` credited a landmark to the room whose mask holds its *cell*. Furniture
+   stands on cells the map reads OCCUPIED; the watershed labels free cells only; so beds,
+   desks and wardrobes were `room: null` and rooms were named by whatever stood on free floor.
+3. The 3B oracle wrote "small unknown room, no toilet fits" on every never-entered room and
+   "no toilet glimpsed through gap" on every doorway -- the *words of the prompt's own example*
+   (`"bathroom-sized room, no television fits","p":1`) -- and `min_prob` (0.05) then dropped
+   them from the order, leaving the stairs alone. Later a sofa made the room with the sink a
+   weak "living room" and the type prior ruled it out for the toilet beside the sink.
+4. The peek's approach bound was sized from the frontier inventory's geodesic (a Dijkstra on
+   the cost grid at the *body* radius, 3.5 m), but A* plans at the *preferred* clearance and
+   relaxes only when nothing else gets through, so its route went 12.5 m round a squeeze. The
+   RPT* instance used the same optimistic distances.
+
+**Fix / workaround:** (1) `room_watershed`: a detected door's cut is snapped to the nearest
+*choke* within 0.9 m -- the medial-axis cell of least clearance whose disk parts the skeleton
+into two substantial pieces -- and sized to the passage; basins on different sides of the
+carved mask never merge, basins on one side still may; plain disk when no choke is in reach.
+Checked on all 15 recorded floors: fixed the one, moved the rest by at most a room. (2) The
+nearest room floor within the footprint plus 0.6 m is the object's room. (3) An **uncertainty
+floor** (`unexplored_floor`, 0.25): a never-entered unknown room or an opening with nothing
+glimpsed is never read below it, whatever the model wrote; `entered=no` is in the prompt; the
+example no longer writes anything off for its size; a weak (one-kind) label never excludes; a
+room holding a *home object* of the target (a sink, for a toilet) is never excluded. (4) The
+approach bound follows the route the planner actually adopted; the inventory and the RPT*
+instance measure distances at the preferred standoff where it reaches, body radius elsewhere.
+
+**Don't:** Do not "fix" (1) by shrinking the disk: at 0.45 m the misplaced door cut nothing
+and R7 merged into the bedroom; at 0.5 m and above it severed the bedroom. No disk radius
+works when the landmark is 0.6 m off; the cut has to move. Do not fix (3) by raising
+`min_prob` or adding a "peek before you descend" rule: the user's model is that the LLM's
+probability expresses it, and the floor keeps the unexplored nodes in RPT*'s hands, where
+distance decides. Do not read `distance_m` in a recording as the route length: until this
+change it was the body-radius geodesic.
+
+---
+
 ## 2026-10-01 — a peek route across a stair head becomes a coverage-veto rotation loop
 
 **Symptom:** Sofa same-spawn run: a visible path near steps 297–303, then stationary

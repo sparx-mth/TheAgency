@@ -1,7 +1,7 @@
 """One bounded schema repair around the node oracle's own scoring."""
 from __future__ import annotations
 
-from sparx_agency.core.mapping.topology.search_node_oracle import SearchNodeOracle
+from sparx_agency.core.mapping.topology.search_node_oracle import UNEXPLORED_FLOOR, SearchNodeOracle
 
 
 class RepairingNodeOracle(SearchNodeOracle):
@@ -13,8 +13,8 @@ class RepairingNodeOracle(SearchNodeOracle):
     runtime raises rather than flying on a flat distribution.
     """
 
-    def __init__(self, client):
-        super().__init__(client)
+    def __init__(self, client, unexplored_floor=UNEXPLORED_FLOOR):
+        super().__init__(client, unexplored_floor=unexplored_floor)
         self.repair_attempts = 0
         self.repair_successes = 0
 
@@ -32,7 +32,7 @@ class RepairingNodeOracle(SearchNodeOracle):
         reply, repaired = None, None
         try:
             reply = self.ask(user)
-            repaired = self.score(reply, nodes)
+            repaired = self.score(reply, nodes, self.unexplored_floor)
         except Exception:
             repaired = None
         if repaired is not None and reply is not None:

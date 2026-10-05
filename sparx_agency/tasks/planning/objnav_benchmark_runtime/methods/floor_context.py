@@ -31,7 +31,7 @@ class FloorContextBank:
         first_pid = max([0] + [state["graph"].registry.next_pid for state in self.contexts.values()
                                if getattr(state.get("graph"), "registry", None) is not None])
         p.graph = ObservedSceneGraph(p.llm_client, label_settings=p.room_label_settings, first_pid=first_pid)
-        p.graph.oracle = RepairingNodeOracle(p.llm_client)
+        p.graph.oracle = RepairingNodeOracle(p.llm_client, unexplored_floor=p.loop_settings.unexplored_floor)
         p.doors = ObservedDoors(p.door_settings)
         # Co-located detections vote on one object's class (a sofa box on a
         # five-times-confirmed bed is the misidentification); the plurality

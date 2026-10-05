@@ -294,6 +294,36 @@ def test_a_peek_whose_walk_overruns_its_bound_looks_from_nearby_or_retires_the_o
     assert [e for e in policy.loop.events if e["event"] == "peek_from_here"]
 
 
+def test_the_approach_bound_grows_to_the_route_the_planner_actually_adopted():
+    """Hanson 2026-10-04, actions 166-196: the inventory said 3.5 m along the floor (walked at the body
+    radius), A* planned 12.5 m around a squeeze (at the preferred clearance), and the 30-action bound
+    sized on the former ran out 5.8 m short while the route was still being followed."""
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0))
+    gap = west_gap(openings_of(policy, episode, world))
+    policy.supervisor.inner._solver = lambda candidates, instance=None: [gap.node_id, 1, 0]
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    peek = policy.loop._peek
+    assert peek["approach_bound"] == 20, "the straight 1.9 m walk: the floor of 20 actions"
+    assert not [e for e in policy.loop.events if e["event"] == "peek_approach_extended"], "a route as long as the geodesic extends nothing"
+    # The planner's route is four times the geodesic: the bound follows it.
+    long_route = [(IN_A[0] - 0.25 * i, IN_A[1] + (0.0 if i % 2 else 0.2)) for i in range(50)]      # ~12 m of zig-zag
+    policy.route_memory.path = long_route
+    policy.route_memory.reason = "new_goal_or_invalid_route"
+    peek["approach_actions"] = 3
+    policy.loop._size_approach_to_route(obs_at(episode, 3, IN_A), peek)
+    length = sum(math.dist(long_route[i], long_route[i + 1]) for i in range(len(long_route) - 1))
+    assert peek["approach_bound"] == 3 + policy.loop.settings.openings.approach_bound(length, episode.action_spec.forward_step_m) > 60
+    extended = [e for e in policy.loop.events if e["event"] == "peek_approach_extended"]
+    assert len(extended) == 1 and extended[0]["was"] == 20 and extended[0]["route_m"] == pytest.approx(length, abs=0.01)
+    assert policy.loop.stats["peek_approach_extended"] == 1
+    # A route kept from the last action (not newly adopted) is not re-measured.
+    policy.route_memory.reason = "committed_safe_route"
+    before = peek["approach_bound"]
+    policy.route_memory.path = long_route * 2
+    policy.loop._size_approach_to_route(obs_at(episode, 4, IN_A), peek)
+    assert peek["approach_bound"] == before
+
+
 def test_a_refused_threshold_is_re_aimed_once_at_a_passable_cell_on_the_agents_side_then_retired():
     """The cell went occupied as the map grew around it: one re-aim within merge_m, then give up."""
     policy, episode, world, rooms, _ = opening_policy(order=(1, 0))
@@ -399,9 +429,10 @@ def test_a_new_opening_while_nothing_is_in_force_buys_the_oracle_a_call_at_most_
 
 
 # -- the weak-type rule --------------------------------------------------------------
-def test_a_weak_type_label_does_not_rule_out_a_room_with_several_openings():
+def test_a_weak_type_label_never_rules_a_room_out():
     """Ranchester step 75: a toilet glimpsed through a door named the hallway a bathroom and every door
-    off it was demoted with it. Room B here has two openings and one kind of object: kept as a node."""
+    off it was demoted with it. Hanson step 321: a sofa made the room with the sink a 'living room' and
+    ruled it out for the toilet. One kind of object is a guess the oracle sees as `type=bathroom?`."""
     policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
     assert policy.target.query == "chair"
     see(policy, {1: ["toilet"]}, step=0)
@@ -415,12 +446,12 @@ def test_a_weak_type_label_does_not_rule_out_a_room_with_several_openings():
     assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "still a node, still chosen by the order"
     policy.loop.plan(obs_at(episode, 1, IN_A), world)
     assert policy.loop.stats["weak_type_kept"] == 1, "logged once per room"
-    # Two openings are within the allowance: ruled out as before.
+    # The former openings allowance is not consulted any more: kept whatever the bound says.
     policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), weak_type_max_openings=2)
     see(policy, {1: ["toilet"]}, step=0)
     policy.graph.relabel(1, 0)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "type:bathroom"} and policy.loop.stats["weak_type_kept"] == 0
+    assert 1 not in policy.loop._excluded and policy.loop.stats["weak_type_kept"] == 1
     # A strong label (two kinds of object) rules the room out whatever its openings.
     policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
     see(policy, {1: ["toilet", "sink"]}, step=0)
@@ -428,6 +459,28 @@ def test_a_weak_type_label_does_not_rule_out_a_room_with_several_openings():
     assert policy.graph.label_info(1)["strength"] == "strong"
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._excluded == {1: "type:bathroom"}
+
+
+def test_a_home_object_of_the_target_keeps_a_strongly_labelled_room_a_node():
+    """Hanson 2026-10-04: the bathroom's sink was merged into a room of sofas. For a toilet, a sink is
+    where it lives; the room stays a node whatever its label says."""
+    from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["sofa", "bed"]}, step=0)                       # NamingLLM: a bedroom, strongly
+    policy.graph.relabel(1, 0)
+    assert policy.graph.label_info(1)["label"] == "bedroom" and policy.graph.label_info(1)["strength"] == "strong"
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {1: "type:bedroom"}, "a toilet is not searched for in a bedroom"
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["sofa", "bed", "shower"]}, step=0)             # still a bedroom to the classifier
+    policy.graph.relabel(1, 0)
+    assert policy.graph.label_info(1)["label"] == "bedroom" and policy.graph.label_info(1)["strength"] == "strong"
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert 1 not in policy.loop._excluded and policy.loop.stats["home_object_kept"] == 1
+    kept = [e for e in policy.loop.events if e["event"] == "home_object_kept"][0]
+    assert kept["room"] == 1 and kept["home_objects"] == ["shower"]
 
 
 # -- target landmarks as nodes -----------------------------------------------------------

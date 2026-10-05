@@ -94,6 +94,7 @@ import time
 import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
+from sparx_agency.core.mapping.topology.search_node_oracle import UNEXPLORED_FLOOR
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import frontier_goals_by_room
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
@@ -102,7 +103,7 @@ from sparx_agency.core.planning.exploration.room_costs import build_instance
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ROOM_LLM
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import implausible_room
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object, implausible_room, ruled_out
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import (
     LANDMARK, OpeningSettings, detect_openings, is_opening_node, landmark_openings, opening_options)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_vantage import vantage_point
@@ -151,13 +152,30 @@ class LoopSettings:
             visible from the corridor.
         type_prior: Drop a room whose identified type cannot hold the
             target (:mod:`room_priors`) from the nodes altogether, whatever
-            the oracle said -- unless an object of the target's own class
-            has been confirmed inside it, which outranks any prior. A sofa
-            is not searched for in a bedroom.
+            the oracle said -- when the label is STRONG (two or more kinds
+            of object agree) and neither an object of the target's own
+            class nor a home object of the target (a sink, for a toilet)
+            has been confirmed inside it. A sofa is not searched for in a
+            bedroom. A weak label (one kind of object) never excludes:
+            the oracle sees it as ``type=bedroom?`` and values the room
+            itself (since 2026-10-05; before, a single sofa seen through a
+            merged partition ruled a bathroom out for the toilet beside it).
         min_prob: A node the oracle values below this is not offered to the
-            solver. The oracle's "1" for a room "too small for a couch" is
+            solver. The oracle's "1" for a bedroom in a search for a couch is
             not worth the walk; the exploration fallback carries the search
             when nothing clears the bar.
+        unexplored_floor: The least probability an UNEXPLORED node is read
+            at, whatever the oracle wrote (``search_node_oracle.
+            SearchNodeOracle(unexplored_floor=...)``): a room never entered
+            and not yet identified, an opening nothing was glimpsed
+            through. The search knows nothing about such a place, so the
+            least it owes it is a look; the Hanson recording of 2026-10-04
+            had the 3B model write off two never-entered rooms and six
+            doorways at 0-1% ("no toilet fits") and leave the storey for
+            the stairs at action 27. The floor keeps them in the order --
+            above ``min_prob`` -- and RPT* weighs them against the stairs
+            by distance, which is where the user's "peek before you
+            descend" lives: not as a rule, as a probability. 0 disables.
         supervisor_rounds: Supervisor rounds allowed on one action before the
             loop falls back to the floor-wide frontier. A guard against a
             transition loop nobody has found yet, not a budget: the longest
@@ -181,17 +199,13 @@ class LoopSettings:
             yet seen -- as nodes beside the rooms and the stairs, visited by
             a peek (:mod:`opening_nodes`). ``openings.enabled`` is the
             switch.
-        weak_type_max_openings: A room whose type rests on a single kind of
-            object (a ``weak`` label) may be ruled out by type only if it
-            has at most this many openings -- exits to space not yet seen
-            (:mod:`opening_nodes`), the rooms off it the search has not
-            looked into. A toilet glimpsed through a door names the small
-            room behind the door; when the partition has hung that glimpse
-            on the hallway it was seen from, the hallway -- several doors,
-            many exits -- reads as a bathroom, and ruling IT out would rule
-            out every room off it (Ranchester 2026-10-04, step 75). A
-            strong label excludes regardless; so does a weak one on a room
-            with nothing left to look into.
+        weak_type_max_openings: Retained for configuration compatibility
+            and the record. Until 2026-10-05 a weak label ruled a room out
+            unless the room had more than this many openings (Ranchester
+            2026-10-04, step 75: a toilet glimpsed through a door named the
+            hallway a bathroom and every door off it was demoted with it);
+            since then a weak label never rules a room out, whatever its
+            openings, so this bound is not consulted.
     """
 
     visit: str = "scan"
@@ -203,6 +217,7 @@ class LoopSettings:
     scan_seen_fraction: float = 0.5
     type_prior: bool = True
     min_prob: float = 0.05
+    unexplored_floor: float = UNEXPLORED_FLOOR
     supervisor_rounds: int = 5
     confine_routes: bool = True
     entry_frontier: bool = True
@@ -227,6 +242,9 @@ class LoopSettings:
                 raise ValueError("%s must be positive and finite" % name)
         if isinstance(self.min_prob, bool) or not math.isfinite(self.min_prob) or not 0 <= self.min_prob < 1:
             raise ValueError("min_prob must lie in [0, 1)")
+        if (isinstance(self.unexplored_floor, bool) or not math.isfinite(self.unexplored_floor)
+                or not 0 <= self.unexplored_floor < 1):
+            raise ValueError("unexplored_floor must lie in [0, 1)")
         if isinstance(self.scan_seen_fraction, bool) or not math.isfinite(self.scan_seen_fraction) or not 0 < self.scan_seen_fraction <= 1:
             raise ValueError("scan_seen_fraction must lie in (0, 1]")
         if isinstance(self.openings, dict):
@@ -323,8 +341,9 @@ class RoomSearchLoop:
                       "reclassified_in_transit": 0, "relabels": 0, "relabels_kept_visit": 0,
                       "stairs_offered": 0, "stairs_chosen": 0, "stairs_taken": 0, "stairs_refused": 0,
                       "openings_offered": 0, "openings_chosen": 0, "peeks_completed": 0, "peeks_abandoned": 0,
+                      "peek_approach_extended": 0,
                       "landmarks_offered": 0, "landmarks_chosen": 0, "landmarks_inspected": 0,
-                      "weak_type_kept": 0,
+                      "weak_type_kept": 0, "home_object_kept": 0,
                       "way_back_held_for_rooms": 0,
                       "skipped_in_transit": 0,
                       "arrivals": 0, "entry_frontier": 0, "entry_centroid": 0, "entry_vantage": 0, "entry_peek": 0,
@@ -577,7 +596,8 @@ class RoomSearchLoop:
             cruise_speed_mps=p.episode.action_spec.forward_step_m / s.action_time_s,
             search_time_s=self.settings.service_steps() * s.action_time_s,
             leaves={o.node_id: o.leaf_m for o in stairs},          # the climb, on every arc touching the stairs
-            service_s={o.node_id: peek for o in openings})         # a look from the threshold, not a room's scan
+            service_s={o.node_id: peek for o in openings},         # a look from the threshold, not a room's scan
+            preferred_cost=p.preferred_cost(world) if hasattr(p, "preferred_cost") else None)
 
     def _opening_options(self, obs, world, cost):
         """The floor's openings as nodes (:mod:`opening_nodes`): exits not yet peeked, then the target landmarks not yet looked at."""
@@ -708,12 +728,14 @@ class RoomSearchLoop:
           ``sweep`` this test stands down: the sweep's own termination rule
           (N steps or no frontier) decides when a room is done.
         * ``type:<label>`` -- the room's identified type cannot hold the
-          target (:mod:`room_priors`), and no object of the target's own
-          class has been confirmed inside it. A WEAK label (one kind of
-          object) does not rule out a room with more than
-          :attr:`LoopSettings.weak_type_max_openings` openings to unseen
-          space among ``openings``: the one object may belong to a room
-          behind one of them (``weak_type_kept`` events).
+          target (:func:`room_priors.ruled_out`): the label is STRONG, and
+          neither an object of the target's own class nor a home object of
+          the target (a sink, for a toilet) has been confirmed inside it. A
+          WEAK label (one kind of object) never rules a room out: the one
+          object may belong to a room behind one of its openings, or to a
+          room the partition merged into it (``weak_type_kept`` events,
+          logged once per room); a home object in a room of another type
+          is the partition's merge showing (``home_object_kept``).
 
         The room in force is never excluded mid-visit: its turn ends by the
         visit's own rule, and the exclusion takes effect at the loop point.
@@ -735,17 +757,9 @@ class RoomSearchLoop:
                     excluded[pid] = "scanned:%s" % how
                     continue
             if self.settings.type_prior:
-                info = p.graph.label_info(pid) or {}
-                label = info.get("label")
-                if implausible_room(p.target, label) and not any(p.target.accepts(c) for c in p.graph.objects_in(pid)):
-                    if info.get("strength") == "weak" and exits.get(pid, 0) > self.settings.weak_type_max_openings:
-                        if pid not in self._weak_kept:
-                            self._weak_kept.add(pid)
-                            self.stats["weak_type_kept"] += 1
-                            self._log(obs, "weak_type_kept", room=pid, label=label, openings=exits[pid],
-                                      objects=p.graph.objects_in(pid))
-                        continue
-                    excluded[pid] = "type:%s" % label
+                why = self._ruled_out(obs, pid, exits.get(pid, 0))
+                if why is not None:
+                    excluded[pid] = why
         if set(excluded) != set(self._excluded):
             newly = sorted(set(excluded) - set(self._excluded))
             self.stats["excluded_scanned"] += sum(1 for pid in newly if excluded[pid].startswith("scanned"))
@@ -754,6 +768,33 @@ class RoomSearchLoop:
                 self._log(obs, "excluded", rooms={str(pid): excluded[pid] for pid in newly})
         self._excluded = excluded
         return excluded
+
+    def _ruled_out(self, obs, pid, exits=0):
+        """``type:<label>`` when the type prior rules room ``pid`` out, else None -- logging what kept it a node.
+
+        A weak label that would have ruled the room out is kept
+        (``weak_type_kept``, once per room); so is a home object of the
+        target in a room of another type (``home_object_kept``).
+        """
+        p = self.policy
+        info = p.graph.label_info(pid) or {}
+        label = info.get("label")
+        objects = p.graph.objects_in(pid)
+        if not implausible_room(p.target, label) or any(p.target.accepts(c) for c in objects):
+            return None
+        why = ruled_out(p.target, label, info.get("strength"), objects)
+        if why is not None:
+            return why
+        if pid not in self._weak_kept:
+            self._weak_kept.add(pid)
+            homes = sorted({c for c in objects if home_object(p.target, c)})
+            if homes:
+                self.stats["home_object_kept"] += 1
+                self._log(obs, "home_object_kept", room=pid, label=label, objects=objects, home_objects=homes)
+            else:
+                self.stats["weak_type_kept"] += 1
+                self._log(obs, "weak_type_kept", room=pid, label=label, openings=exits, objects=objects)
+        return None
 
     # -- the clue rule: a new kind of object names the room; the oracle says what that is worth ----
     def _reclassify(self, obs, pid, where):
@@ -807,7 +848,7 @@ class RoomSearchLoop:
         where = "transit" if p.supervisor.state == TRANSIT else "search"
         if self.settings.scanning and self.settings.type_prior:
             label = (p.graph.label_info(pid) or {}).get("label")
-            if not implausible_room(p.target, label) or any(p.target.accepts(c) for c in p.graph.objects_in(pid)):
+            if self._ruled_out(obs, pid) is None:
                 self.stats["relabels_kept_visit"] += 1
                 self._log(obs, "relabel_kept_visit", room=pid, label=label, where=where)
                 return False
@@ -1135,6 +1176,7 @@ class RoomSearchLoop:
             return None, {"route_failed": True}
         command = p._navigate(obs, world, goal, "peek")
         if command is not None:
+            self._size_approach_to_route(obs, peek)
             return command, {}
         self.stats["plan_failures"] += 1
         if not peek["reaimed"]:
@@ -1149,6 +1191,36 @@ class RoomSearchLoop:
                     return command, {}
         self._retire_peek(obs, opening, "unreachable")
         return None, {"route_failed": True}
+
+    def _size_approach_to_route(self, obs, peek):
+        """Raise the peek's approach bound to what the route the planner actually adopted needs.
+
+        The bound was sized at SELECT from the frontier inventory's
+        geodesic, which is walked at the body radius; A* plans at the
+        preferred clearance and relaxes only when it must, so a threshold
+        3.5 m away along the floor can be a 12.5 m route around a squeeze
+        (Hanson 2026-10-04, actions 166-196: a 30-action bound spent
+        5.8 m short on a route still being followed). Each time the route
+        in force changes, the bound is the larger of what it was and what
+        the remaining route is worth, charged from the actions already
+        spent; the loop logs the extension.
+        """
+        p = self.policy
+        path = p.route_memory.path
+        if path is None or p.route_memory.reason != "new_goal_or_invalid_route":
+            return
+        points = [(float(q.x), float(q.y)) if hasattr(q, "x") else (float(q[0]), float(q[1]))
+                  for q in getattr(path, "points", path)]
+        if len(points) < 2:
+            return
+        length = sum(math.dist(points[i], points[i + 1]) for i in range(len(points) - 1))
+        needed = peek["approach_actions"] + self.settings.openings.approach_bound(
+            length, p.episode.action_spec.forward_step_m)
+        if needed > peek["approach_bound"]:
+            self.stats["peek_approach_extended"] += 1
+            self._log(obs, "peek_approach_extended", node=peek["node"], route_m=round(length, 2),
+                      approach_bound=int(needed), was=int(peek["approach_bound"]))
+            peek["approach_bound"] = int(needed)
 
     def _reaim_threshold(self, obs, world, opening, here):
         """The passable cell nearest the threshold within ``merge_m`` of it, on the agent's side; None when none."""

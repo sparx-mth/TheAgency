@@ -77,7 +77,7 @@ def search_snapshot(policy):
                          "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
                          "distance_m": estimate.get("distance_m"), "centroid": [float(v) for v in o.xy]})
     objects = [{"id": lm.id, "class": lm.class_name, "count": lm.count, "xy": list(lm.xy),
-                "room": graph.room_at(world, lm.xy) if world is not None else None}
+                "room": graph.object_room(world, lm) if world is not None else None}
                for lm in policy.landmarks.confirmed()] if hasattr(policy, "landmarks") else []
     building = getattr(policy, "building", None)
     floor = {}
@@ -97,6 +97,7 @@ def search_snapshot(policy):
             "room_in_force": loop.room_id, "local_steps": loop.local_steps, "local_budget": loop.visit_budget(),
             "visit": loop.settings.visit, "scan": None if loop._scan is None else dict(loop._scan),
             "peek": loop.peek_state() if hasattr(loop, "peek_state") else None,
+            "glance": policy.glances.state() if hasattr(policy, "glances") else None,
             "excluded": {str(pid): why for pid, why in sorted(loop._excluded.items())},
             "order": list(loop.order), "order_index": loop.order_index, "next_room": loop.next_room,
             "rooms": rooms, "stairs": stairs, "openings": openings, "objects": objects,

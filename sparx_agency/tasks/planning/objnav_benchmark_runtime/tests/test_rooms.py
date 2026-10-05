@@ -194,3 +194,33 @@ def test_strong_conflicting_object_prevents_a_false_door_boundary():
     assert not tracker.confirmed() and tracker.depth_accepted == 0
 
 
+
+
+def test_furniture_standing_on_occupied_cells_belongs_to_the_room_around_it():
+    """Hanson 2026-10-04: the bed and the desks of the bedroom were ``room: null`` -- an object occupies
+    its own cells, which the watershed never labels -- and the room was named by its one chair."""
+    cells = np.full((100, 160), 100, np.int8)
+    cells[20:80, 10:75] = 0
+    cells[20:80, 85:150] = 0
+    cells[44:56, 75:85] = 0
+    cells[30:52, 25:45] = 100                                 # the bed: a 2 m x 2.2 m block inside room A
+    world = OccupancyGrid2D(cells, OccupancyGrid2DParams(0.1, 0, 0),
+                            values=OccupancyValues(free=0, occupied=100, unknown=-1))
+    settings = WatershedRoomParams(min_room_separation_m=1, min_clearance_m=0.3,
+                                    min_room_cells=40, door_cut_m=0.75, merge_dynamics_m=10)
+    graph = ObservedSceneGraph(FakeLLM(), segmentation=settings)
+    target = gibson_label_mapper().target_labels("chair")
+    door = SimpleNamespace(id=0, xy=(8.05, 5.05), count=3)
+    bed = SimpleNamespace(id=0, class_name="bed", xy=(3.5, 4.1), count=5, radius_m=1.0)        # the block's centre
+    chair = SimpleNamespace(id=1, class_name="chair", xy=(12.0, 5.0), count=3, radius_m=0.25)  # on room B's floor
+    far = SimpleNamespace(id=2, class_name="vase", xy=(15.9, 9.9), count=3, radius_m=0.1)       # in the outer wall, 1 m from any floor
+    graph.update(world, [bed, chair, far], target, doors=[door], step=10, reason=False)
+    assert len(graph.registry.rooms) == 2
+    a = graph.room_at(world, (2.0, 7.0))
+    b = graph.room_at(world, (12.0, 5.0))
+    assert a is not None and b is not None and a != b
+    assert graph.room_at(world, bed.xy) is None, "the bed's own cells are not room floor"
+    assert graph.object_room(world, bed) == a, "... but the bed stands in room A"
+    assert graph.objects_in(a) == ["bed"] and graph.objects_in(b) == ["chair"]
+    assert graph.object_room(world, far) is None, "an object a metre from any floor is nobody's"
+    assert graph.room_near(world, bed.xy, 1.6) == a and graph.room_near(world, (12.0, 5.0), 0.1) == b

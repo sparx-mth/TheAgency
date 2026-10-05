@@ -4,8 +4,8 @@ from __future__ import annotations
 import pytest
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    OMITTED_PERCENT, OPENING, P_CEILING, ROOM, STAIRS, SYSTEM_PROMPT, SearchContext, SearchNode, SearchNodeOracle,
-    coarse_seconds, format_node, format_prompt, normalise, parse_reply)
+    OMITTED_PERCENT, OPENING, P_CEILING, ROOM, STAIRS, SYSTEM_PROMPT, UNEXPLORED_FLOOR, SearchContext, SearchNode,
+    SearchNodeOracle, coarse_seconds, floor_unexplored, format_node, format_prompt, normalise, parse_reply)
 
 
 class Scripted:
@@ -49,15 +49,17 @@ def test_the_prompt_lists_every_node_in_the_format_the_system_prompt_explains():
     assert "THIS STOREY: a storey with a kitchen and a living room" in text and "OTHER STOREYS: storey F0: ..." in text
     assert format_node(KITCHEN) == "id=0  ROOM  type=kitchen  size=12m2  frontier=0  searched=40s  ago=30s  seen: fridge, sink"
     assert format_node(LIVING).endswith("ago=0s  here=yes  seen: sofa, television")
-    assert format_node(UNKNOWN) == "id=2  ROOM  type=unknown  size=18m2  frontier=3  searched=0s  ago=never  seen: nothing yet"
+    assert format_node(UNKNOWN) == "id=2  ROOM  type=unknown  size=18m2  frontier=3  searched=0s  entered=no  seen: nothing yet"
     assert format_node(UP) == "id=100000  STAIRS up  to a storey NOT visited yet"
     assert format_node(DOWN) == ("id=100001  STAIRS down  to a storey ALREADY visited (storey F0: rooms found: kitchen; "
                                  "searched 2min; 1 room with frontier left)  the robot came up these stairs 10s ago "
                                  "(arrived_by=yes)")
     for rule in ("type=unknown means NOT", "HOME MISSING HERE", "NEVER use distance", "planner adds travel and climbing",
                  "arrived_by=yes", "Do NOT make the scores sum to 100", "independently", 'STEP 1 -- "home"', 'STEP 2 -- "storey"',
-                 "never copy its numbers"):
+                 "never copy its numbers", "entered=no", "UNEXPLORED places", "merged two rooms into one"):
         assert rule in SYSTEM_PROMPT
+    assert "no television fits" not in SYSTEM_PROMPT, (
+        "the example taught a 3B model to write 'no <target> fits' on every small unknown room (Hanson 2026-10-04)")
 
 
 def test_an_opening_is_a_node_named_by_the_room_it_opens_from_and_what_was_glimpsed_through_it():
@@ -193,3 +195,48 @@ def test_two_likely_rooms_are_not_diluted_into_categorical_shares():
 
 
 
+
+
+# -- the uncertainty floor (2026-10-05) -----------------------------------------------
+GAP = SearchNode(200002, OPENING, "gap", via="room 2 (type=unknown)")
+DOORWAY_WITH_TOILET = SearchNode(200001, OPENING, "doorway", objects=("toilet",), via="room 2 (type=unknown)")
+UNKNOWN_ENTERED = SearchNode(3, ROOM, "unknown", area_m2=9.0, frontier_clusters=2, searched_s=12.0, last_inside_ago_s=20.0)
+WEAK_BEDROOM_UNENTERED = SearchNode(4, ROOM, "bedroom", tentative=True, area_m2=14.0, frontier_clusters=1)
+
+
+def test_which_nodes_are_unexplored():
+    assert UNKNOWN.unexplored, "never entered, not identified"
+    assert GAP.unexplored, "an opening nothing was glimpsed through"
+    assert not DOORWAY_WITH_TOILET.unexplored, "a glimpse is a preliminary classification: the model's to value"
+    assert not UNKNOWN_ENTERED.unexplored, "the robot stood in it; its search time speaks"
+    assert not WEAK_BEDROOM_UNENTERED.unexplored, "a type was inferred from outside: the model's to value"
+    assert not KITCHEN.unexplored and not UP.unexplored and not DOWN.unexplored
+
+
+def test_the_floor_raises_what_the_model_wrote_off_and_leaves_the_rest_alone():
+    nodes = [KITCHEN, UNKNOWN, UP, GAP, DOORWAY_WITH_TOILET, WEAK_BEDROOM_UNENTERED]
+    reply = {"nodes": [{"id": 0, "p": 0}, {"id": 2, "why": "small unknown room, no toilet fits", "p": 1},
+                       {"id": 100000, "p": 60}, {"id": 200002, "why": "no toilet glimpsed through gap", "p": 0},
+                       {"id": 200001, "p": 1}, {"id": 4, "why": "bedroom, no toilet", "p": 2}]}
+    scores, floored = floor_unexplored(parse_reply(reply, nodes)[0], nodes, UNEXPLORED_FLOOR)
+    assert floored == (2, 200002)
+    assert scores[2] == scores[200002] == pytest.approx(25.0)
+    assert scores[0] == 0 and scores[100000] == 60 and scores[200001] == 1 and scores[4] == 2
+    result = SearchNodeOracle.score(reply, nodes, UNEXPLORED_FLOOR)
+    assert result.floored == (2, 200002) and result.probs[2] == pytest.approx(0.25) and result.probs[200002] == pytest.approx(0.25)
+    assert result.reasons[2] == "small unknown room, no toilet fits", "the model's words are kept beside the floored number"
+    above = SearchNodeOracle.score({"nodes": [{"id": 2, "p": 40}, {"id": 200002, "p": 30}]}, [UNKNOWN, GAP], UNEXPLORED_FLOOR)
+    assert above.floored == () and above.probs[2] == pytest.approx(0.40), "a serious valuation stands"
+    off = SearchNodeOracle.score(reply, nodes, 0.0)
+    assert off.floored == () and off.probs[2] == pytest.approx(0.01), "0 disables the floor"
+
+
+def test_the_oracle_applies_its_floor_to_fresh_and_reused_replies():
+    client = Scripted({"nodes": [{"id": 2, "why": "too small", "p": 1}, {"id": 100000, "p": 60}]})
+    oracle = SearchNodeOracle(client, unexplored_floor=0.3)
+    first = oracle.probabilities("toilet", [UNKNOWN, UP])
+    assert first.probs[2] == pytest.approx(0.3) and first.floored == (2,) and first.probs[100000] == pytest.approx(0.6)
+    again = oracle.probabilities("toilet", [UNKNOWN, UP])
+    assert again.reused and again.probs[2] == pytest.approx(0.3) and client.calls == 1
+    with pytest.raises(ValueError):
+        SearchNodeOracle(client, unexplored_floor=1.0)

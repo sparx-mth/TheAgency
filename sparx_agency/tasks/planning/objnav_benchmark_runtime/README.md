@@ -342,13 +342,42 @@ refresh.
    (`methods/room_priors.py`, `LoopSettings.type_prior`: a sofa is not
    searched for in a bedroom, a bathroom or a kitchen; a toilet not in a
    bedroom; the table is exclusions, not permissions, so a hallway stays
-   searchable and `unknown` is never excluded -- unless an object of the
-   target's own class has been confirmed inside the room, which outranks
-   the prior). Excluded rooms carry probability 0 so nothing reads them as
-   unvalued; when nothing is left to value and no staircase is offered, no
-   model call is made and the exploration fallback carries the search.
-   `LoopSettings.min_prob` (0.05) keeps the oracle's "1 -- too small for a
-   couch" out of the order.
+   searchable and `unknown` is never excluded). Since 2026-10-05 the type
+   rule has three guards (`room_priors.ruled_out`): it applies to a
+   **strong** label only (two or more kinds of object agree -- a weak
+   label is a guess the oracle sees as `type=bedroom?` and values itself,
+   `weak_type_kept` events); never when an object of the target's own
+   class has been confirmed in the room; and never when a **home object**
+   of the target stands in it (`HOME_OBJECTS`: a sink or a shower where a
+   toilet lives -- the Hanson recording merged a bathroom's sink into a
+   "living room" of sofas and ruled it out for the toilet a metre from
+   the sink; `home_object_kept` events). Excluded rooms carry probability
+   0 so nothing reads them as unvalued; when nothing is left to value and
+   no staircase is offered, no model call is made and the exploration
+   fallback carries the search. `LoopSettings.min_prob` (0.05) keeps the
+   oracle's "1" for a bedroom in a search for a couch out of the order.
+
+   **The uncertainty floor** (`LoopSettings.unexplored_floor`, 0.25,
+   applied in `search_node_oracle.SearchNodeOracle`, since 2026-10-05). A
+   room never entered and still `unknown`, or an opening nothing was
+   glimpsed through, is a place the search knows *nothing* about, and the
+   least it owes such a place is a look: its probability is never read
+   below the floor, whatever the model wrote (`floored` in the estimate
+   events). The Hanson recording of 2026-10-04 had the 3B model write
+   "small unknown room, no toilet fits" on two never-entered rooms and
+   "no toilet glimpsed through gap" on six doorways -- the words of the
+   prompt's own example, applied to a toilet -- `min_prob` dropped them
+   all, the order was `[stairs]`, and the agent left the storey at action
+   27 with every door on it unlooked into. With the floor the unexplored
+   nodes stay in RPT*'s hands, where distance decides: two unknown rooms
+   3 m away at 0.25 come before a staircase 21 m away at 0.6, and the
+   user's "peek into the rooms before you descend" is a probability, not
+   a rule. A room with a *weak* type, or an opening with a glimpse, has a
+   preliminary classification and is the model's to value; the room line
+   now says `entered=no` instead of `ago=never`, and the prompt's rules
+   2b and 2c say what that means (an unexplored place owes a look, never
+   "too small"; a home-type object in a room of another type is the map's
+   merge showing).
 
    **The clue rule holds in both modes**: one confirmed object names the
    room (`RoomLabelSettings.min_objects = 1`; a single class is a *weak*
@@ -539,6 +568,48 @@ after the highest pid any storey has handed out
 (`RoomRegistry(first_pid=...)`, `FloorContextBank.new`), so `R0` names one
 room in a recording, not one per floor.
 
+**Where a door cuts, and whose room the furniture is** (since 2026-10-05).
+The partition is a clearance watershed over observed free space with a
+confirmed door as an absolute boundary
+(`core/mapping/topology/room_watershed.py`). A door *detected* from RGB-D
+sits where the box's depth put it, and the Hanson recording had one 0.6 m
+off its doorway, on the bedroom's own floor at a junction: the 0.75 m disk
+carved there severed the bedroom around its bed into R0 and R6 and cut
+nothing it should have. So the ObjectNav segmentation
+(`scene_graph.DEFAULT_SEGMENTATION`, `door_snap_reach_m=0.9`) **snaps each
+door's cut to the nearest choke** -- the medial-axis cell of least
+clearance within reach whose disk parts the skeleton into two substantial
+pieces (a dead-end notch is narrow too, but cutting it severs nothing) --
+and sizes the disk to the passage; a door with no choke in reach (walls not
+yet observed) keeps the plain disk. The merge then never joins basins that
+lie on *different sides* of the carved mask and may still join two basins
+of one room beside the cut (`merge_basins_by_dynamics(basin_sides=)`),
+where before any border through the disk was unmergeable. Replayed on the
+fifteen recorded floors of 2026-10-04 the change fixed the one it was
+written for (bedroom whole, R7 and the corridor apart) and moved the
+others by at most a room; it is a heuristic over the observed geometry --
+a furniture passage narrower than the doorway within reach of the door
+would be taken for it. Objects are credited to rooms by
+`ObservedSceneGraph.object_room`: the landmark's cell when it is room
+floor, else the nearest room floor within its footprint radius plus 0.6 m
+-- furniture stands on cells the map reads OCCUPIED, which the watershed
+never labels, so the bed, the desks and the wardrobe of that bedroom were
+`room: null` and the room was a "living room?" from its one chair.
+
+**Distances are measured the way A\* flies them** (since 2026-10-05).
+The planner plans at the preferred standoff (`preferred_clearance_m`,
+0.30 m) and relaxes to the body radius (0.18 m) only when nothing else
+gets through; the frontier inventory and the RPT* instance used to
+measure every distance on the body-radius graph, so a threshold 3.5 m
+away through a 0.5 m squeeze read as 3.5 m while the route around the
+squeeze was 12.5 m (Hanson, actions 166-196: a 30-action approach bound
+spent 5.8 m short on a route still being followed). Now
+`accessible_frontiers(preferred_cost=)` and `build_instance(preferred_cost=)`
+measure at the preferred standoff where it reaches and fall back to the
+body radius where only a squeeze connects (`RPTSearchPolicy.preferred_cost`),
+and a peek's approach bound is raised to what the route the planner
+actually adopted needs (`peek_approach_extended` events).
+
 Steps 2–6 run on the action a room's turn ends, so a released room is
 replaced by a transit at once -- never by a throwaway floor-wide route. A
 room whose budget ran out is **not** put on the visit cooldown (the fresh
@@ -617,6 +688,44 @@ counted, kept with its type, message and origin under
 type. Before this, an empty hold cost one idle `TURN_LEFT` per action until
 the step budget ran out -- the "camera spinning in place" of the Ranchester
 recordings -- and a model failure was an agent error.
+
+## Glances: where along a route a look to the side pays
+
+`methods/path_glances.py` (`GlanceSettings` on the policy, since 2026-10-05).
+The camera's cone is narrow and the map is what it saw: an agent walking a
+corridor sees the corridor, and a door a step to the side passes through
+the edge of the frame or not at all (Hanson, action 35). Turning in place
+costs no path length -- nothing under SPL -- but under the 500-action
+budget a full circle every few steps is unaffordable, so the question is
+*where* along the route a look pays, and which look. The scheduler scores
+the route in force every `revalue_actions` (3) and whenever it changes:
+candidate points one every `stride_m` (0.5 m) up to `horizon_m` (6 m),
+each with the route's heading there; for each, the unknown floor a glance
+would sweep -- left (from the heading's cone out to a right angle), right,
+or the full circle -- by optimistic rays through the unknown that stop at
+walls (`core/planning/exploration/view_gain.py`), **minus what the walk
+reveals anyway** (the forward cones along the whole route ahead), so a
+doorway's room counts once, at the point it shows best: the user's "one
+step forward and all three areas show; two and the first is hidden
+again". The best gain per action wins -- a side glance costs the turns
+out (the turns back are the follower's), a circle the full count -- if
+it clears `min_gain_m2` (3) and `min_gain_per_action_m2` (0.5): six
+forward steps into unknown space sweep the cone over 1.5 m of new floor,
+around 10 m2 in a room, so walking is the better buy wherever the unknown
+is ahead; a doorway beside the route shows the walk nothing and a glance
+5-15 m2 (the Hanson routes replayed on their final maps: 14.8 m2 at
+action 33, 7.6 m2 at 164). When the agent reaches the point the look is
+performed, one in-place turn per action, as a suspended phase like the
+warm-up: the loop is not ticked and not charged, the supervisor's clocks
+pause, and the committed route's watchdogs are told the pause
+(`glance_scheduled` / `glance_started` / `glance_complete` /
+`glance_aborted` events in `episode_info()["glances"]`; the planned and
+active glance in the per-step `search` record and on the HUD). A spot
+where a full rotation already stood (the scan ledger) is never glanced
+from -- whatever is unknown from there is beyond range or behind
+furniture -- and a target sighting or a stair traversal aborts a glance;
+the warm-up, a peek's look, a scan's rotation and the takeover never
+start one. `enabled=False` is the ablation.
 
 ## Frontier sweep and the action economy
 

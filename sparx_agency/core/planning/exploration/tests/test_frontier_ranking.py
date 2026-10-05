@@ -317,3 +317,50 @@ def test_a_cluster_in_unlabelled_space_is_dropped_and_shape_is_checked():
                                   min_cluster_cells=1, params=off_graph) == {}
 
 
+
+
+# -- distances the way the planner flies them (2026-10-05) ------------------------------
+def squeeze_world():
+    """A wall with a one-cell squeeze near the robot and a wide gap far from it.
+
+    The frontier lies on the far side of the wall. At the body radius the
+    squeeze at row 1 is passable and the boundary is two cells away; at
+    the preferred standoff only the gap at row 4 is, and the walk is round
+    through it. Returns ``(world, body_cost, preferred_cost)``.
+    """
+    world = world_from([
+        "###########",
+        "#?........#",
+        "#?...#....#",
+        "#?...#....#",
+        "#?...#....#",
+        "#.........#",
+        "###########",
+    ])
+    body = flat_cost(world)
+    preferred = flat_cost(world)
+    preferred[1, 5] = np.inf                           # the squeeze at row 1: lethal at the preferred standoff
+    return world, body, preferred
+
+
+def test_distances_are_measured_at_the_preferred_standoff_where_it_reaches():
+    from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
+    world, body, preferred = squeeze_world()
+    labels = np.ones(world.grid.shape, dtype=np.int32)
+    origin = at(6, 1)
+    through = accessible_frontiers(world, body, labels, origin, math.pi)
+    around = accessible_frontiers(world, body, labels, origin, math.pi, preferred_cost=preferred)
+    assert len(through.goals) == len(around.goals) == 1
+    assert through.goals[0].geodesic_m < 6 * RES, "through the squeeze: a few cells"
+    assert around.goals[0].geodesic_m > through.goals[0].geodesic_m + 3 * RES, (
+        "the route A* will fly goes round through the gap, and that is what the goal is charged")
+    assert around.goals[0].cell == through.goals[0].cell, "the same boundary, measured differently"
+    gx, gy = through.goals[0].cell
+    assert around.distance_m[gy, gx] == pytest.approx(around.goals[0].geodesic_m)
+    # A cell reachable only through the squeeze keeps its body-radius distance rather than reading unreachable.
+    world2, body2, preferred2 = squeeze_world()
+    preferred2[5, 5] = np.inf                           # the gap at row 5 is a squeeze too
+    only_squeeze = accessible_frontiers(world2, body2, labels, origin, math.pi, preferred_cost=preferred2)
+    assert len(only_squeeze.goals) == 1 and only_squeeze.goals[0].geodesic_m == pytest.approx(through.goals[0].geodesic_m)
+    with pytest.raises(ValueError):
+        accessible_frontiers(world, body, labels, origin, math.pi, preferred_cost=preferred[:3])

@@ -135,11 +135,23 @@ class FrontierInventory:
     distance_m: np.ndarray
 
 
-def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None):
+def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, preferred_cost=None):
     """Build the inventory without confusing a planning horizon with reachability.
 
     Uses the planner's clearance-qualified passable graph. A goal snapped across
     a disconnected wall is rejected rather than credited to an unseen room.
+
+    Args:
+        preferred_cost: Optional cost array at the planner's PREFERRED
+            standoff (``WeightedAStarPlanner2D.cost_for``), beside ``cost``
+            at the body radius. A* plans at the preferred standoff and
+            relaxes to the body radius only when nothing else gets
+            through, so the route it will actually fly is the preferred
+            one wherever that exists: with this given, every distance is
+            measured at the preferred standoff where the cell is reachable
+            there and at the body radius otherwise. Without it a threshold
+            3.5 m away through a 0.5 m squeeze read as 3.5 m while the
+            route around the squeeze was 12.5 m (Hanson 2026-10-04).
     """
     params = replace(params or FrontierRankingParams(),
                      max_geodesic_m=max(1.0, world.grid.size * world.resolution * math.sqrt(2.0)))
@@ -160,6 +172,12 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None):
         return FrontierInventory((), {}, cells, distances)
     on_graph = ids >= 0
     distances[on_graph] = dist[ids[on_graph]] * world.resolution
+    if preferred_cost is not None:
+        preferred = np.asarray(preferred_cost, dtype=float)
+        if preferred.shape != cost.shape:
+            raise ValueError("preferred_cost %s is not shaped like cost %s" % (preferred.shape, cost.shape))
+        distances = _prefer_distances(world, np.where(source_component, preferred, np.inf), origin_xy, yaw,
+                                      params, distances)
     clusters = frontier_clusters(world, source_component, ids)
     blocked = world.grid != world.values.free
     goals, by_room = [], {}
@@ -175,7 +193,7 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None):
         nearest = int(np.argmin((cluster.cols - gx) ** 2 + (cluster.rows - gy) ** 2))
         if not line_of_sight_clear(blocked, gx, gy, int(cluster.cols[nearest]), int(cluster.rows[nearest])):
             continue
-        goal = _rank(world, [cluster], dist, ids, origin_xy, yaw, params)[0]
+        goal = _rank_by_distance(world, [cluster], distances, origin_xy, yaw, params)[0]
         goals.append(goal)
         cells[cluster.rows, cluster.cols] = True
         room = _room_of(labels, cluster)
@@ -334,16 +352,39 @@ def _distances(world, ids, graph, origin_xy, params) -> Optional[np.ndarray]:
                     limit=limit_cells)
 
 
+def _prefer_distances(world, preferred_cost, origin_xy, yaw, params, fallback) -> np.ndarray:
+    """Per-cell metres at the preferred standoff where reachable there, else ``fallback``."""
+    ids, graph = _graph(preferred_cost, None, None, origin_xy, yaw)
+    dist = _distances(world, ids, graph, origin_xy, params)
+    if dist is None:
+        return fallback
+    out = np.array(fallback, dtype=float, copy=True)
+    on_graph = ids >= 0
+    preferred = dist[ids[on_graph]] * world.resolution
+    reached = np.isfinite(preferred)
+    rows, cols = np.nonzero(on_graph)
+    out[rows[reached], cols[reached]] = preferred[reached]
+    return out
+
+
 def _rank(world, clusters: Sequence[FrontierCluster], dist, ids, origin_xy, yaw,
           params) -> List[FrontierGoal]:
     """Score reachable clusters -- gain over geodesic cost, facing as a discount."""
+    distances = np.full(world.grid.shape, np.inf, dtype=float)
+    on_graph = ids >= 0
+    distances[on_graph] = dist[ids[on_graph]] * float(world.resolution)
+    return _rank_by_distance(world, clusters, distances, origin_xy, yaw, params)
+
+
+def _rank_by_distance(world, clusters: Sequence[FrontierCluster], distances: np.ndarray, origin_xy, yaw,
+                      params) -> List[FrontierGoal]:
+    """Score reachable clusters from a per-cell metre field -- gain over geodesic cost, facing as a discount."""
     goals: List[FrontierGoal] = []
     for cluster in clusters:
         gx, gy = cluster.cell
-        steps = float(dist[int(ids[gy, gx])])
-        if not math.isfinite(steps):
+        geodesic = float(distances[gy, gx])
+        if not math.isfinite(geodesic):
             continue
-        geodesic = steps * float(world.resolution)
         x, y = (float(v) for v in world.grid_to_world(gx, gy))
         error = normalize_angle(math.atan2(y - float(origin_xy[1]),
                                            x - float(origin_xy[0])) - float(yaw))

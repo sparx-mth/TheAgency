@@ -423,7 +423,7 @@ def landmark_openings(policy, obs, world, cost, settings: OpeningSettings, inspe
         xy, geodesic = standoff
         heading = math.atan2(landmark.xy[1] - xy[1], landmark.xy[0] - xy[0])
         out.append(Opening(index=LANDMARK_INDEX_BASE + int(landmark.id), xy=xy, heading=float(normalize_angle(heading)),
-                           size_cells=0, geodesic_m=float(geodesic), room_pid=p.graph.room_at(world, landmark.xy),
+                           size_cells=0, geodesic_m=float(geodesic), room_pid=p.graph.object_room(world, landmark),
                            door_id=None, glimpsed=(str(landmark.class_name),), kind=LANDMARK,
                            landmark_id=int(landmark.id), landmark_xy=(float(landmark.xy[0]), float(landmark.xy[1]))))
     return out

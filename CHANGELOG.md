@@ -6,6 +6,50 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **Informative glances along a route** (`objnav_benchmark_runtime/methods/path_glances.py`,
+  `core/planning/exploration/view_gain.py`, 2026-10-05): the route in force is scored every few
+  actions for the one point where a look to the left, to the right or all round would reveal the
+  most unknown floor the walk itself will not (optimistic rays through the unknown, stopped by
+  walls, the forward cones along the route subtracted); if the gain clears 3 m2 and 0.5 m2 per
+  action, the look is performed when the agent gets there -- one in-place turn per action, a
+  suspended phase like the warm-up (no loop charge, clocks paused, the route's watchdogs told the
+  pause). A spot where a full rotation already stood is never glanced from; a target sighting
+  or a stair traversal aborts a glance. `GlanceSettings` on the policy, `glances` in the method
+  configuration, `episode_info` and the per-step `search` record, a HUD line.
+- **An uncertainty floor on unexplored nodes** (`search_node_oracle.SearchNodeOracle(unexplored_floor=)`,
+  `LoopSettings.unexplored_floor`, default 0.25): a never-entered room still `unknown`, or an
+  opening nothing was glimpsed through, is read at no less than the floor whatever the model
+  wrote (`floored` in the result and the estimate events). The room line says `entered=no`; the
+  prompt gains rules 2b (unexplored places owe a look; never "too small") and 2c (a home-type
+  object in a room of another type means the map merged two rooms); the worked example no
+  longer writes a small unknown room off. Hanson 2026-10-04 left its storey at action 27 with
+  two never-entered rooms and six doorways valued at 0-1% by the 3B model.
+- **Door cuts snapped to the choke** (`core/mapping/topology/room_watershed.py`
+  `WatershedRoomParams.door_snap_reach_m`, on in the ObjectNav scene graph at 0.9 m): a detected
+  door is moved onto the nearest medial-axis constriction whose removal parts the skeleton into
+  two substantial pieces, and the disk carved there is sized to the passage; basins on different
+  sides of the carved mask never merge (`merge_basins_by_dynamics(basin_sides=)`), basins on one
+  side still may; a door with no choke in reach keeps the plain disk. The Hanson bedroom (R0/R6)
+  is one room again, R7 and the corridor stay apart; the other fourteen recorded floors move by
+  at most one room.
+- **Furniture belongs to the room around it** (`ObservedSceneGraph.object_room` / `room_near`):
+  a landmark standing on occupied cells is credited to the nearest room floor within its
+  footprint radius plus 0.6 m (the bed, the desks and the wardrobe of Hanson's bedroom were
+  `room: null` and the room was a "living room?" from its chair).
+- **Home objects** (`room_priors.HOME_OBJECTS`, `ruled_out`): a room holding an object of the
+  kind the target lives with (a sink or a shower, for a toilet) is never ruled out by type.
+### Changed
+- **The type prior rules out STRONG labels only**: a weak label (one kind of object) never
+  excludes a room; the oracle sees it as `type=bedroom?` and values it (`weak_type_kept`, once
+  per room; `LoopSettings.weak_type_max_openings` is retained but no longer consulted). The
+  relabel-ends-the-visit rule follows the same test.
+- **The peek's approach bound follows the route the planner adopted**
+  (`peek_approach_extended` events): Hanson's peek of action 166 was sized on a 3.5 m geodesic
+  and cancelled 5.8 m short on a 12.5 m route still being followed.
+- **Distances are measured the way A\* flies them**: `accessible_frontiers(preferred_cost=)` and
+  `build_instance(preferred_cost=)` take the cost grid at the planner's preferred standoff and
+  measure every reachable distance there, falling back to the body-radius graph where only a
+  squeeze connects; `RPTSearchPolicy.preferred_cost` supplies it. Reachability is unchanged.
 - **The room visit is a scan** (`objnav_benchmark_runtime/methods/room_search_loop.py`,
   `LoopSettings.visit="scan"`, 2026-10-04): transit to the room's vantage point -- the reachable
   interior cell of greatest clearance (`room_vantage.py`) -- turn a full circle on measured yaw,

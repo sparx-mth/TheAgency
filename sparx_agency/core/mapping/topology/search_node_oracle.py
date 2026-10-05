@@ -30,6 +30,19 @@ usable node (the caller repairs the schema once, then backs off), and reuse
 the last reply when the prompt is byte-identical -- the effort numbers are
 shown in coarse steps so an unchanged map produces an unchanged prompt.
 
+One more thing stays in code, since 2026-10-05: the **uncertainty floor**
+(``unexplored_floor``). A room never entered and not yet identified, or an
+opening nothing has been glimpsed through, is a place the search knows
+NOTHING about; the least it owes such a place is a look, so its probability
+is never read below the floor whatever the model wrote. The Hanson
+recording of 2026-10-04 had a 3B model value two never-entered rooms and
+six doorways at 0-1% ("small unknown room, no toilet fits" -- the words of
+the prompt's own example, applied to a toilet) against 60% for the stairs,
+and the agent left the storey at action 27 with every door on it unlooked
+into. The floor is the ``entered``/``identified`` flags made binding: the
+model still ranks the unexplored places against each other and against the
+stairs, but it cannot write any of them off.
+
 Python 3.8 syntax, standard library only.
 """
 from __future__ import annotations
@@ -50,6 +63,9 @@ P_CEILING = 1.0 - 1e-6
 OMITTED_PERCENT = 1.0
 #: Object classes shown per room; a longer list is answered about the list, not the room.
 MAX_CLASSES_IN_PROMPT = 8
+#: Default probability floor for an unexplored node (a never-entered, unidentified room;
+#: an opening with nothing glimpsed through it). See the module docstring.
+UNEXPLORED_FLOOR = 0.25
 
 SYSTEM_PROMPT = """You are the reasoning module of a robot searching ONE building for an \
 instance of ONE target category. The robot has partly mapped the building into NODES.
@@ -59,8 +75,9 @@ IDENTIFIED YET -- never "empty"; a type ending in "?" was inferred from a single
 kind of object and may be wrong (a sink alone reads as a kitchen until a toilet \
 shows). Each room line gives: size; frontier = the number of unexplored openings \
 or boundaries still accessible inside it (0 is NOT proof of object absence); searched = the time the robot \
-has spent inside it; ago = the time since it was last inside (never = not entered \
-yet); seen = the objects confirmed in it; here=yes if the robot stands in it now.
+has spent inside it; entered=no if the robot has never stood in it (it was only \
+seen from outside), else ago = the time since it was last inside; seen = the \
+objects confirmed in it; here=yes if the robot stands in it now.
 STAIRS nodes are staircases to another storey (up or down). Taking one means \
 leaving this storey and searching the other one. The line says whether that \
 storey was visited before and, if so, what was found and how much was searched \
@@ -104,14 +121,25 @@ sized; a 20 m2+ room on a ground floor is the living room -- and (b) the STAIRS 
 toward the storey where the home type usually is. Judge each by how well the sizes \
 fit and how much of each unknown room is unseen. When the home type is not expected \
 on this storey, the stairs can have a high probability without suppressing other nodes.
- 3. A room of ANOTHER identified type gets 0-3, even if the object could \
-conceivably be there. Do not inflate a probability merely to avoid choosing.
+ 2b. UNEXPLORED places: an UNKNOWN room with entered=no, and an OPENING with nothing \
+glimpsed, are places the robot knows NOTHING about. It owes each of them at least a \
+look before "not here" means anything, so each gets at least 25 -- more when the home \
+type is still missing on a storey where it belongs, less (10-20) only when STEP 2 says \
+the home type does not belong on this storey at all. Never write one off for its size.
+ 2c. An object of the home type's kind seen in a room of ANOTHER type -- a sink or a \
+shower in a "living room", a bed in a "kitchen", a stove in a "bedroom" -- means the \
+map merged two rooms into one: value that room like an unknown room of the home \
+type (30 or more), not by its label.
+ 3. A room of ANOTHER identified type, entered or seen with objects of only that type, \
+gets 0-3, even if the object could conceivably be there. Do not inflate a \
+probability merely to avoid choosing.
  4. A room the target cannot be in by type (frying pan in a bathroom, toilet in a \
 bedroom) gets 0-1, whatever else its line says.
  5. frontier=0 means no accessible unexplored boundary, not full semantic coverage. \
 Lower the probability with search evidence, but allow missed or occluded objects.
  6. Searched long and recently -> low, not zero. Searched briefly, or long ago, \
-with frontier left -> stays promising. Never entered, right type -> the best bet.
+with frontier left -> stays promising. Never entered, right type -> the best bet; \
+never entered, type unknown -> rule 2b.
  7. A hallway or corridor rarely holds the target, but one with frontier LEADS to \
 unseen rooms: value it by what it may lead to.
  8. STAIRS to a visited storey: if a room of the home type was FOUND there and is \
@@ -135,19 +163,19 @@ Reply with ONLY this JSON, keys in this order:
 Example of the FORMAT and the style of reasoning -- a different building every \
 time, so never copy its numbers. TARGET television, robot on an upper storey:
 id=4  ROOM  type=bedroom  size=13m2  frontier=0  searched=1min  ago=3min  seen: bed, lamp
-id=9  ROOM  type=unknown  size=6m2  frontier=1  searched=0s  ago=never  seen: nothing yet
-id=11  ROOM  type=unknown  size=22m2  frontier=2  searched=0s  ago=never  seen: nothing yet
+id=9  ROOM  type=unknown  size=6m2  frontier=1  searched=0s  entered=no  seen: nothing yet
+id=11  ROOM  type=unknown  size=22m2  frontier=2  searched=0s  entered=no  seen: nothing yet
 id=100003  STAIRS down  to a storey NOT visited yet
 id=200001  OPENING  doorway off room 11 (type=unknown)  to space NOT seen yet  glimpsed through it: toilet
 id=200002  OPENING  gap off room 11 (type=unknown)  to space NOT seen yet  glimpsed through it: nothing yet
 {"home":"living room, sometimes a bedroom",
  "storey":"upper floor (bedroom found); no living room here; living rooms are downstairs",
  "nodes":[{"id":4,"why":"bedroom, fully seen, no television","p":2},
-{"id":9,"why":"bathroom-sized room, no television fits","p":1},
-{"id":11,"why":"large upstairs room, maybe a lounge","p":30},
+{"id":9,"why":"small unexplored room, never entered, a bathroom perhaps","p":25},
+{"id":11,"why":"large unexplored upstairs room, maybe a lounge","p":40},
 {"id":100003,"why":"unvisited ground floor holds the living room","p":60},
-{"id":200001,"why":"toilet glimpsed: a bathroom, no television","p":1},
-{"id":200002,"why":"unseen upstairs room, a bedroom most likely","p":8}]}"""
+{"id":200001,"why":"toilet glimpsed: a bathroom, no television","p":2},
+{"id":200002,"why":"unseen upstairs room, nothing known of it yet","p":25}]}"""
 USER_PROMPT_TEMPLATE = """TARGET: {target}
 
 THIS STOREY: {storey}
@@ -209,6 +237,22 @@ class SearchNode:
         if self.kind not in KINDS:
             raise ValueError("SearchNode.kind must be one of %s, got %r" % (KINDS, self.kind))
 
+    @property
+    def unexplored(self) -> bool:
+        """Whether the search knows nothing about this place yet, so the floor applies.
+
+        A room never entered whose type is still ``unknown``; an opening
+        nothing has been glimpsed through. A staircase never is -- the
+        other storey is valued by what this one turned out to be -- and
+        neither is an identified room or an opening with a glimpse, which
+        the model values on the evidence.
+        """
+        if self.kind == ROOM:
+            return self.last_inside_ago_s is None and (self.label or "unknown").strip().lower() == "unknown"
+        if self.kind == OPENING:
+            return not any(str(c).strip() for c in self.objects)
+        return False
+
 
 @dataclass(frozen=True)
 class SearchContext:
@@ -243,6 +287,8 @@ class NodeOracleResult:
         reused: The prompt was byte-identical to the last one answered, so
             the kept reply was re-read instead of spending a call.
         omitted: Node ids the model did not score (given :data:`OMITTED_PERCENT`).
+        floored: Node ids read at the uncertainty floor because the model
+            valued an unexplored place below it (see the module docstring).
         reading: The model's steps 1 and 2 in its own words -- ``home`` (where
             the target normally lives) and ``storey`` (what this storey is and
             whether the home type was found or is missing here). Written
@@ -261,6 +307,8 @@ class NodeOracleResult:
     omitted: Tuple[int, ...] = ()
     reading: Dict[str, str] = field(default_factory=dict)
     probability_model: str = "independent_search_success"
+    #: Node ids whose probability was raised to the uncertainty floor (``unexplored_floor``).
+    floored: Tuple[int, ...] = ()
 
 
 # -- the prompt -------------------------------------------------------------
@@ -304,7 +352,7 @@ def format_node(node: SearchNode) -> str:
     parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % size,
              "frontier=%d" % max(0, int(node.frontier_clusters)),
              "searched=%s" % coarse_seconds(node.searched_s),
-             "ago=%s" % coarse_seconds(node.last_inside_ago_s)]
+             "entered=no" if node.last_inside_ago_s is None else "ago=%s" % coarse_seconds(node.last_inside_ago_s)]
     if node.here:
         parts.append("here=yes")
     parts.append("seen: %s" % seen)
@@ -381,6 +429,28 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
     return scores, elsewhere, reasons, omitted
 
 
+def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode],
+                     unexplored_floor: float) -> Tuple[Dict[int, float], Tuple[int, ...]]:
+    """Raise every unexplored node's percentage to the floor; return the new scores and the ids raised.
+
+    The floor is a fraction in ``[0, 1)``; the scores are percentages. A
+    node the model scored at or above the floor is left alone, so the
+    model's ranking among the unexplored places survives wherever it
+    valued them seriously.
+    """
+    if not unexplored_floor > 0.0:
+        return scores, ()
+    percent = 100.0 * float(unexplored_floor)
+    out = dict(scores)
+    floored = []
+    for node in nodes:
+        nid = int(node.id)
+        if nid in out and node.unexplored and out[nid] < percent - 1e-9:
+            out[nid] = percent
+            floored.append(nid)
+    return out, tuple(sorted(floored))
+
+
 def normalise(scores: Dict[int, float], elsewhere: float) -> Tuple[Dict[int, float], float]:
     """Convert each percentage independently; retain the old function signature.
 
@@ -418,16 +488,23 @@ class SearchNodeOracle:
             or anything with ``chat_json(system, user, ...)``. When the client
             accepts ``reasoning=True`` the call is routed to the config's
             reasoning model; a plainer client is called without it.
+        unexplored_floor: The least probability an unexplored node
+            (:attr:`SearchNode.unexplored`) is read at, whatever the model
+            wrote; 0 disables the floor. See the module docstring.
 
     Attributes:
         reuses: Queries answered from the kept reply.
         queries: Calls actually made.
+        unexplored_floor: As given.
     """
 
-    def __init__(self, client) -> None:
+    def __init__(self, client, unexplored_floor: float = UNEXPLORED_FLOOR) -> None:
+        if not (0.0 <= float(unexplored_floor) < 1.0) or not math.isfinite(float(unexplored_floor)):
+            raise ValueError("unexplored_floor must lie in [0, 1), got %r" % (unexplored_floor,))
         self._client = client
         self._last_prompt = None  # type: Optional[str]
         self._last_reply = None   # type: Optional[Dict[str, Any]]
+        self.unexplored_floor = float(unexplored_floor)
         self.reuses = 0
         self.queries = 0
 
@@ -458,7 +535,7 @@ class SearchNodeOracle:
             raise ValueError("SearchNodeOracle needs at least one node")
         user = self.prompt(target, nodes, context)
         if user == self._last_prompt and self._last_reply is not None:
-            kept = self.score(self._last_reply, nodes)
+            kept = self.score(self._last_reply, nodes, self.unexplored_floor)
             if kept is not None:
                 self.reuses += 1
                 return replace(kept, reused=True)
@@ -466,7 +543,7 @@ class SearchNodeOracle:
             reply = self.ask(user)
         except Exception:
             return self.uniform(nodes, raw_reply=None)
-        result = self.score(reply, nodes)
+        result = self.score(reply, nodes, self.unexplored_floor)
         if result is None:
             return self.uniform(nodes, raw_reply=reply if isinstance(reply, dict) else None)
         self.remember(user, reply)
@@ -482,12 +559,13 @@ class SearchNodeOracle:
                                 raw_reply=raw_reply, spread=0.0)
 
     @staticmethod
-    def score(reply: Any, nodes: Sequence[SearchNode]) -> Optional[NodeOracleResult]:
-        """Parse, fill the omitted, normalise, clamp."""
+    def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0) -> Optional[NodeOracleResult]:
+        """Parse, fill the omitted, floor the unexplored, normalise, clamp."""
         parsed = parse_reply(reply, nodes)
         if parsed is None:
             return None
         scores, elsewhere, reasons, omitted = parsed
+        scores, floored = floor_unexplored(scores, nodes, unexplored_floor)
         probs, elsewhere = normalise(scores, elsewhere)
         values = list(probs.values())
         reading = {key: str(reply[key])[:200] for key in ("home", "storey")
@@ -495,7 +573,7 @@ class SearchNodeOracle:
         return NodeOracleResult(probs=probs, elsewhere=elsewhere, p_present=1.0 - elsewhere,
                                 source="llm", reasons=reasons, raw_reply=reply if isinstance(reply, dict) else None,
                                 spread=float(max(values) - min(values)) if values else 0.0, omitted=omitted,
-                                reading=reading)
+                                reading=reading, floored=floored)
 
 
 

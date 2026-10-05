@@ -21,7 +21,8 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import Room
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import implausible_room, target_key
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import (
+    home_object, implausible_room, ruled_out, target_key)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import (
     SCAN_POINT_INSIDE, SEEN_FROM_SCAN, RoomScanLedger, visible_fraction)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
@@ -268,9 +269,9 @@ def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_targe
     llm = NamingLLM()
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm)
     assert policy.target.query == "chair" and target_key(policy.target) == "chair"
-    see(policy, {1: ["toilet"]}, step=0)
+    see(policy, {1: ["toilet", "sink"]}, step=0)                     # two kinds of object: a STRONG bathroom
     policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["label"] == "bathroom"
+    assert policy.graph.label_info(1)["label"] == "bathroom" and policy.graph.label_info(1)["strength"] == "strong"
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._excluded == {1: "type:bathroom"} and policy.loop.stats["excluded_type"] == 1
     assert policy.supervisor.room_id == 0, "a chair is not searched for in a bathroom"
@@ -278,11 +279,23 @@ def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_targe
     assert policy.loop.estimates[1]["excluded"] == "type:bathroom"
     # A chair confirmed in the bathroom outranks the prior.
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
-    see(policy, {1: ["toilet", "chair"]}, step=0)
+    see(policy, {1: ["toilet", "sink", "chair"]}, step=0)
     policy.graph.relabel(1, 0)
     assert policy.graph.label_info(1)["label"] == "bathroom"
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._excluded == {} and policy.supervisor.room_id == 1
+    # A weak label -- one kind of object -- is the oracle's to value, never an exclusion (2026-10-05).
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    see(policy, {1: ["toilet"]}, step=0)
+    policy.graph.relabel(1, 0)
+    assert policy.graph.label_info(1)["strength"] == "weak"
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {} and policy.loop.stats["weak_type_kept"] == 1
+    assert ruled_out(policy.target, "bathroom", "weak", ["toilet"]) is None
+    assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink"]) == "type:bathroom"
+    assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink", "chair"]) is None, "the target itself"
+    assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink", "desk"]) is None, "a desk is where chairs live"
+    assert home_object("toilet", "sink") and home_object("toilet", "shower") and not home_object("toilet", "sofa")
 
 
 def test_the_type_prior_table_is_exclusions_not_permissions():

@@ -10,7 +10,7 @@ from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import threshold_cells
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import RoomReasoningUnavailable
 
-SUSPENDED_PHASES = ("warmup", "doorway_peek", "room_return", "discovery_fallback")
+SUSPENDED_PHASES = ("warmup", "doorway_peek", "room_return", "discovery_fallback", "glance")
 
 
 def discover(p, obs, world, cost):

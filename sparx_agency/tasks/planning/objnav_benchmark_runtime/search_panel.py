@@ -96,6 +96,15 @@ def _header(col, search):
         col.line("WARM-UP %d/%d actions" % (warmup["actions"], warmup["budget"]), AMBER)
     if peek:
         col.line("PEEK R%d: %s" % (peek["room"], peek["phase"]), AMBER)
+    glance = search.get("glance") or {}
+    if glance.get("active"):
+        active = glance["active"]
+        col.line("GLANCE %s: turn %d, %.1f m2 of unknown in view" % (active.get("kind", "?"), active.get("turns", 0),
+                                                                     active.get("gain_m2", 0.0)), AMBER)
+    elif glance.get("planned"):
+        planned = glance["planned"]
+        col.line("glance %s planned %.1f m ahead: %.1f m2 for %d actions" % (
+            planned.get("kind", "?"), planned.get("along_m", 0.0), planned.get("gain_m2", 0.0), planned.get("actions", 0)), GREY)
     col.line("Accessible frontiers: %d (blue diamonds)" % len(search.get("accessible_frontiers", ())), GREY)
     floor = search.get("floor") or {}
     if floor:

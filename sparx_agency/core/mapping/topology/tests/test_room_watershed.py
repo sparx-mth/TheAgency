@@ -511,3 +511,95 @@ def test_the_merged_segmentation_is_deterministic():
     assert np.array_equal(runs[0][1], runs[1][1])
     assert [s.centroid_cells for s in runs[0][2]] == \
         [s.centroid_cells for s in runs[1][2]]
+
+
+# -- door cuts snapped to the choke (detected doors, 2026-10-05) ----------------
+HOME_RES = 0.1  # the ObjectNav maps
+
+
+def room_doorway_hall():
+    """A room, a 0.8 m doorway in a 0.3 m wall, a hall beyond -- and a dead-end notch in the room's wall.
+
+    Returns ``(free, doorway_cell, misplaced_door_cell, notch_cell)``. The
+    misplaced door is where a detected door landed in the Hanson recording:
+    0.6 m short of its doorway, on the room's floor. The notch (0.4 m wide,
+    1 m deep) is narrower than the doorway and as near the misplaced door,
+    but it is a spur: cutting it parts nothing.
+    """
+    free = np.zeros((80, 70), dtype=bool)
+    free[10:40, 10:60] = True          # the room: 3 m x 5 m
+    free[43:70, 10:60] = True          # the hall north of the wall
+    free[40:43, 31:39] = True          # the doorway: 0.8 m wide, 0.3 m thick wall
+    free[0:10, 26:30] = True           # the notch: 0.4 m wide, 1 m deep, dead end in the south wall
+    return free, (35, 41), (35, 35), (28, 5)
+
+
+def home_params(**overrides):
+    base = dict(min_room_separation_m=1.0, min_clearance_m=0.3, min_room_cells=50,
+                door_cut_m=0.75, merge_dynamics_m=0.2)
+    base.update(overrides)
+    return WatershedRoomParams(**base)
+
+
+def clearance_and_skeleton(free):
+    healed = heal_free_mask(free)
+    return healed, distance_transform_edt(healed) * HOME_RES, room_watershed.medial_axis(healed, rng=0)
+
+
+def test_a_misplaced_door_snaps_to_its_doorway_and_the_cut_is_sized_to_the_passage():
+    free, doorway, misplaced, _ = room_doorway_hall()
+    _, clearance, skeleton = clearance_and_skeleton(free)
+    choke = room_watershed.snap_door_to_choke(skeleton, clearance, misplaced, home_params(door_snap_reach_m=0.9), HOME_RES)
+    assert choke is not None
+    (cx, cy), half_width = choke
+    assert 40 <= cy <= 42 and 31 <= cx <= 38, "the choke is in the doorway, 0.6 m from where the door was detected"
+    assert 0.3 <= half_width <= 0.5, "half of a 0.8 m doorway, within a cell"
+
+
+def test_the_snapped_cut_separates_room_and_hall_without_carving_the_rooms_floor():
+    free, doorway, misplaced, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9)
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, [misplaced])
+    room, hall = int(room_lbl[20, 15]), int(room_lbl[60, 35])
+    assert room > 0 and hall > 0 and room != hall and len(stats) == 2
+    assert int(room_lbl[35, 35]) == room, "the floor under the detected position stays the room's"
+    healed, clearance, _ = clearance_and_skeleton(free)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [misplaced], params, HOME_RES)
+    plain = door_disk_mask(free.shape, [misplaced], int(round(params.door_cut_m / HOME_RES)))
+    assert carve.sum() < 0.5 * plain.sum(), "a passage-sized disk in the doorway, not a 1.5 m hole in the room"
+    assert carve[41, 35] and not carve[35, 35]
+    assert not barrier.any(), "a snapped cut parts the rooms by side, not by a disk-shaped barrier"
+
+
+def test_a_dead_end_notch_is_not_a_choke():
+    """Narrower than the doorway and as near, but a spur: its disk parts no passage."""
+    free, doorway, misplaced, notch = room_doorway_hall()
+    _, clearance, skeleton = clearance_and_skeleton(free)
+    params = home_params(door_snap_reach_m=0.9)
+    beside_notch = (28, 12)                                    # on the room floor, 0.2 m from the notch's mouth
+    choke = room_watershed.snap_door_to_choke(skeleton, clearance, beside_notch, params, HOME_RES)
+    assert choke is None or not (26 <= choke[0][0] <= 29 and choke[0][1] <= 12), "the notch is never chosen"
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, [beside_notch])
+    assert int(room_lbl[20, 15]) == int(room_lbl[5, 28]) > 0, "... so the notch stays part of the room"
+
+
+def test_a_door_with_no_choke_within_reach_keeps_the_plain_disk():
+    """Walls not yet observed: the door stands in open floor and the disk carve is all there is."""
+    free = np.zeros((60, 60), dtype=bool)
+    free[5:55, 5:55] = True
+    door = (30, 30)
+    params = home_params(door_snap_reach_m=0.9)
+    healed, clearance, skeleton = clearance_and_skeleton(free)
+    assert room_watershed.snap_door_to_choke(skeleton, clearance, door, params, HOME_RES) is None
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [door], params, HOME_RES)
+    assert np.array_equal(carve, door_disk_mask(free.shape, [door], int(round(params.door_cut_m / HOME_RES))))
+    assert np.array_equal(barrier, carve)
+
+
+def test_snapping_off_reproduces_the_plain_carve():
+    free, doorway, misplaced, _ = room_doorway_hall()
+    healed, clearance, _ = clearance_and_skeleton(free)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [misplaced], home_params(), HOME_RES)
+    assert np.array_equal(carve, door_disk_mask(free.shape, [misplaced], int(round(0.75 / HOME_RES))))
+    assert np.array_equal(barrier, carve)
+    assert not any(m.any() for m in room_watershed.door_carve_mask(healed, clearance, [], home_params(door_snap_reach_m=0.9), HOME_RES))

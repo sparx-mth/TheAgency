@@ -17,9 +17,37 @@ from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RevisableRoomLabels
 
+#: How far beyond its footprint an object may stand from room floor and still be the room's.
+OBJECT_ROOM_REACH_M = 0.6
+
+
+def room_near_cell(labels, world, xy, reach_m):
+    """The pid of the nearest labelled cell to world ``xy`` within ``reach_m``, or None."""
+    gx, gy = world.world_to_grid(*xy)
+    radius = max(1, int(math.ceil(float(reach_m) / world.resolution)))
+    h, w = labels.shape
+    x0, x1 = max(0, gx - radius), min(w, gx + radius + 1)
+    y0, y1 = max(0, gy - radius), min(h, gy + radius + 1)
+    if x0 >= x1 or y0 >= y1:
+        return None
+    window = labels[y0:y1, x0:x1]
+    ys, xs = np.nonzero(window > 0)
+    if not len(xs):
+        return None
+    d2 = (xs + x0 - gx) ** 2 + (ys + y0 - gy) ** 2
+    nearest = int(np.argmin(d2))
+    if d2[nearest] > radius * radius:
+        return None
+    return int(window[ys[nearest], xs[nearest]]) - 1
+
+
 DEFAULT_SEGMENTATION = WatershedRoomParams(
     min_room_separation_m=1.0, min_clearance_m=0.3, min_room_cells=50,
-    door_cut_m=0.75, merge_dynamics_m=0.2)
+    door_cut_m=0.75, merge_dynamics_m=0.2,
+    # A detected door's position is an estimate along the camera ray; the cut
+    # goes to the nearest choke within this reach (Hanson 2026-10-04: a door
+    # 0.6 m off its doorway split the bedroom around its bed into R0 and R6).
+    door_snap_reach_m=0.9)
 
 
 class ObservedSceneGraph:
@@ -80,6 +108,21 @@ class ObservedSceneGraph:
         label = int(self.labels[gy, gx])
         return label - 1 if label > 0 else None
 
+    def room_near(self, world, xy, reach_m):
+        """The pid of the room at ``xy``, else of the nearest room floor within ``reach_m``, else None.
+
+        For objects, not the agent: a bed, a wardrobe or a desk stands on
+        cells the map reads OCCUPIED, which the watershed never labels, so
+        the room's own furniture read as belonging to no room (Hanson
+        2026-10-04: the bed and the desks of R0/R6 were ``room: null`` and
+        the bedroom was named by its one chair). The nearest labelled cell
+        within the object's footprint plus a step is the room it stands in.
+        """
+        pid = self.room_at(world, xy)
+        if pid is not None or self.labels is None:
+            return pid
+        return room_near_cell(self.labels, world, xy, reach_m)
+
     def objects_in(self, pid):
         """Class names of the confirmed landmarks the latest update placed in room ``pid``."""
         return list(self._objects.get(pid, ()))
@@ -116,7 +159,7 @@ class ObservedSceneGraph:
         return before is None or before.label != after.label
 
     def update(self, world, landmarks, target, doors=(), step=0, reason=True,
-               cost=None, here_xy=None, yaw=0.0, ranking=None, exclude=None):
+               cost=None, here_xy=None, yaw=0.0, ranking=None, exclude=None, preferred_cost=None):
         """Re-segment the floor into rooms and refresh every per-room fact.
 
         Args:
@@ -126,6 +169,9 @@ class ObservedSceneGraph:
                 the watershed carved a "room" on the landing that the search
                 then valued, peeked and waited on. Excluded cells belong to
                 no room, carry no label and credit no frontier to anybody.
+            preferred_cost: Optional cost array at the planner's preferred
+                standoff, for distances measured the way A* will fly them
+                (:func:`~frontier_ranking.accessible_frontiers`).
         """
         doors = tuple(doors)
         cells = [world.world_to_grid(*door.xy) for door in doors]
@@ -150,7 +196,7 @@ class ObservedSceneGraph:
                       for pid, room in rooms.items()}
         self.frontier_inventory = None
         if cost is not None and here_xy is not None:
-            self.refresh_accessibility(world, cost, here_xy, yaw, ranking)
+            self.refresh_accessibility(world, cost, here_xy, yaw, ranking, preferred_cost)
         self._objects = self._room_objects(world, pid_labels, landmarks)
         if not rooms:
             self.label_tracker.update({}, step, changed)
@@ -165,11 +211,12 @@ class ObservedSceneGraph:
                                        prob=self.probs.get(pid, 0.0), xy=room.centroid)
                             for pid, room in rooms.items()]
 
-    def refresh_accessibility(self, world, cost, here_xy, yaw=0.0, ranking=None):
+    def refresh_accessibility(self, world, cost, here_xy, yaw=0.0, ranking=None, preferred_cost=None):
         """One source of truth for accessible counts, planning goals and map markers."""
         if self.labels is None:
             return
-        self.frontier_inventory = accessible_frontiers(world, cost, self.labels, here_xy, yaw, ranking)
+        self.frontier_inventory = accessible_frontiers(world, cost, self.labels, here_xy, yaw, ranking,
+                                                       preferred_cost=preferred_cost)
         self.facts = {pid: replace(fact, frontier_clusters=len(self.frontier_inventory.by_room.get(pid + 1, ())))
                       for pid, fact in self.facts.items()}
 
@@ -206,14 +253,31 @@ class ObservedSceneGraph:
                       for door, adjacent in zip(doors, pairs)]
 
     def _room_objects(self, world, pid_labels, landmarks):
+        """``{pid: [class, ...]}`` -- every confirmed landmark credited to the room it stands in.
+
+        The landmark's cell when it is room floor; otherwise the nearest
+        room floor within its footprint radius plus :data:`OBJECT_ROOM_REACH_M`
+        (furniture occupies its own cells, see :meth:`room_near`).
+        """
         objects = {pid: [] for pid in self.registry.rooms}
         for landmark in landmarks:
             if landmark.class_name in DOOR_LABELS:
                 continue
-            gx, gy = world.world_to_grid(*landmark.xy)
-            if world.in_bounds(gx, gy) and pid_labels[gy, gx] > 0:
-                objects[int(pid_labels[gy, gx]) - 1].append(landmark.class_name)
+            pid = self.object_room(world, landmark, pid_labels)
+            if pid is not None and pid in objects:
+                objects[pid].append(landmark.class_name)
         return objects
+
+    def object_room(self, world, landmark, pid_labels=None):
+        """The pid of the room a landmark stands in (its cell, else the nearest floor within its footprint + reach)."""
+        labels = self.labels if pid_labels is None else pid_labels
+        if labels is None:
+            return None
+        gx, gy = world.world_to_grid(*landmark.xy)
+        if world.in_bounds(gx, gy) and labels[gy, gx] > 0:
+            return int(labels[gy, gx]) - 1
+        radius = float(getattr(landmark, "radius_m", None) or 0.0)
+        return room_near_cell(labels, world, landmark.xy, radius + OBJECT_ROOM_REACH_M)
 
     def nodes(self, world, step, here_xy=None, action_time_s=1.0, exclude=()):
         """Every room as a :class:`SearchNode`, with the facts the oracle values it by."""
