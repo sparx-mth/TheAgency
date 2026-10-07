@@ -61,7 +61,7 @@ from __future__ import annotations
 import inspect
 import math
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 ROOM = "room"
 STAIRS = "stairs"
@@ -83,6 +83,12 @@ UNEXPLORED_FLOOR = 0.25
 #: model write "living rooms are downstairs" at every loop point and 25 on every upstairs gap all
 #: the same (the worked example's number), so thirteen peeks outranked the stairs it stood beside.
 UNEXPLORED_ELSEWHERE = 0.10
+#: The least a node holding a confirmed HOME OBJECT of the target (``SearchNode.home``: a bathtub
+#: or a sink for a toilet) is read at, whatever the model wrote: the object co-occurrence prior
+#: the prompt states in prose, as arithmetic. The Allensville toilet run of 2026-10-05 valued the
+#: strong bathroom holding the bathtub at 0 for the toilet (the room had been finished by sight
+#: from the spawn point) and peeked twenty openings before it.
+HOME_FLOOR = 0.60
 #: The three answers to "is a room of the home type on this storey?".
 HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE = "found", "missing", "elsewhere"
 HOME_HERE = (HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE)
@@ -256,6 +262,12 @@ class SearchNode:
         arrived_ago_s: Stairs: seconds since that arrival, when ``arrived_by``.
         via: Opening: the mapped room it opens from, in prompt words --
             ``room 6 (type=bathroom?)`` -- or None when unknown.
+        home: The room holds a confirmed HOME OBJECT of the target (a
+            bathtub or a sink for a toilet, a television for a sofa):
+            the one room type the target lives in is standing in it, so
+            its probability is never read below the oracle's
+            ``home_floor`` (:func:`floor_unexplored`), whatever the model
+            wrote. The loop sets it from ``room_priors.HOME_OBJECTS``.
     """
 
     id: int
@@ -274,6 +286,7 @@ class SearchNode:
     arrived_by: bool = False
     arrived_ago_s: Optional[float] = None
     via: Optional[str] = None
+    home: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -523,6 +536,7 @@ def parse_home_here(reply: Any) -> Optional[str]:
 
 def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unexplored_floor: float,
                      home_here: Optional[str] = None, unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE,
+                     home_floor: float = 0.0,
                      ) -> Tuple[Dict[int, float], Tuple[int, ...], Tuple[int, ...]]:
     """Apply rule 2b's arithmetic to the unexplored nodes; return the new scores, the ids raised and the ids lowered.
 
@@ -537,6 +551,12 @@ def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unex
     know about an unexplored place on this storey beyond that reading, and
     the 3B model writes the worked example's 25 on each of them regardless.
     0 disables the respective value.
+
+    ``home_floor`` (since 2026-10-07) is the least a node with
+    :attr:`SearchNode.home` is read at, whatever ``home_here`` says: a
+    confirmed bathtub on this storey IS the toilet's home type, found,
+    whatever the model wrote about the storey -- the Allensville toilet run
+    valued the strong bathroom holding the bathtub at 0 for the toilet.
     """
     out = dict(scores)
     floored, capped = [], []
@@ -547,16 +567,31 @@ def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unex
             if nid in out and node.unexplored and abs(out[nid] - percent) > 1e-9:
                 (floored if out[nid] < percent else capped).append(nid)
                 out[nid] = percent
-        return out, tuple(sorted(floored)), tuple(sorted(capped))
-    if not unexplored_floor > 0.0:
-        return out, (), ()
-    percent = 100.0 * float(unexplored_floor)
+        homed = []  # type: List[int]
+        _floor_home(out, nodes, home_floor, homed)
+        capped = [nid for nid in capped if nid not in homed]
+        return out, tuple(sorted(set(floored + homed))), tuple(sorted(capped))
+    if unexplored_floor > 0.0:
+        percent = 100.0 * float(unexplored_floor)
+        for node in nodes:
+            nid = int(node.id)
+            if nid in out and node.unexplored and out[nid] < percent - 1e-9:
+                out[nid] = percent
+                floored.append(nid)
+    _floor_home(out, nodes, home_floor, floored)
+    return out, tuple(sorted(set(floored))), ()
+
+
+def _floor_home(out: Dict[int, float], nodes: Sequence[SearchNode], home_floor: float, floored: List[int]) -> None:
+    """Raise every ``home`` node below ``home_floor`` to it, in place, noting the ids in ``floored``."""
+    if not home_floor > 0.0:
+        return
+    percent = 100.0 * float(home_floor)
     for node in nodes:
         nid = int(node.id)
-        if nid in out and node.unexplored and out[nid] < percent - 1e-9:
+        if nid in out and node.home and out[nid] < percent - 1e-9:
             out[nid] = percent
             floored.append(nid)
-    return out, tuple(sorted(floored)), ()
 
 
 def normalise(scores: Dict[int, float], elsewhere: float) -> Tuple[Dict[int, float], float]:
@@ -603,17 +638,22 @@ class SearchNodeOracle:
         unexplored_elsewhere: What an unexplored node is read at when the
             model's STEP 2 says the home type lives on another storey
             (``home_here="elsewhere"``); 0 leaves the model's numbers.
+        home_floor: The least a node holding a confirmed home object of
+            the target (:attr:`SearchNode.home`) is read at, whatever the
+            model wrote and whatever its STEP 2 says; 0 disables.
 
     Attributes:
         reuses: Queries answered from the kept reply.
         queries: Calls actually made.
         unexplored_floor: As given.
         unexplored_elsewhere: As given.
+        home_floor: As given.
     """
 
     def __init__(self, client, unexplored_floor: float = UNEXPLORED_FLOOR,
-                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE) -> None:
-        for name, value in (("unexplored_floor", unexplored_floor), ("unexplored_elsewhere", unexplored_elsewhere)):
+                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE, home_floor: float = HOME_FLOOR) -> None:
+        for name, value in (("unexplored_floor", unexplored_floor), ("unexplored_elsewhere", unexplored_elsewhere),
+                            ("home_floor", home_floor)):
             if not (0.0 <= float(value) < 1.0) or not math.isfinite(float(value)):
                 raise ValueError("%s must lie in [0, 1), got %r" % (name, value))
         self._client = client
@@ -621,6 +661,7 @@ class SearchNodeOracle:
         self._last_reply = None   # type: Optional[Dict[str, Any]]
         self.unexplored_floor = float(unexplored_floor)
         self.unexplored_elsewhere = float(unexplored_elsewhere)
+        self.home_floor = float(home_floor)
         self.reuses = 0
         self.queries = 0
 
@@ -651,7 +692,7 @@ class SearchNodeOracle:
             raise ValueError("SearchNodeOracle needs at least one node")
         user = self.prompt(target, nodes, context)
         if user == self._last_prompt and self._last_reply is not None:
-            kept = self.score(self._last_reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
+            kept = self.score(self._last_reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
             if kept is not None:
                 self.reuses += 1
                 return replace(kept, reused=True)
@@ -659,7 +700,7 @@ class SearchNodeOracle:
             reply = self.ask(user)
         except Exception:
             return self.uniform(nodes, raw_reply=None)
-        result = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
+        result = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
         if result is None:
             return self.uniform(nodes, raw_reply=reply if isinstance(reply, dict) else None)
         self.remember(user, reply)
@@ -676,14 +717,15 @@ class SearchNodeOracle:
 
     @staticmethod
     def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0,
-              unexplored_elsewhere: float = 0.0) -> Optional[NodeOracleResult]:
-        """Parse, fill the omitted, apply rule 2b to the unexplored (floor, or the elsewhere value), normalise, clamp."""
+              unexplored_elsewhere: float = 0.0, home_floor: float = 0.0) -> Optional[NodeOracleResult]:
+        """Parse, fill the omitted, apply rule 2b to the unexplored (floor, or the elsewhere value) and the home floor, normalise, clamp."""
         parsed = parse_reply(reply, nodes)
         if parsed is None:
             return None
         scores, elsewhere, reasons, omitted = parsed
         home_here = parse_home_here(reply)
-        scores, floored, capped = floor_unexplored(scores, nodes, unexplored_floor, home_here, unexplored_elsewhere)
+        scores, floored, capped = floor_unexplored(scores, nodes, unexplored_floor, home_here, unexplored_elsewhere,
+                                                   home_floor=home_floor)
         probs, elsewhere = normalise(scores, elsewhere)
         values = list(probs.values())
         reading = {key: str(reply[key])[:200] for key in ("home", "storey", "home_here")

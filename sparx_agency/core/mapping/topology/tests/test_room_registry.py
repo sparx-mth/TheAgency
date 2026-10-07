@@ -153,13 +153,13 @@ def test_a_room_that_grows_tenfold_keeps_its_pid_by_containment():
     reg.update([make_stats(1, 10, 12, 10, 20)], identity_c2w)            # 2 x 10 cells: the sliver
     rooms = reg.update([make_stats(1, 5, 30, 5, 30)], identity_c2w)      # 25 x 25: the room (IoU 0.03)
     assert list(rooms.keys()) == [0]
-    strict = RoomRegistry(iou_threshold=0.25, containment_threshold=1.5)   # the historical matcher
+    strict = RoomRegistry(iou_threshold=0.25, containment_threshold=1.5, anchors=False)   # the historical matcher
     strict.update([make_stats(1, 10, 12, 10, 20)], identity_c2w)
     assert list(strict.update([make_stats(1, 5, 30, 5, 30)], identity_c2w).keys()) == [1]
 
 
 def test_containment_matches_fill_only_what_iou_left_so_splits_and_merges_keep_the_larger_overlap():
-    reg = RoomRegistry(iou_threshold=0.25)
+    reg = RoomRegistry(iou_threshold=0.25, anchors=False)
     reg.update([make_stats(1, 0, 20, 0, 30)], identity_c2w)               # pid 0: 20 x 30
     # A split: the larger half keeps the pid (IoU 0.67), the smaller half is new, though it is fully
     # contained in the old room.
@@ -169,7 +169,7 @@ def test_containment_matches_fill_only_what_iou_left_so_splits_and_merges_keep_t
     rooms = reg.update([make_stats(1, 0, 20, 0, 30)], identity_c2w)
     assert list(rooms.keys()) == [0]
     # A tiny room inside a big fresh one does not steal the big one's pid from its IoU match.
-    reg = RoomRegistry(iou_threshold=0.25)
+    reg = RoomRegistry(iou_threshold=0.25, anchors=False)
     reg.update([make_stats(1, 0, 20, 0, 20), make_stats(2, 25, 27, 25, 30)], identity_c2w)   # pids 0 (big), 1 (tiny)
     rooms = reg.update([make_stats(1, 0, 30, 0, 32)], identity_c2w)                            # one fresh room holding both
     assert list(rooms.keys()) == [0]
@@ -178,6 +178,64 @@ def test_containment_matches_fill_only_what_iou_left_so_splits_and_merges_keep_t
     reg.update([make_stats(1, 10, 12, 10, 20)], identity_c2w)
     rooms = reg.update([make_stats(1, 0, 30, 0, 15), make_stats(2, 0, 30, 15, 30)], identity_c2w)
     assert list(rooms.keys()) == [1, 2]
+
+
+# -- birth anchors (2026-10-07) ----------------------------------------------------
+def test_a_split_room_keeps_its_number_on_the_side_of_its_birth_anchor_not_the_larger_side():
+    """The Allensville spawn room: R0 at step 0, cut off by a door 0.5 m away at step 8 with the
+    far side bigger -- the IoU rule renumbered the room the agent stood in R1 and gave R0 to the
+    far side. The anchor keeps R0 where the room was born; the far side is the new room."""
+    reg = RoomRegistry(iou_threshold=0.15)
+    reg.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)                        # pid 0, born at (4.5, 4.5)
+    assert reg.rooms[0].anchor == (4, 4) or reg.rooms[0].anchor == (5, 5)
+    reg.update([make_stats(1, 0, 10, 0, 40)], identity_c2w)                        # it grows along a hallway
+    assert list(reg.rooms.keys()) == [0]
+    rooms = reg.update([make_stats(1, 0, 10, 0, 10), make_stats(2, 0, 10, 12, 40)], identity_c2w)   # the door cuts it
+    assert list(rooms.keys()) == [0, 1], "the small half holding the anchor keeps 0; the big far half is 1"
+    assert rooms[0].n_cells == 100 and rooms[1].n_cells == 280
+    assert reg.anchored == 2, "the growth tick and the split tick were both decided by the anchor"
+    # The historical rule, for comparison: the number follows the larger half.
+    old = RoomRegistry(iou_threshold=0.15, anchors=False)
+    old.update([make_stats(1, 0, 10, 0, 10)], identity_c2w)
+    old.update([make_stats(1, 0, 10, 0, 40)], identity_c2w)
+    rooms = old.update([make_stats(1, 0, 10, 0, 10), make_stats(2, 0, 10, 12, 40)], identity_c2w)
+    assert list(rooms.keys()) == [1, 0]
+
+
+def test_a_merge_keeps_the_oldest_number_and_the_split_after_it_re_adopts_the_other_from_memory():
+    """Spawn room R0 and hallway R1 merge for a tick (the door cut wobbles) and separate 30 ticks
+    later: R0 and R1 again, not R0 and R2 -- the memory is the episode's, not ten ticks."""
+    reg = RoomRegistry(iou_threshold=0.15, memory_ticks=1000, memory_rooms=48)
+    reg.update([make_stats(1, 0, 10, 0, 10), make_stats(2, 0, 10, 12, 40)], identity_c2w)    # pids 0, 1
+    rooms = reg.update([make_stats(1, 0, 10, 0, 40)], identity_c2w)                            # merged
+    assert list(rooms.keys()) == [0] and reg.remembered == (1,)
+    for _ in range(30):
+        reg.update([make_stats(1, 0, 10, 0, 40)], identity_c2w)
+    rooms = reg.update([make_stats(1, 0, 10, 0, 10), make_stats(2, 0, 10, 12, 40)], identity_c2w)
+    assert list(rooms.keys()) == [0, 1] and reg.readopted == 1 and reg.remembered == ()
+    assert rooms[1].anchor is not None, "a re-adopted room keeps its birth anchor"
+
+
+def test_the_memory_is_bounded_by_a_room_count_as_well_as_by_ticks():
+    reg = RoomRegistry(iou_threshold=0.25, memory_ticks=1000, memory_rooms=2)
+    reg.update([make_stats(1, 0, 5, 0, 5), make_stats(2, 10, 15, 10, 15), make_stats(3, 20, 25, 20, 25)], identity_c2w)
+    reg.update([], identity_c2w)
+    assert reg.remembered == (1, 2), "the oldest vanished room is dropped first"
+    with pytest.raises(ValueError):
+        RoomRegistry(memory_rooms=-1)
+
+
+def test_a_room_born_with_its_centroid_off_its_mask_is_anchored_on_the_mask():
+    """An L-shaped room's centroid can lie outside it; the anchor is then the nearest mask cell."""
+    mask = np.zeros(SHAPE, dtype=bool)
+    mask[0:20, 0:5] = True
+    mask[15:20, 0:20] = True
+    ys, xs = np.where(mask)
+    stats = RoomStats(id=1, mask=mask, n_cells=int(mask.sum()), centroid_cells=(float(xs.mean()), float(ys.mean())))
+    reg = RoomRegistry(iou_threshold=0.25)
+    rooms = reg.update([stats], identity_c2w)
+    ax, ay = rooms[0].anchor
+    assert mask[ay, ax]
 
 
 def test_containment_threshold_is_validated():

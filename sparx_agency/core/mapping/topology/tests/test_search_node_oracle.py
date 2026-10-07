@@ -232,6 +232,32 @@ def test_the_floor_raises_what_the_model_wrote_off_and_leaves_the_rest_alone():
     assert off.floored == () and off.probs[2] == pytest.approx(0.01), "0 disables the floor"
 
 
+def test_a_room_holding_a_home_object_of_the_target_is_read_at_the_home_floor_whatever_the_model_or_its_storey_verdict_said():
+    """Allensville toilet, step 26: the strong bathroom with the bathtub valued 0 for the toilet. A
+    confirmed bathtub IS the toilet's home type, found -- the co-occurrence prior as arithmetic."""
+    bathroom = SearchNode(1, ROOM, "bathroom", area_m2=4.0, frontier_clusters=0, objects=("bathtub",), home=True)
+    nodes = [KITCHEN, bathroom, UNKNOWN]
+    reply = {"home_here": "found", "nodes": [{"id": 0, "p": 0}, {"id": 1, "why": "bathroom, seen", "p": 0}, {"id": 2, "p": 30}]}
+    result = SearchNodeOracle.score(reply, nodes, UNEXPLORED_FLOOR, UNEXPLORED_ELSEWHERE, 0.60)
+    assert result.probs[1] == pytest.approx(0.60) and 1 in result.floored
+    assert result.probs[0] == 0 and result.probs[2] == pytest.approx(0.30), "the others keep the model's numbers"
+    assert result.reasons[1] == "bathroom, seen", "the model's words stay beside the floored number"
+    higher = SearchNodeOracle.score(dict(reply, nodes=[{"id": 1, "p": 85}]), [bathroom], UNEXPLORED_FLOOR, 0.10, 0.60)
+    assert higher.probs[1] == pytest.approx(0.85) and higher.floored == (), "a valuation above the floor stands"
+    # 'elsewhere' caps the unexplored places; the home room is still read at its floor.
+    elsewhere = dict(reply, home_here="elsewhere")
+    result = SearchNodeOracle.score(elsewhere, nodes, UNEXPLORED_FLOOR, UNEXPLORED_ELSEWHERE, 0.60)
+    assert result.probs[1] == pytest.approx(0.60) and result.probs[2] == pytest.approx(0.10)
+    assert 1 in result.floored and 1 not in result.capped
+    # Off, and the oracle's own defaults.
+    off = SearchNodeOracle.score(reply, nodes, UNEXPLORED_FLOOR, UNEXPLORED_ELSEWHERE, 0.0)
+    assert off.probs[1] == 0
+    assert SearchNodeOracle(Scripted({})).home_floor == pytest.approx(0.60)
+    with pytest.raises(ValueError):
+        SearchNodeOracle(Scripted({}), home_floor=1.0)
+    assert not KITCHEN.home and SearchNode(9, ROOM, "unknown").home is False
+
+
 # -- home_here: the model's STEP 2 as a structured verdict (2026-10-05, the Ranchester couch) -----
 def test_when_the_model_says_the_home_type_is_elsewhere_unexplored_places_read_at_the_elsewhere_value():
     """Ranchester couch: 'living rooms are downstairs' at every loop point, 25 on every upstairs gap all

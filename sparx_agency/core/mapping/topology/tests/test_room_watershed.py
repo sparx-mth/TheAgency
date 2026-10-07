@@ -603,3 +603,46 @@ def test_snapping_off_reproduces_the_plain_carve():
     assert np.array_equal(carve, door_disk_mask(free.shape, [misplaced], int(round(0.75 / HOME_RES))))
     assert np.array_equal(barrier, carve)
     assert not any(m.any() for m in room_watershed.door_carve_mask(healed, clearance, [], home_params(door_snap_reach_m=0.9), HOME_RES))
+
+
+# -- thresholds the robot walked through (2026-10-07) ------------------------------
+def walk(cells_from, cells_to, n):
+    """``n`` trail cells from one ``(cx, cy)`` to another, inclusive."""
+    (x0, y0), (x1, y1) = cells_from, cells_to
+    return [(int(round(x0 + (x1 - x0) * t / (n - 1))), int(round(y0 + (y1 - y0) * t / (n - 1)))) for t in range(n)]
+
+
+def test_a_trail_through_a_doorway_names_the_doorway_and_a_trail_along_a_corridor_names_nothing():
+    """Room -> doorway -> hall: the clearance dips to the doorway's half-width between two wider
+    spaces. The Allensville hallway (0.30-0.50 m of clearance for forty actions) never dips."""
+    free, doorway, _, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5)
+    trail = walk((35, 20), (35, 60), 21)                      # south room, through the doorway, into the hall
+    found = room_watershed.trail_thresholds(free, HOME_RES, trail, params)
+    assert len(found) == 1 and 39 <= found[0][1] <= 43 and found[0][0] == 35, found
+    corridor = np.zeros((20, 80), dtype=bool)
+    corridor[6:14, 2:78] = True                               # 0.8 m wide, uniformly
+    assert room_watershed.trail_thresholds(corridor, HOME_RES, walk((5, 10), (75, 10), 36), params) == []
+    assert room_watershed.trail_thresholds(free, HOME_RES, trail[:2], params) == [], "a two-cell trail says nothing"
+    with pytest.raises(ValueError):
+        room_watershed.trail_thresholds(free, 0.0, trail, params)
+
+
+def test_a_walked_through_threshold_is_carved_like_a_snapped_door_and_only_at_a_severing_choke():
+    free, doorway, _, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5)
+    # No door was ever detected; the robot walked through. The room and the hall still separate.
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, door_cells=[], threshold_cells=[doorway])
+    room, hall = int(room_lbl[20, 15]), int(room_lbl[60, 35])
+    assert room > 0 and hall > 0 and room != hall and len(stats) == 2
+    healed, clearance, _ = clearance_and_skeleton(free)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [], params, HOME_RES, threshold_cells=[doorway])
+    assert carve[41, 35] and not barrier.any(), "a passage-sized cut, never a plain-disk barrier"
+    # A threshold on open floor (no severing choke within reach) is not carved at all.
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [], params, HOME_RES, threshold_cells=[(35, 20)])
+    assert not carve.any() and not barrier.any()
+    # Off by default: the threshold cells are ignored when the reach is 0.
+    carve, _ = room_watershed.door_carve_mask(healed, clearance, [], home_params(door_snap_reach_m=0.9), HOME_RES,
+                                              threshold_cells=[doorway])
+    assert not carve.any()
+
