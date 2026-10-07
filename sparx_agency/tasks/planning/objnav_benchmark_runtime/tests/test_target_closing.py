@@ -350,8 +350,8 @@ def test_unverified_candidate_releases_to_exploration_and_is_not_retried():
     assert command.info.get("kind") != "target_closing"
     assert len(calls) > released_at  # global exploration resumed on the release step
     assert p.episode_info()["target_closing"]["rejected"][0]["xyz"] == list(anchor)
-    # The same spot flickering again must not start a second takeover...
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    # The same spot flickering again (under the override confidence) must not start a second takeover...
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
     p.plan(observation(ep, 4, depth=3))
     assert not p.closing.active
     # ...but a confident, depth-projected object elsewhere still does (1.5 m away
@@ -375,20 +375,22 @@ def test_release_disabled_keeps_episode_ending_error(monkeypatch):
     assert p.closing.phase == "FAILED"
 
 
-def test_a_target_box_on_a_confirmed_other_object_is_outvoted_and_starts_nothing():
-    """Five frames of a bed where the box now says chair: the map says bed, the takeover stays off."""
+def test_a_target_box_at_a_confirmed_other_objects_spot_is_its_own_instance_and_may_start_a_takeover():
+    """Five frames of a bed, then a box that says chair at the same spot. Until 2026-10-07 the chair box
+    voted on the bed and lost (``map_rejections``); with classes never merging it is a second instance --
+    the detector's word, verified by the takeover's own two frames like any other candidate."""
     p, ep = setup_policy()
     p.detector.detect = lambda rgb: [DetectionWire("bed", .9, (280, 200, 360, 280))]
     for step in range(5):
         p.plan(observation(ep, step, depth=3))
     [bed] = p.landmarks.confirmed()
-    assert bed.class_name == "bed" and bed.votes == {"bed": 5}
+    assert bed.class_name == "bed" and bed.count == 5 and bed.votes == {}, "no votes without class voting"
     p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
     p.plan(observation(ep, 5, depth=3))
-    assert not p.closing.active and p.closing.map_rejections >= 1
-    assert p.landmarks.confirmed()[0].votes == {"bed": 5, "chair": 1}, "the box voted, and lost"
-    assert p._target_xy is None, "no target evidence from an outvoted box"
-    assert p.perception.counts["outvoted_detections"] == 1
+    assert p.closing.active and p.closing.map_rejections == 0
+    assert sorted(lm.class_name for lm in p.landmarks.all_landmarks()) == ["bed", "chair"], "two instances at one spot"
+    assert p.landmarks.confirmed() == [bed], "one chair frame confirms nothing yet"
+    assert p.perception.counts.get("outvoted_detections", 0) == 0
 
 
 # -- the terminal inspection on a big object at close range (Ranchester couch, 2026-10-04) ----
@@ -449,8 +451,9 @@ def test_an_exhausted_inspection_without_any_in_range_sighting_releases_the_lock
     assert p.closing.inspection_sighting is None and not p.closing.active and not p.closing.locked
     assert p.closing.phase == "RELEASED" and p.closing.inspection_releases == 1 and p.closing.releases == 1
     assert p.closing.last_release == "inspection saw nothing"
-    [(spot, floor, step, radius)] = p.closing.rejected
+    [(spot, floor, step, radius, why)] = p.closing.rejected
     assert spot == anchor and step == 4 and radius == pytest.approx(2.0 * p.settings.target_closing.rejection_radius_m)
+    assert why == "inspection saw nothing", "the memory keeps WHY: a failed inspection is never overridden"
     assert p.closing.rejected_near(anchor[:2], floor), "a landmark there is not worth another look"
     assert p.closing.rejected_near((anchor[0] + 1.5, anchor[1]), floor), "... within twice the plain radius"
     assert not p.closing.rejected_near((anchor[0] + 2.5, anchor[1]), floor)
@@ -496,23 +499,31 @@ def test_an_inspection_that_tried_every_view_and_saw_nothing_releases_before_its
     assert command.info["kind"] == "target_released"
 
 
-def test_a_lock_the_map_outvotes_is_released_at_once(monkeypatch):
-    """A sofa from four metres, confirmed as a bed by the map's vote from two: the lock goes, the spot is
-    remembered, and no inspection is spent on it."""
+def test_a_confirmed_object_of_another_class_at_the_anchor_is_a_second_object_and_the_lock_stands(monkeypatch):
+    """Until 2026-10-07 four ``bed`` observations at a locked chair's anchor voted the chair into a bed and the
+    map released the lock ("contradicted by the map"). Classes never merge now: the bed is a second
+    landmark beside the chair, the map has no contradiction to make, and the lock stands."""
     p, ep, near = locked_at_two_metres(monkeypatch)
     anchor = p.closing.anchor
-    for frame in range(10, 14):                                     # the map confirms a bed where the sofa was
-        p.landmarks.observe("bed", anchor[:2], frame_id=frame, radius_m=0.8)
-    bed = next(lm for lm in p.landmarks.confirmed() if lm.class_name == "bed")
-    assert p.landmarks.is_confirmed(bed) and not p.target.accepts("bed")
+    chair = p.landmarks.all_landmarks()[0]
+    for frame in range(10, 14):
+        p.landmarks.observe("bed", anchor[:2], frame_id=frame, radius_m=chair.radius_m)
+    classes = sorted(lm.class_name for lm in p.landmarks.confirmed())
+    assert classes == ["bed", "chair"] and chair.class_name == "chair" and chair.votes == {}
     p.detector.detect = lambda rgb: []
     obs = replace(near, step=2)
     p.perception.observe(obs)
     p.closing.observe(obs)                                          # the policy's own order: perceive, then the closing
-    assert not p.closing.active and p.closing.phase == "RELEASED", "released before any plan: this action is the search's"
-    assert p.closing.map_releases == 1 and p.closing.last_release == "contradicted by the map"
-    assert p.closing.rejected[0][3] == pytest.approx(2.0 * p.settings.target_closing.rejection_radius_m)
-    assert p.closing.inspection_releases == 0 and p._target_xy is None
+    assert p.closing.active and p.closing.locked and p.closing.phase != "RELEASED"
+    assert p.closing.map_releases == 0 and p.closing.last_release is None and p.closing.rejected == []
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import contradicted_by_map
+    assert contradicted_by_map(p, "chair", anchor) is None, "no class vote, no contradiction"
+    # The library's voting mode keeps the historical release available for whoever wires it.
+    from sparx_agency.core.mapping.objects.landmarks import ObjectLandmarkMap
+    voting = ObjectLandmarkMap(nearest_match=True, class_votes=True, footprint_iou=0.15)
+    for frame in range(5):
+        lm = voting.observe("bed", (0.0, 0.0), frame_id=frame, radius_m=0.8)
+    assert voting.observe("sofa", (0.1, 0.0), frame_id=5, radius_m=0.8) is lm and lm.class_name == "bed"
 
 
 def test_the_exhausted_inspection_stop_can_be_switched_off(monkeypatch):
@@ -563,14 +574,51 @@ def test_a_released_spot_does_not_block_a_close_view_of_the_same_object():
     p.plan(observation(ep, 2, depth=3.5))
     assert not p.closing.active and p.closing.releases == 1
     spot = p.closing.rejected[0][0]
-    # Seen again from the same place: the memory holds.
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    # Seen again from the same place, under the override confidence: the memory holds.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
     p.plan(observation(ep, 3, depth=3.5))
     assert not p.closing.active
     # Seen from 1.2 m, standing 2.3 m closer: the same spot, a new view -- the takeover starts.
     near = replace(observation(ep, 4, depth=1.2), pose=AgentPose(2.3, 0, 0, 0))
     p.plan(near)
     assert p.closing.active and math.dist(p.closing.anchor[:2], spot[:2]) < p.settings.target_closing.rejection_radius_m
+
+
+def test_an_overwhelming_box_starts_a_takeover_past_an_unverified_release_but_not_past_a_failed_inspection(monkeypatch):
+    """Allensville toilet, actions 45-53: a 0.95-0.97 toilet in plain view at 2.4 m, refused nine frames
+    running because a wrongly outvoted lock was remembered 2 m around it. The detector's word at 0.80 and
+    up is not a flicker; the memory of a close look that saw nothing, or a stalled approach, still holds."""
+    p, ep = setup_policy(target_closing={"max_verify_steps": 2, "release_cooldown_actions": 10})
+    p.plan(observation(ep, 0, depth=3.5))
+    p.detector.detect = lambda rgb: []
+    p.plan(observation(ep, 1, depth=3.5))
+    p.plan(observation(ep, 2, depth=3.5))
+    assert not p.closing.active and p.closing.last_release == "unverified" and p.closing.rejected[0][4] == "unverified"
+    # The same spot at 0.7 during the cooldown: refused, as before.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
+    p.plan(observation(ep, 3, depth=3.5))
+    assert not p.closing.active and p.closing.overrides == 0
+    # At 0.9: the override starts the takeover past the memory AND the cooldown.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.plan(observation(ep, 4, depth=3.5))
+    assert p.closing.active and p.closing.overrides == 1
+    # A spot released by a failed inspection is never overridden.
+    p, ep, near = locked_at_two_metres(monkeypatch, max_reacquire_steps=2)
+    p.detector.detect = lambda rgb: []
+    for step in (2, 3, 4):
+        p.plan(replace(near, step=step))
+    assert not p.closing.active and p.closing.last_release.startswith("inspection saw nothing")
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .95, (280, 200, 360, 280))]
+    far = replace(observation(ep, 5, depth=3.0), pose=AgentPose(-1.0, 0, 0, 0))     # the same spot, from 3 m
+    try:
+        p.plan(far)
+    except AssertionError:
+        pass                                   # the frozen search was handed the action: no takeover started
+    assert not p.closing.active and p.closing.overrides == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(override_confidence=0.4)
+    off = TargetClosingSettings(override_confidence=1.0)
+    assert off.override_confidence == 1.0
 
 
 def test_the_association_radius_grows_with_range_for_a_far_object():
@@ -628,9 +676,9 @@ def test_a_release_cools_far_candidates_but_not_close_ones():
     p.plan(observation(ep, 1, depth=3.5))
     p.plan(observation(ep, 2, depth=3.5))
     assert not p.closing.active and p.closing.released_step == 2
-    # A DIFFERENT far object two actions later: cooling, no takeover.
+    # A DIFFERENT far object two actions later, under the override confidence: cooling, no takeover.
     far_elsewhere = replace(observation(ep, 4, depth=3.5), pose=AgentPose(0, 0, 0, math.pi / 2))
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
     p.plan(far_elsewhere)
     assert not p.closing.active, "the search moves before it spends two more frames on a far candidate"
     # A close object during the cooldown: taken.
@@ -814,7 +862,9 @@ def test_the_inspection_pitch_follows_the_targets_height_not_its_label(monkeypat
 def test_a_fresh_centred_in_range_sighting_stops_at_whatever_pitch_it_came(monkeypatch):
     """The Hanson toilet projected at 60 degrees down where its height predicted 30: twenty actions of
     LOOK_UP / LOOK_DOWN after a fresh, centred sighting at 0.91 m, until the budget STOPped."""
-    p, original = setup_policy()
+    # The synthetic toilet of this fixture stands at camera height, which the context check would
+    # doubt (tested in test_target_context); the pitch mechanics are the point here.
+    p, original = setup_policy(target_closing={"context_check": False})
     ep = replace(tilt_episode(p, original), target_category="toilet")
     p.reset(ep, gibson_label_mapper().target_labels("toilet"))
     freeze_global(monkeypatch, p)
@@ -839,14 +889,14 @@ def test_the_legacy_target_evidence_does_not_walk_after_what_the_takeover_refuse
     """Hanson/000001, second fly: the takeover released a far chair as unverified at action 18 and the
     legacy pursuit walked nine actions toward the same landmark, moving the agent off its warm-up spot."""
     p, ep = setup_policy(target_closing={"max_verify_steps": 2})
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
     p.plan(observation(ep, 0, depth=3.5))
     assert p.closing.active and not p.closing.locked
     p.detector.detect = lambda rgb: []
     p.plan(observation(ep, 1, depth=3.5))
     p.plan(observation(ep, 2, depth=3.5))
     assert not p.closing.active and p.closing.last_release == "unverified" and p.closing.rejected
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
     for step in (3, 4, 5):
         p.plan(observation(ep, step, depth=3.5))
     assert p._target_xy is None, "the released spot is not a legacy target either"
@@ -860,7 +910,7 @@ def test_a_fresh_off_centre_sighting_at_another_pitch_is_centred_not_tilted_away
     """A toilet in view at 0 degrees, 20 degrees left of the centre column, where its height predicts a
     30-degree look-down: the converter tilts before it faces, so asking for the predicted pitch LOOKed
     away from the target and never turned -- LOOK_DOWN / LOOK_UP for the whole 24-action budget."""
-    p, original = setup_policy()
+    p, original = setup_policy(target_closing={"context_check": False})      # an eye-level synthetic toilet, see above
     ep = replace(tilt_episode(p, original), target_category="toilet")
     p.reset(ep, gibson_label_mapper().target_labels("toilet"))
     freeze_global(monkeypatch, p)
@@ -935,9 +985,10 @@ def test_an_inspection_entered_early_steps_closer_when_the_fresh_range_is_beyond
     assert p.closing.inspection_started is None and third.waypoints, "and a fresh out-of-range frame does not re-enter it"
 
 
-def test_the_map_keeps_voting_during_a_takeover_so_it_can_outvote_the_lock(monkeypatch):
-    """Until 2026-10-05 nothing fed the landmark map while the takeover walked in, so the documented map
-    release (the sofa from four metres that is the bed from two) could never fire in flight."""
+def test_the_map_keeps_mapping_during_a_takeover_but_another_class_never_outvotes_the_lock(monkeypatch):
+    """Until 2026-10-05 nothing fed the landmark map while the takeover walked in. Since 2026-10-07 classes
+    never merge: a ``bed`` box at the locked chair's spot opens a bed landmark beside it instead of voting
+    the chair into a bed, and the lock stands (the Allensville toilet was lost to exactly such a vote)."""
     p, ep = setup_policy(target_closing={"failed_inspection_radius_factor": 2.0})
     freeze_global(monkeypatch, p)
     world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
@@ -950,13 +1001,11 @@ def test_the_map_keeps_voting_during_a_takeover_so_it_can_outvote_the_lock(monke
     assert p._target_id is None
     p.detector.detect = lambda rgb: [DetectionWire("bed", .95, (280, 200, 360, 280))]
     for step in range(2, 8):
-        try:
-            p.plan(observation(ep, step, depth=2))
-        except AssertionError:
-            pass                                   # the frozen search was handed the action after the release
-        if not p.closing.active:
-            break
-    assert not p.closing.active and p.closing.map_releases == 1 and p.closing.last_release == "contradicted by the map"
+        p.plan(observation(ep, step, depth=2))
+        assert p.closing.active and p.closing.locked
+    assert p.closing.map_releases == 0 and p.closing.last_release is None
+    assert sorted(lm.class_name for lm in p.landmarks.all_landmarks()) == ["bed", "chair"], "two instances, no vote"
+    assert p.perception.counts.get("outvoted_detections", 0) == 0 and not p.landmarks.class_votes
 
 
 def test_the_closings_own_release_turn_is_not_charged_to_the_room_loop(monkeypatch):

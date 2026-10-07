@@ -8,7 +8,7 @@ import numpy as np
 from sparx_agency.core.mapping.topology.room_adjacency import room_adjacency
 from sparx_agency.core.mapping.topology.room_registry import RoomRegistry
 from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters, link_doors, door_room_pairs
-from sparx_agency.core.mapping.topology.room_watershed import segment_rooms_watershed, WatershedRoomParams
+from sparx_agency.core.mapping.topology.room_watershed import segment_rooms_watershed, trail_thresholds, WatershedRoomParams
 from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, SearchNode, SearchNodeOracle
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
@@ -48,7 +48,26 @@ DEFAULT_SEGMENTATION = WatershedRoomParams(
     # A detected door's position is an estimate along the camera ray; the cut
     # goes to the nearest choke within this reach (Hanson 2026-10-04: a door
     # 0.6 m off its doorway split the bedroom around its bed into R0 and R6).
-    door_snap_reach_m=0.9)
+    door_snap_reach_m=0.9,
+    # A clearance dip the agent WALKED THROUGH is a threshold (room_watershed.
+    # trail_thresholds): carved at the severing choke within this reach, so the
+    # room beyond it separates the tick the agent is through, not when its floor
+    # has grown a clearance peak of its own (since 2026-10-07).
+    threshold_snap_reach_m=0.5)
+
+#: The registry remembers a vanished room's mask for this many updates -- the
+#: episode, in effect (500 actions plus the warm-ups) -- bounded by
+#: ``REGISTRY_MEMORY_ROOMS`` masks: the Allensville spawn room merged into the
+#: hallway at step 10 and re-split at step 44, 34 ticks past the former 10-tick
+#: memory, under a new number.
+REGISTRY_MEMORY_TICKS = 1000
+REGISTRY_MEMORY_ROOMS = 48
+#: Trail points closer than this to the last kept one are not kept (turning in
+#: place adds nothing to the clearance profile); the trail keeps this much travel.
+TRAIL_SPACING_M = 0.15
+TRAIL_LENGTH_M = 6.0
+#: A threshold already on record within this distance is the same threshold.
+THRESHOLD_MATCH_M = 0.6
 
 
 class ObservedSceneGraph:
@@ -70,7 +89,8 @@ class ObservedSceneGraph:
     """
 
     def __init__(self, client, segmentation=None, label_settings=None, first_pid=0):
-        self.registry = RoomRegistry(iou_threshold=0.15, first_pid=first_pid)
+        self.registry = RoomRegistry(iou_threshold=0.15, first_pid=first_pid,
+                                     memory_ticks=REGISTRY_MEMORY_TICKS, memory_rooms=REGISTRY_MEMORY_ROOMS)
         self.label_tracker = RevisableRoomLabels(client, label_settings)
         self.classifier = self.label_tracker.classifier
         self.oracle = SearchNodeOracle(client)
@@ -90,12 +110,54 @@ class ObservedSceneGraph:
         self.p_present = 0.0
         #: ``{pid: step}`` -- the last action the agent's cell lay in the room.
         self.last_inside = {}
+        #: The agent's recent positions (world xy, ``TRAIL_SPACING_M`` apart, the
+        #: last ``TRAIL_LENGTH_M`` of travel) and the thresholds -- doorways it
+        #: walked through, world xy -- read off the clearance along them; sticky
+        #: for the floor, carved as cuts on every update (``threshold_events``).
+        self.trail = []
+        self.thresholds = []
+        self.threshold_events = []
+        self._trail_grown = False
+        #: Optional ``class_name -> bool``: whether an object class is a home object of the
+        #: episode's target (``room_priors.home_object``); sets :attr:`SearchNode.home` on the
+        #: nodes handed to the oracle, which reads such a room at its ``home_floor`` at least.
+        self.home_object = None
         #: Optional ``world -> (H, W) bool`` naming the unknown cells the search has
         #: settled (:class:`~sightlines.SightLedger.resolved`): looked through without
         #: a return, or enclosed pockets. The frontier is read with them written
         #: OCCUPIED, so no room counts a boundary toward them and no goal is made of
         #: it. None reads the frontier off the map as it is.
         self.resolved_provider = None
+
+    def note_pose(self, xy):
+        """Remember where the agent stands, for the walked-through thresholds."""
+        point = (float(xy[0]), float(xy[1]))
+        if self.trail and math.dist(self.trail[-1], point) < TRAIL_SPACING_M:
+            return
+        self.trail.append(point)
+        self._trail_grown = True
+        travelled = 0.0
+        keep = len(self.trail)
+        for i in range(len(self.trail) - 1, 0, -1):
+            travelled += math.dist(self.trail[i - 1], self.trail[i])
+            if travelled > TRAIL_LENGTH_M:
+                keep = len(self.trail) - i + 1
+                break
+        if keep < len(self.trail):
+            del self.trail[:len(self.trail) - keep]
+
+    def _refresh_thresholds(self, world, free, step):
+        """Add every new clearance dip the trail walked through to the floor's thresholds."""
+        if not self._trail_grown or self.segmentation.threshold_snap_reach_m <= 0.0 or len(self.trail) < 3:
+            return
+        self._trail_grown = False
+        cells = [world.world_to_grid(x, y) for x, y in self.trail]
+        for cx, cy in trail_thresholds(free, world.resolution, cells, self.segmentation):
+            xy = world.grid_to_world(int(cx), int(cy))
+            if any(math.dist(xy, known) <= THRESHOLD_MATCH_M for known in self.thresholds):
+                continue
+            self.thresholds.append((float(xy[0]), float(xy[1])))
+            self.threshold_events.append({"step": int(step), "xy": [round(float(v), 2) for v in xy]})
 
     def frontier_world(self, world):
         """The map the frontier is read from: ``world`` with the settled unknown written OCCUPIED, or ``world``."""
@@ -196,7 +258,12 @@ class ObservedSceneGraph:
         free = world.grid == world.values.free
         if exclude is not None:
             free = free & ~np.asarray(exclude, dtype=bool)
-        _, _, stats = segment_rooms_watershed(free, world.resolution, self.segmentation, door_cells=cells)
+        if here_xy is not None:
+            self.note_pose(here_xy)
+        self._refresh_thresholds(world, free, step)
+        threshold_cells = [world.world_to_grid(x, y) for x, y in self.thresholds]
+        _, _, stats = segment_rooms_watershed(free, world.resolution, self.segmentation, door_cells=cells,
+                                              threshold_cells=threshold_cells)
         rooms = self.registry.update(stats, world.grid_to_world)
         partition = (tuple(sorted(rooms)), tuple(sorted(door.id for door in doors)))
         changed = self._partition is not None and self._partition != partition
@@ -326,12 +393,14 @@ class ObservedSceneGraph:
         metadata = self.label_tracker.metadata
         here = self.room_at(world, here_xy) if here_xy is not None else None
         excluded = set(int(pid) for pid in exclude)
+        is_home = getattr(self, "home_object", None)
         out = []
         for pid, room in self.registry.rooms.items():
             if pid in excluded:
                 continue
             fact = self.facts.get(pid)
             inside = self.last_inside.get(pid)
+            objects = tuple(self._objects.get(pid, ()))
             out.append(SearchNode(
                 id=pid, kind=ROOM, label=labels[pid].label if pid in labels else "unknown",
                 tentative=metadata.get(pid, {}).get("strength") == "weak",
@@ -339,7 +408,8 @@ class ObservedSceneGraph:
                 frontier_clusters=0 if fact is None else int(fact.frontier_clusters),
                 searched_s=float(self.searched.get(pid, 0.0)),
                 last_inside_ago_s=None if inside is None else max(0.0, (int(step) - inside) * action_time_s),
-                here=(pid == here), objects=tuple(self._objects.get(pid, ()))))
+                here=(pid == here), objects=objects,
+                home=bool(is_home is not None and any(is_home(name) for name in objects))))
         return out
 
     def _reason(self, world, objects, target, step, changed, extra_nodes=(), context=None, here_xy=None,

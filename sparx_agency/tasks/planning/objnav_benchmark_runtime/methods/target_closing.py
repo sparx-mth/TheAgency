@@ -10,6 +10,7 @@ from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box, observed_objects
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import contradicted_by_map
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import unknown_around
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_context import suspect
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_path import TargetApproachPath
 
 
@@ -29,13 +30,56 @@ class TargetClosingSettings:
     track_confidence: float = 0.30
     confirmation_frames: int = 2
     association_radius_m: float = 0.50
-    look_down_distance_m: float = 1.20
+    # Within this range the camera pitch FOLLOWS THE TARGET'S ELEVATION -- the
+    # close-range band of the dynamic pitch controller (``_pitch``, ``_elevation``,
+    # since 2026-10-07): a target below the camera (a toilet 0.4 m high drops under a
+    # level camera's lower edge from about 1.4 m in) is looked DOWN at, one above it
+    # (a wall-mounted television, the top of a wardrobe) is looked UP at, by at least
+    # one tilt step; beyond the band the approach is level. The name is historical:
+    # until 2026-10-07 only the look-down existed, and a hardcoded LOOK_DOWN drove
+    # high targets out of the frame.
+    look_down_distance_m: float = 1.30
+    # A target within this height of the camera is level with it: neither LOOK is
+    # forced, and the verification frame falls back to whichever view keeps the box
+    # inside the frame.
+    elevation_band_m: float = 0.15
     terminal_distance_m: float = 1.00
     range_tolerance_m: float = 0.05
     refine_distance_m: float = 0.15
     max_verify_steps: int = 12
     max_reacquire_steps: int = 24
     max_closing_steps: int = 160
+    # A box at or above this confidence starts a takeover past the rejection memory
+    # of UNVERIFIED and map-contradicted releases and the release cooldown (since
+    # 2026-10-07): the memory stops the same far flicker from restarting the
+    # takeover, and a 0.95 toilet in plain view at 2.4 m is not a flicker -- the
+    # Allensville toilet run refused nine such frames (actions 45-53) because a lock
+    # the map had wrongly outvoted was remembered 2 m around it. A spot released by a
+    # FAILED INSPECTION (the closing looked from close and saw nothing) or an approach
+    # that stalled is not bypassed -- the detector's word from far does not beat a look
+    # from near -- and neither is a boxed-in spot, where the agent itself is the
+    # problem. Border clipping, incoherent depth and the map's contradiction stand.
+    # 1.0 disables the override.
+    override_confidence: float = 0.80
+    # The semantic sanity check (``target_context.suspect``): a candidate in a room
+    # whose STRONG type excludes the target, or whose measured surface height
+    # contradicts its class (a counter top read as a bed), counts
+    # ``context_penalty`` of its confidence toward the start threshold and needs
+    # ``context_confirmation_frames`` consecutive frames from at least two
+    # viewpoints ``context_baseline_m`` apart to lock. Allensville/2 and
+    # Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter at 0.55 m after
+    # two frames from one spot. ``context_check=False`` is the former behaviour.
+    context_check: bool = True
+    context_penalty: float = 0.70
+    context_confirmation_frames: int = 4
+    context_baseline_m: float = 0.30
+    # In VERIFY a fresh, aligned candidate too close for a step used to be held --
+    # and a satisfied hold is idle, which the headless agent turns into a TURN that
+    # moves the box out of the frame (Allensville toilet, action 77: centred at
+    # 1.18 m, TURN_LEFT, lost). The verification frame is chosen to keep the box
+    # whole: a LOOK_DOWN for a low target (the user's close-range policy), else the
+    # one LOOK or TURN whose predicted shift leaves the box inside the frame.
+    verify_keep_in_frame: bool = True
     # A box touching the image border is a partial view: its depth centroid is
     # unreliable and the clipped end of a bed reads as a sofa. Such a box may
     # not START a takeover; once locked the approach tolerates spill-over.
@@ -118,7 +162,8 @@ class TargetClosingSettings:
                 or not 0 < self.track_confidence <= self.confidence):
             raise ValueError("track_confidence must be in (0, confidence]")
         for key in ("association_radius_m", "look_down_distance_m", "terminal_distance_m", "range_tolerance_m",
-                    "refine_distance_m", "rejection_radius_m", "rejection_min_range_m", "failed_inspection_radius_factor"):
+                    "refine_distance_m", "rejection_radius_m", "rejection_min_range_m", "failed_inspection_radius_factor",
+                    "elevation_band_m"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)
@@ -150,6 +195,19 @@ class TargetClosingSettings:
         if (isinstance(self.footing_unknown_fraction, bool) or not math.isfinite(self.footing_unknown_fraction)
                 or not 0 <= self.footing_unknown_fraction <= 1):
             raise ValueError("footing_unknown_fraction must lie in [0, 1]")
+        if (isinstance(self.override_confidence, bool) or not math.isfinite(self.override_confidence)
+                or not self.confidence <= self.override_confidence <= 1):
+            raise ValueError("override_confidence must lie in [confidence, 1]")
+        for key in ("context_check", "verify_keep_in_frame"):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError("%s must be a bool" % key)
+        if (isinstance(self.context_penalty, bool) or not math.isfinite(self.context_penalty)
+                or not 0 < self.context_penalty <= 1):
+            raise ValueError("context_penalty must lie in (0, 1]")
+        if type(self.context_confirmation_frames) is not int or self.context_confirmation_frames < self.confirmation_frames:
+            raise ValueError("context_confirmation_frames must be an int of at least confirmation_frames")
+        if isinstance(self.context_baseline_m, bool) or not math.isfinite(self.context_baseline_m) or self.context_baseline_m < 0:
+            raise ValueError("context_baseline_m must be finite and non-negative")
 
 
 class TargetClosing:
@@ -167,7 +225,7 @@ class TargetClosing:
     def __init__(self, policy):
         self.policy, self.settings = policy, policy.settings.target_closing
         self.path = TargetApproachPath(policy)
-        self.rejected = []                 # (anchor xyz, floor id, action, radius m) per released candidate
+        self.rejected = []                 # (anchor xyz, floor id, action, radius m, why) per released candidate
         self.releases = 0
         self.inspection_releases = 0
         self.inspection_resumptions = 0    # inspections ended to step closer: seen fresh, measured out of range
@@ -181,6 +239,9 @@ class TargetClosing:
         self.footing_sweeps = 0            # footing sweeps asked for by a lock with no safe path
         self.boxed_releases = 0            # locks released because no path existed from where the agent stood
         self.boxed_in = []                 # (robot xy, floor id, action) per boxed-in release
+        self.overrides = 0                 # takeovers started past the memory by ``override_confidence``
+        self.context_rejections = 0        # confident boxes the context penalty kept under the start threshold
+        self.suspect_locks_held = 0        # frames a suspect candidate had the frames but not the viewpoints
         self._clear()
 
     def _clear(self):
@@ -205,13 +266,25 @@ class TargetClosing:
         self.footing_done = False          # a footing sweep was asked for by this lock
         self.pathless_after_footing = 0    # pathless actions since the sweep ended
         self.close_trail = []              # (x, y) per consecutive CLOSE action, for the stall clock
+        self.suspect = None                # why the context check doubts this candidate (``target_context``)
+        self.sightings = []                # (x, y) of the agent per counted consecutive frame
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
 
-    def _rejected_nearby(self, xyz, floor_id):
-        return any(floor == floor_id and math.dist(spot[:2], xyz[:2]) <= radius
-                   for spot, floor, _, radius in self.rejected)
+    #: Releases whose spot a box at ``override_confidence`` may start a takeover inside of.
+    OVERRIDABLE_RELEASES = ("unverified", "contradicted by the map")
+
+    def _rejected_nearby(self, xyz, floor_id, override=False):
+        for entry in self.rejected:
+            spot, floor, _, radius = entry[:4]
+            why = entry[4] if len(entry) > 4 else "unverified"     # a 4-tuple is a legacy (unverified) entry
+            if floor != floor_id or math.dist(spot[:2], xyz[:2]) > radius:
+                continue
+            if override and why in self.OVERRIDABLE_RELEASES:
+                continue
+            return True
+        return False
 
     def rejected_near(self, xy, floor_id):
         """Whether a released candidate's anchor lies within ``rejection_radius_m`` of ``xy`` on ``floor_id``.
@@ -225,10 +298,16 @@ class TargetClosing:
         """Confident in-frame boxes, and those with a coherent 3-D position.
 
         Before a lock the box must also clear the image border and lie away
-        from every spot already released as unverified on this floor. While
-        a candidate is active, a box of the target's class down to
-        ``track_confidence`` is projected too, and counts if -- and only if --
-        it lands on the candidate's anchor: a re-sighting, not a new object.
+        from every spot already released as unverified on this floor --
+        unless it reaches ``override_confidence`` (the unverified and
+        map-contradicted memory, the cooldown and a boxed-in spot are
+        bypassed; a failed inspection's spot is not). A box the context
+        check doubts (``target_context.suspect``) counts
+        ``context_penalty`` of its confidence toward the start threshold.
+        While a candidate is active, a box of the target's class down to
+        ``track_confidence`` is projected too, and counts if -- and only if
+        -- it lands on the candidate's anchor: a re-sighting, not a new
+        object.
         """
         p, s = self.policy, self.settings
         k = obs.camera.intrinsics
@@ -259,13 +338,26 @@ class TargetClosing:
                           and math.dist(self.anchor, xyz) <= radius)
             if not strong and not associated:
                 continue                                       # a weak box is only ever a re-sighting
+            override = s.override_confidence < 1.0 and detection.conf >= s.override_confidence
             if not self.locked and range_m > s.rejection_min_range_m:
                 cooling = (not self.active and self.released_step is not None
                            and obs.step - self.released_step < s.release_cooldown_actions)
-                if cooling or self._rejected_nearby(xyz, p.mapping.floor_id) or self._boxed_in_here(obs):
+                if self._rejected_nearby(xyz, p.mapping.floor_id, override=override):
                     continue
+                if cooling and not override:
+                    continue
+                if self._boxed_in_here(obs):
+                    continue                                   # no path from HERE: the spot, not the box, is the problem
+                if override and not associated and not self.active and (cooling or self._rejected_nearby(xyz, p.mapping.floor_id)):
+                    self.overrides += 1
             if not self.locked and contradicted_by_map(p, label, xyz, rows[-1].get("radius_m")) is not None:
                 self.map_rejections += 1                       # a confirmed non-target object stands here
+                continue
+            doubt = self._suspect(obs, label, xyz) if (s.context_check and not self.locked) else None
+            if doubt is not None and not associated and detection.conf * s.context_penalty < s.confidence:
+                # Confident enough on its own, not where it stands: no takeover on this box.
+                self.context_rejections += 1
+                kept.append(detection)
                 continue
             kept.append(detection)
             if not obs.pose.z - 0.3 <= xyz[2] <= obs.pose.z + 2.2:
@@ -274,8 +366,22 @@ class TargetClosing:
                 continue
             if not strong:
                 self.weak_resightings += 1
-            projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m")))
+            projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), doubt))
         return kept, projected
+
+    def _suspect(self, obs, label, xyz):
+        """Why the context check doubts a box of ``label`` at ``xyz`` (``target_context.suspect``), or None."""
+        p = self.policy
+        info, objects = {}, ()
+        graph = getattr(p, "graph", None)
+        world = getattr(p, "last_world", None)
+        if graph is not None and world is not None and getattr(graph, "labels", None) is not None:
+            pid = graph.room_near(world, (float(xyz[0]), float(xyz[1])), 0.6)
+            if pid is not None:
+                info = graph.label_info(pid) or {}
+                objects = graph.objects_in(pid)
+        return suspect(p.target, label, xyz, obs.pose.z, label=info.get("label"),
+                       strength=info.get("strength"), objects=objects)
 
     def observe(self, obs):
         if obs.step == self.processed:
@@ -303,17 +409,21 @@ class TargetClosing:
         if not self.active:
             return
         if projected:
-            detection, xyz, near = max(projected, key=lambda item: item[0].conf)
+            detection, xyz, near, doubt = max(projected, key=lambda item: item[0].conf)
             self.count = self.count + 1 if obs.step == self.last_seen + 1 else 1
+            self.sightings = (self.sightings if obs.step == self.last_seen + 1 else []) + [(float(obs.pose.x), float(obs.pose.y))]
             self.observed_xyz, self.observed_near_m = xyz, (None if near is None else float(near))
             self.xyz = tuple((old + new) / 2 for old, new in zip(self.xyz, xyz)) if self.locked else xyz
             self.box, self.label, self.last_seen = detection.xyxy, detection.cls, obs.step
             if self.anchor is None:
                 self.anchor, self.floor_id = xyz, p.mapping.floor_id
-            self.locked |= self.count >= s.confirmation_frames
+            if doubt is not None and not self.locked:
+                self.suspect = doubt
+            self.locked |= self._confirmed()
             p._target_xy, p._target_step, p._target_floor_id = self.xyz[:2], obs.step, self.floor_id
         elif not self.locked:
             self.count = 0
+            self.sightings = []
         if (not self.locked and s.release_unverified
                 and obs.step - self.started >= s.max_verify_steps):
             self._release(obs)
@@ -324,6 +434,27 @@ class TargetClosing:
             # something else since (the sofa from four metres is the bed from two).
             self.map_releases += 1
             self._release(obs, radius_factor=s.failed_inspection_radius_factor, why="contradicted by the map")
+
+    def _confirmed(self):
+        """Whether the consecutive frames so far lock the candidate.
+
+        ``confirmation_frames`` frames as before; a candidate the context
+        check doubts (``suspect``) needs ``context_confirmation_frames`` of
+        them, taken from at least two spots ``context_baseline_m`` apart --
+        a turn in place is not a second viewpoint, and the Allensville
+        counter was locked on two frames from one spot.
+        """
+        s = self.settings
+        if self.suspect is None or not s.context_check:
+            return self.count >= s.confirmation_frames
+        if self.count < s.context_confirmation_frames:
+            return False
+        spots = self.sightings[-self.count:]
+        baseline = max((math.dist(a, b) for a in spots for b in spots), default=0.0)
+        if baseline + 1e-9 < s.context_baseline_m:
+            self.suspect_locks_held += 1
+            return False
+        return True
 
     def _boxed_in_here(self, obs):
         """Whether the agent still stands where a lock was released for want of a path (``boxed_in_radius_m``)."""
@@ -340,7 +471,7 @@ class TargetClosing:
         p = self.policy
         if self.anchor is not None and remember:
             self.rejected.append((self.anchor, self.floor_id, obs.step,
-                                  float(radius_factor) * self.settings.rejection_radius_m))
+                                  float(radius_factor) * self.settings.rejection_radius_m, str(why)))
         self.releases += 1
         self.released_step = int(obs.step)
         self.last_release = why
@@ -357,6 +488,34 @@ class TargetClosing:
         # the evaluator records it as failure, with any forced STOP distinguished.
         raise RuntimeError("Target closing failed (exploration remains locked): " + reason)
 
+    def _elevation(self, obs, distance=None):
+        """Where the target stands against the camera: ``+1`` above, ``-1`` below, ``0`` level.
+
+        From the measured 3-D centroid when there is one (its height against
+        the camera's, within ``elevation_band_m`` is level); else from the box
+        centre's bearing above the horizon -- the optical ray's elevation
+        corrected by the camera's own pitch -- read at ``distance`` when
+        known, otherwise against half a tilt step. The one input of the
+        dynamic pitch controller: LOOK_DOWN below, LOOK_UP above, never a
+        fixed direction (a hardcoded look-down drove a wall-mounted
+        television out of the frame).
+        """
+        s = self.settings
+        camera_z = obs.pose.z + obs.camera.height_m
+        if self.xyz is not None:
+            dz = float(self.xyz[2]) - camera_z
+            return 0 if abs(dz) <= s.elevation_band_m else (1 if dz > 0 else -1)
+        if self.box is None:
+            return 0
+        k = obs.camera.intrinsics
+        v = (self.box[1] + self.box[3]) / 2
+        angle = math.atan2(k.cy - v, k.fy) - float(obs.pose.camera_pitch)      # elevation above the horizon
+        if distance is not None and math.isfinite(distance) and distance > 0:
+            dz = math.tan(angle) * distance
+            return 0 if abs(dz) <= s.elevation_band_m else (1 if dz > 0 else -1)
+        band = 0.5 * float(self.policy.episode.action_spec.tilt_angle_rad or 0.0)
+        return 0 if abs(angle) <= band else (1 if angle > 0 else -1)
+
     def _pitch(self, obs, distance):
         actions = self.policy.episode.action_spec
         if not actions.has_camera_tilt:
@@ -364,12 +523,19 @@ class TargetClosing:
         # The pitch is the target's measured height's, never its label's: "a potted
         # plant is low" sent the camera 30 degrees down at a plant standing in a metre-
         # tall planter, where its foliage never projected, for 24 actions (Hanson
-        # 2026-10-05); a plant on the floor is low by this geometry anyway.
+        # 2026-10-05); a plant on the floor is low by this geometry anyway. Positive
+        # is down: a target below the camera gives a positive angle, one above it a
+        # negative one -- LOOK_UP. Inside ``look_down_distance_m`` the elevation
+        # commits the camera to at least one tilt in its direction, so the terminal
+        # frames hold a low toilet or a high television whole.
         camera_z = obs.pose.z + obs.camera.height_m
         desired = math.atan2(camera_z - self.xyz[2], max(distance, 1e-6))
-        low = self.xyz[2] < camera_z - 0.15
-        if low and distance < self.settings.look_down_distance_m:
-            desired = max(actions.tilt_angle_rad, desired)
+        if distance < self.settings.look_down_distance_m:
+            elevation = self._elevation(obs, distance)
+            if elevation < 0:
+                desired = max(actions.tilt_angle_rad, desired)
+            elif elevation > 0:
+                desired = min(-actions.tilt_angle_rad, desired)
         desired = round(desired / actions.tilt_angle_rad) * actions.tilt_angle_rad
         if actions.min_pitch_rad is not None:
             desired = max(actions.min_pitch_rad, desired)
@@ -402,8 +568,11 @@ class TargetClosing:
             self.inspection_index = 0
             error = self._bbox_error(obs)
             info = {"kind": "target_closing", "reason": reason, "target_visible": True}
+            if self.suspect is not None:
+                info["suspect"] = self.suspect
             distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2]) if self.xyz is not None else float("inf")
-            if (not self.locked and abs(error) <= offset + 1e-6
+            aligned = abs(error) <= offset + 1e-6
+            if (not self.locked and aligned
                     and distance > self.settings.terminal_distance_m + actions.forward_step_m):
                 # Two steps ahead: a one-step waypoint sits inside the converter's arrival
                 # tolerance and yields no action at all. One MOVE_FORWARD results either way.
@@ -416,6 +585,13 @@ class TargetClosing:
                 ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
                 return NavigationCommand.follow([(obs.pose.x, obs.pose.y), ahead], camera_pitch=pitch,
                                                 info=dict(info, verify_step="towards the candidate"))
+            if (not self.locked and self.settings.verify_keep_in_frame
+                    and turn_action(error, offset) is None):
+                # The hold below would be satisfied as it stands -- idle -- and an idle
+                # result is executed as a turn. Choose the frame instead.
+                view = self._verification_view(obs, distance)
+                if view is not None:
+                    return view
             return NavigationCommand.hold(camera_pitch=pitch, final_yaw=normalize_angle(obs.pose.yaw + error), info=info)
         angles = (0, 1, 0, -1)
         yaw = normalize_angle(bearing + angles[self.inspection_index % 4] * offset)
@@ -425,6 +601,76 @@ class TargetClosing:
         return NavigationCommand.hold(camera_pitch=pitch,
                                       final_yaw=yaw,
                                       info={"kind": "target_closing", "reason": reason, "target_visible": False})
+
+    def _verification_view(self, obs, distance):
+        """The next frame for a fresh, aligned candidate too close to step toward: one that keeps its box whole.
+
+        A satisfied hold is idle, and the headless agent's idle action is a
+        turn, which moved the centred Allensville toilet out of the frame
+        at 1.18 m. **The pitch follows the target's elevation**
+        (:meth:`_elevation`): a target below the camera is looked DOWN at,
+        one above it -- a wall-mounted television, the top of a wardrobe --
+        is looked UP at; a box cut by the bottom or the top edge says the
+        same thing; never a fixed direction. Level with the camera, the LOOK
+        whose predicted shift (``fy * tan(tilt)`` pixels) leaves the box
+        inside the frame margins, down before up (the floor is nearer than
+        the ceiling); failing both, the TURN whose shift (``fx * tan(turn)``)
+        keeps it, toward the box's side before away. None when no view keeps
+        it.
+        """
+        actions, s = self.policy.episode.action_spec, self.settings
+        k = obs.camera.intrinsics
+        x1, y1, x2, y2 = self.box
+        margin = s.border_margin_px
+        info = {"kind": "target_closing", "reason": "verification frame that keeps the box whole",
+                "target_visible": True}
+        if self.suspect is not None:
+            info["suspect"] = self.suspect
+        pitch_now = float(obs.pose.camera_pitch)
+        tilt = float(actions.tilt_angle_rad) if actions.has_camera_tilt else None
+        top_cut, bottom_cut = y1 < margin, y2 > k.height - margin
+
+        def pitch_ok(value):
+            if actions.min_pitch_rad is not None and value < actions.min_pitch_rad - 1e-9:
+                return False
+            return actions.max_pitch_rad is None or value <= actions.max_pitch_rad + 1e-9
+
+        def fits(du, dv):
+            return (x1 + du >= margin and x2 + du <= k.width - margin
+                    and y1 + dv >= margin and y2 + dv <= k.height - margin)
+
+        def look(sign, step):
+            """One tilt step, ``+1`` down / ``-1`` up: when the limits allow it and the box stays in (or is cut on that side)."""
+            value = pitch_now + sign * tilt
+            dv = -sign * k.fy * math.tan(tilt)                 # LOOK_DOWN moves the image content UP
+            cut = bottom_cut if sign > 0 else top_cut
+            if pitch_ok(value) and (cut or fits(0.0, dv)):
+                return NavigationCommand.hold(camera_pitch=value, final_yaw=obs.pose.yaw,
+                                              info=dict(info, verify_step=step, elevation=elevation))
+            return None
+
+        elevation = self._elevation(obs, distance) if tilt is not None else 0
+        if tilt is not None:
+            if elevation < 0 or (elevation == 0 and bottom_cut):
+                view = look(+1, "look down at a low target")
+                if view is not None:
+                    return view
+            elif elevation > 0 or (elevation == 0 and top_cut):
+                view = look(-1, "look up at a high target")
+                if view is not None:
+                    return view
+            for sign, step in ((+1, "look down"), (-1, "look up")):
+                view = look(sign, step)
+                if view is not None:
+                    return view
+        du = k.fx * math.tan(actions.turn_angle_rad)
+        toward_left = (x1 + x2) / 2 < k.cx                  # the box is left of centre: a LEFT turn moves it right
+        for turn_left in ((True, False) if toward_left else (False, True)):
+            if fits(du if turn_left else -du, 0.0):
+                yaw = normalize_angle(obs.pose.yaw + (actions.turn_angle_rad if turn_left else -actions.turn_angle_rad))
+                return NavigationCommand.hold(camera_pitch=None if tilt is None else pitch_now, final_yaw=yaw,
+                                              info=dict(info, verify_step="turn %s" % ("left" if turn_left else "right")))
+        return None
 
     def plan(self, obs, world):
         p, s = self.policy, self.settings
@@ -484,7 +730,15 @@ class TargetClosing:
         visible = self.last_seen == obs.step
         self.phase = "CLOSE" if visible else "CLOSE_OCCLUDED"
         self.occluded_path_steps += int(not visible)
-        return replace(command, camera_pitch=0.0 if p.episode.action_spec.has_camera_tilt else None,
+        # Level during transit; inside ``look_down_distance_m`` the pitch follows the
+        # target's elevation (``_pitch``: down at a toilet, up at a wall-mounted
+        # television) so the terminal frames hold it whole -- the close-range policy,
+        # in both directions (since 2026-10-07; before, the approach forced level and
+        # the inspection alone tilted).
+        pitch = None
+        if p.episode.action_spec.has_camera_tilt:
+            pitch = self._pitch(obs, distance) if distance <= s.look_down_distance_m else 0.0
+        return replace(command, camera_pitch=pitch,
                        info=dict(command.info, target_confirmed=True, persistent_lock=True,
                                  target_visible=visible, range_m=distance, phase=self.phase))
 
@@ -733,7 +987,10 @@ class TargetClosing:
                 "map_rejections": self.map_rejections, "weak_resightings": self.weak_resightings,
                 "no_path_steps": self.no_path_steps, "footing_sweeps": self.footing_sweeps,
                 "boxed_releases": self.boxed_releases,
+                "overrides": self.overrides, "context_rejections": self.context_rejections,
+                "suspect": self.suspect, "suspect_locks_held": self.suspect_locks_held,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}
                              for xy, floor, step in self.boxed_in],
-                "rejected": [{"xyz": list(spot), "floor_id": floor, "step": step, "radius_m": radius}
-                             for spot, floor, step, radius in self.rejected]}
+                "rejected": [{"xyz": list(entry[0]), "floor_id": entry[1], "step": entry[2], "radius_m": entry[3],
+                              "why": entry[4] if len(entry) > 4 else "unverified"}
+                             for entry in self.rejected]}

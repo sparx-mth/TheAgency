@@ -11,6 +11,56 @@ Format per entry:
 
 ---
 
+## 2026-10-07 — The Allensville frame-by-frame audit: four failures that were not where the video said they were
+
+**Symptom:** Three recordings of the 5x3 benchmark (`runs/zson-benchmark-5x3-20261005/campaign/frontier/
+Allensville`) read as: table objects not registered; a room graph with R0 alone for 30 actions, then R0
+and R2 with no R1; a kitchen island STOPped on as a `bed`; a strong bathroom valued 0 for a toilet; a
+0.95 toilet ignored at 2.4 m; the approach to it turning in place and reverting to exploration.
+
+**Root causes (from `steps.jsonl`, not from the video):**
+- The table's vases projected with valid depth and were dropped as `same_frame_association`: the
+  landmark map associated ANY class within 0.70 m of a landmark's centroid, and the fused cabinet had
+  already been fed that frame. The same rule voted a toilet (4 votes) and the bathtub 0.5 m beside it
+  into one landmark, which flipped to `bathtub`, released the toilet's lock as "contradicted by the
+  map" with a 2 m rejection radius -- which is why the 0.95-0.97 toilet in plain view at 2.39 m was
+  refused nine frames running (beyond `rejection_min_range_m`).
+- The pid followed the LARGER half of a split (the IoU rule): the spawn room was R0, became R1 when a
+  door 0.5 m away cut it off, merged back as R0, and re-split as R2 after the 10-tick memory had
+  expired, while the hallway the agent had just walked into carried R0 and the spawn room's
+  "entered" record. The step-40 "doorway" is a uniformly narrow hallway (0.30-0.50 m clearance for
+  forty actions on the saved map) -- no partition could have split it there; the far rooms appear at
+  step 80 when their floor is first seen.
+- The counter front read as `bed` had its supported points 0.67-0.70 m above the agent base (every
+  real bed of the run: 0.11-0.52 m) inside a STRONG kitchen, and locked on two frames from one spot.
+- The bathroom's 0 was not the type prior: the warm-up spin at the spawn point "saw" >50 % of its
+  cells through the door (`scanned:seen_from_scan`) and finished it with the bathtub inside.
+- Within 2 m a toilet's box always touches the BOTTOM image edge; `clipped_box` called that a
+  sliver (`border_rejections` 3 -> 26), no fresh frame counted, the ±30-degree sweep ran for 12
+  actions and released `unverified`, twice. And at 1.18 m a centred, counted frame was followed by
+  TURN_LEFT: the hold was satisfied, idle, and the headless agent executes idle as a turn.
+
+**Fixes:** classes never merge in the landmark map (no class vote; a cup on a table is two instances),
+same-class instances told apart by size (0.35 m centroid floor, footprint IoU 0.25); a height-aware
+same-frame rule; the bottom-edge floor cutoff is not a sliver; birth anchors and an episode-long memory
+in the room registry; walked-through clearance dips carved like snapped doors; the home-object floor
+and the no-finish-from-outside guard; `override_confidence` 0.80 past the unverified/map memory; the
+context check (room type, height band) with a four-frame, two-viewpoint lock; a verification frame
+that keeps the box whole with the pitch following the target's elevation (LOOK_DOWN below the camera,
+LOOK_UP above -- a fixed look-down drove a wall-mounted television out of the frame), and the same
+dynamic pitch on the close approach inside 1.3 m. Progress entry 024.
+
+**Don't:** read "the lock was wrong" off a map release without checking what landmark the anchor fell
+on -- a neighbour of another class within 0.70 m was enough to outvote it. Don't let classes merge in
+the object memory at all: every cross-class rule the map had (centroid radius, then footprint overlap)
+collapsed something resting on or beside something else. Don't take `scanned:*` for the type prior in
+the HUD; `excluded` says which. Don't hand a VERIFY candidate a hold that is already satisfied -- in
+Habitat idle is a turn -- and don't hardcode the direction of the LOOK that replaces it: the target's
+elevation decides. And on this machine `.venv/bin/python` has no pytest; the shell's `venv/bin/python`
+(3.12, pytest 7.4, numpy 1.26) is the one that runs the suites.
+
+---
+
 ## 2026-10-05 — The 5x3 same-storey benchmark: eight failures, five mechanisms, none of them the reasoning
 
 **Symptom:** `runs/zson-benchmark-5x3-20261005`: SR 7/15, SPL 0.27, DTG 3.6 m. Every success was a

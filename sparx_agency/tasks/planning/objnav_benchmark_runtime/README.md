@@ -40,25 +40,78 @@ counts for nothing (`weak_resightings` in the diagnostics).
 image edge is a partial view — its depth centroid is unreliable, and the clipped
 end of a bed reads as a sofa (the Ranchester couch-downstairs run of 2026-10-04
 ended on exactly such an 84 px sliver) — unless it fills 30 % of the frame in
-either dimension, the big object at terminal range that no frame holds whole
-(`clipped_box`). Clipped boxes cannot start or count
+both dimensions, the big object at terminal range that no frame holds whole
+(`clipped_box`). **A box cut only by the bottom edge is not a sliver** (since
+2026-10-07): a level camera 0.88 m up sees the floor from about 1.4 m out, so a
+LOW object at 1-2 m -- a toilet, a chair seat -- is cut by the bottom edge on
+every frame while standing whole laterally, and its near edge and centroid are
+on the object. The Allensville toilet run refused twenty-three such frames of a
+0.97 toilet at 1.2-1.7 m, never counted two in a row and released the candidate
+twice; a box touching only the bottom edge, with its top in the lower half of
+the frame and at least 15 % of the frame in both dimensions, counts. Clipped
+boxes cannot start or count
 towards a lock; once locked, the approach tolerates spill-over. A box projecting
 within `rejection_radius_m` (**1.0 m**) of a spot already released as unverified
 on the same floor is ignored before a lock -- **unless it is seen from within
 `rejection_min_range_m` (2.0 m)**: the memory stops the same far flicker from
 restarting the takeover from the same place, and a close view is new evidence
 (the Ranchester couch released at 3.8 m from the stair head was never
-re-verified from 1 m, twice, until this). The 3-D association radius for the
+re-verified from 1 m, twice, until this) -- **or it reaches `override_confidence`
+(0.80)** (since 2026-10-07): the detector's word at that level is not a flicker,
+and the same toilet run refused nine frames of a 0.95-0.97 toilet in plain view
+at 2.4 m because a lock the map had wrongly outvoted was remembered 2 m around
+it. The override passes the memory of `unverified` and `contradicted by the map`
+releases and the release cooldown; a spot released by a **failed inspection**
+(the closing looked from close and saw nothing), a stalled approach or a
+boxed-in spot still holds, and border clipping, incoherent depth and the map's
+own contradiction are not overridden (`overrides` in the diagnostics; the
+rejection memory records `why`). The 3-D association radius for the
 consecutive-frame lock grows with range (`association_range_gain`, 0.15 m per
 metre beyond 2 m: 0.77 m at 3.8 m), because the visible centroid of a long
 object seen from far moves more than half a metre between two frames.
+
+**The context check** (`methods/target_context.py`, `context_check`, since
+2026-10-07). A detector's confidence is a score over the crop; it knows nothing
+about the room the crop was taken in or how high the surface it fired on is.
+Allensville/2 and Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter
+front read as `bed` from 0.55 m -- its supported points 0.67-0.70 m above the
+agent's base where every real bed of the recording measured 0.11-0.52 m, inside
+a room the map had made a STRONG kitchen from its refrigerator and oven -- after
+two frames from one spot. A candidate is **suspect** when its footprint lies in
+a room whose strong type is one the target is not searched for in
+(`room_priors.IMPLAUSIBLE_ROOMS`, `room:kitchen`) or when its measured centroid
+height contradicts its class (`CLASS_HEIGHT_BANDS`, calibrated on the Allensville
+recordings: a bed's or a toilet's surface under 0.60 m above the base,
+`height:0.69`). A suspect box counts `context_penalty` (0.70) of its confidence
+toward the start threshold (0.60 x 0.70 is no takeover; 0.75 is), and its lock
+needs `context_confirmation_frames` (4) consecutive frames from at least two
+viewpoints `context_baseline_m` (0.30 m) apart -- a turn in place is not a
+second viewpoint (`suspect`, `context_rejections`, `suspect_locks_held` in the
+diagnostics and the HUD). It is a penalty, not a refusal: a bed in a room the
+partition merged with a kitchen is still locked, from two places.
 
 **Before the lock, ownership is provisional.** A fresh candidate within one
 turn of the image centre is *stepped toward*, not centred (since 2026-10-05):
 the box stays in the frame after a step and the next frame can be the
 consecutive one, where the centring turn moved the box across the image and
 the detector dropped it on the other side, four cycles running, at a chair
-3.5 m off; a candidate farther off-centre is faced first. If `max_verify_steps` (12) pass
+3.5 m off; a candidate farther off-centre is faced first. **A candidate too
+close to step toward gets a frame that keeps its box whole**
+(`verify_keep_in_frame`, since 2026-10-07): the hold that used to follow was
+already satisfied -- idle -- and the headless agent executes an idle result as
+a TURN, which moved the centred Allensville toilet out of the frame at 1.18 m
+(action 77) and reset the count. **The pitch follows the target's elevation**
+(`TargetClosing._elevation`, `elevation_band_m` 0.15 m): a target whose
+measured 3-D centroid stands below the camera -- or, without one, whose box
+centre bears below the horizon once the camera's own pitch is taken out -- is
+looked DOWN at, one above the camera (a wall-mounted television, the top of a
+wardrobe) is looked UP at, and a box cut by the bottom or the top edge says
+the same thing; never a fixed direction (a hardcoded LOOK_DOWN drove high
+targets out of the frame). Level with the camera, the LOOK whose predicted
+shift (`fy * tan(tilt)` pixels) leaves the box inside the frame margins, down
+before up; failing both, the TURN whose shift (`fx * tan(turn)`) keeps it,
+toward the box's side before away (`verify_step` and `elevation` in the command
+info). If `max_verify_steps` (12) pass
 without the lock, `release_unverified` (default **true**) hands control back to
 exploration in phase `RELEASED`, records the anchor in the rejection memory and
 clears the legacy target hint; the room/stair search resumes where it was
@@ -98,12 +151,17 @@ without NavMesh projection, explicitly reported as such.
 
 A* owns heading during transit, including doorway/corner turns that put the target
 outside the FOV. Bbox yaw servoing is confined to terminal inspection so it cannot
-fight the route. At `terminal_distance_m` (**1.0 m**), forward motion stops and
-inspection remains stationary. The inspection pitch is the one the target's
-**measured height** predicts -- a toilet 0.45 m up is low, a plant in a metre-tall
-planter is at eye level and gets no look-down (until 2026-10-05 "a potted plant
-is low" by label sent the camera 30 degrees down at exactly such a plant for 24
-actions); missed detections
+fight the route. The camera is level in transit; **inside `look_down_distance_m`
+(1.30 m) the approach carries the target's own pitch** (since 2026-10-07, the same
+`_pitch` the inspection uses): one tilt step at least in the direction of the
+target's elevation -- down at a toilet, up at a wall-mounted television -- so the
+terminal frames hold the object whole. At `terminal_distance_m` (**1.0 m**),
+forward motion stops and inspection remains stationary. The inspection pitch is
+the one the target's **measured height** predicts -- a toilet 0.45 m up is low, a
+plant in a metre-tall planter is at eye level and gets no look-down (until
+2026-10-05 "a potted plant is low" by label sent the camera 30 degrees down at
+exactly such a plant for 24 actions), a television above the camera gets LOOK_UP;
+missed detections
 trigger bounded pitch-up/down and yaw views referenced to the stored target bearing,
 not accumulating turns from the current yaw. The predicted pitch is where to
 *look* for a target not in view, never a condition on having seen it: a fresh,
@@ -149,9 +207,11 @@ anchor goes into the rejection memory with twice the radius
 and the search resumes on the next action with the spot excluded from the
 takeover and from the target-landmark nodes. The release comes as soon as every
 inspection view (three yaws, up to three pitches) has been tried once with
-nothing seen -- not after the 24-action budget -- and *at once* when the map's
-class vote at the anchor outvotes the lock (`map_releases`: the sofa from four
-metres that the map has since confirmed as a bed from two). `release_on_failed_inspection:
+nothing seen -- not after the 24-action budget -- and, under the library's
+class-voting map only, *at once* when the map's class vote at the anchor outvotes
+the lock (`map_releases`: the sofa from four metres that the map has since
+confirmed as a bed from two; this runtime's map never merges classes since
+2026-10-07, so the vote and the release read zero here). `release_on_failed_inspection:
 false` restores the historical recordable method error (**not**
 `ObjNavInternalError`: the harness finalizes failed metrics; its forced STOP is
 not a successful policy STOP and appears as `termination=agent_error`).
@@ -206,6 +266,7 @@ own frozen configurations; changed code does not relabel their outcomes.
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
 | `methods/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
+| `methods/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |
 | `methods/target_path.py` | Persistent NavMesh standoff goal, meaningful target refinement and continuous collision-qualified A* execution through occlusion |
 | `methods/room_search_loop.py` | The seven-step room-search loop: one scan visit per room (vantage point, full rotation, finished for the episode) or the bounded room-confined sweep; re-classify → re-estimate → re-order at each loop point over the rooms that are still nodes; transit to the chosen room's vantage point / nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
 | `methods/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
@@ -218,8 +279,8 @@ own frozen configurations; changed code does not relabel their outcomes.
 | `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
 | `methods/peek_stairs.py` | Floor-local seen-connector footprint: excluded from the room partition (stairs are never a room), from peek viewpoints and from a peek-only A* copy; ordinary stair navigation is unchanged |
 | `methods/camera_control.py` | Sole pitch owner; bounded stair inspection, the footing sweep (a circle at 30 degrees down that maps the blind radius, for a pathless lock or a boxed-in fallback), long unprompted cadence and safe restoration |
-| `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association with a height check, class votes per landmark |
-| `core/mapping/objects/landmarks.py` | The landmark map: positional association (dedupe radius or footprint-disc IoU), per-class vote tally per landmark, plurality class with recorded relabels, confirmation by a clear plurality |
+| `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association within a class with a height check |
+| `core/mapping/objects/landmarks.py` | The landmark map: per-class association (a tight dedupe radius or footprint-disc IoU; classes never merge), confirmation by observation count; the class vote of 2026-10-04 kept behind `class_votes=True` |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
 | `methods/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
 | `methods/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
@@ -429,7 +490,20 @@ refresh.
    room): the Ranchester couch search had a cabinet and a potted plant make
    an upstairs room a strong "living_room" at 0.95, which put a living room
    on the storey summary the node oracle reads and wobbled its verdict on
-   where living rooms are. **The labels are read before the nodes
+   where living rooms are. **A home object is a prior, not only a guard**
+   (since 2026-10-07, `LoopSettings.home_floor`, 0.60): a room holding a
+   confirmed home object of the target is handed to the oracle with
+   `SearchNode.home` set and is never read below the floor, whatever the
+   model wrote and whatever its storey verdict says -- a bathtub on this
+   storey IS the toilet's home type, found -- and such a room is **never
+   finished by sight from outside it**: the scan ledger's `seen_from_scan`
+   and `seen_through` verdicts (half its floor seen through its door) do not
+   exclude it, only a scan the agent stood in does (`home_object_kept` events
+   with `scanned`). The Allensville toilet run's warm-up spin at the spawn
+   point saw more than half of the bathroom's floor through its door,
+   finished it with the bathtub inside and the toilet behind the jamb, valued
+   it 0 and peeked twenty openings before coming back to it at action 283.
+   **The labels are read before the nodes
    are chosen** (`ObservedSceneGraph.refresh_labels` at the loop point):
    until 2026-10-05 the re-classification ran inside the oracle call,
    after the exclusions, so a room that became a strong bedroom on that
@@ -696,7 +770,20 @@ the record of having stood in it (`entered=no` to the oracle). A pair
 under the IoU threshold now matches when `containment_threshold` (0.6) of
 the smaller mask lies inside the larger; IoU matches are consumed first,
 so a split's larger half keeps the number and a merge's survivor is the
-old room with the larger overlap.
+old room with the larger overlap. **A room keeps its number by where it
+was born** (since 2026-10-07, `RoomRegistry(anchors=True)`): each room
+carries its birth anchor -- the cell it was first instantiated at -- and
+a fresh mask holding a previous room's anchor is matched to it before any
+IoU score, oldest pid first. The IoU rule alone handed a split room's
+number to the LARGER half, which is whichever side the agent has mapped
+more of: the Allensville couch run's spawn room was R0 at step 0, became
+R1 when a door 0.5 m away cut it off at step 8, merged back as R0 at step
+10 and re-split as R2 at step 44 while the hallway the agent had just
+walked into carried R0 -- and with it the spawn room's record of having
+been stood in. The registry's memory of vanished rooms is the episode's
+(`REGISTRY_MEMORY_TICKS`, bounded by `REGISTRY_MEMORY_ROOMS` masks), not
+ten ticks, so the hallway comes back as R1 after a 34-tick merge instead of
+as R2.
 
 **Where a door cuts, and whose room the furniture is** (since 2026-10-05).
 The partition is a clearance watershed over observed free space with a
@@ -719,7 +806,18 @@ fifteen recorded floors of 2026-10-04 the change fixed the one it was
 written for (bedroom whole, R7 and the corridor apart) and moved the
 others by at most a room; it is a heuristic over the observed geometry --
 a furniture passage narrower than the doorway within reach of the door
-would be taken for it. Objects are credited to rooms by
+would be taken for it. **A threshold the agent walked through is a cut too**
+(since 2026-10-07, `room_watershed.trail_thresholds`,
+`threshold_snap_reach_m=0.5`): the scene graph keeps the agent's recent
+trail and reads the clearance along it; a dip to 0.55 m or less with 0.30 m
+more clearance within 1.5 m of travel on BOTH sides is a doorway, carved at
+the severing choke within reach exactly as a snapped door is -- never a plain
+disk, since no detection vouches for it -- so the room beyond separates the
+tick the agent is through, not when its floor has grown a clearance peak.
+A uniformly narrow corridor never dips and is never cut (the Allensville
+hallway: 0.30-0.50 m for forty actions). Thresholds are sticky for the
+storey (`ObservedSceneGraph.thresholds`, `threshold_events`). Objects are
+credited to rooms by
 `ObservedSceneGraph.object_room`: the landmark's cell when it is room
 floor, else the nearest room floor within its footprint radius plus 0.6 m
 -- furniture stands on cells the map reads OCCUPIED, which the watershed
@@ -983,34 +1081,55 @@ and takes priority even over committed stair tasks. Coherent depth pixels are
 projected at their actual image coordinates, with frame/floor/association
 rejection reasons recorded. No bed/sofa proximity blacklist is used.
 
-**Object identity is a vote, per frame, per place** (since 2026-10-04;
-`core/mapping/objects/landmarks.py` with `class_votes=True`, wired in
-`methods/floor_context.py` and `methods/perception_cycle.py`). Every
-projected detection carries a **footprint**: a disc around its world
-centroid, half the box's width at its depth
-(`perception.footprint_radius_m`, clamped to 0.15-1.5 m). A detection is
-folded into an existing landmark **whatever its class** when its centroid
-lies within the dedupe radius (0.70 m) of the landmark's or the two footprint
-discs overlap by IoU ≥ 0.15 (`landmarks.disc_iou`, the lens formula -- a bed
-seen from two sides overlaps itself even with the centroids a metre apart,
-two cups 30 cm apart do not), and its height is within 0.35 m of the
-landmark's first measured height (a television on a cabinet is two objects
-stacked in plan view, never one vote). Each landmark keeps **`votes`: the
-number of frames in which it was seen as each class**, at most one vote per
-frame; its `class_name` is the plurality (a tie keeps the current class),
-and a change of plurality is a recorded relabel (`landmark_relabels`,
-`outvoted_detections` in the perception diagnostics). A landmark is
-**confirmed** -- shown to the room classifier, the node oracle and the
-HUD, and allowed to start target evidence -- only when its leading class
-holds `min_observations` (2) votes **and strictly more than the runner-up**:
-a bed seen five times and called a sofa once stays a bed and the "sofa" never
-reaches the object list, the room label or the LLM; a bed/sofa tie is not an
-object the search may act on yet. Target evidence is judged on the **map's**
-class, not the box's: a `sofa` box projecting onto a confirmed `bed` is the
-misidentification (`contradicted_by_map` in the target-closing pre-lock
-check), and the box is counted as an outvoted detection rather than a
-target. This is what makes the object list handed to the LLM a
-high-confidence list rather than a log of every detector flicker.
+**Object identity is per class, and same-class instances are told apart by
+size** (since 2026-10-07; `core/mapping/objects/landmarks.py` with
+`class_votes=False`, wired in `methods/floor_context.py` from
+`RPTSettings.landmark_dedupe_radius_m` / `landmark_footprint_iou`, and
+`methods/perception_cycle.py`). Every projected detection carries a
+**footprint**: a disc around its world centroid, half the box's width at its
+depth (`perception.footprint_radius_m`, clamped to 0.15-1.5 m). **Classes
+never merge**: a detection associates only with a landmark of its own class,
+whatever the proximity or the footprint overlap -- a cup on a table and the
+table are two instances in memory, a toilet and the bathtub beside it are
+two, a vase on a cabinet is its own landmark. Every cross-class rule the map
+ever had collapsed distinct objects resting on or beside one another into
+one and cost a target lock: the two vases on the cabinet in the first frame
+of the Allensville couch run (dropped as `same_frame_association` on every
+frame by the 0.70 m centroid radius), and the toilet and bathtub 0.5 m apart
+in the toilet run, voted into one landmark that flipped to `bathtub` and had
+the toilet's lock released as contradicted by the map. **Two observations of
+one class are one instance** when their centroids lie within
+`landmark_dedupe_radius_m` (**0.35 m**, re-observation jitter -- the ported
+0.70 m merged two dining chairs) or when both carry a measured footprint and
+the discs overlap by IoU ≥ `landmark_footprint_iou` (**0.25**, `landmarks.
+disc_iou`, the lens formula: about one radius apart for equal discs, so a
+bed re-seen from its other side with the centroids 0.8 m apart is one bed and
+two chairs 0.3 m apart are two chairs), and when the height is within 0.35 m
+of the landmark's first measured height (two of a kind stacked in plan view
+on different levels are two; the band stays at 0.35 m because one object's
+measured centroid height swings that much with viewing range -- the
+Allensville toilet read 0.33 m from 5 m and 0.64 m from 1 m). A second box
+of the same object in one frame is `same_frame_association`; a box of
+another class over the same pixels is its own landmark. The per-frame alias
+filter (`object_evidence.deduplicate_detections`: a box of another class
+over the **same pixels**, IoU ≥ 0.9 -- one crop, two prompt names) is the
+one cross-class rule kept, and it acts on the detector's output of a frame,
+not on the map. The detection floor (`RPTSettings.detection_confidence`) is
+0.30, the takeover's own tracking threshold -- a landmark needs two
+observations to be confirmed, so a weak box costs nothing alone, and the
+former 0.35 dropped a cup at 0.34 on that table. A landmark is **confirmed**
+-- shown to the room classifier, the node oracle and the HUD, and allowed to
+start target evidence -- once it has `min_observations` (2) observations; a
+lone detector flicker of a wrong class is a one-observation landmark the
+search never acts on. Target evidence is judged on the landmark's class --
+the box's own now -- and the takeover verifies a candidate on two consecutive
+frames of its own and the context check (above), not on the map's word.
+**The class vote** of 2026-10-04 -- co-located detections of any class
+folded into one landmark as votes, the plurality naming it, a `sofa` box on a
+confirmed `bed` outvoted (`contradicted_by_map`, `map_rejections`,
+`map_releases`, `outvoted_detections`) -- stays in the library behind
+`ObjectLandmarkMap(class_votes=True)` for its other users and reads zero in
+this runtime's diagnostics.
 
 ## Models and vocabulary
 

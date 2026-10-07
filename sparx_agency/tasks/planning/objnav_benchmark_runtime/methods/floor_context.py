@@ -6,6 +6,7 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import Obje
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import ObservedDoors
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidence
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingNodeOracle
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import RoomSearchLoop
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import ObservedSceneGraph
 
@@ -32,17 +33,25 @@ class FloorContextBank:
                                if getattr(state.get("graph"), "registry", None) is not None])
         p.graph = ObservedSceneGraph(p.llm_client, label_settings=p.room_label_settings, first_pid=first_pid)
         p.graph.oracle = RepairingNodeOracle(p.llm_client, unexplored_floor=p.loop_settings.unexplored_floor,
-                                             unexplored_elsewhere=p.loop_settings.unexplored_elsewhere)
+                                             unexplored_elsewhere=p.loop_settings.unexplored_elsewhere,
+                                             home_floor=p.loop_settings.home_floor)
+        # The oracle's ``home`` flag per room: a confirmed home object of THIS target.
+        p.graph.home_object = lambda class_name, target=p.target: home_object(target, class_name)
         # The frontier is read with the settled unknown written occupied: what the
         # camera looked through without a return, and the enclosed pockets.
         sight = getattr(p, "sight", None)
         if sight is not None:
             p.graph.resolved_provider = sight.resolved
         p.doors = ObservedDoors(p.door_settings)
-        # Co-located detections vote on one object's class (a sofa box on a
-        # five-times-confirmed bed is the misidentification); the plurality
-        # is what the rooms, the LLM and the target evidence see.
-        p.landmarks = ObjectLandmarkMap(nearest_match=True, class_votes=True)
+        # Classes never merge (since 2026-10-07): a cup on a table, a toilet beside a
+        # bathtub, a vase on a cabinet are separate instances whatever their proximity
+        # or footprint overlap. Same-class instances are told apart by size: a tight
+        # centroid floor plus footprint-disc overlap (``RPTSettings.landmark_*``).
+        # The class vote the map used to take (a sofa box on a confirmed bed voting
+        # on the bed) stays in the library behind ``class_votes=True``; the room
+        # objects, the LLM and the target evidence see each class's own landmarks.
+        p.landmarks = ObjectLandmarkMap(dedupe_radius_m=p.settings.landmark_dedupe_radius_m, nearest_match=True,
+                                        class_votes=False, footprint_iou=p.settings.landmark_footprint_iou)
         p.target_evidence = TargetEvidence(p.target_settings)
         p.supervisor = ObjectSearchSupervisor(p.supervisor_params, solver=p.solver)
         # The loop mirrors the supervisor: the room in force and the local

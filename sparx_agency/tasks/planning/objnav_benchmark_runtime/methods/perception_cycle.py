@@ -23,12 +23,13 @@ HEIGHT_TOLERANCE_M = 0.35
 def associate_landmark(policy, xyz, radius_m=None, exclude=(), class_name=None):
     """The map landmark an observation at ``xyz`` belongs to, or None.
 
-    The landmark map associates in plan view (centroid radius or footprint
-    overlap, any class under voting; ``class_name`` alone without it); this
-    adds the one check it cannot make -- the object's height against the
-    landmark's first measured height -- and takes the first candidate that
-    passes. Returns ``(landmark, co_located)``: ``co_located`` says whether
-    some landmark shared the footprint at another height.
+    The landmark map associates in plan view -- same class only (the
+    ObjectNav wiring, ``class_votes=False``: a cup never joins the table it
+    stands on), by centroid radius or footprint overlap; this adds the one
+    check it cannot make -- the object's height against the landmark's first
+    measured height -- and takes the first candidate that passes. Returns
+    ``(landmark, co_located)``: ``co_located`` says whether some same-class
+    landmark shared the footprint at another height.
     """
     p = policy
     candidates = p.landmarks.matches(tuple(float(v) for v in xyz[:2]), radius_m, class_name=class_name, exclude=exclude)
@@ -42,11 +43,17 @@ def associate_landmark(policy, xyz, radius_m=None, exclude=(), class_name=None):
 def contradicted_by_map(policy, label, xyz, radius_m=None):
     """A confirmed landmark here whose plurality class the target does not accept.
 
-    The map's answer to a lone misidentification: a ``sofa`` box projecting
-    onto a bed the map has confirmed five times is a vote the bed outweighs,
-    not a sofa. Returns that landmark, or None when the map does not object.
+    Only under class voting: with classes never merging (the ObjectNav
+    wiring since 2026-10-07) a box of another class at a landmark's spot is
+    a second object, not a vote against the first, so the map has no
+    contradiction to make and this returns None. Under voting, a ``sofa``
+    box projecting onto a bed the map has confirmed five times is a vote the
+    bed outweighs, not a sofa. Returns that landmark, or None when the map
+    does not object.
     """
     p = policy
+    if not p.landmarks.class_votes:
+        return None
     landmark, _ = associate_landmark(p, xyz, radius_m, class_name=label)
     if landmark is None or not p.landmarks.is_confirmed(landmark):
         return None
@@ -128,15 +135,17 @@ class PerceptionCycle:
             if reason is not None:
                 row["status"] = reason
                 continue
-            # The landmark map owns the plan-view association; the height
-            # check here keeps a television off the cabinet it stands on.
+            # The landmark map owns the plan-view association -- same class only; the
+            # height check here keeps a second chair on a mezzanine off the one below.
             radius = row.get("radius_m")
             landmark, co_located = associate_landmark(p, xyz, radius, exclude=used, class_name=label)
             if landmark is None and co_located:
                 row["status"] = "inconsistent_3d_association"      # co-located in plan view, another height
                 continue
-            if landmark is None and p.landmarks.matches(tuple(float(v) for v in xyz[:2]), radius, class_name=label):
-                row["status"] = "same_frame_association"           # only landmarks this frame already fed
+            if landmark is None and associate_landmark(p, xyz, radius, class_name=label)[0] is not None:
+                # The only landmark it belongs to -- class, footprint AND height -- was fed
+                # by this frame already: a second box of the same object.
+                row["status"] = "same_frame_association"
                 continue
             before = landmark.class_name if landmark is not None else None
             landmark = p.landmarks.observe(label, tuple(float(v) for v in xyz[:2]), frame_id=obs.step,
@@ -148,16 +157,17 @@ class PerceptionCycle:
             if before is not None and landmark.class_name != before:
                 self.counts["landmark_relabels"] += 1
             if landmark.class_name != label:
-                self.counts["outvoted_detections"] += 1
-            # Evidence for the target is the map's class, not the box's: a sofa
-            # box on a confirmed bed is the misidentification, not a sofa. And a
-            # box clipped at the image edge is a partial view (the same gate the
-            # takeover applies): the Ranchester upstairs run spent nine actions
-            # pursuing a 48 px sliver the takeover had rightly refused.
+                self.counts["outvoted_detections"] += 1          # class voting only; never with classes kept apart
+            # Evidence for the target is the landmark's class -- the box's own, with
+            # classes never merging (under voting, the plurality: a sofa box on a
+            # confirmed bed was the misidentification). And a box clipped at the image
+            # edge is a partial view (the same gate the takeover applies): the
+            # Ranchester upstairs run spent nine actions pursuing a 48 px sliver the
+            # takeover had rightly refused.
             closing = getattr(p, "closing", None)
             if closing is not None and closing.active:
-                # The takeover owns the target while it is active; the map keeps voting
-                # (so it can outvote the lock) but the legacy pursuit records nothing.
+                # The takeover owns the target while it is active; the map keeps mapping
+                # the frames it sees, but the legacy pursuit records nothing.
                 row["target_evidence"] = "takeover_active"
                 continue
             if (p.target.accepts(label) and p.target.accepts(landmark.class_name)

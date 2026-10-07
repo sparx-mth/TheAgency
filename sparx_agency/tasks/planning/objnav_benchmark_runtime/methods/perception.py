@@ -146,7 +146,7 @@ def _supported_centroid(observation, box, transform, row):
     return xyz
 
 
-def clipped_box(box, intrinsics, margin_px, min_fraction=0.3):
+def clipped_box(box, intrinsics, margin_px, min_fraction=0.3, floor_cut_min_fraction=0.15):
     """Whether ``box`` is a SLIVER at an image edge: touching it within ``margin_px`` AND narrow.
 
     The one test behind both target gates -- the takeover's start and the
@@ -159,12 +159,34 @@ def clipped_box(box, intrinsics, margin_px, min_fraction=0.3):
     filling the view (the Ranchester couch from 0.7 m: 392 x 379 px) -- and
     is not clipped in this sense: refusing it meant the takeover never
     started from beside the couch.
+
+    **The bottom edge alone is the camera's floor cutoff, not a sliver**
+    (since 2026-10-07). A level camera 0.88 m up sees the floor from about
+    1.4 m out, so a LOW object -- a toilet, a chair seat -- at 1-2 m is cut
+    by the bottom edge on every frame while standing whole in the frame
+    laterally; its depth centroid and near edge are on the object. The
+    Allensville toilet run refused twenty-three such frames of a 0.97
+    toilet at 1.2-1.7 m, never counted two in a row and released the
+    candidate twice. A box that touches ONLY the bottom edge, whose top lies
+    in the lower half of the frame and which spans at least
+    ``floor_cut_min_fraction`` of the frame in BOTH dimensions (the toilet:
+    113 x 187 px of 640 x 480; a 60 px sliver is still a sliver), is not
+    clipped; a box also touching a side edge, or the top, is judged as before.
     """
     m = int(margin_px)
     x1, y1, x2, y2 = box
-    touches = bool(x1 < m or y1 < m or x2 > intrinsics.width - m or y2 > intrinsics.height - m)
+    lateral = bool(x1 < m or x2 > intrinsics.width - m)
+    top = bool(y1 < m)
+    bottom = bool(y2 > intrinsics.height - m)
+    if not (lateral or top or bottom):
+        return False
     narrow = (x2 - x1) < min_fraction * intrinsics.width or (y2 - y1) < min_fraction * intrinsics.height
-    return touches and narrow
+    if not narrow:
+        return False
+    floor_cut = (bottom and not lateral and not top and y1 >= intrinsics.cy
+                 and (y2 - y1) >= floor_cut_min_fraction * intrinsics.height
+                 and (x2 - x1) >= floor_cut_min_fraction * intrinsics.width)
+    return not floor_cut
 
 
 def footprint_radius_m(box, depth_m, fx, floor_m=0.15, ceiling_m=1.5):

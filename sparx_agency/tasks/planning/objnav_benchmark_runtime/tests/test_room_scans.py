@@ -347,6 +347,49 @@ def test_the_type_prior_table_is_exclusions_not_permissions():
     assert target_key("tv") == "television" and target_key("plant") == "potted plant"
 
 
+def test_a_room_holding_a_home_object_of_the_target_is_not_finished_by_sight_from_outside():
+    """Allensville toilet run, step 26: the warm-up spin at the spawn point saw more than half of the
+    bathroom's floor through its door (``seen_from_scan``), finished it with the bathtub inside and the
+    toilet behind the jamb, and the strong bathroom read 0 for the toilet while twenty openings were
+    peeked. A scan the agent STOOD in still finishes it."""
+    from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import SEEN_THROUGH
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["bathtub"]}, step=0)
+    policy.scans.mark(1, SEEN_FROM_SCAN)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert 1 not in policy.loop._excluded, "a bathtub is where a toilet lives: the room stays a node"
+    kept = [e for e in policy.loop.events if e["event"] == "home_object_kept" and "scanned" in e]
+    assert policy.loop.stats["home_object_kept"] >= 1 and len(kept) == 1
+    assert kept[0]["scanned"] == SEEN_FROM_SCAN and kept[0]["home_objects"] == ["bathtub"]
+    assert policy.loop.estimates[1]["entry"] != "excluded", "... and it is offered to the solver"
+    # Looked into with no frontier left: the same guard.
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["sink"]}, step=0)
+    policy.scans.mark(1, SEEN_THROUGH)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert 1 not in policy.loop._excluded
+    # Stood in and turned a full circle: finished, bathtub or not.
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["bathtub"]}, step=0)
+    policy.scans.mark(1, SCAN_POINT_INSIDE)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {1: "scanned:" + SCAN_POINT_INSIDE} and policy.loop.stats["home_object_kept"] == 0
+    # A room with no home object seen from outside is finished, as before.
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["coat rack"]}, step=0)
+    policy.scans.mark(1, SEEN_FROM_SCAN)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {1: "scanned:" + SEEN_FROM_SCAN}
+    assert LoopSettings().home_floor == pytest.approx(0.60)
+    with pytest.raises(ValueError):
+        LoopSettings(home_floor=1.0)
+
+
 def test_a_room_whose_evidence_rules_it_out_on_this_action_is_excluded_on_this_action():
     """Hanson 2026-10-05, action 150: the bedroom's label became strong at the loop point's own
     re-classification, AFTER the nodes had been chosen; the oracle was shown it and valued it at 0.10

@@ -94,7 +94,7 @@ import time
 import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
-from sparx_agency.core.mapping.topology.search_node_oracle import UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR
+from sparx_agency.core.mapping.topology.search_node_oracle import HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import frontier_goals_by_room
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
@@ -105,6 +105,7 @@ from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ROOM_LLM
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object, implausible_room, ruled_out
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import SCAN_POINT_INSIDE
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import (
     LANDMARK, OpeningSettings, detect_openings, is_opening_node, landmark_openings, opening_options)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_vantage import vantage_point
@@ -186,6 +187,17 @@ class LoopSettings:
             thirteen peeks outranked the staircase it stood 0.9 m from.
             At 0.10 the stairs at 0.6 come first and a door beside the
             route is still a cheap peek. 0 leaves the model's numbers.
+        home_floor: The least a room holding a confirmed HOME OBJECT of the
+            target (``room_priors.HOME_OBJECTS``: a bathtub or a sink for a
+            toilet) is read at, whatever the oracle wrote -- the object
+            co-occurrence prior as arithmetic (since 2026-10-07). Such a
+            room is also never finished by sight from OUTSIDE it
+            (``seen_from_scan`` / ``seen_through``): the Allensville toilet
+            run's warm-up spin saw more than half of the bathroom's floor
+            through its door, finished it with the bathtub inside and the
+            toilet behind the jamb, and valued it 0 for the toilet while it
+            peeked twenty openings. 0 disables the floor (the finishing
+            guard stands).
         supervisor_rounds: Supervisor rounds allowed on one action before the
             loop falls back to the floor-wide frontier. A guard against a
             transition loop nobody has found yet, not a budget: the longest
@@ -237,6 +249,7 @@ class LoopSettings:
     min_prob: float = 0.05
     unexplored_floor: float = UNEXPLORED_FLOOR
     unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE
+    home_floor: float = HOME_FLOOR
     supervisor_rounds: int = 5
     confine_routes: bool = True
     entry_frontier: bool = True
@@ -263,7 +276,7 @@ class LoopSettings:
                 raise ValueError("%s must be positive and finite" % name)
         if isinstance(self.min_prob, bool) or not math.isfinite(self.min_prob) or not 0 <= self.min_prob < 1:
             raise ValueError("min_prob must lie in [0, 1)")
-        for name in ("unexplored_floor", "unexplored_elsewhere"):
+        for name in ("unexplored_floor", "unexplored_elsewhere", "home_floor"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value < 1:
                 raise ValueError("%s must lie in [0, 1)" % name)
@@ -355,6 +368,7 @@ class RoomSearchLoop:
         self._peek = None             # the peek in force: node, opening, approach actions, look targets, index
         self._inspected = set()       # landmark ids looked at from close on this storey (target landmark nodes)
         self._weak_kept = set()       # pids whose weak type label was not allowed to rule them out (logged once)
+        self._home_kept_scans = set()  # pids a sight-from-outside verdict was not allowed to finish (logged once)
         self._last_reason_step = -10 ** 9   # the action of the last oracle call, for the openings' revalue throttle
         self._excluded = {}           # pid -> why the room was not offered at the last SELECT
         self._scan = None             # the visit in force under ``scan``: phase, room, approach actions, swept yaw
@@ -806,6 +820,16 @@ class RoomSearchLoop:
                 continue
             if self.settings.scanning and ledger is not None:
                 how = ledger.status(world, pid, room, frontier=self._live_frontier(pid), doored=pid in doored)
+                if how is not None and how != SCAN_POINT_INSIDE and self._home_objects(pid):
+                    # Finished by sight from OUTSIDE -- half its floor seen from the
+                    # door -- with a home object of the target standing in it: the
+                    # toilet is behind the jamb the sightline never passed. A room
+                    # the agent stood in and turned a circle in is finished as before.
+                    if pid not in self._home_kept_scans:
+                        self._home_kept_scans.add(pid)
+                        self.stats["home_object_kept"] += 1
+                        self._log(obs, "home_object_kept", room=pid, scanned=how, home_objects=self._home_objects(pid))
+                    how = None
                 if how is not None:
                     excluded[pid] = "scanned:%s" % how
                     continue
@@ -843,6 +867,11 @@ class RoomSearchLoop:
         """
         fact = self.policy.graph.facts.get(pid) if getattr(self.policy.graph, "facts", None) else None
         return None if fact is None else int(fact.frontier_clusters)
+
+    def _home_objects(self, pid):
+        """The confirmed home objects of the target in room ``pid`` (``room_priors.HOME_OBJECTS``), sorted."""
+        p = self.policy
+        return sorted({c for c in p.graph.objects_in(pid) if home_object(p.target, c)})
 
     def _ruled_out(self, obs, pid, exits=0):
         """``type:<label>`` when the type prior rules room ``pid`` out, else None -- logging what kept it a node.

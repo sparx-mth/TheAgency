@@ -6,6 +6,78 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **The context check on a target candidate** (`objnav_benchmark_runtime/methods/target_context.py`,
+  `TargetClosingSettings.context_*`, 2026-10-07): a box whose footprint lies in a room whose STRONG
+  type the target is not searched for in (`room:kitchen`), or whose measured centroid height
+  contradicts its class (`CLASS_HEIGHT_BANDS`, calibrated on the Allensville recordings: a bed's or
+  a toilet's surface under 0.60 m above the agent base, `height:0.69`), counts 0.70 of its confidence
+  toward the takeover's start threshold and needs four consecutive frames from two viewpoints
+  0.30 m apart to lock. Allensville/2 and Newfields/2 of the 5x3 benchmark STOPped on a kitchen
+  counter front read as `bed` from 0.55 m after two frames from one spot (`suspect`,
+  `context_rejections`, `suspect_locks_held` in the diagnostics).
+- **`override_confidence` (0.80)** on the takeover: a box at that confidence starts a takeover past
+  the rejection memory of `unverified` and `contradicted by the map` releases and the release
+  cooldown -- a 0.95 toilet in plain view at 2.4 m is not a flicker (the Allensville toilet run
+  refused nine such frames) -- while a failed-inspection spot, a stalled approach, a boxed-in spot,
+  border clipping and the map's own contradiction still hold; the rejection memory records `why`.
+- **A verification frame that keeps the box whole, with the pitch following the target's
+  elevation** (`verify_keep_in_frame`, `TargetClosing._elevation`, `elevation_band_m` 0.15 m): a
+  fresh, aligned candidate too close to step toward used to be held, and a satisfied hold is executed
+  as a TURN (the headless agent's idle action), which moved the centred Allensville toilet out of the
+  frame at 1.18 m. The frame is now a LOOK in the direction of the target's elevation -- its 3-D
+  centroid against the camera's height, or its box centre against the horizon -- DOWN at a toilet,
+  UP at a wall-mounted television, never a fixed direction; level with the camera, the LOOK or TURN
+  whose predicted pixel shift keeps the box in the frame.
+- **Dynamic pitch on the close approach** (`look_down_distance_m` 1.30 m is now the band of the
+  controller, both directions): CLOSE used to force a level camera until the terminal inspection;
+  inside the band the approach carries the target's own geometric pitch (`_pitch`, at least one tilt
+  toward its elevation, the same function the inspection uses), so a low toilet or a high television
+  is held whole on the terminal frames. `_pitch` itself is symmetric now: a target above the camera
+  within the band gets LOOK_UP where the rounded geometry said level.
+- **Thresholds the agent walked through are cuts** (`room_watershed.trail_thresholds`,
+  `WatershedRoomParams.threshold_*`, `ObservedSceneGraph.trail/thresholds`): a clearance dip of
+  0.55 m or less with 0.30 m more clearance within 1.5 m of travel on both sides is a doorway,
+  carved at the severing choke within 0.5 m exactly as a snapped door is (never a plain disk), so
+  the room beyond separates the tick the agent is through it; a uniformly narrow corridor never dips.
+- **A home object is a prior** (`LoopSettings.home_floor` 0.60, `SearchNode.home`,
+  `SearchNodeOracle(home_floor=)`): a room holding a confirmed home object of the target (a bathtub
+  for a toilet) is never read below the floor, whatever the model wrote or its storey verdict says,
+  and is never finished by sight from outside it (`seen_from_scan` / `seen_through`) -- the
+  Allensville toilet run finished the bathroom with the bathtub inside from the spawn point's spin
+  and valued it 0 (`home_object_kept` events with `scanned`).
+- Progress entry `docs/progress/entries/024-allensville-audit-perception-rooms-priors-closing.md`,
+  regressions in `tests/test_perception_association.py`, `tests/test_target_context.py` and the
+  registry/watershed/oracle/scan suites (1969 pass across the runtime, exploration, topology and
+  objnav packages; 1891 before).
+
+### Fixed
+- **Classes never merge in the landmark map, and same-class instances are told apart by size**
+  (`core/mapping/objects/landmarks.py`, `floor_context.new`, `RPTSettings.landmark_dedupe_radius_m`
+  0.35 / `landmark_footprint_iou` 0.25, 2026-10-07): the ObjectNav map no longer takes the class vote
+  (`class_votes=False`) -- a cup on a table, a toilet beside a bathtub, a vase on a cabinet are separate
+  instances whatever their proximity or footprint overlap -- and two observations of one class are one
+  instance only within 0.35 m (the ported 0.70 m merged two dining chairs) or at a footprint-disc IoU
+  of 0.25 (about one radius apart: a bed re-seen from its other side is one bed). The two vases on the
+  cabinet in the first frame of the Allensville couch run were dropped as `same_frame_association` on
+  every frame, and the toilet and the bathtub 0.5 m beside it were voted into one landmark that flipped
+  to `bathtub` and released the toilet's lock as "contradicted by the map" with a 2 m rejection radius.
+  The vote (`contradicted_by_map`, `map_rejections`, `map_releases`, `outvoted_detections`) stays in
+  the library behind `class_votes=True` and reads zero in this runtime; the per-frame alias filter
+  (a box of another class over the same pixels, IoU ≥ 0.9) is the one cross-class rule kept, on the
+  detector's output, not the map. `RPTSettings.detection_confidence` 0.35 -> 0.30 (the takeover's
+  tracking threshold; a landmark needs two observations, so a weak box costs nothing alone).
+- **A box cut only by the bottom edge is not a sliver** (`perception.clipped_box`): a low object at
+  1-2 m is cut by the bottom edge on every level frame; a box touching only that edge, with its top
+  in the lower half and 15 % of the frame in both dimensions, counts. The Allensville toilet run
+  refused 23 such frames of a 0.97 toilet at 1.2-1.7 m and released the candidate twice.
+- **Room numbers follow the room, not the larger half** (`RoomRegistry(anchors=True)`,
+  `TrackedRoom.anchor`, `memory_rooms`): a fresh mask holding a previous room's birth anchor is
+  matched to it before any IoU score (oldest pid first on a merge), and the scene graph's registry
+  remembers vanished rooms for the episode (`REGISTRY_MEMORY_TICKS` 1000, bounded to 48 masks). The
+  Allensville spawn room was R0 -> R1 -> (merged) R0 -> R2 across steps 0-44 while the hallway the
+  agent walked into carried R0 and its "entered" record.
+
+### Added (2026-10-05)
 - **The sight ledger** (`objnav_benchmark_runtime/methods/sightlines.py`, `SightSettings`,
   2026-10-05): every action the camera's cone is cast over the map it has just updated; an
   unknown cell a ray ends at inside the floor's visible band (beyond the blind radius, within
