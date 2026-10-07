@@ -558,6 +558,24 @@ def test_budget_spent_ends_the_room_at_once_and_is_productive():
     assert sup._attempts.get(1) is None
 
 
+def test_route_failed_in_search_ends_the_room_as_unreachable_and_charges_an_attempt():
+    """The visit cannot reach its own point inside the room (the scan's vantage, with the agent let
+    into SEARCH by the arrival tolerance while its cell is outside the mask). Before 2026-10-07 the
+    flag was dropped outside TRANSIT and the room stayed in force for the whole visit bound while
+    the fallback drove. Exhausted still beats it: a room with nothing left is finished."""
+    sup = arrived_in_room_one()
+    out = sup.update(TWO_ROOMS, facts(r1=3, r2=2), (10.0, 0.0), now=2.0,
+                     last_plan_s=1.0, route_failed=True)
+    assert isinstance(out.action, Release)
+    assert out.action.verdict == UNREACHABLE and out.completed == (1, UNREACHABLE)
+    assert out.state == SELECT and out.rooms_done == 0
+    assert sup.stats["plan_fails"] == 1 and sup._attempts.get(1) == 1
+    sup = arrived_in_room_one()
+    out = sup.update(TWO_ROOMS, facts(r1=0, r2=2), (10.0, 0.0), now=2.0,
+                     last_plan_s=1.0, route_failed=True, frontier_exhausted=True)
+    assert out.action.verdict == EXHAUSTED
+
+
 def test_budget_spent_is_ignored_outside_search():
     sup = supervisor(solver=fixed_solver(1, 2))
     sup.update(TWO_ROOMS, facts(r1=3), HERE, now=0.0, last_plan_s=0.0)

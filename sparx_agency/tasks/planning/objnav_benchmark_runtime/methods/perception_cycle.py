@@ -11,6 +11,7 @@ import requests
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import DETECTOR
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import DetectorFrameError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import deduplicate_detections
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box, observed_objects, STAIR_LABELS
 
@@ -95,9 +96,11 @@ class PerceptionCycle:
         try:
             self.raw = tuple(p.detector.detect(obs.rgb))
         except Exception as exc:  # the detector service, not this frame's geometry
-            if isinstance(exc, ObjNavInternalError) and not isinstance(exc.__cause__, requests.RequestException):
-                # Not a transport failure: the service's vocabulary, model or configuration
-                # changed under the evaluation. That ends the run; a back-off would fly on.
+            if isinstance(exc, ObjNavInternalError) and not isinstance(
+                    exc.__cause__, (requests.RequestException, DetectorFrameError, ValueError, KeyError)):
+                # Not a transport or frame failure: the service's vocabulary, model or
+                # configuration changed under the evaluation. That ends the run; a back-off
+                # would fly on. A malformed reply for ONE frame is a frame failure.
                 raise
             retry = p.fallback.note_service_failure(obs, DETECTOR, exc)
             self.raw = self.detections = ()

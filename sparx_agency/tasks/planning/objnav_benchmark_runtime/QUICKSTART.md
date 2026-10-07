@@ -1,5 +1,10 @@
 # Gibson ObjectNav — end-to-end quick start
 
+> **Running the published 1,000-episode Gibson val benchmark?** Use the one-click script
+> and its guide instead: [`gibson/BENCHMARK.md`](gibson/BENCHMARK.md)
+> (`gibson/run_benchmark.sh`). This file is the step-by-step manual behind it and the
+> guide to the multi-storey *development* campaigns.
+
 Run the full ObjectNav pipeline in the Habitat simulator on licensed Gibson
 buildings: observed RGB-D mapping → YOLO-World detections → room scene graph →
 room LLM (P(target) per room) → RPT\* room order → room-search loop with A\*

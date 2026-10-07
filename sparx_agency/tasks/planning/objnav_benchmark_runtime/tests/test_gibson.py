@@ -111,7 +111,12 @@ def test_fmm_matches_reference_computation(semantic):
     assert field.distance((1, 0, 0)) == 0  # exactly on success boundary
     assert field.map_cell((1, 0, 1)) == (60, 60)
     with pytest.raises(ValueError, match="outside"):
-        field.distance((-2.001, 0, 1))  # never numpy negative-index wrapping
+        field.map_cell((-2.001, 0, 1))  # never numpy negative-index wrapping
+    with pytest.raises(ValueError, match="outside"):
+        field.distance((-2.001, 0, 1), start=True)  # a published start off the map is a data error
+    sentinel = float(np.max(reference)) * PROTOCOL.map_resolution_m
+    assert field.distance((-2.001, 0, 1)) == sentinel, "an agent off the map reads unreachable, never aborts the run"
+    assert field.map_cell_or_none((-2.001, 0, 1)) is None
 
 
 def test_depth_encoding_and_coordinate_axes():

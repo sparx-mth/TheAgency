@@ -49,7 +49,7 @@ class GibsonEnv(ObjNavEnv):
         """Optional local NavMesh geometry service, separate from evaluator data."""
         return getattr(self._simulator, "project_target", None)
 
-    @lru_cache(maxsize=4)
+    @lru_cache(maxsize=8)      # six categories per scene: every field of a scene stays resident
     def _field(self, scene, floor_id, category_index):
         episode = next(e for e in self._dataset.episodes.values()
                        if (e.scene, e.floor_id, e.category_index) == (scene, floor_id, category_index))

@@ -1,7 +1,8 @@
 """One bounded schema repair around the node oracle's own scoring."""
 from __future__ import annotations
 
-from sparx_agency.core.mapping.topology.search_node_oracle import HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, SearchNodeOracle
+from sparx_agency.core.mapping.topology.search_node_oracle import (
+    HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, SearchNodeOracle, system_prompt)
 
 
 class RepairingNodeOracle(SearchNodeOracle):
@@ -27,13 +28,14 @@ class RepairingNodeOracle(SearchNodeOracle):
         self.repair_attempts += 1
         user = self.prompt(target, nodes, context)
         user += ('\nYour previous answer did not satisfy the schema. Return exactly '
-                 '{"home_here":"found|missing|elsewhere","nodes":[{"id":0,"why":"brief reason","p":50}, ...]} '
+                 '{"home":"...","house":"...","stage":"...","pass":"first|second",'
+                 '"nodes":[{"id":0,"why":"brief reason","p":50}, ...]} '
                  'with one entry per actual node id from the input (not the example id), '
                  'independent integer p values in 0-100 (do not normalise across nodes), '
                  'and nothing outside the JSON object.')
         reply, repaired = None, None
         try:
-            reply = self.ask(user)
+            reply = self.ask(user, system_prompt(nodes, context))
             repaired = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
         except Exception:
             repaired = None

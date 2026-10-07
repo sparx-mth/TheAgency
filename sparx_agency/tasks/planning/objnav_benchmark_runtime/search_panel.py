@@ -114,6 +114,13 @@ def _header(col, search):
     reading = search.get("reading") or {}
     if reading.get("home"):
         col.line("LLM: home = %s" % reading["home"], GREY)
+    if reading.get("house"):
+        col.line("LLM: house = %s" % reading["house"], GREY)
+    if reading.get("stage"):
+        col.line("LLM: stage = %s" % reading["stage"], GREY)
+    if reading.get("pass"):
+        col.line("LLM: pass = %s%s" % (reading["pass"].upper(),
+                                        " -- finished rooms are nodes again" if reading["pass"] == "second" else ""), GREY)
     if reading.get("storey"):
         col.line("LLM: storey = %s" % reading["storey"], GREY)
     if reading.get("home_here"):

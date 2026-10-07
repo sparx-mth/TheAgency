@@ -258,16 +258,43 @@ class OpeningRegistry:
         return index
 
     def peeked(self, floor: int, xy: Tuple[float, float]) -> bool:
-        return any(math.dist(record["xy"], xy) <= self.done_m for record in self._peeked.get(int(floor), ()))
+        """Whether a completed peek already covers ``xy``: within ``done_m`` of its threshold, or inside what it looked at.
 
-    def mark_peeked(self, floor: int, xy: Tuple[float, float], step: int, why: str = "looked") -> None:
+        A look from a threshold reveals one to three metres of floor beyond
+        it, and the frontier then sits that far past the old threshold --
+        through the same door. Before 2026-10-07 that re-snapped seed was a
+        new opening (``match_m`` away from the old one) and bought another
+        walk and look at the same doorway; the Allensville toilet run peeked
+        twenty openings that way. A seed inside the cone a completed look
+        swept (``heading`` +/- ``cone_rad``, out to ``looked_m``) is covered
+        by that look.
+        """
+        for record in self._peeked.get(int(floor), ()):
+            dx, dy = float(xy[0]) - record["xy"][0], float(xy[1]) - record["xy"][1]
+            distance = math.hypot(dx, dy)
+            if distance <= self.done_m:
+                return True
+            heading = record.get("heading")
+            if heading is None or distance > float(record.get("looked_m", 0.0)):
+                continue
+            if abs(normalize_angle(math.atan2(dy, dx) - heading)) <= float(record.get("cone_rad", 0.0)):
+                return True
+        return False
+
+    def mark_peeked(self, floor: int, xy: Tuple[float, float], step: int, why: str = "looked",
+                    heading: Optional[float] = None, cone_rad: float = 0.0, looked_m: float = 0.0) -> None:
+        """Remember a finished peek at ``xy``; with ``heading``, the cone it looked into counts as peeked too."""
         self._peeked.setdefault(int(floor), []).append(
-            {"xy": (float(xy[0]), float(xy[1])), "step": int(step), "why": str(why)})
+            {"xy": (float(xy[0]), float(xy[1])), "step": int(step), "why": str(why),
+             "heading": None if heading is None else float(heading), "cone_rad": float(cone_rad),
+             "looked_m": float(looked_m)})
 
     def diagnostics(self) -> Dict:
         return {"known": {str(f): {str(i): [round(v, 2) for v in xy] for i, xy in known.items()}
                           for f, known in self._known.items()},
-                "peeked": {str(f): [dict(r, xy=[round(v, 2) for v in r["xy"]]) for r in records]
+                "peeked": {str(f): [dict(r, xy=[round(v, 2) for v in r["xy"]],
+                                         heading=None if r.get("heading") is None else round(r["heading"], 3))
+                                    for r in records]
                            for f, records in self._peeked.items()}}
 
 

@@ -6,6 +6,31 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **LLM-first node oracle for the single-storey benchmark** (`core/mapping/topology/search_node_oracle.py`,
+  `objnav_benchmark_runtime/methods/{house_context,room_search_loop,scene_graph}.py`, 2026-10-07): the 14B
+  model is shown EVERY room of the storey -- finished and type-excluded ones included, each with
+  `status=never_entered|entered|scanned(<how>, <ago>)` -- and a HOUSE line (room types found with their
+  status, rooms unidentified, openings unlooked, whether frontier is reachable, `actions used about N of
+  500`), and asked to reason as a person who knows homes does (where the target lives, incl. an en-suite
+  toilet reached through a bedroom and a television in a living room then a bedroom, never a bathroom;
+  what the rooms found imply for the unidentified ones -- one kitchen, one living room; and how the
+  budget weighs: unexplored first, scanned home-type rooms late) before any number, writing `home`,
+  `house`, `stage` and a `pass` verdict (`first`/`second`). Under `second` (or a floor with no unfinished
+  room, exit or frontier) finished rooms are nodes again and a revisit scans from a spot
+  `LoopSettings.revisit_standoff_m` (1.5 m) from the earlier scan points (`second_pass`,
+  `second_pass_forced`, `revisits_*` stats). The three arithmetic floors (`unexplored_floor`,
+  `unexplored_elsewhere`, `home_floor`) and the hard type exclusion (`type_prior`) are OFF by default; the
+  storey/stairs rules became a `STAIRS_SUPPLEMENT` shown only when a staircase is a node. The reasoning
+  model is not spent on a loop point with nothing offerable (`oracle_calls_skipped`), in `reconsider()`
+  too. `tests/probe_node_oracle.py`: five single-storey scenarios, all five pass on `qwen2.5:14b-instruct`.
+- **One-click Gibson benchmark** (`objnav_benchmark_runtime/gibson/run_benchmark.sh`, `BENCHMARK.md`,
+  `gibson/progress.py`, `gibson.run --lean --progress-file`): services up (Ollama docker/native/external,
+  the CPU YOLO-World detector), preflight, the 1,000 published episodes with LEAN records (the scores
+  and the counters that explain an outcome, ~10 KB per episode instead of ~100 KB), a console progress
+  bar per episode, `progress.json` rewritten atomically after every episode (done/total, ETA, the
+  episode in progress, running SR/SPL/SoftSPL/DTG overall, per scene and per category), `--status DIR`
+  and `--summary`, automatic resume into an existing `--output`, services down on exit. The README
+  covers install, data, weights, one episode, the full split, sharding, reading the results.
 - **The context check on a target candidate** (`objnav_benchmark_runtime/methods/target_context.py`,
   `TargetClosingSettings.context_*`, 2026-10-07): a box whose footprint lies in a room whose STRONG
   type the target is not searched for in (`room:kitchen`), or whose measured centroid height
@@ -51,6 +76,35 @@ future-you, not for a commit log.
   objnav packages; 1891 before).
 
 ### Fixed
+- **The 1,000-episode run no longer dies on the kinematic contract** (`objnav_benchmark/{kinematics,
+  env_contract,runner}.py`, `gibson/protocol.py`, 2026-10-07): published starts lie up to 0.28 m below
+  the shipped navmesh and habitat-sim settles the agent on its first TRANSLATION (turns bypass the
+  navmesh filter); `KinematicTolerance.settle_m` (0.30 for Gibson) takes that off the first moving
+  action additively, and `climb_m` is 0.60 for Gibson because the evaluated storey itself steps up to
+  0.50 m on one stride (treads, split levels; the 0.20 m bound refused ~1 step in 300). An agent position
+  off the floor map reads as the unreachable sentinel instead of raising; `merge_runs` refuses
+  diagnostic shards and compares `target_override`/`publishable`/`kinematics`.
+- **Target closing** (`methods/target_closing.py`): a near candidate (inside 2 m) released from the spot
+  the agent still stands on is refused until it moves (the rejection memory records where the agent
+  stood; `same_spot_rejections`), a suspect candidate may step inside the terminal range to earn its
+  second viewpoint, a locked target without a path is kept in frame instead of the idle hold that the
+  headless agent executed as a turn (233 reversals in one Darden episode), and a frame the detector did
+  not see is NO evidence: the chain is carried, the clocks pause (`blind_frames`) -- before, a transient
+  detector failure released a correct lock with a 2 m rejection around the real target.
+- **Perception**: a malformed detector reply for one frame is a frame failure (`DetectorFrameError`,
+  back-off) rather than the end of the run; only identity drift (vocabulary/model) still is. The
+  per-frame `/health` GET is gone (the `/detect` reply echoes the identity). An LLM request that runs
+  into its timeout is never retried (one hung call cost 20 minutes).
+- **Room-search loop**: a SEARCH-state `route_failed` (the scan's vantage unreachable with the agent let
+  in by the arrival tolerance) now ends the turn `unreachable` instead of being dropped for 36 actions of
+  blind fallback; a completed peek covers the cone it looked into, so the frontier it reveals through
+  the same door is not a new opening (the "twenty openings" drain); the vantage-point EDT runs on the
+  room's bounding box; the map-edge `ValueError` is caught inside the fallback guard.
+- **Half-levels** (`methods/spawn_floor_guard.py`, `core/planning/exploration/floor_atlas.py`): a settled
+  plateau 0.5-1.5 m off the spawn plane that the atlas read as a landing for ever (Klickitat: 361 idle
+  turns) is adopted as a level of the spawn storey after 30 actions (`FloorAtlas.adopt_level`,
+  `half_level_adopted`); the storey below is not a drop, goals on the level are allowed; a plateau a
+  storey away stays confined.
 - **Classes never merge in the landmark map, and same-class instances are told apart by size**
   (`core/mapping/objects/landmarks.py`, `floor_context.new`, `RPTSettings.landmark_dedupe_radius_m`
   0.35 / `landmark_footprint_iou` 0.25, 2026-10-07): the ObjectNav map no longer takes the class vote

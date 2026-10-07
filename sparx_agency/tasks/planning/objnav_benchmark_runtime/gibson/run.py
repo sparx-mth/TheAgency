@@ -21,6 +21,8 @@ from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import (
+    LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
 
 
@@ -58,6 +60,12 @@ def parser():
     p.add_argument("--target-override", choices=CATEGORIES,
                    help="DIAGNOSTIC: the category the agent searches for instead of the published goal; "
                         "scoring stays against the published goal and the run is marked non-publishable")
+    p.add_argument("--lean", action="store_true",
+                   help="Keep only the counters that explain an outcome in each episode row (no per-action "
+                        "series or event logs): ~100 KB -> a few KB per episode; the scores are untouched")
+    p.add_argument("--progress-file", type=Path,
+                   help="Where the live progress JSON is rewritten after every episode "
+                        "(default: <output>/progress.json)")
     return p
 
 
@@ -216,6 +224,7 @@ def prepare(args):
               "full_split": args.scene is None and args.limit is None and args.shards == 1,
               "target_override": args.target_override,
               "publishable": args.target_override is None and method.get("publishable", True),
+              "lean_records": bool(args.lean),
               "dataset": dataset.manifest() if dataset else None}
     return env, policy, config, issues
 
@@ -239,35 +248,40 @@ def main(argv=None, *, configuration_guard=None):
             return 0
         _gpu_gate(args)
         output = args.output or default_run_dir("gibson", "val")
-        recorder = None
-        if args.record:
-            from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import EpisodeRecorder, PolicyProbe, RecordingAgent, RecordingEnv
-            from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_live_page
-            output.mkdir(parents=True, exist_ok=True)
-            write_live_page(output)
-            recorder = EpisodeRecorder(output, policy, fps=args.video_fps)
-            probe = PolicyProbe(policy)
-            agent = RecordingAgent(HeadlessObjNavAgent(probe, gibson_label_mapper(), name=policy.name), probe, recorder)
-            env = RecordingEnv(env, recorder)
-        else:
-            agent = HeadlessObjNavAgent(policy, gibson_label_mapper(), name=policy.name)
-
-        def progress(i, n, row):
-            # Evaluator-only sidecar: not injected into agent_info or observations.
-            base = getattr(env, "env", env)
-            diagnostics = base.evaluation_diagnostics()
-            with (output / "evaluation_diagnostics.jsonl").open("a") as stream:
-                stream.write(json.dumps(dict(diagnostics, episode_id=row.episode_id), allow_nan=False) + "\n")
-            if recorder is not None:
-                recorder.complete(row)
-            print("%d/%d %s SR=%d SPL=%.3f DTG=%s SoftSPL=%.3f" %
-                  (i, n, row.episode_id, row.success, row.spl, row.distance_to_goal_m, row.soft_spl), flush=True)
-
+        agent_class = LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent
         with MetricsLogger(output, config, resume=args.resume) as logger:
+            tracker = ProgressTracker(args.progress_file or (output / "progress.json"),
+                                      len(config["selected_episode_ids"]), completed=logger.records,
+                                      label="gibson val%s" % (" (%s)" % args.scene if args.scene else ""))
+            scored = env                                  # the scorer underneath every wrapper
+            env = ProgressEnv(env, tracker)
+            recorder = None
+            if args.record:
+                from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import EpisodeRecorder, PolicyProbe, RecordingAgent, RecordingEnv
+                from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_live_page
+                output.mkdir(parents=True, exist_ok=True)
+                write_live_page(output)
+                recorder = EpisodeRecorder(output, policy, fps=args.video_fps)
+                probe = PolicyProbe(policy)
+                agent = RecordingAgent(agent_class(probe, gibson_label_mapper(), name=policy.name), probe, recorder)
+                env = RecordingEnv(env, recorder)
+            else:
+                agent = agent_class(policy, gibson_label_mapper(), name=policy.name)
+
+            def progress(i, n, row):
+                # Evaluator-only sidecar: not injected into agent_info or observations.
+                diagnostics = scored.evaluation_diagnostics()
+                with (output / "evaluation_diagnostics.jsonl").open("a") as stream:
+                    stream.write(json.dumps(dict(diagnostics, episode_id=row.episode_id), allow_nan=False) + "\n")
+                if recorder is not None:
+                    recorder.complete(row)
+                print(tracker.update(i, n, row), flush=True)
+
             summary = run_benchmark(env, agent, logger=logger, episode_ids=config["selected_episode_ids"],
                                     on_agent_error="record", require_stop_for_success=False,
                                     path_length_dimension="planar", path_length_epsilon_m=PROTOCOL.path_length_epsilon_m,
                                     kinematics=PROTOCOL.kinematics(), progress=progress)
+            tracker.finish()
         from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.report import write_report
         write_report(output)
         if args.record:

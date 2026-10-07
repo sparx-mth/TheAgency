@@ -97,11 +97,17 @@ class RPTSearchPolicy:
                 "target_closing": asdict(self.settings.target_closing),
                 "target_navmesh_projection": self.target_projector is not None,
                 "room_visit": ("vantage point + full rotation; a scanned room (or one a scan saw more than half of) "
-                               "is finished for the episode, and so is a room with no live frontier that the camera "
-                               "looked into or walked through, or that is a doorless fragment under %.1f m2; rooms whose "
-                               "STRONG type label cannot hold the target -- with no home object of the target inside -- "
-                               "are not nodes; one signature object (a bed, a toilet, an oven) makes a label strong"
-                               % self.loop_settings.fragment_max_m2
+                               "is finished for the first pass, and so is a room with no live frontier that the camera "
+                               "looked into or walked through, or that is a doorless fragment under %.1f m2; finished "
+                               "rooms are shown to the oracle with their status and offered again%s once its pass "
+                               "verdict says the home is covered (a revisit scans from a spot at least %.1f m from the "
+                               "earlier scan points); rooms whose STRONG type label cannot hold the target are %s; "
+                               "one signature object (a bed, a toilet, an oven) makes a label strong"
+                               % (self.loop_settings.fragment_max_m2,
+                                  "" if self.loop_settings.second_pass else " (DISABLED: second_pass off)",
+                                  self.loop_settings.revisit_standoff_m,
+                                  "not nodes (type_prior on)" if self.loop_settings.type_prior
+                                  else "valued by the oracle like every other room (type_prior off)")
                                if self.loop_settings.scanning else "bounded frontier sweep of %d actions" % self.loop_settings.local_steps),
                 "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
                                   "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
@@ -109,11 +115,11 @@ class RPTSearchPolicy:
                                   % DEFAULT_SEGMENTATION.door_snap_reach_m,
                 "openings": ("doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs, "
                              "visited by a peek (threshold, face the unknown, one look to each side) priced at %d actions; "
-                             "an opening nothing was glimpsed through, like a never-entered unknown room, is read at no "
-                             "less than p=%.2f (the uncertainty floor) while the oracle's home_here is found or missing, "
-                             "and at p=%.2f exactly when it says the home type lives on another storey"
-                             % (self.loop_settings.openings.service_steps, self.loop_settings.unexplored_floor,
-                                self.loop_settings.unexplored_elsewhere)
+                             "valued by the oracle (uncertainty floor %s, elsewhere value %s, home floor %s)"
+                             % (self.loop_settings.openings.service_steps,
+                                "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor,
+                                "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere,
+                                "off" if not self.loop_settings.home_floor else "p=%.2f" % self.loop_settings.home_floor)
                              + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
                                 "visited by the same peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
                                                                             self.loop_settings.openings.landmark_standoff_m)
@@ -123,10 +129,18 @@ class RPTSearchPolicy:
                                     "initially classified, scanned and previously peeked rooms are exempt"
                                     if self.settings.doorway_peek.gate_floor_departure else
                                     "none: a floor change is the RPT* order's or the fallback rule's to take at any time"),
-                "node_oracle": {"nodes": "rooms of the floor in force + its staircases" + (
+                "node_oracle": {"nodes": "every room of the floor in force (finished and type-excluded ones shown with "
+                                         "their status) + its staircases" + (
                                     " + its openings" if self.loop_settings.openings.enabled else ""),
-                                "asks": "independent P(searching there finds target), without a fixed action horizon",
+                                "asks": "independent P(searching there finds target), without a fixed action horizon; "
+                                        "the model is briefed with the HOUSE line (room types found, rooms unidentified, "
+                                        "openings unlooked, actions used of the budget) and writes home/house/stage and a "
+                                        "first|second pass verdict before the numbers (LLM-first, 2026-10-07)",
                                 "probability_model": "independent_search_success",
+                                "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor,
+                                                "unexplored_elsewhere": self.loop_settings.unexplored_elsewhere,
+                                                "home_floor": self.loop_settings.home_floor},
+                                "second_pass": self.loop_settings.second_pass, "type_prior": self.loop_settings.type_prior,
                                 "route": "LLM_REASONING_MODEL", "cadence": "loop points and semantic discovery; unchanged prompts reused"},
                 "floor_change_decision": ("RPT* over rooms and stair nodes; a staircase is charged its flight plus "
                                           "%.1f m on every arc; no allowance, no clock; the explicit floor_decision "
@@ -332,8 +346,17 @@ class RPTSearchPolicy:
         started = time.monotonic()
         floor_revision = self.mapping.floor_revision
         transition = self.building.transition if self.building else None
-        world = self.mapping.update(observation, integrate=not (self.building and self.building.traversing),
-                                    arrival_allowed=transition.arrival_allowed if transition else True)
+        try:
+            world = self.mapping.update(observation, integrate=not (self.building and self.building.traversing),
+                                        arrival_allowed=transition.arrival_allowed if transition else True)
+        except ValueError as exc:
+            # The agent walked within the camera's range of the 80 m map's edge: the frame
+            # cannot be integrated, but the episode goes on with the map as it stands
+            # (review of 2026-10-07: this raise stood outside the fallback's guard).
+            if self.last_world is None:
+                raise
+            self.fallback.record_failure(observation, "mapping", exc)
+            world = self.last_world
         world = self._confine(observation, world)
         self.telemetry.latencies["mapping"].append((time.monotonic() - started) * 1000)
         if self.mapping.floor_revision != floor_revision:

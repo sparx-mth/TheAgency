@@ -42,9 +42,10 @@ See [runtime architecture](../README.md), [FALCON mapping](BOUNDED_FALCON.md),
 
 ## Data and running
 
-End-to-end setup and the exact command sequence (environments, downloads, services,
-episodes, campaign) are in [../QUICKSTART.md](../QUICKSTART.md); this section holds the
-protocol detail behind them.
+The one-click benchmark -- install, one episode, all 1,000, progress, results -- is
+[BENCHMARK.md](BENCHMARK.md) (`run_benchmark.sh`). The step-by-step command sequence for
+the development campaigns is in [../QUICKSTART.md](../QUICKSTART.md); this section holds
+the protocol detail behind both.
 
 Use licensed local Gibson meshes/navmeshes and the released ObjectNav episode
 annotations. `.glb.json.gz` rows in scene archives are dummy PointNav metadata,

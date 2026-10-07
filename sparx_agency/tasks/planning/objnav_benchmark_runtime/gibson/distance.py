@@ -44,18 +44,40 @@ class GibsonDistanceField:
 
         Map origin is (Habitat Z, Habitat X), in centimetres in val_info.pbz2.
         This is NOT our public ENU frame. Negative indices must not wrap.
+
+        Raises:
+            ValueError: When the position lies outside the floor map.
         """
+        cell = self.map_cell_or_none(habitat_position)
+        if cell is None:
+            raise ValueError("Habitat position is outside its Gibson floor map")
+        return cell
+
+    def map_cell_or_none(self, habitat_position):
+        """:meth:`map_cell`, or None when the position lies outside the floor map."""
         x, _, z = habitat_position
         col_f = (z - self.origin_m[0]) * 20.0
         row_f = (x - self.origin_m[1]) * 20.0
         h, w = self.cells.shape
         if not (0 <= row_f < h and 0 <= col_f < w):
-            raise ValueError("Habitat position is outside its Gibson floor map")
+            return None
         return int(row_f), int(col_f)
 
     def distance(self, habitat_position, start=False):
-        """Reference DTG/DTS in metres, including the upstream finite sentinel."""
-        cell = self.map_cell(habitat_position)
+        """Reference DTG/DTS in metres, including the upstream finite sentinel.
+
+        A published ``start`` outside the floor map is a data error and
+        raises; an agent position outside it during or after the episode
+        (none of 60,000 navigable samples per scene falls outside, but the
+        contract must hold for every step of a 1,000-episode run) reads as
+        the reference's unreachable sentinel -- the farthest value the map
+        holds -- rather than aborting the run (since 2026-10-07).
+        """
+        cell = self.map_cell_or_none(habitat_position)
+        if cell is None:
+            if start:
+                raise ValueError("Published start is outside its Gibson floor map")
+            return float(self.cells.max()) * PROTOCOL.map_resolution_m
         return float(self.cells[cell]) * PROTOCOL.map_resolution_m
 
     def start_uses_sentinel(self, habitat_position):

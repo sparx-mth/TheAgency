@@ -64,8 +64,25 @@ class GibsonProtocol:
         between two valid navmesh points near a sliding boundary (observed in
         Wiconisco). Keep a finite bound, all turn/heading checks, and the
         independently recomputed path-length check rather than disabling them.
+
+        ``settle_m`` and ``climb_m`` (since 2026-10-07): some published v1.1
+        starts lie off the shipped navmesh surface -- up to 0.28 m below it
+        (Wiconisco/000003; Darden/000000 is 0.10 m below), thirty of them
+        by more than 0.15 m -- and habitat-sim 0.2.4 settles the agent onto
+        the mesh on its first TRANSLATION (turns bypass the navmesh filter),
+        a vertical move the agent did not make. Up to 0.30 m of it is taken
+        off that one action before the bounds are judged. And the evaluated
+        storey itself is not flat: steps measured on the shipped navmeshes
+        climb up to 0.50 m on one 0.25 m stride (Collierville, Wiconisco:
+        treads and split levels inside the storey band) in about one step
+        in three hundred, where the default 0.20 m bound -- Habitat's one
+        stair riser -- refused them. Without both the contract refused the
+        episode and, through the runner, the whole run, and a resume
+        replayed the refusal. Starts are still never snapped by us, and
+        the horizontal bounds (step 0.30 m, heading 90 degrees; 100k
+        sampled steps gave 0.287 m / 77 degrees at most) stand.
         """
-        return KinematicTolerance(heading_deg=90.0, forward_overshoot_m=0.05)
+        return KinematicTolerance(heading_deg=90.0, forward_overshoot_m=0.05, settle_m=0.30, climb_m=0.60)
 
 
 PROTOCOL = GibsonProtocol()

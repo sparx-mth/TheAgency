@@ -329,7 +329,7 @@ class ObservedSceneGraph:
         return labels
 
     def reason(self, world, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0,
-               exclude=()):
+               exclude=(), scanned=None):
         """Value every node from the observations so far, without inventing a partition change.
 
         Args:
@@ -338,17 +338,20 @@ class ObservedSceneGraph:
             step: The current action.
             extra_nodes: :class:`SearchNode` s beyond the rooms -- the
                 staircases the loop offers -- valued in the same call.
-            context: :class:`~search_node_oracle.SearchContext` on the storeys.
+            context: :class:`~search_node_oracle.SearchContext` on the home.
             here_xy: The agent's position, to mark the room it stands in.
             action_time_s: Seconds per action, to phrase "last inside N ago".
-            exclude: Room pids NOT shown to the model -- rooms the search has
-                finished or ruled out by type. They keep a probability of 0.0
-                so nothing downstream reads them as unvalued; the storey
-                summary still names their types.
+            exclude: Room pids NOT shown to the model. They keep a
+                probability of 0.0 so nothing downstream reads them as
+                unvalued. Empty since the LLM-first loop of 2026-10-07: every
+                room is shown with its status and the model values it.
+            scanned: ``{pid: (how, ago_s)}`` -- the rooms the scan ledger has
+                finished, in the prompt's words, and how long ago; rendered
+                as ``status=scanned(<how>, <ago>)`` on the node line.
         """
         if self.registry.rooms:
             self._reason(world, self._objects, target, step, False, extra_nodes, context, here_xy, action_time_s,
-                         exclude=exclude)
+                         exclude=exclude, scanned=scanned)
 
     def _door_links(self, world, pid_labels, doors, cells):
         cut = int(round(self.segmentation.door_cut_m / world.resolution))
@@ -387,13 +390,14 @@ class ObservedSceneGraph:
         radius = float(getattr(landmark, "radius_m", None) or 0.0)
         return room_near_cell(labels, world, landmark.xy, radius + OBJECT_ROOM_REACH_M)
 
-    def nodes(self, world, step, here_xy=None, action_time_s=1.0, exclude=()):
+    def nodes(self, world, step, here_xy=None, action_time_s=1.0, exclude=(), scanned=None):
         """Every room as a :class:`SearchNode`, with the facts the oracle values it by."""
         labels = self.label_tracker.labels
         metadata = self.label_tracker.metadata
         here = self.room_at(world, here_xy) if here_xy is not None else None
         excluded = set(int(pid) for pid in exclude)
         is_home = getattr(self, "home_object", None)
+        scanned = scanned or {}
         out = []
         for pid, room in self.registry.rooms.items():
             if pid in excluded:
@@ -401,6 +405,7 @@ class ObservedSceneGraph:
             fact = self.facts.get(pid)
             inside = self.last_inside.get(pid)
             objects = tuple(self._objects.get(pid, ()))
+            finished = scanned.get(pid)
             out.append(SearchNode(
                 id=pid, kind=ROOM, label=labels[pid].label if pid in labels else "unknown",
                 tentative=metadata.get(pid, {}).get("strength") == "weak",
@@ -409,15 +414,17 @@ class ObservedSceneGraph:
                 searched_s=float(self.searched.get(pid, 0.0)),
                 last_inside_ago_s=None if inside is None else max(0.0, (int(step) - inside) * action_time_s),
                 here=(pid == here), objects=objects,
-                home=bool(is_home is not None and any(is_home(name) for name in objects))))
+                home=bool(is_home is not None and any(is_home(name) for name in objects)),
+                scanned=None if finished is None else str(finished[0]),
+                scanned_ago_s=None if finished is None or finished[1] is None else max(0.0, float(finished[1]))))
         return out
 
     def _reason(self, world, objects, target, step, changed, extra_nodes=(), context=None, here_xy=None,
-                action_time_s=1.0, exclude=()):
+                action_time_s=1.0, exclude=(), scanned=None):
         rooms = self.registry.rooms
         try:
             labels = self.label_tracker.update(objects, step, changed)
-            nodes = self.nodes(world, step, here_xy, action_time_s, exclude=exclude) + list(extra_nodes)
+            nodes = self.nodes(world, step, here_xy, action_time_s, exclude=exclude, scanned=scanned) + list(extra_nodes)
             if not nodes:
                 # Every room finished or ruled out and no staircase to offer:
                 # nothing to ask. The probabilities read zero and the loop's
@@ -428,7 +435,8 @@ class ObservedSceneGraph:
                                            prob=0.0, xy=room.centroid) for pid, room in rooms.items()]
                 self.last_reasoning = {"labels": {str(pid): item for pid, item in self.label_tracker.metadata.items()},
                                        "oracle": {"probs": {}, "reasons": {}, "p_present": 0.0, "elsewhere": 1.0,
-                                                  "source": "no_nodes", "reused": False, "omitted": [], "reading": {}},
+                                                  "source": "no_nodes", "reused": False, "omitted": [], "reading": {},
+                                                  "pass_verdict": None},
                                        "doors": self.doors, "nodes": [], "excluded": sorted(int(p) for p in exclude),
                                        "label_history": list(self.label_tracker.history),
                                        "partition_revision": self.partition_revision}

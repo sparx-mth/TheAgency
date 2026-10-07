@@ -301,6 +301,14 @@ class LLMClient:
     def _post_with_retry(self, url: str, payload: Dict[str, Any],
                          extra_headers: Optional[Dict[str, str]] = None,
                          tries: int = 2, timeout_s: Optional[float] = None):
+        """POST ``payload``; a transient transport error is retried once, a timeout never.
+
+        A request that ran into its timeout was not a blip: the model is
+        still generating (or the server is wedged), and a second attempt
+        costs the whole timeout again -- 20 minutes per node-oracle call at
+        the reasoning route's 600 s (review of 2026-10-07). The caller's
+        back-off handles a slow or dead service; here the timeout is final.
+        """
         headers = {"Content-Type": "application/json"}
         if extra_headers:
             headers.update(extra_headers)
@@ -313,6 +321,8 @@ class LLMClient:
                                    timeout=timeout)
                 r.raise_for_status()
                 return r
+            except requests.Timeout as e:
+                raise RuntimeError(f"LLM request timed out after {timeout:.0f}s (not retried): {e}") from e
             except requests.RequestException as e:
                 last_err = e
                 if attempt + 1 < tries:

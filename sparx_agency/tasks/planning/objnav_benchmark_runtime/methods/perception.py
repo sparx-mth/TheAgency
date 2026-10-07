@@ -15,6 +15,17 @@ from sparx_agency.tasks.mapping.scene_graph.serve.contract import detections_fro
 STAIR_LABELS = frozenset(("stairs", "staircase"))
 
 
+class DetectorFrameError(ValueError):
+    """One frame's reply was unusable (shape, hash, a malformed box): the frame fails, the run goes on.
+
+    Distinct from the identity drift ``HttpDetector`` raises as
+    ``ObjNavInternalError`` (another vocabulary, model or configuration
+    answering), which ends the run: a malformed box in one of half a million
+    frames is a frame failure for the detector back-off, not a reason to
+    abandon a thousand episodes (review of 2026-10-07).
+    """
+
+
 class HttpDetector:
     """Pin vocabulary/model/configuration without reconfiguring shared services."""
     def __init__(self, url, vocabulary, timeout_s=30.0, expected_backend=None):
@@ -51,34 +62,46 @@ class HttpDetector:
     def detect(self, rgb):
         self.last_detections, self.last_diagnostics = (), {}
         try:
-            self.health()
+            if self._identity is None:
+                # One identity check; every /detect reply echoes classes and metadata,
+                # which are checked below, so a GET per frame bought nothing.
+                self.health()
             body = encode_frame(np.ascontiguousarray(rgb[..., ::-1]))
             response = self.session.post(self.url + "/detect", data=body,
                                          headers={"Content-Type": "image/jpeg"}, timeout=self.timeout_s)
             response.raise_for_status()
             data = response.json()
-            if (data.get("h"), data.get("w")) != rgb.shape[:2]:
-                raise ValueError("Detector boxes do not refer to the submitted frame")
+            if not isinstance(data, dict):
+                raise DetectorFrameError("Detector reply is not a JSON object")
             if tuple(data.get("classes", ())) != self.vocabulary or data.get("metadata") != self._identity["metadata"]:
-                raise ValueError("Detector was reconfigured during inference")
+                # Identity drift: another vocabulary, model or configuration is answering.
+                raise ObjNavInternalError("Detector service failed: Detector was reconfigured during inference "
+                                          "(vocabulary or model configuration changed)")
+            if (data.get("h"), data.get("w")) != rgb.shape[:2]:
+                raise DetectorFrameError("Detector boxes do not refer to the submitted frame")
             request_hash = data.get("request_sha256")
             verified = self._identity["metadata"].get("backend") in ("grounded_vlm", "hybrid")
             if (verified or request_hash is not None) and request_hash != hashlib.sha256(body).hexdigest():
-                raise ValueError("Detector verification belongs to a different submitted frame")
+                raise DetectorFrameError("Detector verification belongs to a different submitted frame")
             diagnostics = data.get("diagnostics", {})
             if not isinstance(diagnostics, dict) or (verified and diagnostics.get("mode") != self._identity["metadata"]["backend"]):
-                raise ValueError("Invalid detector verification diagnostics")
-            detections = detections_from_json(data["detections"])
+                raise DetectorFrameError("Invalid detector verification diagnostics")
+            try:
+                detections = detections_from_json(data["detections"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DetectorFrameError("Malformed detections in the reply: %s" % exc) from exc
             for detection in detections:
                 if (detection.cls not in self.vocabulary or not math.isfinite(detection.conf)
                         or not 0 <= detection.conf <= 1 or not all(math.isfinite(v) for v in detection.xyxy)):
-                    raise ValueError("Invalid detection or unexpected vocabulary")
+                    raise DetectorFrameError("Invalid detection or unexpected vocabulary")
             self.last_detections = tuple(detections)
             self.last_diagnostics = dict(diagnostics, request_sha256=request_hash) if diagnostics else {}
             self.last_inference_ms = data.get("ms")
             self.last_peak_rss_mib = data.get("peak_rss_mib")
             return detections
-        except (requests.RequestException, ValueError, KeyError) as exc:
+        except ObjNavInternalError:
+            raise
+        except (requests.RequestException, DetectorFrameError, ValueError, KeyError) as exc:
             raise ObjNavInternalError("Detector service failed: %s" % exc) from exc
 
 

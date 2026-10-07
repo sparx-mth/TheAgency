@@ -451,7 +451,7 @@ def test_an_exhausted_inspection_without_any_in_range_sighting_releases_the_lock
     assert p.closing.inspection_sighting is None and not p.closing.active and not p.closing.locked
     assert p.closing.phase == "RELEASED" and p.closing.inspection_releases == 1 and p.closing.releases == 1
     assert p.closing.last_release == "inspection saw nothing"
-    [(spot, floor, step, radius, why)] = p.closing.rejected
+    [(spot, floor, step, radius, why, stood)] = p.closing.rejected
     assert spot == anchor and step == 4 and radius == pytest.approx(2.0 * p.settings.target_closing.rejection_radius_m)
     assert why == "inspection saw nothing", "the memory keeps WHY: a failed inspection is never overridden"
     assert p.closing.rejected_near(anchor[:2], floor), "a landmark there is not worth another look"
@@ -1064,3 +1064,84 @@ def test_the_blocked_clock_survives_collision_jitter():
     assert p._blocked_since == 3.0, "a slide is not progress"
     p.plan(replace(observation(ep, 2), pose=AgentPose(0.30, 0.05, 0, 0)))          # a forward step's worth
     assert p._blocked_since is None, "a step clears the clock"
+
+
+# -- the review of 2026-10-07: bounded re-takeovers, blind frames, the suspect's step, the locked frame ----
+def test_a_near_candidate_released_from_this_spot_is_not_taken_over_again_until_the_agent_moves():
+    """Twelve takeovers of one chair 1.5 m away in eighty actions, from one spot: a close view is new
+    evidence from a NEW spot, the same evidence from the spot it was released at."""
+    p, ep = setup_policy(target_closing={"max_verify_steps": 2})
+    p.plan(observation(ep, 0, depth=1.5))
+    assert p.closing.active and not p.closing.locked
+    anchor = p.closing.anchor
+    p.detector.detect = lambda rgb: []
+    p.plan(observation(ep, 1, depth=1.5))
+    p.plan(observation(ep, 2, depth=1.5))
+    assert not p.closing.active and p.closing.releases == 1
+    assert p.closing.rejected[0][5] == (0.0, 0.0), "the memory keeps where the agent stood"
+    # The same box from the same spot: refused, however close.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
+    for step in (3, 4, 5):
+        p.plan(observation(ep, step, depth=1.5))
+    assert not p.closing.active and p.closing.same_spot_rejections == 3 and p.closing.releases == 1
+    # From 1.2 m away (beyond boxed_in_radius_m) the same object is a new view: a takeover starts.
+    moved = replace(observation(ep, 6, depth=1.5), pose=AgentPose(0.0, 1.2, 0, 0))
+    p.plan(moved)
+    assert p.closing.active and p.closing.same_spot_rejections == 3
+    assert math.dist(p.closing.anchor[:2], anchor[:2]) > 1.0, "a different anchor from the new spot"
+    assert p.episode_info()["target_closing"]["rejected"][0]["from_xy"] == [0.0, 0.0]
+
+
+def test_a_detector_frame_in_back_off_is_no_evidence_and_pauses_the_closing_clocks(monkeypatch):
+    """A transient detector failure during a correct lock used to read as 'target not seen': the
+    inspection cycled blind and released the lock with a 2 m rejection around the real target."""
+    p, ep, near = locked_at_two_metres(monkeypatch, max_verify_steps=3)
+    assert p.closing.locked
+    started = p.closing.started
+
+    def broken(rgb):
+        raise RuntimeError("detector away")
+
+    p.detector.detect = broken
+    for step in (2, 3, 4, 5):
+        command = p.plan(replace(near, step=step))
+        assert p.closing.active and p.closing.locked, "no evidence either way: the lock stands"
+        assert command.info.get("blind") is True
+    assert p.closing.blind_frames >= 1 and p.closing.releases == 0
+    assert p.closing.started >= started + 1, "the clocks moved with the blind frames"
+    assert p.closing.last_seen == 5, "the consecutive-frame chain is carried across the blind frames"
+    # A frame that never had a candidate stays with the search: blind frames start nothing.
+    q, eq = setup_policy()
+    q.detector.detect = broken
+    q.plan(observation(eq, 0, depth=2))
+    assert not q.closing.active and q.closing.blind_frames == 0
+
+
+def test_a_suspect_candidate_may_step_inside_the_terminal_range_to_earn_its_second_viewpoint():
+    """A suspect lock needs two viewpoints 0.30 m apart; VERIFY only stepped while more than 1.25 m
+    away, so a suspect first seen at 1.2 m held, turned and released for ever (52 frames held)."""
+    p, ep = setup_policy()
+    p.plan(observation(ep, 0, depth=1.2))
+    assert p.closing.active and not p.closing.locked
+    p.closing.suspect = "room:kitchen"
+    command = p.plan(observation(ep, 1, depth=1.2))
+    assert not p.closing.locked, "two frames from one spot do not lock a suspect"
+    assert command.waypoints and command.info.get("verify_step") == "towards the candidate", "a step, not a hold"
+    assert command.info.get("suspect") == "room:kitchen"
+    plain, ep2 = setup_policy()
+    plain.plan(observation(ep2, 0, depth=1.2))
+    plain.plan(observation(ep2, 1, depth=1.2))
+    assert plain.closing.locked, "an unsuspected candidate locks on its second frame"
+
+
+def test_a_locked_target_without_a_path_is_kept_in_frame_rather_than_turned_away_from(monkeypatch):
+    """The pathless wait held the centred target with a satisfied hold, which the headless agent
+    executes as a turn, and the next frame turned back: 233 reversals in one Darden episode."""
+    p, ep, near = locked_at_two_metres(monkeypatch)
+    monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)
+    monkeypatch.setattr(p.camera_control, "begin_inspection", lambda *a, **kw: False)
+    far = replace(observation(ep, 2, depth=1.6), pose=AgentPose(0.4, 0, 0, 0))    # 1.6 m off: not terminal
+    command = p.plan(far)
+    assert p.closing.locked and not command.stop
+    assert command.info.get("verify_step", "").startswith(("look", "turn")), (
+        "a frame that keeps the box whole, never an idle hold: %r" % (command.info,))

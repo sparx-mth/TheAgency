@@ -18,7 +18,18 @@ plans on -- rather than in each frontier, opening, peek and route module:
   the first tread are obstacles already;
 * a goal is refused when its cell is masked, or when the storey the agent
   stands on is further than ``floor_plane_bound_m`` from the spawn plane
-  (``Z_spawn +/- 0.5 m``) -- then nothing on it is a destination.
+  (``Z_spawn +/- 0.5 m``) -- then nothing on it is a destination;
+* a **half-level** (since 2026-10-07): a split-level house has floor
+  0.5-1.5 m off the spawn plane that is neither another storey nor a
+  staircase -- the agent walked up a step or a ramp onto it. The atlas
+  reads it as a landing and stays in transition, which froze the map and
+  left every route unplannable (Klickitat 2026-10-05: 361 idle turns).
+  After ``HALF_LEVEL_ACTIONS`` actions on such a settled plateau the guard
+  has the atlas adopt it as a level of its own (:meth:`FloorAtlas.adopt_level`)
+  and treats it as part of the spawn storey: goals on it are allowed, and
+  drops are measured from the lower of the two planes so the storey below
+  stays walkable. A plateau ``min_floor_separation_m`` or more from the
+  spawn plane is another storey and is never adopted.
 
 All of this is a constraint on what the agent may choose, not knowledge
 about the target: the only privileged input is the stair geometry the
@@ -38,6 +49,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs im
 
 #: Refusal events kept for the recording; the counters are complete.
 MAX_EVENTS = 50
+#: Actions a settled plateau inside the separation rule may stay "in transition" before it is adopted.
+HALF_LEVEL_ACTIONS = 30
 
 
 class SpawnFloorGuard:
@@ -54,8 +67,10 @@ class SpawnFloorGuard:
         self.drops: Dict[int, np.ndarray] = {}
         self.mask: Optional[np.ndarray] = None
         self.off_plane: bool = False
+        self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
-        self.stats = {"goals_refused": 0, "drop_cells": 0, "stair_cells": 0, "off_plane_actions": 0}
+        self.stats = {"goals_refused": 0, "drop_cells": 0, "stair_cells": 0, "off_plane_actions": 0,
+                      "half_levels_adopted": 0}
 
     # -- per action -----------------------------------------------------------
     def observe(self, obs, world):
@@ -65,6 +80,7 @@ class SpawnFloorGuard:
         if not self.enabled:
             self.mask = None
             return world
+        self._adopt_half_level(obs)
         self._track_plane(obs)
         drops = self._drops_for(self.policy.mapping.floor_id, world)
         self._mark_drops(obs, world, drops)
@@ -96,14 +112,35 @@ class SpawnFloorGuard:
     def diagnostics(self) -> dict:
         return {"enabled": self.enabled, "spawn_z_m": self.spawn_z, "floor_plane_bound_m": self.bound_m,
                 "drop_m": self.drop_m, "off_plane": self.off_plane, "stats": dict(self.stats),
-                "events": list(self.events)}
+                "half_levels": sorted(self.half_levels), "events": list(self.events)}
 
     # -- internals ------------------------------------------------------------
     def _plane_offset(self) -> float:
         plane = getattr(self.policy.mapping, "_anchor", None)
         if plane is None or self.spawn_z is None:
             return 0.0
+        if self.policy.mapping.floor_id in self.half_levels:
+            return 0.0                              # an adopted half-level is the spawn storey
         return float(plane) - self.spawn_z
+
+    def _adopt_half_level(self, obs):
+        """Adopt a settled plateau the atlas cannot resolve as a level of the spawn storey (see the module docstring)."""
+        atlas = getattr(self.policy.mapping, "atlas", None)
+        if atlas is None or not atlas.params.enabled or not atlas.in_transition or self.spawn_z is None:
+            return
+        height = atlas.destination_height_m
+        if height is None or atlas.transition_ticks < HALF_LEVEL_ACTIONS:
+            return
+        separation = float(self.policy.settings.multifloor.min_floor_separation_m)
+        if abs(float(height) - self.spawn_z) >= separation:
+            return                                  # another storey: confined, as the protocol says
+        waited = int(atlas.transition_ticks)              # adopt_level resets the atlas's count
+        floor = atlas.adopt_level(obs.pose, float(height))
+        self.half_levels.add(int(floor))
+        self.stats["half_levels_adopted"] += 1
+        self._record({"action": obs.step, "event": "half_level_adopted", "floor_id": int(floor),
+                      "height_m": round(float(height), 3), "offset_m": round(float(height) - self.spawn_z, 3),
+                      "after_actions": waited})
 
     def _track_plane(self, obs):
         offset = self._plane_offset()
@@ -126,6 +163,8 @@ class SpawnFloorGuard:
         plane = getattr(self.policy.mapping, "_anchor", None)
         if plane is None:
             return
+        if self.policy.mapping.floor_id in self.half_levels and self.spawn_z is not None:
+            plane = min(float(plane), self.spawn_z)   # the storey below an adopted half-level is not a drop
         points = backproject_depth(obs.depth_m, obs.camera, obs.pose, self.policy.settings.depth_stride)
         if not len(points):
             return

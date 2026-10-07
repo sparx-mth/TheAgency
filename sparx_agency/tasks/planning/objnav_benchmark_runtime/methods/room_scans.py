@@ -140,6 +140,7 @@ class RoomScanLedger:
         self.records = []
         self._finished = {}       # (floor, pid) -> reason, sticky for the episode
         self._finished_cells = {} # (floor, pid) -> the room's size the verdict was reached on (None: unknown)
+        self._finished_step = {}  # (floor, pid) -> the action the verdict was first reached on (None: unknown)
         self._cache = {}          # (floor, pid, n_cells, len(records)) -> reason or None
         self._pose_progress = {}  # (floor, pid) -> (n_cells, poses evaluated) for the cone test
         self.regrown = []         # (floor, pid, reason, cells then, cells now) of every verdict re-judged
@@ -157,7 +158,7 @@ class RoomScanLedger:
         return [r for r in self.records if r["floor"] == floor]
 
     # -- the verdict --------------------------------------------------------
-    def status(self, world, pid, room, frontier=None, doored=None):
+    def status(self, world, pid, room, frontier=None, doored=None, step=None):
         """None while the room is unfinished, else the test that finished it (sticky).
 
         Args:
@@ -166,6 +167,9 @@ class RoomScanLedger:
                 and ``fragment`` tests, which need it to be zero.
             doored: Whether a confirmed door stands on the room, when known;
                 None is read as "no door known".
+            step: The current action, when known: remembered the first time
+                a verdict is reached so :meth:`finished_step` can say how
+                long ago the room was finished.
         """
         floor = self.policy.mapping.floor_id
         key = (floor, int(pid))
@@ -179,6 +183,7 @@ class RoomScanLedger:
             self.regrown.append((floor, int(pid), sticky, int(then), int(room.n_cells)))
             del self._finished[key]
             del self._finished_cells[key]
+            self._finished_step.pop(key, None)
         cache_key = (floor, int(pid), int(room.n_cells), len(self.records))
         if cache_key in self._cache:
             result = self._cache[cache_key]
@@ -190,7 +195,25 @@ class RoomScanLedger:
         if result is not None:
             self._finished[key] = result
             self._finished_cells[key] = int(room.n_cells)
+            self._finished_step[key] = self._verdict_step(world, room, result, step)
         return result
+
+    def _verdict_step(self, world, room, result, step):
+        """The action a fresh verdict dates from: the latest scan point inside the room, else ``step``."""
+        if result == SCAN_POINT_INSIDE:
+            inside = []
+            for record in self.on_floor():
+                gx, gy = world.world_to_grid(*record["xy"])
+                if world.in_bounds(gx, gy) and room.mask[gy, gx]:
+                    inside.append(int(record["step"]))
+            if inside:
+                return max(inside)
+        return None if step is None else int(step)
+
+    def finished_step(self, pid, floor_id=None):
+        """The action room ``pid`` was finished on, or None when unfinished or unknown."""
+        floor = self.policy.mapping.floor_id if floor_id is None else floor_id
+        return self._finished_step.get((floor, int(pid)))
 
     def _status(self, world, room):
         records = self.on_floor()
@@ -270,11 +293,21 @@ class RoomScanLedger:
         self._pose_progress[key] = (int(room.n_cells), index)
         return False
 
-    def mark(self, pid, reason, floor_id=None):
+    def mark(self, pid, reason, floor_id=None, step=None):
         """Finish a room by a verdict reached elsewhere (sticky, like the ledger's own; no size is known to re-judge it by)."""
         floor = self.policy.mapping.floor_id if floor_id is None else floor_id
         self._finished[(floor, int(pid))] = str(reason)
         self._finished_cells[(floor, int(pid))] = None
+        self._finished_step[(floor, int(pid))] = None if step is None else int(step)
+
+    def scan_points_in(self, world, room, floor_id=None):
+        """The completed scan points standing inside ``room``'s mask on this floor, as world ``(x, y)`` tuples."""
+        points = []
+        for record in self.on_floor(floor_id):
+            gx, gy = world.world_to_grid(*record["xy"])
+            if world.in_bounds(gx, gy) and room.mask[gy, gx]:
+                points.append(tuple(record["xy"]))
+        return points
 
     def finished(self, world, graph):
         """``{pid: reason}`` for every finished room of ``graph`` on this floor."""

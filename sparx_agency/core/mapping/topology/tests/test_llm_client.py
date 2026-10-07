@@ -253,10 +253,20 @@ def test_retry_once_then_success(monkeypatch):
 def test_retry_exhausted_raises(monkeypatch):
     monkeypatch.setattr(llm_client_mod.time, "sleep", lambda _t: None)
     client = _client("ollama", [requests.ConnectionError("a"),
-                                requests.Timeout("b")])
+                                requests.ConnectionError("b")])
     with pytest.raises(RuntimeError, match="failed after 2 tries"):
         client.chat_text("s", "u")
     assert len(client.sess.posts) == 2
+
+
+def test_a_timeout_is_never_retried(monkeypatch):
+    """A request that ran into its timeout is still generating or wedged; a second try costs the whole
+    timeout again (20 minutes per node-oracle call at the reasoning route's 600 s)."""
+    monkeypatch.setattr(llm_client_mod.time, "sleep", lambda _t: None)
+    client = _client("ollama", [requests.Timeout("slow"), _ollama_reply('{"ok": 1}')])
+    with pytest.raises(RuntimeError, match="timed out after 30s \\(not retried\\)"):
+        client.chat_text("s", "u")
+    assert len(client.sess.posts) == 1, "one attempt: the caller's back-off takes it from here"
 
 
 def test_http_error_status_is_retried(monkeypatch):

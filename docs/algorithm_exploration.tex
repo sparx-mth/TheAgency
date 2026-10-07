@@ -18,8 +18,9 @@
         \STATE otherwise release the candidate and remember the spot; \textbf{continue}
     \ENDIF
     \IF{the current node's visit is complete}
-        \STATE $\mathcal{N}_t \leftarrow \textsc{CandidateNodes}(\mathcal{G}_t, \mathcal{S}, c^{*})$ \COMMENT{rooms, openings, stairs; finished or implausible rooms excluded}
-        \STATE $p \leftarrow \textsc{LLM-Oracle}(c^{*}, \mathcal{N}_t)$ \COMMENT{$P(\text{target found at } n)$ per node, with priors}
+        \STATE $\mathcal{N}_t \leftarrow \textsc{CandidateNodes}(\mathcal{G}_t, \mathcal{S}, c^{*})$ \COMMENT{every room with its status (never entered / entered / scanned), openings, stairs}
+        \STATE $(p, pass) \leftarrow \textsc{LLM-Oracle}(c^{*}, \mathcal{N}_t, \textsc{House}(\mathcal{G}_t, \mathcal{S}, t/T))$ \COMMENT{$P(\text{target found at } n)$ per node from home layout, rooms found and budget; $pass \in \{\text{first}, \text{second}\}$}
+        \STATE $\mathcal{N}_t \leftarrow \mathcal{N}_t \setminus \{\text{scanned rooms}\}$ \textbf{if} $pass = \text{first}$ \COMMENT{the first pass covers the home; the second re-checks scanned rooms from a new spot}
         \STATE $node_t \leftarrow \textsc{RPT}^{*}(\mathcal{N}_t, p, \text{travel costs})$
     \ENDIF
     \STATE $\textsc{Navigate}(node_t)$

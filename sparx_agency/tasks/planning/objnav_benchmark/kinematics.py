@@ -36,7 +36,7 @@ Python 3.8 syntax, standard library only.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.errors import EnvContractError
@@ -107,9 +107,23 @@ class KinematicTolerance:
         climb_m: How far a MOVE_FORWARD may change the height, metres, when it
             advances less than this; a longer one may climb its own length
             (Habitat's stairs: 0.2 m up a step, slopes up to 45 degrees).
+        settle_m: How much vertical motion the FIRST TRANSLATION of an
+            episode may carry beyond the bounds above, metres: a published
+            start that lies off the navmesh surface is settled onto it by
+            the simulator on the first action that moves the agent (turns
+            bypass the navmesh filter, so with a warm-up rotation that is
+            the first MOVE_FORWARD; Gibson val starts lie up to 0.28 m
+            below the mesh, Darden/000000 0.10 m), which is the simulator
+            placing the agent, not the action moving it. The excuse is
+            additive -- that much of the height change is taken off before
+            the climb and in-place bounds are judged, so a settle plus a
+            step up a tread passes -- and the horizontal bounds still
+            apply. 0 (the default) excuses nothing; the protocol that
+            knows its data sets it.
 
     Raises:
-        HarnessError: On a tolerance that is not a positive finite number.
+        HarnessError: On a tolerance that is not a positive finite number
+            (``settle_m`` may be 0).
     """
 
     position_m: float = 0.02
@@ -120,14 +134,16 @@ class KinematicTolerance:
     min_heading_check_m: float = 0.05
     heading_deg: float = 10.0
     climb_m: float = 0.2
+    settle_m: float = 0.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
             value = getattr(self, item.name)
-            if not (is_length(value) and value > 0.0):
+            lowest_allowed = 0.0 if item.name == "settle_m" else None
+            if not (is_length(value) and (value > 0.0 or value == lowest_allowed)):
                 raise HarnessError(
-                    "KinematicTolerance.%s must be a positive finite number, "
-                    "got %r" % (item.name, value))
+                    "KinematicTolerance.%s must be a %sfinite number, "
+                    "got %r" % (item.name, "non-negative " if lowest_allowed == 0.0 else "positive ", value))
 
 
 def _wrapped(angle: float) -> float:
@@ -234,7 +250,8 @@ def _check_forward(action, motion, spec, tolerance) -> None:
 
 
 def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
-                 spec: DiscreteActionSpec, tolerance: KinematicTolerance) -> None:
+                 spec: DiscreteActionSpec, tolerance: KinematicTolerance,
+                 first: bool = False) -> None:
     """Refuse a realised motion that the episode's action spec cannot explain.
 
     Args:
@@ -243,6 +260,11 @@ def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
         after: The pose after it.
         spec: The episode's action spec, which the motion must match.
         tolerance: How far the motion may stray from the spec's.
+        first: Whether the agent has not moved yet this episode, so this
+            action may be its first translation, on which up to
+            ``tolerance.settle_m`` of vertical motion is the simulator
+            placing the agent on the mesh and is taken off before the
+            bounds are judged (see :attr:`KinematicTolerance.settle_m`).
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -258,6 +280,11 @@ def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
         if not isinstance(value, kind):
             raise TypeError("%s must be a %s, got %r"
                             % (name, kind.__name__, value))
+    if first and tolerance.settle_m > 0.0:
+        # The settle is the simulator's, not the action's: take it off, keep the rest.
+        dz = after.z - before.z
+        excused = math.copysign(min(abs(dz), tolerance.settle_m), dz)
+        after = replace(after, z=after.z - excused)
     motion = _motion(before, after)
     if action in _TURN_SIGN:
         _check_turn(action, motion, spec, tolerance)

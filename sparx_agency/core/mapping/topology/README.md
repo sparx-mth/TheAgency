@@ -95,29 +95,44 @@ decides whether to keep a stale label — nothing is cached on failure.
   to uniform is never kept.
 - `search_node_oracle.py` — the successor of `search_oracle` for the
   room-search loop, written for a capable model (the runtime routes it to
-  `LLMConfig.reasoning_model`). One call per loop point over every NODE the
-  search could go to next -- each room with its type (or `unknown`, an
-  exploration node; `kitchen?` when named from a single kind of object),
-  size, frontier left, time searched and how long ago, objects seen; each
-  staircase with its direction, whether the other storey was visited and
-  what was found there, whether the robot arrived by it -- asking for the
-  probability that going there NEXT finds the target, plus `elsewhere`. The
-  system prompt spells out the judgement (irrelevant type or fully observed
-  room → 0; searched long and recently → low; unknown rooms valued by size,
-  frontier and the room types still missing; a staircase by what this storey
-  turned out to be) and forbids reasoning about distance, which RPT*
-  charges. Code keeps only the contract: parse, drop invented ids, give an
-  omitted node a small share, rescale to one, clamp below 1, refuse a reply
-  with no usable node, reuse the reply when the prompt is byte-identical
-  (effort numbers are shown in coarse steps for that). `LLMClient.chat_json`
-  takes `reasoning=True` to select the reasoning model, its timeout, its
-  reply cap and its context window (`LLM_REASONING_MODEL`, default
-  `qwen2.5:14b-instruct`; `LLM_REASONING_TIMEOUT_S`; `LLM_REASONING_MAX_TOKENS`;
-  `LLM_REASONING_NUM_CTX` -- asked for explicitly because Ollama truncates an
-  outgrown window from the front, which would drop the system prompt).
+  `LLMConfig.reasoning_model`, a 14B instruct model). One call per loop
+  point over every NODE the search could go to next -- **every room of the
+  storey**, finished ones included, each with its type (or `unknown`;
+  `kitchen?` when named from a single kind of object), size, frontier
+  left, `status=` (`never_entered` / `entered` / `scanned(<how>, <ago>)`),
+  time searched, objects seen; each opening with the room it opens from
+  and what was glimpsed through it; and, in the multi-storey development
+  protocol only, each staircase -- asking for the probability that going
+  there NEXT finds the target. **LLM-first since 2026-10-07:** the user
+  prompt carries a HOUSE line (every room type found with its status, the
+  rooms still unidentified, the openings not looked into, whether
+  unexplored frontier is reachable, and `actions used about N of 500`),
+  and the system prompt asks for three written steps before the numbers --
+  `home` (where the target lives: a toilet in a bathroom or an en-suite
+  reached through a bedroom; a television in a living room, then a
+  bedroom, rarely a kitchen, never a bathroom), `house` (one kitchen, one
+  living room, one to four bedrooms, one to three bathrooms: what the rooms
+  found say about the rest), `stage` (early: the unexplored first; late:
+  the detector may have missed the target in a scanned room of the right
+  type) -- plus a `pass` verdict (`first` / `second`) the loop reads to
+  decide whether scanned rooms are offered again. It forbids reasoning
+  about distance, which RPT* charges. Code keeps only the contract:
+  parse, drop invented ids, give an omitted node a small share, clamp
+  below 1, refuse a reply with no usable node, reuse the reply when the
+  prompt is byte-identical (effort and budget numbers are shown in coarse
+  steps for that). The three arithmetic floors (`unexplored_floor`,
+  `unexplored_elsewhere`, `home_floor`) are knobs, **off by default**; the
+  storey/stairs rules (`home_here`) are a `STAIRS_SUPPLEMENT` appended only
+  when a staircase is a node. `LLMClient.chat_json` takes `reasoning=True`
+  to select the reasoning model, its timeout, its reply cap and its
+  context window (`LLM_REASONING_MODEL`, default `qwen2.5:14b-instruct`;
+  `LLM_REASONING_TIMEOUT_S`; `LLM_REASONING_MAX_TOKENS`;
+  `LLM_REASONING_NUM_CTX` -- asked for explicitly because Ollama truncates
+  an outgrown window from the front, which would drop the system prompt);
+  a request that runs into its timeout is not retried.
   `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
-  three scenarios against the live model and checks the reasoning, not just
-  the schema.
+  five single-storey scenarios against the live model and checks the
+  judgement, not just the schema.
 - `target_matcher.py` — target-name matching: exact → cache → LLM →
   token-overlap fallback. The fallback rung is not implemented here: it
   delegates to `core/common/label_match.py`, which is the same rule the

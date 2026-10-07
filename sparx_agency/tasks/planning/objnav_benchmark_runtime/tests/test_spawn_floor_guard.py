@@ -185,3 +185,53 @@ def test_entrypoint_defaults_sit_below_the_policy_config_and_above_the_settings_
     assert run._method(args())[1]["allow_stair_traversal"] is False
     assert run._method(args(), defaults={"allow_stair_traversal": True})[1]["allow_stair_traversal"] is True
     assert run._method(args(config), defaults={"allow_stair_traversal": True})[1]["allow_stair_traversal"] is False
+
+
+def test_a_settled_half_level_is_adopted_as_part_of_the_spawn_storey_after_thirty_actions():
+    """Klickitat 2026-10-05: a split-level house, the agent on a plateau 0.6 m up that the atlas read as a
+    landing for ever -- no map integrated, every route unplannable, 361 idle turns. After HALF_LEVEL_ACTIONS
+    on the settled plateau the guard adopts it: a floor of its own, goals allowed, the storey below not a drop.
+    A plateau a storey away (1.5 m or more) is never adopted."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.spawn_floor_guard import HALF_LEVEL_ACTIONS
+    policy, episode, world, _ = forbidden_stairs()
+    atlas = policy.mapping.atlas
+    policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
+    assert policy.floor_guard.spawn_z == 0.0
+    # Walk up onto a plateau 0.6 m above the spawn plane and settle there (translated, level).
+    step = 1
+    for i in range(6):
+        pose = at(episode, step, 3.0 + 0.3 * i, 3.0, z=0.6)
+        atlas.update(pose.pose)
+        step += 1
+    assert atlas.in_transition and atlas.destination_height_m == pytest.approx(0.6, abs=0.05)
+    assert atlas.diagnostics()["transition_ticks"] >= 1 and len(atlas.floors) == 1, "a landing to the atlas: no floor"
+    # Not yet thirty actions on it: still confined, nothing adopted.
+    policy.floor_guard.observe(at(episode, step, 4.5, 3.0, z=0.6), world)
+    assert policy.floor_guard.half_levels == set() and atlas.in_transition
+    while atlas.transition_ticks < HALF_LEVEL_ACTIONS:
+        atlas.update(at(episode, step, 4.5, 3.0, z=0.6).pose)
+        step += 1
+    obs = at(episode, step, 4.5, 3.0, z=0.6)
+    policy.floor_guard.observe(obs, world)
+    assert not atlas.in_transition and len(atlas.floors) == 2 and atlas.elevation_m == pytest.approx(0.6, abs=0.05)
+    assert policy.floor_guard.half_levels == {1} and policy.floor_guard.stats["half_levels_adopted"] == 1
+    adopted = [e for e in policy.floor_guard.events if e["event"] == "half_level_adopted"]
+    assert len(adopted) == 1 and adopted[0]["floor_id"] == 1 and adopted[0]["after_actions"] >= HALF_LEVEL_ACTIONS
+    assert atlas.completion_reason == "half_level_adopted"
+    # The adopted level is the spawn storey to the guard: goals on it are allowed.
+    policy.mapping.floor_id, policy.mapping._anchor = 1, atlas.elevation_m
+    policy.floor_guard.observe(at(episode, step + 1, 4.5, 3.0, z=0.6), world)
+    assert not policy.floor_guard.off_plane and policy.floor_guard.goal_allowed(obs, world, (4.0, 3.0), "room_entry")
+    assert policy.episode_info()["spawn_floor_guard"]["half_levels"] == [1]
+    # A plateau a storey away is another storey: the atlas makes a floor of it itself, the guard adopts
+    # nothing, and every goal on it is refused as before.
+    policy, episode, world, _ = forbidden_stairs()
+    atlas = policy.mapping.atlas
+    policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
+    for i in range(HALF_LEVEL_ACTIONS + 10):
+        atlas.update(at(episode, i + 1, 3.0 + 0.3 * min(i, 5), 3.0, z=1.6).pose)
+    assert not atlas.in_transition and len(atlas.floors) == 2 and atlas.completion_reason == "destination_platform_confirmed"
+    policy.mapping.floor_id, policy.mapping._anchor = atlas.active_id, atlas.elevation_m
+    policy.floor_guard.observe(at(episode, 60, 4.5, 3.0, z=1.6), world)
+    assert policy.floor_guard.half_levels == set() and policy.floor_guard.stats["half_levels_adopted"] == 0
+    assert policy.floor_guard.off_plane and not policy.floor_guard.goal_allowed(obs, world, (4.0, 3.0), "room_entry")

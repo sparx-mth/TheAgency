@@ -216,9 +216,12 @@ def test_a_scan_visit_turns_a_full_circle_at_the_vantage_point_and_finishes_the_
     assert policy.supervisor.history[-1][:2] == (1, EXHAUSTED), "finished -- productive, cooled, not repeatable"
     assert policy.loop.events[-4]["event"] == "scan_complete" and policy.loop.events[-4]["turns"] == 12
     assert policy.loop.events[-4]["swept_degrees"] == pytest.approx(360.0, abs=1.0)
-    # The loop point on the same action: room B is finished, so it is not a node any more.
+    # The loop point on the same action: room B is finished -- shown to the oracle as scanned, not a node
+    # of the first pass any more.
     assert reasoned == [0, last]
-    assert policy.reasoned_with[-1]["exclude"] == (1,)
+    assert policy.reasoned_with[-1]["exclude"] == (), "every room is shown to the oracle"
+    assert policy.reasoned_with[-1]["scanned"] == {1: ("full rotation", 0.0)}
+    assert "rooms found" in policy.reasoned_with[-1]["context"].house and "actions used about 0 of 500" in policy.reasoned_with[-1]["context"].house
     assert policy.loop._excluded == {1: "scanned:" + SCAN_POINT_INSIDE}
     assert policy.loop.estimates[1]["entry"] == "excluded" and policy.loop.estimates[1]["excluded"].startswith("scanned")
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 0
@@ -291,14 +294,31 @@ def test_the_warmup_scan_finishes_the_spawn_room_before_the_first_room_is_chosen
     policy.scans.record(obs_at(episode, 12, IN_A), rooms[0], source="warmup")
     command = policy.loop.plan(obs_at(episode, 12, IN_A), world)
     assert policy.loop._excluded == {0: "scanned:" + SCAN_POINT_INSIDE}
-    assert policy.reasoned_with[-1]["exclude"] == (0,)
+    assert policy.reasoned_with[-1]["exclude"] == () and policy.reasoned_with[-1]["scanned"] == {0: ("full rotation", 0.0)}
     assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "room A is not a node; room B is next"
     assert policy.loop.estimates[0]["entry"] == "excluded"
 
 
+def test_the_type_prior_is_off_by_default_and_the_oracle_sees_every_room_with_its_type():
+    """LLM-first (2026-10-07): a strong bathroom is shown to the oracle as ``type=bathroom`` and valued by
+    the model, not withheld by the table -- which ruled a bedroom out for a toilet when an en-suite is
+    reached through one."""
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    assert not policy.loop.settings.type_prior and LoopSettings().type_prior is False
+    see(policy, {1: ["toilet", "sink"]}, step=0)
+    policy.graph.relabel(1, 0)
+    assert policy.graph.label_info(1)["strength"] == "strong"
+    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {} and policy.loop.stats["excluded_type"] == 0
+    assert policy.reasoned_with[-1]["exclude"] == ()
+    assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "the stub oracle still values it"
+    assert policy.loop.estimates[1]["entry"] == "vantage" and policy.loop.estimates[1]["label"] == "bathroom"
+
+
 def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_target_was_seen_in_it():
+    """The type prior switched on (``type_prior=True``): the hard version of the rule."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm)
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm, type_prior=True)
     assert policy.target.query == "chair" and target_key(policy.target) == "chair"
     see(policy, {1: ["toilet", "sink"]}, step=0)                     # two kinds of object: a STRONG bathroom
     policy.graph.relabel(1, 0)
@@ -308,8 +328,9 @@ def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_targe
     assert policy.supervisor.room_id == 0, "a chair is not searched for in a bathroom"
     assert command.info["kind"] in ("vantage", "room_scan"), "... and the agent already stands in room A, so its visit begins"
     assert policy.loop.estimates[1]["excluded"] == "type:bathroom"
+    assert policy.reasoned_with[-1]["exclude"] == (), "shown to the oracle all the same: the big picture"
     # A chair confirmed in the bathroom outranks the prior.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     see(policy, {1: ["toilet", "sink", "chair"]}, step=0)
     policy.graph.relabel(1, 0)
     assert policy.graph.label_info(1)["label"] == "bathroom"
@@ -317,7 +338,7 @@ def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_targe
     assert policy.loop._excluded == {} and policy.supervisor.room_id == 1
     # A weak label -- one kind of object that names no room on its own -- is the oracle's to value,
     # never an exclusion (2026-10-05): a sink alone may be a kitchen's.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     see(policy, {1: ["sink"]}, step=0)
     policy.graph.relabel(1, 0)
     assert policy.graph.label_info(1)["strength"] == "weak"
@@ -325,7 +346,7 @@ def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_targe
     assert policy.loop._excluded == {} and policy.loop.stats["weak_type_kept"] == 1
     # One SIGNATURE object names its room on its own (2026-10-05): a toilet is a bathroom, and the
     # bathroom is ruled out for a chair with no second kind of object needed.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     see(policy, {1: ["toilet"]}, step=0)
     policy.graph.relabel(1, 0)
     assert policy.graph.label_info(1)["strength"] == "strong" and policy.graph.label_info(1)["signature"]
@@ -385,7 +406,7 @@ def test_a_room_holding_a_home_object_of_the_target_is_not_finished_by_sight_fro
     policy.scans.mark(1, SEEN_FROM_SCAN)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._excluded == {1: "scanned:" + SEEN_FROM_SCAN}
-    assert LoopSettings().home_floor == pytest.approx(0.60)
+    assert LoopSettings().home_floor == 0.0, "LLM-first: the model values the bathtub's room itself"
     with pytest.raises(ValueError):
         LoopSettings(home_floor=1.0)
 
@@ -396,14 +417,14 @@ def test_a_room_whose_evidence_rules_it_out_on_this_action_is_excluded_on_this_a
     ("bedroom, fully seen, no toilet"), and it stayed in the order until the next loop point. The
     labels are read from the evidence before the nodes are chosen now."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm)
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm, type_prior=True)
     see(policy, {1: ["toilet"]}, step=0)             # the background refresh: evidence recorded, no label yet
     assert policy.graph.label_info(1) is None
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert llm.calls == 1, "one classifier call for the one room with a new kind of object"
     assert policy.graph.label_info(1)["label"] == "bathroom" and policy.graph.label_info(1)["strength"] == "strong"
     assert policy.loop._excluded == {1: "type:bathroom"}
-    assert policy.reasoned_with[-1]["exclude"] == (1,), "withheld from the oracle on the same action"
+    assert policy.reasoned_with[-1]["exclude"] == (), "shown to the oracle with its type; withheld from the solver"
     assert policy.supervisor.room_id == 0 and command.info["kind"] in ("vantage", "room_scan")
     assert policy.loop.estimates[1]["excluded"] == "type:bathroom"
 
@@ -418,10 +439,27 @@ def test_the_room_in_force_is_never_excluded_mid_visit():
     assert 1 not in policy.loop._excluded, "its turn ends by the visit's own rule"
 
 
+def test_a_relabel_mid_scan_never_ends_the_visit_under_the_llm_first_default():
+    """LLM-first: no name ends a scan -- the few turns finish the room, and the model values the new fact
+    at the loop point (a toilet seen while scanning for a chair is a bathroom the oracle will rate low)."""
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    vantage = policy.route_memory.goal
+    policy.loop.plan(obs_at(episode, 1, vantage), world)
+    assert policy.supervisor.state == SEARCH and policy.loop._scan["phase"] == "rotate"
+    see(policy, {1: ["coat rack", "toilet"]}, step=2)
+    command = policy.loop.plan(obs_at(episode, 2, vantage, yaw=0.5), world)
+    assert policy.graph.label_info(1)["label"] == "bathroom"
+    assert policy.supervisor.state == SEARCH and policy.supervisor.room_id == 1 and command.info["kind"] == "room_scan"
+    assert policy.loop.stats["relabels_kept_visit"] == 1 and policy.loop.stats["reclassified_releases"] == 0
+    assert policy.loop._needs_reason, "... valued at the loop point"
+
+
 def test_a_relabel_mid_scan_keeps_the_visit_unless_the_new_type_rules_the_room_out():
     """Upstairs Ranchester: a potted plant renamed the room 'living room' at 180 degrees of its
-    rotation and the turn ended -- half a scan wasted. A toilet, on the other hand, means leave now."""
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    rotation and the turn ended -- half a scan wasted. A toilet, on the other hand, means leave now --
+    with the type prior on."""
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     vantage = policy.route_memory.goal
     policy.loop.plan(obs_at(episode, 1, vantage), world)
@@ -575,3 +613,134 @@ def test_a_warmup_moved_mid_rotation_starts_its_circle_again():
     assert discover(p, nearby, world, cost).info["warmup_step"] == 2, "a 0.2 m drift is the same spot"
 
 
+
+
+# -- the second pass (LLM-first, 2026-10-07) -----------------------------------------
+def _frontier_somewhere(policy):
+    """A stub frontier inventory with one reachable goal: the floor is not exhausted."""
+    from sparx_agency.core.planning.exploration.frontier_ranking import FrontierGoal, FrontierInventory
+    goal = FrontierGoal(xy=(1.2, 3.0), cell=(12, 30), size_cells=5, geodesic_m=3.0, heading_error_rad=0.0, utility=1.0)
+    policy.graph.frontier_inventory = FrontierInventory(goals=(goal,), by_room={}, cells=np.zeros((1, 1), bool),
+                                                        distance_m=None)
+
+
+def test_finished_rooms_are_shown_to_the_oracle_but_withheld_from_the_solver_during_the_first_pass():
+    """Both rooms scanned, frontier left elsewhere, no verdict yet: the first pass stands -- the finished
+    rooms are not nodes, and with nothing offerable the reasoning model is not spent on the loop point."""
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), openings={"enabled": False})
+    _frontier_somewhere(policy)
+    policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
+    policy.scans.record(obs_at(episode, 9, IN_B), rooms[1], source="room_scan")
+    command = policy.loop.plan(obs_at(episode, 20, IN_A), world)
+    assert policy.loop._excluded == {0: "scanned:" + SCAN_POINT_INSIDE, 1: "scanned:" + SCAN_POINT_INSIDE}
+    assert not policy.loop.second_pass() and policy.loop._revisits == set()
+    assert reasoned == [], "nothing the answer could send the search to: no call"
+    assert policy.loop.stats["oracle_calls_skipped"] == 1
+    assert any(e["event"] == "oracle_skipped" and e["frontier_left"] for e in policy.loop.events)
+    assert command.info.get("fallback") is not None, "the exploration fallback carries the action"
+    assert policy.loop.diagnostics()["finished"] == {"0": {"how": SCAN_POINT_INSIDE, "step": 5},
+                                                     "1": {"how": SCAN_POINT_INSIDE, "step": 9}}
+
+
+def test_the_oracles_second_pass_verdict_offers_the_finished_rooms_and_a_revisit_scans_from_a_new_spot():
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), openings={"enabled": False})
+    _frontier_somewhere(policy)
+    policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
+    first_spot = policy.loop._vantage(world, policy.navigation_cost(world), rooms[1])[0]
+    policy.scans.record(obs_at(episode, 9, first_spot), rooms[1], source="room_scan")
+    policy.graph.last_reasoning = {"oracle": {"pass_verdict": "second"}}       # the model: the home is covered
+    obs = obs_at(episode, 200, IN_A)
+    command = policy.loop.plan(obs, world)
+    assert policy.loop.second_pass() and policy.loop._excluded == {}
+    assert policy.loop._revisits == {0, 1} and policy.loop.stats["revisits_offered"] == 2
+    assert policy.loop.stats["second_pass_rounds"] == 1 and policy.loop.stats["second_pass_forced"] == 0
+    assert [e for e in policy.loop.events if e["event"] == "second_pass"][0] == {
+        "step": 200, "floor_id": 0, "event": "second_pass", "rooms": [0, 1], "forced": False}
+    assert reasoned == [200], "the finished rooms are valued afresh as nodes"
+    assert policy.reasoned_with[-1]["scanned"] == {0: ("full rotation", 195.0), 1: ("full rotation", 191.0)}
+    assert "rooms found" in policy.reasoned_with[-1]["context"].house
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1"
+    assert policy.loop.stats["revisits_chosen"] == 1 and policy.loop.events[-1]["revisit"] is True
+    goal = policy.route_memory.goal
+    assert cell_in(world, rooms[1], goal)
+    assert math.dist(goal, first_spot) >= LoopSettings().revisit_standoff_m, "a second look from a different spot"
+    # Not released as finished on the way in: that is the point of going.
+    policy.loop.plan(obs_at(episode, 201, IN_A), world)
+    assert policy.supervisor.room_id == 1 and policy.loop.stats["finished_in_transit"] == 0
+    policy.loop.plan(obs_at(episode, 202, goal), world)
+    assert policy.supervisor.state == SEARCH and policy.loop._scan["revisit"] is True
+    assert policy.loop.stats["revisit_scans"] == 1
+    assert [e for e in policy.loop.events if e["event"] == "scan_begin"][-1]["revisit"] is True
+
+
+def test_an_exhausted_floor_forces_the_second_pass_whatever_the_verdict():
+    """No unfinished room, no exit to look into, no reachable frontier: re-checking the scanned rooms is
+    the only move there is, so the finished rooms are nodes and the oracle is asked to value them."""
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0))
+    assert policy.graph.frontier_inventory is None, "the fixture has no frontier inventory: nothing reachable"
+    policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
+    policy.scans.record(obs_at(episode, 9, IN_B), rooms[1], source="room_scan")
+    command = policy.loop.plan(obs_at(episode, 20, IN_A), world)
+    assert policy.loop._exhausted and policy.loop.second_pass()
+    assert policy.loop._excluded == {} and policy.loop._revisits == {0, 1}
+    assert policy.loop.stats["second_pass_forced"] == 1
+    assert [e for e in policy.loop.events if e["event"] == "second_pass"][0]["forced"] is True
+    assert reasoned == [20] and command.info["kind"] == "transit/1"
+    assert policy.loop.diagnostics()["second_pass"] is True
+    # Off, a finished room is never a node again.
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), second_pass=False)
+    policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
+    policy.scans.record(obs_at(episode, 9, IN_B), rooms[1], source="room_scan")
+    policy.graph.last_reasoning = {"oracle": {"pass_verdict": "second"}}
+    policy.loop.plan(obs_at(episode, 20, IN_A), world)
+    assert not policy.loop.second_pass() and set(policy.loop._excluded) == {0, 1} and reasoned == []
+    with pytest.raises(ValueError):
+        LoopSettings(second_pass=1)
+    with pytest.raises(ValueError):
+        LoopSettings(revisit_standoff_m=-1.0)
+
+
+def test_the_house_line_is_the_big_picture_in_the_prompts_words():
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.house_context import house_line, scan_words
+    policy, episode, world, rooms, _ = scan_policy(order=(1, 0), llm=NamingLLM())
+    see(policy, {0: ["bed"], 1: ["toilet", "sink"]}, step=0)
+    policy.graph.relabel(0, 0)
+    policy.graph.relabel(1, 0)
+    policy.graph.last_inside = {0: 3}
+    line = house_line(policy.graph, {1: ("full rotation", 4.0)}, 2, 149, 500, frontier_left=True)
+    assert line == ("rooms found: bathroom (scanned), bedroom (entered); every known room identified; "
+                    "2 openings not yet looked into; unexplored frontier still reachable; actions used about 125 of 500")
+    policy, episode, world, rooms, _ = scan_policy(order=(1, 0))
+    line = house_line(policy.graph, {0: ("fragment", None)}, 1, 480, 500, frontier_left=False)
+    assert line == ("rooms found: none yet; 2 rooms unidentified (1 scanned); 1 opening not yet looked into; "
+                    "no unexplored frontier left; actions used about 475 of 500")
+    assert scan_words(SCAN_POINT_INSIDE) == "full rotation" and scan_words(SEEN_FROM_SCAN) == "seen from another room's scan"
+    assert scan_words("odd") == "odd"
+
+
+def test_a_second_scan_stands_away_from_the_first():
+    policy, episode, world, rooms, _ = scan_policy(order=(1, 0))
+    cost = policy.navigation_cost(world)
+    first = vantage_point(world, rooms[1].mask, np.isfinite(cost), 0.4)
+    again = vantage_point(world, rooms[1].mask, np.isfinite(cost), 0.4, avoid=[first[0]], avoid_radius_m=1.5)
+    assert math.dist(again[0], first[0]) >= 1.5 and cell_in(world, rooms[1], again[0])
+    assert again[1] <= first[1], "the best spot outside the disc has no more clearance than the best spot"
+    tiny = np.zeros(world.grid.shape, bool)
+    tiny[30:33, 80:83] = True
+    cramped = vantage_point(world, tiny, None, 0.0, avoid=[world.grid_to_world(81, 31)], avoid_radius_m=1.5)
+    assert cramped is not None and cell_in(world, type("R", (), {"mask": tiny})(), cramped[0]), (
+        "a room too small for the standoff is re-scanned from its one good spot")
+
+
+def test_the_vantage_clearance_on_the_bounding_box_equals_the_full_grid_transform():
+    from scipy.ndimage import distance_transform_edt
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_vantage import _clearance
+    rng = np.random.default_rng(3)
+    mask = np.zeros((120, 160), bool)
+    mask[30:70, 40:110] = True
+    mask[45:52, 60:70] = False                      # a pillar inside the room
+    mask[rng.integers(30, 70, 20), rng.integers(40, 110, 20)] = False
+    np.testing.assert_array_equal(_clearance(mask), distance_transform_edt(mask))
+    edge = np.zeros((20, 20), bool)
+    edge[0:5, 15:20] = True                         # touching the grid's edge: the edge is "not the room" either way
+    np.testing.assert_array_equal(_clearance(edge), distance_transform_edt(edge))

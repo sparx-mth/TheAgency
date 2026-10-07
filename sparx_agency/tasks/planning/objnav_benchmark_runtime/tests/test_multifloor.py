@@ -323,8 +323,13 @@ def test_vertical_navmesh_correction_is_bounded_and_not_a_val_protocol_change():
     for dz in (0.305, 0.52):
         check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0, dz, 0), MULTIFLOOR_PROTOCOL.actions(), MULTIFLOOR_PROTOCOL.kinematics())
     assert MULTIFLOOR_PROTOCOL.max_native_vertical_m == 0.60
+    # Since 2026-10-07 the val protocol's own climb bound is 0.60 m too: the shipped navmeshes step up
+    # to 0.50 m on one stride inside the evaluated storey (treads, split levels), and the 0.20 m bound
+    # refused real episodes -- and, through the runner, the run. The scoring is untouched.
+    check_motion(DiscreteAction.MOVE_FORWARD, before, corrected, PROTOCOL.actions(), PROTOCOL.kinematics())
+    assert PROTOCOL.kinematics().climb_m == 0.60 and PROTOCOL.kinematics().settle_m == 0.30
     with pytest.raises(EnvContractError):
-        check_motion(DiscreteAction.MOVE_FORWARD, before, corrected, PROTOCOL.actions(), PROTOCOL.kinematics())
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0, 0.7, 0), PROTOCOL.actions(), PROTOCOL.kinematics())
     with pytest.raises(EnvContractError):
         check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0, 1.0, 0), MULTIFLOOR_PROTOCOL.actions(), MULTIFLOOR_PROTOCOL.kinematics())
 

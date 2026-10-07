@@ -242,6 +242,8 @@ class TargetClosing:
         self.overrides = 0                 # takeovers started past the memory by ``override_confidence``
         self.context_rejections = 0        # confident boxes the context penalty kept under the start threshold
         self.suspect_locks_held = 0        # frames a suspect candidate had the frames but not the viewpoints
+        self.same_spot_rejections = 0      # near candidates refused because they were released from this very spot
+        self.blind_frames = 0              # frames the detector was in back-off: no evidence, clocks paused
         self._clear()
 
     def _clear(self):
@@ -275,12 +277,24 @@ class TargetClosing:
     #: Releases whose spot a box at ``override_confidence`` may start a takeover inside of.
     OVERRIDABLE_RELEASES = ("unverified", "contradicted by the map")
 
-    def _rejected_nearby(self, xyz, floor_id, override=False):
+    def _rejected_nearby(self, xyz, floor_id, override=False, here=None):
+        """Whether a released candidate's anchor covers ``xyz`` on ``floor_id``.
+
+        With ``here`` (the agent's position) only the releases made from
+        within ``boxed_in_radius_m`` of it count: the test for a NEAR
+        candidate, which is new evidence from a new spot but the same
+        evidence from the spot it was already released at (the review of
+        2026-10-07 reproduced twelve takeovers of one chair from one spot).
+        """
         for entry in self.rejected:
             spot, floor, _, radius = entry[:4]
             why = entry[4] if len(entry) > 4 else "unverified"     # a 4-tuple is a legacy (unverified) entry
             if floor != floor_id or math.dist(spot[:2], xyz[:2]) > radius:
                 continue
+            if here is not None:
+                stood = entry[5] if len(entry) > 5 else None
+                if stood is None or math.dist(stood, here) > self.settings.boxed_in_radius_m:
+                    continue
             if override and why in self.OVERRIDABLE_RELEASES:
                 continue
             return True
@@ -350,6 +364,15 @@ class TargetClosing:
                     continue                                   # no path from HERE: the spot, not the box, is the problem
                 if override and not associated and not self.active and (cooling or self._rejected_nearby(xyz, p.mapping.floor_id)):
                     self.overrides += 1
+            elif not self.locked and not self.active:
+                # A close view is new evidence -- from a NEW spot. From the spot the same
+                # candidate was already released at, or given up at for want of a path, it
+                # is the same evidence, and the takeover/release cycle it bought was unbounded
+                # (twelve takeovers of one chair in eighty actions, review of 2026-10-07).
+                here = (obs.pose.x, obs.pose.y)
+                if self._rejected_nearby(xyz, p.mapping.floor_id, override=override, here=here) or self._boxed_in_here(obs):
+                    self.same_spot_rejections += 1
+                    continue
             if not self.locked and contradicted_by_map(p, label, xyz, rows[-1].get("radius_m")) is not None:
                 self.map_rejections += 1                       # a confirmed non-target object stands here
                 continue
@@ -383,11 +406,25 @@ class TargetClosing:
         return suspect(p.target, label, xyz, obs.pose.z, label=info.get("label"),
                        strength=info.get("strength"), objects=objects)
 
+    def blind(self):
+        """Whether this frame carried no detector evidence (the service failed or is in back-off)."""
+        evidence = getattr(getattr(self.policy, "perception", None), "detector_evidence", None) or {}
+        return bool(evidence.get("skipped") or evidence.get("failed"))
+
     def observe(self, obs):
         if obs.step == self.processed:
             return
         self.processed = obs.step
         p, s = self.policy, self.settings
+        if self.active and self.blind():
+            # No evidence either way: the consecutive-frame chain is carried across the
+            # frame, nothing is counted and no clock advances (``plan`` pauses them). Before
+            # 2026-10-07 a detector back-off read as "target not seen": a correct lock was
+            # released as "the inspection saw nothing" with a 2 m rejection around it.
+            self.blind_frames += 1
+            if self.last_seen == obs.step - 1:
+                self.last_seen = obs.step
+            return
         boxes, projected = self._candidates(obs)
         # Only a candidate with a coherent 3-D projection starts a takeover: a confident
         # box without depth support has nothing the next frame can be checked against,
@@ -471,7 +508,8 @@ class TargetClosing:
         p = self.policy
         if self.anchor is not None and remember:
             self.rejected.append((self.anchor, self.floor_id, obs.step,
-                                  float(radius_factor) * self.settings.rejection_radius_m, str(why)))
+                                  float(radius_factor) * self.settings.rejection_radius_m, str(why),
+                                  (float(obs.pose.x), float(obs.pose.y))))
         self.releases += 1
         self.released_step = int(obs.step)
         self.last_release = why
@@ -572,8 +610,13 @@ class TargetClosing:
                 info["suspect"] = self.suspect
             distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2]) if self.xyz is not None else float("inf")
             aligned = abs(error) <= offset + 1e-6
+            # A suspect candidate needs two viewpoints ``context_baseline_m`` apart, and a
+            # turn in place is not one: let it step inside the terminal range (never onto
+            # the object) rather than hold at 1.2 m where it could never lock (review of
+            # 2026-10-07: 52 frames held, five releases, no move).
+            nearest = self.settings.terminal_distance_m if self.suspect is None else 0.6 * self.settings.terminal_distance_m
             if (not self.locked and aligned
-                    and distance > self.settings.terminal_distance_m + actions.forward_step_m):
+                    and distance > nearest + actions.forward_step_m):
                 # Two steps ahead: a one-step waypoint sits inside the converter's arrival
                 # tolerance and yields no action at all. One MOVE_FORWARD results either way.
                 # Within one turn of the centre the box stays in the frame after a step,
@@ -585,10 +628,11 @@ class TargetClosing:
                 ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
                 return NavigationCommand.follow([(obs.pose.x, obs.pose.y), ahead], camera_pitch=pitch,
                                                 info=dict(info, verify_step="towards the candidate"))
-            if (not self.locked and self.settings.verify_keep_in_frame
-                    and turn_action(error, offset) is None):
+            if self.settings.verify_keep_in_frame and turn_action(error, offset) is None:
                 # The hold below would be satisfied as it stands -- idle -- and an idle
-                # result is executed as a turn. Choose the frame instead.
+                # result is executed as a turn. Choose the frame instead. For a LOCKED target
+                # without a path too: the idle turn and the centring turn back alternated
+                # for the whole pathless wait (233 reversals in one Darden episode).
                 view = self._verification_view(obs, distance)
                 if view is not None:
                     return view
@@ -676,6 +720,8 @@ class TargetClosing:
         p, s = self.policy, self.settings
         if self.failure:
             self.fail(self.failure)
+        if self.blind():
+            return self._blind_frame(obs, world)
         if obs.step - self.started >= s.max_closing_steps:
             self.fail("closing action bound reached")
         if not self.locked and not s.release_unverified and obs.step - self.started >= s.max_verify_steps:
@@ -741,6 +787,27 @@ class TargetClosing:
         return replace(command, camera_pitch=pitch,
                        info=dict(command.info, target_confirmed=True, persistent_lock=True,
                                  target_visible=visible, range_m=distance, phase=self.phase))
+
+    def _blind_frame(self, obs, world):
+        """The action for a frame without detector evidence: the clocks stand still, the approach may go on.
+
+        Every bound that counts frames moves one action later; a locked
+        target with a path is walked toward (A* needs no detections), an
+        unlocked candidate is faced where it was last seen.
+        """
+        self.started += 1
+        if self.inspection_started is not None:
+            self.inspection_started += 1
+        info = {"kind": "target_closing", "reason": "detector frame missing: no evidence, clocks paused",
+                "target_visible": False, "blind": True}
+        if self.locked and self.xyz is not None:
+            command = self.path.command(self, obs, world)
+            if command is not None:
+                self.phase = "CLOSE_OCCLUDED"
+                return replace(command, info=dict(command.info, **info, persistent_lock=True))
+        bearing = (math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
+                   if self.xyz is not None else self.verification_yaw)
+        return NavigationCommand.hold(final_yaw=normalize_angle(bearing), info=info)
 
     def _no_path(self, obs, world, distance):
         """A LOCKED target A* cannot reach from here: look at the floor around, then give the spot up.
@@ -989,8 +1056,10 @@ class TargetClosing:
                 "boxed_releases": self.boxed_releases,
                 "overrides": self.overrides, "context_rejections": self.context_rejections,
                 "suspect": self.suspect, "suspect_locks_held": self.suspect_locks_held,
+                "same_spot_rejections": self.same_spot_rejections, "blind_frames": self.blind_frames,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}
                              for xy, floor, step in self.boxed_in],
                 "rejected": [{"xyz": list(entry[0]), "floor_id": entry[1], "step": entry[2], "radius_m": entry[3],
-                              "why": entry[4] if len(entry) > 4 else "unverified"}
+                              "why": entry[4] if len(entry) > 4 else "unverified",
+                              "from_xy": None if len(entry) < 6 else [round(v, 2) for v in entry[5]]}
                              for entry in self.rejected]}

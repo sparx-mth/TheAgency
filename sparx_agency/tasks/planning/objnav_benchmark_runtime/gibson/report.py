@@ -90,11 +90,13 @@ def merge_runs(directories, output):
     base = runs[0][0]
     comparable_keys = ("protocol", "runtime", "source_sha256", "method", "seed",
                        "reference_sim_version_match", "dataset", "shards", "limit",
-                       "on_agent_error")
+                       "on_agent_error", "target_override", "publishable", "kinematics")
     records, shard_ids = [], set()
     for config, rows in runs:
-        if any(config[key] != base[key] for key in comparable_keys):
-            raise ValueError("Shards disagree on data, protocol, method, source, or runtime")
+        if any(config.get(key) != base.get(key) for key in comparable_keys):
+            raise ValueError("Shards disagree on data, protocol, method, source, runtime, or publishability")
+        if config.get("target_override") is not None or config.get("publishable") is False:
+            raise ValueError("A diagnostic (non-publishable) shard cannot form a full evaluation")
         if config["limit"] is not None or config["shard_index"] in shard_ids:
             raise ValueError("Limited or duplicate shards cannot form a full evaluation")
         if {r.episode_id for r in rows} != set(config["selected_episode_ids"]):

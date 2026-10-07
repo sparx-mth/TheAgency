@@ -14,12 +14,17 @@ happens so a recording can be read against this docstring:
   greatest clearance -- turn a full circle, and leave. The camera's ray ends
   at the nearest object, so a 360-degree scan from the open floor shows what
   a second viewpoint or a walk to the far frontier would, and the room is
-  FINISHED for the episode (:class:`~room_scans.RoomScanLedger`, which also
-  finishes every room the scan saw more than half of). A finished room is
-  not a node any more -- not valued, not ordered, not entered -- whatever
-  frontier its mask still shows; nor is a room whose identified type cannot
-  hold the target (:mod:`room_priors`: a sofa is not searched for in a
-  bedroom). Under ``visit="sweep"`` (the former behaviour, kept as an
+  FINISHED for the first pass (:class:`~room_scans.RoomScanLedger`, which
+  also finishes every room the scan saw more than half of). A finished
+  room is still SHOWN to the oracle -- ``status=scanned(<how>, <ago>)`` --
+  but not offered as a node while the oracle's own ``pass`` verdict says an
+  unexplored place is still worth looking at; once it says the home is
+  covered (``second``, :attr:`LoopSettings.second_pass`) the finished rooms
+  are nodes again at the model's probability, and a revisit is a scan from
+  a different spot (LLM-first, since 2026-10-07). A room whose identified
+  type cannot hold the target is likewise shown and valued by the model;
+  :attr:`LoopSettings.type_prior` (off) is the hard version of that rule
+  (:mod:`room_priors`). Under ``visit="sweep"`` (the former behaviour, kept as an
   ablation) goals come from inside the room's mask for ``local_steps``
   actions, routes planned on a COPY of the map with every other room
   blocked, and the same room may be chosen straight back. In both modes the
@@ -39,13 +44,18 @@ happens so a recording can be read against this docstring:
   (:mod:`opening_nodes`, since 2026-10-04) -- a doorway or gap at the edge
   of the mapped floor leading to space not seen yet, named by the room it
   opens from and the objects glimpsed through it -- the probability that
-  going there NEXT finds the target, plus the mass in none of them.
-  Everything the user listed is the model's to weigh: an irrelevant type
-  and a fully observed room read as zero, a room searched long and recently
-  as low, a large unknown room with frontier as an exploration node worth a
-  look, a storey not yet stood on as the whole set of rooms it may hold, an
-  opening nothing was glimpsed through as the unknown room behind it.
-  Distance is NOT the model's concern: it is charged by RPT* in step 4.
+  going there NEXT finds the target, plus the mass in none of them. The
+  model is given the HOUSE line (:mod:`house_context`): every room type
+  found so far with its status, the rooms still unidentified, the openings
+  not looked into, and the action budget spent -- and asked to reason as a
+  person who knows homes does: where the target lives (an en-suite toilet
+  is reached through a bedroom), what the rooms found say about the rest (a
+  living room found makes a sofa unlikely in the unidentified rooms), and
+  how the budget weighs (early: the unexplored first; late: the detector
+  may have missed the target in a scanned room of the right type). It
+  writes ``home``, ``house``, ``stage`` and the ``pass`` verdict before the
+  numbers. Distance is NOT the model's concern: it is charged by RPT* in
+  step 4.
 * **4. Visit order** -- the supervisor's SELECT hands the surviving nodes and
   the arc-weight instance to RPT*: rooms at their entry points, staircases at
   the foot of the flight with a LEAF as long as the flight plus the fixed
@@ -94,7 +104,8 @@ import time
 import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
-from sparx_agency.core.mapping.topology.search_node_oracle import HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR
+from sparx_agency.core.mapping.topology.search_node_oracle import (
+    BUDGET_STEP, HOME_FLOOR, PASS_SECOND, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR)
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import frontier_goals_by_room
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
@@ -104,6 +115,7 @@ from sparx_agency.core.planning.exploration.room_costs import build_instance
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ROOM_LLM
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.house_context import house_line, scan_words
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object, implausible_room, ruled_out
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import SCAN_POINT_INSIDE
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import (
@@ -157,47 +169,56 @@ class LoopSettings:
             the oracle said -- when the label is STRONG (two or more kinds
             of object agree) and neither an object of the target's own
             class nor a home object of the target (a sink, for a toilet)
-            has been confirmed inside it. A sofa is not searched for in a
-            bedroom. A weak label (one kind of object) never excludes:
-            the oracle sees it as ``type=bedroom?`` and values the room
-            itself (since 2026-10-05; before, a single sofa seen through a
-            merged partition ruled a bathroom out for the toilet beside it).
+            has been confirmed inside it. **Off by default since 2026-10-07
+            (LLM-first):** the oracle sees every room with its type and
+            values it, and the table contradicted the model's own knowledge
+            -- a toilet in an en-suite IS reached through a bedroom, which
+            the table ruled out. On, it is the hard version of the rule:
+            a sofa is not searched for in a bedroom. A weak label (one kind
+            of object) never excludes either way.
         min_prob: A node the oracle values below this is not offered to the
             solver. The oracle's "1" for a bedroom in a search for a couch is
             not worth the walk; the exploration fallback carries the search
             when nothing clears the bar.
+        second_pass: Offer the rooms the scan ledger has FINISHED as nodes
+            again once the oracle's own ``pass`` verdict says the home has
+            been covered (``second``): late in the budget the chance that
+            the detector missed the target in a scanned room of the right
+            type outgrows the chance that an unseen room holds it, and the
+            model raises those rooms (since 2026-10-07). A revisit is a
+            scan from a different spot (``revisit_standoff_m``); the room
+            is never released as finished on the way in. While the verdict
+            is ``first`` (or missing) finished rooms are withheld as before:
+            the first pass over the home comes before the second. Off, a
+            finished room is never a node again.
+        revisit_standoff_m: ``second_pass`` -- a second scan stands at
+            least this far from every earlier scan point in the room, so it
+            sees what the first one grazed; a room too small for that is
+            re-scanned from its one good spot.
         unexplored_floor: The least probability an UNEXPLORED node is read
             at, whatever the oracle wrote (``search_node_oracle.
             SearchNodeOracle(unexplored_floor=...)``): a room never entered
             and not yet identified, an opening nothing was glimpsed
-            through. The search knows nothing about such a place, so the
-            least it owes it is a look; the Hanson recording of 2026-10-04
-            had the 3B model write off two never-entered rooms and six
-            doorways at 0-1% ("no toilet fits") and leave the storey for
-            the stairs at action 27. The floor keeps them in the order --
-            above ``min_prob`` -- and RPT* weighs them against the stairs
-            by distance, which is where the user's "peek before you
-            descend" lives: not as a rule, as a probability. 0 disables.
+            through. **0 (off) by default since 2026-10-07:** the oracle's
+            prompt states the rule ("never below 10 while the home type is
+            missing") and the 14B model applies it; the floor was the 3B
+            era's arithmetic (Hanson 2026-10-04: two never-entered rooms
+            and six doorways written off at 0-1%). Set it to restore.
         unexplored_elsewhere: What an unexplored node is read at instead
-            when the oracle's own STEP 2 says the target's home type lives
-            on ANOTHER storey (``home_here="elsewhere"``): rule 2b's "less",
-            applied by the code. The Ranchester couch search of 2026-10-05
-            had the 3B model write "living rooms are downstairs" at every
-            loop point and 25 on every upstairs gap all the same, and
-            thirteen peeks outranked the staircase it stood 0.9 m from.
-            At 0.10 the stairs at 0.6 come first and a door beside the
-            route is still a cheap peek. 0 leaves the model's numbers.
+            when the multi-storey supplement's ``home_here`` verdict says
+            the target's home type lives on ANOTHER storey. **0 (off) by
+            default**; only the stair-traversal development protocol ever
+            sees that verdict.
         home_floor: The least a room holding a confirmed HOME OBJECT of the
             target (``room_priors.HOME_OBJECTS``: a bathtub or a sink for a
-            toilet) is read at, whatever the oracle wrote -- the object
-            co-occurrence prior as arithmetic (since 2026-10-07). Such a
-            room is also never finished by sight from OUTSIDE it
-            (``seen_from_scan`` / ``seen_through``): the Allensville toilet
-            run's warm-up spin saw more than half of the bathroom's floor
-            through its door, finished it with the bathtub inside and the
-            toilet behind the jamb, and valued it 0 for the toilet while it
-            peeked twenty openings. 0 disables the floor (the finishing
-            guard stands).
+            toilet) is read at, whatever the oracle wrote. **0 (off) by
+            default since 2026-10-07:** the room's ``seen:`` line shows the
+            bathtub and the model values it. The finishing guard stands
+            regardless: such a room is never finished by sight from
+            OUTSIDE it (``seen_from_scan`` / ``seen_through``) -- the
+            Allensville toilet run's warm-up spin saw more than half of
+            the bathroom's floor through its door and finished it with the
+            toilet behind the jamb.
         supervisor_rounds: Supervisor rounds allowed on one action before the
             loop falls back to the floor-wide frontier. A guard against a
             transition loop nobody has found yet, not a budget: the longest
@@ -245,8 +266,10 @@ class LoopSettings:
     vantage_arrival_m: float = 0.6
     vantage_min_clearance_m: float = 0.4
     scan_seen_fraction: float = 0.5
-    type_prior: bool = True
+    type_prior: bool = False
     min_prob: float = 0.05
+    second_pass: bool = True
+    revisit_standoff_m: float = 1.5
     unexplored_floor: float = UNEXPLORED_FLOOR
     unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE
     home_floor: float = HOME_FLOOR
@@ -267,13 +290,15 @@ class LoopSettings:
                 raise ValueError("%s must be a positive integer" % name)
         if self.scan_approach_steps >= self.scan_visit_steps:
             raise ValueError("scan_approach_steps must leave room for the rotation inside scan_visit_steps")
-        for name in ("confine_routes", "entry_frontier", "stairs_as_nodes", "type_prior"):
+        for name in ("confine_routes", "entry_frontier", "stairs_as_nodes", "type_prior", "second_pass"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError("%s must be a bool" % name)
         for name in ("vantage_arrival_m", "vantage_min_clearance_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
+        if isinstance(self.revisit_standoff_m, bool) or not math.isfinite(self.revisit_standoff_m) or self.revisit_standoff_m < 0:
+            raise ValueError("revisit_standoff_m must be finite and non-negative")
         if isinstance(self.min_prob, bool) or not math.isfinite(self.min_prob) or not 0 <= self.min_prob < 1:
             raise ValueError("min_prob must lie in [0, 1)")
         for name in ("unexplored_floor", "unexplored_elsewhere", "home_floor"):
@@ -371,6 +396,10 @@ class RoomSearchLoop:
         self._home_kept_scans = set()  # pids a sight-from-outside verdict was not allowed to finish (logged once)
         self._last_reason_step = -10 ** 9   # the action of the last oracle call, for the openings' revalue throttle
         self._excluded = {}           # pid -> why the room was not offered at the last SELECT
+        self._finished = {}           # pid -> (how, step) for every room the scan ledger has finished, offered or not
+        self._revisits = set()        # finished rooms offered as second-pass nodes at the last SELECT
+        self._second_pass_logged = False   # the second_pass event is logged once per stretch of the verdict
+        self._exhausted = False       # the floor has no unfinished room, no exit and no reachable frontier left
         self._scan = None             # the visit in force under ``scan``: phase, room, approach actions, swept yaw
         self._way_back_held_logged = None    # (rooms left, openings left) the last way_back_held event was logged for
         self.estimates = {}
@@ -390,6 +419,8 @@ class RoomSearchLoop:
                       "entry_reaimed": 0, "entry_lost": 0,
                       "scans_completed": 0, "scans_in_place": 0, "scan_approach_actions": 0,
                       "scan_unreachable": 0, "excluded_scanned": 0, "excluded_type": 0, "finished_in_transit": 0,
+                      "second_pass_rounds": 0, "second_pass_forced": 0, "revisits_offered": 0, "revisits_chosen": 0,
+                      "revisit_scans": 0, "oracle_calls_skipped": 0,
                       "reconsiders_deferred": 0,
                       "confined_actions": 0, "unconfined_actions": 0, "plan_failures": 0,
                       "supervisor_rounds": 0, "rounds_exhausted": 0, "llm_fallbacks": 0}
@@ -443,6 +474,14 @@ class RoomSearchLoop:
             return
         cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
         stairs, openings = self._collect_nodes(obs, world, cost)
+        if not self._worth_asking(stairs, openings):
+            # Nothing the answer could send the search to (the spawn room finished, no
+            # doorway seen yet): the clue is kept for the loop point a node appears at.
+            self._needs_reason = True
+            self.stats["oracle_calls_skipped"] += 1
+            self._log(obs, "oracle_skipped", where="reconsider", rooms=len(p.graph.registry.rooms),
+                      finished=sorted(int(pid) for pid in self._finished), frontier_left=self._frontier_left())
+            return
         self._reason(obs, world, stairs, openings)
         options = self._options(obs, world, cost, stairs, openings)
         instance = None
@@ -565,7 +604,10 @@ class RoomSearchLoop:
             else:
                 entry = "vantage" if self.settings.scanning else ("frontier" if self._entry[1] else "centroid")
                 self.stats["entry_" + entry] += 1
-            self._log(obs, "transit", room=state.room_id, goal=list(state.goal_xy), entry=entry, order=list(state.order))
+                if state.room_id in self._revisits:
+                    self.stats["revisits_chosen"] += 1
+            self._log(obs, "transit", room=state.room_id, goal=list(state.goal_xy), entry=entry, order=list(state.order),
+                      revisit=state.room_id in self._revisits)
         if state.changed and state.state == SEARCH:
             self.local_steps = 0                            # step 7
             self.room_id = state.room_id
@@ -598,8 +640,18 @@ class RoomSearchLoop:
             new_openings = any(o.node_id not in p.graph.stair_probs for o in openings if o.opening.kind != LANDMARK)
             if new_openings and obs.step - self._last_reason_step >= self.settings.openings.revalue_actions:
                 unvalued = True
+            if (self.second_pass() and self._revisits
+                    and (int(obs.step) // BUDGET_STEP) != (max(0, self._last_reason_step) // BUDGET_STEP)):
+                # The budget line moved: the model re-weighs the scanned rooms against the time left.
+                unvalued = True
             if self._needs_reason or unvalued:
-                self._reason(obs, world, stairs, openings)
+                if self._worth_asking(stairs, openings):
+                    self._reason(obs, world, stairs, openings)
+                elif self._needs_reason:
+                    self.stats["oracle_calls_skipped"] += 1
+                    self._log(obs, "oracle_skipped", rooms=len(rooms), finished=sorted(int(pid) for pid in self._finished),
+                              frontier_left=self._frontier_left())
+                    self._needs_reason = False
             options = self._options(obs, world, cost, stairs, openings)      # step 6's entry point per node
             if options:
                 started = time.monotonic()
@@ -686,7 +738,8 @@ class RoomSearchLoop:
                 or building.ground_truth is None or building.committed):
             self._stairs = {}
             return []
-        rooms_left = self.settings.scanning and (any(pid not in self._excluded for pid in p.graph.registry.rooms)
+        rooms_left = self.settings.scanning and (any(pid not in self._excluded and pid not in self._finished
+                                                     for pid in p.graph.registry.rooms)
                                                  or bool(self._openings))
         options = stair_options(building, obs, world, cost, p.floors.save(), p.settings.action_time_s,
                                 rooms_left=rooms_left)
@@ -752,12 +805,17 @@ class RoomSearchLoop:
             self._exclusions(obs, world, openings)
         started = time.monotonic()
         shown = [o for o in openings if o.opening.kind != LANDMARK]        # a target landmark's probability is fixed
+        scanned = self._scanned_for_prompt(obs)
+        house = house_line(p.graph, scanned, len(shown), int(obs.step), int(p.episode.max_steps),
+                           frontier_left=self._frontier_left())
         try:
+            # Every room is shown, finished and ruled-out ones included, with its
+            # status: the model values the whole home (LLM-first, 2026-10-07).
             p.graph.reason(world, p.target, obs.step,
                            extra_nodes=[o.node for o in stairs] + [o.node for o in shown],
-                           context=search_context(getattr(p, "building", None), p, p.floors.save()),
+                           context=search_context(getattr(p, "building", None), p, p.floors.save(), house=house),
                            here_xy=(obs.pose.x, obs.pose.y), action_time_s=p.settings.action_time_s,
-                           exclude=tuple(self._excluded))
+                           exclude=(), scanned=scanned)
         except Exception as exc:  # the room LLM: timeout, bad JSON, refused uniform prior
             retry = p.fallback.note_service_failure(obs, ROOM_LLM, exc)
             self._log(obs, "llm_failure", error="%s: %s" % (type(exc).__name__, exc), retry_step=retry)
@@ -769,6 +827,9 @@ class RoomSearchLoop:
         self._last_reason_step = int(obs.step)
         self.stats["llm_reasonings"] += 1
         oracle = p.graph.last_reasoning.get("oracle", {})
+        # The fresh verdict decides whether the finished rooms are offered on THIS
+        # action (the exclusions above were read under the previous one).
+        self._exclusions(obs, world, openings, after_reasoning=True)
         # Kept apart from ``events``, which is the record of step transitions;
         # one entry per reasoning round, with what the oracle was shown and said.
         self.estimate_events.append(dict(
@@ -778,66 +839,135 @@ class RoomSearchLoop:
             p_present=round(float(oracle.get("p_present", 0.0)), 3),
             elsewhere=round(float(oracle.get("elsewhere", 0.0)), 3), reused=bool(oracle.get("reused")),
             omitted=list(oracle.get("omitted", ())), reading=dict(oracle.get("reading", {})),
-            home_here=oracle.get("home_here"), floored=list(oracle.get("floored", ())),
-            capped=list(oracle.get("capped", ())),
+            home_here=oracle.get("home_here"), pass_verdict=oracle.get("pass_verdict"),
+            floored=list(oracle.get("floored", ())), capped=list(oracle.get("capped", ())),
+            house=house, scanned=sorted(int(pid) for pid in scanned),
             excluded={str(pid): why for pid, why in sorted(self._excluded.items())}))
 
-    # -- what is not a node: finished rooms and rooms the target cannot be in ----
-    def _exclusions(self, obs, world, openings=()):
-        """Rooms withheld from the oracle, the solver and the transit this action, with why.
+    def _scanned_for_prompt(self, obs):
+        """``{pid: (how, ago_s)}`` for every finished room, in the prompt's words (from the last :meth:`_exclusions`)."""
+        p = self.policy
+        out = {}
+        for pid, (how, step) in self._finished.items():
+            ago = None if step is None else max(0.0, (int(obs.step) - int(step)) * p.settings.action_time_s)
+            out[pid] = (scan_words(how), ago)
+        return out
 
-        Two tests, both read off the live map:
+    def second_pass(self, exhausted=None):
+        """Whether finished rooms are nodes again: the oracle's ``pass`` says the home is covered, or the floor is exhausted.
+
+        ``exhausted`` is the geometric reading from the last :meth:`_exclusions`
+        (no unfinished room, no exit, no reachable frontier) unless given.
+        """
+        if not self.settings.second_pass or not self.settings.scanning:
+            return False
+        if exhausted is None:
+            exhausted = self._exhausted
+        if exhausted:
+            return True
+        oracle = self.policy.graph.last_reasoning.get("oracle", {}) if getattr(self.policy, "graph", None) else {}
+        return oracle.get("pass_verdict") == PASS_SECOND
+
+    # -- what is not a node: finished rooms and rooms the target cannot be in ----
+    def _exclusions(self, obs, world, openings=(), after_reasoning=False):
+        """Rooms withheld from the solver and the transit this action, with why.
+
+        Since 2026-10-07 (LLM-first) every room is SHOWN to the oracle with
+        its status; this decides only which rooms are OFFERED as nodes. Two
+        tests, both read off the live map:
 
         * ``scanned:<how>`` -- the :class:`~room_scans.RoomScanLedger` says a
           completed look-around stood in the room or saw most of it
           (``scan_point_inside``, ``seen_from_scan``); or, with no live
           frontier left in it, that the camera looked into it or walked it
           through (``seen_through``), or that it is a doorless fragment
-          under 3 m2 (``fragment``). Under ``sweep`` this test stands down:
-          the sweep's own termination rule (N steps or no frontier) decides
-          when a room is done.
-        * ``type:<label>`` -- the room's identified type cannot hold the
-          target (:func:`room_priors.ruled_out`): the label is STRONG, and
+          under 3 m2 (``fragment``). Withheld while the oracle's ``pass``
+          verdict is ``first`` (or missing): the first pass over the home
+          comes before any second look. Under ``pass="second"``
+          (:attr:`LoopSettings.second_pass`) finished rooms are offered at
+          the oracle's probability -- the model has said the home is covered
+          and the detector may have missed the target -- and recorded in
+          :attr:`_finished` either way for the prompt's ``status=``. Under
+          ``sweep`` this test stands down: the sweep's own termination rule
+          decides when a room is done.
+        * ``type:<label>`` -- with :attr:`LoopSettings.type_prior` on, the
+          room's identified type cannot hold the target
+          (:func:`room_priors.ruled_out`): the label is STRONG, and
           neither an object of the target's own class nor a home object of
           the target (a sink, for a toilet) has been confirmed inside it. A
           WEAK label (one kind of object) never rules a room out: the one
           object may belong to a room behind one of its openings, or to a
           room the partition merged into it (``weak_type_kept`` events,
           logged once per room); a home object in a room of another type
-          is the partition's merge showing (``home_object_kept``).
+          is the partition's merge showing (``home_object_kept``). Off by
+          default: the oracle sees the type and values the room.
 
         The room in force is never excluded mid-visit: its turn ends by the
         visit's own rule, and the exclusion takes effect at the loop point.
         """
         p = self.policy
-        excluded = {}
+        excluded, finished, verdicts = {}, {}, {}
         ledger = getattr(p, "scans", None)
         exits = self._exits_by_room(openings)
         doored = set()
         for door in getattr(p.graph, "doors", ()) or ():
             doored.update(int(pid) for pid in door.get("rooms", ()))
+        in_force = self.room_id if p.supervisor.state in (TRANSIT, SEARCH) else None
         for pid, room in p.graph.registry.rooms.items():
-            if pid == self.room_id and p.supervisor.state in (TRANSIT, SEARCH):
+            if pid == in_force:
+                if pid in self._finished:
+                    finished[pid] = self._finished[pid]
                 continue
-            if self.settings.scanning and ledger is not None:
-                how = ledger.status(world, pid, room, frontier=self._live_frontier(pid), doored=pid in doored)
-                if how is not None and how != SCAN_POINT_INSIDE and self._home_objects(pid):
-                    # Finished by sight from OUTSIDE -- half its floor seen from the
-                    # door -- with a home object of the target standing in it: the
-                    # toilet is behind the jamb the sightline never passed. A room
-                    # the agent stood in and turned a circle in is finished as before.
-                    if pid not in self._home_kept_scans:
-                        self._home_kept_scans.add(pid)
-                        self.stats["home_object_kept"] += 1
-                        self._log(obs, "home_object_kept", room=pid, scanned=how, home_objects=self._home_objects(pid))
-                    how = None
-                if how is not None:
-                    excluded[pid] = "scanned:%s" % how
-                    continue
+            if not self.settings.scanning or ledger is None:
+                continue
+            how = ledger.status(world, pid, room, frontier=self._live_frontier(pid), doored=pid in doored,
+                                step=int(obs.step))
+            if how is not None and how != SCAN_POINT_INSIDE and self._home_objects(pid):
+                # Finished by sight from OUTSIDE -- half its floor seen from the
+                # door -- with a home object of the target standing in it: the
+                # toilet is behind the jamb the sightline never passed. A room
+                # the agent stood in and turned a circle in is finished as before.
+                if pid not in self._home_kept_scans:
+                    self._home_kept_scans.add(pid)
+                    self.stats["home_object_kept"] += 1
+                    self._log(obs, "home_object_kept", room=pid, scanned=how, home_objects=self._home_objects(pid))
+                how = None
+            if how is not None:
+                verdicts[pid] = how
+                finished[pid] = (how, ledger.finished_step(pid))
+        # The second pass: the oracle's own verdict, or the floor exhausted -- no
+        # unfinished room, no exit to look into, no reachable frontier left -- in
+        # which case re-checking the scanned rooms is the only move there is.
+        unfinished = [pid for pid in p.graph.registry.rooms if pid != in_force and pid not in verdicts]
+        has_exit = any(o.opening.kind != LANDMARK for o in openings)
+        # With a storey change allowed the stairs are a move too: there the second
+        # pass is the model's verdict alone (the development protocol).
+        exhausted = (self.settings.scanning and bool(verdicts) and not unfinished and not has_exit
+                     and not self._frontier_left()
+                     and not (p.settings.allow_stair_traversal and self.settings.stairs_as_nodes))
+        revisiting = self.second_pass(exhausted=exhausted) and bool(verdicts)
+        for pid in p.graph.registry.rooms:
+            if pid == in_force:
+                continue
+            how = verdicts.get(pid)
+            if how is not None and not revisiting:
+                excluded[pid] = "scanned:%s" % how
+                continue
             if self.settings.type_prior:
                 why = self._ruled_out(obs, pid, exits.get(pid, 0))
                 if why is not None:
                     excluded[pid] = why
+        self._exhausted = exhausted
+        if revisiting and not self._second_pass_logged:
+            self._second_pass_logged = True
+            self.stats["second_pass_rounds"] += 1
+            if exhausted:
+                self.stats["second_pass_forced"] += 1
+            if not after_reasoning:
+                self._needs_reason = True       # the finished rooms are nodes now: value them afresh
+            self._log(obs, "second_pass", rooms=sorted(int(pid) for pid in verdicts), forced=exhausted)
+        elif not revisiting:
+            self._second_pass_logged = False
         if set(excluded) != set(self._excluded):
             newly = sorted(set(excluded) - set(self._excluded))
             self.stats["excluded_scanned"] += sum(1 for pid in newly if excluded[pid].startswith("scanned"))
@@ -845,7 +975,31 @@ class RoomSearchLoop:
             if newly:
                 self._log(obs, "excluded", rooms={str(pid): excluded[pid] for pid in newly})
         self._excluded = excluded
+        self._finished = finished
         return excluded
+
+    def _frontier_left(self):
+        """Whether the floor still has a reachable frontier anywhere (the exploration fallback's first rung)."""
+        inventory = getattr(self.policy.graph, "frontier_inventory", None)
+        goals = getattr(inventory, "goals", None) if inventory is not None else None
+        if not goals:
+            return False
+        return any(math.isfinite(float(getattr(goal, "geodesic_m", float("inf")))) for goal in goals)
+
+    def _worth_asking(self, stairs, openings):
+        """Whether this loop point has a node the oracle's answer could send the search to.
+
+        An unfinished room, a staircase or an exit to look into is one. With
+        nothing of the kind -- the spawn room finished by the warm-up and no
+        doorway seen yet -- the reasoning model is not spent on a reply that
+        cannot change the action: the exploration fallback carries the search
+        to the nearest frontier, and the call is made when a node appears.
+        The finished rooms count once the second pass has them offered.
+        """
+        p = self.policy
+        if stairs or any(o.opening.kind != LANDMARK for o in openings):
+            return True
+        return any(pid not in self._excluded for pid in p.graph.registry.rooms)
 
     @staticmethod
     def _exits_by_room(openings):
@@ -951,9 +1105,11 @@ class RoomSearchLoop:
         """
         p = self.policy
         where = "transit" if p.supervisor.state == TRANSIT else "search"
-        if self.settings.scanning and self.settings.type_prior:
+        if self.settings.scanning:
             label = (p.graph.label_info(pid) or {}).get("label")
-            if self._ruled_out(obs, pid) is None:
+            if not self.settings.type_prior or self._ruled_out(obs, pid) is None:
+                # LLM-first: no name ends a scan; the model values the new fact at
+                # the loop point. With the type prior on, only a ruling-out name does.
                 self.stats["relabels_kept_visit"] += 1
                 self._log(obs, "relabel_kept_visit", room=pid, label=label, where=where)
                 return False
@@ -982,13 +1138,15 @@ class RoomSearchLoop:
                        frontier_goals_by_room(world, cost, p.graph.labels, (obs.pose.x, obs.pose.y),
                                               obs.pose.yaw, p.sweep.settings.ranking))
         self._entries, options = {}, []
+        revisits = set()
         for option in p.graph.options:
             if option.room_id in self._excluded:
                 continue
             xy, from_frontier = option.xy, False
+            revisit = option.room_id in self._finished
             if self.settings.scanning:
                 room = p.graph.registry.rooms.get(option.room_id)
-                found = self._vantage(world, cost, room) if room is not None else None
+                found = self._vantage(world, cost, room, revisit=revisit) if room is not None else None
                 if found is not None:
                     xy = found[0]
             else:
@@ -997,9 +1155,13 @@ class RoomSearchLoop:
                     nearest = min(goals, key=lambda g: g.geodesic_m)
                     xy, from_frontier = nearest.xy, True
             self._entries[option.room_id] = (xy, from_frontier)
+            if revisit:
+                revisits.add(option.room_id)
             # The probability the supervisor filters on is the oracle's latest, whatever
             # the option carried: the two are one number, read from one place.
             options.append(replace(option, xy=xy, prob=p.graph.probs.get(option.room_id, option.prob)))
+        self.stats["revisits_offered"] += len(revisits - self._revisits)
+        self._revisits = revisits
         for stair in stairs:
             self._entries[stair.node_id] = (stair.approach.xy, False)
             options.append(stair.option(p.graph.stair_probs.get(stair.node_id, 0.0)))
@@ -1010,21 +1172,30 @@ class RoomSearchLoop:
             options.append(opening.option(prob))
         return options
 
-    def _vantage(self, world, cost, room):
+    def _vantage(self, world, cost, room, revisit=False):
         """Where to stand in ``room`` to see it: ``((x, y), clearance_m)`` or None.
 
         The interior cell of greatest clearance among those the observed
         passable map reaches from the agent (the frontier inventory's
         geodesic field when it is current, else every finite-cost cell).
+        For a second-pass ``revisit`` the room's earlier scan points are
+        avoided by :attr:`LoopSettings.revisit_standoff_m`, so the second
+        look is taken from a different spot.
         """
         p = self.policy
         inventory = p.graph.frontier_inventory
         reachable = (np.isfinite(inventory.distance_m) if inventory is not None
                      and getattr(inventory, "distance_m", None) is not None
                      and inventory.distance_m.shape == room.mask.shape else np.isfinite(cost))
-        found = vantage_point(world, room.mask, reachable, self.settings.vantage_min_clearance_m)
+        avoid, standoff = (), 0.0
+        ledger = getattr(p, "scans", None)
+        if revisit and ledger is not None and self.settings.revisit_standoff_m > 0.0:
+            avoid, standoff = ledger.scan_points_in(world, room), self.settings.revisit_standoff_m
+        found = vantage_point(world, room.mask, reachable, self.settings.vantage_min_clearance_m,
+                              avoid=avoid, avoid_radius_m=standoff)
         if found is None:
-            found = vantage_point(world, room.mask, None, self.settings.vantage_min_clearance_m)
+            found = vantage_point(world, room.mask, None, self.settings.vantage_min_clearance_m,
+                                  avoid=avoid, avoid_radius_m=standoff)
         return found
 
     def _record(self, instance, dropped, options):
@@ -1146,7 +1317,7 @@ class RoomSearchLoop:
             if self.settings.scanning:
                 # The vantage point moved out from under the route (the mask re-segmented):
                 # re-aim at where it is now, once; the centroid is the last resort.
-                found = self._vantage(world, cost, room)
+                found = self._vantage(world, cost, room, revisit=state.room_id in self._revisits)
                 candidates = [c for c in ([found[0]] if found is not None else []) + [tuple(room.centroid)]
                               if math.dist(c, xy_goal) > world.resolution]
                 self._log(obs, "entry_lost", room=state.room_id, goal=[round(v, 2) for v in xy_goal],
@@ -1188,8 +1359,8 @@ class RoomSearchLoop:
         """
         p = self.policy
         ledger = getattr(p, "scans", None)
-        if not self.settings.scanning or ledger is None:
-            return False
+        if not self.settings.scanning or ledger is None or pid in self._revisits:
+            return False       # a second-pass revisit is finished already: that is the point of going
         frontier = self._live_frontier(pid)
         doored = any(int(pid) in (door.get("rooms") or ()) for door in getattr(p.graph, "doors", ()) or ())
         how = ledger.status(world, pid, room, frontier=frontier, doored=doored)
@@ -1393,6 +1564,15 @@ class RoomSearchLoop:
         if opening.kind == LANDMARK:
             self._inspected.add(opening.landmark_id)
             self.stats["landmarks_inspected"] += 1
+        elif why == "looked":
+            # The look swept the opening's heading plus one turn each side, and the
+            # camera's half field of view beyond that: the frontier it reveals through
+            # the same door is covered, not a new opening (opening_nodes.OpeningRegistry.peeked).
+            k = p.episode.camera.intrinsics
+            half_fov = math.atan(0.5 * float(k.width) / float(k.fx))
+            cone = self.settings.openings.look_turns * p.episode.action_spec.turn_angle_rad + half_fov
+            p.openings.mark_peeked(p.mapping.floor_id, opening.xy, obs.step, why, heading=float(opening.heading),
+                                   cone_rad=float(cone), looked_m=float(self.settings.openings.glimpse_m))
         else:
             p.openings.mark_peeked(p.mapping.floor_id, opening.xy, obs.step, why)
         if why != "looked":
@@ -1512,12 +1692,16 @@ class RoomSearchLoop:
         p = self.policy
         scan = self._scan
         if scan is None or scan["room"] != state.room_id:
+            revisit = state.room_id in self._revisits
             scan = self._scan = dict(room=state.room_id, phase="approach", approach_actions=0,
-                                     turns=0, swept=0.0, last_yaw=None, vantage=None, started=int(obs.step))
-            self._log(obs, "scan_begin", room=state.room_id)
+                                     turns=0, swept=0.0, last_yaw=None, vantage=None, started=int(obs.step),
+                                     revisit=revisit)
+            if revisit:
+                self.stats["revisit_scans"] += 1
+            self._log(obs, "scan_begin", room=state.room_id, revisit=revisit)
         inside = self._inside(obs, world, room)
         if scan["phase"] == "approach":
-            found = self._vantage(world, cost, room)
+            found = self._vantage(world, cost, room, revisit=scan.get("revisit", False))
             vantage = found[0] if found is not None else None
             scan["vantage"] = None if vantage is None else [round(v, 2) for v in vantage]
             here = (obs.pose.x, obs.pose.y)
@@ -1560,7 +1744,8 @@ class RoomSearchLoop:
             self.stats["exhausted_releases"] += 1
             self._log(obs, "scan_complete", room=state.room_id, turns=scan["turns"],
                       swept_degrees=round(math.degrees(scan["swept"]), 1), actions=int(obs.step) - scan["started"],
-                      approach_actions=scan["approach_actions"], in_place=scan.get("in_place", False))
+                      approach_actions=scan["approach_actions"], in_place=scan.get("in_place", False),
+                      revisit=scan.get("revisit", False))
             self._scan = None
             return None, {"frontier_exhausted": True}
         scan["turns"] += 1
@@ -1663,6 +1848,8 @@ class RoomSearchLoop:
                 "order": list(self.order), "order_index": self.order_index, "next_room": self.next_room,
                 "estimates": {str(pid): dict(item) for pid, item in self.estimates.items()},
                 "excluded": {str(pid): why for pid, why in sorted(self._excluded.items())},
+                "finished": {str(pid): {"how": how, "step": step} for pid, (how, step) in sorted(self._finished.items())},
+                "second_pass": self.second_pass(), "revisits_offered_now": sorted(int(pid) for pid in self._revisits),
                 "scan": None if self._scan is None else dict(self._scan),
                 "peek": self.peek_state(),
                 "stairs_offered": sorted(self._stairs), "openings_offered": sorted(self._openings),

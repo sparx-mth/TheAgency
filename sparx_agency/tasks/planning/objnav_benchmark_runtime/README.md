@@ -14,9 +14,11 @@ lift the flag explicitly). Habitat target closing additionally uses
 declared local NavMesh projection (`target_navmesh_projection` in run configuration).
 This is an experimental multi-story algorithm, **not a claim of solved navigation**.
 
-**To set up and run it end to end, start with [QUICKSTART.md](QUICKSTART.md)**: environments,
-dataset and weight downloads, then the services, the frozen episodes and the campaign in
-order. This file is the architecture reference.
+**To run the published Gibson val benchmark end to end, start with
+[gibson/BENCHMARK.md](gibson/BENCHMARK.md)** (one script: services, preflight, the 1,000
+episodes with lean records and live progress, the summary). [QUICKSTART.md](QUICKSTART.md)
+is the step-by-step manual and the guide to the multi-storey development campaigns. This
+file is the architecture reference.
 
 ## Exploration selection
 
@@ -464,11 +466,54 @@ refresh.
    and 121 and came back to each; the clue is kept for the loop point the
    visit ends on, where every node is re-valued anyway.
 
-   **What is not a node.** At every loop point the loop withholds two kinds
-   of room from the oracle, the solver and the transit, and records why
-   (`excluded` in the events, estimates and HUD): a room the ledger has
-   **finished**, and a room whose identified type **cannot hold the target**
-   (`methods/room_priors.py`, `LoopSettings.type_prior`: a sofa is not
+   **LLM-first (since 2026-10-07).** The node oracle
+   (`core/mapping/topology/search_node_oracle.py`, the 14B reasoning model)
+   is shown **every room of the storey** -- finished and type-excluded ones
+   included, each with a `status=` of `never_entered`, `entered` or
+   `scanned(<how>, <ago>)` -- together with a **HOUSE line**
+   (`methods/house_context.py`): every room type found so far with its
+   status, the rooms still unidentified, the openings not yet looked into,
+   whether unexplored frontier is still reachable, and the budget
+   (`actions used about 150 of 500`, in 25-action steps so an unchanged map
+   keeps an unchanged prompt). The prompt asks the model to reason as a
+   person who knows homes does, in three written steps before any number:
+   **home** (where the target lives: a toilet in a bathroom, separate or an
+   en-suite reached through a bedroom; a television in a living room, then
+   a bedroom, rarely a kitchen, never a bathroom), **house** (a home has one
+   kitchen and one living room, so a living room found makes a sofa
+   unlikely in the unidentified rooms; a bathroom still missing makes the
+   small unidentified rooms and the unlooked doorways where the toilet must
+   be -- exploration first), and **stage** (early: the unexplored first,
+   scanned rooms low; late, with the home type found and the target not
+   seen: the detector may have MISSED it in a scanned room of the right
+   type, and the chance that an unseen room holds it falls with every place
+   looked at). It writes a structured **`pass` verdict** -- `first` while an
+   unexplored place is still worth looking at before any scanned room is
+   re-checked, `second` once the home is covered -- which the loop reads to
+   decide whether finished rooms are **offered as nodes again**
+   (`LoopSettings.second_pass`): a revisit is a scan from a spot at least
+   `revisit_standoff_m` (1.5 m) from the room's earlier scan points, and
+   a floor with no unfinished room, no exit and no reachable frontier
+   forces the second pass whatever the verdict (`second_pass_forced`). The
+   three arithmetic floors below (`unexplored_floor`, `unexplored_elsewhere`,
+   `home_floor`) and the hard type exclusion (`type_prior`) are **off by
+   default** -- they were the 3B era's defaults, and the model is given the
+   facts they encoded instead; each stays a knob. The storey/stairs
+   reasoning of the multi-storey development protocol is a supplement to
+   the prompt shown only when a staircase is a node. With nothing to offer
+   -- the spawn room finished by the warm-up, no doorway seen yet -- the
+   reasoning model is not spent (`oracle_calls_skipped`); the fallback
+   carries the search until a node appears.
+   `tests/probe_node_oracle.py` runs five single-storey scenarios against
+   the live model and checks the judgement (all five pass on
+   `qwen2.5:14b-instruct`, ~30 s per call on a 32-thread CPU).
+
+   **What is not a node (the first pass).** At every loop point the loop
+   withholds finished rooms from the solver and the transit while the
+   oracle's verdict is `first`, and records why (`excluded` in the events,
+   estimates and HUD); with `LoopSettings.type_prior` switched on it also
+   withholds a room whose identified type **cannot hold the target**
+   (`methods/room_priors.py`: a sofa is not
    searched for in a bedroom, a bathroom or a kitchen; a toilet not in a
    bedroom; the table is exclusions, not permissions, so a hallway stays
    searchable and `unknown` is never excluded). Since 2026-10-05 the type
@@ -498,12 +543,14 @@ refresh.
    an upstairs room a strong "living_room" at 0.95, which put a living room
    on the storey summary the node oracle reads and wobbled its verdict on
    where living rooms are. **A home object is a prior, not only a guard**
-   (since 2026-10-07, `LoopSettings.home_floor`, 0.60): a room holding a
+   (`LoopSettings.home_floor`, off by default since the LLM-first change;
+   0.60 restores it): a room holding a
    confirmed home object of the target is handed to the oracle with
-   `SearchNode.home` set and is never read below the floor, whatever the
-   model wrote and whatever its storey verdict says -- a bathtub on this
-   storey IS the toilet's home type, found -- and such a room is **never
-   finished by sight from outside it**: the scan ledger's `seen_from_scan`
+   `SearchNode.home` set and, with the floor on, is never read below it,
+   whatever the model wrote and whatever its storey verdict says -- a
+   bathtub on this storey IS the toilet's home type, found -- and such a
+   room is **never finished by sight from outside it** (this guard stands
+   regardless): the scan ledger's `seen_from_scan`
    and `seen_through` verdicts (half its floor seen through its door) do not
    exclude it, only a scan the agent stood in does (`home_object_kept` events
    with `scanned`). The Allensville toilet run's warm-up spin at the spawn
@@ -516,9 +563,9 @@ refresh.
    after the exclusions, so a room that became a strong bedroom on that
    very action was shown to the oracle, valued at 0.10 ("bedroom, fully
    seen, no toilet") and kept in the order for one more loop point (Hanson
-   action 150). Excluded rooms carry probability
-   0 so nothing reads them as unvalued; when nothing is left to value and
-   no staircase is offered, no model call is made and the exploration
+   action 150). Withheld rooms keep the oracle's own probability for the
+   record and the HUD but are not offered; when nothing is left to offer
+   and no staircase is a node, no model call is made and the exploration
    fallback carries the search. `LoopSettings.min_prob` (0.05) keeps the
    oracle's "1" for a bedroom in a search for a couch out of the order.
 
@@ -543,8 +590,10 @@ refresh.
    A room finished by what the walk to it showed is released `exhausted`
    before it is entered (`finished_in_transit` events).
 
-   **The uncertainty floor** (`LoopSettings.unexplored_floor`, 0.25,
-   applied in `search_node_oracle.SearchNodeOracle`, since 2026-10-05). A
+   **The uncertainty floor** (`LoopSettings.unexplored_floor`, applied in
+   `search_node_oracle.SearchNodeOracle`, since 2026-10-05; **0 -- off --
+   by default since 2026-10-07**, when the rule moved into the prompt and
+   the 14B model was found to apply it; 0.25 restores the arithmetic). A
    room never entered and still `unknown`, or an opening nothing was
    glimpsed through, is a place the search knows *nothing* about, and the
    least it owes such a place is a look: its probability is never read
@@ -564,8 +613,10 @@ refresh.
    2b and 2c say what that means (an unexplored place owes a look, never
    "too small"; a home-type object in a room of another type is the map's
    merge showing). **The floor has one condition** (`LoopSettings.
-   unexplored_elsewhere`, 0.10, since the Ranchester couch search of
-   2026-10-05): the model's own STEP 2, asked for as a structured verdict
+   unexplored_elsewhere`, since the Ranchester couch search of
+   2026-10-05; off by default since 2026-10-07, 0.10 restores it; only the
+   multi-storey supplement ever produces the verdict): the model's own
+   storey step, asked for as a structured verdict
    `home_here` -- `found` (a room of the home type is on this storey),
    `missing` (none yet, but it belongs here) or `elsewhere` (it lives on
    another storey). The 3B model answers that reliably ("living rooms are

@@ -283,3 +283,31 @@ def test_a_kinematics_option_of_the_wrong_type_is_refused_before_the_episode_sta
     assert env.resets == []
     with pytest.raises(TypeError, match="action must be a DiscreteAction"):
         check_motion(1, START, START, SPEC, TOLERANCE)
+
+
+def test_a_first_action_settle_onto_the_mesh_is_excused_only_when_the_protocol_allows_it():
+    """Gibson val Darden/000000 starts 0.10 m below the navmesh; habitat-sim lifts the agent on the first
+    action. Default tolerance: refused (a turn that moved 0.10 m). With ``settle_m``: the vertical part
+    of the FIRST action is the simulator's; the horizontal bounds still hold, and later actions are not
+    excused at all."""
+    pose = AgentPose(1.0, 2.0, 0.0, math.radians(40.0))
+    lifted = moved(pose, dz=0.10)
+    turned = AgentPose(lifted.x, lifted.y, lifted.z, pose.yaw + SPEC.turn_angle_rad, pose.camera_pitch)
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, turned, SPEC, TOLERANCE, first=True)
+    settling = KinematicTolerance(settle_m=0.30)
+    check_motion(A.TURN_LEFT, pose, turned, SPEC, settling, first=True)
+    check_motion(F, pose, moved(pose, dx=0.25 * math.cos(pose.yaw), dy=0.25 * math.sin(pose.yaw), dz=0.28), SPEC,
+                 settling, first=True)
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, turned, SPEC, settling, first=False), "only the first action"
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, AgentPose(lifted.x, lifted.y, 0.35, turned.yaw), SPEC, settling, first=True)
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, AgentPose(lifted.x + 0.05, lifted.y, lifted.z, turned.yaw), SPEC, settling,
+                     first=True), "the horizontal bound stands"
+    assert KinematicTolerance().settle_m == 0.0, "off by default"
+    with pytest.raises(HarnessError):
+        KinematicTolerance(settle_m=-0.1)
+    with pytest.raises(HarnessError):
+        KinematicTolerance(position_m=0.0), "every other tolerance is still strictly positive"

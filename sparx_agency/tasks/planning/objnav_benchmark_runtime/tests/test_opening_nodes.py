@@ -443,7 +443,7 @@ def test_a_weak_type_label_never_rules_a_room_out():
     ruled it out for the toilet. One kind of object that names no room on its own (a sink: kitchen or
     bathroom) is a guess the oracle sees as `type=bathroom?`; a signature object (a toilet) is not weak,
     see test_room_scans."""
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     assert policy.target.query == "chair"
     see(policy, {1: ["sink"]}, step=0)
     policy.graph.relabel(1, 0)
@@ -457,32 +457,41 @@ def test_a_weak_type_label_never_rules_a_room_out():
     policy.loop.plan(obs_at(episode, 1, IN_A), world)
     assert policy.loop.stats["weak_type_kept"] == 1, "logged once per room"
     # The former openings allowance is not consulted any more: kept whatever the bound says.
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), weak_type_max_openings=2)
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), weak_type_max_openings=2,
+                                                      type_prior=True)
     see(policy, {1: ["sink"]}, step=0)
     policy.graph.relabel(1, 0)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert 1 not in policy.loop._excluded and policy.loop.stats["weak_type_kept"] == 1
-    # A strong label (two kinds of object) rules the room out whatever its openings.
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+    # A strong label (two kinds of object) rules the room out whatever its openings -- with the prior on.
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     see(policy, {1: ["toilet", "sink"]}, step=0)
     policy.graph.relabel(1, 0)
     assert policy.graph.label_info(1)["strength"] == "strong"
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._excluded == {1: "type:bathroom"}
+    # LLM-first (the default): the strong bathroom is shown to the oracle with its type and valued by it.
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+    assert not policy.loop.settings.type_prior
+    see(policy, {1: ["toilet", "sink"]}, step=0)
+    policy.graph.relabel(1, 0)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {} and policy.loop.stats["excluded_type"] == 0
+    assert policy.reasoned_with[-1]["exclude"] == (), "every room is shown"
 
 
 def test_a_home_object_of_the_target_keeps_a_strongly_labelled_room_a_node():
     """Hanson 2026-10-04: the bathroom's sink was merged into a room of sofas. For a toilet, a sink is
     where it lives; the room stays a node whatever its label says."""
     from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     policy.target = gibson_label_mapper().target_labels("toilet")
     see(policy, {1: ["sofa", "bed"]}, step=0)                       # NamingLLM: a bedroom, strongly
     policy.graph.relabel(1, 0)
     assert policy.graph.label_info(1)["label"] == "bedroom" and policy.graph.label_info(1)["strength"] == "strong"
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "type:bedroom"}, "a toilet is not searched for in a bedroom"
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+    assert policy.loop._excluded == {1: "type:bedroom"}, "with the prior on, a toilet is not searched for in a bedroom"
+    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
     policy.target = gibson_label_mapper().target_labels("toilet")
     see(policy, {1: ["sofa", "bed", "shower"]}, step=0)             # still a bedroom to the classifier
     policy.graph.relabel(1, 0)
@@ -673,3 +682,25 @@ def test_an_opening_released_blocked_is_retired_rather_than_re_chosen():
     assert policy.loop.stats["peeks_abandoned"] == 1
     assert [e for e in policy.loop.events if e["event"] == "peek_abandoned"][-1]["reason"] == "released blocked"
     assert policy.supervisor.room_id != gap.node_id and gap.node_id not in policy.loop._openings, "not chosen again"
+
+
+def test_a_completed_look_covers_the_frontier_it_reveals_through_the_same_door():
+    """Allensville toilet run: a peek reveals 1-3 m of floor beyond the threshold, the frontier re-snaps
+    there, and the registry issued a new id for the same doorway -- twenty peeks. A seed inside the cone
+    a completed look swept is covered; one behind the agent, or beyond the looked range, is not."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OpeningRegistry
+    registry = OpeningRegistry(match_m=1.0, done_m=1.0)
+    registry.mark_peeked(0, (5.0, 5.0), step=40, heading=0.0, cone_rad=math.radians(70.0), looked_m=3.0)
+    assert registry.peeked(0, (5.5, 5.2)), "within done_m, as before"
+    assert registry.peeked(0, (7.5, 5.0)), "2.5 m straight through the door: looked at"
+    assert registry.peeked(0, (6.5, 6.4)), "inside the swept cone"
+    assert not registry.peeked(0, (8.5, 5.0)), "beyond the looked range: a new opening"
+    assert not registry.peeked(0, (3.0, 5.0)), "behind the threshold: not looked at"
+    assert not registry.peeked(0, (5.5, 7.5)), "outside the cone"
+    assert not registry.peeked(1, (7.5, 5.0)), "another storey"
+    # An abandoned peek (no look) covers only its threshold disc.
+    plain = OpeningRegistry(match_m=1.0, done_m=1.0)
+    plain.mark_peeked(0, (5.0, 5.0), step=40, why="unreachable")
+    assert plain.peeked(0, (5.5, 5.0)) and not plain.peeked(0, (7.5, 5.0))
+    assert plain.diagnostics()["peeked"]["0"][0]["heading"] is None
+    assert registry.diagnostics()["peeked"]["0"][0]["heading"] == 0.0

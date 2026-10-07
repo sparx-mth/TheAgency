@@ -57,6 +57,7 @@ def _drive(env: ObjNavEnv, agent: ObjNavAgent, episode: ObjNavEpisode,
     sent = 0
     action = _STOP
     agent_error = None
+    moved = False      # until the first action that displaces the agent (its first translation)
     # checked_reset refused an episode already over. Forced STOP ends it.
     while not env.episode_over:
         action, agent_error = decide(agent, observation, episode.action_spec, mode)
@@ -65,7 +66,9 @@ def _drive(env: ObjNavEnv, agent: ObjNavAgent, episode: ObjNavEpisode,
         sent += 1
         counts[action.name] += 1
         check_step(env, episode, observation, action, sent, before=before,
-                   kinematics=kinematics)
+                   kinematics=kinematics, moved=moved)
+        if observation.pose.position() != before.position():
+            moved = True
         positions.append(observation.pose.position())
     return _Trace(tuple(positions), counts, sent, action, agent_error)
 

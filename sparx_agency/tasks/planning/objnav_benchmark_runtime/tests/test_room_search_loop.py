@@ -114,10 +114,11 @@ def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None,
     rooms = install_rooms(policy, world, labels, probs)
     reasoned, refreshed = [], []
 
-    def reason(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=()):
+    def reason(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=(),
+               scanned=None):
         reasoned.append(step)
         policy.reasoned_with.append({"stairs": [n.id for n in extra_nodes], "context": context, "here": here_xy,
-                                     "exclude": tuple(exclude)})
+                                     "exclude": tuple(exclude), "scanned": dict(scanned or {})})
         for pid in policy.graph.registry.rooms:             # like the real one: every room gets a probability
             policy.graph.probs.setdefault(pid, 0.05)
         for pid in exclude:
@@ -638,7 +639,8 @@ def test_the_oracle_decides_what_the_new_name_is_worth():
     llm = NamingLLM()
     policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    def oracle(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=()):
+    def oracle(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=(),
+               scanned=None):
         reasoned.append(step)
         info = policy.graph.label_info(1) or {}
         policy.graph.probs = {0: 0.6, 1: 0.0 if info.get("label") == "bathroom" else 0.4}

@@ -61,6 +61,29 @@ elevation decides. And on this machine `.venv/bin/python` has no pytest; the she
 
 ---
 
+## 2026-10-07 — Before the 1,000-episode run: the harness itself would have ended it, and the budget went to peeks
+
+**Symptom:** a review of the Gibson adapter before the full val split found that the kinematic
+contract -- our own self-check, not the scorer -- raised `EnvContractError` out of `run_benchmark` on
+(a) a published start settled onto the navmesh by habitat-sim on the first translation (starts lie up
+to 0.28 m below the mesh; Darden/000000 0.10 m) and (b) an on-mesh forward step that climbs more than
+0.20 m, which the shipped Collierville/Wiconisco navmeshes do about once in 300 steps (treads, split
+levels inside the storey). Either ends the run, and a `--resume` replays the same refusal for ever.
+Two smoke episodes then spent 247 of 500 actions on ten doorway peeks and 120 on target verification
+(18 and 10 releases) for one bed.
+
+**Root causes and fixes:** `KinematicTolerance.settle_m` (0.30, additive, on the first action that
+moves the agent -- turns bypass the navmesh filter, so with a warm-up rotation that is action ~13,
+not action 1) and `climb_m` 0.60 for Gibson; a near candidate released from the spot the agent still
+stands on is the same evidence and is refused until it moves; a completed peek covers the cone it
+looked into so the frontier it reveals through the same door is not a new opening; the oracle is told
+that unexplored places share the chance of the rooms still missing (0.35 on each of fourteen doorways
+became 0.20 on each of six -- still generous; the peek's real price is the walk, charged as travel).
+
+**Don't:** key a "first action" excuse to `sent == 1`; trust that a 14B on a 32-thread CPU is cheap --
+64 s median per oracle call, 14 calls, 15 of a 21-minute episode; or read a `pass` verdict the model
+never wrote: a missing key is the first pass, never the second.
+
 ## 2026-10-05 — The 5x3 same-storey benchmark: eight failures, five mechanisms, none of them the reasoning
 
 **Symptom:** `runs/zson-benchmark-5x3-20261005`: SR 7/15, SPL 0.27, DTG 3.6 m. Every success was a
