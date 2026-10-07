@@ -37,11 +37,13 @@ class RPTSettings:
     body_radius_m: float = 0.18
     preferred_clearance_m: float = 0.30
     local_exploration: str = "frontier"
+    stay_on_start_floor: bool = False
+    stair_exclusion_margin_m: float = 0.8
     falcon: FalconParams = field(default_factory=FalconParams)
     multifloor: MultiFloorParams = field(default_factory=MultiFloorParams)
 
     def __post_init__(self):
-        for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m", "preferred_clearance_m"):
+        for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m", "preferred_clearance_m", "stair_exclusion_margin_m"):
             value = getattr(self, key)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)
@@ -54,6 +56,8 @@ class RPTSettings:
             raise ValueError("Preferred clearance cannot be smaller than the robot radius")
         if self.local_exploration not in ("frontier", "falcon"):
             raise ValueError("local_exploration must be frontier or falcon; no silent fallback")
+        if type(self.stay_on_start_floor) is not bool:
+            raise ValueError("stay_on_start_floor must be boolean")
         if isinstance(self.falcon, dict):
             object.__setattr__(self, "falcon", FalconParams(**self.falcon))
         if not isinstance(self.falcon, FalconParams):

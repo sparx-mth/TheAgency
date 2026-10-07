@@ -163,6 +163,23 @@ def test_protocol_is_separate_and_permits_bounded_camera_inspection():
     assert "incomplete" in MULTIFLOOR_PROTOCOL.goal_definition
 
 
+def test_same_floor_guard_vetoes_forward_motion_near_ground_truth_stairs():
+    policy, episode = setup_policy()
+    connector = {"id": 0, "bottom_xyz": [0.5, 0, 0], "top_xyz": [0.5, 0, 2.7],
+                 "bottom_z": 0, "top_z": 2.7,
+                 "polyline_xyz": [[0.5, 0, 0], [0.5, 0, 2.7]], "length_m": 2.7}
+    episode = replace(episode, metadata={"floor_levels": [{"height_m": 0}, {"height_m": 2.7}],
+                                        "stair_connectors": [connector]})
+    settings = replace(policy.settings, stay_on_start_floor=True,
+                       multifloor=MultiFloorParams(enabled=False))
+    policy = type(policy)(policy.detector, policy.llm_client, settings)
+    policy.reset(episode, None)
+    observation_at_pose = SimpleNamespace(pose=AgentPose(0, 0, 0, 0))
+    assert policy.filter_action(observation_at_pose, DiscreteAction.MOVE_FORWARD) == DiscreteAction.TURN_RIGHT
+    away = SimpleNamespace(pose=AgentPose(1, 0, 0, 0))
+    assert policy.filter_action(away, DiscreteAction.MOVE_FORWARD) == DiscreteAction.MOVE_FORWARD
+
+
 def test_unselected_recording_does_not_touch_frames_or_policy(tmp_path):
     policy, episode = setup_policy()
     recorder = EpisodeRecorder(tmp_path, policy, selected_episode_ids={"another/episode"})

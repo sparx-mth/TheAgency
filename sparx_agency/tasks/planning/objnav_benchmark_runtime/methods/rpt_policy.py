@@ -16,6 +16,7 @@ from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSolver
 from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCON_SOURCE
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
+from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.params import WeightedAStarParams
@@ -28,6 +29,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory i
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidenceSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ExplorationFallback, FallbackSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context import FloorContextBank
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_ground_truth import GroundTruthStairs
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import FrontierSweep, SweepSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
@@ -92,6 +94,8 @@ class RPTSearchPolicy:
         self._blocked = self._plan_calls = self._duplicates_removed = 0
         self._solver_records = []
         self.last_world = None
+        self._floor_lock_stairs = None
+        self._floor_lock_height = None
         self.telemetry = ExplorationMetrics()
         self.camera_control = CameraController(episode.action_spec)
         self.perception = PerceptionCycle(self)
@@ -101,6 +105,10 @@ class RPTSearchPolicy:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_policy import FalconObjectNav
             self.hierarchy = FalconObjectNav(self)
         self.building = None
+        if s.stay_on_start_floor:
+            self._floor_lock_stairs = GroundTruthStairs.from_metadata(episode.metadata)
+            if not self._floor_lock_stairs.available:
+                raise ValueError("stay_on_start_floor requires ground-truth stair metadata")
         if s.multifloor.enabled:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.multifloor_policy import MultiFloorSearch
             self.building = MultiFloorSearch(self)
@@ -143,6 +151,21 @@ class RPTSearchPolicy:
             self.telemetry.latencies["policy_decision"].append((time.monotonic() - started) * 1000)
 
     def filter_action(self, observation, action):
+        if action == DiscreteAction.MOVE_FORWARD and self._floor_lock_stairs is not None:
+            if self._floor_lock_height is None:
+                self._floor_lock_height = observation.pose.z
+            current = observation.pose
+            step = self.episode.action_spec.forward_step_m
+            next_x = current.x + step * math.cos(current.yaw)
+            next_y = current.y + step * math.sin(current.yaw)
+            connectors = self._floor_lock_stairs.touching(
+                self._floor_lock_height, self.settings.multifloor.floor_match_m)
+            for connector in connectors:
+                current_distance = connector.distance_xy(current.x, current.y)
+                next_distance = connector.distance_xy(next_x, next_y)
+                if (next_distance <= self.settings.stair_exclusion_margin_m
+                        and next_distance < current_distance):
+                    return DiscreteAction.TURN_RIGHT
         if self.building and self.building.committed:
             return self.building.filter_action(observation, action)
         return self.hierarchy.filter_action(observation, action) if self.hierarchy else action
