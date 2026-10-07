@@ -8,7 +8,26 @@ centroid, observation count up), anything else opens a new landmark, and a
 landmark is only *confirmed* — trusted for publication/planning — once it has
 been observed ``min_observations`` times (false-positive guard).
 
-**Class voting** (``class_votes=True``) changes what "the same object" means:
+**Classes never merge** (the default, ``class_votes=False``): an observation
+associates only with a landmark of its own class, whatever the proximity or
+the footprint overlap -- a cup on a table and the table are two instances, a
+toilet and the bathtub beside it are two, a vase on a cabinet is its own
+landmark. This is the ObjectNav runtime's rule since 2026-10-07: every
+cross-class rule the map ever had collapsed distinct objects resting on or
+beside one another into one and cost a target lock (the Allensville toilet,
+voted into its bathtub).
+
+**Same-class instances are told apart by size** (since 2026-10-07): two
+observations of one class are the same instance when their centroids lie
+within ``dedupe_radius_m`` -- a floor for re-observation jitter, no longer
+the whole rule -- or when both carry a measured footprint and the discs
+overlap by at least ``footprint_iou``, which scales with the object: at 0.25
+two equal discs merge up to about one radius apart, so a bed re-seen from its
+other side (centroids 0.8 m apart) stays one bed while two dining chairs
+0.3 m apart stay two chairs. An unmeasured footprint falls back to the radius.
+
+**Class voting** (``class_votes=True``, kept for other users of the map and
+as the historical ObjectNav behaviour) changes what "the same object" means:
 an observation that lands on an existing landmark's footprint -- centroid
 within the dedupe radius, or footprint discs overlapping by at least
 ``footprint_iou`` -- is folded into that landmark *whatever its class*, as a
@@ -16,7 +35,11 @@ vote. The landmark's class is the plurality of its votes, so a bed seen five
 times and called a sofa once stays a bed and the sofa never reaches the map;
 a landmark whose votes change majority is relabelled (and the change is
 recorded). Confirmation then needs a clear plurality: the leading class must
-hold ``min_observations`` votes and strictly more than the runner-up.
+hold ``min_observations`` votes and strictly more than the runner-up. Under
+voting with both footprints measured, an observation of *another* class
+associates by disc overlap alone, never by the centroid radius
+(``cross_class_footprint_only``): the centroid rule folded every small thing
+near a big one into it.
 
 Landmark XY is **world ENU** (the frame of ``Pose2D`` and the BEV grid), e.g.
 from :func:`sparx_agency.core.mapping.objects.geometry.backproject_bbox_to_world`.
@@ -118,18 +141,25 @@ class ObjectLandmarkMap:
         dedupe_radius_m: An observation within this distance of a same-class
             landmark's running centroid merges into it. Note the radius is
             measured against the *current* centroid, so a slowly re-observed
-            object can walk the centroid (ported semantics).
+            object can walk the centroid (ported semantics). With footprints
+            measured this is the floor for re-observation jitter and the
+            disc overlap (``footprint_iou``) does the size-aware work.
         min_observations: Observations required before a landmark appears in
             :meth:`confirmed`.
         nearest_match: Try the nearest landmark first rather than the first
             in discovery order.
         class_votes: Associate by position alone and let the classes vote
-            (see the module docstring). Off, the ported same-class rule.
-        footprint_iou: Under class voting, two footprints whose discs
-            overlap by at least this much are the same object even when
-            their centroids sit further apart than the dedupe radius. The
-            default 0.15 lets two equal discs merge up to about 1.25 radii
-            apart -- a 1 m bed seen from both sides, not two cups.
+            (see the module docstring). Off -- the default -- classes never
+            merge: the ported same-class rule, size-aware.
+        footprint_iou: Two footprints whose discs overlap by at least this
+            much are the same object even when their centroids sit further
+            apart than the dedupe radius. 0.25 lets two equal discs merge up
+            to about one radius apart -- a bed re-seen from its other side,
+            not two chairs at one table.
+        cross_class_footprint_only: Under class voting, an observation of a
+            class other than the landmark's, with both footprints measured,
+            associates by the disc-overlap test alone (see the module
+            docstring). False restores the centroid rule across classes.
 
     Raises:
         ValueError: If ``dedupe_radius_m`` is not positive, ``min_observations``
@@ -138,7 +168,8 @@ class ObjectLandmarkMap:
 
     def __init__(self, dedupe_radius_m: float = 0.70,
                  min_observations: int = 2, nearest_match: bool = False,
-                 class_votes: bool = False, footprint_iou: float = 0.15) -> None:
+                 class_votes: bool = False, footprint_iou: float = 0.25,
+                 cross_class_footprint_only: bool = True) -> None:
         if float(dedupe_radius_m) <= 0.0:
             raise ValueError("dedupe_radius_m must be positive, got %r"
                              % (dedupe_radius_m,))
@@ -152,6 +183,7 @@ class ObjectLandmarkMap:
         self._nearest_match = bool(nearest_match)
         self._class_votes = bool(class_votes)
         self._footprint_iou = float(footprint_iou)
+        self._cross_class_footprint_only = bool(cross_class_footprint_only)
         self._frames = {}  # type: Dict[int, int]
         self._landmarks = {}  # type: Dict[int, ObjectLandmark]
         self._next_id = 0
@@ -164,12 +196,18 @@ class ObjectLandmarkMap:
         return self._class_votes
 
     def _associated(self, landmark: ObjectLandmark, wx: float, wy: float,
-                    radius_m: Optional[float]) -> bool:
+                    radius_m: Optional[float], class_name: Optional[str] = None) -> bool:
+        same_class = class_name is None or class_name == landmark.class_name
+        if not same_class and not self._class_votes:
+            return False                       # classes never merge (matches() filters this too)
+        footprints = radius_m is not None and landmark.radius_m is not None
+        # Across classes (voting only) with both footprints measured, the centroid radius
+        # says nothing: a vase stands within 0.70 m of the cabinet it is on.
+        by_centroid = same_class or not (footprints and self._cross_class_footprint_only)
         ox, oy = landmark.xy
-        if (ox - wx) ** 2 + (oy - wy) ** 2 <= self._radius_sq:
+        if by_centroid and (ox - wx) ** 2 + (oy - wy) ** 2 <= self._radius_sq:
             return True
-        if (self._class_votes and radius_m is not None and landmark.radius_m is not None
-                and disc_iou((wx, wy), float(radius_m), landmark.xy, landmark.radius_m) >= self._footprint_iou):
+        if footprints and disc_iou((wx, wy), float(radius_m), landmark.xy, landmark.radius_m) >= self._footprint_iou:
             return True
         return False
 
@@ -178,10 +216,13 @@ class ObjectLandmarkMap:
                 exclude: Iterable[int] = ()) -> List[ObjectLandmark]:
         """Every landmark an observation at ``xy`` could belong to, best first.
 
-        Under class voting any class qualifies; otherwise only ``class_name``
-        (required then). ``exclude`` drops landmark ids already fed by the
-        same frame. The order is by centroid distance when ``nearest_match``,
-        else discovery order -- the same order :meth:`observe` folds in.
+        Without class voting only landmarks of ``class_name`` qualify
+        (required then); under voting any class does, and ``class_name``
+        only decides whether the centroid rule applies (see
+        ``cross_class_footprint_only``). ``exclude`` drops landmark ids
+        already fed by the same frame. The order is by centroid distance
+        when ``nearest_match``, else discovery order -- the same order
+        :meth:`observe` folds in.
         """
         wx, wy = float(xy[0]), float(xy[1])
         excluded = set(int(i) for i in exclude)
@@ -192,7 +233,7 @@ class ObjectLandmarkMap:
             candidates = [lm for lm in candidates if lm.class_name == class_name]
         if self._nearest_match:
             candidates.sort(key=lambda lm: (lm.xy[0] - wx) ** 2 + (lm.xy[1] - wy) ** 2)
-        return [lm for lm in candidates if self._associated(lm, wx, wy, radius_m)]
+        return [lm for lm in candidates if self._associated(lm, wx, wy, radius_m, class_name)]
 
     def match(self, xy: Tuple[float, float], radius_m: Optional[float] = None,
               class_name: Optional[str] = None, exclude: Iterable[int] = ()) -> Optional[ObjectLandmark]:
