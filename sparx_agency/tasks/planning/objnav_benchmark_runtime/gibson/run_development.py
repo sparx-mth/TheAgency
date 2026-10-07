@@ -33,7 +33,10 @@ def prepare(args):
     try:
         ids = list(select_episodes(env.episode_ids(), getattr(args, "limit", None)))
         env.validate_starts(ids)
-        policy, method = _method(args)
+        # Multi-storey development episodes are generated to need a floor change: the
+        # benchmark default (no stair traversal) is lifted here, visibly in ``method``,
+        # unless --policy-config says otherwise.
+        policy, method = _method(args, defaults={"allow_stair_traversal": True} if multistory else None)
         policy.target_projector = getattr(env, "target_projector", None)
         method["target_navmesh_projection"] = policy.target_projector is not None
         protocol = env.protocol if multistory else DEVELOPMENT_PROTOCOL

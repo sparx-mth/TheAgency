@@ -4,7 +4,13 @@ Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order
 local exploration and A*/WA* paths → existing discrete actions. Both explorers
 retain persistent floor contexts; stair connectors come from the simulator's
 navmesh by default (`RPTSettings.multifloor.stair_source`, see
-[MULTISTORY.md](gibson/MULTISTORY.md)). Habitat target closing additionally uses
+[MULTISTORY.md](gibson/MULTISTORY.md)). **Taking them is off by default**
+(`RPTSettings.allow_stair_traversal: false`): the standard ZSON benchmarks
+score an episode on its spawn storey, so the search is confined to it --
+seen staircases and observed drops are impassable, no goal off the spawn
+plane is accepted, and no staircase is a node, a fallback or a climb
+(`methods/spawn_floor_guard.py`; the multi-storey development entrypoints
+lift the flag explicitly). Habitat target closing additionally uses
 declared local NavMesh projection (`target_navmesh_projection` in run configuration).
 This is an experimental multi-story algorithm, **not a claim of solved navigation**.
 
@@ -277,6 +283,7 @@ own frozen configurations; changed code does not relabel their outcomes.
 | `methods/stair_nodes.py` | Staircases as nodes of the loop's RPT* instance: ids above every room pid, the facts the oracle values them by, the climb as a leaf charged on every arc |
 | `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: the best floor-wide exit (object shadows and frontiers of rooms the target cannot be in wait behind it), the stairs by the explicit fallback rule, the demoted frontiers, a retired frontier, a relocation, a footing sweep -- a move, never an idle spin; failure records and service back-off |
 | `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
+| `methods/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: the world every decision plans on has every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied (so no frontier, opening, peek or route reaches a flight), and `_navigate` refuses a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; inert when traversal is allowed |
 | `methods/peek_stairs.py` | Floor-local seen-connector footprint: excluded from the room partition (stairs are never a room), from peek viewpoints and from a peek-only A* copy; ordinary stair navigation is unchanged |
 | `methods/camera_control.py` | Sole pitch owner; bounded stair inspection, the footing sweep (a circle at 30 degrees down that maps the blind radius, for a pathless lock or a boxed-in fallback), long unprompted cadence and safe restoration |
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association within a class with a height check |
@@ -665,6 +672,10 @@ refresh.
    (unless `doorway_peek.gate_floor_departure` is turned on): the staircase
    is a node like the rooms, taken when the order puts it first; the
    existing 40-action arrival-return guard and the fallback rule still apply.
+   **All of this presumes `allow_stair_traversal: true`.** Under the benchmark
+   default (false) no staircase is offered to the oracle or the solver, `commit`
+   and the fallback's explicit rule refuse, an unplanned height departure starts
+   no traversal, and the spawn-floor guard keeps every goal on the spawn plane.
    **The way back is the one exception**: under `scan` the staircase the
    agent arrived by is withheld while this storey still has a room that is
    neither finished nor ruled out (`way_back_held` events) -- the storey is

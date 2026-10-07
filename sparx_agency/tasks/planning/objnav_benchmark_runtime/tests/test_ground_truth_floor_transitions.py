@@ -52,7 +52,9 @@ def hall(unknown_east_of=None):
 
 
 def gt_policy(**overrides):
-    return setup_policy("bed", **dict({"map_size_m": 40.0, "metadata": STRUCTURE}, **overrides))
+    # These are the multi-storey regressions: the stairs must be takeable, so the
+    # benchmark default (``allow_stair_traversal=False``) is lifted explicitly.
+    return setup_policy("bed", **dict({"map_size_m": 40.0, "metadata": STRUCTURE, "allow_stair_traversal": True}, **overrides))
 
 
 def close(points, expected):

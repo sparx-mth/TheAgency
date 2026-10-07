@@ -101,7 +101,15 @@ def _runtime(issues):
     return packages
 
 
-def _method(args):
+def _method(args, defaults=None):
+    """The policy and its frozen description.
+
+    Args:
+        args: Parsed CLI; ``--policy-config`` JSON overrides every default.
+        defaults: ``RPTSettings`` fields an entrypoint sets below the policy
+            config -- the multi-storey development protocol lifts
+            ``allow_stair_traversal``, whose benchmark default is False.
+    """
     if args.agent == "stop":
         return StopDiagnostic(), {"method": "diagnostic-stop", "publishable": False}
     from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
@@ -115,7 +123,7 @@ def _method(args):
         if overrides.get("local_exploration", args.explorer) != args.explorer:
             raise ValueError("--explorer disagrees with --policy-config")
         overrides["local_exploration"] = args.explorer
-    settings = RPTSettings(**dict(overrides, seed=args.seed))
+    settings = RPTSettings(**dict(defaults or {}, **dict(overrides, seed=args.seed)))
     config = LLMConfig.from_env()
     config.seed = args.seed
     client = VerifiedLLMClient(LLMClient(config))

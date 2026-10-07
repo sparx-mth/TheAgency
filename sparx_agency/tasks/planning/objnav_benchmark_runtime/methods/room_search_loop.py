@@ -682,7 +682,8 @@ class RoomSearchLoop:
         """
         p = self.policy
         building = getattr(p, "building", None)
-        if not self.settings.stairs_as_nodes or building is None or building.ground_truth is None or building.committed:
+        if (not self.settings.stairs_as_nodes or not p.settings.allow_stair_traversal or building is None
+                or building.ground_truth is None or building.committed):
             self._stairs = {}
             return []
         rooms_left = self.settings.scanning and (any(pid not in self._excluded for pid in p.graph.registry.rooms)

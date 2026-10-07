@@ -91,7 +91,7 @@ class RecordingSupervisor:
 
 
 def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None, stair_prob=0.3, metadata=None,
-                visit="sweep", **loop_overrides):
+                visit="sweep", settings=None, **loop_overrides):
     """A policy on the two-room world, with a counting LLM and a fixed room order.
 
     The background process is stubbed: rooms and labels are installed by hand,
@@ -100,12 +100,13 @@ def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None,
     without a probability 0.05 and every stair node offered ``stair_prob``,
     and recording the nodes and context it was handed. ``llm`` replaces the
     neutral fake for the classifier (the oracle is stubbed either way);
-    ``metadata`` is the episode's scene structure (the ground-truth stairs).
-    ``visit`` is the loop's visit mode: these regressions were written for
-    the bounded ``sweep`` and keep running it; the scan-mode tests ask for
-    ``visit="scan"``.
+    ``metadata`` is the episode's scene structure (the ground-truth stairs);
+    ``settings`` are ``RPTSettings`` overrides (``loop_overrides`` are the
+    loop's own). ``visit`` is the loop's visit mode: these regressions were
+    written for the bounded ``sweep`` and keep running it; the scan-mode
+    tests ask for ``visit="scan"``.
     """
-    policy, episode = setup_policy(llm=llm, metadata=metadata or {})
+    policy, episode = setup_policy(llm=llm, metadata=metadata or {}, **(settings or {}))
     policy.loop_settings = LoopSettings(visit=visit, **loop_overrides)
     policy.supervisor_params = policy.loop_settings.supervisor_params(policy.settings.seed)
     policy.loop.settings = policy.loop_settings
@@ -704,10 +705,13 @@ def stair_policy(order, stair_prob=0.3, probs=(0.6, 0.4), structure=STRUCTURE, *
 
     The coordinator knows only the stairs its perfect detector has had in
     frame; the fixture stands in for that sighting, so the connector becomes
-    a portal of this floor when the building observes.
+    a portal of this floor when the building observes. The benchmark default
+    forbids taking stairs (``allow_stair_traversal=False``); these are the
+    multi-storey regressions, so the fixture lifts it explicitly.
     """
     policy, episode, world, rooms, reasoned = loop_policy(order=order, probs=probs, stair_prob=stair_prob,
-                                                          metadata=structure, **loop_overrides)
+                                                          metadata=structure, settings={"allow_stair_traversal": True},
+                                                          **loop_overrides)
     obs = obs_at(episode, 0, IN_A)
     policy.mapping.atlas.update(obs.pose)                      # floor 0 at z=0, as the first mapping update does
     for connector in policy.building.ground_truth.connectors:

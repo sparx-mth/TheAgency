@@ -35,6 +35,21 @@ class RPTSettings:
             last Ranchester recording were all cancelled. ``{"enabled":
             True}`` restores them; the floor-departure gate they fed is a
             further option of their own (``gate_floor_departure``).
+        allow_stair_traversal: Whether the search may change storeys. OFF
+            by default: the standard ZSON benchmarks (Gibson SemExp v1.1,
+            HM3D) score an episode on the spawn storey, so a staircase is
+            never a node of the room-search loop, never the exploration
+            fallback's last resort, never committed or climbed, and an
+            unplanned height departure starts no traversal; every seen
+            staircase and every observed drop below the storey plane is
+            impassable for frontiers, openings, peeks and routes, and no goal
+            off the spawn plane is accepted (``methods/spawn_floor_guard.py``).
+            ``True`` restores the multi-storey search exactly as before.
+        floor_plane_bound_m: With stair traversal forbidden, how far the
+            storey the agent stands on may lie from the spawn height before
+            every goal on it is refused -- the ``Z_spawn +/- 0.5 m`` plane.
+            Larger than the atlas's ``departure_m`` (0.45): a plateau the
+            atlas still calls this floor is this floor.
     """
 
     map_size_m: float = 80.0
@@ -67,6 +82,8 @@ class RPTSettings:
     preferred_clearance_m: float = 0.30
     local_exploration: str = "frontier"
     warmup_steps: int = 12
+    allow_stair_traversal: bool = False
+    floor_plane_bound_m: float = 0.5
     target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
     doorway_peek: PeekSettings = field(default_factory=lambda: PeekSettings(enabled=False))
     falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
@@ -74,10 +91,12 @@ class RPTSettings:
 
     def __post_init__(self):
         for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m",
-                    "preferred_clearance_m", "landmark_dedupe_radius_m"):
+                    "preferred_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m"):
             value = getattr(self, key)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)
+        if type(self.allow_stair_traversal) is not bool:
+            raise ValueError("allow_stair_traversal must be boolean; no silent fallback")
         if (isinstance(self.landmark_footprint_iou, bool) or not math.isfinite(self.landmark_footprint_iou)
                 or not 0 < self.landmark_footprint_iou <= 1):
             raise ValueError("landmark_footprint_iou must lie in (0, 1]")

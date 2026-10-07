@@ -191,7 +191,9 @@ package versions and the GPU gate, and writes the frozen configuration:
 ```
 
 It exits 0 after writing the JSON (`method.detector.metadata.backend` must read `yolo_world`,
-`method.ground_truth_stairs` `true`); any refusal names the missing piece.
+`method.ground_truth_stairs` `true`, and for a multi-storey manifest `method.allow_stair_traversal`
+`true` -- `run_development` lifts the benchmark default, which forbids stairs, for that schema);
+any refusal names the missing piece.
 
 ### 2.6 Smoke run: one recorded episode
 
@@ -271,6 +273,27 @@ Same services and flags; `gibson.run` reads the `val/` split and the original sc
     --episodes-dir "$DATA/objectnav/objectnav/gibson/v1.1/val" --scenes-dir "$DATA/gibson/val/scenes" \
     --explorer frontier --output "$HOME/objnav_benchmark/val" $RUN_FLAGS --preflight   # drop --preflight to run
 ```
+
+#### Five-scene smoke: one recorded episode per validation scene
+
+`gibson.five_scene` runs the first published episode of each of the five scenes sequentially,
+each as its own recorded `gibson.run` job, and prints one `EPISODE COMPLETE` line per scene
+(scene, goal, SR, SPL, DTG, runtime, steps, termination, video path) as soon as that job ends,
+then a consolidated table (also saved as `<output>/summary.txt`, with `metrics.csv`,
+`summary.json` and `index.html`). A scene whose job ends without a scored row prints
+`EPISODE FAILED` and points at its `run.log`. It forwards `--allow-shared-gpu`,
+`--gpu-device` and the `--detector-*` options to every job:
+
+```bash
+"$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
+    --episodes-dir "$DATA/objectnav/objectnav/gibson/v1.1/val" --scenes-dir "$DATA/gibson/val/scenes" \
+    --output runs/gibson_5scene_$(date -u +%Y%m%dT%H%M%SZ) $RUN_FLAGS
+```
+
+Known data property: some published v1.1 starts lie off the shipped navmesh surface (Darden/000000
+is 0.10 m below it), so habitat-sim 0.2.4 lifts the agent on its first action and the kinematic
+contract refuses the episode. Starts are never snapped; select another episode of that scene
+explicitly with `gibson.run --scene <Scene> --limit 1 --shards 200 --shard-index <k>`.
 
 ---
 

@@ -59,6 +59,9 @@ class MultiFloorSearch:
     def __init__(self, policy):
         self.policy, self.params = policy, policy.settings.multifloor
         s = policy.settings
+        #: ``RPTSettings.allow_stair_traversal``: False confines the search to the spawn
+        #: storey -- stairs are still SEEN and placed (the guard masks them), never taken.
+        self.allowed = s.allow_stair_traversal
         self.terrain = StairTerrain(self.params, s.map_resolution_m, s.body_radius_m, s.body_height_m, s.depth_stride)
         self.ground_truth = None
         self.detector = None
@@ -130,6 +133,10 @@ class MultiFloorSearch:
         -- the recording can then tell an RPT* floor change from a fallback
         one, and :meth:`_start` knows to end the node's turn in the loop.
         """
+        if not self.allowed:
+            self.events.append({"action": obs.step, "event": "stairs_refused", "portal_id": portal["id"],
+                                "reason": "allow_stair_traversal is false"})
+            return False
         if not self.can_leave_floor(obs):
             return False
         if self.active is portal and portal.get("selected_by") == SELECTED_BY_LOOP:
@@ -168,7 +175,9 @@ class MultiFloorSearch:
                 self.source_trail.append(xyz)
                 self.source_trail = self.source_trail[-24:]
         if self.transition is None and atlas.floors and abs(obs.pose.z - height) > self.params.stable_height_m:
-            if self.ground_truth is not None:
+            if not self.allowed:
+                self._forbid_departure(obs, height)
+            elif self.ground_truth is not None:
                 self._start_unplanned(obs, height)
             else:
                 direction = 1 if obs.pose.z > height else -1
@@ -177,6 +186,19 @@ class MultiFloorSearch:
                 self._start(obs)
         if self.transition is not None:
             self.transition.observe(obs)
+
+    def _forbid_departure(self, obs, height):
+        """Stair traversal is off: a height departure is recorded once per excursion and starts nothing.
+
+        The atlas alone decides what the excursion was; the guard refuses
+        every goal while the storey in force is off the spawn plane.
+        """
+        if self._departure_ignored:
+            return
+        self._departure_ignored = True
+        self.events.append({"action": obs.step, "event": "height_departure_ignored",
+                            "height_m": round(obs.pose.z - height, 3),
+                            "reason": "stair traversal disabled (allow_stair_traversal is false)"})
 
     def _see_stairs(self, obs):
         """Run the perfect detector on this frame and record what it saw; the first sighting of a staircase is an event."""
@@ -294,7 +316,9 @@ class MultiFloorSearch:
                 else:
                     self._discover(obs)
         if atlas.in_transition and self.transition is None:
-            if self.ground_truth is not None:
+            if not self.allowed:
+                self._forbid_departure(obs, atlas.elevation_m)
+            elif self.ground_truth is not None:
                 self._start_unplanned(obs, atlas.elevation_m)
             else:
                 direction = 1 if obs.pose.z > atlas.elevation_m else -1
@@ -395,7 +419,16 @@ class MultiFloorSearch:
         asking for a last-resort floor change by the explicit rule, when the
         loop has nothing to offer. Observed mode keeps its allowance-based
         selection and look-down inspections.
+
+        With stair traversal forbidden nothing is selected, approached or
+        climbed here -- not by the loop's order, not by the fallback rule,
+        not by the observed-mode allowance -- and a portal somehow left
+        active is deferred.
         """
+        if not self.allowed and not self.traversing:
+            if self.active is not None:
+                self._abandon(obs, "stair traversal disabled (allow_stair_traversal is false)")
+            return None
         if self.traversing:
             return self.transition.plan(obs)
         if self.active is not None and not self.can_leave_floor(obs):
@@ -662,6 +695,7 @@ class MultiFloorSearch:
 
     def diagnostics(self):
         return {"phase": self.phase, "stair_source": self.params.stair_source,
+                "allow_stair_traversal": self.allowed,
                 "ground_truth": self.ground_truth.diagnostics() if self.ground_truth is not None else None,
                 "stairs_seen": self.sightings.diagnostics(),
                 "atlas": self.policy.mapping.atlas.diagnostics(),

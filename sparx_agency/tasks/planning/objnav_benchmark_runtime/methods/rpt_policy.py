@@ -37,6 +37,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.path_glances i
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import RoomScanLedger
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import SightLedger, SightSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.spawn_floor_guard import SpawnFloorGuard
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_peek import DoorwayPeek
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES, discover
@@ -144,6 +145,8 @@ class RPTSearchPolicy:
                 "ground_truth_semantics": False,
                 "ground_truth_stairs": self.settings.multifloor.enabled and self.settings.multifloor.stair_source == "ground_truth",
                 "stair_source": self.settings.multifloor.stair_source, "training_free": True,
+                "allow_stair_traversal": self.settings.allow_stair_traversal,
+                "floor_plane_bound_m": self.settings.floor_plane_bound_m,
                 "non_metric": False, "clock": "global action ledger; room clock pauses off-floor"}
 
     def reset(self, episode, target):
@@ -187,6 +190,8 @@ class RPTSearchPolicy:
         if s.multifloor.enabled:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.multifloor_policy import MultiFloorSearch
             self.building = MultiFloorSearch(self)
+        # Spawn-floor confinement: inert when stair traversal is allowed.
+        self.floor_guard = SpawnFloorGuard(self)
         self.peek = DoorwayPeek(self)
         self.closing = TargetClosing(self)
         # Where along the route in force a look to the side (or all round) is worth
@@ -308,6 +313,7 @@ class RPTSearchPolicy:
             # building/room task or consuming privileged goal data.
             try:
                 world = self.mapping.update(observation, arrival_allowed=False)
+                world = self._confine(observation, world)
                 self.last_world = world
                 self.sight.observe(observation, world)
                 # The landmark map keeps voting while the takeover walks in (the legacy
@@ -328,6 +334,7 @@ class RPTSearchPolicy:
         transition = self.building.transition if self.building else None
         world = self.mapping.update(observation, integrate=not (self.building and self.building.traversing),
                                     arrival_allowed=transition.arrival_allowed if transition else True)
+        world = self._confine(observation, world)
         self.telemetry.latencies["mapping"].append((time.monotonic() - started) * 1000)
         if self.mapping.floor_revision != floor_revision:
             self.peek.cancel(observation, "floor_changed", restore=False)
@@ -469,7 +476,24 @@ class RPTSearchPolicy:
     def _discover(self, obs, world, cost):
         return discover(self, obs, world, cost)
 
+    def _confine(self, observation, world):
+        """The world every decision plans on: seen stairs and observed drops impassable while traversal is forbidden.
+
+        Stored back as the floor's world so the display panels, the peek
+        copy and the terrain all read the same map; the observed log-odds
+        grid underneath is untouched and rebuilds the world next action.
+        """
+        confined = self.floor_guard.observe(observation, world)
+        if confined is not world:
+            self.mapping.worlds[self.mapping.floor_id] = confined
+        return confined
+
     def _navigate(self, observation, world, goal, kind, final_yaw=None):
+        if not self.floor_guard.goal_allowed(observation, world, goal, kind):
+            self._visited_frontiers.append(tuple(goal))
+            self.route_memory.clear("goal off the spawn floor")
+            self._route = self._goal = None
+            return None
         if not self.route_memory.reusable(observation, world, self.planner, goal, kind):
             if self.route_memory.reason == "no_progress":
                 self._visited_frontiers.append(tuple(goal))
@@ -540,6 +564,7 @@ class RPTSearchPolicy:
                 "target_closing": self.closing.diagnostics(),
                 "perception": self.perception.diagnostics(), "camera": dict(self.camera_control.last), "floor_maps": self.mapping.integrity(),
                 "building": self.building.diagnostics() if self.building else None,
+                "spawn_floor_guard": self.floor_guard.diagnostics(),
                 "frontier_sweep": self.sweep.diagnostics(),
                 "room_search_loop": self.loop.diagnostics(),
                 "room_scans": self.scans.diagnostics(),

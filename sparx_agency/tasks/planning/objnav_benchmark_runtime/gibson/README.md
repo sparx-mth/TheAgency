@@ -145,6 +145,16 @@ Corozal, Darden, Markleeville and Wiconisco. The reference-floor planar score us
 distance and no mandatory STOP. Preserve its sentinel start and protocol.
 Reference Habitat is 0.1.5; this installation is 0.2.4. The mismatch is explicit.
 
+Every published start and goal lie on one storey (all 1,000 rows carry
+`floor_id 0`, and `val_info.pbz2` holds one floor map per scene), as in HM3D
+and the other ZSON benchmarks. The policy therefore runs with
+`RPTSettings.allow_stair_traversal: false` by default: seen staircases and
+observed drops are impassable, no goal leaves the spawn plane
+(`floor_plane_bound_m`, 0.5 m), and no staircase is ever a node, a fallback or
+a climb (`methods/spawn_floor_guard.py`, [../README.md](../README.md)).
+`gibson.run` keeps that default; pass `--policy-config` with
+`{"allow_stair_traversal": true}` only for an explicitly multi-storey experiment.
+
 The separate **multi-story development/2** protocol uses 3D travel and
 height-qualified reference-floor goals. Its audited native vertical bound remains
 **0.60 m**, not the policy's **0.24 m** observed tread limit. Cameras remain

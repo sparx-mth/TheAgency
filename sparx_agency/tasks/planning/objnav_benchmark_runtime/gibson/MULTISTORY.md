@@ -9,6 +9,16 @@ annotated-target successes. Multi-story search quality is not solved.
 Two sources, one setting; the atlas, the per-floor contexts and the portal
 bookkeeping are the same under both.
 
+**Whether they are taken at all is a separate setting:**
+`RPTSettings.allow_stair_traversal`, **false by default** because the
+published single-storey benchmarks are scored on the spawn floor
+(`methods/spawn_floor_guard.py`). The multi-storey entrypoints lift it
+explicitly -- `run_development` for a manifest of this protocol's schema and
+`stair_diagnostic` always set `allow_stair_traversal: true` below the policy
+config, and the frozen `method` block records the value -- so every command in
+this file runs with stairs takeable. A `--policy-config` that sets it false
+wins and turns a multi-storey campaign into a guaranteed spawn-floor search.
+
 **`ground_truth` -- the default.** The evaluator reads the scene's navmesh once
 per scene (`gibson/stair_connectors.py`): the area-supported storey heights
 (the generator's own rule -- 8 m² within ±0.30 m, 1.5 m apart) and, between
