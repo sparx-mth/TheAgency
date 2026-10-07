@@ -13,7 +13,7 @@ import pickle
 import subprocess
 
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
-from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES, gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
@@ -55,6 +55,9 @@ def parser():
     p.add_argument("--resume", action="store_true")
     p.add_argument("--allow-sim-version-mismatch", action="store_true")
     p.add_argument("--allow-shared-gpu", action="store_true")
+    p.add_argument("--target-override", choices=CATEGORIES,
+                   help="DIAGNOSTIC: the category the agent searches for instead of the published goal; "
+                        "scoring stays against the published goal and the run is marked non-publishable")
     return p
 
 
@@ -191,7 +194,7 @@ def prepare(args):
     else:
         try:
             dataset = GibsonDataset(args.episodes_dir, args.scenes_dir, full=args.scene is None, scene=args.scene)
-            env = GibsonEnv(dataset, args.seed, args.gpu_device)
+            env = GibsonEnv(dataset, args.seed, args.gpu_device, target_override=args.target_override)
             ids = select_episodes(env.episode_ids(), args.limit, args.shards, args.shard_index)
             env.validate_starts(ids)
         except (OSError, ValueError, KeyError, ImportError, EOFError, pickle.UnpicklingError) as exc:
@@ -211,6 +214,8 @@ def prepare(args):
               "scene": args.scene, "recording": {"enabled": args.record, "fps": args.video_fps},
               "kinematics": asdict(PROTOCOL.kinematics()),
               "full_split": args.scene is None and args.limit is None and args.shards == 1,
+              "target_override": args.target_override,
+              "publishable": args.target_override is None and method.get("publishable", True),
               "dataset": dataset.manifest() if dataset else None}
     return env, policy, config, issues
 

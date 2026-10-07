@@ -252,3 +252,22 @@ def test_reset_attaches_the_navmesh_structure_when_the_simulator_provides_it(tmp
     plain.close()
 
 
+
+
+def test_target_override_changes_only_what_the_agent_is_told(tmp_path, semantic):
+    import pytest
+    paths = write_dataset(tmp_path, semantic)
+    env = GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator())
+    episode_id = env.episode_ids()[0]
+    published = env.reset(episode_id)[0].target_category
+    published_start_dtg = env._start_dtg
+    env.close()
+    other = next(c for c in ("bed", "tv", "toilet") if c != published)
+    diagnostic = GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator(), target_override=other)
+    episode, observation = diagnostic.reset(episode_id)
+    assert episode.target_category == other and observation.target_category == other
+    # The evaluator still measures against the published goal: the start distance is unchanged.
+    assert diagnostic._start_dtg == published_start_dtg
+    diagnostic.close()
+    with pytest.raises(ValueError):
+        GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator(), target_override="car")

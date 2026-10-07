@@ -7,6 +7,7 @@ from functools import lru_cache
 
 from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.core.planning.objnav.interfaces.env import ObjNavEnv
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.measurement import EpisodeMeasurement, TERMINATION_STOP, TERMINATION_STEP_LIMIT
@@ -19,7 +20,18 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator impo
 class GibsonEnv(ObjNavEnv):
     name = "habitat/gibson-semexp-v1.1"
 
-    def __init__(self, dataset, seed=0, gpu_device=0, simulator=None, protocol=PROTOCOL):
+    def __init__(self, dataset, seed=0, gpu_device=0, simulator=None, protocol=PROTOCOL, target_override=None):
+        """
+        Args:
+            target_override: Diagnostic only. A Gibson category the AGENT is told to
+                search for instead of the episode's published goal; the evaluator
+                keeps scoring against the published goal, so success is not
+                meaningful and such a run is never publishable. Used to stress a
+                search whose target is absent from the spawn storey.
+        """
+        if target_override is not None and target_override not in CATEGORIES:
+            raise ValueError("target_override must be one of %r, got %r" % (CATEGORIES, target_override))
+        self.target_override = target_override
         self._dataset, self._seed = dataset, seed
         self.protocol = protocol
         self._camera, self._actions = protocol.camera(), protocol.actions()
@@ -78,8 +90,8 @@ class GibsonEnv(ObjNavEnv):
                                       self._dataset.scenes_dir / (row.scene + ".navmesh"),
                                       row.start_position, row.start_rotation, seed)
         self._episode = ObjNavEpisode(episode_id, row.scene, self.protocol.benchmark, self.protocol.split,
-                                     row.category, self._camera, self._actions, self.protocol.max_steps,
-                                     metadata=self._scene_metadata())
+                                     self.target_override or row.category, self._camera, self._actions,
+                                     self.protocol.max_steps, metadata=self._scene_metadata())
         self._observation = self._observation_from(frame)
         if any(abs(a - b) > 1e-4 for a, b in zip(self._habitat_position(), row.start_position)):
             raise EnvContractError("Simulator changed the published episode start")
