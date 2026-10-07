@@ -1,0 +1,31 @@
+\begin{algorithm}[htbp]
+\caption{LLM-Guided Room Search with Target Closing}
+\label{alg:exploration}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Initial pose $x_0$, RGB-D stream $(I_t, D_t)$, target category $c^{*}$, action budget $T$
+\STATE \textbf{Output:} \textsc{STOP} at the target, or the budget exhausted
+\STATE Initialise map $\mathcal{M}$, object memory $\mathcal{L}$, scene graph $\mathcal{G}$, visit ledger $\mathcal{S}$
+\STATE \textsc{WarmUp}($x_0$) \COMMENT{one full rotation; the spawn room is scanned}
+\WHILE{$t < T$}
+    \STATE $\mathcal{O}_t \leftarrow \textsc{Detect}(I_t, D_t)$ \COMMENT{open-vocabulary detections with 3-D positions}
+    \STATE $\mathcal{L} \leftarrow \textsc{FuseObjects}(\mathcal{L}, \mathcal{O}_t)$ \COMMENT{per class; instances never merge across classes}
+    \STATE $\mathcal{G}_t \leftarrow \textsc{UpdateSceneGraph}(\mathcal{M}, \mathcal{L}, \hat{x}_t)$ \COMMENT{rooms, doors, openings, stairs}
+    \STATE $\textsc{LabelRooms}(\mathcal{G}_t)$ \COMMENT{LLM room type from the objects seen in each room}
+    \IF{$\textsc{TargetCandidate}(\mathcal{O}_t, c^{*})$}
+        \STATE $\textsc{Verify}$: consecutive frames, pitch toward the target's elevation
+        \STATE $\textsc{Approach}$: A$^{*}$ to a standoff point, camera on the target
+        \STATE $\textsc{Inspect}$: fresh in-range detection $\Rightarrow$ \textsc{STOP}, \textbf{return}
+        \STATE otherwise release the candidate and remember the spot; \textbf{continue}
+    \ENDIF
+    \IF{the current node's visit is complete}
+        \STATE $\mathcal{N}_t \leftarrow \textsc{CandidateNodes}(\mathcal{G}_t, \mathcal{S}, c^{*})$ \COMMENT{rooms, openings, stairs; finished or implausible rooms excluded}
+        \STATE $p \leftarrow \textsc{LLM-Oracle}(c^{*}, \mathcal{N}_t)$ \COMMENT{$P(\text{target found at } n)$ per node, with priors}
+        \STATE $node_t \leftarrow \textsc{RPT}^{*}(\mathcal{N}_t, p, \text{travel costs})$
+    \ENDIF
+    \STATE $\textsc{Navigate}(node_t)$
+    \STATE $\textsc{Visit}(node_t)$ \COMMENT{room: scan from the vantage point; opening: peek; stairs: change storey}
+    \STATE $\mathcal{S} \leftarrow \mathcal{S} \cup \{node_t\}$
+    \STATE \textbf{on failure:} $\textsc{ExplorationFallback}(\mathcal{M})$ \COMMENT{nearest useful frontier, never idle}
+\ENDWHILE
+\end{algorithmic}
+\end{algorithm}
