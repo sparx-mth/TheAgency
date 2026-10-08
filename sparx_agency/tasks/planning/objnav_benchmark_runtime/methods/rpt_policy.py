@@ -36,6 +36,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.path_glances import GlanceScheduler, GlanceSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import RoomScanLedger
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_gaps import FrontierGaps, GapSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import SightLedger, SightSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.spawn_floor_guard import SpawnFloorGuard
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
@@ -70,6 +71,7 @@ class RPTSearchPolicy:
         self.fallback_settings = FallbackSettings()
         self.glance_settings = GlanceSettings()
         self.sight_settings = SightSettings()
+        self.gap_settings = GapSettings()
         self.target_projector = None  # optional simulator-local geometry, never goal annotations
 
     def configuration(self):
@@ -87,6 +89,12 @@ class RPTSearchPolicy:
                                      + ("; a confident detection cut off by the frame's edge is a cue to turn toward it"
                                         if self.glance_settings.cue_enabled else "")
                                 if self.glance_settings.enabled else "none"),
+                "frontier_gaps": dict(asdict(self.gap_settings),
+                                      rule="the unknown behind a frontier is probed along its outward heading and a "
+                                           "cone around it; ending at known cells within depth_m on every ray -- or "
+                                           "within the target's smallest footprint dimension when that is larger -- "
+                                           "makes it a gap: demoted now, settled in the ledger from the next action"
+                                      if self.gap_settings.enabled else "none: every frontier is an exit"),
                 "sight": dict(asdict(self.sight_settings),
                               rule="unknown looked through from %d poses within %.1f m without a depth return, and "
                                    "enclosed unknown pockets under %.1f m2, are settled: not frontier, not openings, "
@@ -175,6 +183,9 @@ class RPTSearchPolicy:
         # return, per floor: settled unknown is not frontier, and the poses say
         # which rooms were walked through or looked into.
         self.sight = SightLedger(self, self.sight_settings)
+        # The shallow unknown behind a frontier -- the slit behind a sofa -- judged
+        # every action over the inventory and settled in the ledger (frontier_gaps).
+        self.frontier_gaps = FrontierGaps(self, self.gap_settings)
         # Where every completed look-around stood, on every floor: the one memory
         # of "this room is finished" that survives the watershed renumbering rooms.
         self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction,
@@ -467,6 +478,10 @@ class RPTSearchPolicy:
         else:
             self.graph.refresh_accessibility(world, cost, (pose.x, pose.y), pose.yaw, self.sweep.settings.ranking,
                                              preferred_cost=self.preferred_cost(world))
+        # Every frontier of the inventory is probed for the depth of the unknown behind it:
+        # a gap (shallow in every direction, or shallower than the target's footprint) is
+        # demoted this action and settled in the ledger, so it is no frontier from the next.
+        self.frontier_gaps.probe(observation, world, self.graph.frontier_inventory, self.target)
         return cost
 
     def room_exclusion(self, world):
@@ -591,7 +606,7 @@ class RPTSearchPolicy:
                 "frontier_sweep": self.sweep.diagnostics(),
                 "room_search_loop": self.loop.diagnostics(),
                 "room_scans": self.scans.diagnostics(),
-                "sight": self.sight.diagnostics(),
+                "sight": self.sight.diagnostics(), "frontier_gaps": self.frontier_gaps.diagnostics(),
                 "openings": self.openings.diagnostics(),
                 "glances": self.glances.diagnostics(),
                 "exploration_fallback": self.fallback.diagnostics(),

@@ -52,6 +52,7 @@ from sparx_agency.core.mapping.topology.search_node_oracle import OPENING, Searc
 from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import goal_rooms, split_exits
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_gaps import unknown_heading
 
 #: Opening node ids start here, above the stair band (100 000 - 199 999).
 OPENING_NODE_BASE = 200_000
@@ -240,6 +241,13 @@ class OpeningRegistry:
         self._known: Dict[int, Dict[int, Tuple[float, float]]] = {}
         self._peeked: Dict[int, List[Dict]] = {}
         self._next = 0
+        self.gaps_refused = 0              # exits the gap rule kept from becoming openings, over the episode
+        self.last_gaps: List[Dict] = []    # ... the last action's, for the record
+
+    def note_gaps(self, gaps, step) -> None:
+        """Record the exits the gap rule refused this action (``[(xy, why), ...]``)."""
+        self.gaps_refused += len(gaps)
+        self.last_gaps = [{"xy": [round(float(v), 2) for v in xy], "why": why, "step": int(step)} for xy, why in gaps]
 
     def identify(self, floor: int, xy: Tuple[float, float]) -> int:
         """The id of the known opening within ``match_m`` of ``xy`` (moved to it), else a new id."""
@@ -290,40 +298,13 @@ class OpeningRegistry:
              "looked_m": float(looked_m)})
 
     def diagnostics(self) -> Dict:
-        return {"known": {str(f): {str(i): [round(v, 2) for v in xy] for i, xy in known.items()}
+        return {"gaps_refused": self.gaps_refused, "last_gaps": list(self.last_gaps),
+                "known": {str(f): {str(i): [round(v, 2) for v in xy] for i, xy in known.items()}
                           for f, known in self._known.items()},
                 "peeked": {str(f): [dict(r, xy=[round(v, 2) for v in r["xy"]],
                                          heading=None if r.get("heading") is None else round(r["heading"], 3))
                                     for r in records]
                            for f, records in self._peeked.items()}}
-
-
-def unknown_heading(world, cell: Tuple[int, int], radius_cells: int = 6) -> Optional[float]:
-    """Which way the unknown lies from a frontier cell: from the known floor around it toward the unknown.
-
-    The direction from the centroid of the known FREE cells in the window to
-    the centroid of its UNKNOWN cells. The mean direction to the unknown
-    alone is not it: a frontier cell has unknown on several sides -- the
-    strip behind a bed beside it, the gap it stands in -- and Ranchester
-    attempt 8 read the stair passage's heading as pointing back into the
-    hallway, three times in sixty actions. The known floor is the one side
-    the agent came from, so away from it is through the opening. None when
-    the window holds no unknown or no free cell.
-    """
-    gx, gy = int(cell[0]), int(cell[1])
-    h, w = world.grid.shape
-    x0, x1 = max(0, gx - radius_cells), min(w, gx + radius_cells + 1)
-    y0, y1 = max(0, gy - radius_cells), min(h, gy + radius_cells + 1)
-    window = world.grid[y0:y1, x0:x1]
-    unknown_ys, unknown_xs = np.nonzero(window == world.values.unknown)
-    free_ys, free_xs = np.nonzero(window == world.values.free)
-    if not len(unknown_xs) or not len(free_xs):
-        return None
-    dx = float(np.mean(unknown_xs) - np.mean(free_xs))
-    dy = float(np.mean(unknown_ys) - np.mean(free_ys))
-    if math.hypot(dx, dy) < 1e-6:
-        return None
-    return math.atan2(dy, dx)
 
 
 def glimpsed_through(threshold: Tuple[float, float], heading: float, landmarks, settings: OpeningSettings) -> Tuple[str, ...]:
@@ -365,10 +346,12 @@ def detect_openings(policy, obs, world, settings: OpeningSettings, registry: Ope
 
     Exits by the exploration fallback's own test (:func:`split_exits`
     without its type rule -- a hallway named after the toilet glimpsed from
-    it must still offer its doors), merged within ``merge_m``, at least
-    ``min_cells`` wide, not yet peeked, and not at the foot or head of a
-    seen staircase -- the stairs are a node of their own, and the unknown
-    beyond a flight is the other storey, not a room of this one.
+    it must still offer its doors, but with the gap rule: the shallow
+    unknown behind furniture is never an opening), merged within
+    ``merge_m``, at least ``min_cells`` wide, not yet peeked, and not at the
+    foot or head of a seen staircase -- the stairs are a node of their own,
+    and the unknown beyond a flight is the other storey, not a room of this
+    one.
     """
     p = policy
     inventory = getattr(p.graph, "frontier_inventory", None)
@@ -376,7 +359,9 @@ def detect_openings(policy, obs, world, settings: OpeningSettings, registry: Ope
         return []
     goals = p.sweep.admissible(obs, world, list(inventory.goals))
     landmarks = list(p.landmarks.confirmed()) if getattr(p, "landmarks", None) is not None else []
-    exits, _ = split_exits(goals, landmarks, world.resolution, p.fallback.settings, type_rule=False)
+    gaps = getattr(getattr(p, "frontier_gaps", None), "reasons", None) or {}
+    exits, demoted = split_exits(goals, landmarks, world.resolution, p.fallback.settings, type_rule=False, gaps=gaps)
+    registry.note_gaps([(goal.xy, why) for goal, why in demoted if why.startswith("gap")], obs.step)
     stairs = stair_points(p)
     exits = [g for g in exits if not any(math.dist(g.xy, point) <= settings.merge_m for point in stairs)]
     if not exits:

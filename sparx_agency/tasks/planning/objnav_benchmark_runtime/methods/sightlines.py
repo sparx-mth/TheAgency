@@ -21,6 +21,13 @@ step, and a human never takes one toward them:
   it is **resolved**: not an exit, not an opening, not a glance's gain, not
   a room's frontier. A cell that later turns out to be floor (seen from
   another side) is known from then on, and the mark is void by itself.
+* **Gaps** (since 2026-10-08, :mod:`frontier_gaps`). The shallow unknown
+  behind a frontier -- a band that ends at known cells within a fraction of
+  a metre in every direction, the slit between a sofa's back and the wall
+  -- is settled by the gap prober through :meth:`SightLedger.settle_gaps`
+  once the frontier has been judged a gap: the pocket rule misses it,
+  because such a strip leaks through one-cell holes in the observed wall
+  into the unknown outside the house and is never *enclosed*.
 * **Pockets.** An unknown region enclosed by known cells -- the strip
   behind a bed against an observed wall, the island between the spawn
   point and the bed in front of it (the camera's blind radius leaves the
@@ -64,7 +71,7 @@ from scipy.ndimage import label as connected_components
 
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 
-LOOKED_THROUGH, POCKET = "looked_through", "pocket"
+LOOKED_THROUGH, POCKET, GAP = "looked_through", "pocket", "gap"
 
 
 @dataclass(frozen=True)
@@ -127,6 +134,7 @@ class _FloorSight:
     last_key: np.ndarray           # int64 -- the pose bin that last counted, so one pose counts once
     poses: List[Tuple[int, float, float, float, float]]   # (step, x, y, yaw, pitch)
     cache: Dict[str, Tuple[int, object]]                  # name -> (step, value), per-step memo
+    gaps: Optional[np.ndarray] = None                     # bool -- unknown behind a frontier judged a gap (frontier_gaps)
 
 
 def floor_band(camera_height_m, pitch_rad, half_vfov_rad, min_depth_m, max_depth_m):
@@ -213,7 +221,7 @@ class SightLedger:
         state = self._floors.get(int(floor_id))
         if state is None or state.looked.shape != tuple(shape):
             state = _FloorSight(looked=np.zeros(shape, dtype=np.uint8), last_key=np.full(shape, -1, dtype=np.int64),
-                                poses=[], cache={})
+                                poses=[], cache={}, gaps=np.zeros(shape, dtype=bool))
             self._floors[int(floor_id)] = state
         return state
 
@@ -368,13 +376,33 @@ class SightLedger:
             return np.zeros(world.grid.shape, dtype=bool)
         return self._memo(state, "pockets", self._step(step), lambda: enclosed_pockets(world, self.settings.pocket_max_m2))
 
+    def gaps(self, world, floor_id=None):
+        """``(H, W)`` bool: unknown cells settled as the shallow unknown behind a gap frontier (``frontier_gaps``)."""
+        state = self._floor(self._floor_id(floor_id), world.grid.shape)
+        if not self.settings.enabled or state.gaps is None:
+            return np.zeros(world.grid.shape, dtype=bool)
+        return state.gaps & (world.grid == world.values.unknown)
+
+    def settle_gaps(self, world, mask, floor_id=None) -> int:
+        """Settle the unknown cells of ``mask`` as a gap's; returns how many were new. The per-step memo is dropped."""
+        state = self._floor(self._floor_id(floor_id), world.grid.shape)
+        cells = np.asarray(mask, dtype=bool) & (world.grid == world.values.unknown)
+        fresh = int((cells & ~state.gaps).sum())
+        if fresh:
+            state.gaps |= cells
+            for name in ("resolved", "overlay"):
+                state.cache.pop(name, None)
+            self.stats["gap_cells"] = self.stats.get("gap_cells", 0) + fresh
+        return fresh
+
     def resolved(self, world, floor_id=None, step=None):
         """``(H, W)`` bool: the unknown cells the frontier logic should treat as settled."""
         if not self.settings.enabled:
             return None
         state = self._floor(self._floor_id(floor_id), world.grid.shape)
         return self._memo(state, "resolved", self._step(step),
-                          lambda: self.looked_through(world, floor_id) | self.pockets(world, floor_id, step))
+                          lambda: (self.looked_through(world, floor_id) | self.pockets(world, floor_id, step)
+                                   | self.gaps(world, floor_id)))
 
     def overlay(self, world, floor_id=None, step=None):
         """The map with every resolved cell written OCCUPIED -- for the frontier logic, never for the planner."""
@@ -415,7 +443,8 @@ class SightLedger:
             out["floors"][str(floor)] = {"poses": len(state.poses),
                                          "looked_cells": int((state.looked > 0).sum()),
                                          "looked_%d+" % self.settings.min_looks:
-                                             int((state.looked >= self.settings.min_looks).sum())}
+                                             int((state.looked >= self.settings.min_looks).sum()),
+                                         "gap_cells": 0 if state.gaps is None else int(state.gaps.sum())}
         return out
 
 

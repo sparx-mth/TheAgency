@@ -202,6 +202,9 @@ def method_snapshot(policy):
             "rooms": len(graph.registry.rooms) if graph is not None else 0,
             "solver": str(solver.last.reason) if solver is not None else "not called",
             "fallback": policy.fallback.snapshot() if hasattr(policy, "fallback") and hasattr(policy.fallback, "snapshot") else {},
+            "frontier_gaps": ({"step": policy.frontier_gaps.step, "gaps": list(policy.frontier_gaps.last),
+                               "stats": dict(policy.frontier_gaps.stats)}
+                              if hasattr(policy, "frontier_gaps") else {}),
             "search": search_snapshot(policy)}
 
 

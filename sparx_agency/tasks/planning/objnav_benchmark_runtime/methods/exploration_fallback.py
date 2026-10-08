@@ -188,17 +188,19 @@ def object_shadow(goal, landmarks, resolution_m, margin_m, default_radius_m, len
     return None
 
 
-def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of=None, type_rule=True):
+def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of=None, type_rule=True, gaps=None):
     """Split ranked frontier goals into exits and demoted frontiers, order kept.
 
     Demoted, with the reason: inside the camera's blind radius
     (``settings.near_blind_m``); credited to a room the loop withheld as
     ``type:`` (when ``type_rule``; ``room_of`` maps a goal to its pid and
-    ``excluded`` a pid to the reason); or an object's shadow
+    ``excluded`` a pid to the reason); a gap (``gaps`` maps a goal's cell to
+    the gap prober's reason, :mod:`frontier_gaps`); or an object's shadow
     (:func:`object_shadow`). Returns ``(exits, [(goal, why), ...])``.
     """
     excluded = excluded or {}
     room_of = room_of or {}
+    gaps = gaps or {}
     exits, demoted = [], []
     for goal in goals:
         why = None
@@ -207,6 +209,8 @@ def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of
             why = "inside the camera's blind radius (%.2f m)" % goal.geodesic_m
         elif type_rule and pid is not None and str(excluded.get(pid, "")).startswith("type:"):
             why = "room %d is %s" % (pid, excluded[pid])
+        elif tuple(int(v) for v in goal.cell) in gaps:
+            why = gaps[tuple(int(v) for v in goal.cell)]
         else:
             landmark = object_shadow(goal, landmarks, resolution_m, settings.shadow_margin_m,
                                      settings.shadow_default_radius_m, settings.shadow_length_factor)
@@ -238,7 +242,7 @@ class ExplorationFallback:
         self.failures = []
         self.stats = {"invocations": 0, "frontier": 0, "stairs": 0, "frontier_demoted": 0, "frontier_retired": 0,
                       "room_peek": 0, "relocation": 0, "footing": 0, "hold": 0, "failures": 0,
-                      "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0,
+                      "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0, "gaps_demoted": 0,
                       "goal_kept": 0, "goal_switched": 0, "goal_outranked": 0,
                       ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0}
         self._logged = set()
@@ -401,10 +405,11 @@ class ExplorationFallback:
 
         Demoted: an object's shadow (:func:`object_shadow`, against this
         storey's confirmed landmarks), a frontier inside the camera's blind
-        radius, or a frontier the inventory credits to a room the loop
-        withheld as ``type:`` -- one the target cannot be in. ``scanned:``
-        exclusions do not demote: a finished room's opening is how the next
-        room is found.
+        radius, a gap -- the shallow unknown behind furniture the gap
+        prober judged this action (:mod:`frontier_gaps`) -- or a frontier
+        the inventory credits to a room the loop withheld as ``type:`` --
+        one the target cannot be in. ``scanned:`` exclusions do not demote:
+        a finished room's opening is how the next room is found.
         """
         p, s = self.policy, self.settings
         self.last_demoted = []
@@ -412,10 +417,13 @@ class ExplorationFallback:
             return list(goals), []
         landmarks = list(p.landmarks.confirmed()) if getattr(p, "landmarks", None) is not None else []
         excluded = getattr(getattr(p, "loop", None), "excluded", None) or {}
+        gaps = getattr(getattr(p, "frontier_gaps", None), "reasons", None) or {}
         exits, demoted = split_exits(goals, landmarks, world.resolution, s, excluded=excluded,
-                                     room_of=goal_rooms(inventory), type_rule=True)
+                                     room_of=goal_rooms(inventory), type_rule=True, gaps=gaps)
         for goal, why in demoted:
-            if why.startswith("inside the camera"):
+            if why.startswith("gap"):
+                self.stats["gaps_demoted"] += 1
+            elif why.startswith("inside the camera"):
                 self.stats["blind_demoted"] += 1
                 # Sticky: a blind-radius demotion retires the goal, so the step toward
                 # the next exit cannot promote it back (the retired rung still tries it).

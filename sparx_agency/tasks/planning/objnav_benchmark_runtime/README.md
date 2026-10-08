@@ -344,6 +344,38 @@ inside `look_down_distance_m` carries the memory's elevation (`_pitch`): a low t
 stepped toward looking DOWN, an elevated one looking UP, as the approach and the
 inspection already did; the face turn that ends the backing manoeuvre carries it too.
 
+#### Gaps behind furniture are not frontiers (since 2026-10-08)
+
+A frontier is free floor beside unknown, and every one used to be an exit: a
+doorway onto a room not seen yet, or the slit between the back of a sofa and the
+wall. Wiconisco/000000 spent 269 of 500 actions peeking openings, one of them a
+28-cell "gap" valued at 0.4 by the oracle whose unknown behind it was 0.18 m² and
+0.4 m wide -- a cell count does not tell a slit from a doorway (the slit is as
+long as the sofa), the shadow rule needs a confirmed landmark, and the ledger's
+pocket rule needs the unknown *enclosed*, which a strip along a wall never is (it
+leaks through one-cell holes in the observed wall into the unknown outside the
+house). `methods/frontier_gaps.py` probes **the unknown behind each frontier of
+the inventory, every action**: rays from the frontier cell along its outward
+heading and a ±45° cone, each until the first known cell (the wall behind the
+sofa, or floor the camera has seen) or 2.5 m, plus the band's thickness from its
+distance transform where the rays run. Bounded on every ray and shallower *or*
+thinner than `depth_m` (0.7 m) is a **gap**: the band along a wall with the
+frontier down its length is shallow, the slit entered from its end is thin; a
+doorway has a ray that runs deep, a corridor is deep, an unseen room is wide.
+**Target scale**: for a macro target the threshold is the target's smallest
+footprint dimension when that is larger (`TARGET_FOOTPRINT_M`: bed 0.9 m, sofa
+0.8 m; toilet 0.38, chair 0.4, plant 0.25, television 0.1) -- an alcove 0.8 m
+deep is an exit for a toilet search and a gap for a bed search. A gap is demoted
+this action (`split_exits`, reason `gap: …`, after every exit and every other
+demoted frontier; `gaps_demoted` in the fallback's stats, `gaps_refused` in the
+opening registry) and its unknown cells are settled in the sightline ledger
+(`SightLedger.settle_gaps`), so from the next action it is no frontier at all:
+not an opening node for the oracle, not "frontier left" in a room's facts, not an
+exit for the fallback -- the room is finished when its floor is, and the search
+moves on. Settled cells are masked to what is still unknown, so a gap later seen
+to be floor is known from then on. `GapSettings.enabled: false` restores the
+former behaviour; `frontier_gaps` in the episode record lists each verdict.
+
 - `--explorer frontier`: the existing observed-frontier baseline (default).
 - `--explorer falcon`: bounded FALCON 2D/2.5D adaptation, not the unchanged ROS
   aerial binary. Local bursts, target interrupts and the episode ledger remain
@@ -371,7 +403,8 @@ own frozen configurations; changed code does not relabel their outcomes.
 | `gibson/gpu_plan.py` | Who gets the one GPU -- LLM, then YOLO-World, then Habitat -- from the free VRAM and explicit footprints; the rest on the CPU; the plan recorded in every run |
 | `methods/room_search_loop.py` | The seven-step room-search loop: one scan visit per room (vantage point, full rotation, finished for the episode) or the bounded room-confined sweep; re-classify → re-estimate → re-order at each loop point over the rooms that are still nodes; transit to the chosen room's vantage point / nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
 | `methods/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
-| `methods/sightlines.py` | The sight ledger: unknown looked through without a depth return (within 2.5 m, from two poses) and enclosed unknown pockets under 3 m2 are settled -- written occupied for the frontier logic alone -- and every camera pose per storey |
+| `methods/sightlines.py` | The sight ledger: unknown looked through without a depth return (within 2.5 m, from two poses), enclosed unknown pockets under 3 m2 and the gaps the prober settles are resolved -- written occupied for the frontier logic alone -- and every camera pose per storey |
+| `methods/frontier_gaps.py` | The gap prober: rays into the unknown behind every frontier of the inventory, its depth and thickness; bounded and shallower or thinner than 0.7 m -- or than the target's smallest footprint dimension -- is a gap, demoted now and settled for later |
 | `methods/room_vantage.py` | Where to stand in a room to see it: the reachable interior cell of greatest clearance (distance transform of the room mask) |
 | `methods/room_priors.py` | Where a target cannot be: the room types a search need not enter for it (exclusions, not permissions; `unknown` never excluded) |
 | `core/mapping/topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room still a node and every staircase -- P(going there next finds the target) per node plus "elsewhere" |
