@@ -1,0 +1,555 @@
+% =============================================================================
+%  LLM-Guided Room Search with Target Closing -- modular pseudocode (algorithm2e)
+%  and notation legend for the paper.
+%
+%  * Standalone: compiles as-is on Overleaf (pdfLaTeX / XeLaTeX / LuaLaTeX).
+%  * To paste into the paper:
+%      1. copy the block between  %% PREAMBLE BEGIN  and  %% PREAMBLE END
+%         into the paper's preamble (drop lines your preamble already has);
+%      2. copy the block between  %% BODY BEGIN  and  %% BODY END  where the
+%         algorithms should appear.
+%  * Do NOT load `algorithmic`/`algpseudocode` next to algorithm2e: both define
+%    the `algorithm` environment.  docs/algorithm_exploration.tex (the older
+%    single-block version) uses `algorithmic`; this file supersedes it.
+%
+%  Every block mirrors the runtime in
+%  sparx_agency/tasks/planning/objnav_benchmark_runtime/methods/ (room_search_loop,
+%  scene_graph, room_scans, opening_nodes, target_closing, exploration_fallback)
+%  and sparx_agency/core/{mapping/topology/search_node_oracle, planning/exploration/
+%  room_costs, rpt_room_solver}.  Default parameter values in Table~\ref{tab:params}
+%  are the code defaults on 2026-10-08.
+% =============================================================================
+\documentclass[10pt]{article}
+\usepackage[margin=0.9in]{geometry}
+
+%% PREAMBLE BEGIN ------------------------------------------------------------
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,tabularx,array}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\DontPrintSemicolon
+\SetAlgoSkip{smallskip}
+\SetAlCapSkip{0.6ex}
+\SetFuncSty{textsc}                    % named (black-box) algorithms in small caps
+\SetArgSty{textnormal}                 % upright arguments (lets \textsc{...} verdicts render cleanly)
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+\SetKwInOut{State}{State}
+\SetKwProg{Fn}{Function}{:}{}
+\SetKw{KwAnd}{and}
+\SetKw{KwOr}{or}
+\SetKw{KwNot}{not}
+\SetKw{KwContinue}{continue}
+\SetKw{KwWith}{with}
+
+% --- our sub-algorithms (called by name from the main loop) ------------------
+\SetKwFunction{UpdateSG}{UpdateSceneGraph}
+\SetKwFunction{Finished}{RoomFinished}
+\SetKwFunction{Candidates}{CandidateNodes}
+\SetKwFunction{Oracle}{NodeOracle}
+\SetKwFunction{Order}{OrderNodes}
+\SetKwFunction{Visit}{Visit}
+\SetKwFunction{Closing}{TargetClosing}
+\SetKwFunction{Fallback}{ExplorationFallback}
+\SetKwFunction{Release}{Release}
+% --- established / baseline algorithms, never expanded -----------------------
+\SetKwFunction{Detect}{YOLO-World}
+\SetKwFunction{Integrate}{IntegrateDepth}
+\SetKwFunction{Backproject}{Backproject}
+\SetKwFunction{DoorDet}{ConfirmedDoors}
+\SetKwFunction{Watershed}{WatershedRooms}
+\SetKwFunction{RoomLLM}{LLM-RoomClassifier}
+\SetKwFunction{LLM}{LLM-Reason}
+\SetKwFunction{HouseLine}{HouseLine}
+\SetKwFunction{AStar}{A$^{\ast}$}
+\SetKwFunction{RPT}{RPT$^{\ast}$}
+\SetKwFunction{Dijkstra}{MultiSourceDijkstra}
+\SetKwFunction{Snap}{SnapToPassable}
+\SetKwFunction{Vantage}{Vantage}
+\SetKwFunction{Vis}{Visible}
+\SetKwFunction{Traverse}{TraverseStairs}
+\SetKwFunction{Rotate}{FullRotation}
+\SetKwFunction{BackOff}{BackOff}
+\SetKwFunction{Execute}{Execute}
+
+% --- notation macros ----------------------------------------------------------
+\newcommand{\Occ}{\mathcal{M}}        % BEV occupancy map of the storey in force
+\newcommand{\Lmk}{\mathcal{L}}        % object-landmark map
+\newcommand{\SG}{\mathcal{G}}         % scene graph
+\newcommand{\Rooms}{\mathcal{R}}      % rooms
+\newcommand{\Doors}{\mathcal{D}}      % confirmed doors
+\newcommand{\Opens}{\mathcal{E}}      % openings (exits of the mapped floor)
+\newcommand{\Stairs}{\mathcal{K}}     % seen staircases
+\newcommand{\Ledger}{\mathcal{S}}     % scan ledger
+\newcommand{\Rej}{\mathcal{Q}}        % rejection memory of released target candidates
+\newcommand{\Nodes}{\mathcal{N}}      % candidate nodes
+\newcommand{\Dets}{\mathcal{O}}       % detections of the current frame
+\newcommand{\Front}{\Phi}             % accessible-frontier inventory
+\newcommand{\target}{c^{\ast}}        % target category
+\newcommand{\pose}{\mathbf{x}}        % full pose
+\newcommand{\pos}{\mathbf{p}}         % planar position
+\newcommand{\cen}{\mathbf{q}}         % 3-D centroid
+\newcommand{\mem}{\boldsymbol{\mu}}   % fused 3-D target memory
+\newcommand{\tsc}[1]{\textsc{#1}}
+\newcommand{\kind}[1]{\textsc{#1}}
+%% PREAMBLE END --------------------------------------------------------------
+
+\begin{document}
+
+%% BODY BEGIN ----------------------------------------------------------------
+\section*{Method pseudocode}
+
+The method is a per-action loop (Algorithm~\ref{alg:main}) over seven designed
+sub-components: an observed-only scene graph (Alg.~\ref{alg:scenegraph}), a
+position-based scan ledger that decides when a room is finished
+(Alg.~\ref{alg:finished}), the candidate-node set of rooms, openings, target
+landmarks and staircases (Alg.~\ref{alg:nodes}), an LLM oracle that estimates
+per-node find probabilities (Alg.~\ref{alg:oracle}), a cost-aware visit order
+solved by RPT$^{\ast}$ (Alg.~\ref{alg:order}), the one-scan / one-peek visit
+primitives (Alg.~\ref{alg:visit}), a pre-empting target-closing takeover
+(Alg.~\ref{alg:closing}) and a never-idle exploration fallback
+(Alg.~\ref{alg:fallback}). Established algorithms (YOLO-World, watershed
+segmentation, A$^{\ast}$, Dijkstra, RPT$^{\ast}$, the LLM calls) are invoked by
+name and not expanded. Notation is summarised in
+Tables~\ref{tab:legend-global}--\ref{tab:params}.
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{UpdateSceneGraph}: perception and observed-only scene-graph update}
+\label{alg:scenegraph}
+\Input{frame $(I_t, D_t, \pose_t)$; maps $\Occ$, $\Lmk$; graph $\SG$}
+\Output{updated $\Occ$, $\Lmk$, $\SG=(\Rooms,\Doors,\Opens,\Stairs)$}
+$\Dets_t \gets \Detect{$I_t$}$ \tcp*[r]{open-vocabulary boxes $(b,\kappa,s)$}
+$\Occ \gets \Integrate{$\Occ, D_t, \pose_t$}$ \tcp*[r]{free / occupied / unknown BEV cells}
+\ForEach{$(b,\kappa,s)\in\Dets_t$ \KwWith $s\ge s_{\det}$}{
+  $(\cen,\rho) \gets \Backproject{$b, D_t, \pose_t$}$ \tcp*[r]{coherent 3-D centroid and footprint radius}
+  $\lambda \gets$ nearest $\lambda'\!\in\!\Lmk$ with $\kappa_{\lambda'}{=}\kappa$ \KwAnd
+     $\big(\|\cen-\cen_{\lambda'}\|\le d_{\mathrm{dup}}$ \KwOr $\mathrm{IoU}(\cen,\rho;\cen_{\lambda'},\rho_{\lambda'})\ge\iota\big)$
+     \tcp*[r]{same class only}
+  \lIf{$\lambda$ exists}{$\cen_\lambda \gets$ running mean$(\cen_\lambda,\cen)$; $n_\lambda \gets n_\lambda+1$}
+  \lElse{$\Lmk \gets \Lmk\cup\{\lambda{=}(\kappa,\cen,\rho,n{=}1)\}$}
+}
+$\Lmk^{+} \gets \{\lambda\in\Lmk : n_\lambda\ge n_{\min}\}$ \tcp*[r]{confirmed landmarks; classes never merge}
+$\Doors \gets \DoorDet{$\Dets_t,\Occ$}$;\quad $\Stairs\gets$ seen staircases\;
+$\Rooms \gets \Watershed{$\mathrm{free}(\Occ)\setminus\mathrm{fp}(\Stairs),\ \Doors\cup\Theta$}$ \tcp*[r]{cut at doors and walked thresholds; sticky ids}
+\ForEach{$r\in\Rooms$}{
+  $\Omega_r, A_r, F_r \gets$ mask, area, live frontier clusters;\quad $\Lmk_r\gets\{\lambda\in\Lmk^{+}:\cen_\lambda\in\Omega_r\}$\;
+  \lIf(\tcp*[f]{weak: 1 class; strong: $\ge2$ classes or a signature object}){a new class entered $\Lmk_r$}{$(\ell_r,\sigma_r)\gets\RoomLLM{$\Lmk_r$}$}
+}
+\KwRet{$(\Occ,\Lmk,\SG)$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{RoomFinished}: scan-ledger verdict for room $r$}
+\label{alg:finished}
+\Input{room $r$: mask $\Omega_r$, area $A_r$, live frontier $F_r$, door flag $\delta_r$; ledger $\Ledger_f$; pose trail $\mathcal{P}_f$}
+\Output{verdict $\in\{\varnothing,\ \tsc{inside},\ \tsc{seen},\ \tsc{through},\ \tsc{fragment}\}$}
+\lIf(\tcp*[f]{sticky unless the room regrew}){$r$ was finished before \KwAnd $A_r\le\gamma A_r^{\mathrm{then}}$}{\KwRet{earlier verdict}}
+\lIf(\tcp*[f]{a completed look-around stood in $r$}){$\exists\,\mathbf{z}\in\Ledger_f:\ \mathbf{z}\in\Omega_r$}{\KwRet{\tsc{inside}}}
+\lIf(\tcp*[f]{a scan point saw most of $r$}){$\exists\,\mathbf{z}\in\Ledger_f:\ \Vis{$\mathbf{z},\Omega_r$}\ge\eta$}{\KwRet{\tsc{seen}}}
+\If(\tcp*[f]{no accessible unexplored boundary left}){$F_r=\varnothing$}{
+  \lIf{$\exists\,\pose\in\mathcal{P}_f:\ \Vis{$\pose,\Omega_r$}\ge\eta$ \KwOr $\big(\pos\in\Omega_r$ \KwAnd $w(\Omega_r)<w_{\mathrm{nar}}\big)$}{\KwRet{\tsc{through}}}
+  \lIf(\tcp*[f]{the strip behind a bed, not a bathroom}){$A_r<A_{\mathrm{frag}}$ \KwAnd \KwNot $\delta_r$}{\KwRet{\tsc{fragment}}}
+}
+\KwRet{$\varnothing$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{CandidateNodes}: the node set at a loop point}
+\label{alg:nodes}
+\Input{$\SG$, $\Occ$, $\Lmk^{+}$, $\Ledger$, $\Rej$; target $\target$; node in force $v$}
+\Output{nodes $\Nodes_t$, each with kind $k_i$, entry point $e_i$, status $s_i$; finished rooms $X_t$}
+$X_t \gets \{r\in\Rooms\setminus\{v\} : \Finished{$r$}\ne\varnothing\}$ \tcp*[r]{Alg.~\ref{alg:finished}}
+drop from $X_t$ any $r$ finished only from outside that holds a home object of $\target$ \tcp*[r]{the toilet behind the jamb}
+\lIf(\tcp*[f]{floor exhausted: second look forced}){$\Rooms\setminus X_t=\varnothing$ \KwAnd no exit \KwAnd no reachable frontier}{$X_t\gets\varnothing$}
+$\Nodes_t\gets\varnothing$\;
+\ForEach{$r\in\Rooms\setminus\{v\}$}{
+  $\Nodes_t \gets \Nodes_t\cup\{(r,\ \kind{room},\ e_r{=}\Vantage{$\Omega_r$},\ s_r)\}$ \tcp*[r]{$s_r\in\{$never, entered, scanned(how, ago)$\}$}
+}
+$\Opens \gets$ exits of the mapped floor: frontier clusters $\varphi\in\Front$ with $|\varphi|\ge n_{\mathrm{op}}$, not an object's shadow, not under the agent, merged within $d_{\mathrm{mrg}}$\;
+\ForEach{$o\in\Opens$ \KwNot yet peeked or abandoned}{
+  $\Nodes_t \gets \Nodes_t\cup\{(o,\ \kind{opening},\ e_o{=}\text{threshold},\ \text{room of origin},\ \text{door seen?},\ \text{classes glimpsed through } o)\}$\;
+}
+\ForEach{$\lambda\in\Lmk^{+}$ \KwWith $\kappa_\lambda$ accepted by $\target$, \KwNot inspected, $\cen_\lambda\notin\Rej$}{
+  $\Nodes_t \gets \Nodes_t\cup\{(\lambda,\ \kind{landmark},\ e_\lambda{=}\text{standoff at } d_{\mathrm{L}} \text{ on the agent's side})\}$ \tcp*[r]{fixed $p_\lambda{=}p_{\mathrm{L}}$, no oracle call}
+}
+\lIf(\tcp*[f]{multi-storey only}){storey changes allowed}{add every $k\in\Stairs$ as $(k,\ \kind{stairs},\ e_k{=}\text{foot of the flight})$}
+\KwRet{$(\Nodes_t, X_t)$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{NodeOracle}: $p_i = P(\text{target found}\mid\text{go to node } i \text{ next})$}
+\label{alg:oracle}
+\Input{target $\target$; nodes $\Nodes_t$; $\SG$, $\Ledger$; action $t$, budget $T$; cached prompt/reply $(\mathcal{U}^{-},\mathcal{Y}^{-})$}
+\Output{$\mathbf{p}=(p_i)_{i\in\Nodes_t}$; pass verdict $\varpi\in\{\tsc{first},\tsc{second}\}$}
+$H \gets \HouseLine{$\SG,\Ledger$}$: room types found with status, \#unidentified rooms, \#openings not looked into, frontier left?, actions used $\approx\lfloor t/\Delta_B\rfloor\Delta_B$ of $T$\;
+\ForEach{$i\in\Nodes_t$ \KwWith $k_i\ne\kind{landmark}$}{
+  $u_i\gets$ one line: kind, $\ell_i$ (tentative if $\sigma_i$ weak), $A_i$, $|F_i|$, $s_i$, $\tau_i$, $\Lmk_i$;\ opening: origin room, door?, glimpsed classes;\ stairs: direction, other storey's record\;
+}
+$\mathcal{U}\gets(\target, H, \{u_i\})$\;
+\lIf(\tcp*[f]{byte-identical prompt $\Rightarrow$ no call}){$\mathcal{U}=\mathcal{U}^{-}$}{$\mathcal{Y}\gets\mathcal{Y}^{-}$}
+\lElse(\tcp*[f]{reasons on \emph{home/house/stage/pass} first; no distance}){$\mathcal{Y}\gets\LLM{rules, $\mathcal{U}$}$}
+\lForEach(\tcp*[f]{independent estimates, \emph{not} renormalised}){$i$ scored $y_i$ in $\mathcal{Y}$}{$p_i \gets \min\!\big(\max(y_i/100,\,0),\ p_{\max}\big)$}
+\lForEach(\tcp*[f]{forgotten, not ruled out}){$i$ omitted from $\mathcal{Y}$}{$p_i\gets p_{\mathrm{omit}}$}
+discard invented ids;\ \lIf{no usable node remains}{repair the schema once, else back off (Alg.~\ref{alg:fallback})}
+$p_{\varnothing}\gets\prod_{i}(1-p_i)$ \tcp*[r]{mass in none of them, under RPT$^{\ast}$'s independence approximation}
+$\varpi\gets$ the \emph{pass} verdict of $\mathcal{Y}$ (\tsc{first} if absent)\;
+\KwRet{$(\mathbf{p},\varpi)$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{OrderNodes}: cost-aware visit order (HPP-PT instance for RPT$^{\ast}$)}
+\label{alg:order}
+\Input{nodes $\Nodes_t$ with entries $e_i$ and probabilities $p_i$; $\Occ$; pose $\pos_t$; cruise speed $\nu$; service times $\tau^{\mathrm{svc}}_i$; stair leaves $\ell_i$}
+\Output{visit order $\pi=(\pi_1,\dots,\pi_m)$}
+\lForEach(\tcp*[f]{never a fabricated arc weight}){$i\in\Nodes_t$}{$e_i\gets\Snap{$e_i, r_{\mathrm{snap}}$}$; drop $i$ if none}
+$V\gets\{e_i\}\cup\{e_0{=}\pos_t\}$ \tcp*[r]{the depot is the agent's own cell}
+$d\gets\Dijkstra{unit-weight 8-graph of passable cells, $V$}$ \tcp*[r]{all pairs in one sweep; metric, in metres}
+keep the nodes $d$ connects to $e_0$; cap to $m\le m_{\max}$ (nearest first, then likeliest)\;
+$C_{uv}\gets \big(d(e_u,e_v)+\ell_u+\ell_v\big)/\nu+\tau^{\mathrm{svc}}_v$ \tcp*[r]{service on entering arcs; stair leaf on every incident arc}
+$p_i\gets\min(p_i,\,1-\epsilon)$ \tcp*[r]{RPT$^{\ast}$ divides by $1-p$}
+$\pi\gets\RPT{$V, C, \mathbf{p}, e_0$}$ \tcp*[r]{$\textstyle\min_\pi J(\pi)=\sum_{i=0}^{m-1}\Big[\prod_{j=1}^{i}(1-p_{\pi_j})\Big]C_{\pi_i\pi_{i+1}}$, $\pi_0=e_0$}
+\KwRet{$\pi$} \tcp*[r]{the whole order; committed until the head's visit ends}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{Visit}: the node in force, one action per call}
+\label{alg:visit}
+\Input{node $v$ with kind $k_v$ and entry $e_v$; $\Occ$; pose $\pose_t$; ledger $\Ledger$; visit counter $n_v$}
+\Output{action $a_t$, or a release verdict $\in\{\tsc{exhausted},\tsc{unreachable},\tsc{budget},\tsc{reclassified},\tsc{traversed}\}$}
+\lIf{$n_v>B_{k_v}$}{\KwRet{\tsc{released}: budget}}
+\lIf(\tcp*[f]{re-plan on the new fact}){$k_v=\kind{room}$ \KwAnd a new class renamed $v$}{\KwRet{\tsc{released}: reclassified}}
+\If(\tcp*[f]{transit}){$\|\pos_t-e_v\|>d_{\mathrm{arr}}$}{
+  \lIf(\tcp*[f]{$\arg\max_{c\in\Omega_v}\mathrm{DT}_{\Omega_v}(c)$, re-read as the map grows}){$k_v=\kind{room}$}{$e_v\gets\Vantage{$\Omega_v$}$}
+  $a_t\gets$ next step of $\AStar{$\Occ,\pos_t,e_v$}$ on the room-confined map\;
+  \lIf{no route}{\KwRet{\tsc{released}: unreachable}} \lElse{\KwRet{$a_t$}}
+}
+\Switch{$k_v$}{
+  \uCase(\tcp*[f]{the look-around: the camera's ray ends at the nearest object}){\kind{room}}{
+    \lIf{yaw swept $<2\pi$ since arrival}{\KwRet{turn by $\Delta\psi$}}
+    $\Ledger_f\gets\Ledger_f\cup\{\pos_t\}$;\ \KwRet{\tsc{released}: exhausted} \tcp*[r]{finished for the episode}
+  }
+  \uCase(\tcp*[f]{peek into the unknown / at the landmark}){\kind{opening}, \kind{landmark}}{
+    \lIf{headings $h_v-\Delta\psi,\ h_v,\ h_v+\Delta\psi$ not all looked at}{\KwRet{turn toward the next}}
+    retire $v$ for the storey;\ \KwRet{\tsc{released}: exhausted} \tcp*[r]{its floor joins the partition}
+  }
+  \Case{\kind{stairs}}{
+    hand control to \Traverse{$v$}; on a storey first set foot on: \Rotate{} and $\Ledger_{f'}\gets\Ledger_{f'}\cup\{\pos\}$;\ \KwRet{\tsc{released}: traversed}\;
+  }
+}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{TargetClosing}: verify, approach, inspect; \tsc{stop} or release}
+\label{alg:closing}
+\Input{detections $\Dets_t$ with 3-D projections; pose $\pose_t$; $\Occ$; rejection memory $\Rej$; phase $\phi$; memory $\mem$; streak $n_c$}
+\Output{action $a_t$; \tsc{stop}; or \tsc{released} (control returns to the search)}
+$\mathcal{C}\gets\{(b,\kappa,s,\cen)\in\Dets_t : \target \text{ accepts } \kappa,\ s\ge s_{\mathrm{lock}},\ b \text{ not clipped at the image border},\ \cen\notin\Rej\}$\;
+\If(\tcp*[f]{takeover: exploration is suspended}){$\phi=\varnothing$ \KwAnd $\mathcal{C}\ne\varnothing$}{
+  $\cen_0\gets$ most confident candidate;\ $\mem\gets\cen_0$;\ $n_c\gets 0$;\ $\phi\gets\tsc{verify}$\;
+  \lIf(\tcp*[f]{re-verify from a wider view}){$\|\pos_t-\cen_0\|<d_{\mathrm{sud}}$}{\BackOff{}: retreat $n_b$ steps, face $\cen_0$}
+}
+\uIf{some $\cen\in\mathcal{C}$ has $\|\cen-\mem\|\le r_{\mathrm{as}}$}{
+  $\mem\gets$ precision-weighted update, $w=1/\sigma(\|\pos_t-\cen\|)^2$;\ $n_c\gets n_c+1$ \tcp*[r]{3-D target memory}
+}
+\lElseIf{$\phi=\tsc{verify}$}{$n_c\gets 0$}
+\Switch{$\phi$}{
+  \uCase{\tsc{verify}}{
+    \lIf(\tcp*[f]{locked}){$n_c\ge k_c$ (or $k'_c$, from viewpoints $\ge\beta$ apart, if context-suspect)}{$\phi\gets\tsc{close}$}
+    \lElseIf{$>n_{\mathrm{ver}}$ actions in \tsc{verify}}{\KwRet{\Release{$\mem,\varrho$}}}
+    \lElse{\KwRet{face $\mem$ (sweep if out of view)}}
+  }
+  \uCase{\tsc{close}}{
+    \lIf(\tcp*[f]{the map outvotes the lock}){$\Lmk^{+}$ now holds another class at $\cen_0$}{\KwRet{\Release{$\mem,2\varrho$}}}
+    \lIf{$\|\pos_t-\mem\|\le d_{\mathrm{term}}$}{$\phi\gets\tsc{inspect}$}
+    \lElse(\tcp*[f]{no path / stalled: release}){\KwRet{step of $\AStar{$\Occ,\pos_t,\mathrm{standoff}(\mem)$}$; pitch to $\mem$'s height within $d_{\mathrm{look}}$}}
+  }
+  \Case{\tsc{inspect}}{
+    $\hat d\gets$ freshly measured near-edge range to the target, if seen this frame\;
+    \lIf{seen fresh \KwAnd $\hat d\le d_{\mathrm{term}}+\epsilon_d$}{\KwRet{\tsc{stop}}}
+    \lIf{$n_{\mathrm{insp}}$ views spent \KwAnd it was seen in range from here}{\KwRet{\tsc{stop}}}
+    \lIf(\tcp*[f]{wrong lock}){$n_{\mathrm{insp}}$ views spent \KwAnd never seen from here}{\KwRet{\Release{$\mem,2\varrho$}}}
+    \KwRet{next bounded yaw/pitch view centred on $\mem$}\;
+  }
+}
+\Fn{\Release{$\cen,\varrho'$}}{$\Rej\gets\Rej\cup\{(\cen,f,\varrho')\}$;\ $\phi\gets\varnothing$;\ no new takeover for $n_{\mathrm{cool}}$ actions;\ \KwRet{\tsc{released}}}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{\textsc{ExplorationFallback}: the search never idles}
+\label{alg:fallback}
+\Input{$\Occ$, $\SG$; ranked accessible-frontier inventory $\Front$; retired goals; floor state}
+\Output{an action that moves (a hold only as the last rung)}
+\lIf{a model service failed}{arm a doubling back-off; do not ask it until the back-off ends}
+$\Front_{\mathrm{exit}}\gets\{\varphi\in\Front:\ \text{reachable},\ \KwNot \text{ an object's shadow},\ \KwNot \text{ in a type-excluded room}\}$\;
+\lIf(\tcp*[f]{rung 1: the best exit on the floor}){$\Front_{\mathrm{exit}}\ne\varnothing$}{\KwRet{A$^{\ast}$ step toward $\arg\max_{\varphi\in\Front_{\mathrm{exit}}} U(\varphi)$}}
+\lIf(\tcp*[f]{rung 2}){floor exhausted \KwAnd storey changes allowed}{\KwRet{\Traverse{explicit up/down rule}}}
+\lIf(\tcp*[f]{rung 3: still unknown space}){$\Front\setminus\Front_{\mathrm{exit}}\ne\varnothing$}{\KwRet{step toward the nearest}}
+\lIf(\tcp*[f]{rung 4}){retired goals remain}{\KwRet{step toward the nearest}}
+\lIf(\tcp*[f]{rung 5: a new vantage point}){a reachable known cell exists}{\KwRet{relocate to the farthest one}}
+\lIf(\tcp*[f]{rung 6: blind disc underfoot}){footing not yet swept here}{\KwRet{\tsc{look\_down}, one rotation, \tsc{look\_up}}}
+\KwRet{hold} \tcp*[r]{rung 7: every rung spent at this spot}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[t]\small
+\caption{LLM-guided room search with target closing (main loop)}
+\label{alg:main}
+\Input{target category $\target$; RGB-D and pose stream $(I_t,D_t,\pose_t)$; action budget $T$}
+\Output{\tsc{stop} at the target (\tsc{found}), or \tsc{not found} when the budget is spent}
+\State{$\Occ,\Lmk,\SG\gets\varnothing$;\ $\Ledger,\Rej\gets\varnothing$;\ node in force $v\gets\varnothing$;\ pass $\varpi\gets\tsc{first}$}
+\Rotate{} in place;\ $\Ledger_{f_0}\gets\Ledger_{f_0}\cup\{\pos_0\}$ \tcp*[r]{warm-up: the spawn room is scanned first}
+\For{$t\gets 0$ \KwTo $T-1$}{
+  $(\Occ,\Lmk,\SG)\gets\UpdateSG{$I_t,D_t,\pose_t$}$ \tcp*[r]{Alg.~\ref{alg:scenegraph}, every action}
+  \If(\tcp*[f]{Alg.~\ref{alg:closing} pre-empts everything}){closing active \KwOr a candidate of $\target$ with a 3-D projection appears}{
+    $a_t\gets\Closing{$\Dets_t,\pose_t,\Occ,\Rej$}$\;
+    \lIf{$a_t=\tsc{stop}$}{\KwRet{\tsc{found}}}
+    \lIf(\tcp*[f]{resume at a loop point, with $\Rej$ grown}){$a_t=\tsc{released}$}{$v\gets\varnothing$}
+    \lElse{\Execute{$a_t$};\ \KwContinue}
+  }
+  $a_t\gets\varnothing$\;
+  \Repeat(\tcp*[f]{a released node is replaced on this same action}){$a_t\ne\varnothing$ \KwOr $v=\varnothing$, at most $n_{\mathrm{rnd}}$ rounds}{
+    \If(\tcp*[f]{loop point}){$v=\varnothing$}{
+      $(\Nodes_t,X_t)\gets\Candidates{$\SG,\Occ,\Lmk^{+},\Ledger,\Rej,\target,v$}$ \tcp*[r]{Alg.~\ref{alg:nodes}}
+      \If{$\Nodes_t$ holds an unfinished room, an exit or a staircase}{
+        $(\mathbf{p},\varpi)\gets\Oracle{$\target,\Nodes_t,\SG,\Ledger,t,T$}$ \tcp*[r]{Alg.~\ref{alg:oracle}: one reasoning call per loop point}
+        \lIf(\tcp*[f]{first pass: no second looks yet}){$\varpi=\tsc{first}$}{$\Nodes_t\gets\Nodes_t\setminus X_t$}
+        $p_\lambda\gets p_{\mathrm{L}}$ for landmark nodes;\ $\pi\gets\Order{$\Nodes_t,\mathbf{p},\pos_t$}$;\ $v\gets\pi_1$ \tcp*[r]{Alg.~\ref{alg:order}}
+      }
+    }
+    \If{$v\ne\varnothing$}{
+      $a_t\gets\Visit{$v$}$ \tcp*[r]{Alg.~\ref{alg:visit}: transit by A$^{\ast}$, then scan / peek / climb}
+      \lIf{$a_t$ is a release verdict}{$v\gets\varnothing$;\ $a_t\gets\varnothing$}
+    }
+  }
+  \lIf(\tcp*[f]{Alg.~\ref{alg:fallback}: no node, no route, or LLM back-off}){$a_t=\varnothing$}{$a_t\gets\Fallback{$\Occ,\SG$}$}
+  \Execute{$a_t$}\;
+}
+\KwRet{\tsc{not found}}
+\end{algorithm}
+
+\clearpage
+\section*{Notation legend}
+
+\begin{table}[!htbp]\small\centering
+\caption{Global state and notation (used throughout Algorithms~\ref{alg:scenegraph}--\ref{alg:main}).}
+\label{tab:legend-global}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\target$ & Target object category (the query, e.g.\ \emph{toilet}); $\target$ \emph{accepts} a detector class $\kappa$ when $\kappa$ is an alias of it. \\
+$t,\ T$ & Current action index and the episode's action budget. \\
+$\pose_t=(\pos_t,\psi_t,\theta_t,f_t)$ & Agent pose: planar position $\pos_t\in\mathbb{R}^2$, yaw $\psi_t$, camera pitch $\theta_t$, storey (floor id) $f_t$. \\
+$(I_t,D_t)$ & RGB image and depth image of action $t$. \\
+$\Dets_t$ & Detections of the frame: boxes $b$ with class $\kappa$, confidence $s$ and, when depth supports it, 3-D centroid $\cen\in\mathbb{R}^3$. \\
+$\Occ$ & Observed bird's-eye-view occupancy grid of the storey in force (free / occupied / unknown); one grid per storey. \\
+$\Lmk,\ \Lmk^{+}$ & Object-landmark map and its confirmed subset. A landmark $\lambda=(\kappa_\lambda,\cen_\lambda,\rho_\lambda,n_\lambda)$: class, centroid, footprint radius, observation count. \\
+$\SG=(\Rooms,\Doors,\Opens,\Stairs)$ & Observed-only scene graph: rooms, confirmed doors, openings (exits of the mapped floor), seen staircases. \\
+$r\in\Rooms$ & A room with mask $\Omega_r$, area $A_r$, live frontier clusters $F_r$, confirmed objects $\Lmk_r$, label $\ell_r$ with strength $\sigma_r\in\{\text{weak},\text{strong}\}$ (or \emph{unknown}), searched time $\tau_r$, status $s_r\in\{\text{never entered},\text{entered},\text{scanned}\}$. \\
+$\Ledger_f$ & Scan ledger of storey $f$: the positions at which a full look-around was completed (remembered by \emph{place}, not by room id, because the watershed renumbers rooms). \\
+$\Rej$ & Rejection memory: anchors $(\cen,f,\varrho')$ of released target candidates; no new takeover starts within radius $\varrho'$ of one. \\
+$\Nodes_t$ & Candidate nodes at a loop point; node $i$ has kind $k_i\in\{\kind{room},\kind{opening},\kind{landmark},\kind{stairs}\}$, entry point $e_i$ and status $s_i$. \\
+$p_i$ & Oracle estimate that going to node $i$ \emph{next} finds the target; independent per node, never normalised to sum to one. \\
+$\pi,\ C,\ J(\pi)$ & Visit order, arc-cost matrix in seconds, and RPT$^{\ast}$'s expected time-to-find objective. \\
+$v$ & Node in force ($\varnothing$ at a \emph{loop point}: nothing committed, re-plan now). \\
+$a_t$ & Action: \textsc{move\_forward} ($\delta$), \textsc{turn\_left/right} ($\Delta\psi$), \textsc{look\_up/down}, \textsc{stop}. \\
+$\Front$ & Accessible-frontier inventory: clusters $\varphi$ of unexplored boundary reachable at the body clearance, with geodesic distance and utility $U(\varphi)$ (cluster size, discounted by travel and heading change). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithm~\ref{alg:scenegraph} (scene-graph update).}
+\label{tab:legend-sg}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$s_{\det}$ & Minimum detector confidence for a box to be projected and fused. \\
+$(\cen,\rho)$ & Back-projected 3-D centroid of a box (connected depth support, not a centre-ray percentile) and its footprint radius (half the box width at its depth). \\
+$d_{\mathrm{dup}},\ \iota$ & Same-class association: centroids within $d_{\mathrm{dup}}$, \emph{or} footprint discs with IoU $\ge\iota$ (scales with object size: a bed re-seen from the other side merges, two chairs 0.3\,m apart do not). \\
+$n_{\min}$ & Frames in which a landmark must be observed before it is confirmed (false-positive guard). \\
+$\mathrm{fp}(\Stairs)$ & Footprint cells of seen staircases, never room floor. \\
+$\Theta$ & Walked thresholds: clearance dips along the agent's trail, used as extra cuts beside confirmed doors. \\
+$(\ell_r,\sigma_r)$ & Evidence-gated, revisable room label from the LLM classifier: \emph{weak} from one object class or a hesitant model; \emph{strong} from $\ge2$ distinct classes or one \emph{signature object} (bed, toilet, oven) the model agrees with. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithm~\ref{alg:finished} (scan-ledger verdict).}
+\label{tab:legend-finished}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\mathbf{z}\in\Ledger_f$ & A completed scan point on storey $f$. \\
+$\mathcal{P}_f$ & Trail of poses the agent stood at on storey $f$ (known free). \\
+$\Vis{$\mathbf{z},\Omega_r$}$ & Fraction of $\Omega_r$ a camera at $\mathbf{z}$ could see: within depth range, clear line of sight through observed free space (unknown blocks sight); for a pose, restricted to the camera cone. \\
+$\eta$ & Seen fraction that credits a room to a scan or a pose. \\
+$w(\Omega_r),\ w_{\mathrm{nar}}$ & Widest clearance of the room and the \emph{narrow} bound: a corridor or balcony the camera cone spans while walked. \\
+$A_{\mathrm{frag}},\ \delta_r$ & Fragment area bound and the room's door flag: a doorless sliver with no frontier is a fragment of a neighbour. \\
+$\gamma,\ A_r^{\mathrm{then}}$ & Regrow factor and the area at which the verdict was reached; a verdict is sticky unless the room grows past $\gamma A_r^{\mathrm{then}}$. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithm~\ref{alg:nodes} (candidate nodes).}
+\label{tab:legend-nodes}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$X_t$ & Rooms finished by the ledger; withheld from the order while the pass verdict is \tsc{first}, offered again under \tsc{second} (and when the floor is exhausted). \\
+home object & An object that marks the room the target lives in (a sink or shower for a toilet); keeps a room a node whatever its label or verdict. \\
+$e_r=\Vantage{$\Omega_r$}$ & Room entry point: the reachable interior cell of greatest clearance, $\arg\max_{c\in\Omega_r}\mathrm{DT}_{\Omega_r}(c)$ (Euclidean distance transform of the mask); on a revisit, outside discs of radius $d_{\mathrm{rv}}$ around earlier scan points. \\
+$o\in\Opens$ & Opening: a genuine exit of the mapped floor -- frontier cluster of $\ge n_{\mathrm{op}}$ cells, not an object's shadow, not under the agent -- merged with neighbours within $d_{\mathrm{mrg}}$; described by the room it opens from, whether a door frame was seen, and the classes glimpsed through it within $d_{\mathrm{gl}}$ in a $\pm\alpha_{\mathrm{gl}}$ cone. Retired for the storey once peeked or unreachable. \\
+$e_o$ & The opening's threshold cell (re-aimed to the nearest passable cell on the agent's side). \\
+$e_\lambda,\ d_{\mathrm{L}},\ p_{\mathrm{L}}$ & Target-landmark node: standoff point at $d_{\mathrm{L}}$ from a confirmed landmark of the target's class on the agent's side, valued at the fixed $p_{\mathrm{L}}$ (the detector's word is the evidence). \\
+$e_k$ & Stair node entry: the foot of the flight on this storey's map. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithm~\ref{alg:oracle} (LLM node oracle).}
+\label{tab:legend-oracle}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$H$ & The \emph{house line}: every room type found so far with its status, rooms still unidentified, openings not looked into, whether frontier is left, and the budget spent. \\
+$\Delta_B$ & Budget step: effort and budget are shown in coarse steps so an unchanged map yields an unchanged prompt. \\
+$u_i$ & One prompt line per node with the facts the model values it by; target landmarks are not shown (fixed $p_{\mathrm{L}}$). \\
+$\mathcal{U},\ \mathcal{Y}$ & Prompt and structured JSON reply; $(\mathcal{U}^{-},\mathcal{Y}^{-})$ the cached pair, reused on a byte-identical prompt. \\
+$y_i$ & The model's score for node $i$ in percent; $p_{\max}$ the ceiling, $p_{\mathrm{omit}}$ the small share given to a node the model forgot. \\
+$p_{\varnothing}$ & Probability the target is in none of the nodes, $\prod_i(1-p_i)$ (independent-terminal approximation, not a categorical share). \\
+$\varpi$ & Pass verdict: \tsc{first} while an unexplored place is still worth looking at before any scanned room is re-checked; \tsc{second} when the home is covered and the detector may have missed the target. \\
+rules & System prompt: where the target normally lives, what the rooms found imply about the unidentified ones, how the budget weighs exploration against a second look -- and \emph{not} distance, which Alg.~\ref{alg:order} charges. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithm~\ref{alg:order} (cost-aware ordering).}
+\label{tab:legend-order}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$r_{\mathrm{snap}}$ & Radius within which a blocked entry point is moved onto a passable cell; a node with none is dropped, not priced. \\
+$e_0,\ V$ & Depot (the agent's own cell) and the vertex set of the instance. \\
+$d(e_u,e_v)$ & Geodesic distance in metres on the unit-weight 8-connected passable graph (binary weights keep the matrix metric, which RPT$^{\ast}$'s dominance pruning requires). \\
+$m_{\max}$ & Most nodes one solve ranges over (the nearest node is always kept, the rest by probability). \\
+$\nu$ & Cruise speed, forward step per action time. \\
+$\tau^{\mathrm{svc}}_i$ & Service time folded into every arc entering $i$: $\tau_{\mathrm{scan}}$ for a room, $\tau_{\mathrm{peek}}$ for an opening or landmark; preserves the triangle inequality. \\
+$\ell_i$ & Stair leaf in metres: flight length plus the fixed cost of a storey change, charged on every arc into \emph{and} out of a stair node ($0$ otherwise). \\
+$\epsilon$ & Probability clamp: RPT$^{\ast}$'s heuristic divides by $1-p$. \\
+$J(\pi)$ & Expected time-to-find of order $\pi$: each leg is paid only if the target was not found earlier. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithm~\ref{alg:visit} (visit primitives).}
+\label{tab:legend-visit}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$n_v,\ B_{k}$ & Actions spent on the visit in force and the bound per node kind ($B_{\mathrm{room}}$ for a scan, $B_{\mathrm{peek}}$ for a peek). \\
+$d_{\mathrm{arr}}$ & Arrival radius at the entry point. \\
+room-confined map & Planning copy of $\Occ$ with every other room blocked, so the approach stays inside the room in force. \\
+$\Delta\psi$ & Yaw of one turn action; a scan is a full $2\pi$ sweep measured on the pose, a peek is the three headings $h_v\pm\Delta\psi$ around the opening's heading $h_v$ (toward the unknown, or toward the landmark). \\
+release verdicts & \tsc{exhausted} (scan or peek complete: productive, not repeatable), \tsc{unreachable} (no route), \tsc{budget} ($n_v>B_k$), \tsc{reclassified} (a new object class renamed the room), \tsc{traversed} (climb begun; the storey's search resumes on return). \\
+$\Traverse$ & Building coordinator that approaches the stair foot and climbs; on a storey never stood on, a warm-up rotation is recorded as that storey's first scan. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithm~\ref{alg:closing} (target closing).}
+\label{tab:legend-closing}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\mathcal{C}$ & Candidate boxes of the target this frame: confidence $\ge s_{\mathrm{lock}}$, a coherent depth projection, not a sliver at the image edge, not inside the rejection memory. \\
+$\phi$ & Closing phase: $\varnothing$ (inactive), \tsc{verify}, \tsc{close}, \tsc{inspect}; terminal outcomes \tsc{stop} and \tsc{released}. \\
+$\cen_0,\ \mem$ & Anchor (first centroid, kept for association and for $\Rej$) and the fused 3-D target memory: precision-weighted running mean with per-frame weight $w=1/\sigma(d)^2$, $\sigma(d)=\sigma_0+\sigma_1 d$ at range $d$. \\
+$r_{\mathrm{as}}$ & Association radius between a new projection and $\mem$ (grows slowly with range). \\
+$n_c,\ k_c,\ k'_c,\ \beta$ & Consecutive-frame streak and the frames needed to lock; $k'_c$ frames from viewpoints at least $\beta$ apart when the context check doubts the box (e.g.\ a bed-sized box in a kitchen). \\
+$d_{\mathrm{sud}},\ n_b$ & Sudden-proximity range below which the back-off manoeuvre retreats $n_b$ steps into known-free cells before verifying. \\
+$n_{\mathrm{ver}}$ & Verification bound; an unverified candidate is released with radius $\varrho$. \\
+$\mathrm{standoff}(\mem),\ d_{\mathrm{term}},\ \epsilon_d$ & Approach goal beside the target, terminal range for \tsc{stop}, and its tolerance. \\
+$d_{\mathrm{look}}$ & Range within which the camera pitch follows the target's elevation (down at a toilet, up at a wall-mounted television). \\
+$\hat d$ & Freshly measured near-edge range of the detected surface (what the success radius is measured to), never the remembered range alone. \\
+$n_{\mathrm{insp}}$ & Inspection bound of stationary yaw/pitch views around $\mem$. \\
+$\varrho,\ n_{\mathrm{cool}}$ & Rejection radius (doubled when a lock failed inspection or the map outvoted it) and the cooldown before another takeover may start. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Symbols of Algorithms~\ref{alg:fallback} and~\ref{alg:main}.}
+\label{tab:legend-main}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\Front_{\mathrm{exit}}$ & Frontiers that lead somewhere: reachable, not an \emph{object's shadow} (the strip of unknown behind a bed or cabinet, no longer than the object could cast) and not in a room whose type excludes the target. \\
+$U(\varphi)$ & Frontier utility: rewards cluster size, discounts geodesic travel and heading change. \\
+retired goals & Frontier goals given up after a transient plan failure; still unknown space. \\
+footing sweep & \tsc{look\_down}, one rotation, \tsc{look\_up}: maps the blind disc under the camera that makes a stationary agent's surroundings read as impassable. \\
+back-off & A failed LLM or detector service is not asked again for a doubling number of actions; this algorithm carries the search meanwhile. \\
+loop point & The moment $v=\varnothing$: a node released, the start of a storey, or a node without a value appeared. Algorithms~\ref{alg:nodes}--\ref{alg:order} run once per loop point, on the same action as the release. \\
+$n_{\mathrm{rnd}}$ & Bound on same-action re-plans (release $\to$ re-order $\to$ transit) before the fallback takes the action. \\
+$\Rotate$ & One full in-place rotation; the warm-up that gives the map its first rooms and the ledger its first scan. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]\small\centering
+\caption{Parameters and their default values in the runtime (Gibson ObjectNav protocol: $T=500$, $\delta=0.25$\,m, $\Delta\psi=30^{\circ}$, 1\,s per action).}
+\label{tab:params}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+Parameter & Default & Role \\
+\midrule
+$s_{\det}$ & $0.30$ & Detector confidence to fuse a box (Alg.~\ref{alg:scenegraph}) \\
+$n_{\min}$ & $2$ & Frames to confirm a landmark \\
+$d_{\mathrm{dup}},\ \iota$ & $0.70$\,m, $0.25$ & Same-class association radius and footprint IoU \\
+$\eta$ & $0.5$ & Seen fraction for \tsc{seen} / \tsc{through} (Alg.~\ref{alg:finished}) \\
+$w_{\mathrm{nar}},\ A_{\mathrm{frag}},\ \gamma$ & $0.9$\,m, $3$\,m$^2$, $1.5$ & Narrow-room clearance, fragment area, regrow factor \\
+$n_{\mathrm{op}},\ d_{\mathrm{mrg}}$ & $8$ cells, $1.5$\,m & Opening size and merge radius (Alg.~\ref{alg:nodes}) \\
+$d_{\mathrm{gl}},\ \alpha_{\mathrm{gl}}$ & $3.0$\,m, $35^{\circ}$ & Glimpse range and half-cone through an opening \\
+$p_{\mathrm{L}},\ d_{\mathrm{L}}$ & $0.85$, $1.5$\,m & Target-landmark probability and standoff \\
+$d_{\mathrm{rv}}$ & $1.5$\,m & Revisit: avoid earlier scan points \\
+$\Delta_B$ & $25$ actions & Budget step in the prompt (Alg.~\ref{alg:oracle}) \\
+$p_{\max},\ p_{\mathrm{omit}}$ & $1-10^{-6}$, $0.01$ & Probability ceiling; share of an omitted node \\
+$r_{\mathrm{snap}},\ \epsilon,\ m_{\max}$ & $2.0$\,m, $10^{-6}$, $12$ & Snap radius, clamp, nodes per solve (Alg.~\ref{alg:order}) \\
+$\tau_{\mathrm{scan}},\ \tau_{\mathrm{peek}}$ & $22$\,s, $4$\,s & Service time of a room scan / a peek \\
+$B_{\mathrm{room}},\ B_{\mathrm{peek}},\ d_{\mathrm{arr}}$ & $36$, $30$ actions, $0.6$\,m & Visit bounds and arrival radius (Alg.~\ref{alg:visit}) \\
+$s_{\mathrm{lock}}$ & $0.50$ & Candidate confidence to start a takeover (Alg.~\ref{alg:closing}) \\
+$k_c,\ k'_c,\ \beta$ & $2$, $4$, $0.30$\,m & Confirmation frames; context-suspect frames and baseline \\
+$r_{\mathrm{as}}$ & $0.50$\,m & Association radius to the 3-D memory \\
+$d_{\mathrm{sud}},\ n_b$ & $1.30$\,m, $3$ & Sudden-proximity range and back-off steps \\
+$n_{\mathrm{ver}},\ n_{\mathrm{insp}}$ & $12$, $24$ actions & Verification and inspection bounds (closing bound $160$) \\
+$d_{\mathrm{term}},\ \epsilon_d,\ d_{\mathrm{look}}$ & $1.00$\,m, $0.05$\,m, $1.30$\,m & Terminal range, tolerance, pitch-follow range \\
+$\sigma_0,\ \sigma_1$ & $0.03$\,m, $0.03$ & Memory noise model $\sigma(d)=\sigma_0+\sigma_1 d$ \\
+$\varrho,\ n_{\mathrm{cool}}$ & $1.0$\,m, $15$ actions & Rejection radius and release cooldown \\
+warm-up, $n_{\mathrm{rnd}}$ & $12$ turns, $5$ & Full rotation at spawn (Alg.~\ref{alg:main}); same-action re-plan bound \\
+\bottomrule
+\end{tabularx}
+\end{table}
+%% BODY END ------------------------------------------------------------------
+
+\end{document}
