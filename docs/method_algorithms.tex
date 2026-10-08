@@ -1,0 +1,44 @@
+% Main algorithm, high-level. Requires in the preamble: \usepackage{algorithm} \usepackage{algorithmic} (and amsmath for \text).
+\begin{algorithm}[t]
+\caption{LLM-Guided Room Search with Target Closing}
+\label{alg:exploration}
+\begin{algorithmic}[1]
+
+\STATE \textbf{Input:} Target category $c^{*}$, initial pose $x_0$, sensor streams $(I_t, D_t)$, action budget $T$
+\STATE \textbf{Output:} \textsc{STOP} at the target, or search terminated when the budget is spent
+
+\STATE Initialise the scene graph $\mathcal{G}_0$ and turn a full circle in place to seed the map and the object memory
+
+\WHILE{Target not found and $t < T$}
+\STATE Detect objects in $I_t$ with YOLO-World, project them to 3-D with $D_t$, and fuse them into the object memory $\mathcal{O}_t$
+\STATE Update scene graph $\mathcal{G}_t \leftarrow \textsc{SceneGraph}(\mathcal{G}_{t-1}, \mathcal{O}_t, D_t, \hat{x}_t)$: occupancy map, rooms cut at doors, openings, stairs
+\STATE Classify the type of each room with the LLM from the objects seen in it
+
+\IF{the target is sighted at any point}
+\STATE Verify the sighting over consecutive frames and refine its 3-D position
+\STATE Navigate to a standoff point near the target, keeping the camera on it
+\STATE Inspect at close range: if the target is confirmed, \textsc{STOP} and \textbf{return}
+\STATE Otherwise release the candidate, remember the spot as rejected, and resume the search
+\ENDIF
+
+\IF{no node is currently selected}
+\STATE Collect candidate nodes $\mathcal{N}_t$: rooms not yet scanned, openings to unseen space, remembered objects of class $c^{*}$, staircases
+\STATE Ask the LLM oracle for $p_i = P(\text{target found at } i)$ for every $i \in \mathcal{N}_t$, given the house seen so far and the budget spent
+\STATE Compute travel costs between the nodes on the map and order them with RPT$^{*}$ to minimise the expected time-to-find
+\STATE Select next node $node_t \leftarrow$ first node of the RPT$^{*}$ order
+\ENDIF
+
+\STATE Navigate to $node_t$ with A$^{*}$
+\STATE Visit $node_t$:
+\begin{ALC@g}
+\STATE Room: stand at its vantage point and turn a full circle; the room is now scanned
+\STATE Opening: look through it from the threshold; the space behind joins the map
+\STATE Staircase: change storey and repeat the warm-up turn
+\end{ALC@g}
+\STATE Mark $node_t$ as visited and release it, so the next iteration re-plans
+\STATE If no node or no route is available, move to the nearest reachable frontier
+
+\ENDWHILE
+
+\end{algorithmic}
+\end{algorithm}
