@@ -47,6 +47,13 @@ class FalconPlanner:
         grid[world.grid == world.values.occupied] = 100
         self.frontiers.update(grid)
 
+    @staticmethod
+    def _world_cells(world, cells, limit=64):
+        if len(cells) > limit:
+            indices = np.linspace(0, len(cells) - 1, limit, dtype=int)
+            cells = cells[indices]
+        return [list(world.grid_to_world(int(cell[0]), int(cell[1]))) for cell in cells]
+
     def used(self, cell, yaw):
         xy = self.world.grid_to_world(*cell)
         return any(math.dist(xy, point) < 0.3 and abs(normalize_angle(yaw - angle)) < math.radians(20)
@@ -87,6 +94,11 @@ class FalconPlanner:
         camera = CameraVisibility(world, obs.camera, obs.pose.camera_pitch, body_height, p)
         clusters = self.frontiers.in_scope(scope, world.resolution, deadline)
         record["frontier_clusters"] = len(clusters)
+        record["frontier_clusters_world"] = [
+            {"id": int(fid), "cell_count": int(len(cells)),
+             "centroid_xy": list(world.grid_to_world(*np.mean(cells, axis=0))),
+             "boundary_samples_xy": self._world_cells(world, cells)}
+            for fid, cells in sorted(clusters.items())]
         if not clusters:
             return FalconPlan("frontiers_exhausted")
         ranked = sorted(clusters, key=lambda fid: (np.linalg.norm(clusters[fid].mean(axis=0) - start), fid))
@@ -97,12 +109,28 @@ class FalconPlanner:
             start_yaw=obs.pose.yaw, turn_angle=obs.action_spec.turn_angle_rad,
             arrival_m=getattr(obs, "arrival_m", 0.2))
         record.update(dormant_frontiers=dormant, viewpoint_candidates=sum(map(len, views.values())))
+        record["viewpoint_candidates_world"] = [
+            {"frontier_id": int(fid), "xy": list(world.grid_to_world(*view.cell)),
+             "yaw_rad": float(view.yaw), "unknown_gain_cells": int(view.gain),
+             "visible_frontier_cells": int(view.visible)}
+            for fid, candidates in sorted(views.items()) for view in candidates]
         if not views:
             return FalconPlan("planning_capacity" if record["deferred_frontiers"] else "no_useful_reachable_frontiers")
         topology_cost = getattr(obs, "topology_cost", cost)
         topology_free = np.isfinite(topology_cost) & scope & (world.grid == world.values.free)
         self.connectivity.update(world, topology_free, scope, deadline)
         c = self.connectivity
+        record["connectivity_groups_world"] = [
+            {"id": int(index), "unknown": bool(zone.unknown),
+             "active": bool(index in c.active), "cell_count": int(len(zone.pixels)),
+             "center_xy": list(world.grid_to_world(*zone.cell)),
+             "cell_samples_xy": self._world_cells(world, zone.pixels)}
+            for index, zone in enumerate(c.zones)]
+        rows, columns = c.graph.nonzero()
+        record["connectivity_edges_world"] = [
+            {"from": int(source), "to": int(destination),
+             "cost_m": float(c.graph[source, destination])}
+            for source, destination in zip(rows, columns) if source < destination]
         unknown = (world.grid == world.values.unknown) & scope
         guidance = GridRoutes(np.where(topology_free, 1.0, np.where(unknown, p.unknown_penalty, np.inf)), world.resolution, p.max_grid_nodes)
         representatives = {fid: candidates[0] for fid, candidates in views.items()}
@@ -121,7 +149,7 @@ class FalconPlanner:
                 center = tuple(map(int, zone.pixels[np.argmin(((zone.pixels - mean) ** 2).sum(axis=1))]))
             cp.append((zid, center, 0.0, zone.unknown))
         record.update(zones=len(c.zones), unknown_zones=sum(item[3] for item in cp),
-                      connectivity_edges=int(c.graph.nnz // 2), updated_tiles=c.updated_tiles,
+                  connectivity_edge_count=int(c.graph.nnz // 2), updated_tiles=c.updated_tiles,
                       isolated_unknown_zones=c.isolated_unknown)
         if len(cp) > p.max_order_nodes:
             return FalconPlan("planning_capacity")

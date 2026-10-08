@@ -8,6 +8,7 @@
   },
   "falcon": {
     "cell_size_m": 4.0,
+    "min_cluster_cells": 1,
     "candidate_angles": 8,
     "top_viewpoints": 2
   }
