@@ -169,12 +169,26 @@ split. Three ways to make that manageable:
 - **Shard across machines.** `run_benchmark.sh --shards 4 --shard-index 0` (… 1, 2, 3)
   on four machines, then merge the four complete directories into one result with
   `python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.report <dir0> <dir1> <dir2> <dir3> --merge-output <merged>`.
-- **Run detached.** `nohup run_benchmark.sh > /dev/null 2>&1 &` or inside `tmux`; the
-  console output is also in `<output>/run.log`.
+- **Run detached.** Name the directory up front, let the launcher record its own PID, and put
+  the monitor (2.4) beside it; `setsid` gives the run its own session, so a closed terminal or a
+  dropped SSH/IDE session cannot reach it:
+  ```bash
+  OUT=runs/gibson_val_$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$OUT"
+  setsid nohup bash -c 'echo $$ > "$1/launcher.pid"; exec "$2" --output "$1"' _ "$OUT" \
+      sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/run_benchmark.sh \
+      > "$OUT/launcher.log" 2>&1 < /dev/null &
+  setsid nohup "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.monitor \
+      "$OUT" --interval 300 > /dev/null 2>&1 < /dev/null &
+  ```
+  (`bash -c` writes the PID itself because `setsid` forks when it is a group leader, so `$!`
+  would name a process that has already exited.) To stop it, `kill -TERM -- -$(cat
+  "$OUT/launcher.pid")` ends the whole group -- the run, the detector and the Ollama it
+  started; the run lock is an advisory `flock`, so the same command with `--output "$OUT"`
+  resumes afterwards. The console output is also in `<output>/run.log`.
 
 ### 2.4 Watching progress
 
-Three views of the same thing:
+Four views of the same thing:
 
 - **The console.** One line per finished episode:
   `[######------------------------] 212/1000  21.2% | SR 0.642 SPL 0.331 DTG 1.52 | ETA 3d02h | last Corozal/000011 chair SR=1 SPL=0.712 steps=143 (412s)`
@@ -185,6 +199,15 @@ Three views of the same thing:
   Any tool can poll it (`watch -n 60 cat progress.json`).
 - **`run_benchmark.sh --status <output>`** prints that file as a readable table, from any
   shell, while the run is going.
+- **The monitor** (`gibson.monitor <output> --interval 300`, the detached companion of 2.3)
+  reads for a run nobody is watching: every tick it appends one status line (UTC, done/total,
+  SR/SPL/DTG, ETA, the episode in progress, the last outcome) to `<output>/monitor.log` and
+  keeps `<output>/episodes.csv` current -- one row per finished episode with the scalar fields
+  of `episodes.jsonl` only (id, scene, target, success, SPL, SoftSPL, path length, shortest
+  path, start and final distance to goal, steps, STOP, termination, wall time, agent error).
+  When the launcher's process is gone it writes the finished summary (or the progress view,
+  if the run died before `summary.json`) to the log and to `<output>/FINAL_SUMMARY.txt`, and
+  exits with the launcher's exit code. `--once` prints one line and exits, for a cron job.
 
 ### 2.5 Reading the results
 
@@ -194,6 +217,8 @@ Three views of the same thing:
 | `comparison.md`, `audit.json` | the same numbers beside the published SemExp / PONI / LFG / OSG-Nav rows, and whether this was the complete split (an incomplete or single-scene run is marked `NOT a full benchmark result`) |
 | `progress.json` | the live progress (also the per-scene / per-category running table) |
 | `episodes.jsonl` | one row per episode: id, scene, target, success, SPL, SoftSPL, DTG, path lengths, steps, STOP, termination, wall time, and the lean diagnostics (`agent_info`) |
+| `episodes.csv`, `monitor.log`, `FINAL_SUMMARY.txt` | the monitor's (2.4): the scalar columns of `episodes.jsonl` alone, one status line per tick, and the summary it wrote when the run ended |
+| `launcher.pid`, `launcher.log` | a detached launch (2.3): the launcher's PID (its process group, for `kill -TERM -- -PID`) and everything it printed |
 | `evaluation_diagnostics.jsonl` | the evaluator's own per-episode line (final DTG, path, collisions, first success action) |
 | `run.json`, `preflight.json` | the frozen configuration; `source-commit.txt`/`source-changes.diff` the code that ran |
 | `run.log`, `detector.log` | the console output and the detector service's log |

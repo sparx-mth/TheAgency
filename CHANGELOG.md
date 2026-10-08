@@ -6,6 +6,18 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **Detached Gibson run monitor** (`objnav_benchmark_runtime/gibson/monitor.py`, `tests/test_monitor.py`,
+  `BENCHMARK.md` 2.3-2.5, 2026-10-08): the companion of a `nohup`/`setsid` launch of the 1,000-episode
+  benchmark that nobody is watching. Every tick it appends one status line (UTC, done/total, running
+  SR/SPL/DTG, ETA, the episode in progress, the last outcome) to `<output>/monitor.log` and keeps
+  `<output>/episodes.csv` current -- the scalar columns of `episodes.jsonl` alone (id, scene, target,
+  success, SPL, SoftSPL, path length, shortest path, start and final distance to goal, steps, STOP,
+  termination, wall time, agent error), no diagnostics. Completion is judged by the launcher's PID
+  (`launcher.pid`, written by the launcher itself because `setsid` forks), `exit_code.txt` supplies the
+  code and is ignored when older than the PID file (a preflight into the same directory leaves one);
+  the finished summary goes to the log and `FINAL_SUMMARY.txt`. `BENCHMARK.md` now gives the detached
+  recipe, the stop command (`kill -TERM -- -PGID`, the lock being an advisory `flock` so a resume
+  follows) and lists the new files.
 - **LLM-first node oracle for the single-storey benchmark** (`core/mapping/topology/search_node_oracle.py`,
   `objnav_benchmark_runtime/methods/{house_context,room_search_loop,scene_graph}.py`, 2026-10-07): the 14B
   model is shown EVERY room of the storey -- finished and type-excluded ones included, each with

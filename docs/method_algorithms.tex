@@ -1,44 +1,79 @@
-% Main algorithm, high-level. Requires in the preamble: \usepackage{algorithm} \usepackage{algorithmic} (and amsmath for \text).
-\begin{algorithm}[t]
-\caption{LLM-Guided Room Search with Target Closing}
-\label{alg:exploration}
-\begin{algorithmic}[1]
+\documentclass[10pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
 
-\STATE \textbf{Input:} Target category $c^{*}$, initial pose $x_0$, sensor streams $(I_t, D_t)$, action budget $T$
-\STATE \textbf{Output:} \textsc{STOP} at the target, or search terminated when the budget is spent
+% --- Keywords and Function Definitions ---
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+\SetKwInOut{State}{State}
+\SetKwComment{Comment}{$\triangleright$\ }{}
+\SetCommentSty{textit}
+\SetFuncSty{textsc}
+\SetKw{KwOr}{or}
+\SetKw{KwContinue}{continue}
+\SetKw{Stop}{Stop}
+\SetKw{Found}{Found}
+\SetKw{Fail}{Fail}
+\SetKwFunction{WarmUp}{WarmUp360}
+\SetKwFunction{InitSceneGraph}{InitSceneGraph}
+\SetKwFunction{UpdateSceneGraph}{UpdateSceneGraph}
+\SetKwFunction{ClassifyRooms}{LLM-ClassifyRooms}
+\SetKwFunction{CandidateNodes}{CandidateNodes}
+\SetKwFunction{Dijkstra}{Dijkstra}
+\SetKwFunction{LLM}{LLM}
+\SetKwFunction{RPT}{RPT$^{*}$}
+\SetKwFunction{AStar}{A$^{*}$}
+\SetKwFunction{Navigate}{Navigate}
+\SetKwFunction{TargetClosing}{TargetClosing}
+\SetKwFunction{ExploreLocal}{ExploreLocal}
+\SetKwFunction{ExploreFrontier}{ExploreFrontier}
 
-\STATE Initialise the scene graph $\mathcal{G}_0$ and turn a full circle in place to seed the map and the object memory
+\begin{document}
 
-\WHILE{Target not found and $t < T$}
-\STATE Detect objects in $I_t$ with YOLO-World, project them to 3-D with $D_t$, and fuse them into the object memory $\mathcal{O}_t$
-\STATE Update scene graph $\mathcal{G}_t \leftarrow \textsc{SceneGraph}(\mathcal{G}_{t-1}, \mathcal{O}_t, D_t, \hat{x}_t)$: occupancy map, rooms cut at doors, openings, stairs
-\STATE Classify the type of each room with the LLM from the objects seen in it
-
-\IF{the target is sighted at any point}
-\STATE Verify the sighting over consecutive frames and refine its 3-D position
-\STATE Navigate to a standoff point near the target, keeping the camera on it
-\STATE Inspect at close range: if the target is confirmed, \textsc{STOP} and \textbf{return}
-\STATE Otherwise release the candidate, remember the spot as rejected, and resume the search
-\ENDIF
-
-\IF{no node is currently selected}
-\STATE Collect candidate nodes $\mathcal{N}_t$: rooms not yet scanned, openings to unseen space, remembered objects of class $c^{*}$, staircases
-\STATE Ask the LLM oracle for $p_i = P(\text{target found at } i)$ for every $i \in \mathcal{N}_t$, given the house seen so far and the budget spent
-\STATE Compute travel costs between the nodes on the map and order them with RPT$^{*}$ to minimise the expected time-to-find
-\STATE Select next node $node_t \leftarrow$ first node of the RPT$^{*}$ order
-\ENDIF
-
-\STATE Navigate to $node_t$ with A$^{*}$
-\STATE Visit $node_t$:
-\begin{ALC@g}
-\STATE Room: stand at its vantage point and turn a full circle; the room is now scanned
-\STATE Opening: look through it from the threshold; the space behind joins the map
-\STATE Staircase: change storey and repeat the warm-up turn
-\end{ALC@g}
-\STATE Mark $node_t$ as visited and release it, so the next iteration re-plans
-\STATE If no node or no route is available, move to the nearest reachable frontier
-
-\ENDWHILE
-
-\end{algorithmic}
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{LLM-Guided Object Search}
+\label{alg:main}
+\Input{target category $c^{*}$; RGB-D observations $(I_t, D_t)$ and pose $x_t$; step budget $T$}
+\Output{\Stop at the target (\Found), or \Fail when the budget is spent}
+\State{scene graph $\mathcal{G}$; candidate nodes $\mathcal{N}$; distances $d$; probabilities $p$; visit order $\pi$; destination $v$; path $\tau$}
+\BlankLine
+\Comment{Warm-up}
+\WarmUp{} \Comment*[r]{rotate $360^{\circ}$ in place: first view of the surroundings}
+$\mathcal{G} \gets \InitSceneGraph{$x_0$}$ \Comment*[r]{initial map, rooms and objects from the warm-up scan}
+\While{$t < T$}{
+  \Comment{Scene graph}
+  $\mathcal{G} \gets \UpdateSceneGraph{$\mathcal{G}, I_t, D_t, x_t$}$ \Comment*[r]{map, rooms, openings, detected objects}
+  $\mathcal{G} \gets \ClassifyRooms{$\mathcal{G}$}$ \Comment*[r]{LLM assigns each room a type from the objects seen in it}
+  $\mathcal{N} \gets \CandidateNodes{$\mathcal{G}$}$ \Comment*[r]{unscanned rooms, openings, sighted targets}
+  \lIf(\Comment*[f]{nothing to plan over}){$\mathcal{N} = \varnothing$}{\ExploreFrontier{}; \KwContinue}
+  
+  \Comment{Distances}
+  $d \gets \Dijkstra{$\mathcal{G}, x_t, \mathcal{N}$}$ \Comment*[r]{travel cost from $x_t$ to, and between, the nodes}
+  
+  \Comment{Probabilities}
+  $p \gets \LLM{$c^{*}, \mathcal{G}, \mathcal{N}$}$ \Comment*[r]{$p_i$: probability that the target is found at node $i$}
+  
+  \Comment{Visit order}
+  $\pi \gets \RPT{$\mathcal{N}, p, d$}$;\quad $v \gets \pi_1$ \Comment*[r]{order minimising the expected time-to-find}
+  
+  \Comment{Navigation, local exploration and verification}
+  \Repeat{$v$ explored \KwOr $c^{*}$ is sighted}{
+    \uIf{not yet arrived at $v$}{
+      $\tau \gets \AStar{$x_t, v$}$ \Comment*[r]{collision-free path to $v$ on the current map}
+      \Navigate{$\tau$} \Comment*[r]{one step along $\tau$; perception keeps updating $\mathcal{G}$}
+    }
+    \Else{
+      \ExploreLocal{$v$} \Comment*[r]{room: walk to its vantage point and scan $360^{\circ}$; opening: peek from the threshold}
+    }
+  }
+  \uIf{$c^{*}$ is sighted}{
+    \lIf(\Comment*[f]{verify, approach by A$^{*}$, inspect; else release and re-plan}){\TargetClosing{$c^{*}$} $=$ \Stop}{\KwRet{\Found}}
+  }
+  \lElse(\Comment*[f]{the node is done; the next iteration re-plans}){mark $v$ explored}
+}
+\KwRet{\Fail}
 \end{algorithm}
+
+\end{document}
