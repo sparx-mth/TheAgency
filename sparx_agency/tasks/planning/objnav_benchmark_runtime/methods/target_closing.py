@@ -315,6 +315,8 @@ class TargetClosing:
         self.backoff_repeats = 0           # close candidates on an anchor already backed off from: verified in place
         self.backed_off = []               # (anchor xyz, floor id) per manoeuvre made
         self.wider_releases = 0            # candidates the wider perspective did not confirm
+        self.repeat_releases = 0           # second unverified releases of one anchor, escalated to non-overridable
+        self.disproved_refusals = 0        # legacy-pursuit landmarks refused on a release that disproved them from close
         self.no_step_holds = 0             # verify steps withheld because the step would push the box out of the frame
         self.support_sightings = 0         # frames a support-surface box stood consistent with the 3-D memory
         self.support_holds = 0             # inspection releases withheld on that evidence
@@ -362,6 +364,11 @@ class TargetClosing:
     #: A candidate backed off from and never re-seen from the wider perspective: not overridable, and refused
     #: from twice ``boxed_in_radius_m`` of the spot it was released at (the agent must really go elsewhere).
     WIDER_RELEASE = "unverified from a wider perspective"
+    #: The second ``unverified`` release of the same anchor: the same evidence is not new evidence (Markleeville
+    #: 2026-10-08, 35 takeovers of one table in 450 actions, every one past the ``unverified`` memory at 0.80).
+    REPEAT_RELEASE = "unverified again"
+    #: Releases that disproved the candidate from close: the legacy pursuit does not walk after them at any range.
+    DISPROVED_RELEASES = (WIDER_RELEASE, REPEAT_RELEASE, "inspection saw nothing", "inspection saw nothing in any view")
 
     def _rejected_nearby(self, xyz, floor_id, override=False, here=None):
         """Whether a released candidate's anchor covers ``xyz`` on ``floor_id``.
@@ -379,7 +386,7 @@ class TargetClosing:
                 continue
             if here is not None:
                 stood = entry[5] if len(entry) > 5 else None
-                reach = self.settings.boxed_in_radius_m * (2.0 if why == self.WIDER_RELEASE else 1.0)
+                reach = self.settings.boxed_in_radius_m * (2.0 if why in (self.WIDER_RELEASE, self.REPEAT_RELEASE) else 1.0)
                 if stood is None or math.dist(stood, here) > reach:
                     continue
             if override and why in self.OVERRIDABLE_RELEASES:
@@ -581,6 +588,11 @@ class TargetClosing:
                 # and re-taken at 0.80 each time).
                 self.wider_releases += 1
                 self._release(obs, radius_factor=s.failed_inspection_radius_factor, why=self.WIDER_RELEASE)
+            elif self.anchor is not None and self._released_unverified_near(self.anchor):
+                # The same candidate was already given back as unverified once: a third look from
+                # the same evidence is not owed (the override is for far flickers, not for this).
+                self.repeat_releases += 1
+                self._release(obs, radius_factor=s.failed_inspection_radius_factor, why=self.REPEAT_RELEASE)
             else:
                 self._release(obs)
             return
@@ -643,6 +655,22 @@ class TargetClosing:
                 self.support_sightings += 1
                 self.support_seen, self.support_xyz = obs.step, tuple(float(v) for v in xyz)
                 return
+
+    def _disproved_near(self, xy):
+        """Whether a release that disproved its candidate from close covers ``xy`` on this floor."""
+        floor = self.policy.mapping.floor_id
+        for entry in self.rejected:
+            why = entry[4] if len(entry) > 4 else "unverified"
+            if entry[1] == floor and why in self.DISPROVED_RELEASES and math.dist(entry[0][:2], (float(xy[0]), float(xy[1]))) <= entry[3]:
+                return True
+        return False
+
+    def _released_unverified_near(self, xyz):
+        """Whether an anchor within the association radius of ``xyz`` on this floor was already released as unverified."""
+        s = self.settings
+        floor = self.policy.mapping.floor_id
+        return any(entry[1] == floor and math.dist(entry[0][:2], xyz[:2]) <= s.association_radius_m
+                   and (entry[4] if len(entry) > 4 else "unverified") == "unverified" for entry in self.rejected)
 
     def _backed_off_near(self, xyz):
         """Whether a manoeuvre was already made for a candidate anchored within the association radius of ``xyz``."""
@@ -1155,10 +1183,19 @@ class TargetClosing:
         question, so the search does not walk after what the takeover has
         just refused (Hanson 2026-10-05, actions 18-26: nine actions toward
         a released chair, and the warm-up begun again where they ended).
+        **At any range** a landmark on an anchor a release *disproved from
+        close* (``DISPROVED_RELEASES``: the wider perspective, the second
+        unverified look, an inspection that saw nothing) is refused too --
+        Markleeville/000000, 2026-10-08: the closing gave the table back from
+        the wider perspective at action 41 and the legacy pursuit STOPped on
+        it at action 50.
         """
         s = self.settings
         if self.locked:
             return False
+        if self._disproved_near(xy):
+            self.disproved_refusals += 1
+            return True
         range_m = math.dist((obs.pose.x, obs.pose.y), (float(xy[0]), float(xy[1])))
         if range_m <= s.rejection_min_range_m:
             return False
@@ -1385,7 +1422,8 @@ class TargetClosing:
                                                                    qualifies=self._history_qualifies()),
                 "backoff": None if self.backoff is None else self.backoff.diagnostics(),
                 "backoffs": self.backoffs, "backoff_skips": self.backoff_skips, "backoff_repeats": self.backoff_repeats,
-                "wider_releases": self.wider_releases, "no_step_holds": self.no_step_holds,
+                "wider_releases": self.wider_releases, "repeat_releases": self.repeat_releases,
+                "disproved_refusals": self.disproved_refusals, "no_step_holds": self.no_step_holds,
                 "support_sightings": self.support_sightings, "support_seen_step": self.support_seen,
                 "support_xyz": self.support_xyz, "support_holds": self.support_holds, "support_stops": self.support_stops,
                 "history_holds": self.history_holds, "history_stops": self.history_stops,

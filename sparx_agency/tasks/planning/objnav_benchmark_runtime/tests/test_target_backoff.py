@@ -372,3 +372,68 @@ def test_a_fresh_near_edge_inside_the_terminal_radius_stops_before_the_standoff(
     assert command.stop and p.closing.phase == "STOP"
     assert math.dist((0.0, 0.0), p.closing.xyz[:2]) > p.settings.target_closing.terminal_distance_m
     assert command.info["reason"] == "fresh terminal target confirmation"
+
+
+# -- what the closing disproved from close binds the legacy pursuit, at any range (Markleeville/000000 re-fly) ----
+def test_a_disproved_release_refuses_the_legacy_pursuit_at_close_range_too(monkeypatch):
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    p, ep = open_floor_policy(monkeypatch)
+    target = (0.8, 0.0, 0.5)
+
+    def only_from_close(step, pose, u, v, depth, visible):
+        return [box_at("chair", u, v, conf=0.9, half=60)] if visible and math.dist((pose.x, pose.y), target[:2]) <= 1.0 else []
+    drive(p, ep, target, "chair", only_from_close, steps=60, until=lambda policy: not policy.closing.active)
+    closing = p.closing
+    assert closing.last_release == TargetClosing.WIDER_RELEASE
+    obs = replace(observation(ep, 100, depth=0.8), pose=AgentPose(0, 0, 0, 0), target_category="chair")
+    assert closing.refuses_far_candidate(obs, target[:2]), "0.8 m away, inside the disproved anchor's radius"
+    assert closing.disproved_refusals == 1
+    assert not closing.refuses_far_candidate(obs, (0.8, 3.5)), "another object 3.5 m aside is not covered"
+    # The 'unverified' memory alone still only binds far candidates, as before.
+    closing.rejected.append(((-1.0, 1.0, 0.5), p.mapping.floor_id, 90, 1.0, "unverified", (-3.0, -3.0)))
+    assert not closing.refuses_far_candidate(obs, (-1.0, 1.0)), "a near 'unverified' release: a close view is new evidence"
+
+
+def test_the_second_unverified_release_of_one_anchor_is_not_overridable():
+    """Markleeville/000001 re-fly: 35 takeovers of one surface, each released 'unverified' after twelve actions,
+    each restarted by a 0.80 box past that memory. The second release of the same anchor escalates."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    p, ep = setup_policy(target_closing={"backoff": False})
+    box = DetectionWire("chair", .9, (280, 200, 360, 280))
+    seen, blank = [box], []
+
+    def run_verification(start):
+        p.detector.detect = lambda rgb: seen
+        p.plan(observation(ep, start, depth=0.9))                         # the takeover, one frame
+        assert p.closing.active and not p.closing.locked
+        p.detector.detect = lambda rgb: blank
+        step = start + 1
+        while p.closing.active:
+            try:
+                p.plan(observation(ep, step, depth=0.9))
+            except AssertionError:
+                break
+            step += 1
+        return step
+    step = run_verification(0)
+    assert p.closing.last_release == "unverified" and p.closing.repeat_releases == 0
+    p.detector.detect = lambda rgb: seen                                  # at 0.9 confidence: the override
+    p.plan(observation(ep, step + 1, depth=0.9))
+    assert p.closing.active, "a confident box past an 'unverified' memory: the second look is owed"
+    p.detector.detect = lambda rgb: blank
+    step += 2
+    while p.closing.active:
+        try:
+            p.plan(observation(ep, step, depth=0.9))
+        except AssertionError:
+            break
+        step += 1
+    assert p.closing.last_release == TargetClosing.REPEAT_RELEASE and p.closing.repeat_releases == 1
+    assert p.closing.rejected[-1][3] == pytest.approx(2.0 * p.settings.target_closing.rejection_radius_m)
+    p.detector.detect = lambda rgb: seen
+    try:
+        p.plan(observation(ep, step + 1, depth=0.9))
+    except AssertionError:
+        pass
+    assert not p.closing.active, "the third look is not"
+    assert p.closing.refuses_far_candidate(observation(ep, step + 2, depth=0.9), p.closing.rejected[-1][0][:2])

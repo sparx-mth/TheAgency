@@ -29,7 +29,14 @@ without re-seeing the box; the release was `unverified`, which `override_confide
 the search walked two steps back to the same spot -- the loop. One manoeuvre per anchor
 (`backoff_repeats`), and a candidate the wider perspective never confirmed is released as
 `unverified from a wider perspective`: the failed-inspection radius, no override, refused from twice the
-same-spot radius. (c) The fixed capsule margin (0.6 m plus a cell) double-counts the body radius the
+same-spot radius. The re-fly then showed two more holes in the same wall: the *legacy* target pursuit
+walked to the disproved table and STOPped on it nine actions after the closing had given it back
+(`refuses_far_candidate` only bound far candidates -- now every release that disproved its candidate from
+close binds it at any range), and without a manoeuvre to spend, the same surface was re-taken 35 times
+through the `unverified` override (the second unverified release of one anchor now escalates to
+`unverified again`, non-overridable). With both, Markleeville/000001 found the real bed (SR 1, 331
+actions); /000000 still STOPped on a `bed` whose surface stands 0.56 m above the base -- a mattress
+height, inside every band -- which no geometry check separates from a bed. (c) The fixed capsule margin (0.6 m plus a cell) double-counts the body radius the
 planner inflates by anyway; `adaptive_capsule` shrinks it per flight until no body-passable region is
 split or erased (0.3 m there). (d) `_approach_pitch` on every step toward the target -- the pitch for
 where it will be after the step -- and, in the LOOK-less Gibson protocol, no verification step that

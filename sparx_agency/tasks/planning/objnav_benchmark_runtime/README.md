@@ -302,7 +302,14 @@ takeover began and the range it closed):
   (`wider_releases`): the failed-inspection radius, no confidence override, and refused
   again from twice `boxed_in_radius_m` of the spot. The retreat arrives by the converter's
   own tolerance (plus half a step, or three idle actions while facing the goal), so it
-  does not spin on the spot.
+  does not spin on the spot. Two more rules from the re-fly: the **second `unverified`
+  release of one anchor escalates** the same way (`unverified again`, `repeat_releases`:
+  the override exists for far flickers, and 35 takeovers of one surface in 450 actions
+  were the same evidence 35 times), and every release that **disproved its candidate
+  from close** (`DISPROVED_RELEASES`: the wider perspective, the second look, an
+  inspection that saw nothing) binds the legacy target pursuit at any range
+  (`refuses_far_candidate`, `disproved_refusals`) -- Markleeville/000000 re-flown: the
+  closing gave the table back at action 41 and the legacy pursuit STOPped on it at 50.
 
 **Proactive pitch, and no step that loses the box** (Wiconisco toilet, 2026-10-08:
 bottom-cut box at 1.32 m, one MOVE_FORWARD, gone -- four times). Every approach step and
