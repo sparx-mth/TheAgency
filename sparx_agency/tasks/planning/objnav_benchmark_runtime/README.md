@@ -294,7 +294,32 @@ takeover began and the range it closed):
   manoeuvre is bounded (`backoff_max_actions`, 20), its actions do not count against the
   verification budget, and with no clear space known it is skipped and recorded
   (`backoffs`, `backoff_skips`, `backoff.skipped`): verification proceeds in place as
-  before. `backoff: false` disables it.
+  before. `backoff: false` disables it. Two rules keep it from becoming a loop
+  (Markleeville 2026-10-08: eight manoeuvres on one table read as a bed from 0.9 m): the
+  manoeuvre is made **once per object** -- a later close sighting on an anchor already
+  backed off from is verified in place (`backoff_repeats`) -- and a candidate the wider
+  perspective never re-saw is released as `unverified from a wider perspective`
+  (`wider_releases`): the failed-inspection radius, no confidence override, and refused
+  again from twice `boxed_in_radius_m` of the spot. The retreat arrives by the converter's
+  own tolerance (plus half a step, or three idle actions while facing the goal), so it
+  does not spin on the spot.
+
+**Proactive pitch, and no step that loses the box** (Wiconisco toilet, 2026-10-08:
+bottom-cut box at 1.32 m, one MOVE_FORWARD, gone -- four times). Every approach step and
+every verification step toward the candidate carries `_approach_pitch`: the pitch the
+memory predicts for *after* the step (atan of the height difference over the range one
+step closer, quantised to the tilt step, a full tilt at least inside the close band), so
+a low target is stepped toward looking DOWN from the moment the predicted angle is
+nearer a tilt step than level, and an elevated one looking UP, all the way in. The
+published Gibson protocol has no LOOK actions at all; there `_step_keeps_box` predicts
+the box's rows after the step (and `_verification_view` the vertical stretch a TURN
+gives a low box) and a verification step that would push a bottom-cut box out of the
+frame is withheld (`no_step_holds`) -- the lock comes from the next frame where the
+agent stands. And since the benchmark measures to the object, a **fresh sighting whose
+near edge is inside the terminal radius is terminal evidence wherever the centroid is**:
+the inspection starts, and STOPs, from there, where a low object is still in the frame;
+a fresh *centred* reading beyond the limit resumes the approach rather than spinning
+through the budget.
 
 **Support-surface resilience** (`methods/support_surface.py`). At close range a mounted
 or supported object leaves the frame before its support does -- the television on a
@@ -347,7 +372,7 @@ own frozen configurations; changed code does not relabel their outcomes.
 | `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: the best floor-wide exit (object shadows and frontiers of rooms the target cannot be in wait behind it), the stairs by the explicit fallback rule, the demoted frontiers, a retired frontier, a relocation, a footing sweep -- a move, never an idle spin; failure records and service back-off |
 | `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
 | `methods/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: the world every decision plans on has every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied (so no frontier, opening, peek or route reaches a flight), and `_navigate` refuses a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`), so the mask cannot leave A* without a start; inert when traversal is allowed |
-| `methods/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run (`FLOOR_RUN_M`, the floor in front of the stairs is not the stairs) and off the agent's own trail; excluded from the room partition (stairs are never a room), from peek viewpoints and from a peek-only A* copy; ordinary stair navigation is unchanged |
+| `methods/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run (`FLOOR_RUN_M`, the floor in front of the stairs is not the stairs) and off the agent's own trail, its capsule margin bounded per flight so it never splits or erases a body-passable corridor (`adaptive_capsule`: preferred 0.65 m down to the body radius, judged as the planner judges passability; Markleeville's stair-head corridor needed 0.3 m); excluded from the room partition (stairs are never a room), from peek viewpoints and from a peek-only A* copy; ordinary stair navigation is unchanged |
 | `methods/camera_control.py` | Sole pitch owner; bounded stair inspection, the footing sweep (a circle at 30 degrees down that maps the blind radius, for a pathless lock or a boxed-in fallback), long unprompted cadence and safe restoration |
 | `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association within a class with a height check |
 | `core/mapping/objects/landmarks.py` | The landmark map: per-class association (a tight dedupe radius or footprint-disc IoU; classes never merge), confirmation by observation count; the class vote of 2026-10-04 kept behind `class_votes=True` |

@@ -58,8 +58,16 @@ sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.demo`; saved setting
 are in `~/.config/sparx/gibson-demo.json`. It does not download licensed scenes.
 
 Run simulator jobs with the existing Habitat conda interpreter; use `.venv`
-only for lightweight tests/tools. Before rendering, check GPU ownership. Detector
-and room-language services run on CPU on this workstation.
+only for lightweight tests/tools. Before rendering, check GPU ownership;
+`gpu_plan.py` decides which services share it ([BENCHMARK.md](BENCHMARK.md)).
+
+**Depth holes.** The scan's missing geometry -- glass, mirrors, glossy screens
+-- renders as depth 0. The baselines drop those pixels; this bridge fills a hole
+enclosed by valid depth (half its rim, at most half the frame) from its nearest
+valid pixels so it projects as the surface around it, and drops the rest
+(`GibsonProtocol.depth_hole_*`, per-episode counts in
+`evaluation_diagnostics.jsonl` under `depth_holes`). The citations and the
+Markleeville measurement are in [PROTOCOL_AND_TUNING.md](PROTOCOL_AND_TUNING.md).
 
 ### Detector setup
 

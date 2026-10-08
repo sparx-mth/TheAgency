@@ -39,8 +39,10 @@ def open_floor_policy(monkeypatch, label="chair", tilt=False, **closing):
     return p, ep
 
 
-def box_at(label, u, v, conf=0.9, half=20):
-    return DetectionWire(label, conf, (u - half, v - half, u + half, v + half))
+def box_at(label, u, v, conf=0.9, half=20, width=640, height=480):
+    """A square box of ``2 * half`` px centred on ``(u, v)``, clipped to the frame as a detector's box is."""
+    return DetectionWire(label, conf, (max(0.0, u - half), max(0.0, v - half),
+                                       min(float(width - 1), u + half), min(float(height - 1), v + half)))
 
 
 def drive(p, ep, target_xyz, label, detections, steps=80, until=None):
@@ -64,7 +66,12 @@ def drive(p, ep, target_xyz, label, detections, steps=80, until=None):
         boxes = list(frame)
         p.detector.detect = lambda rgb, boxes=boxes: boxes
         obs = replace(observation(ep, step, depth=depth), pose=pose, target_category=label)
-        command = p.plan(obs)
+        try:
+            command = p.plan(obs)
+        except AssertionError:
+            if until is not None and not p.closing.active:
+                break                                        # released inside observe(): the frozen search took over
+            raise
         phases.append(p.closing.phase)
         if lock_step is None and p.closing.locked:
             lock_step = step
@@ -83,8 +90,9 @@ def drive(p, ep, target_xyz, label, detections, steps=80, until=None):
 def test_a_target_seen_suddenly_at_arms_length_is_re_verified_from_farther_back(monkeypatch):
     p, ep = open_floor_policy(monkeypatch)
     target = (0.8, 0.0, 0.5)
+    # A chair at arm's length fills a good part of the frame: 120 px, not a 40 px sliver.
     actions, poses, phases, lock_step = drive(
-        p, ep, target, "chair", lambda step, pose, u, v, d, visible: [box_at("chair", u, v)] if visible else [])
+        p, ep, target, "chair", lambda step, pose, u, v, d, visible: [box_at("chair", u, v, half=60)] if visible else [])
     closing = p.closing
     assert actions[-1] == DiscreteAction.STOP and closing.locked
     assert closing.backoffs == 1 and closing.backoff_skips == 0
@@ -97,7 +105,8 @@ def test_a_target_seen_suddenly_at_arms_length_is_re_verified_from_farther_back(
     assert math.dist((final.x, final.y), target[:2]) <= p.settings.target_closing.terminal_distance_m + 0.05
     assert closing.memory.n >= 4 and closing.memory.sigma_m < closing.memory.noise_floor_m
     diag = p.episode_info()["target_closing"]
-    assert diag["backoff"]["actions"] >= 5 and diag["approach"]["path_m"] > 1.0 and not diag["approach"]["qualifies"]
+    assert diag["backoff"]["actions"] >= 5 and diag["approach"]["path_m"] >= 0.75 and not diag["approach"]["qualifies"]
+    assert diag["backoff"]["retreat_actions"] <= 10 and diag["backoff"]["outcome"].startswith("facing"), "arrived, no idle turns"
 
 
 def test_no_clear_space_behind_skips_the_manoeuvre_and_verifies_in_place():
@@ -239,3 +248,127 @@ def test_the_verification_step_toward_a_close_candidate_tilts_by_its_elevation(m
     assert command.camera_pitch == pytest.approx(sign * ep.action_spec.tilt_angle_rad)
     expected = DiscreteAction.LOOK_DOWN if sign > 0 else DiscreteAction.LOOK_UP
     assert DiscreteActionConverter(ep.action_spec).step(pose, command).action == expected
+
+
+# -- the manoeuvre runs once per object, and a candidate the wider perspective does not confirm is disproved ------
+def test_a_candidate_not_confirmed_from_the_wider_perspective_is_released_for_good_and_not_re_manoeuvred(monkeypatch):
+    """Markleeville 2026-10-08: a table read as a bed from 0.9 m, eight manoeuvres, eight unverified releases, each
+    re-taken at 0.80 past the 'unverified' memory. Now: one manoeuvre, a non-overridable release, no repeat."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    p, ep = open_floor_policy(monkeypatch)
+    target = (0.8, 0.0, 0.5)
+
+    def only_from_close(step, pose, u, v, depth, visible):
+        near = math.dist((pose.x, pose.y), target[:2]) <= 1.0
+        return [box_at("chair", u, v, conf=0.9, half=60)] if visible and near else []
+    actions, poses, phases, lock_step = drive(p, ep, target, "chair", only_from_close, steps=60,
+                                              until=lambda policy: not policy.closing.active)
+    closing = p.closing
+    assert lock_step is None and not closing.active and closing.phase == "RELEASED"
+    assert closing.backoffs == 1 and closing.wider_releases == 1 and closing.last_release == TargetClosing.WIDER_RELEASE
+    assert closing.rejected[-1][4] == TargetClosing.WIDER_RELEASE
+    assert closing.rejected[-1][3] == pytest.approx(2.0 * p.settings.target_closing.rejection_radius_m), "twice the radius"
+    released_at = closing.rejected[-1][5]
+    # Back at the spot where the box fires, at 0.9 confidence: refused, override or not -- same evidence, same place.
+    pose = AgentPose(0.0, 0.0, 0.0, 0.0)
+    pixels, depths = project_to_image(np.array([target]), ep.camera, pose)
+    p.detector.detect = lambda rgb: [box_at("chair", pixels[0][0], pixels[0][1], conf=0.9, half=60)]
+    freeze_global(monkeypatch, p)
+    try:
+        p.plan(replace(observation(ep, 100, depth=float(depths[0])), pose=pose, target_category="chair"))
+    except AssertionError:
+        pass                                                         # the search owned the action: no takeover
+    assert not closing.active and closing.same_spot_rejections >= 1
+    # From a spot well away from the release (more than twice boxed_in_radius_m) the box may start a takeover
+    # again -- but no second manoeuvre: this object had its wider look.
+    far = AgentPose(1.5, 0.75, 0.0, math.atan2(-0.75, -0.7))
+    assert math.dist((far.x, far.y), released_at) > 2.0 * p.settings.target_closing.boxed_in_radius_m
+    pixels, depths = project_to_image(np.array([target]), ep.camera, far)
+    p.detector.detect = lambda rgb: [box_at("chair", pixels[0][0], pixels[0][1], conf=0.9, half=60)]
+    p.plan(replace(observation(ep, 101, depth=float(depths[0])), pose=far, target_category="chair"))
+    assert closing.active and closing.backoff is None and closing.backoff_repeats == 1 and closing.backoffs == 1
+
+
+# -- proactive pitch and the no-step rule (Wiconisco toilet, 2026-10-08) -------------------------------------
+def toilet_frame(ep, pose, target, top_m=0.75, half_width=55):
+    """A toilet's box as a detector draws it: from the tank top down to where the base meets the floor."""
+    centroid, depths = project_to_image(np.array([target]), ep.camera, pose)
+    top, _ = project_to_image(np.array([[target[0], target[1], top_m]]), ep.camera, pose)
+    base, _ = project_to_image(np.array([[target[0], target[1], 0.0]]), ep.camera, pose)
+    u = centroid[0][0]
+    box = DetectionWire("toilet", 0.95, (max(0.0, u - half_width), max(0.0, top[0][1]),
+                                          min(639.0, u + half_width), min(479.0, base[0][1])))
+    return box, float(depths[0])
+
+
+def test_without_look_actions_no_verify_step_pushes_a_bottom_cut_box_out_of_the_frame(monkeypatch):
+    """Wiconisco/000000, action 430: toilet box on the bottom edge at 1.32 m, one MOVE_FORWARD, gone. The step
+    is withheld and the lock comes from the next frame; the published protocol has no LOOK."""
+    p, ep = open_floor_policy(monkeypatch, label="toilet", backoff=False)
+    assert not ep.action_spec.has_camera_tilt
+    pose, target = AgentPose(0, 0, 0, 0), (1.32, 0.0, 0.45)
+    box, depth = toilet_frame(ep, pose, target)
+    assert box.xyxy[3] >= 479, "the frame of the recording: cut by the bottom edge"
+    p.detector.detect = lambda rgb: [box]
+    command = p.plan(replace(observation(ep, 0, depth=depth), pose=pose, target_category="toilet"))
+    assert p.closing.active and p.closing.count == 1
+    assert not command.waypoints and command.info.get("verify_step") != "towards the candidate"
+    assert p.closing.no_step_holds == 1 and command.info.get("verify_step_withheld")
+    p.plan(replace(observation(ep, 1, depth=depth), pose=pose, target_category="toilet"))
+    assert p.closing.locked and p.closing.count == 2, "the second frame from the same spot locks it"
+
+
+def test_with_look_actions_the_verify_step_toward_a_low_target_looks_down_proactively(monkeypatch):
+    p, ep = open_floor_policy(monkeypatch, label="toilet", tilt=True, backoff=False)
+    pose, target = AgentPose(0, 0, 0, 0), (1.6, 0.0, 0.45)
+    box, depth = toilet_frame(ep, pose, target)
+    assert box.xyxy[3] < 472, "whole in the frame from 1.6 m"
+    p.detector.detect = lambda rgb: [box]
+    command = p.plan(replace(observation(ep, 0, depth=depth), pose=pose, target_category="toilet"))
+    assert command.info["verify_step"] == "towards the candidate" and command.waypoints
+    # 1.35 m after the step, the box's centroid ~0.5 m below the camera: 21 degrees, nearer one tilt step than level.
+    assert command.camera_pitch == pytest.approx(ep.action_spec.tilt_angle_rad)
+    assert DiscreteActionConverter(ep.action_spec).step(pose, command).action == DiscreteAction.LOOK_DOWN
+    # From 2.3 m the predicted angle (14 degrees at 2.05 m) is nearer level: no tilt yet, the box stays whole.
+    pose, target = AgentPose(0, 0, 0, 0), (2.3, 0.0, 0.45)
+    p, ep = open_floor_policy(monkeypatch, label="toilet", tilt=True, backoff=False)
+    box, depth = toilet_frame(ep, pose, target)
+    p.detector.detect = lambda rgb: [box]
+    command = p.plan(replace(observation(ep, 0, depth=depth), pose=pose, target_category="toilet"))
+    assert command.info["verify_step"] == "towards the candidate" and command.camera_pitch == pytest.approx(0.0)
+
+
+def test_the_approach_carries_the_predicted_pitch_on_every_step_not_only_inside_the_close_band(monkeypatch):
+    p, ep = open_floor_policy(monkeypatch, label="toilet", tilt=True, backoff=False)
+    target = (2.6, 0.0, 0.45)
+    pitches = []
+
+    def detections(step, pose, u, v, depth, visible):
+        return [box_at("toilet", u, v, conf=0.95, half=50)] if visible else []
+    actions, poses, phases, lock_step = drive(p, ep, target, "toilet", detections, steps=40)
+    assert actions[-1] == DiscreteAction.STOP and lock_step is not None
+    assert DiscreteAction.LOOK_DOWN in actions
+    first_look = actions.index(DiscreteAction.LOOK_DOWN)
+    assert math.dist((poses[first_look].x, poses[first_look].y), target[:2]) > 1.3, "looked down before the close band"
+
+
+def test_a_fresh_near_edge_inside_the_terminal_radius_stops_before_the_standoff():
+    """The benchmark measures to the object: a couch whose near edge is 0.95 m away is reached, wherever
+    its centroid is -- and a low object without LOOK actions is still in the frame from here."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy
+    p, original = setup_policy(target_closing={"backoff": False})
+    ep = replace(original, target_category="couch")
+    p.reset(ep, gibson_label_mapper().target_labels("couch"))
+    far = DetectionWire("couch", .9, (200, 240, 440, 360))             # a couch's height, 1.3 m out
+    p.detector.detect = lambda rgb: [far]
+    p.plan(replace(observation(ep, 0, depth=1.3), target_category="couch"))
+    p.plan(replace(observation(ep, 1, depth=1.3), target_category="couch"))
+    assert p.closing.locked
+    # The next frame: the box's pixels measure 0.95 m (the near edge of a long couch) while the fused centroid
+    # is still beyond the terminal distance.
+    obs = replace(observation(ep, 2, depth=1.3), target_category="couch")
+    obs.depth_m[240:360, 200:440] = 0.95
+    command = p.plan(obs)
+    assert command.stop and p.closing.phase == "STOP"
+    assert math.dist((0.0, 0.0), p.closing.xyz[:2]) > p.settings.target_closing.terminal_distance_m
+    assert command.info["reason"] == "fresh terminal target confirmation"

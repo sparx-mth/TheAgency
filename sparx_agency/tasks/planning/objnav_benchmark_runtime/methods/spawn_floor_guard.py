@@ -82,6 +82,7 @@ class SpawnFloorGuard:
         self.events: List[dict] = []
         self.stats = {"goals_refused": 0, "drop_cells": 0, "stair_cells": 0, "off_plane_actions": 0,
                       "half_levels_adopted": 0, "walked_exempt_cells": 0}
+        self.stair_margins_m = {}               # portal id -> capsule margin drawn, metres (``adaptive_capsule``)
 
     # -- per action -----------------------------------------------------------
     def observe(self, obs, world):
@@ -96,8 +97,10 @@ class SpawnFloorGuard:
         drops = self._drops_for(self.policy.mapping.floor_id, world)
         self._mark_drops(obs, world, drops)
         mask = drops.copy()
-        stairs = (stair_peek_mask(self.policy, world, obs.pose, carve=False)
+        margins = {}
+        stairs = (stair_peek_mask(self.policy, world, obs.pose, carve=False, report=margins)
                   if getattr(self.policy, "building", None) is not None else None)
+        self.stair_margins_m = margins
         if stairs is not None:
             mask |= stairs
         exempt = 0
@@ -132,6 +135,7 @@ class SpawnFloorGuard:
     def diagnostics(self) -> dict:
         return {"enabled": self.enabled, "spawn_z_m": self.spawn_z, "floor_plane_bound_m": self.bound_m,
                 "drop_m": self.drop_m, "off_plane": self.off_plane, "stats": dict(self.stats),
+                "stair_margins_m": dict(self.stair_margins_m),
                 "half_levels": sorted(self.half_levels), "events": list(self.events)}
 
     # -- internals ------------------------------------------------------------

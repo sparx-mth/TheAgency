@@ -11,6 +11,42 @@ Format per entry:
 
 ---
 
+## 2026-10-08 — The 3x3 on Darden/Markleeville/Wiconisco: a manoeuvre that looped, a capsule that closed a corridor, a toilet that left through the floor
+
+**Symptom:** `runs/benchmark_9episodes_20261008T082632Z`: SR 6/9. Markleeville/000000 and /000001 (bed)
+spent 106-114 actions in `target_back_off` and 69-97 in `target_verify` -- six to eight backing manoeuvres,
+each ending `action bound reached`, each followed by an `unverified` release and a re-takeover of the same
+0.73 m-high surface read as a bed -- then STOPped on it, 5-6 m from the real bed. In /000000 the stair
+capsule also cut the 0.55 m corridor between the stairwell and the wall to a 0.25 m gap (75 free cells
+beyond it unreachable). Wiconisco/000000 (toilet) saw a bottom-cut box at 1.32 m, took the verification
+step toward it, lost it through the bottom of the frame, and repeated that four times before releasing.
+
+**Root causes and fixes:** (a) the manoeuvre's arrival test (0.25 m) was tighter than the converter's, so
+at 0.25 m from the goal the route read complete, the idle result became a TURN, and eleven turns on the
+spot spent the bound -- arrival is now the converter's tolerance plus half a step, or three idle actions
+while facing the goal, with a retreat budget of two half-turns plus the steps. (b) The re-verification swept
+without re-seeing the box; the release was `unverified`, which `override_confidence` (0.80) bypasses, and
+the search walked two steps back to the same spot -- the loop. One manoeuvre per anchor
+(`backoff_repeats`), and a candidate the wider perspective never confirmed is released as
+`unverified from a wider perspective`: the failed-inspection radius, no override, refused from twice the
+same-spot radius. (c) The fixed capsule margin (0.6 m plus a cell) double-counts the body radius the
+planner inflates by anyway; `adaptive_capsule` shrinks it per flight until no body-passable region is
+split or erased (0.3 m there). (d) `_approach_pitch` on every step toward the target -- the pitch for
+where it will be after the step -- and, in the LOOK-less Gibson protocol, no verification step that
+pushes a bottom-cut box out of the frame (`_step_keeps_box`); a fresh near edge inside the terminal
+radius is terminal evidence wherever the centroid is, and a fresh centred reading beyond it resumes the
+approach instead of spinning out the budget. The false `bed` itself -- a table top at 0.73 m -- stands:
+`target_context.CLASS_HEIGHT_BANDS` flags a bed surface too LOW (a counter), not too high.
+
+**Don't:** don't let a manoeuvre's own arrival rule disagree with the converter's -- the converter decides
+when a route is done and what idle looks like. Don't make a release overridable when it came from a second
+viewpoint; the override exists for *far* flickers. Don't trust a 40 px synthetic box at 0.8 m in a test:
+a real detector's box reaches the floor and is cut by the bottom edge, and `clipped_box` has a rule for
+exactly that. And don't predict a turn's effect on a box horizontally only: a low box stretches toward the
+bottom edge by cos(b)/cos(b').
+
+---
+
 ## 2026-10-08 — The stair mask trapped the agent: a capsule of "genuine" obstacles with the agent inside it
 
 **Symptom:** `runs/smoke_gpu_plan_20261008T070438Z` (Collierville/000000, toilet): the agent

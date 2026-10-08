@@ -129,6 +129,15 @@ def test_depth_encoding_and_coordinate_axes():
     assert np.isnan(decoded[0, 5])
     np.testing.assert_allclose(metric_depth(np.array([[0, 1 / 3, 1.0]]), camera, True),
                                [[np.nan, 2.0, np.inf]], equal_nan=True)
+    # Depth holes (raw 0, the scan's missing geometry): enclosed ones take the surface around them BEFORE the
+    # clipping, so a screen in a wall 2 m away reads 2 m; without the rule they are no reading, as the baselines'.
+    frame = np.full((12, 16), 2.0, np.float32)
+    frame[4:8, 5:11] = 0.0
+    stats = {}
+    filled = metric_depth(frame, camera, depth_holes=PROTOCOL.depth_holes(), stats=stats)
+    assert np.all(filled == 2.0) and stats["filled"] == 1 and stats["pixels_filled"] == 24
+    assert np.isnan(metric_depth(frame, camera)[5, 6]), "no rule: dropped"
+    assert PROTOCOL.depth_hole_fill and PROTOCOL.depth_holes().max_fraction == 0.5
     p = habitat_pose((3, 2, 1), np.eye(3), np.eye(3))
     assert (p.x, p.y, p.z, p.yaw) == (-1, -3, 2, 0)
     theta = math.pi / 6

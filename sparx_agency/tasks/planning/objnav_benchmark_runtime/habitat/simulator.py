@@ -13,6 +13,7 @@ import numpy as np
 from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
+from sparx_agency.core.mapping.depth.depth_holes import fill_depth_holes
 
 
 def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
@@ -33,14 +34,27 @@ def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
                                 math.hypot(camera_forward[0], camera_forward[2])))
 
 
-def metric_depth(raw, camera, normalized=False):
-    """Decode Lab normalized depth or raw Sim metres; preserve clip semantics."""
+def metric_depth(raw, camera, normalized=False, depth_holes=None, stats=None):
+    """Decode Lab normalized depth or raw Sim metres; preserve clip semantics.
+
+    ``depth_holes`` (a :class:`DepthHoleFill`) fills the enclosed no-return
+    pixels -- raw ``0``, the scan's missing geometry -- from their valid
+    neighbours before the near/far clipping, so a mirror or a black screen
+    projects as the wall around it; the remaining holes are ``NaN``, no
+    reading, as every baseline treats them. ``stats`` (a dict) receives the
+    fill's counts when given.
+    """
     depth = np.asarray(raw, dtype=np.float32)
     if depth.ndim == 3 and depth.shape[2] == 1:
         depth = depth[..., 0]
     depth = depth.copy()
+    holes = depth <= 0 if not normalized else np.zeros(depth.shape, dtype=bool)
     if normalized:
         depth = depth * (camera.max_depth_m - camera.min_depth_m) + camera.min_depth_m
+    if depth_holes is not None and depth_holes.enabled and holes.any():
+        depth, counts = fill_depth_holes(depth, holes, depth_holes)
+        if stats is not None:
+            stats.update(counts)
     near = (depth <= camera.min_depth_m) | (depth <= 0)
     far = depth >= camera.max_depth_m
     depth[near] = np.nan
@@ -59,12 +73,15 @@ class HabitatRGBDSimulator:
         gpu_device: Rendering device index; this class never starts other models.
     """
 
-    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0):
+    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, depth_holes=None):
         self.camera = camera
         self.actions = actions
         self.radius_m = radius_m
         self.allow_sliding = allow_sliding
         self.gpu_device = gpu_device
+        self.depth_holes = depth_holes          # DepthHoleFill or None (every hole dropped, as the baselines do)
+        self.depth_hole_stats = {"frames": 0, "frames_with_holes": 0, "holes": 0, "filled": 0,
+                                 "pixels_filled": 0, "pixels_left": 0}
         self._sim = None
         self._scene = None
         self._structure = None  # per-scene navmesh storeys and stair connectors
@@ -75,6 +92,7 @@ class HabitatRGBDSimulator:
         import habitat_sim
         import quaternion
 
+        self.depth_hole_stats = {key: 0 for key in self.depth_hole_stats}     # per episode
         if self._scene != str(scene_path):
             self.close()
             self._sim = habitat_sim.Simulator(self._configuration(scene_path))
@@ -194,7 +212,15 @@ class HabitatRGBDSimulator:
                                       "mount_error_m": float(np.linalg.norm(depth_sensor.position - expected_position)),
                                       "registered": True}
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
-        return rgb, metric_depth(raw["depth"], self.camera), pose
+        counts = {}
+        depth = metric_depth(raw["depth"], self.camera, depth_holes=self.depth_holes, stats=counts)
+        totals = self.depth_hole_stats
+        totals["frames"] += 1
+        if counts:
+            totals["frames_with_holes"] += 1
+            for key in ("holes", "filled", "pixels_filled", "pixels_left"):
+                totals[key] += int(counts.get(key, 0))
+        return rgb, depth, pose
 
     def close(self):
         """Release rendering memory before another scene/process takes it."""

@@ -36,7 +36,8 @@ class GibsonEnv(ObjNavEnv):
         self.protocol = protocol
         self._camera, self._actions = protocol.camera(), protocol.actions()
         self._simulator = simulator if simulator is not None else HabitatRGBDSimulator(
-            self._camera, self._actions, protocol.agent_radius_m, protocol.allow_sliding, gpu_device)
+            self._camera, self._actions, protocol.agent_radius_m, protocol.allow_sliding, gpu_device,
+            depth_holes=protocol.depth_holes())
         self._episode = None
         self._steps, self._stopped = 0, False
         self.sentinel_start_ids = []
@@ -149,7 +150,8 @@ class GibsonEnv(ObjNavEnv):
                 "path_length_m": self._path, "shortest_path_m": self._shortest,
                 "start_uses_reference_sentinel": self._start_sentinel,
                 "collisions": self._collisions if self._collision_available else None,
-                "first_success_action": self._first_success_action}
+                "first_success_action": self._first_success_action,
+                "depth_holes": dict(getattr(self._simulator, "depth_hole_stats", None) or {})}
 
     def measure(self):
         if not self.episode_over:

@@ -43,6 +43,24 @@ class GibsonProtocol:
     path_length_dimension: str = "xz-planar"
     path_length_epsilon_m: float = 1e-5
     reference_sim_version: str = "0.1.5"
+    # Depth holes (since 2026-10-08): a Gibson scan has no geometry where the scanner saw glass,
+    # a mirror or a glossy screen, and Habitat renders those pixels as 0. Every zero-shot
+    # baseline drops them (SemExp/L3MVN/SG-Nav push them to 100 m, home-robot zero-weights
+    # them, ApexNav culls them; VLFM inpaints and then excludes them from obstacles), which
+    # leaves a mirror as unknown -- a frontier. Here a hole that is enclosed by valid depth on
+    # at least ``depth_hole_min_rim`` of its rim and no larger than ``depth_hole_max_fraction``
+    # of the frame is filled from its nearest valid pixels (``core.mapping.depth.depth_holes``)
+    # and projects as the surface around it; larger or open voids are dropped as before. A
+    # deviation from the baselines' sensor handling, recorded here in the frozen configuration;
+    # ``depth_hole_fill=False`` restores theirs.
+    depth_hole_fill: bool = True
+    depth_hole_max_fraction: float = 0.5
+    depth_hole_min_rim: float = 0.5
+
+    def depth_holes(self) -> "DepthHoleFill":
+        """The rule the simulator bridge fills no-return pixels by."""
+        from sparx_agency.core.mapping.depth.depth_holes import DepthHoleFill
+        return DepthHoleFill(self.depth_hole_fill, self.depth_hole_max_fraction, self.depth_hole_min_rim)
 
     def camera(self) -> CameraSpec:
         """The registered RGB-D pinhole camera."""

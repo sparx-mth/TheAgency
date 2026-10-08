@@ -312,6 +312,10 @@ class TargetClosing:
         self.blind_frames = 0              # frames the detector was in back-off: no evidence, clocks paused
         self.backoffs = 0                  # backing manoeuvres made for a candidate seen suddenly at close range
         self.backoff_skips = 0             # ... and those skipped for want of clear space behind the agent
+        self.backoff_repeats = 0           # close candidates on an anchor already backed off from: verified in place
+        self.backed_off = []               # (anchor xyz, floor id) per manoeuvre made
+        self.wider_releases = 0            # candidates the wider perspective did not confirm
+        self.no_step_holds = 0             # verify steps withheld because the step would push the box out of the frame
         self.support_sightings = 0         # frames a support-surface box stood consistent with the 3-D memory
         self.support_holds = 0             # inspection releases withheld on that evidence
         self.support_stops = 0             # STOPs on consistent support-surface tracking at terminal range
@@ -355,6 +359,9 @@ class TargetClosing:
 
     #: Releases whose spot a box at ``override_confidence`` may start a takeover inside of.
     OVERRIDABLE_RELEASES = ("unverified", "contradicted by the map")
+    #: A candidate backed off from and never re-seen from the wider perspective: not overridable, and refused
+    #: from twice ``boxed_in_radius_m`` of the spot it was released at (the agent must really go elsewhere).
+    WIDER_RELEASE = "unverified from a wider perspective"
 
     def _rejected_nearby(self, xyz, floor_id, override=False, here=None):
         """Whether a released candidate's anchor covers ``xyz`` on ``floor_id``.
@@ -372,7 +379,8 @@ class TargetClosing:
                 continue
             if here is not None:
                 stood = entry[5] if len(entry) > 5 else None
-                if stood is None or math.dist(stood, here) > self.settings.boxed_in_radius_m:
+                reach = self.settings.boxed_in_radius_m * (2.0 if why == self.WIDER_RELEASE else 1.0)
+                if stood is None or math.dist(stood, here) > reach:
                     continue
             if override and why in self.OVERRIDABLE_RELEASES:
                 continue
@@ -538,7 +546,11 @@ class TargetClosing:
                 self.memory = TargetMemory3D(xyz, range_m, obs.step, s.memory_noise_floor_m, s.memory_noise_per_m)
                 self.history = ApproachHistory(here, range_m, obs.step)
                 if s.backoff and range_m < s.sudden_proximity_m:
-                    self.backoff = BackoffManeuver(p, s.backoff_steps, s.backoff_max_actions)
+                    if self._backed_off_near(xyz):
+                        self.backoff_repeats += 1          # one manoeuvre per object: verify this one in place
+                    else:
+                        self.backoff = BackoffManeuver(p, s.backoff_steps, s.backoff_max_actions)
+                        self.backed_off.append((xyz, p.mapping.floor_id))
             else:
                 self.memory.update(xyz, range_m, obs.step)
             self.xyz = self.memory.xyz
@@ -559,7 +571,18 @@ class TargetClosing:
             self.started += 1                  # the manoeuvre's actions are not verification actions: the clock waits
         if (not self.locked and s.release_unverified
                 and obs.step - self.started >= s.max_verify_steps):
-            self._release(obs)
+            manoeuvre = self.backoff
+            if (manoeuvre is not None and manoeuvre.goal is not None and manoeuvre.finished is not None
+                    and self.last_seen < manoeuvre.finished):
+                # Backed off, turned to face it, swept -- and the detector never fired again: the
+                # close-range box the wider perspective does not confirm is disproved, like a
+                # failed inspection, and no confidence overrides that (Markleeville 2026-10-08:
+                # eight manoeuvres on one table read as a bed from 0.9 m, released as "unverified"
+                # and re-taken at 0.80 each time).
+                self.wider_releases += 1
+                self._release(obs, radius_factor=s.failed_inspection_radius_factor, why=self.WIDER_RELEASE)
+            else:
+                self._release(obs)
             return
         if self.locked and s.release_on_failed_inspection and self.anchor is not None:
             landmark = contradicted_by_map(p, self.label or "", self.anchor)
@@ -620,6 +643,12 @@ class TargetClosing:
                 self.support_sightings += 1
                 self.support_seen, self.support_xyz = obs.step, tuple(float(v) for v in xyz)
                 return
+
+    def _backed_off_near(self, xyz):
+        """Whether a manoeuvre was already made for a candidate anchored within the association radius of ``xyz``."""
+        s = self.settings
+        floor = self.policy.mapping.floor_id
+        return any(f == floor and math.dist(anchor[:2], xyz[:2]) <= s.association_radius_m for anchor, f in self.backed_off)
 
     def _history_qualifies(self):
         """Whether this candidate was tracked and approached over an EXTENDED path (``approach_history_m``)."""
@@ -715,6 +744,48 @@ class TargetClosing:
             desired = min(actions.max_pitch_rad, desired)
         return float(desired)
 
+    def _approach_pitch(self, obs, distance):
+        """The pitch for a step toward the target: where the target will be AFTER the step.
+
+        The proactive half of the dynamic pitch controller (since 2026-10-08):
+        a low target that is in the lower half of the frame now leaves it
+        through the bottom edge on the next step if the camera stays level
+        (Wiconisco toilet, action 430: bottom-cut box at 1.32 m, one
+        MOVE_FORWARD, lost; four times, then released). So the pitch is
+        :meth:`_pitch` at the range one step closer -- the elevation the
+        memory predicts there, quantised to the tilt step, a full tilt at
+        least inside the close band -- for every approach step, not only
+        inside ``look_down_distance_m``; a level target stays level. None
+        without LOOK actions.
+        """
+        if not self.policy.episode.action_spec.has_camera_tilt or self.xyz is None:
+            return None
+        ahead = max(0.3, distance - self.policy.episode.action_spec.forward_step_m)
+        return self._pitch(obs, ahead)
+
+    def _step_keeps_box(self, obs, distance):
+        """Whether a step toward the target leaves its box inside the frame, with the camera as it is.
+
+        For a protocol without LOOK actions (the published Gibson one): a box
+        already cut by the bottom edge, or whose centre the memory's geometry
+        puts below the frame after the step, is lost by stepping -- the
+        verification frame is taken from here instead (``no_step_holds``).
+        """
+        if self.box is None or self.xyz is None:
+            return True
+        k = obs.camera.intrinsics
+        margin = self.settings.border_margin_px
+        x1, y1, x2, y2 = self.box
+        if y2 > k.height - margin or y1 < margin:
+            return False
+        step = self.policy.episode.action_spec.forward_step_m
+        ahead = max(0.3, distance - step)
+        camera_z = obs.pose.z + obs.camera.height_m
+        angle = math.atan2(camera_z - float(self.xyz[2]), ahead) - float(obs.pose.camera_pitch)   # below the axis
+        predicted_v = k.cy + k.fy * math.tan(angle)
+        half = 0.5 * (y2 - y1) * distance / ahead                                                   # the box grows
+        return margin <= predicted_v - half and predicted_v + half <= k.height - margin
+
     def _scan(self, obs, pitch, reason):
         """Face the candidate while it is in view -- and step towards it -- or sweep when it is not.
 
@@ -750,7 +821,8 @@ class TargetClosing:
             # 2026-10-07: 52 frames held, five releases, no move).
             nearest = self.settings.terminal_distance_m if self.suspect is None else 0.6 * self.settings.terminal_distance_m
             if (not self.locked and aligned
-                    and distance > nearest + actions.forward_step_m):
+                    and distance > nearest + actions.forward_step_m
+                    and (actions.has_camera_tilt or self._step_keeps_box(obs, distance))):
                 # Two steps ahead: a one-step waypoint sits inside the converter's arrival
                 # tolerance and yields no action at all. One MOVE_FORWARD results either way.
                 # Within one turn of the centre the box stays in the frame after a step,
@@ -758,15 +830,20 @@ class TargetClosing:
                 # turn moved the box across the image and the detector dropped it on the
                 # other side -- four times in a row at a chair 3.5 m off (Hanson 2026-10-05).
                 # Never for a LOCKED target without a safe path: that one waits for A*.
+                # Without LOOK actions, never a step that pushes a low box out through the
+                # bottom edge (``_step_keeps_box``); with them, the step carries the pitch
+                # the target will need after it (``_approach_pitch``).
                 reach = 2.0 * actions.forward_step_m
                 ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
-                if pitch is None and actions.has_camera_tilt and distance <= self.settings.look_down_distance_m:
-                    # The dynamic pitch controller during close verification: the step toward a
-                    # low target looks down, toward a high one looks up (the memory's elevation).
-                    pitch = self._pitch(obs, distance)
+                if pitch is None:
+                    pitch = self._approach_pitch(obs, distance)
                 return NavigationCommand.follow([(obs.pose.x, obs.pose.y), ahead], camera_pitch=pitch,
                                                 info=dict(info, verify_step="towards the candidate",
                                                           elevation=self._elevation(obs, distance)))
+            if (not self.locked and aligned and not actions.has_camera_tilt
+                    and distance > nearest + actions.forward_step_m):
+                self.no_step_holds += 1
+                info["verify_step_withheld"] = "a step would push the box out of the frame"
             if self.settings.verify_keep_in_frame and turn_action(error, offset) is None:
                 # The hold below would be satisfied as it stands -- idle -- and an idle
                 # result is executed as a turn. Choose the frame instead. For a LOCKED target
@@ -879,8 +956,19 @@ class TargetClosing:
                     return view
         du = k.fx * math.tan(actions.turn_angle_rad)
         toward_left = (x1 + x2) / 2 < k.cx                  # the box is left of centre: a LEFT turn moves it right
+        # A turn moves a low or high box vertically too: a point below the camera at bearing
+        # b sits at v - cy = fy tan(e) / cos(b), so turning it off-axis stretches the offset
+        # by cos(b) / cos(b') -- the Wiconisco toilet's bottom-cut box left through the floor
+        # on a "turn that keeps it in frame" (2026-10-08).
+        bearing = math.atan2(((x1 + x2) / 2 - k.cx), k.fx)
+
+        def rows_after(turn_left):
+            after = bearing + (actions.turn_angle_rad if turn_left else -actions.turn_angle_rad)
+            scale = math.cos(bearing) / max(math.cos(after), 1e-6)
+            return (y1 - k.cy) * scale, (y2 - k.cy) * scale
         for turn_left in ((True, False) if toward_left else (False, True)):
-            if fits(du if turn_left else -du, 0.0):
+            top, bottom = rows_after(turn_left)
+            if fits(du if turn_left else -du, 0.0) and k.cy + top >= margin and k.cy + bottom <= k.height - margin:
                 yaw = normalize_angle(obs.pose.yaw + (actions.turn_angle_rad if turn_left else -actions.turn_angle_rad))
                 return NavigationCommand.hold(camera_pitch=None if tilt is None else pitch_now, final_yaw=yaw,
                                               info=dict(info, verify_step="turn %s" % ("left" if turn_left else "right")))
@@ -911,14 +999,22 @@ class TargetClosing:
             return command
         measured = self._fresh_measured(obs)
         out_of_range = measured is not None and measured > s.terminal_distance_m + s.range_tolerance_m
-        if self.inspection_started is not None and self.inspection_sighting is None and out_of_range:
-            # Seen fresh from here, aligned or not, but the measured surface lies beyond
-            # the terminal range: the filtered estimate entered the inspection early (an
-            # older, nearer reading averaged in). Standing still would spend the budget
-            # on a target in plain view and release it as "saw nothing"; step closer.
+        if self.inspection_started is not None and out_of_range and (self.inspection_sighting is None
+                                                                      or self._centred(obs)):
+            # Seen fresh from here but the measured surface lies beyond the terminal range:
+            # the filtered estimate entered the inspection early (an older, nearer reading
+            # averaged in), or an earlier borderline reading registered a sighting the
+            # centred view does not confirm. Standing still would spend the budget on a
+            # target in plain view and release it as "saw nothing" -- or STOP on it from
+            # too far when the budget runs out; step closer.
             self.inspection_started = None
             self.inspection_resumptions += 1
-        if self.inspection_started is not None or (distance <= s.terminal_distance_m and not out_of_range):
+        # A fresh sighting whose NEAR EDGE is already inside the terminal radius is terminal
+        # evidence wherever the centroid is (since 2026-10-08): the benchmark measures to the
+        # object, and a low object without LOOK actions is still in the frame from here where
+        # it may not be from the standoff (the Wiconisco toilet at 0.65 m is below the FOV).
+        in_range = measured is not None and measured <= s.terminal_distance_m + s.range_tolerance_m
+        if self.inspection_started is not None or in_range or (distance <= s.terminal_distance_m and not out_of_range):
             command = self._inspect(obs, distance)
             if command is None:
                 # The lock was wrong: released, the spot remembered. This action is one
@@ -954,9 +1050,7 @@ class TargetClosing:
         # television) so the terminal frames hold it whole -- the close-range policy,
         # in both directions (since 2026-10-07; before, the approach forced level and
         # the inspection alone tilted).
-        pitch = None
-        if p.episode.action_spec.has_camera_tilt:
-            pitch = self._pitch(obs, distance) if distance <= s.look_down_distance_m else 0.0
+        pitch = self._approach_pitch(obs, distance)
         return replace(command, camera_pitch=pitch,
                        info=dict(command.info, target_confirmed=True, persistent_lock=True,
                                  target_visible=visible, range_m=distance, phase=self.phase))
@@ -1078,6 +1172,15 @@ class TargetClosing:
         return replace(sweep, info=dict(sweep.info, kind="target_closing", phase=self.phase, persistent_lock=True,
                                         target_visible=self.last_seen == obs.step,
                                         reason="no safe target path; mapping the floor around the feet"))
+
+    def _centred(self, obs):
+        """Whether the fresh box is aligned: its centre within half a turn, or spanning the image's centre column."""
+        if self.last_seen != obs.step or self.box is None:
+            return False
+        k = obs.camera.intrinsics
+        if self.box[0] <= k.cx <= self.box[2]:
+            return True
+        return turn_action(self._bbox_error(obs), self.policy.episode.action_spec.turn_angle_rad) is None
 
     def _bbox_error(self, obs):
         # Optical x points right whereas positive ENU yaw turns left. At a
@@ -1281,7 +1384,8 @@ class TargetClosing:
                 "approach": None if self.history is None else dict(self.history.diagnostics(),
                                                                    qualifies=self._history_qualifies()),
                 "backoff": None if self.backoff is None else self.backoff.diagnostics(),
-                "backoffs": self.backoffs, "backoff_skips": self.backoff_skips,
+                "backoffs": self.backoffs, "backoff_skips": self.backoff_skips, "backoff_repeats": self.backoff_repeats,
+                "wider_releases": self.wider_releases, "no_step_holds": self.no_step_holds,
                 "support_sightings": self.support_sightings, "support_seen_step": self.support_seen,
                 "support_xyz": self.support_xyz, "support_holds": self.support_holds, "support_stops": self.support_stops,
                 "history_holds": self.history_holds, "history_stops": self.history_stops,

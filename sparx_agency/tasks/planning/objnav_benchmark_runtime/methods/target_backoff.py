@@ -45,8 +45,11 @@ class BackoffManeuver:
         self.skipped: Optional[str] = None  # why no manoeuvre was made
         self.outcome: Optional[str] = None  # how a manoeuvre that was made ended
         self.actions = 0
+        self.retreat_actions = 0
         self.started: Optional[int] = None
         self.finished: Optional[int] = None
+        self._last_xy: Optional[Tuple[float, float]] = None
+        self._stalled = 0                   # consecutive retreat actions without displacement
 
     @property
     def active(self) -> bool:
@@ -73,18 +76,32 @@ class BackoffManeuver:
         if self.actions > self.max_actions:
             return self._finish(obs, "action bound reached; verifying from here")
         here = (float(obs.pose.x), float(obs.pose.y))
-        tilt = self.policy.episode.action_spec.has_camera_tilt
+        spec = self.policy.episode.action_spec
+        tilt = spec.has_camera_tilt
         info = {"kind": "target_closing", "phase": "BACK_OFF", "target_visible": False, "backoff_state": self.state,
                 "backoff_goal": [round(v, 2) for v in self.goal], "backoff_source": self.source}
         if self.state == "retreat":
-            tolerance = max(self.policy.converter_params.goal_tolerance_m, 0.5 * self.policy.episode.action_spec.forward_step_m)
-            if math.dist(here, self.goal) <= tolerance:
+            # Arrival is the converter's: within its goal tolerance the route is complete and
+            # its idle result is executed as a TURN (Markleeville 2026-10-08: eleven turns on
+            # the spot, 0.25 m from the goal, until the action bound). Half a step of slack,
+            # and standing still for three retreat actions is arrival too.
+            tolerance = self.policy.converter_params.goal_tolerance_m + 0.5 * spec.forward_step_m
+            toward = math.atan2(self.goal[1] - here[1], self.goal[0] - here[0])
+            facing = turn_action(normalize_angle(toward - obs.pose.yaw), spec.turn_angle_rad) is None
+            if facing and self._last_xy is not None and math.dist(self._last_xy, here) < 1e-3:
+                self._stalled += 1                      # facing the goal and not moving: the converter is idling there
+            elif not facing or self._last_xy is None or math.dist(self._last_xy, here) >= 1e-3:
+                self._stalled = 0
+            self._last_xy = here
+            budget = 2 * int(math.ceil(math.pi / spec.turn_angle_rad)) + self.steps + 2   # turn out, step, turn back
+            if math.dist(here, self.goal) <= tolerance or self._stalled >= 3 or self.retreat_actions >= budget:
                 self.state = "face"
             else:
                 command = self.policy._navigate(obs, world, self.goal, "target_backoff")
                 if command is None:
                     self.state = "face"                      # the path is gone: face the target from here
                 else:
+                    self.retreat_actions += 1
                     # Level in transit: the retreat frames are ordinary mapping frames.
                     return replace(command, camera_pitch=0.0 if tilt else None,
                                    info=dict(command.info, **info, reason="backing off to re-verify from a wider perspective"))
@@ -144,4 +161,5 @@ class BackoffManeuver:
     def diagnostics(self) -> Dict[str, object]:
         return {"state": self.state, "goal": None if self.goal is None else [round(v, 2) for v in self.goal],
                 "source": self.source, "skipped": self.skipped, "outcome": self.outcome, "actions": self.actions,
+                "retreat_actions": self.retreat_actions,
                 "started_step": self.started, "finished_step": self.finished}

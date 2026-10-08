@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 
 import numpy as np
 import pytest
@@ -301,3 +302,46 @@ def test_the_trail_stays_carved_after_the_agent_moves_on():
         gx, gy = world.world_to_grid(*xy)
         assert later.grid[gy, gx] == world.values.free, "the trail is never masked"
     assert policy.floor_guard.goal_allowed(at(episode, 3, 3.0, 3.0), later, (4.6, 1.6), "frontier")
+
+
+# -- the capsule never closes a corridor (Markleeville/000000, 2026-10-08) -------------------------------------
+def along_the_wall(x):
+    """The same flight, standing ``x`` from the west face of the wall at x = 5.5 (room A's east wall)."""
+    flight = [[x, 1.0, 0.0], [x, 2.0, 0.9], [x, 3.0, 1.8], [x, 4.0, 2.7]]
+    return dict(STRUCTURE, stair_connectors=[dict(STRUCTURE["stair_connectors"][0], bottom_xyz=flight[0],
+                                                   top_xyz=flight[-1], polyline_xyz=flight)])
+
+
+def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_the_wall_passable():
+    """Markleeville: the only way from the south of the room to the north ran between the stairwell and the
+    wall, 0.55 m wide; the 0.6 m capsule left 0.25 m of it. Here the flight stands 0.7 m from room A's east
+    wall with a cabinet run closing its west side, so that corridor is the only way north."""
+    from scipy import ndimage
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import _passable
+    policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(4.8))     # 0.7 m from the wall
+    world.grid[5:55, 30:46] = world.values.occupied                                 # x 3.0-4.6, y 0.5-5.5: no way round
+    obs = obs_at(episode, 0, (5.25, 0.7))                                            # at the corridor's south end
+    confined = policy.floor_guard.observe(obs, world)
+    margins = policy.floor_guard.stair_margins_m
+    preferred = policy.settings.body_radius_m + policy.converter_params.goal_tolerance_m + world.resolution
+    assert list(margins.values()) == [0.3] and 0.3 < preferred, "six cells asked for, three drawn: the widest that leaves a body-wide corridor"
+    body = int(math.ceil(policy.settings.body_radius_m / world.resolution))
+    free = confined.grid == world.values.free
+    passable = _passable(free, ~free, body)
+    labels, _ = ndimage.label(passable, structure=np.ones((3, 3)))
+    south, north = world.world_to_grid(5.3, 0.5), world.world_to_grid(5.3, 4.8)
+    assert labels[south[1], south[0]] and labels[south[1], south[0]] == labels[north[1], north[0]], \
+        "the corridor along the wall still joins the south of the room to the north"
+    assert policy._navigate(obs, confined, (5.3, 4.8), "frontier") is not None, "A* uses it"
+    for y in (1.3, 1.5):
+        gx, gy = world.world_to_grid(4.8, y)
+        assert confined.grid[gy, gx] == world.values.occupied, "the first treads stay impassable"
+    assert not policy.floor_guard.goal_allowed(obs, confined, (4.8, 1.4), "frontier")
+
+
+def test_the_capsule_keeps_its_preferred_margin_where_nothing_is_in_the_way():
+    policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(2.0))     # 3.5 m of open floor to the wall
+    policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
+    preferred = policy.settings.body_radius_m + policy.converter_params.goal_tolerance_m + world.resolution
+    assert list(policy.floor_guard.stair_margins_m.values()) == [round(math.ceil(preferred / world.resolution) * world.resolution, 2)]
+    assert policy.episode_info()["spawn_floor_guard"]["stair_margins_m"] == policy.floor_guard.stair_margins_m

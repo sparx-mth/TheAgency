@@ -8,6 +8,7 @@
 #   gibson/run_benchmark.sh --preflight                       # services + data + config check, no episode
 #   gibson/run_benchmark.sh --status runs/gibson_val_X        # print the live progress of a run and exit
 #   gibson/run_benchmark.sh --five-scene 3                    # 3 recorded episodes per val scene (15), live dashboard
+#   gibson/run_benchmark.sh --five-scene 3 --scenes Darden Markleeville Wiconisco   # ... for a subset of the scenes
 #
 # The GPU is handed out by gibson/gpu_plan.py before the services start -- LLM first, YOLO second,
 # Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services).
@@ -15,7 +16,7 @@
 # see BENCHMARK.md beside this file for the full list and what each one is for.
 set -euo pipefail
 
-usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,13 +53,14 @@ CLIP_WEIGHTS="${CLIP_WEIGHTS:-$MODELS/clip/ViT-B-32.pt}"
 RUNS_ROOT="${RUNS_ROOT:-$REPO/runs}"
 
 # -- the command line -----------------------------------------------------------------------
-OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" EXTRA=()
+OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" FIVE_SCENES=() EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) OUTPUT="$2"; shift 2 ;;
     --scene) SCENE="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --five-scene) FIVE_SCENE="$2"; RECORD=1; shift 2 ;;
+    --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do FIVE_SCENES+=("$1"); shift; done ;;   # a subset, five-scene mode
     --record) RECORD=1; shift ;;
     --full-records) LEAN=0; shift ;;
     --preflight) PREFLIGHT=1; shift ;;
@@ -83,7 +85,9 @@ die() { say "ERROR: $*" >&2; exit 1; }
 [[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-  if [[ -n "$FIVE_SCENE" ]]; then OUTPUT="$RUNS_ROOT/benchmark_$((FIVE_SCENE * 5))episodes_${STAMP}"
+  if [[ -n "$FIVE_SCENE" ]]; then
+    SCENE_COUNT=${#FIVE_SCENES[@]}; [[ $SCENE_COUNT -gt 0 ]] || SCENE_COUNT=5
+    OUTPUT="$RUNS_ROOT/benchmark_$((FIVE_SCENE * SCENE_COUNT))episodes_${STAMP}"
   elif [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/gibson_${SCENE}_${STAMP}"; else OUTPUT="$RUNS_ROOT/gibson_val_${STAMP}"; fi
 fi
 if [[ -n "$FIVE_SCENE" ]]; then
@@ -228,6 +232,7 @@ if [[ -n "$FIVE_SCENE" ]]; then
              --episodes-per-scene "$FIVE_SCENE" --explorer frontier --detector-url "$DETECTOR_URL" --detector-backend yolo_world
              --seed "$SEED" --gpu-device "$GPU_DEVICE" --allow-sim-version-mismatch)
   [[ "$ALLOW_SHARED_GPU" == 1 ]] && FIVE_ARGS+=(--allow-shared-gpu)
+  [[ ${#FIVE_SCENES[@]} -gt 0 ]] && FIVE_ARGS+=(--scenes "${FIVE_SCENES[@]}")
   FIVE_ARGS+=("${EXTRA[@]}")
   date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"
   say "five-scene campaign: $FIVE_SCENE episode(s) per scene, stairs forbidden; results stream to $OUTPUT/benchmark_results.{json,csv}" | tee -a "$LOG"
