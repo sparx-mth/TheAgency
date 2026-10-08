@@ -31,6 +31,17 @@ plans on -- rather than in each frontier, opening, peek and route module:
   stays walkable. A plateau ``min_floor_separation_m`` or more from the
   spawn plane is another storey and is never adopted.
 
+Two rules keep the mask from trapping the agent itself (since 2026-10-08;
+Collierville/000000 walked past the foot of a flight 0.6 m from its
+centreline, the capsule covered its cell as a GENUINE obstacle -- which the
+planner's start relaxation never opens -- and the fallback held for 309
+actions): the floor run of a flight within ``peek_stairs.FLOOR_RUN_M`` of
+the storey plane is not drawn, and the cells the agent stands on or has
+stood on this storey (``peek_stairs.walked_exemption``: the sight ledger's
+trail plus the current pose, body radius and one cell around each) are
+carved out of the combined mask -- the agent was physically there, and
+nothing written for planning may outvote that (``walked_exempt_cells``).
+
 All of this is a constraint on what the agent may choose, not knowledge
 about the target: the only privileged input is the stair geometry the
 perfect detector already hands the coordinator once a staircase is in frame.
@@ -45,7 +56,7 @@ import numpy as np
 
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.objnav.camera_geometry import backproject_depth
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask, walked_exemption
 
 #: Refusal events kept for the recording; the counters are complete.
 MAX_EVENTS = 50
@@ -70,7 +81,7 @@ class SpawnFloorGuard:
         self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
         self.stats = {"goals_refused": 0, "drop_cells": 0, "stair_cells": 0, "off_plane_actions": 0,
-                      "half_levels_adopted": 0}
+                      "half_levels_adopted": 0, "walked_exempt_cells": 0}
 
     # -- per action -----------------------------------------------------------
     def observe(self, obs, world):
@@ -85,11 +96,20 @@ class SpawnFloorGuard:
         drops = self._drops_for(self.policy.mapping.floor_id, world)
         self._mark_drops(obs, world, drops)
         mask = drops.copy()
-        stairs = stair_peek_mask(self.policy, world) if getattr(self.policy, "building", None) is not None else None
+        stairs = (stair_peek_mask(self.policy, world, obs.pose, carve=False)
+                  if getattr(self.policy, "building", None) is not None else None)
         if stairs is not None:
             mask |= stairs
+        exempt = 0
+        if mask.any():
+            # Where the agent stands or has stood is passable, whatever the depth said about it
+            # (a drop painted under a step the agent then took): never a cell A* cannot start from.
+            walked = walked_exemption(self.policy, world, obs.pose)
+            exempt = int((mask & walked).sum())
+            mask &= ~walked
         self.stats["drop_cells"] = int(drops.sum())
         self.stats["stair_cells"] = 0 if stairs is None else int(stairs.sum())
+        self.stats["walked_exempt_cells"] = exempt
         self.mask = mask if mask.any() else None
         if self.mask is None:
             return world

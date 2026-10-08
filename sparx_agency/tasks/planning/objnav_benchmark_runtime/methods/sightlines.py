@@ -227,6 +227,35 @@ class SightLedger:
         state = self._floors.get(self._floor_id(floor_id))
         return [] if state is None else list(state.poses)
 
+    def walked_mask(self, world, floor_id=None, radius_m=0.0, include=None) -> np.ndarray:
+        """``(H, W)`` bool: every cell within ``radius_m`` of a spot the agent stood at on the storey.
+
+        The one fact about passability nothing on the map can outvote: the
+        agent was physically there. Masks written over the world for
+        planning (seen staircases, observed drops) are carved out here so
+        the agent is never left standing inside "genuine" obstacles with no
+        start for A* (Collierville 2026-10-08: 309 idle turns 0.6 m from the
+        foot of a flight). ``include`` adds poses not yet in the ledger --
+        the current one, which is recorded after the world is confined.
+        """
+        state = self._floors.get(self._floor_id(floor_id))
+        points = [(float(x), float(y)) for _, x, y, _, _ in (state.poses if state is not None else [])]
+        points += [(float(x), float(y)) for x, y in (include or ())]
+        mask = np.zeros(world.grid.shape, dtype=bool)
+        if not points:
+            return mask
+        cells = {world.world_to_grid(x, y) for x, y in points}
+        n = int(math.ceil(float(radius_m) / world.resolution))
+        h, w = mask.shape
+        ys, xs = np.ogrid[-n:n + 1, -n:n + 1]
+        disc = (xs * xs + ys * ys) <= n * n
+        for gx, gy in cells:
+            if not (-n <= gx < w + n and -n <= gy < h + n):
+                continue
+            y0, y1, x0, x1 = max(0, gy - n), min(h, gy + n + 1), max(0, gx - n), min(w, gx + n + 1)
+            mask[y0:y1, x0:x1] |= disc[y0 - (gy - n):y1 - (gy - n), x0 - (gx - n):x1 - (gx - n)]
+        return mask
+
     def _memo(self, state, name, step, compute):
         hit = state.cache.get(name)
         if hit is not None and hit[0] == step:

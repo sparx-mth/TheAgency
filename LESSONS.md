@@ -11,6 +11,46 @@ Format per entry:
 
 ---
 
+## 2026-10-08 — The stair mask trapped the agent: a capsule of "genuine" obstacles with the agent inside it
+
+**Symptom:** `runs/smoke_gpu_plan_20261008T070438Z` (Collierville/000000, toilet): the agent
+walked a doorway peek past the foot of a staircase, the connector was placed at action 190, and from
+action 191 the exploration fallback printed `off the observed passable map; the idle turn is the
+only move` for the remaining 309 actions -- `hold: 309` in `exploration_fallback.stats`, `footing: 0`
+(the floor around the agent was *known*, so no footing sweep), the closing never engaged, SR 0 at
+the step limit. The recorded planning grid showed the agent's cell `occupied`, inside a smooth
+1.3 m-wide capsule running along the flight's centreline and 0.65 m past its foot into the room.
+
+**Root cause:** `peek_stairs.stair_peek_mask` rasterises each seen connector polyline clipped to
+`height ± departure_m` (0.45 m) with a capsule radius of body radius + arrival tolerance + one cell
+(0.53 m -> 6 cells of 0.1 m = ±0.65 m), and `SpawnFloorGuard.observe` writes that into the planning
+world as `occupied`. The polyline begins *on the floor* at the foot anchor (z = storey height), so the
+floor in front of the stairs was in the band, and the capsule covered the corridor the agent used to
+pass the foot 0.60 m from the centreline. The weighted A* relaxes a blocked start only for its own
+cell and its inflation *skirt* -- cells "lethal but not truly occupied" -- and the mask cells are
+truly occupied by construction, so every plan from inside the capsule returned `NO_PATH`;
+`peek_planning_world` re-applied the same capsule for the fallback's own plans. The hold rung has no
+recovery: the idle turn does not change the map, so the episode was over at action 191.
+
+**Fix:** two rules in `peek_stairs` (and the guard, which combines stairs with observed drops):
+the floor run of a flight within `FLOOR_RUN_M` (0.10 m) of the storey plane is not drawn (the treads
+above and below still are), and the cells within body radius + one cell of every pose the agent has
+taken on the storey -- `SightLedger.walked_mask`, plus the current pose, which the ledger records only
+after the world is confined -- are carved out of the mask (`walked_exemption`, counted as
+`walked_exempt_cells`). The agent was physically there; nothing written for planning may outvote
+that. Regression: `test_spawn_floor_guard.py::test_an_agent_inside_the_stair_capsule_...`.
+
+**Don't:** don't widen `_clear_start_footprint` to open "genuine" obstacles around the start -- that
+is the one guarantee that A* never threads a real wall; the mask had to stop claiming the cell
+instead. Don't read `footing: 0` as "the agent could see its feet": a mask makes the blind disk
+*known*, which is why the footing sweep -- the rung meant for exactly this -- never ran. And don't
+compare this run's SR with the morning's CPU run of the same episode as evidence about the closing
+changes made the same day: the detector on CUDA and the LLM on the GPU give different numerics,
+the search diverged before any target was seen, and the failure was in a module neither change
+touched.
+
+---
+
 ## 2026-10-07 — The Allensville frame-by-frame audit: four failures that were not where the video said they were
 
 **Symptom:** Three recordings of the 5x3 benchmark (`runs/zson-benchmark-5x3-20261005/campaign/frontier/

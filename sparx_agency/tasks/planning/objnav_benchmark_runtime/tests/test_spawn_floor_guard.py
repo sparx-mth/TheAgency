@@ -14,9 +14,9 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search
     FLIGHT, IN_A, STAIRS, STRUCTURE, loop_policy, obs_at, stair_policy)
 
 
-def forbidden_stairs(order=(STAIRS, 1, 0), stair_prob=0.9, **loop_overrides):
+def forbidden_stairs(order=(STAIRS, 1, 0), stair_prob=0.9, metadata=STRUCTURE, **loop_overrides):
     """``stair_policy`` under the benchmark default: the staircase is seen and placed, traversal forbidden."""
-    policy, episode, world, rooms, _ = loop_policy(order=order, stair_prob=stair_prob, metadata=STRUCTURE, **loop_overrides)
+    policy, episode, world, rooms, _ = loop_policy(order=order, stair_prob=stair_prob, metadata=metadata, **loop_overrides)
     obs = obs_at(episode, 0, IN_A)
     policy.mapping.atlas.update(obs.pose)
     for connector in policy.building.ground_truth.connectors:
@@ -235,3 +235,69 @@ def test_a_settled_half_level_is_adopted_as_part_of_the_spawn_storey_after_thirt
     policy.floor_guard.observe(at(episode, 60, 4.5, 3.0, z=1.6), world)
     assert policy.floor_guard.half_levels == set() and policy.floor_guard.stats["half_levels_adopted"] == 0
     assert policy.floor_guard.off_plane and not policy.floor_guard.goal_allowed(obs, world, (4.0, 3.0), "room_entry")
+
+
+# -- the mask never traps the agent (Collierville/000000, 2026-10-08: 309 idle turns 0.6 m from the foot) --------
+RUN_UP = [[4.0, 0.2, 0.0], [4.0, 1.0, 0.0]] + FLIGHT[1:]          # a flat run on the floor, then the same flight
+RUN_UP_STRUCTURE = dict(STRUCTURE, stair_connectors=[dict(STRUCTURE["stair_connectors"][0], bottom_xyz=RUN_UP[0],
+                                                           polyline_xyz=RUN_UP, length_m=4.8)])
+
+
+def test_the_floor_run_of_a_flight_is_not_masked_while_its_treads_are():
+    """The polyline begins on the storey's own floor; within FLOOR_RUN_M of the plane it is floor, not flight."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import FLOOR_RUN_M
+    policy, episode, world, _ = forbidden_stairs(metadata=RUN_UP_STRUCTURE)
+    mask = stair_peek_mask(policy, world)
+    assert mask.any()
+    gx, gy = world.world_to_grid(4.0, 0.2)
+    assert not mask[gy, gx], "the flat run-up on the floor is walkable"
+    gx, gy = world.world_to_grid(4.0, 1.3)
+    assert mask[gy, gx], "the first treads (0.27 m up) are masked"
+    gx, gy = world.world_to_grid(4.0, 1.5)
+    assert mask[gy, gx], "... up to the departure band"
+    # The mask starts where the flight leaves the floor run: 0.1 m of rise is 0.11 m of run here.
+    ys, xs = np.nonzero(mask)
+    assert min(world.grid_to_world(x, y)[1] for x, y in zip(xs, ys)) >= 1.0 + FLOOR_RUN_M / 0.9 - 0.7, "capsule margin only"
+
+
+def test_an_agent_inside_the_stair_capsule_is_never_on_an_occupied_cell_and_can_plan_out(monkeypatch):
+    """Collierville: the agent walked past the foot of a flight 0.6 m from its centreline; the capsule covered
+    its cell as a GENUINE obstacle, A* had no start, and the fallback held for the rest of the episode."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import peek_stairs, spawn_floor_guard
+    policy, episode, world, _ = forbidden_stairs()
+    beside = (4.6, 1.3)                                              # 0.6 m east of the flight's first treads
+    obs = at(episode, 0, *beside)
+    cell = world.world_to_grid(*beside)
+    assert world.is_free(*cell)
+    # Without the exemption the capsule swallows the cell: the regression.
+    zeros = lambda policy_, world_, pose=None: np.zeros(world_.grid.shape, dtype=bool)
+    monkeypatch.setattr(peek_stairs, "walked_exemption", zeros)
+    monkeypatch.setattr(spawn_floor_guard, "walked_exemption", zeros)
+    trapped = policy.floor_guard.observe(obs, world)
+    assert trapped.grid[cell[1], cell[0]] == world.values.occupied
+    assert policy._navigate(obs, trapped, IN_A, "frontier") is None, "no start cell: every goal fails"
+    monkeypatch.undo()
+    # With it the agent's own footprint is carved out of the mask and A* leaves the capsule.
+    confined = policy.floor_guard.observe(obs, world)
+    assert confined.grid[cell[1], cell[0]] == world.values.free
+    assert policy.floor_guard.stats["walked_exempt_cells"] > 0
+    assert stair_peek_mask(policy, confined, obs.pose)[cell[1], cell[0]] == False
+    command = policy._navigate(obs, confined, IN_A, "frontier")
+    assert command is not None and command.waypoints, "a route out of the capsule exists"
+    # The flight itself is still impassable: no goal on it, no route onto it.
+    assert not policy.floor_guard.goal_allowed(obs, confined, (4.0, 1.4), "frontier")
+    assert policy._navigate(obs, confined, (4.0, 1.4), "frontier") is None
+
+
+def test_the_trail_stays_carved_after_the_agent_moves_on():
+    """Cells the agent stood on remain passable in later masks, so the way back always exists."""
+    policy, episode, world, _ = forbidden_stairs()
+    for step, xy in enumerate(((4.6, 1.3), (4.6, 1.6), (4.6, 1.9))):
+        obs = at(episode, step, *xy)
+        confined = policy.floor_guard.observe(obs, world)
+        policy.sight.observe(obs, confined)
+    later = policy.floor_guard.observe(at(episode, 3, 3.0, 3.0), world)
+    for xy in ((4.6, 1.3), (4.6, 1.6), (4.6, 1.9)):
+        gx, gy = world.world_to_grid(*xy)
+        assert later.grid[gy, gx] == world.values.free, "the trail is never masked"
+    assert policy.floor_guard.goal_allowed(at(episode, 3, 3.0, 3.0), later, (4.6, 1.6), "frontier")
