@@ -171,7 +171,7 @@ def test_three_episodes_per_scene_stream_results_and_running_means(tmp_path, mon
     assert out.count("EPISODE COMPLETE") == 15 and out.count("RUNNING MEAN") == 15
     assert "RUNNING MEAN      episodes=15/15  SR=0.667" in out
     assert out.count("SCENE DONE        scene=") == 5
-    assert "FIVE-SCENE SUMMARY (15/15 episodes scored; the first 3 published episode(s) per scene)" in out
+    assert "FIVE-SCENE SUMMARY (15/15 episodes scored; the first 3 published episode(s) per scene; Collierville" in out
     results = json.loads((output / "benchmark_results.json").read_text())
     assert results["allow_stair_traversal"] is False and results["episodes_total"] == 15
     assert results["episodes_scored"] == 15 and len(results["episodes"]) == 15
@@ -195,3 +195,34 @@ def test_a_job_that_allowed_stairs_is_refused(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="allow_stair_traversal=True"):
         five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "out"),
                          "--poll-s", "0"])
+
+
+def test_a_scene_subset_runs_only_those_scenes_in_the_given_order(tmp_path, monkeypatch, capsys):
+    seen = []
+
+    def on_benchmark(command):
+        scene = command[command.index("--scene") + 1]
+        seen.append(scene)
+        write_scored_episodes(Path(command[command.index("--output") + 1]),
+                              [record(scene, index=i) for i in range(2)])
+        return 0
+
+    benchmark_run_fake(monkeypatch, on_benchmark)
+    output = tmp_path / "campaign"
+    code = five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(output),
+                            "--episodes-per-scene", "2", "--scenes", "Wiconisco", "Darden", "--poll-s", "0"])
+    assert code == 0 and seen == ["Wiconisco", "Darden"]
+    out = capsys.readouterr().out
+    assert out.count("EPISODE COMPLETE") == 4 and "episodes=4/4" in out
+    assert "FIVE-SCENE SUMMARY (4/4 episodes scored; the first 2 published episode(s) per scene; Wiconisco, Darden)" in out
+    results = json.loads((output / "benchmark_results.json").read_text())
+    assert results["scenes"] == ["Wiconisco", "Darden"] and results["episodes_total"] == 4
+    assert [row["scene"] for row in results["episodes"]] == ["Wiconisco", "Wiconisco", "Darden", "Darden"]
+    with (output / "metrics.csv").open() as stream:
+        assert [row["scene"] for row in csv.DictReader(stream)] == ["Wiconisco", "Wiconisco", "Darden", "Darden"]
+    with pytest.raises(SystemExit):
+        five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "x"),
+                         "--scenes", "Darden", "Darden"])
+    with pytest.raises(SystemExit):
+        five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "y"),
+                         "--scenes", "Nowhere"])

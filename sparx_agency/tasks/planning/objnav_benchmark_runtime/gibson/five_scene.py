@@ -62,11 +62,11 @@ def assert_stairs_forbidden(directory):
                            % (directory, allowed))
 
 
-def report(root, episodes_per_scene=1):
+def report(root, episodes_per_scene=1, scenes=SCENES):
     """Summarise actual completed scene rows, with links to every recording."""
     root = Path(root)
     records, rows = [], []
-    for scene in SCENES:
+    for scene in scenes:
         for record in scene_records(root, scene, episodes_per_scene):
             records.append(record)
             _append_report_row(rows, scene, record)
@@ -151,6 +151,8 @@ def main(argv=None):
     add_detector_options(parser, url_default="http://127.0.0.1:18092")
     parser.add_argument("--episodes-per-scene", type=int, default=1,
                         help="The first N published val episodes of every scene, in split order")
+    parser.add_argument("--scenes", nargs="+", choices=SCENES, default=list(SCENES), metavar="SCENE",
+                        help="A subset of the five val scenes, run in this order (default: all five)")
     parser.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gpu-device", type=int, default=0)
@@ -162,13 +164,16 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.episodes_per_scene <= 200:
         parser.error("--episodes-per-scene must be between 1 and 200")
+    if len(set(args.scenes)) != len(args.scenes):
+        parser.error("--scenes lists a scene twice")
     args.output.mkdir(parents=True, exist_ok=False)
-    per_scene, total = args.episodes_per_scene, args.episodes_per_scene * len(SCENES)
+    scenes = list(args.scenes)
+    per_scene, total = args.episodes_per_scene, args.episodes_per_scene * len(scenes)
     policy_config = args.output / "policy_config.json"
     write_atomically(policy_config, strict_json({"allow_stair_traversal": False}, "policy config", indent=2))
     fingerprint = source_fingerprint()
     status = {"source_sha256": fingerprint, "episodes_per_scene": per_scene, "episodes_total": total,
-              "allow_stair_traversal": False, "split": "val", "scenes": list(SCENES), "seed": args.seed,
+              "allow_stair_traversal": False, "split": "val", "scenes": scenes, "seed": args.seed,
               "explorer": args.explorer, "completed": [], "failed": []}
     write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
     records, rows = [], []
@@ -181,7 +186,7 @@ def main(argv=None):
         print(status_line(record, video), flush=True)
         print(running_mean_line(records, total), flush=True)
 
-    for scene in SCENES:
+    for scene in scenes:
         if source_fingerprint() != fingerprint:
             raise RuntimeError("Source changed mid-campaign; refusing to mix algorithm versions")
         directory = args.output / scene
@@ -198,7 +203,7 @@ def main(argv=None):
         status["completed" if code == 0 else "failed"].append(scene)
         status["running"] = None
         write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
-        report(args.output, per_scene)
+        report(args.output, per_scene, scenes)
         if not scored:
             print(failure_line(scene, code, directory / "run.log"), flush=True)
         else:
@@ -207,8 +212,8 @@ def main(argv=None):
     if records:
         table = summary_table(records)
         write_atomically(args.output / "summary.txt", table)
-        print("\nFIVE-SCENE SUMMARY (%d/%d episodes scored; the first %d published episode(s) per scene)\n%s"
-              % (len(records), total, per_scene, table), flush=True)
+        print("\nFIVE-SCENE SUMMARY (%d/%d episodes scored; the first %d published episode(s) per scene; %s)\n%s"
+              % (len(records), total, per_scene, ", ".join(scenes), table), flush=True)
     else:
         print("\nFIVE-SCENE SUMMARY: no scene produced a scored episode", flush=True)
     return int(bool(status["failed"]) or len(records) != total)
