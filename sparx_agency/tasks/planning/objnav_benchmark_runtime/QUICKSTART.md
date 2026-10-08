@@ -211,12 +211,23 @@ any refusal names the missing piece.
 One line per episode is printed (`success=`, `SPL=`, `steps=`); a 500-action episode takes
 ~10 minutes with CPU services. Watch it live in `$HOME/objnav_benchmark/smoke/live.html`.
 
-#### Office GPU visual verification
+#### The GPU: let the plan decide
 
-Check `nvidia-smi` before sharing the GPU. On a sufficiently spacious office GPU,
-start the detector with `CUDA_VISIBLE_DEVICES=0`, `--device cuda:0`,
-`--clip-model "$MODELS/clip/ViT-B-32.pt"` and `--allow-shared-gpu` instead of the
-CPU settings above. Habitat uses `--gpu-device 0 --allow-shared-gpu`.
+`gibson/gpu_plan.py` hands the free VRAM out in the order the processes bottleneck --
+the LLM first, the detector second, the renderer third -- and offloads what does not
+fit to the CPU ([BENCHMARK.md section 3.1](gibson/BENCHMARK.md)); `run_benchmark.sh`
+applies it before starting the services. By hand, print it and follow it:
+
+```bash
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan --format env
+```
+
+With `OLLAMA_CUDA_VISIBLE_DEVICES=0` start `ollama serve` without `CUDA_VISIBLE_DEVICES=-1`
+(and export `LLM_NUM_GPU` as printed); with `DETECTOR_DEVICE=cuda:0` start the detector with
+`CUDA_VISIBLE_DEVICES=0 --device cuda:0 --clip-model "$MODELS/clip/ViT-B-32.pt"`; with
+`ALLOW_SHARED_GPU=1` add `--allow-shared-gpu` to the Habitat run. Check `nvidia-smi` first:
+the plan reads the card as it is, and a process that holds it after the plan was made is
+not in the plan.
 The active RPT* policy uses Python/NumPy/SciPy, not ZSON embeddings or navigation
 PyTorch tensors; CLIP here is YOLO-World's text encoder. Do not change the policy
 just to claim every component is CUDA. Ollama may also use GPU 0 when sufficient
@@ -279,20 +290,28 @@ Same services and flags; `gibson.run` reads the `val/` split and the original sc
     --explorer frontier --output "$HOME/objnav_benchmark/val" $RUN_FLAGS --preflight   # drop --preflight to run
 ```
 
-#### Five-scene smoke: one recorded episode per validation scene
+#### Five-scene campaign: the first N recorded episodes per validation scene
 
-`gibson.five_scene` runs the first published episode of each of the five scenes sequentially,
-each as its own recorded `gibson.run` job, and prints one `EPISODE COMPLETE` line per scene
-(scene, goal, SR, SPL, DTG, runtime, steps, termination, video path) as soon as that job ends,
-then a consolidated table (also saved as `<output>/summary.txt`, with `metrics.csv`,
-`summary.json` and `index.html`). A scene whose job ends without a scored row prints
-`EPISODE FAILED` and points at its `run.log`. It forwards `--allow-shared-gpu`,
-`--gpu-device` and the `--detector-*` options to every job:
+`gibson.five_scene` runs the first `--episodes-per-scene` published episodes (default 1) of
+each of the five scenes sequentially, in official `val` split order, each scene as its own
+recorded `gibson.run` job. While a job runs it tails that scene's `episodes.jsonl`, so the
+moment an episode is scored it prints `EPISODE COMPLETE` (scene, goal, SR, SPL, DTG, runtime,
+steps, termination, video path) and a `RUNNING MEAN` line over every episode so far, and
+rewrites `<output>/benchmark_results.json` (campaign identity, per-episode rows, running
+`BenchmarkSummary`) and `benchmark_results.csv`. Each scene ends with `SCENE DONE`, the campaign
+with a consolidated table (`summary.txt`, plus `metrics.csv`, `summary.json`, `index.html`).
+A scene whose job ends without a scored row prints `EPISODE FAILED` and points at its `run.log`.
+
+Stair traversal is forbidden explicitly: the campaign writes `<output>/policy_config.json`
+(`{"allow_stair_traversal": false}`), passes it to every job, and refuses a scene whose frozen
+`run.json` records anything else. It forwards `--explorer`, `--allow-shared-gpu`,
+`--gpu-device`, `--video-fps` and the `--detector-*` options to every job. The 5 x 3 benchmark:
 
 ```bash
 "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
     --episodes-dir "$DATA/objectnav/objectnav/gibson/v1.1/val" --scenes-dir "$DATA/gibson/val/scenes" \
-    --output runs/gibson_5scene_$(date -u +%Y%m%dT%H%M%SZ) $RUN_FLAGS
+    --output runs/benchmark_15episodes_$(date -u +%Y%m%dT%H%M%SZ) --episodes-per-scene 3 \
+    --explorer frontier $RUN_FLAGS
 ```
 
 Known data property: some published v1.1 starts lie off the shipped navmesh surface (Darden/000000

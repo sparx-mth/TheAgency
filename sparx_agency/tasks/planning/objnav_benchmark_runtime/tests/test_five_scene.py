@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 from dataclasses import asdict
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -17,9 +18,9 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene_cons
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
 
 
-def record(scene, *, success=True, wall_s=12.5, dtg=0.4, steps=37):
+def record(scene, *, success=True, wall_s=12.5, dtg=0.4, steps=37, index=0):
     return EpisodeRecord(
-        benchmark="gibson", split="val", episode_id="%s/000000" % scene, scene_id=scene,
+        benchmark="gibson", split="val", episode_id="%s/%06d" % (scene, index), scene_id=scene,
         target_category="toilet", agent="test-agent", success=success,
         spl=0.5 if success else 0.0, soft_spl=0.5, distance_to_goal_m=dtg,
         path_length_m=6.0, observed_path_length_m=6.0, shortest_path_m=3.0,
@@ -28,14 +29,20 @@ def record(scene, *, success=True, wall_s=12.5, dtg=0.4, steps=37):
         wall_s=wall_s)
 
 
-def write_scored_episode(directory, row):
+def write_scored_episodes(directory, rows, allow_stair_traversal=False):
     config = dict(protocol=asdict(PROTOCOL), runtime={"habitat-sim": "test"}, source_sha256="synthetic",
-                  method={"method": "test-agent"}, seed=0, reference_sim_version_match=False,
-                  dataset={"synthetic": True}, shards=1, shard_index=0, limit=1, full_split=False,
-                  selected_episode_ids=[row.episode_id], on_agent_error="record")
+                  method={"method": "test-agent", "allow_stair_traversal": allow_stair_traversal}, seed=0,
+                  reference_sim_version_match=False, dataset={"synthetic": True}, shards=1, shard_index=0,
+                  limit=len(rows), full_split=False, selected_episode_ids=[row.episode_id for row in rows],
+                  on_agent_error="record")
     with MetricsLogger(directory, config) as logger:
-        logger.log(row)
-        logger.finish(summarise([row]))
+        for row in rows:
+            logger.log(row)
+        logger.finish(summarise(rows))
+
+
+def write_scored_episode(directory, row, **kwargs):
+    write_scored_episodes(directory, [row], **kwargs)
 
 
 def test_status_line_names_scene_goal_and_every_requested_metric(tmp_path):
@@ -74,16 +81,26 @@ def test_recording_video_uses_the_recorder_key(tmp_path):
     assert recording_video(tmp_path, row) == video
 
 
+class FakeProcess:
+    """A finished `gibson.run` child: its side effects were applied when it was started."""
+
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+
 def benchmark_run_fake(monkeypatch, on_benchmark):
     """Intercept only the `gibson.run` child; `MetricsLogger` still shells out to git."""
-    real_run = five_scene.subprocess.run
+    real_popen = five_scene.subprocess.Popen
 
-    def fake_run(command, *args, **kwargs):
+    def fake_popen(command, *args, **kwargs):
         if "sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run" not in command:
-            return real_run(command, *args, **kwargs)
-        return on_benchmark(command)
+            return real_popen(command, *args, **kwargs)
+        return FakeProcess(on_benchmark(command))
 
-    monkeypatch.setattr(five_scene.subprocess, "run", fake_run)
+    monkeypatch.setattr(five_scene.subprocess, "Popen", fake_popen)
 
 
 def test_main_forwards_flags_prints_each_episode_and_a_table(tmp_path, monkeypatch, capsys):
@@ -94,13 +111,13 @@ def test_main_forwards_flags_prints_each_episode_and_a_table(tmp_path, monkeypat
         output = Path(command[command.index("--output") + 1])
         scene = command[command.index("--scene") + 1]
         write_scored_episode(output, record(scene, success=scene != "Darden", dtg=0.0 if scene != "Darden" else 2.5))
-        return type("Result", (), {"returncode": 0})()
+        return 0
 
     benchmark_run_fake(monkeypatch, on_benchmark)
     output = tmp_path / "campaign"
     code = five_scene.main(["--episodes-dir", "/episodes", "--scenes-dir", "/scenes", "--output", str(output),
                             "--detector-url", "http://127.0.0.1:18095", "--allow-shared-gpu",
-                            "--allow-sim-version-mismatch", "--gpu-device", "0"])
+                            "--allow-sim-version-mismatch", "--gpu-device", "0", "--poll-s", "0"])
     assert code == 0
     assert [c[c.index("--scene") + 1] for c in commands] == list(SCENES)
     for command in commands:
@@ -109,11 +126,14 @@ def test_main_forwards_flags_prints_each_episode_and_a_table(tmp_path, monkeypat
         assert command[command.index("--detector-url") + 1] == "http://127.0.0.1:18095"
         assert command[command.index("--gpu-device") + 1] == "0"
         assert command[command.index("--limit") + 1] == "1" and "--record" in command
+        policy_config = Path(command[command.index("--policy-config") + 1])
+        assert json.loads(policy_config.read_text()) == {"allow_stair_traversal": False}
     out = capsys.readouterr().out
     for scene in SCENES:
         assert "EPISODE COMPLETE  scene=%s  goal=toilet  SR=%d" % (scene, scene != "Darden") in out
     assert out.index("EPISODE COMPLETE  scene=Collierville") < out.index("Starting Corozal")
-    assert "FIVE-SCENE SUMMARY (5/5 scenes scored" in out
+    assert "FIVE-SCENE SUMMARY (5/5 episodes scored" in out
+    assert out.count("RUNNING MEAN      episodes=") == 5 and "episodes=5/5  SR=0.800" in out
     assert (output / "summary.txt").read_text().splitlines()[-1].startswith("MEAN (5 ep)")
     with (output / "metrics.csv").open() as stream:
         rows = list(csv.DictReader(stream))
@@ -122,10 +142,56 @@ def test_main_forwards_flags_prints_each_episode_and_a_table(tmp_path, monkeypat
 
 
 def test_main_reports_a_scene_that_ended_without_a_scored_row(tmp_path, monkeypatch, capsys):
-    benchmark_run_fake(monkeypatch, lambda command: type("Result", (), {"returncode": 2})())
-    code = five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "out")])
+    benchmark_run_fake(monkeypatch, lambda command: 2)
+    code = five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "out"),
+                            "--poll-s", "0"])
     out = capsys.readouterr().out
     assert code == 1
     assert out.count("EPISODE FAILED    scene=") == len(SCENES)
     assert "FIVE-SCENE SUMMARY: no scene produced a scored episode" in out
     assert not (tmp_path / "out" / "summary.txt").exists()
+
+
+def test_three_episodes_per_scene_stream_results_and_running_means(tmp_path, monkeypatch, capsys):
+    def on_benchmark(command):
+        output = Path(command[command.index("--output") + 1])
+        scene = command[command.index("--scene") + 1]
+        assert command[command.index("--limit") + 1] == "3"
+        rows = [record(scene, index=i, success=i != 1, dtg=0.0 if i != 1 else 3.0, steps=10 * (i + 1))
+                for i in range(3)]
+        write_scored_episodes(output, rows)
+        return 0
+
+    benchmark_run_fake(monkeypatch, on_benchmark)
+    output = tmp_path / "campaign"
+    code = five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(output),
+                            "--episodes-per-scene", "3", "--poll-s", "0"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out.count("EPISODE COMPLETE") == 15 and out.count("RUNNING MEAN") == 15
+    assert "RUNNING MEAN      episodes=15/15  SR=0.667" in out
+    assert out.count("SCENE DONE        scene=") == 5
+    assert "FIVE-SCENE SUMMARY (15/15 episodes scored; the first 3 published episode(s) per scene)" in out
+    results = json.loads((output / "benchmark_results.json").read_text())
+    assert results["allow_stair_traversal"] is False and results["episodes_total"] == 15
+    assert results["episodes_scored"] == 15 and len(results["episodes"]) == 15
+    assert [row["index"] for row in results["episodes"]] == list(range(1, 16))
+    assert results["running_summary"]["overall"]["n_episodes"] == 15
+    with (output / "benchmark_results.csv").open() as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 15 and rows[0]["episode_id"] == "Collierville/000000" and rows[4]["SR"] == "0"
+    assert (output / "summary.txt").read_text().splitlines()[-1].startswith("MEAN (15 ep)")
+    with (output / "metrics.csv").open() as stream:
+        assert len(list(csv.DictReader(stream))) == 15
+
+
+def test_a_job_that_allowed_stairs_is_refused(tmp_path, monkeypatch):
+    def on_benchmark(command):
+        output = Path(command[command.index("--output") + 1])
+        write_scored_episode(output, record(command[command.index("--scene") + 1]), allow_stair_traversal=True)
+        return 0
+
+    benchmark_run_fake(monkeypatch, on_benchmark)
+    with pytest.raises(RuntimeError, match="allow_stair_traversal=True"):
+        five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "out"),
+                         "--poll-s", "0"])

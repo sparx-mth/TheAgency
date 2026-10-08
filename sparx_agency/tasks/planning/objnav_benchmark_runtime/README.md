@@ -256,6 +256,62 @@ steps, bbox, failures, release counts (`releases`, `inspection_releases`,
 rejections and the rejected spots with their radii
 are included in episode/frame diagnostics and the HUD.
 
+#### Close range: the 3-D memory, the approach history and the sudden-proximity manoeuvre (since 2026-10-08)
+
+**The 3-D memory** (`methods/target_memory.py`). The target's XYZ centroid is saved the
+moment a takeover starts and fused, precision-weighted, with every frame that projects
+onto it: a frame from `r` metres enters with sigma `0.03 + 0.03 r` (depth noise and the
+visible-part shift of a big object both grow with range), so the near frames of the
+approach dominate and the estimate's standard error shrinks frame by frame (`memory` in
+the diagnostics: `xyz`, `frames`, `sigma_m`, `spread_m`). The first centroid stays the
+association anchor. Everything else in the closing reads the memory -- the elevation the
+pitch follows, the range the approach and the terminal test measure, the spot a support
+surface must sit at -- which replaced the former 50/50 update.
+
+**Two close-range situations look alike to the detector and are opposites to the
+closing** (`methods/approach_history.py`, the ledger of the planar path walked since the
+takeover began and the range it closed):
+
+- *Extended approach history* -- at least `approach_history_m` (3 m) walked and
+  `approach_history_closed_m` (1 m) closed: the target was tracked and walked toward
+  over metres, and inside the terminal range a cropped box, a detector drop or a budget
+  run down is **not** a reason to release it. A fresh in-range sighting STOPs whatever
+  its alignment (the benchmark measures range, not heading), and after
+  `history_stop_after_missing` (3) consecutive terminal frames without a fresh box the
+  closing completes on the 3-D memory and STOPs -- the one deliberate exception to "no
+  STOP from remembered range alone", earned by the path; an inspection that would
+  release from beyond the terminal range steps closer instead (`history_holds`,
+  `history_stops`).
+- *Sudden close proximity* -- a candidate first seen inside `sudden_proximity_m`
+  (1.3 m) with no history: the agent turned and there it was, a single viewpoint, and a
+  single viewpoint at 0.7 m is exactly where a counter front read as a bed. Before the
+  lock the **backing manoeuvre** (`methods/target_backoff.py`, phase `BACK_OFF`) takes
+  the agent `backoff_steps` (3) forward steps back into space it knows to be clear --
+  its own trail on this storey, the observed grid, the floor guard, collision-qualified
+  A*, the NavMesh when bound -- turns it to face the remembered coordinates and resets
+  the consecutive-frame count, so the lock needs fresh frames from the wider
+  perspective; then the approach and the terminal inspection follow as usual. The
+  manoeuvre is bounded (`backoff_max_actions`, 20), its actions do not count against the
+  verification budget, and with no clear space known it is skipped and recorded
+  (`backoffs`, `backoff_skips`, `backoff.skipped`): verification proceeds in place as
+  before. `backoff: false` disables it.
+
+**Support-surface resilience** (`methods/support_surface.py`). At close range a mounted
+or supported object leaves the frame before its support does -- the television on a
+dresser becomes the dresser. A box of a `support_surface_classes` label (cabinet, desk,
+dining table, shelf, ...) whose coherent centroid lies under the memory's footprint and
+at or below its height is spatial evidence that the tracked thing is still there
+(`support_sightings`): the inspection is not released as "saw nothing" while that
+evidence is fresh (the dynamic pitch brings the object back into the frame), the map's
+vote for the surface is not a contradiction, and once the inspection budget is spent
+with the evidence fresh and the memory inside the terminal range the closing STOPs
+(`support_stops`). It never counts toward the lock or the terminal test on its own.
+
+**Dynamic pitch during close verification.** The verification step toward a candidate
+inside `look_down_distance_m` carries the memory's elevation (`_pitch`): a low target is
+stepped toward looking DOWN, an elevated one looking UP, as the approach and the
+inspection already did; the face turn that ends the backing manoeuvre carries it too.
+
 - `--explorer frontier`: the existing observed-frontier baseline (default).
 - `--explorer falcon`: bounded FALCON 2D/2.5D adaptation, not the unchanged ROS
   aerial binary. Local bursts, target interrupts and the episode ledger remain
@@ -276,6 +332,11 @@ own frozen configurations; changed code does not relabel their outcomes.
 | `methods/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
 | `methods/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |
 | `methods/target_path.py` | Persistent NavMesh standoff goal, meaningful target refinement and continuous collision-qualified A* execution through occlusion |
+| `methods/target_memory.py` | The closing's 3-D memory: the fused, precision-weighted XYZ centroid (near frames dominate), its standard error and spread, the fixed association anchor |
+| `methods/approach_history.py` | The path walked and the range closed since the takeover began: what separates an extended approach (complete and STOP) from a sudden close sighting (back off and re-verify) |
+| `methods/target_backoff.py` | The backing manoeuvre for a target seen suddenly at arm's length: a verified clear spot two or three steps back (trail, grid, floor guard, A*, NavMesh), the turn back, the hand-off to re-verification |
+| `methods/support_surface.py` | Whether a box of another class is the surface the target stands on: exact class membership and strict geometry under the memory's footprint |
+| `gibson/gpu_plan.py` | Who gets the one GPU -- LLM, then YOLO-World, then Habitat -- from the free VRAM and explicit footprints; the rest on the CPU; the plan recorded in every run |
 | `methods/room_search_loop.py` | The seven-step room-search loop: one scan visit per room (vantage point, full rotation, finished for the episode) or the bounded room-confined sweep; re-classify → re-estimate → re-order at each loop point over the rooms that are still nodes; transit to the chosen room's vantage point / nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
 | `methods/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
 | `methods/sightlines.py` | The sight ledger: unknown looked through without a depth return (within 2.5 m, from two poses) and enclosed unknown pockets under 3 m2 are settled -- written occupied for the frontier logic alone -- and every camera pose per storey |

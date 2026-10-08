@@ -188,8 +188,13 @@ def test_reobservation_refines_goal_but_missing_frames_do_not(monkeypatch):
     goal = p.closing.path.goal_xyz
     p.plan(observation(ep, 2, depth=3.1))  # small update, keep stable endpoint
     assert p.closing.path.goal_xyz == goal
-    p.plan(observation(ep, 3, depth=3.4))  # still associated, meaningful refinement
+    # Precision-weighted fusion (since 2026-10-08): the three frames already in the memory
+    # outweigh one, so a 0.4 m jump moves the estimate ~0.11 m; 0.7 m is a meaningful one.
+    p.plan(observation(ep, 3, depth=3.7))  # still associated, meaningful refinement
     assert p.closing.path.goal_xyz != goal and p.closing.path.refinements == 1
+    memory = p.closing.memory
+    assert memory.n == 4 and memory.anchor[0] == pytest.approx(3.0, abs=0.05)
+    assert 3.1 < memory.xyz[0] < 3.3 and memory.sigma_m < 0.07 and memory.spread_m > 0.2
 
 
 def test_expected_closing_failure_is_recordable_not_infrastructure():

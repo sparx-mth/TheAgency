@@ -121,8 +121,14 @@ def test_a_low_bed_box_is_not_suspect_and_locks_on_two_frames(monkeypatch):
 
 
 # -- the verification frame ---------------------------------------------------------------------
+# These fixtures verify IN PLACE from an open floor at close range. Since 2026-10-08 a candidate
+# first seen inside ``sudden_proximity_m`` with no approach history backs off before verifying
+# (``test_target_backoff.py``); the verification frame itself is what is under test here.
+IN_PLACE = {"backoff": False}
+
+
 def tilt_toilet_policy(monkeypatch):
-    p, original = setup_policy()
+    p, original = setup_policy(target_closing=IN_PLACE)
     ep = replace(original, action_spec=MULTIFLOOR_PROTOCOL.actions(), target_category="toilet")
     p.reset(ep, gibson_label_mapper().target_labels("toilet"))
     freeze_global(monkeypatch, p)
@@ -169,7 +175,7 @@ def test_a_bottom_cut_toilet_at_1_7_m_is_counted_and_stepped_toward(monkeypatch)
 
 # -- the dynamic pitch: the target's elevation decides the direction (2026-10-07) --------------
 def tilt_tv_policy(monkeypatch):
-    p, original = setup_policy()
+    p, original = setup_policy(target_closing=IN_PLACE)
     ep = replace(original, action_spec=MULTIFLOOR_PROTOCOL.actions(), target_category="tv")
     p.reset(ep, gibson_label_mapper().target_labels("tv"))
     freeze_global(monkeypatch, p)
@@ -260,7 +266,7 @@ def test_the_close_approach_pitches_toward_the_target_inside_the_band_and_stays_
 
 def test_a_centred_candidate_without_tilt_turns_toward_the_side_that_keeps_the_box_in_frame(monkeypatch):
     """No LOOK actions in the Gibson protocol: the one turn whose shift leaves the box inside the frame."""
-    p, ep = setup_policy()
+    p, ep = setup_policy(target_closing=IN_PLACE)
     freeze_global(monkeypatch, p)
     world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)

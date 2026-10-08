@@ -23,9 +23,12 @@ This file is only about getting the benchmark to run.
 
 ## 1. Install
 
-Tested on Ubuntu 22.04/24.04, x86-64, one NVIDIA GPU (rendering only; the GPU can be
-shared with a desktop), 32 GB RAM. The two models and the simulator together take about
-20 GB of RAM; CPU inference is the default, so a GPU with 8 GB is plenty.
+Tested on Ubuntu 22.04/24.04, x86-64, one NVIDIA GPU (it can be shared with a desktop),
+32 GB RAM. The two models and the simulator together take about 20 GB of RAM. **The GPU is
+handed out by `gpu_plan.py` before the services start** (section 3.1): the LLM first, the
+detector second, the renderer third, and whatever does not fit in the free VRAM runs on the
+CPU -- so a 24 GB card runs all three on the GPU, an 8 GB card runs the renderer and the
+detector there and the LLM on the CPU, and the plan is printed and recorded either way.
 
 ### 1.1 Clone and the Habitat environment (simulator + the policy)
 
@@ -210,6 +213,46 @@ episodes are the published 1,000, starts are never snapped. The report says so.
 
 Everything has a default for the development laptop; set what differs on your machine.
 
+### 3.1 The GPU: who gets the card
+
+Three processes compete for one GPU, and measured on the CPU they are not equally slow:
+the LLM is the bottleneck by an order of magnitude (seconds per room label, minutes per
+node-oracle call on the 14B model), the detector next (hundreds of milliseconds per frame
+on four cores), the renderer last. `gpu_plan.py` therefore hands the free VRAM out in that
+order -- **1. LLM, 2. YOLO-World, 3. Habitat** -- and offloads what does not fit to the
+CPU, least bottlenecking first. One constraint comes before the priorities: the conda
+`habitat-sim` headless build cannot render without a GPU device, so the renderer's small
+footprint is reserved first (software rendering is an opt-in experiment,
+`HABITAT_CPU_RENDER=1`). An LLM whose estimate fits at least half-way is loaded partially
+(Ollama splits the layers itself); below that it runs on the CPU.
+
+The plan is printed at start-up, written to `gpu_plan.json` beside the services' logs and
+recorded in every run's frozen configuration (`run.json` → `config.gpu_plan`). The
+footprints are explicit, dated estimates: Ollama weights from the pulled manifests x 1.35
+(KV cache and buffers), 2 GB for YOLO-World X + CLIP, 1.5 GB for the renderer; override
+any of them when your measurement differs.
+
+```bash
+# the plan alone, for this machine
+~/miniconda3/envs/habitat/bin/python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan
+```
+
+| variable | default | meaning |
+|---|---|---|
+| `GPU_PLAN` | `auto` | `off` restores CPU services with the renderer alone on the GPU |
+| `LLM_VRAM_MIB`, `YOLO_VRAM_MIB`, `HABITAT_VRAM_MIB` | manifests x 1.35, `2048`, `1536` | the footprint estimates |
+| `GPU_RESERVE_MIB` | `512` | headroom left for the driver / a desktop |
+| `HABITAT_CPU_RENDER` | `0` | `1` lets the plan offload the renderer to software EGL (experimental) |
+| `CLIP_WEIGHTS` | `$MODELS/clip/ViT-B-32.pt` | the detector's local text encoder, passed when present |
+| `OLLAMA_MODELS_DIR` | `$MODELS/ollama` | where the manifests the LLM estimate reads live (native mode's model store) |
+
+In `docker` Ollama mode the container's GPU access was fixed when it was created, and an
+Ollama that is already running keeps its own device: the plan's LLM device is then
+advisory, and the script says so. The per-request `LLM_NUM_GPU` the plan exports (`-1`
+every layer, `0` CPU, empty = the server decides) is sent as Ollama's `num_gpu` option.
+
+### 3.2 Everything else
+
 | variable | default | meaning |
 |---|---|---|
 | `HAB_PY` | `~/miniconda3/envs/habitat/bin/python` | the Habitat interpreter |
@@ -224,13 +267,25 @@ Everything has a default for the development laptop; set what differs on your ma
 | `LLM_REASONING_TIMEOUT_S` | `900` | how long one oracle call may take (the search waits rather than guessing) |
 | `DETECTOR_PORT`, `DETECTOR_THREADS` | `18095`, `4` | the detector service |
 | `SEED` | `17` | simulator, policy and LLM seed (per episode, so order does not matter) |
-| `GPU_DEVICE`, `ALLOW_SHARED_GPU` | `0`, `0` | the rendering GPU; `1` accepts a card already in use (a desktop) |
+| `GPU_DEVICE`, `ALLOW_SHARED_GPU` | `0`, `0` | the rendering GPU; `1` accepts a card already in use (the plan sets it whenever more than one process holds the card) |
 | `RUNS_ROOT` | `<repo>/runs` | where a run directory is created when `--output` is not given |
 | `OMP_NUM_THREADS` | `4` | numpy/torch threads in the simulator process |
 
 Anything the script does not recognise is forwarded to `gibson.run` verbatim
 (`--shards`, `--shard-index`, `--policy-config file.json`, `--full-records` is the
 script's own switch for the full diagnostics, `--video-fps`, …).
+
+### 3.3 The five-scene campaign (`--five-scene N`)
+
+`run_benchmark.sh --five-scene 3` brings the services up under the same GPU plan and runs
+`gibson.five_scene`: the first 3 published `val` episodes of each of the five scenes (15),
+one recorded `gibson.run` job per scene, stair traversal explicitly forbidden
+(`policy_config.json`, checked against every job's `run.json`). Each episode prints
+`EPISODE COMPLETE` (scene, goal, SR, SPL, DTG, runtime, steps, termination, video) and a
+`RUNNING MEAN` line the moment it is scored; `benchmark_results.json` / `.csv` are rewritten
+after every episode under `runs/benchmark_15episodes_<UTC stamp>/`, the services' logs and
+`gpu_plan.json` beside it in `<output>.services/`. The campaign never resumes: a new
+output directory per attempt. See [../QUICKSTART.md](../QUICKSTART.md) for the flags.
 
 ---
 

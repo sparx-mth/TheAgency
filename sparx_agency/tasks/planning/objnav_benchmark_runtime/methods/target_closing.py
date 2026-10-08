@@ -7,10 +7,15 @@ import math
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import pitch_action, turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.approach_history import ApproachHistory
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box, observed_objects
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import contradicted_by_map
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import unknown_around
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.support_surface import (
+    SUPPORT_SURFACE_CLASSES, is_support_surface, supports)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_backoff import BackoffManeuver
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_context import suspect
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_memory import TargetMemory3D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_path import TargetApproachPath
 
 
@@ -154,6 +159,50 @@ class TargetClosingSettings:
     # closing bound raised an agent error). 0 disables the clock.
     approach_stall_actions: int = 20
     approach_stall_m: float = 0.20
+    # THE 3-D MEMORY (``target_memory.TargetMemory3D``, since 2026-10-08). The target's
+    # XYZ centroid is saved the moment a takeover starts and fused, precision-weighted,
+    # with every frame that projects onto it: an observation from ``r`` metres enters
+    # with sigma ``memory_noise_floor_m + memory_noise_per_m * r`` (depth noise and the
+    # visible-part shift of a big object both grow with range), so the near frames of
+    # the approach dominate and the estimate's standard error shrinks frame by frame.
+    # Everything below reads that memory: the elevation the pitch follows, the range the
+    # terminal test and the history STOP measure, the spot a support surface must sit at.
+    memory_noise_floor_m: float = 0.03
+    memory_noise_per_m: float = 0.03
+    # EXTENDED APPROACH HISTORY (``approach_history.ApproachHistory``). A target the agent
+    # tracked and walked toward over at least ``approach_history_m`` of path, closing at
+    # least ``approach_history_closed_m`` of range, is known: inside the terminal range
+    # a cropped box, a detector drop or a budget run down is not a reason to release it.
+    # A fresh in-range sighting STOPs whatever its alignment, and after
+    # ``history_stop_after_missing`` consecutive terminal frames without a fresh box the
+    # closing completes on the 3-D memory and STOPs -- the one deliberate exception to
+    # "no STOP from remembered range alone", earned by the path. 0 path disables it.
+    approach_history_m: float = 3.0
+    approach_history_closed_m: float = 1.0
+    history_stop_after_missing: int = 3
+    # SUDDEN CLOSE PROXIMITY (``target_backoff.BackoffManeuver``). A candidate first seen
+    # within ``sudden_proximity_m`` with no approach history -- the agent turned and there
+    # it was -- is not closed on from that single viewpoint. Before the lock the agent
+    # backs ``backoff_steps`` forward steps into space it knows to be clear (its own
+    # trail, the observed grid, the floor guard, A*, the NavMesh when bound), turns back to
+    # face the remembered coordinates and re-verifies from there; the whole manoeuvre is
+    # bounded by ``backoff_max_actions`` (a retreat straight back is six 30-degree turns,
+    # three steps and six turns back). With no clear space known it is skipped and
+    # recorded, and verification proceeds in place as before. ``backoff=False`` disables it.
+    backoff: bool = True
+    sudden_proximity_m: float = 1.30
+    backoff_steps: int = 3
+    backoff_max_actions: int = 20
+    # SUPPORT-SURFACE RESILIENCE (``support_surface``). At close range a mounted or
+    # supported object leaves the frame before its support does (a television on a
+    # dresser becomes the dresser). A box of a ``support_surface_classes`` label whose
+    # centroid lies under the memory's footprint and at or below its height is spatial
+    # evidence that the tracked thing is still there: the inspection is not released as
+    # "saw nothing", the map's vote for the surface is not a contradiction, and once the
+    # inspection budget is spent with that evidence fresh and the memory inside the
+    # terminal range, the closing STOPs. False restores the former releases.
+    support_surface_resilience: bool = True
+    support_surface_classes: tuple = SUPPORT_SURFACE_CLASSES
 
     def __post_init__(self):
         if isinstance(self.confidence, bool) or not math.isfinite(self.confidence) or not 0 < self.confidence <= 1:
@@ -208,6 +257,23 @@ class TargetClosingSettings:
             raise ValueError("context_confirmation_frames must be an int of at least confirmation_frames")
         if isinstance(self.context_baseline_m, bool) or not math.isfinite(self.context_baseline_m) or self.context_baseline_m < 0:
             raise ValueError("context_baseline_m must be finite and non-negative")
+        for key in ("memory_noise_floor_m", "sudden_proximity_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError("%s must be positive and finite" % key)
+        for key in ("memory_noise_per_m", "approach_history_m", "approach_history_closed_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError("%s must be finite and non-negative" % key)
+        for key in ("history_stop_after_missing", "backoff_steps", "backoff_max_actions"):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 1:
+                raise ValueError("%s must be a positive int" % key)
+        for key in ("backoff", "support_surface_resilience"):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError("%s must be a bool" % key)
+        if (not isinstance(self.support_surface_classes, (tuple, list)) or not self.support_surface_classes
+                or not all(isinstance(name, str) and name.strip() for name in self.support_surface_classes)):
+            raise ValueError("support_surface_classes must be a non-empty sequence of labels")
 
 
 class TargetClosing:
@@ -244,6 +310,13 @@ class TargetClosing:
         self.suspect_locks_held = 0        # frames a suspect candidate had the frames but not the viewpoints
         self.same_spot_rejections = 0      # near candidates refused because they were released from this very spot
         self.blind_frames = 0              # frames the detector was in back-off: no evidence, clocks paused
+        self.backoffs = 0                  # backing manoeuvres made for a candidate seen suddenly at close range
+        self.backoff_skips = 0             # ... and those skipped for want of clear space behind the agent
+        self.support_sightings = 0         # frames a support-surface box stood consistent with the 3-D memory
+        self.support_holds = 0             # inspection releases withheld on that evidence
+        self.support_stops = 0             # STOPs on consistent support-surface tracking at terminal range
+        self.history_holds = 0             # releases withheld inside the terminal range by the approach history
+        self.history_stops = 0             # STOPs the approach history completed without a fresh aligned box
         self._clear()
 
     def _clear(self):
@@ -270,6 +343,12 @@ class TargetClosing:
         self.close_trail = []              # (x, y) per consecutive CLOSE action, for the stall clock
         self.suspect = None                # why the context check doubts this candidate (``target_context``)
         self.sightings = []                # (x, y) of the agent per counted consecutive frame
+        self.memory = None                 # TargetMemory3D: the fused XYZ centroid; ``xyz`` mirrors it
+        self.history = None                # ApproachHistory: the path walked since the takeover began
+        self.backoff = None                # BackoffManeuver for a candidate seen suddenly at close range
+        self.support_seen = -1             # last step a support-surface box stood consistent with the memory
+        self.support_xyz = None
+        self.terminal_missing = 0          # consecutive terminal-range frames without a fresh target box
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -445,32 +524,52 @@ class TargetClosing:
                 glances.abort(obs, "target_takeover")
         if not self.active:
             return
+        here = (float(obs.pose.x), float(obs.pose.y))
         if projected:
             detection, xyz, near, doubt = max(projected, key=lambda item: item[0].conf)
             self.count = self.count + 1 if obs.step == self.last_seen + 1 else 1
-            self.sightings = (self.sightings if obs.step == self.last_seen + 1 else []) + [(float(obs.pose.x), float(obs.pose.y))]
+            self.sightings = (self.sightings if obs.step == self.last_seen + 1 else []) + [here]
             self.observed_xyz, self.observed_near_m = xyz, (None if near is None else float(near))
-            self.xyz = tuple((old + new) / 2 for old, new in zip(self.xyz, xyz)) if self.locked else xyz
-            self.box, self.label, self.last_seen = detection.xyxy, detection.cls, obs.step
+            range_m = math.dist(here, xyz[:2])
             if self.anchor is None:
+                # The 3-D memory and the approach ledger start with the takeover; a candidate
+                # that appears at arm's length with no history is re-verified from farther back.
                 self.anchor, self.floor_id = xyz, p.mapping.floor_id
+                self.memory = TargetMemory3D(xyz, range_m, obs.step, s.memory_noise_floor_m, s.memory_noise_per_m)
+                self.history = ApproachHistory(here, range_m, obs.step)
+                if s.backoff and range_m < s.sudden_proximity_m:
+                    self.backoff = BackoffManeuver(p, s.backoff_steps, s.backoff_max_actions)
+            else:
+                self.memory.update(xyz, range_m, obs.step)
+            self.xyz = self.memory.xyz
+            self.box, self.label, self.last_seen = detection.xyxy, detection.cls, obs.step
             if doubt is not None and not self.locked:
                 self.suspect = doubt
-            self.locked |= self._confirmed()
+            if self.backoff is None or not (self.backoff.state == "pending" or self.backoff.active):
+                self.locked |= self._confirmed()
             p._target_xy, p._target_step, p._target_floor_id = self.xyz[:2], obs.step, self.floor_id
-        elif not self.locked:
-            self.count = 0
-            self.sightings = []
+        else:
+            if not self.locked:
+                self.count = 0
+                self.sightings = []
+            self._support_resighting(obs)
+        if self.history is not None and self.xyz is not None:
+            self.history.record(here, math.dist(here, self.xyz[:2]), obs.step)
+        if self.backoff is not None and (self.backoff.state == "pending" or self.backoff.active):
+            self.started += 1                  # the manoeuvre's actions are not verification actions: the clock waits
         if (not self.locked and s.release_unverified
                 and obs.step - self.started >= s.max_verify_steps):
             self._release(obs)
             return
-        if (self.locked and s.release_on_failed_inspection and self.anchor is not None
-                and contradicted_by_map(p, self.label or "", self.anchor) is not None):
-            # The map outvoted the lock: the object at the anchor has been confirmed as
-            # something else since (the sofa from four metres is the bed from two).
-            self.map_releases += 1
-            self._release(obs, radius_factor=s.failed_inspection_radius_factor, why="contradicted by the map")
+        if self.locked and s.release_on_failed_inspection and self.anchor is not None:
+            landmark = contradicted_by_map(p, self.label or "", self.anchor)
+            if landmark is not None and self._is_support(landmark.class_name):
+                landmark = None                # the surface the target stands on: the same spot, not another object
+            if landmark is not None:
+                # The map outvoted the lock: the object at the anchor has been confirmed as
+                # something else since (the sofa from four metres is the bed from two).
+                self.map_releases += 1
+                self._release(obs, radius_factor=s.failed_inspection_radius_factor, why="contradicted by the map")
 
     def _confirmed(self):
         """Whether the consecutive frames so far lock the candidate.
@@ -492,6 +591,41 @@ class TargetClosing:
             self.suspect_locks_held += 1
             return False
         return True
+
+    def _is_support(self, label):
+        return self.settings.support_surface_resilience and is_support_surface(label, self.settings.support_surface_classes)
+
+    def _support_resighting(self, obs):
+        """Record a support-surface box standing where the memory holds the target, on a frame without the target's own class.
+
+        The television on the dresser becomes the dresser from one metre: a
+        box of a supporting class, projected to a coherent centroid under
+        the memory's footprint and at or below its height, is spatial
+        evidence that the tracked thing is still there (``support_surface``).
+        It never counts toward the lock or the terminal test on its own.
+        """
+        p, s = self.policy, self.settings
+        if not s.support_surface_resilience or not self.active or self.memory is None:
+            return
+        k = obs.camera.intrinsics
+        boxes = [d for d in p.perception.detections if self._is_support(d.cls) and d.conf >= s.track_confidence
+                 and 0 <= d.xyxy[0] < d.xyxy[2] <= k.width and 0 <= d.xyxy[1] < d.xyxy[3] <= k.height]
+        if not boxes:
+            return
+        here = (obs.pose.x, obs.pose.y)
+        for label, xyz in observed_objects(obs, boxes, s.track_confidence):
+            range_m = math.dist(here, self.xyz[:2])
+            radius = s.association_radius_m + s.association_range_gain * max(0.0, range_m - 2.0)
+            if supports(self.xyz, xyz, radius):
+                self.support_sightings += 1
+                self.support_seen, self.support_xyz = obs.step, tuple(float(v) for v in xyz)
+                return
+
+    def _history_qualifies(self):
+        """Whether this candidate was tracked and approached over an EXTENDED path (``approach_history_m``)."""
+        s = self.settings
+        return (self.history is not None and s.approach_history_m > 0
+                and self.history.qualifies(s.approach_history_m, s.approach_history_closed_m))
 
     def _boxed_in_here(self, obs):
         """Whether the agent still stands where a lock was released for want of a path (``boxed_in_radius_m``)."""
@@ -626,8 +760,13 @@ class TargetClosing:
                 # Never for a LOCKED target without a safe path: that one waits for A*.
                 reach = 2.0 * actions.forward_step_m
                 ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
+                if pitch is None and actions.has_camera_tilt and distance <= self.settings.look_down_distance_m:
+                    # The dynamic pitch controller during close verification: the step toward a
+                    # low target looks down, toward a high one looks up (the memory's elevation).
+                    pitch = self._pitch(obs, distance)
                 return NavigationCommand.follow([(obs.pose.x, obs.pose.y), ahead], camera_pitch=pitch,
-                                                info=dict(info, verify_step="towards the candidate"))
+                                                info=dict(info, verify_step="towards the candidate",
+                                                          elevation=self._elevation(obs, distance)))
             if self.settings.verify_keep_in_frame and turn_action(error, offset) is None:
                 # The hold below would be satisfied as it stands -- idle -- and an idle
                 # result is executed as a turn. Choose the frame instead. For a LOCKED target
@@ -645,6 +784,37 @@ class TargetClosing:
         return NavigationCommand.hold(camera_pitch=pitch,
                                       final_yaw=yaw,
                                       info={"kind": "target_closing", "reason": reason, "target_visible": False})
+
+    def _backoff_command(self, obs, world, distance):
+        """The backing manoeuvre's action for a candidate seen suddenly at close range, or None.
+
+        Begun on the first action after the takeover (the retreat spot needs
+        the world), it owns the action until the agent stands back and faces
+        the remembered target; then the consecutive-frame count is reset, so
+        the lock needs fresh frames from the wider perspective. A manoeuvre
+        with no clear space is skipped and recorded; verification proceeds in
+        place as before.
+        """
+        manoeuvre = self.backoff
+        if manoeuvre is None or manoeuvre.state == "done":
+            return None
+        p, s = self.policy, self.settings
+        if manoeuvre.state == "pending":
+            if manoeuvre.begin(obs, world, self.xyz):
+                self.backoffs += 1
+            else:
+                self.backoff_skips += 1
+                return None
+        pitch = None
+        if p.episode.action_spec.has_camera_tilt:
+            pitch = self._pitch(obs, distance) if distance <= s.look_down_distance_m else 0.0
+        command = manoeuvre.command(obs, world, self.xyz, pitch)
+        if command is not None:
+            self.phase = "BACK_OFF"
+            return replace(command, info=dict(command.info, backoff=manoeuvre.diagnostics(),
+                                              target_visible=self.last_seen == obs.step))
+        self.count, self.sightings = 0, []          # re-verify from here: fresh consecutive frames
+        return None
 
     def _verification_view(self, obs, distance):
         """The next frame for a fresh, aligned candidate too close to step toward: one that keeps its box whole.
@@ -732,6 +902,9 @@ class TargetClosing:
             self.fail("target floor changed")
         distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2])
         if not self.locked:
+            command = self._backoff_command(obs, world, distance)
+            if command is not None:
+                return command
             return self._scan(obs, None, "consecutive depth-consistent frames required")
         command = self._continue_footing(obs, world, distance)
         if command is not None:
@@ -957,9 +1130,14 @@ class TargetClosing:
         measured = self._fresh_measured(obs)
         if measured is not None and measured <= limit:
             self.inspection_sighting = obs.step
+        history = self._history_qualifies()
+        support = s.support_surface_resilience and self.inspection_started <= self.support_seen
+        self.terminal_missing = 0 if fresh else self.terminal_missing + 1
         info = {"kind": "target_closing", "target_confirmed": True, "persistent_lock": True,
                 "target_visible": fresh, "range_m": distance, "measured_m": measured, "bbox_yaw_error_rad": error,
-                "box_spans_centre": spans_centre, "phase": self.phase}
+                "box_spans_centre": spans_centre, "phase": self.phase, "approach_history": history,
+                "support_surface_fresh": self.support_seen == obs.step,
+                "memory_sigma_m": None if self.memory is None else self.memory.sigma_m}
         # The pitch the geometry predicts is where to LOOK for the target, not a
         # condition on having seen it: the Hanson toilet projected only at 60 degrees
         # down where the prediction said 30, and twenty actions of LOOK_UP/LOOK_DOWN
@@ -967,10 +1145,52 @@ class TargetClosing:
         if fresh and not turning and measured <= limit:
             self.phase = "STOP"
             return NavigationCommand.stop_here(info=dict(info, phase="STOP", reason="fresh terminal target confirmation"))
+        if history and fresh and measured <= limit:
+            # Tracked and approached over metres: a cropped box whose centre says "turn" is
+            # still the object, and the benchmark measures range, not heading.
+            self.phase = "STOP"
+            self.history_stops += 1
+            return NavigationCommand.stop_here(info=dict(
+                info, phase="STOP", reason="fresh in-range sighting after a %.1f m approach; alignment not required"
+                % self.history.path_m))
+        if (history and not fresh and distance <= limit
+                and self.terminal_missing >= s.history_stop_after_missing):
+            # The trajectory is complete and the detector has dropped the box for a few
+            # frames: the 3-D memory refined over the approach is what we STOP on.
+            self.phase = "STOP"
+            self.history_stops += 1
+            return NavigationCommand.stop_here(info=dict(
+                info, phase="STOP", reason="approach history: target tracked over %.1f m, the 3-D memory stands %.2f m "
+                "away (sigma %.2f m) and %d frames passed without a fresh box"
+                % (self.history.path_m, distance, self.memory.sigma_m, self.terminal_missing)))
         views = self._inspection_views(pitch)
         blank = (s.release_on_failed_inspection and self.inspection_sighting is None
                  and self.last_seen < self.inspection_started and self.inspection_index >= len(views))
-        if obs.step - self.inspection_started >= s.max_reacquire_steps or blank:
+        exhausted = obs.step - self.inspection_started >= s.max_reacquire_steps
+        if (blank or exhausted) and self.inspection_sighting is None and (history or support):
+            if distance <= limit and (exhausted or history):
+                # Not "saw nothing": the approach brought us here, or the surface the target
+                # stands on is still measured at the memory's spot. Complete and STOP.
+                self.phase = "STOP"
+                if history:
+                    self.history_stops += 1
+                else:
+                    self.support_stops += 1
+                return NavigationCommand.stop_here(info=dict(
+                    info, phase="STOP", reason=("approach history: %.1f m walked to this spot; the 3-D memory stands"
+                                                % self.history.path_m) if history else
+                    "support surface consistent with the 3-D memory at terminal range; inspection budget spent"))
+            if history and distance > limit:
+                # Too far for a memory STOP: step closer along the trajectory instead of releasing.
+                self.history_holds += 1
+                self.inspection_started = None
+                self.inspection_resumptions += 1
+                return NavigationCommand.hold(camera_pitch=None, final_yaw=yaw, info=dict(
+                    info, reason="approach history: resuming the approach from %.2f m instead of releasing" % distance))
+            if support and not exhausted:
+                self.support_holds += 1                      # keep looking: the dynamic pitch brings the object back
+                blank = False
+        if exhausted or blank:
             if s.stop_on_exhausted_inspection and self.inspection_sighting is not None:
                 self.phase = "STOP"
                 return NavigationCommand.stop_here(info=dict(
@@ -1057,6 +1277,15 @@ class TargetClosing:
                 "overrides": self.overrides, "context_rejections": self.context_rejections,
                 "suspect": self.suspect, "suspect_locks_held": self.suspect_locks_held,
                 "same_spot_rejections": self.same_spot_rejections, "blind_frames": self.blind_frames,
+                "memory": None if self.memory is None else self.memory.diagnostics(),
+                "approach": None if self.history is None else dict(self.history.diagnostics(),
+                                                                   qualifies=self._history_qualifies()),
+                "backoff": None if self.backoff is None else self.backoff.diagnostics(),
+                "backoffs": self.backoffs, "backoff_skips": self.backoff_skips,
+                "support_sightings": self.support_sightings, "support_seen_step": self.support_seen,
+                "support_xyz": self.support_xyz, "support_holds": self.support_holds, "support_stops": self.support_stops,
+                "history_holds": self.history_holds, "history_stops": self.history_stops,
+                "terminal_missing": self.terminal_missing,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}
                              for xy, floor, step in self.boxed_in],
                 "rejected": [{"xyz": list(entry[0]), "floor_id": entry[1], "step": entry[2], "radius_m": entry[3],

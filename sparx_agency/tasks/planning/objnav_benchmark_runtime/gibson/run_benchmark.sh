@@ -7,12 +7,15 @@
 #   gibson/run_benchmark.sh --output runs/gibson_val_X        # continue an interrupted run in that directory
 #   gibson/run_benchmark.sh --preflight                       # services + data + config check, no episode
 #   gibson/run_benchmark.sh --status runs/gibson_val_X        # print the live progress of a run and exit
+#   gibson/run_benchmark.sh --five-scene 3                    # 3 recorded episodes per val scene (15), live dashboard
 #
+# The GPU is handed out by gibson/gpu_plan.py before the services start -- LLM first, YOLO second,
+# Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services).
 # Everything else is read from the environment, with defaults for the development laptop;
 # see BENCHMARK.md beside this file for the full list and what each one is for.
 set -euo pipefail
 
-usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,15 +46,19 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" HABITAT_SIM_LOG="${HABITAT_SIM_LO
 SEED="${SEED:-17}"
 GPU_DEVICE="${GPU_DEVICE:-0}"
 ALLOW_SHARED_GPU="${ALLOW_SHARED_GPU:-0}"
+# auto: gpu_plan.py decides each process's device from the free VRAM; off: CPU services, Habitat on the GPU.
+GPU_PLAN="${GPU_PLAN:-auto}"
+CLIP_WEIGHTS="${CLIP_WEIGHTS:-$MODELS/clip/ViT-B-32.pt}"
 RUNS_ROOT="${RUNS_ROOT:-$REPO/runs}"
 
 # -- the command line -----------------------------------------------------------------------
-OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 EXTRA=()
+OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) OUTPUT="$2"; shift 2 ;;
     --scene) SCENE="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
+    --five-scene) FIVE_SCENE="$2"; RECORD=1; shift 2 ;;
     --record) RECORD=1; shift ;;
     --full-records) LEAN=0; shift ;;
     --preflight) PREFLIGHT=1; shift ;;
@@ -76,14 +83,50 @@ die() { say "ERROR: $*" >&2; exit 1; }
 [[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-  if [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/gibson_${SCENE}_${STAMP}"; else OUTPUT="$RUNS_ROOT/gibson_val_${STAMP}"; fi
+  if [[ -n "$FIVE_SCENE" ]]; then OUTPUT="$RUNS_ROOT/benchmark_$((FIVE_SCENE * 5))episodes_${STAMP}"
+  elif [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/gibson_${SCENE}_${STAMP}"; else OUTPUT="$RUNS_ROOT/gibson_val_${STAMP}"; fi
 fi
-mkdir -p "$OUTPUT"
-LOG="$OUTPUT/run.log"
+if [[ -n "$FIVE_SCENE" ]]; then
+  [[ -e "$OUTPUT" ]] && die "--five-scene needs a new output directory; $OUTPUT exists (the campaign never resumes)"
+  SERVICE_DIR="$OUTPUT.services"      # the campaign owns $OUTPUT itself and refuses an existing directory
+else
+  SERVICE_DIR="$OUTPUT"
+fi
+mkdir -p "$SERVICE_DIR"
+LOG="$SERVICE_DIR/run.log"
 say "repo $REPO" | tee -a "$LOG"
 say "output $OUTPUT" | tee -a "$LOG"
-git --no-pager rev-parse HEAD > "$OUTPUT/source-commit.txt" 2>/dev/null || true
-git --no-pager diff --no-ext-diff > "$OUTPUT/source-changes.diff" 2>/dev/null || true
+git --no-pager rev-parse HEAD > "$SERVICE_DIR/source-commit.txt" 2>/dev/null || true
+git --no-pager diff --no-ext-diff > "$SERVICE_DIR/source-changes.diff" 2>/dev/null || true
+
+# -- the GPU: who gets the card (LLM, then YOLO, then Habitat; the rest on the CPU) -------------------------
+if [[ "$GPU_PLAN" == "auto" ]]; then
+  export OLLAMA_MODELS_DIR
+  PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan \
+               --gpu-device "$GPU_DEVICE" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
+    || die "gpu_plan.py could not place the processes (nvidia-smi? Ollama manifests under $OLLAMA_MODELS_DIR? set LLM_VRAM_MIB)"
+  OPERATOR_SHARED_GPU="$ALLOW_SHARED_GPU"
+  eval "$PLAN_ENV"                      # sets ALLOW_SHARED_GPU=1 when more than one process (or a desktop) holds the card
+  [[ "$OPERATOR_SHARED_GPU" == 1 ]] && ALLOW_SHARED_GPU=1
+  export OBJNAV_GPU_PLAN_JSON="$SERVICE_DIR/gpu_plan.json"
+  say "GPU plan: LLM=$OBJNAV_LLM_DEVICE  YOLO=$OBJNAV_YOLO_DEVICE  Habitat=$OBJNAV_HABITAT_DEVICE  (gpu_plan.json; GPU_PLAN=off for CPU services)" | tee -a "$LOG"
+  "$HAB_PY" - "$SERVICE_DIR/gpu_plan.json" <<'PY' | tee -a "$LOG"
+import json, sys
+plan = json.load(open(sys.argv[1]))
+print("  %s: %d MiB total, %d used, %d free after a %d MiB reserve" % (plan["gpu_name"], plan["total_mib"], plan["used_mib"], plan["free_mib"], plan["reserve_mib"]))
+for item in plan["placements"]:
+    print("  %-8s %-11s %s" % (item["component"], item["device"], item["reason"]))
+for warning in plan["warnings"]:
+    print("  WARNING: " + warning)
+PY
+  GPU_DEVICE="$HABITAT_GPU_DEVICE"
+  if [[ "$HABITAT_SOFTWARE_RENDER" == 1 ]]; then export LIBGL_ALWAYS_SOFTWARE=1; fi
+else
+  OBJNAV_LLM_DEVICE=cpu OBJNAV_YOLO_DEVICE=cpu OBJNAV_HABITAT_DEVICE=gpu
+  OLLAMA_CUDA_VISIBLE_DEVICES=-1 DETECTOR_DEVICE=cpu DETECTOR_CUDA_VISIBLE_DEVICES=""
+  export LLM_NUM_GPU=""
+  say "GPU plan off: CPU services, Habitat on GPU $GPU_DEVICE" | tee -a "$LOG"
+fi
 
 # -- services ----------------------------------------------------------------------------------
 STARTED_OLLAMA=0 DETECTOR_PID="" OLLAMA_PID=""
@@ -97,8 +140,8 @@ cleanup() {
       native) if [[ -n "$OLLAMA_PID" ]]; then kill -TERM "$OLLAMA_PID" 2>/dev/null || true; wait "$OLLAMA_PID" 2>/dev/null || true; fi ;;
     esac
   fi
-  date -u +%FT%TZ > "$OUTPUT/finished_utc.txt"
-  printf '%s\n' "$code" > "$OUTPUT/exit_code.txt"
+  date -u +%FT%TZ > "$SERVICE_DIR/finished_utc.txt"
+  printf '%s\n' "$code" > "$SERVICE_DIR/exit_code.txt"
   say "exit $code (log: $LOG)"
   exit "$code"
 }
@@ -121,13 +164,20 @@ if ! curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
     docker) docker start "$OLLAMA_CONTAINER" > /dev/null || die "docker start $OLLAMA_CONTAINER failed"; STARTED_OLLAMA=1 ;;
     native) command -v ollama > /dev/null || die "ollama not on PATH (OLLAMA_MODE=native)"
             mkdir -p "$OLLAMA_MODELS_DIR"
-            CUDA_VISIBLE_DEVICES=-1 OLLAMA_HOST="${LLM_BASE_URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" OLLAMA_NUM_PARALLEL=1 \
-              OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$OUTPUT/ollama.log" 2>&1 &
+            if [[ "$OLLAMA_CUDA_VISIBLE_DEVICES" == -1 ]]; then say "starting ollama on the CPU" | tee -a "$LOG"
+            else say "starting ollama on GPU $OLLAMA_CUDA_VISIBLE_DEVICES" | tee -a "$LOG"; fi
+            CUDA_VISIBLE_DEVICES="$OLLAMA_CUDA_VISIBLE_DEVICES" OLLAMA_HOST="${LLM_BASE_URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" \
+              OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
             OLLAMA_PID=$!; STARTED_OLLAMA=1 ;;
     external) die "no LLM service answers at $LLM_BASE_URL (OLLAMA_MODE=external: start it yourself)" ;;
     *) die "OLLAMA_MODE must be docker, native or external" ;;
   esac
   wait_for_url "$LLM_BASE_URL/api/tags" 120 "Ollama"
+elif [[ "$OBJNAV_LLM_DEVICE" != cpu ]]; then
+  say "NOTE: an Ollama already answers at $LLM_BASE_URL; the plan's LLM device ($OBJNAV_LLM_DEVICE) only holds if that server sees the card" | tee -a "$LOG"
+fi
+if [[ "$OLLAMA_MODE" == docker && "$STARTED_OLLAMA" == 1 && "$OBJNAV_LLM_DEVICE" != cpu ]]; then
+  say "NOTE: the $OLLAMA_CONTAINER container's GPU access was fixed when it was created; the plan's LLM device is advisory in docker mode" | tee -a "$LOG"
 fi
 for model in "$LLM_MODEL" "$LLM_REASONING_MODEL"; do
   if ! ollama_has "$model"; then
@@ -145,11 +195,15 @@ if curl -fsS --max-time 5 "$DETECTOR_URL/health" > /dev/null 2>&1; then
   say "detector already up at $DETECTOR_URL (left running)" | tee -a "$LOG"
 else
   VOCAB="$(OMP_NUM_THREADS=2 "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run --print-vocabulary 2>/dev/null | tail -1)"
-  printf '%s\n' "$VOCAB" > "$OUTPUT/vocabulary.txt"
-  say "starting the YOLO-World detector on the CPU at $DETECTOR_URL" | tee -a "$LOG"
-  CUDA_VISIBLE_DEVICES='' "$DETECT_PY" -u -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \
-    --backend yolo_world --model "$YOLO_WEIGHTS" --device cpu --host "$DETECTOR_HOST" --port "$DETECTOR_PORT" \
-    --conf 0.05 --torch-threads "$DETECTOR_THREADS" --classes "$VOCAB" > "$OUTPUT/detector.log" 2>&1 &
+  printf '%s\n' "$VOCAB" > "$SERVICE_DIR/vocabulary.txt"
+  DETECTOR_ARGS=(--backend yolo_world --model "$YOLO_WEIGHTS" --device "$DETECTOR_DEVICE" --host "$DETECTOR_HOST" --port "$DETECTOR_PORT"
+                 --conf 0.05 --torch-threads "$DETECTOR_THREADS" --classes "$VOCAB")
+  [[ -f "$CLIP_WEIGHTS" ]] && DETECTOR_ARGS+=(--clip-model "$CLIP_WEIGHTS")     # the local text encoder: no download on the card
+  # The service keeps the same >512 MiB occupancy gate as gibson.run; the plan has already accounted for who holds the card.
+  [[ "$DETECTOR_DEVICE" == cuda* && "$ALLOW_SHARED_GPU" == 1 ]] && DETECTOR_ARGS+=(--allow-shared-gpu)
+  say "starting the YOLO-World detector on $DETECTOR_DEVICE at $DETECTOR_URL" | tee -a "$LOG"
+  CUDA_VISIBLE_DEVICES="$DETECTOR_CUDA_VISIBLE_DEVICES" "$DETECT_PY" -u -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \
+    "${DETECTOR_ARGS[@]}" > "$SERVICE_DIR/detector.log" 2>&1 &
   DETECTOR_PID=$!
   wait_for_url "$DETECTOR_URL/health" 300 "the detector"
 fi
@@ -166,6 +220,24 @@ if [[ "$RECORD" == 1 && -z "${IMAGEIO_FFMPEG_EXE:-}" ]] && ! command -v ffmpeg >
   else
     die "--record needs FFmpeg: apt install ffmpeg, or set IMAGEIO_FFMPEG_EXE to an encoder with libx264"
   fi
+fi
+
+# -- the five-scene campaign: N recorded episodes per val scene, each a gibson.run job, live dashboard --------
+if [[ -n "$FIVE_SCENE" ]]; then
+  FIVE_ARGS=(--episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" --output "$OUTPUT"
+             --episodes-per-scene "$FIVE_SCENE" --explorer frontier --detector-url "$DETECTOR_URL" --detector-backend yolo_world
+             --seed "$SEED" --gpu-device "$GPU_DEVICE" --allow-sim-version-mismatch)
+  [[ "$ALLOW_SHARED_GPU" == 1 ]] && FIVE_ARGS+=(--allow-shared-gpu)
+  FIVE_ARGS+=("${EXTRA[@]}")
+  date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"
+  say "five-scene campaign: $FIVE_SCENE episode(s) per scene, stairs forbidden; results stream to $OUTPUT/benchmark_results.{json,csv}" | tee -a "$LOG"
+  set +e
+  "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene "${FIVE_ARGS[@]}" 2>&1 | tee -a "$LOG"
+  RUN_CODE=${PIPESTATUS[0]}
+  set -e
+  [[ "$RUN_CODE" == 0 ]] || die "five_scene exited with $RUN_CODE (see $LOG and $OUTPUT/<Scene>/run.log)"
+  say "results: $OUTPUT/benchmark_results.json, benchmark_results.csv, summary.txt, index.html; videos under $OUTPUT/<Scene>/recordings/"
+  exit 0
 fi
 
 # -- the run ------------------------------------------------------------------------------------

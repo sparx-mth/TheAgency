@@ -161,6 +161,22 @@ def _method(args, defaults=None):
     return policy, info
 
 
+def _gpu_plan_record():
+    """The GPU placement plan the launcher decided on (``gpu_plan.py``), for the frozen configuration.
+
+    ``OBJNAV_GPU_PLAN_JSON`` names the file the launcher wrote; without it the
+    record says so. A plan is provenance -- which process had the card --
+    never an input to the policy.
+    """
+    path = os.environ.get("OBJNAV_GPU_PLAN_JSON", "").strip()
+    if not path:
+        return {"source": "none", "note": "launched without gpu_plan.py; devices as the command line and environment say"}
+    try:
+        return dict(json.loads(Path(path).read_text()), source=path)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("OBJNAV_GPU_PLAN_JSON names an unreadable plan: %s" % exc)
+
+
 def _gpu_gate(args):
     if args.allow_shared_gpu:
         return
@@ -221,6 +237,7 @@ def prepare(args):
               "on_agent_error": "record", "allow_shared_gpu": args.allow_shared_gpu,
               "scene": args.scene, "recording": {"enabled": args.record, "fps": args.video_fps},
               "kinematics": asdict(PROTOCOL.kinematics()),
+              "gpu_plan": _gpu_plan_record(),
               "full_split": args.scene is None and args.limit is None and args.shards == 1,
               "target_override": args.target_override,
               "publishable": args.target_override is None and method.get("publishable", True),

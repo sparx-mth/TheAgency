@@ -126,6 +126,22 @@ def test_the_reasoning_route_uses_its_own_model_timeout_cap_and_context():
     assert big["payload"]["options"]["seed"] == 0 and big["payload"]["keep_alive"] == "30m"
 
 
+def test_num_gpu_is_sent_to_ollama_only_when_the_placement_plan_sets_it(monkeypatch):
+    client = _client("ollama", [_ollama_reply('{"a": 1}')])
+    client.chat_json("s", "u")
+    assert "num_gpu" not in client.sess.posts[0]["payload"]["options"], "None leaves the split to the server"
+    client = _client("ollama", [_ollama_reply('{"a": 1}'), _ollama_reply('{"b": 2}')], num_gpu=-1)
+    client.chat_json("s", "u")
+    client.chat_json("s", "u", reasoning=True)
+    assert all(post["payload"]["options"]["num_gpu"] == -1 for post in client.sess.posts), "every layer, both routes"
+    monkeypatch.setenv("LLM_NUM_GPU", "0")
+    assert LLMConfig.from_env().num_gpu == 0, "0 keeps inference on the CPU of a server that has a card"
+    monkeypatch.setenv("LLM_NUM_GPU", "  ")
+    assert LLMConfig.from_env().num_gpu is None
+    with pytest.raises(ValueError):
+        LLMConfig(num_gpu=-2)
+
+
 def test_the_reasoning_route_on_an_openai_backend_sets_the_model_and_the_cap():
     client = _client("openai", [_openai_reply('{"b": 2}')], base_url="https://api.example.com/v1",
                      reasoning_model="gpt-big", reasoning_timeout_s=120.0, reasoning_max_tokens=1200)
