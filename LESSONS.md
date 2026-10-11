@@ -11,6 +11,142 @@ Format per entry:
 
 ---
 
+## 2026-10-11 — Nine failure recordings of the full Gibson run: the toilet was in the frame at 0.92 confidence and the inspection "saw nothing"
+
+**Symptom:** toilet SR 0.288 over 208 episodes (131 of 132 failures were 500-step timeouts, median final DTG
+4.5 m), couch SR 0.41 in Wiconisco against >= 0.86 elsewhere, tv/bed successes with SPL 0.07-0.25. Nine
+representative episodes were re-run with `--record` (`runs/gibson_val_20261008T120112Z.inspection/`, all nine
+reproduced on the first attempt) to look for corridor bottlenecks and skipped doorways (toilet), the misleading
+entity (couch) and bad RPT* room orders (tv/bed). The decision logs answered before the videos were watched.
+
+**Root causes (from `steps.jsonl` + the evaluator's `trajectory.csv`, which has the true DTG per step):**
+- **Toilet timeouts are not search failures.** In all three, the agent found the toilet, walked up to it
+  (true DTG 0.00 -- standing inside the success region), ran INSPECT and released it with `inspection saw
+  nothing in any view`, then spent the remaining 315-458 actions elsewhere (Darden/000193 did it twice, at 132
+  and 409). The detector had the toilet in every one of those frames at confidence 0.90-0.96. What the
+  inspection counted as nothing is a box touching the **bottom edge of the frame** (`y2 >= 479`): a toilet is
+  ~0.4 m tall, the camera is at 0.88 m with a 63-degree vertical field and the Gibson action set has no
+  LOOK_DOWN, so at the closing's inspection range (1.2-1.6 m) the toilet's base is always below the frame and
+  its box is always bottom-cut; the border rule (meant for things half out of the picture) then rejects every
+  view. Whole run: 93 of the 148 toilet failures (63 %) had locked on and released a candidate -- 40 with this
+  exact release as the last one, 23+11+7 with the `unverified` family -- and only 53 (36 %) never sighted a
+  toilet at all. A STOP at the moment of release would have made all three recordings successes.
+- **Couch false positives: no inspection happened.** Wiconisco/000123 STOPped at action 2 and /000010 eight
+  actions after the sighting, both on `fresh terminal target confirmation` at 0.8-0.9 m -- the terminal path
+  accepts a 'sofa' box without the inspection the toilet gets; /000114 ran 27 INSPECT frames, could not decide
+  and STOPped on `inspection exhausted` = accept-by-default. Two of the three (000123, 000114) locked on the
+  **same object** at world (0.4, 5.7), 0.35-0.63 m high, 2.7-9.8 m from any annotated couch; 000010 on another
+  at (5.5, -3.6). The detector reports it as 'sofa' at 0.81-0.93 (and 'couch' 0.78-0.91): the frames
+  (`_verify.jpg`/`_stop.jpg`) decide whether it is a bench/daybed or a real sofa the SemExp annotation lacks.
+- **Low SPL is not RPT* ordering.** Collierville/000043: the *real* TV was in view from action 1 at 3.9 m and
+  the closing released it four times with `no safe path from here` (the success is incidental: inside 1 m when
+  the budget ran out). Collierville/000194 and Corozal/000133: three false candidates each (a 'television' at
+  2.6-4.7 m from the real one; three 'beds' at 0.6-0.8 m range, all at 0.72-0.84 m height -- table height, not
+  bed height), each costing a 13-action BACK_OFF plus a 13-action VERIFY before an `unverified` release
+  (~75 actions per episode), the real target found at 222 / 448. In 000194 the real TV was also seen at action 3
+  and released `unverified`. The rooms the oracle ordered were few and mislabelled (Corozal: 7 of 12
+  `living_room`); the time went to the closing, not to the order.
+
+**Fix / workaround:** pending -- the recordings exist so the fix is chosen on evidence, not on this entry.
+The candidates, in order of expected yield: (1) in the inspection, accept a box cut **only at the bottom** when
+its top edge is well inside the frame -- for a floor-standing object at close range that cut is geometry, not
+occlusion; the bearing is sound and the range can be read from the box's upper part (or inspect low classes
+from >= 1.5 m, where the toilet fits); (2) make the terminal confirmation of a sofa/bed-height candidate go
+through the same inspection a toilet does, and never accept on `inspection exhausted`; (3) treat `no safe path
+from here` to a visible target as a planning problem (goal projection / inflation), not a release. Measure each
+on the 148 toilet failures and the 18 Wiconisco couch STOPs before touching defaults.
+
+**Don't:** Don't take a timeout with a far final DTG as "never found it" -- the lean record's `target_closing`
+counters (`releases`, `inspection_releases`, `last_release`) say whether it was found and let go, at no cost.
+Don't read the recording's `decision.info.distance_to_goal_m` as the score: it is the agent's own number
+(0.00 at action 0); the evaluator's is `trajectory.csv`. Don't infer "the agent reached it" from the closing's
+range alone either -- cross it with the true DTG, as above. And don't widen the border rule globally: it exists
+because a box cut at the top or the sides has no trustworthy centre.
+
+---
+
+## 2026-10-11 — The full Gibson run died at episode 919 of 1,000: one published start lies 3.3 cm outside the navmesh, and a turn "moved" the agent
+
+**Symptom:** `runs/gibson_val_20261008T120112Z`, 36 h in, 918/1000 done (SR 0.666): `EnvContractError: episode
+'Wiconisco/000118', action 1: TURN_LEFT should turn in place (move at most 0.020 m), but the agent moved 0.033 m
+(0.033 m across the floor at -73.3 deg from its heading, +0.000 m up)`. The supervisor replayed the run with
+`--resume`; it died on the same line, and -- correctly -- was not relaunched a third time. The launcher's
+exit trap had also killed the detector and the Ollama; the supervisor restarted both from its snapshot.
+
+**Root cause:** The 2026-10-07 fix for off-mesh published starts excused the *vertical* placement
+(`settle_m`, 0.30 m) and kept "the horizontal bounds stand". Measured against all 1,000 starts with the
+shipped navmeshes (`PathFinder.snap_point` / `try_step(start, start)`), exactly one, Wiconisco/000118, lies
+**outside the mesh horizontally** -- 0.033 m, the only start `is_navigable` rejects; the other 999 are on it
+to the millimetre. In habitat-sim 0.2.4 `turn_left`/`turn_right` are registered as *body* actions, so the
+step filter runs for a turn too and `try_step(start, start)` returns the nearest point *of the mesh*: the
+warm-up turn pulled the agent 3.3 cm onto the edge (and 6.4 cm down -- excused). A kinematic self-check
+refusal is an `EnvContractError`, not an agent error, so it leaves `run_benchmark` and ends the run. Two
+things the earlier entry got wrong on the way: "turns bypass the navmesh filter" (they do not -- Darden/000000
+is lifted 0.10 m by its first *turn*, which the runner's "first action that displaces the agent" rule
+absorbed by luck of phrasing), and that the start validation at preflight would catch a bad start (it
+audits the FMM field, not the navmesh).
+
+**Fix / workaround:** `KinematicTolerance.settle_xy_m` -- the horizontal counterpart of `settle_m`, taken off
+the first action that moves the agent along its own direction, up to the bound; Gibson sets 0.05 m (one map
+cell, the width `forward_overshoot_m` already allows a step), measured: 0.033 m is the only non-zero value
+in the split. Finishing the run then needed a resume whose frozen configuration differed from the recorded
+one in `kinematics` and `source_sha256` -- which the harness refuses, rightly, by default. The honest path
+was an *explicit, bounded, recorded* exception: `MetricsLogger(accept_changes=...)` /
+`gibson.run --resume --resume-accepting-changes kinematics source_sha256` (choices limited to
+`RESUMABLE_CONFIG_CHANGES`: `kinematics`, `source_sha256`, `gpu_plan` -- provenance, or a self-check that
+only refuses an episode, never an input to a decision or a score). The recorded config stays the run's;
+the resume's `run.json` entry carries `config_changes` with both values; `comparison.md` / `audit.json`
+title and disclose it; the supervisor passes it via `RESUME_ARGS`. Verified before relaunch: the replayed
+preflight differed in exactly those two keys and the logger accepted the resume without writing. The run
+continued past 000118 (chair, SR 1, 32 actions) on 2026-10-11 05:07Z.
+
+**Don't:** Don't excuse a first-action displacement without a bound -- the point of the contract is to catch
+a sim that moves on a turn. Don't widen `position_m` (the turn-in-place bound) instead: every turn of every
+episode would then tolerate 5 cm of drift. Don't make the resume comparison lenient by default or silently
+drop keys from it -- the override is named per key, per resume, in the record. Don't trust a protocol
+docstring's account of the simulator's mechanics without measuring: `try_step(start, start)` takes one line.
+Follow-up: a preflight check that reports starts off the mesh beyond `settle_xy_m` *before* a day of compute
+(the measurement script is three loops over `PathFinder`).
+
+---
+
+## 2026-10-08 — A Gibson run cannot be resumed by the script that launched it, and three edits that would kill a day-long run
+
+**Symptom:** Preparing to supervise the 1,000-episode `runs/gibson_val_20261008T120112Z` unattended, the
+documented resume -- `run_benchmark.sh --output <dir>` -- would have been refused as "cannot resume with a
+different config (gpu_plan differ)" the moment the run died, although nothing about the experiment had changed.
+
+**Root cause:** `MetricsLogger._resume` compares the *entire* config text to the recorded one, and the config
+embeds the whole `gpu_plan.json` -- `free_mib`, `used_mib` and the "fits: N MiB of M left" reasons. The
+launcher re-runs `gpu_plan.py` on every start, so the numbers are whatever the card happens to hold at
+that second (949/23103 MiB at 12:01, 916/23136 at 12:06 for the same machine). The config also embeds
+`source_sha256`, the hash of **every `.py` under `sparx_agency/`** (`run.py::source_fingerprint`), tests
+and tools included. Two consequences nobody had written down: (1) under `GPU_PLAN=auto` the script's
+resume essentially never passes; `GPU_PLAN=off` does not help either (its plan record is `source: none`,
+which differs too); (2) adding or editing *any* `.py` in the package while a run is going -- a new helper,
+a test -- makes that run unresumable, forever. And a third hazard found on the way: bash reads a running
+script incrementally, so editing `run_benchmark.sh` while its `bash` is blocked in the `gibson.run | tee`
+pipeline corrupts what it executes after the pipeline (the summary step, the exit code).
+
+**Fix / workaround:** The resume that reproduces the configuration byte for byte replays the *original
+processes*: `gibson/supervise_benchmark.sh` snapshots the live `gibson.run`, detector and Ollama (argv,
+environment, cwd from `/proc/<pid>/`) into `<output>/replay/`, restores `gpu_plan.json` to the recorded
+one, and relaunches the saved argv + `--resume` under the saved environment via `os.execvpe`. Verified
+non-destructively: the replayed argv with `--preflight --resume` produced a `configuration` identical to
+`run.json`'s. Rules for the run's lifetime: no `.py` edits under `sparx_agency/` (the supervisor itself is
+a `.sh` for exactly this reason), no edits to a `.sh` that a live bash is executing (restart the stateless
+supervisor instead), and a new `.py` only once `summary.json` exists. The proper fix -- `_gpu_plan_record`
+dropping the volatile keys, or the resume comparison excluding provenance -- is a `.py` change and so waits
+for the run to finish.
+
+**Don't:** Don't read "It resumes" in BENCHMARK.md (before 2026-10-08) as tested for the auto-plan path --
+it held only for `GPU_PLAN=off` runs whose services were still answering. Don't `cp /proc/<pid>/cmdline`
+and expect to overwrite it later: the copy inherits the `r--r--r--` mode (`cp --no-preserve=mode`). Don't
+expect `tr ... < /proc/<pid>/environ 2>/dev/null` to be silent for another user's process: the
+redirection fails before `2>` applies; test `-r` first.
+
+---
+
 ## 2026-10-08 — The 3x3 on Darden/Markleeville/Wiconisco: a manoeuvre that looped, a capsule that closed a corridor, a toilet that left through the floor
 
 **Symptom:** `runs/benchmark_9episodes_20261008T082632Z`: SR 6/9. Markleeville/000000 and /000001 (bed)

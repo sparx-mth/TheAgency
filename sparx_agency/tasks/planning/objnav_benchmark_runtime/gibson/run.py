@@ -25,6 +25,14 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
 
+#: The frozen-config keys a ``--resume`` may be told to accept a change in -- each is provenance (which
+#: source, which device had the card) or a self-check that only refuses an episode, never an input to a
+#: decision or a score. Everything else (protocol, method, dataset, seed, episodes, runtime, ...) is a
+#: different experiment and is refused, as before. Recorded per resume in ``run.json`` and disclosed by
+#: the report. (2026-10-11: the full val run died at episode 919 on the kinematic self-check; finishing
+#: it under the corrected tolerance meant exactly these two differences, plus the plan a relaunch makes.)
+RESUMABLE_CONFIG_CHANGES = ("kinematics", "source_sha256", "gpu_plan")
+
 
 class StopDiagnostic:
     """Non-privileged plumbing check, never labelled as the search method."""
@@ -55,6 +63,11 @@ def parser():
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--shard-index", type=int, default=0)
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--resume-accepting-changes", nargs="+", choices=RESUMABLE_CONFIG_CHANGES, default=(),
+                   metavar="KEY", dest="resume_accepting_changes",
+                   help="With --resume: the frozen-config keys that may differ from the recorded run -- "
+                        "provenance or a self-check only (%s); what differed is written into run.json's "
+                        "resume entry and the report says so" % ", ".join(RESUMABLE_CONFIG_CHANGES))
     p.add_argument("--allow-sim-version-mismatch", action="store_true")
     p.add_argument("--allow-shared-gpu", action="store_true")
     p.add_argument("--target-override", choices=CATEGORIES,
@@ -253,6 +266,8 @@ def main(argv=None, *, configuration_guard=None):
         return 0
     if args.resume and args.output is None:
         parser().error("--resume requires --output")
+    if args.resume_accepting_changes and not args.resume:
+        parser().error("--resume-accepting-changes requires --resume")
     env, policy, config, issues = prepare(args)
     try:
         if issues:
@@ -266,7 +281,8 @@ def main(argv=None, *, configuration_guard=None):
         _gpu_gate(args)
         output = args.output or default_run_dir("gibson", "val")
         agent_class = LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent
-        with MetricsLogger(output, config, resume=args.resume) as logger:
+        with MetricsLogger(output, config, resume=args.resume,
+                           accept_changes=tuple(args.resume_accepting_changes)) as logger:
             tracker = ProgressTracker(args.progress_file or (output / "progress.json"),
                                       len(config["selected_episode_ids"]), completed=logger.records,
                                       label="gibson val%s" % (" (%s)" % args.scene if args.scene else ""))

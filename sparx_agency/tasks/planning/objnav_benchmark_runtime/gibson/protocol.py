@@ -87,7 +87,9 @@ class GibsonProtocol:
         starts lie off the shipped navmesh surface -- up to 0.28 m below it
         (Wiconisco/000003; Darden/000000 is 0.10 m below), thirty of them
         by more than 0.15 m -- and habitat-sim 0.2.4 settles the agent onto
-        the mesh on its first TRANSLATION (turns bypass the navmesh filter),
+        the mesh on its first body action (a turn included: ``turn_left`` is
+        registered as a body action, so the step filter's
+        ``try_step(start, start)`` places the agent; measured 2026-10-11),
         a vertical move the agent did not make. Up to 0.30 m of it is taken
         off that one action before the bounds are judged. And the evaluated
         storey itself is not flat: steps measured on the shipped navmeshes
@@ -99,8 +101,23 @@ class GibsonProtocol:
         replayed the refusal. Starts are still never snapped by us, and
         the horizontal bounds (step 0.30 m, heading 90 degrees; 100k
         sampled steps gave 0.287 m / 77 degrees at most) stand.
+
+        ``settle_xy_m`` (since 2026-10-11): one published start,
+        Wiconisco/000118, lies 0.033 m *outside* the shipped navmesh
+        horizontally (the only one of the 1,000 that ``is_navigable``
+        rejects; every other start is on the mesh to the millimetre), and
+        the same first-action placement pulled it onto the mesh edge
+        sideways: the warm-up TURN_LEFT "moved" 0.033 m, the 0.020 m
+        turn-in-place bound refused it, and the full validation run died at
+        episode 919 of 1,000 -- twice, deterministically, on 2026-10-10.
+        One map cell (0.05 m, the same width ``forward_overshoot_m`` allows
+        a step) of horizontal placement is now taken off that first action
+        too, measured against all 1,000 published starts: 0.033 m is the
+        only non-zero value. Like ``settle_m`` it changes no score and no
+        decision: the contract only raises.
         """
-        return KinematicTolerance(heading_deg=90.0, forward_overshoot_m=0.05, settle_m=0.30, climb_m=0.60)
+        return KinematicTolerance(heading_deg=90.0, forward_overshoot_m=0.05, settle_m=0.30, climb_m=0.60,
+                                  settle_xy_m=0.05)
 
 
 PROTOCOL = GibsonProtocol()

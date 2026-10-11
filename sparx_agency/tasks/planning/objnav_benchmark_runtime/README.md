@@ -78,6 +78,49 @@ consecutive-frame lock grows with range (`association_range_gain`, 0.15 m per
 metre beyond 2 m: 0.77 m at 3.8 m), because the visible centroid of a long
 object seen from far moves more than half a metre between two frames.
 
+**The part of the object a frame shows moves along the line of sight** (since
+2026-10-11; the toilets of the 1,000-episode validation run, 63 % of whose 148
+failures had locked on and released a candidate). From 2 m a toilet's box holds
+the whole object and the depth patch lands on the bowl (0.38 m up); from 1.3 m
+the frame's lower edge cuts the box, the patch lands on what is left in view --
+the tank -- and the centroid jumps 0.47-0.49 m BACK along the viewing ray (and
+0.2 m up) with 2-3 cm of lateral error. Against a 0.50 m sphere about the anchor
+that is 0.50-0.53 m: every 0.92-0.94 frame of the toilet the agent was standing
+beside was discarded as another object, the inspection released it as "saw
+nothing in any view" with the agent inside the success region, and a 2 m
+rejection around the toilet followed. Three rules of `TargetClosing` answer it:
+
+- **Association is a cylinder, not a sphere** (`_associated`,
+  `association_depth_m` 0.60 m): `association_radius_m` across the ray and in
+  height, that plus the object's depth -- 0.60 m or the anchor frame's footprint
+  diameter, whichever is larger -- along it. Two chairs side by side stay two
+  chairs (`depth_associations` counts what the sphere would have dropped).
+- **A floor-cut frame is a sighting, not a position** (`_floor_cut_box`,
+  `floor_cut_terminal`, `floor_cut_min_hidden_m` 0.05 m): when the box reaches
+  the lower margin, the target is below the camera and the lowest point in view
+  stands higher than the lowest point the lock has measured, the frame counts as
+  fresh but is NOT fused into the 3-D memory (its centroid is the upper part's,
+  a biased reading of the object's; fused, it walked the memory and the standoff
+  measured from it back toward the tank frame by frame), and the terminal range
+  is the smaller of the visible near edge and the planar range to the memory:
+  the part under the frame -- bowl, seat -- stands in front of the part in view
+  for the furniture of this benchmark, and the memory is the centroid the
+  approach's standoff was measured from (`floor_cut_frames`,
+  `floor_cut_measurements`; `floor_cut` in the STOP's info).
+- **Below the field of view, without LOOK actions, the memory completes the
+  STOP** (`_below_the_frame`, `blind_cone_stop`, `blind_cone_max_missing` 6,
+  `blind_cone_min_fraction` 0.15): the Wiconisco toilet, 0.47 m high, showed
+  under 40 px of its rim from 0.9 m, the detector read 0.12-0.18 and no yaw
+  sweep brings back what no yaw puts in the frame. When the geometry (the
+  camera's height, pitch and lower edge; the target's measured top and
+  remembered range) predicts fewer than 15 % of the frame's rows of the target
+  in view -- the sliver `clipped_box` will not accept -- with its bearing inside
+  the horizontal field, the target seen fresh within six actions and the memory
+  within the terminal range, the closing STOPs: the missing box is explained,
+  and the one action that would bring the object back does not exist. The rule
+  is off whenever the action spec has the tilt pair -- there the dynamic pitch
+  controller (below) is its counterpart (`blind_cone_stops`).
+
 **The context check** (`methods/target_context.py`, `context_check`, since
 2026-10-07). A detector's confidence is a score over the crop; it knows nothing
 about the room the crop was taken in or how high the surface it fired on is.
@@ -186,7 +229,13 @@ box (its centre within half a turn, or a box that spans the image's centre colum
 and a **freshly measured** horizontal range -- the near edge of the detected
 surface -- within the terminal radius plus `range_tolerance_m` (**0.05 m**, for
 pitch-dependent projection noise), at whatever pitch the sighting came. No STOP
-from remembered distance alone is allowed. The pitch the target's height predicts
+from remembered distance alone is allowed, with three earned exceptions: the
+approach history (below), the support surface (below), and -- without LOOK
+actions -- a target the geometry puts under the frame, seen fresh a few actions
+before (`_below_the_frame`, above). For a box the frame's lower edge cut, the
+"freshly measured" range is the smaller of the visible near edge and the range
+to the 3-D memory (`_floor_cut`, above): the box is fresh, the range is not
+read from the part of the object that happens to be in view. The pitch the target's height predicts
 is where the inspection LOOKS for it when it is not in view; a fresh off-centre
 sighting is centred at the pitch it was seen at. An inspection the filtered
 estimate entered while every fresh frame measures the surface beyond the limit is

@@ -1150,3 +1150,136 @@ def test_a_locked_target_without_a_path_is_kept_in_frame_rather_than_turned_away
     assert p.closing.locked and not command.stop
     assert command.info.get("verify_step", "").startswith(("look", "turn")), (
         "a frame that keeps the box whole, never an idle hold: %r" % (command.info,))
+
+
+# -- the toilets of the 1,000-episode run (2026-10-11): the part of the object a frame shows moves -----------
+def test_a_resighting_shifted_along_the_line_of_sight_is_the_same_object_and_one_shifted_across_it_is_not(monkeypatch):
+    """Darden/000018 and /000193: from 2 m the depth patch landed on the toilet's bowl, from 1.3 m -- the box cut
+    by the frame's lower edge -- on its tank, 0.47-0.49 m back ALONG the ray and 1.6-3.3 cm across it. A 0.50 m
+    sphere about the anchor dropped every such frame (0.50-0.53 m) and the agent, standing beside the toilet,
+    released it as 'saw nothing in any view'. Along the ray the gate is now the radius plus the object's depth;
+    across it, as tight as before."""
+    p, ep, near = locked_at_two_metres(monkeypatch)                      # anchor (2.0, 0, 0.88); the agent at (1.1, 0)
+    deeper = replace(near, depth_m=np.full(near.depth_m.shape, 1.45, np.float32))   # the same box 0.55 m behind the anchor
+    p.plan(deeper)
+    assert p.closing.last_seen == 2, "0.55 m along the ray is the far part of the same object"
+    assert p.closing.depth_associations == 1, "... and a sphere of 0.50 m would have dropped it"
+    sideways = replace(near, step=3)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (517, 200, 597, 280))]   # 0.55 m to the right at 0.9 m
+    p.plan(sideways)
+    assert p.closing.last_seen == 2, "0.55 m across the ray is another object"
+    assert p.closing.depth_associations == 1
+    with pytest.raises(ValueError):
+        TargetClosingSettings(association_depth_m=-0.1)
+
+
+def low_target_locked(monkeypatch, **closing):
+    """A toilet-high target locked two metres ahead: rows 300-400 of the frame at 2 m put its centroid 0.31 m up
+    (supported points 0.18-0.44 m), on an empty map."""
+    p, ep = setup_policy(target_closing=closing) if closing else setup_policy()
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 300, 360, 400))]
+    p.plan(observation(ep, 0, depth=2))
+    p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1 and 0.25 < p.closing.xyz[2] < 0.37
+    assert p.closing.lowest_m < 0.25 and 0.40 < p.closing.top_m < 0.50
+    return p, ep
+
+
+def floor_cut_frame(ep, step, bottom, near_rows_from=372):
+    """From 1.1 m: a box reaching the lower edge whose depth patch is the object's UPPER part at 1.37 m (0.42-0.80 m
+    up) with the nearer, lower part (0.6 m, under the patch) filling the frame's bottom rows -- a tank over a bowl."""
+    frame = replace(observation(ep, step, depth=1.37), pose=AgentPose(1.1, 0, 0, 0))
+    frame.depth_m[near_rows_from:, :] = 0.6
+    return frame, [DetectionWire("chair", .9, (250, 190, 390, bottom))]
+
+
+def test_a_box_cut_by_the_frames_lower_edge_reads_its_terminal_range_from_the_memory_and_stops(monkeypatch):
+    """The Darden toilet at 0.89 m: the fresh box's near edge was the TANK's, 1.35 m; the standoff the approach had
+    reached was measured from the bowl's memory. Arrived by the memory, out of range by the measurement, released."""
+    p, ep = low_target_locked(monkeypatch)
+    frame, boxes = floor_cut_frame(ep, 2, bottom=480)
+    p.detector.detect = lambda rgb: boxes
+    before = p.closing.xyz
+    command = p.plan(frame)
+    assert p.closing.last_seen == 2 and p.closing.depth_associations == 1, "the tank is the toilet: +0.47 m along the ray"
+    assert p.closing.visible_floor_m > p.closing.lowest_m + 0.05, "the part in view stands above what the lock has seen"
+    assert p.closing.xyz == before and p.closing.floor_cut_frames == 1, "a sighting of the upper part does not move the memory"
+    assert command.stop and p.closing.phase == "STOP" and command.info["reason"] == "fresh terminal target confirmation"
+    assert command.info["floor_cut"] is True and command.info["measured_m"] <= 1.05
+    assert command.info["measured_m"] == pytest.approx(math.dist((1.1, 0), p.closing.xyz[:2]), abs=1e-6)
+    assert p.closing.observed_near_m > 1.3, "... while the visible near edge still said 'too far'"
+    assert p.closing.floor_cut_measurements >= 1
+
+
+def test_the_same_box_whole_in_the_frame_keeps_the_visible_near_edge_as_its_range(monkeypatch):
+    """A box that ends above the lower margin hides nothing: the near edge of what is in view is the near edge,
+    and the frame is fused into the memory like any other."""
+    p, ep = low_target_locked(monkeypatch)
+    frame, boxes = floor_cut_frame(ep, 2, bottom=460)
+    p.detector.detect = lambda rgb: boxes
+    before = p.closing.xyz
+    command = p.plan(frame)
+    assert p.closing.last_seen == 2 and not command.stop
+    assert p.closing.xyz != before and p.closing.floor_cut_frames == 0, "fused: the memory moved toward the new centroid"
+    assert p.closing.observed_near_m > 1.3 and p.closing.floor_cut_measurements == 0
+    assert p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED")
+    off, ep2 = low_target_locked(monkeypatch, floor_cut_terminal=False)
+    frame, boxes = floor_cut_frame(ep2, 2, bottom=480)
+    off.detector.detect = lambda rgb: boxes
+    assert not off.plan(frame).stop, "the switch restores the former measurement"
+    with pytest.raises(ValueError):
+        TargetClosingSettings(floor_cut_terminal="yes")
+
+
+def test_a_low_target_under_the_frame_is_stopped_on_from_the_memory_only_without_look_actions(monkeypatch):
+    """Wiconisco/000031: the 0.47 m toilet from 0.9 m shows under 40 px of its rim, the detector read 0.12-0.18,
+    the yaw sweep saw 'nothing in any view' and the lock was released with the agent inside the success region.
+    No LOOK_DOWN exists in this protocol; the geometry says the camera cannot show the target from here."""
+    p, ep = low_target_locked(monkeypatch)
+    p.detector.detect = lambda rgb: []
+    gone = replace(observation(ep, 2, depth=1.6), pose=AgentPose(1.1, 0, 0, 0))     # 0.9 m from the memory
+    below = p.closing._below_the_frame(gone, 0.9)
+    assert below is not None and 0 < below < 0.15 * 480, "its top, 0.44 m up, would show under 72 px from 0.9 m"
+    command = p.plan(gone)
+    assert command.stop and p.closing.phase == "STOP" and p.closing.blind_cone_stops == 1
+    assert command.info["reason"].startswith("target below the camera's field of view") and "1 action(s) ago" in command.info["reason"]
+    assert command.info["below_frame_px"] == pytest.approx(below, abs=0.1)
+    # The same geometry with the LOOK pair: the pitch controller's business, not this rule's.
+    tilted, original = setup_policy()
+    ep_tilt = tilt_episode(tilted, original)
+    freeze_global(monkeypatch, tilted)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(tilted.mapping.__dict__, "update", lambda *a, **kw: world)
+    tilted.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 300, 360, 400))]
+    tilted.plan(observation(ep_tilt, 0, depth=2))
+    tilted.plan(observation(ep_tilt, 1, depth=2))
+    assert tilted.closing.locked
+    tilted.detector.detect = lambda rgb: []
+    gone_tilt = replace(observation(ep_tilt, 2, depth=1.6), pose=AgentPose(1.1, 0, 0, 0))
+    assert tilted.closing._below_the_frame(gone_tilt, 0.9) is None
+    command = tilted.plan(gone_tilt)
+    assert not command.stop and tilted.closing.blind_cone_stops == 0
+    assert command.camera_pitch is not None and command.camera_pitch > 0, "with LOOK actions the inspection looks down"
+
+
+def test_the_below_the_frame_stop_needs_a_recent_sighting_an_in_range_memory_and_a_target_in_the_horizontal_field(monkeypatch):
+    p, ep = low_target_locked(monkeypatch)
+    p.detector.detect = lambda rgb: []
+    gone = replace(observation(ep, 2, depth=1.6), pose=AgentPose(1.1, 0, 0, 0))
+    assert p.closing._below_the_frame(replace(gone, pose=AgentPose(1.1, 0, 0, math.radians(60))), 0.9) is None, (
+        "a target 60 degrees off the heading is a yaw matter")
+    assert p.closing._below_the_frame(gone, 2.0) is None, "from 2 m the whole object is in the frame"
+    stale = replace(gone, step=1 + p.settings.target_closing.blind_cone_max_missing + 1)
+    command = p.plan(stale)
+    assert not command.stop and p.closing.blind_cone_stops == 0, "seen too long ago: the sweep, as before"
+    off, ep2 = low_target_locked(monkeypatch, blind_cone_stop=False)
+    off.detector.detect = lambda rgb: []
+    assert not off.plan(replace(observation(ep2, 2, depth=1.6), pose=AgentPose(1.1, 0, 0, 0))).stop
+    assert off.closing.blind_cone_stops == 0
+    for kwargs in ({"blind_cone_stop": 1}, {"blind_cone_max_missing": 0}, {"blind_cone_min_fraction": 1.0}):
+        with pytest.raises(ValueError):
+            TargetClosingSettings(**kwargs)
+

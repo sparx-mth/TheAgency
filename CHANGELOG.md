@@ -6,6 +6,16 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **Re-record named episodes of a run for failure inspection** (`objnav_benchmark_runtime/gibson/record_episodes.sh`,
+  `BENCHMARK.md` 2.7, 2026-10-11): `record_episodes.sh <run> <out> [--after-run] label=Scene/NNNNNN[,fallback...]...`
+  re-runs each slot with `--record` under the run's own frozen settings -- the `run.json` argv addressed to one
+  episode (`--scene S --shards 200 --shard-index k --limit 1`), the snapshotted environment, the services reused
+  or replayed -- keeps the first candidate whose re-run reproduces the original outcome (a GPU LLM is not
+  bit-exact) and tries the next otherwise, and writes `videos/<NN>_<label>_<Scene>_<k>.mp4`, the final frame,
+  for a wrong STOP the frames at the closing's first VERIFY / INSPECT / STOP decisions, and `index.md` with the
+  original beside every attempt. `--after-run` queues it behind a benchmark still scoring; `--preflight` checks
+  the slots without recording. First use: nine representative failures of the 1,000-episode validation run
+  (toilet timeouts, Wiconisco couch false positives, circuitous tv/bed successes).
 - **Detached Gibson run monitor** (`objnav_benchmark_runtime/gibson/monitor.py`, `tests/test_monitor.py`,
   `BENCHMARK.md` 2.3-2.5, 2026-10-08): the companion of a `nohup`/`setsid` launch of the 1,000-episode
   benchmark that nobody is watching. Every tick it appends one status line (UTC, done/total, running
@@ -88,6 +98,19 @@ future-you, not for a commit log.
   objnav packages; 1891 before).
 
 ### Fixed
+- **The full Gibson run died at episode 919 on a start 3.3 cm outside the navmesh; finishing it is
+  explicit and recorded** (`objnav_benchmark/{kinematics,logger,run_info}.py`, `gibson/{protocol,run,
+  report}.py`, `gibson/supervise_benchmark.sh`, 2026-10-11): habitat-sim's step filter runs for a turn
+  too (`turn_left` is a body action), and `try_step(start, start)` pulls a start that lies *outside* the
+  mesh horizontally onto its edge -- Wiconisco/000118, the only such start of the 1,000 (measured),
+  "moved" 0.033 m on its warm-up turn and the 0.020 m turn-in-place bound ended the run, twice. New
+  `KinematicTolerance.settle_xy_m` (Gibson: 0.05 m, one map cell) excuses that much horizontal placement
+  on the first action that moves the agent, like `settle_m` does vertically. Because the fix changes the
+  frozen configuration (`kinematics`, `source_sha256`), the resume that finished the run needed
+  `gibson.run --resume --resume-accepting-changes kinematics source_sha256`: `MetricsLogger` accepts a
+  difference in the named keys only (`RESUMABLE_CONFIG_CHANGES`: provenance or a self-check, never a
+  decision or score input), keeps the recorded config, writes both values into the resume's `run.json`
+  entry, and the report titles and discloses it. The supervisor forwards `RESUME_ARGS` on every replay.
 - **The 1,000-episode run no longer dies on the kinematic contract** (`objnav_benchmark/{kinematics,
   env_contract,runner}.py`, `gibson/protocol.py`, 2026-10-07): published starts lie up to 0.28 m below
   the shipped navmesh and habitat-sim settles the agent on its first TRANSLATION (turns bypass the

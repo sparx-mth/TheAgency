@@ -106,6 +106,52 @@ class TargetClosingSettings:
     # beyond two metres (3.8 m -> 0.77 m, 5 m -> 0.95 m); within two metres it
     # is the plain radius.
     association_range_gain: float = 0.15
+    # THE VISIBLE PART MOVES ALONG THE LINE OF SIGHT (since 2026-10-11). The association
+    # gate is a cylinder about the viewing ray, not a sphere about the anchor:
+    # ``association_radius_m`` ACROSS the ray and in height, that plus
+    # ``association_depth_m`` -- or the anchor frame's footprint diameter, whichever is
+    # larger -- ALONG it. When the frame's lower edge cuts a low object the depth patch
+    # lands on what is left in view, its upper and farther part: the Darden toilet's
+    # centroid jumped from the bowl (0.38 m up) to the tank (0.59 m up, 0.47-0.49 m back
+    # along the ray, 1.6-3.3 cm across it) the moment its box touched the bottom edge,
+    # 0.50-0.53 m from the anchor against a 0.50 m sphere, and every 0.92-0.94 frame of
+    # the toilet the agent was standing beside was discarded as another object until the
+    # inspection released it as "saw nothing in any view" (the 1,000-episode validation
+    # run, 2026-10-11: 63 % of the 148 toilet failures had locked on and released a
+    # candidate). Across the ray the gate is as tight as before: two chairs side by side
+    # stay two chairs.
+    association_depth_m: float = 0.60
+    # THE PART UNDER THE FRAME STANDS IN FRONT (since 2026-10-11). The terminal range of a
+    # fresh box cut by the frame's lower edge -- of a target below the camera, with the
+    # part in view now standing higher than the lowest part the lock has measured -- is the
+    # smaller of the visible near edge and the planar range to the 3-D memory. The near
+    # edge of what is in view is the near edge of the UPPER part of the object (the tank,
+    # a backrest); the part the frame cut off (the bowl, the seat) stands in front of it
+    # for the furniture of this benchmark, and the memory, fused from the whole-object
+    # frames of the approach, is the centroid inside the object. It is also the point the
+    # approach's standoff is measured from: without this the agent arrived by the memory
+    # and was out of range by the measurement, in the same frame (the Darden tank's near
+    # edge read 1.35 m with the agent 0.89 m from the bowl). The box is still fresh and
+    # associated: this is no STOP from memory alone.
+    floor_cut_terminal: bool = True
+    floor_cut_min_hidden_m: float = 0.05
+    # BELOW THE FIELD OF VIEW (since 2026-10-11). Without LOOK actions (the published Gibson
+    # protocol) a low target at the terminal range drops under the frame -- the Wiconisco
+    # toilet, 0.47 m high, shows under 40 px of its rim from 0.9 m, where the detector reads
+    # 0.12-0.18 -- and no yaw sweep brings it back; the inspection released it as "saw
+    # nothing in any view" with the agent inside the success region. When the geometry (the
+    # camera's height, pitch and lower edge; the target's measured top and remembered
+    # range) predicts fewer than ``blind_cone_min_fraction`` of the frame's rows of the
+    # target in view -- the sliver threshold of ``perception.clipped_box``: a box this short
+    # is not recognisable -- with its bearing inside the horizontal field, the target seen
+    # fresh within ``blind_cone_max_missing`` actions and the memory within the terminal
+    # range, the closing STOPs: the missing box is explained, and the one action that would
+    # bring the object back, LOOK_DOWN, does not exist. The dynamic pitch controller is this
+    # rule's counterpart where LOOK exists, so the rule is off whenever the action spec has
+    # the tilt pair. ``blind_cone_stop=False`` restores the sweep and its release.
+    blind_cone_stop: bool = True
+    blind_cone_max_missing: int = 6
+    blind_cone_min_fraction: float = 0.15
     # After a release, no new takeover may START on a far candidate for this
     # many actions: six twelve-step verifications from one spot three metres
     # from the couch (Ranchester attempt 4) were the same failure repeated,
@@ -218,6 +264,18 @@ class TargetClosingSettings:
                 raise ValueError("%s must be positive and finite" % key)
         if isinstance(self.association_range_gain, bool) or not math.isfinite(self.association_range_gain) or self.association_range_gain < 0:
             raise ValueError("association_range_gain must be finite and non-negative")
+        for key in ("association_depth_m", "floor_cut_min_hidden_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError("%s must be finite and non-negative" % key)
+        for key in ("floor_cut_terminal", "blind_cone_stop"):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError("%s must be a bool" % key)
+        if type(self.blind_cone_max_missing) is not int or self.blind_cone_max_missing < 1:
+            raise ValueError("blind_cone_max_missing must be a positive int")
+        if (isinstance(self.blind_cone_min_fraction, bool) or not math.isfinite(self.blind_cone_min_fraction)
+                or not 0 < self.blind_cone_min_fraction < 1):
+            raise ValueError("blind_cone_min_fraction must lie in (0, 1)")
         if type(self.release_cooldown_actions) is not int or self.release_cooldown_actions < 0:
             raise ValueError("release_cooldown_actions must be a non-negative int")
         if self.terminal_distance_m + self.range_tolerance_m > self.look_down_distance_m:
@@ -286,6 +344,16 @@ class TargetClosing:
     (``release_unverified``), and so is a locked one whose terminal inspection
     never saw it from close (``release_on_failed_inspection``); a locked target
     seen fresh at terminal range is STOPped on, never given back.
+
+    A frame shows a PART of the object, and the part changes as the frame's
+    edges cut it (since 2026-10-11, the toilets of the 1,000-episode run):
+    a re-sighting is associated in a cylinder along the line of sight
+    (:meth:`_associated`); the terminal range of a box the lower edge cut
+    reads the 3-D memory beside the visible near edge (:meth:`_floor_cut`);
+    and where the protocol has no LOOK_DOWN, a target the geometry puts
+    under the frame is STOPped on from the memory it was seen fresh at a
+    few actions before (:meth:`_below_the_frame`) -- the tilt-less
+    counterpart of the dynamic pitch controller (:meth:`_pitch`).
     """
 
     def __init__(self, policy):
@@ -323,6 +391,10 @@ class TargetClosing:
         self.support_stops = 0             # STOPs on consistent support-surface tracking at terminal range
         self.history_holds = 0             # releases withheld inside the terminal range by the approach history
         self.history_stops = 0             # STOPs the approach history completed without a fresh aligned box
+        self.depth_associations = 0        # re-sightings the along-ray tolerance kept that a 0.50 m sphere would have dropped
+        self.floor_cut_frames = 0          # fresh frames the lower edge cut: sightings that did not move the 3-D memory
+        self.floor_cut_measurements = 0    # terminal ranges read from the 3-D memory because the frame's lower edge cut the box
+        self.blind_cone_stops = 0          # STOPs on a target predicted below the frame, in a protocol without LOOK
         self._clear()
 
     def _clear(self):
@@ -355,6 +427,11 @@ class TargetClosing:
         self.support_seen = -1             # last step a support-surface box stood consistent with the memory
         self.support_xyz = None
         self.terminal_missing = 0          # consecutive terminal-range frames without a fresh target box
+        self.visible_floor_m = None        # the lowest height of the fresh frame's supported points
+        self.lowest_m = None               # the lowest height the target's supported points reached over this lock
+        self.top_m = None                  # ... and the highest: the object's measured top, for the below-the-frame test
+        self.footprint_m = None            # the anchor frame's footprint half-extent (``perception.footprint_radius_m``)
+        self._floor_cut_step = -1          # the last action whose terminal range the memory supplied (counted once)
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -443,7 +520,7 @@ class TargetClosing:
             range_m = math.dist((obs.pose.x, obs.pose.y), xyz[:2])
             radius = s.association_radius_m + s.association_range_gain * max(0.0, range_m - 2.0)
             associated = (self.anchor is not None and p.mapping.floor_id == self.floor_id
-                          and math.dist(self.anchor, xyz) <= radius)
+                          and self._associated(obs, xyz, radius))
             if not strong and not associated:
                 continue                                       # a weak box is only ever a re-sighting
             override = s.override_confidence < 1.0 and detection.conf >= s.override_confidence
@@ -483,8 +560,34 @@ class TargetClosing:
                 continue
             if not strong:
                 self.weak_resightings += 1
-            projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), doubt))
+            projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), doubt, rows[-1]))
         return kept, projected
+
+    def _associated(self, obs, xyz, radius):
+        """Whether a projected centroid is a re-sighting of the anchor.
+
+        A cylinder about the line of sight from the agent to the anchor:
+        within ``radius`` across the ray and in height, within ``radius``
+        plus the object's depth along it -- ``association_depth_m`` or the
+        anchor frame's footprint diameter, whichever is larger. The part of
+        an object a frame shows moves along the ray as the frame's edges cut
+        it (a toilet's bowl from 2 m, its tank from 1.3 m); across the ray
+        it moves no further than the object is wide. ``depth_associations``
+        counts the re-sightings a sphere of ``radius`` would have dropped.
+        """
+        ax, ay, az = (float(v) for v in self.anchor)
+        dx, dy, dz = float(xyz[0]) - ax, float(xyz[1]) - ay, float(xyz[2]) - az
+        rx, ry = ax - float(obs.pose.x), ay - float(obs.pose.y)
+        length = math.hypot(rx, ry)
+        if length < 1e-6:
+            return math.dist(self.anchor, xyz) <= radius
+        along = (dx * rx + dy * ry) / length
+        across = abs(dx * ry - dy * rx) / length
+        depth = max(self.settings.association_depth_m, 2.0 * float(self.footprint_m or 0.0))
+        inside = math.hypot(across, dz) <= radius and abs(along) <= radius + depth
+        if inside and math.dist(self.anchor, xyz) > radius:
+            self.depth_associations += 1
+        return inside
 
     def _suspect(self, obs, label, xyz):
         """Why the context check doubts a box of ``label`` at ``xyz`` (``target_context.suspect``), or None."""
@@ -541,15 +644,22 @@ class TargetClosing:
             return
         here = (float(obs.pose.x), float(obs.pose.y))
         if projected:
-            detection, xyz, near, doubt = max(projected, key=lambda item: item[0].conf)
+            detection, xyz, near, doubt, row = max(projected, key=lambda item: item[0].conf)
             self.count = self.count + 1 if obs.step == self.last_seen + 1 else 1
             self.sightings = (self.sightings if obs.step == self.last_seen + 1 else []) + [here]
             self.observed_xyz, self.observed_near_m = xyz, (None if near is None else float(near))
+            heights = row.get("height_range_m")
+            self.visible_floor_m = None if not heights else float(heights[0])
+            cut = self._floor_cut_box(obs, detection.xyxy, self.visible_floor_m)
+            if heights:
+                self.lowest_m = float(heights[0]) if self.lowest_m is None else min(self.lowest_m, float(heights[0]))
+                self.top_m = float(heights[1]) if self.top_m is None else max(self.top_m, float(heights[1]))
             range_m = math.dist(here, xyz[:2])
             if self.anchor is None:
                 # The 3-D memory and the approach ledger start with the takeover; a candidate
                 # that appears at arm's length with no history is re-verified from farther back.
                 self.anchor, self.floor_id = xyz, p.mapping.floor_id
+                self.footprint_m = None if row.get("radius_m") is None else float(row["radius_m"])
                 self.memory = TargetMemory3D(xyz, range_m, obs.step, s.memory_noise_floor_m, s.memory_noise_per_m)
                 self.history = ApproachHistory(here, range_m, obs.step)
                 if s.backoff and range_m < s.sudden_proximity_m:
@@ -558,6 +668,12 @@ class TargetClosing:
                     else:
                         self.backoff = BackoffManeuver(p, s.backoff_steps, s.backoff_max_actions)
                         self.backed_off.append((xyz, p.mapping.floor_id))
+            elif cut:
+                # The frame shows the UPPER part of the object (the lower edge cut the rest): its
+                # centroid is that part's, a biased reading of the object's, and fusing it walked
+                # the memory -- and the standoff measured from it -- back toward the tank frame by
+                # frame. A sighting, not a position (since 2026-10-11).
+                self.floor_cut_frames += 1
             else:
                 self.memory.update(xyz, range_m, obs.step)
             self.xyz = self.memory.xyz
@@ -1277,6 +1393,7 @@ class TargetClosing:
                 "target_visible": fresh, "range_m": distance, "measured_m": measured, "bbox_yaw_error_rad": error,
                 "box_spans_centre": spans_centre, "phase": self.phase, "approach_history": history,
                 "support_surface_fresh": self.support_seen == obs.step,
+                "floor_cut": fresh and self._floor_cut(obs),
                 "memory_sigma_m": None if self.memory is None else self.memory.sigma_m}
         # The pitch the geometry predicts is where to LOOK for the target, not a
         # condition on having seen it: the Hanson toilet projected only at 60 degrees
@@ -1303,6 +1420,21 @@ class TargetClosing:
                 info, phase="STOP", reason="approach history: target tracked over %.1f m, the 3-D memory stands %.2f m "
                 "away (sigma %.2f m) and %d frames passed without a fresh box"
                 % (self.history.path_m, distance, self.memory.sigma_m, self.terminal_missing)))
+        below = None if fresh else self._below_the_frame(obs, distance)
+        if below is not None and distance <= limit and obs.step - self.last_seen <= s.blind_cone_max_missing:
+            # The camera cannot show the target from here -- it is under the frame's lower
+            # edge, and this protocol has no LOOK_DOWN -- so a missing box is not evidence of
+            # absence, and a yaw sweep cannot find what no yaw brings into view. Seen fresh
+            # a few actions ago, the memory inside the terminal range: STOP (since 2026-10-11;
+            # before, the Wiconisco toilet was released as "saw nothing in any view" with the
+            # agent standing inside the success region).
+            self.phase = "STOP"
+            self.blind_cone_stops += 1
+            return NavigationCommand.stop_here(info=dict(
+                info, phase="STOP", below_frame_px=round(below, 1),
+                reason="target below the camera's field of view from here (%d px of it would show; no LOOK action): "
+                       "seen fresh %d action(s) ago, the 3-D memory stands %.2f m away (sigma %.2f m)"
+                % (max(0, int(below)), obs.step - self.last_seen, distance, self.memory.sigma_m)))
         views = self._inspection_views(pitch)
         blank = (s.release_on_failed_inspection and self.inspection_sighting is None
                  and self.last_seen < self.inspection_started and self.inspection_index >= len(views))
@@ -1366,13 +1498,80 @@ class TargetClosing:
         return all(math.dist((x, y), (x0, y0)) <= s.approach_stall_m for x, y in self.close_trail[1:])
 
     def _fresh_measured(self, obs):
-        """The freshly measured range to the target this action -- the near edge of its surface -- or None when not seen."""
+        """The freshly measured range to the target this action, or None when not seen.
+
+        The near edge of the surface in view, or the centroid, whichever is
+        nearer -- and, for a box the frame's lower edge cut
+        (:meth:`_floor_cut`), the planar range to the 3-D memory when that
+        is nearer still: the part in view is then the upper, farther part
+        of the object, and the memory is its centroid.
+        """
         if self.last_seen != obs.step or self.observed_xyz is None:
             return None
         measured = math.dist((obs.pose.x, obs.pose.y), self.observed_xyz[:2])
         if self.observed_near_m is not None:
             measured = min(measured, self.observed_near_m)
+        if self._floor_cut(obs):
+            memory = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2])
+            if memory < measured:
+                if self._floor_cut_step != obs.step:
+                    self._floor_cut_step = obs.step
+                    self.floor_cut_measurements += 1
+                measured = memory
         return measured
+
+    def _floor_cut(self, obs):
+        """Whether the fresh box is cut by the frame's lower edge with a lower part of the target hidden under it."""
+        return self.last_seen == obs.step and self._floor_cut_box(obs, self.box, self.visible_floor_m)
+
+    def _floor_cut_box(self, obs, box, visible_floor_m):
+        """Whether ``box`` is cut by the frame's lower edge with a lower part of the target hidden under it.
+
+        Three facts, all measured: the box reaches the lower margin; the
+        target is below the camera (its memory); and the lowest supported
+        point in view this frame (``visible_floor_m``) stands at least
+        ``floor_cut_min_hidden_m`` higher than the lowest point the lock has
+        measured so far -- part of what was seen before is now under the
+        frame. A box that touches the bottom edge while showing the object
+        down to the same height as always (a pot standing on the floor,
+        seen from far) is not cut in this sense.
+        """
+        s = self.settings
+        if (not s.floor_cut_terminal or box is None or self.xyz is None
+                or visible_floor_m is None or self.lowest_m is None):
+            return False
+        k = obs.camera.intrinsics
+        if box[3] < k.height - s.border_margin_px:
+            return False
+        camera_z = float(obs.pose.z) + float(obs.camera.height_m)
+        return float(self.xyz[2]) < camera_z and visible_floor_m - self.lowest_m >= s.floor_cut_min_hidden_m
+
+    def _below_the_frame(self, obs, distance):
+        """The rows of the target the camera would show from here, when too few to recognise it; else None.
+
+        Only without LOOK actions (``blind_cone_stop``; with them the pitch
+        controller tilts instead), with the target's bearing inside the
+        horizontal field of view -- a target to the side is a yaw matter the
+        sweep handles -- and its measured top below the camera. The count is
+        the rows from the top's predicted image row down to the frame's
+        lower margin; fewer than ``blind_cone_min_fraction`` of the frame is
+        the sliver ``perception.clipped_box`` will not accept, and the
+        detector has nothing to recognise.
+        """
+        s, actions = self.settings, self.policy.episode.action_spec
+        if not s.blind_cone_stop or actions.has_camera_tilt or self.xyz is None or self.top_m is None:
+            return None
+        k = obs.camera.intrinsics
+        margin = s.border_margin_px
+        bearing = math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
+        if abs(normalize_angle(bearing - obs.pose.yaw)) > math.atan2(0.5 * k.width - margin, k.fx):
+            return None
+        camera_z = float(obs.pose.z) + float(obs.camera.height_m)
+        if self.top_m >= camera_z:
+            return None
+        depression = math.atan2(camera_z - self.top_m, max(float(distance), 1e-6)) - float(obs.pose.camera_pitch)
+        visible = (k.height - margin) - (k.cy + k.fy * math.tan(depression))
+        return float(visible) if visible < s.blind_cone_min_fraction * k.height else None
 
     def _inspection_views(self, pitch):
         """The bounded yaw/pitch views an inspection cycles through, centred on the stored bearing."""
@@ -1428,6 +1627,10 @@ class TargetClosing:
                 "support_xyz": self.support_xyz, "support_holds": self.support_holds, "support_stops": self.support_stops,
                 "history_holds": self.history_holds, "history_stops": self.history_stops,
                 "terminal_missing": self.terminal_missing,
+                "visible_floor_m": self.visible_floor_m, "lowest_m": self.lowest_m, "top_m": self.top_m,
+                "footprint_m": self.footprint_m, "depth_associations": self.depth_associations,
+                "floor_cut_frames": self.floor_cut_frames, "floor_cut_measurements": self.floor_cut_measurements,
+                "blind_cone_stops": self.blind_cone_stops,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}
                              for xy, floor, step in self.boxed_in],
                 "rejected": [{"xyz": list(entry[0]), "floor_id": entry[1], "step": entry[2], "radius_m": entry[3],

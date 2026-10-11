@@ -161,30 +161,48 @@ of the ~100 KB of per-action series a recorded episode keeps). Budget roughly 7-
 per episode with CPU services on a 32-thread machine, i.e. **several days** for the full
 split. Three ways to make that manageable:
 
-- **It resumes.** Interrupt with Ctrl-C (the services are stopped cleanly) and continue
-  later with `run_benchmark.sh --output runs/gibson_val_<stamp>`: the completed episodes
-  are read back from `episodes.jsonl` and skipped. The configuration is frozen in
-  `run.json`; a resume after changing the source, the models, the data or the settings
-  is refused on purpose -- start a new directory for a new experiment.
+- **It resumes -- from the same launch, not from the script.** Interrupt with Ctrl-C (the
+  services are stopped cleanly) and continue later: the completed episodes are read back from
+  `episodes.jsonl` and skipped. The configuration is frozen in `run.json`, and a resume whose
+  configuration differs in *any* byte is refused on purpose -- the source hash (every `.py`
+  under `sparx_agency/`), the models, the data, the settings, **and the GPU plan**. That last one
+  means `run_benchmark.sh --output <dir>` under `GPU_PLAN=auto` is refused almost every time:
+  the launcher re-plans the GPU and the plan's free/used MiB are not what they were. The
+  resume that reproduces the configuration is the supervisor's (2.6), which replays the
+  original processes; by hand, replay `run.json`'s `argv` with `--resume` under the original
+  environment, with `gpu_plan.json` as the run recorded it. And while a run you may want to
+  resume is going, **do not edit any `.py` under `sparx_agency/`** -- that changes the source
+  hash -- and do not edit `run_benchmark.sh` itself: bash reads a running script incrementally.
+  **When the code had to change** -- the run died on a bug in a self-check, as the full run did at
+  episode 919 on 2026-10-10 -- the configuration *will* differ, and `gibson.run --resume
+  --resume-accepting-changes kinematics source_sha256` is the explicit way through: it accepts
+  a difference in the named keys only (`kinematics`, `source_sha256`, `gpu_plan` -- each
+  provenance or a self-check that only refuses an episode, never an input to a decision or a
+  score; anything else is refused as before), keeps the recorded configuration as the run's,
+  writes both values into the resume's entry in `run.json` (`resumes[].config_changes`), and
+  `comparison.md` / `audit.json` title and disclose it. The supervisor (2.6) passes it as
+  `RESUME_ARGS`.
 - **Shard across machines.** `run_benchmark.sh --shards 4 --shard-index 0` (… 1, 2, 3)
   on four machines, then merge the four complete directories into one result with
   `python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.report <dir0> <dir1> <dir2> <dir3> --merge-output <merged>`.
 - **Run detached.** Name the directory up front, let the launcher record its own PID, and put
-  the monitor (2.4) beside it; `setsid` gives the run its own session, so a closed terminal or a
-  dropped SSH/IDE session cannot reach it:
+  the monitor (2.4) and the supervisor (2.6) beside it; `setsid` gives each its own session, so a
+  closed terminal or a dropped SSH/IDE session cannot reach them:
   ```bash
   OUT=runs/gibson_val_$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$OUT"
+  G=sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson
   setsid nohup bash -c 'echo $$ > "$1/launcher.pid"; exec "$2" --output "$1"' _ "$OUT" \
-      sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/run_benchmark.sh \
-      > "$OUT/launcher.log" 2>&1 < /dev/null &
+      "$G/run_benchmark.sh" > "$OUT/launcher.log" 2>&1 < /dev/null &
   setsid nohup "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.monitor \
       "$OUT" --interval 300 > /dev/null 2>&1 < /dev/null &
+  sleep 60   # the run must be past its preflight before the supervisor snapshots it
+  setsid nohup "$G/supervise_benchmark.sh" "$OUT" > /dev/null 2>&1 < /dev/null &
   ```
   (`bash -c` writes the PID itself because `setsid` forks when it is a group leader, so `$!`
-  would name a process that has already exited.) To stop it, `kill -TERM -- -$(cat
-  "$OUT/launcher.pid")` ends the whole group -- the run, the detector and the Ollama it
-  started; the run lock is an advisory `flock`, so the same command with `--output "$OUT"`
-  resumes afterwards. The console output is also in `<output>/run.log`.
+  would name a process that has already exited.) To stop the run for good, `kill -TERM --
+  -$(cat "$OUT/launcher.pid")` ends the whole group -- the run, the detector and the Ollama it
+  started -- and the supervisor sees the exit code 130 and does not resume it (or `touch
+  "$OUT/STOP"` first). The console output is also in `<output>/run.log`.
 
 ### 2.4 Watching progress
 
@@ -219,6 +237,7 @@ Four views of the same thing:
 | `episodes.jsonl` | one row per episode: id, scene, target, success, SPL, SoftSPL, DTG, path lengths, steps, STOP, termination, wall time, and the lean diagnostics (`agent_info`) |
 | `episodes.csv`, `monitor.log`, `FINAL_SUMMARY.txt` | the monitor's (2.4): the scalar columns of `episodes.jsonl` alone, one status line per tick, and the summary it wrote when the run ended |
 | `launcher.pid`, `launcher.log` | a detached launch (2.3): the launcher's PID (its process group, for `kill -TERM -- -PID`) and everything it printed |
+| `supervisor.pid`, `supervisor.log`, `replay/`, `resumes.txt`, `publish.*`, `published_commit.txt` | the supervisor's (2.6): its PID and log, the snapshot a resume replays, how many resumes there were, the commit message and file list it built, and the commit it pushed |
 | `evaluation_diagnostics.jsonl` | the evaluator's own per-episode line (final DTG, path, collisions, first success action) |
 | `run.json`, `preflight.json` | the frozen configuration; `source-commit.txt`/`source-changes.diff` the code that ran |
 | `run.log`, `detector.log` | the console output and the detector service's log |
@@ -226,6 +245,81 @@ Four views of the same thing:
 `run_benchmark.sh --status <output>` after the run prints the headline numbers from
 `summary.json`. For a single recorded episode, `recordings/<key>/index.html` has the video
 beside the map, the LLM's readings and the metrics.
+
+### 2.6 Unattended: supervise, resume, publish
+
+A full split takes a day; nobody watches it end. `supervise_benchmark.sh <output>` is the
+detached companion that does the three things an operator would:
+
+1. **Waits** for the launcher's process (`launcher.pid`), polling every `POLL_S` (60 s), and
+   writes what it sees to `<output>/supervisor.log`.
+2. **Resumes a run that died** -- the launcher gone, no `summary.json` -- at most `MAX_RESUMES`
+   (2) times. Not by calling `run_benchmark.sh` again (see 2.3: that is refused), but by
+   **replaying** the live processes it snapshotted into `<output>/replay/` when it started --
+   `gibson.run`, the detector and the Ollama, each as the argv, environment and working
+   directory read from `/proc` -- with `--resume` appended and `gpu_plan.json` restored to
+   what the run recorded, behind a wrapper that writes `launcher.pid`, `run.log` and
+   `exit_code.txt` as the launcher would; then it restarts the monitor. Services that still
+   answer are reused, dead ones are replayed first. A run that died on the same episode twice
+   is deterministic and is left dead; exit 130 (Ctrl-C / TERM) or a `<output>/STOP` file means
+   the operator stopped it. `--snapshot` retakes the snapshot while the run is alive; `--no-resume`
+   only waits and publishes. `RESUME_ARGS` is appended to every replayed resume -- after a code
+   fix, `RESUME_ARGS="--resume-accepting-changes kinematics source_sha256"` (2.3) is how a
+   supervisor started over a dead run gets it going again: it sees the dead launcher, resumes once
+   with those arguments, and publishes at the end.
+3. **Publishes the result when `summary.json` appears**, so the numbers reach the repository
+   without anyone at the keyboard. In a temporary worktree on the remote's branch tip -- the
+   checkout you work in is never touched, and a commit of yours in the meantime is simply the
+   new base -- it writes `BENCHMARK_RESULTS.md` (one section per run: SR and SPL with 95 %
+   intervals, DTG, per scene, per category, the published rows from `comparison.md`, the
+   provenance), `results/<run>/{summary.json,episodes.csv,run.json}`, closes the progress entry
+   (`PROGRESS_ENTRY`) and adds the CHANGELOG line; commits as the repository's configured git
+   user; pushes `HEAD:<branch>` (`BRANCH` defaults to the branch checked out when it started,
+   `REMOTE` to `origin`); and fast-forwards your local branch if it is checked out and the
+   commit touches nothing you have modified -- otherwise `git pull`. Nothing is force-pushed; a
+   failed push is rebuilt on a fresh fetch and retried `PUSH_RETRIES` (12) times every
+   `PUSH_RETRY_S` (300 s), and if it never lands the commit is kept on a local branch
+   `results/<run>` with the push command in the log. The pushed SHA ends up in
+   `<output>/published_commit.txt`.
+
+`--dry-run` builds the commit and shows it without pushing; `--publish-only` publishes a
+finished run now; `--render` prints the markdown section for a finished run and exits.
+
+### 2.7 Watching a failure: re-record named episodes of a run
+
+A lean run keeps no frames. To *see* why an episode failed, re-run it with `--record` under
+the run's own frozen settings -- `record_episodes.sh` does that for a list of episodes, one
+`gibson.run` job each:
+
+```bash
+gibson/record_episodes.sh runs/gibson_val_<stamp> runs/gibson_val_<stamp>.inspection --after-run \
+    "toilet-timeout=Darden/000018,Darden/000004" "couch-wrong-stop=Wiconisco/000123" ...
+```
+
+Each argument is a **slot**: a label and one or more candidate episodes. The job replays the
+run's `run.json` argv (minus its selection, `--lean` and `--resume`) with `--scene S --shards 200
+--shard-index k --limit 1 --record` -- which addresses exactly `S/00000k` -- under the environment
+the supervisor snapshotted, reusing the detector and the Ollama when they answer and replaying
+them when they do not. A re-run is seeded like the original, but a GPU LLM is not bit-exact, so
+the first candidate whose re-run **reproduces the original outcome** is kept (`--expect same`:
+the success flag; for a failure also its termination; for a success an SPL of at most 0.5 -- a
+slot about a circuitous path) and the next is tried otherwise; `--expect any` keeps the first.
+`--after-run` waits until the run's own `gibson.run` is gone and `summary.json` is there (or the
+supervisor has given up) before touching the card. `--preflight` checks every slot's first
+candidate -- data, services, ffmpeg, and that the shard arithmetic selects the episode -- and
+records nothing. Pick the episodes from `episodes.csv` (2.4) with whatever filter the question
+needs (termination, final DTG, SPL, scene, category).
+
+The result, under `<output-dir>/`: `videos/<NN>_<label>_<Scene>_<k>.mp4` (one frame per
+decision at 6 fps; decision k is at k/6 s), `_final.jpg` (the last frame with the FINAL banner)
+and, for a wrong STOP, `_verify.jpg` / `_inspect.jpg` / `_stop.jpg` -- the frames at the
+closing's first VERIFY (the sighting that took the search over), first INSPECT and STOP
+decisions; `index.md` / `index.json` with the original beside the re-run for every attempt and
+whether it reproduced; and under `jobs/<Scene>_<k>/` the full records: `recordings/<key>/`
+holds `steps.jsonl` (every decision with its detections, planned path, room labels and the LLM's
+readings), `trajectory.csv`, `metrics.json`, and the job's `index.html` shows the video beside
+the map. The log is `record.log`. Re-issuing the command after an interruption reuses the jobs
+already recorded.
 
 **Comparability caveat.** The reference evaluation used habitat-sim 0.1.5; this runs 0.2.4
 (`--allow-sim-version-mismatch` is passed and recorded). The scorer is the SemExp one

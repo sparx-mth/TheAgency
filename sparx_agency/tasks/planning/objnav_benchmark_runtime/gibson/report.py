@@ -45,15 +45,34 @@ def _read_run(directory):
     return config, records
 
 
+def _resumes(directory):
+    """Every resume of the run as ``run.json`` recorded it, with the config keys it was allowed to change.
+
+    Returns:
+        ``(count, changes)``: how many resumes there were, and one
+        ``{"utc", "episodes_done", "changed": [key, ...]}`` per resume that
+        differed from the recorded config (``gibson.run --resume-accepting-changes``).
+    """
+    resumes = read_run_info(Path(directory).expanduser() / "run.json").get("resumes") or []
+    changes = [{"utc": entry.get("utc"), "episodes_done": entry.get("episodes_done"),
+                "changed": sorted(entry.get("config_changes") or {})}
+               for entry in resumes if entry.get("config_changes")]
+    return len(resumes), changes
+
+
 def write_report(directory):
     """Recompute from episode rows; mark unfinished/subset/diagnostic results."""
     directory = Path(directory).expanduser()
     config, records = _read_run(directory)
+    resumes, config_changes = _resumes(directory)
     summary = summarise(records)
     full_ids = {"%s/%06d" % (scene, index) for scene in SCENES for index in range(200)}
     full = (config["full_split"] and {r.episode_id for r in records} == full_ids
             and config["method"]["method"] != "diagnostic-stop")
     title = "Full Gibson validation" if full else "NOT a full benchmark result (subset, incomplete, or diagnostic)"
+    if config_changes:
+        title += " -- resumed with recorded config changes (%s); see the audit" % ", ".join(
+            sorted({key for change in config_changes for key in change["changed"]}))
     baselines = [ReportedResult(
         method, "gibson", "val", sr, spl, SOURCE, distance_to_goal_m=dtg,
         notes="TF=%s; NM=%s. Paper-reported, protocol equivalence not established."
@@ -63,6 +82,8 @@ def write_report(directory):
              "agent_errors": summary.agent_errors,
              "reference_sim_version_match": config["reference_sim_version_match"],
              "exact_osg_protocol_reproduction": False,
+             "resumes": resumes,
+             "resumes_with_config_changes": config_changes,
              "primary_metrics": ["SR", "SPL", "DTG (SemExp distance-to-success, m)"],
              "supplementary_metrics": ["SoftSPL", "steps", "wall_s"],
              "total_wall_s": sum(row.wall_s for row in records),
@@ -71,6 +92,15 @@ def write_report(directory):
     text = "# %s\n\n" % title
     text += ("SR/SPL are episode means including failures; DTG here is FMM distance "
              "to the 1 m success region. SoftSPL is supplementary.\n\n")
+    if config_changes:
+        text += ("**Resume caveat:** %d resume(s) continued this run under a frozen configuration that "
+                 "differed in %s -- each a key `gibson.run --resume-accepting-changes` admits because it is "
+                 "provenance (`source_sha256`, `gpu_plan`) or a self-check that only refuses an episode "
+                 "(`kinematics`), never an input to a decision or a score; the recorded and resumed values "
+                 "are in `run.json` under `resumes[].config_changes`. The episodes before and after were "
+                 "scored by the same scorer under the same protocol.\n\n"
+                 % (len(config_changes), ", ".join("`%s`" % key for key in sorted(
+                     {key for change in config_changes for key in change["changed"]}))))
     text += comparison_table(summary, baselines)
     text += ("\n\n**Comparison caveat:** the published rows are reference values, not "
              "paired re-evaluations. ApexNav and SG-Nav do not report Gibson. "
