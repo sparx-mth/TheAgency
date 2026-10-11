@@ -1,7 +1,7 @@
 # 026 - The full Gibson validation run, detached, with a monitor
 
 **Branch:** `feat/objnav-habitat-gibson-nadav`
-**Status:** in-progress -- the run is going (`runs/gibson_val_20261008T120112Z`); code, tests and docs done
+**Status:** done -- the run is going (`runs/gibson_val_20261008T120112Z`); code, tests and docs done
 **Roadmap item:** ObjectNav -- the published Gibson val benchmark end to end (follows 025's one-click script)
 
 ## Goal
@@ -34,7 +34,7 @@ whole split, and a multi-day job needs to survive the operator's session ending.
 - [x] Monitor launched detached beside the run, 5-minute ticks.
 - [x] `BENCHMARK.md`: the detached recipe, the stop command (`kill -TERM -- -PGID`), the monitor as
       the fourth progress view, the new files in the results table.
-- [ ] When the run ends: read `FINAL_SUMMARY.txt` / `summary.json` / `comparison.md`; record SR, SPL,
+- [x] When the run ends: read `FINAL_SUMMARY.txt` / `summary.json` / `comparison.md`; record SR, SPL,
       DTG here and in a LESSONS entry if anything other than the policy's quality explains a number.
 
 ## Open questions
@@ -52,5 +52,5 @@ whole split, and a multi-day job needs to survive the operator's session ending.
   touched here.
 
 ## Result
-(when the run ends)
+Finished 2026-10-11T08:49:49Z after 1 resume(s): **SR 0.653, SPL 0.366, DTG 1.59 m** over 1000/1000 published episodes (full split: true; agent errors 1). Per-scene and per-category tables, the published-row comparison and the provenance: `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md` (section `gibson_val_20261008T120112Z`); the data under `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/results/gibson_val_20261008T120112Z/`. Published from the detached run by `supervise_benchmark.sh`.
 

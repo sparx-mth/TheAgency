@@ -6,6 +6,7 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261008T120112Z/`, 2026-10-11): SR 0.653, SPL 0.366, DTG 1.59 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **Detached Gibson run monitor** (`objnav_benchmark_runtime/gibson/monitor.py`, `tests/test_monitor.py`,
   `BENCHMARK.md` 2.3-2.5, 2026-10-08): the companion of a `nohup`/`setsid` launch of the 1,000-episode
   benchmark that nobody is watching. Every tick it appends one status line (UTC, done/total, running
