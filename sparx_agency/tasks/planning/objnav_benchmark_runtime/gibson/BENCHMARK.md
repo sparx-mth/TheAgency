@@ -193,11 +193,36 @@ split. Three ways to make that manageable:
 - **Shard across machines.** `run_benchmark.sh --shards 4 --shard-index 0` (… 1, 2, 3)
   on four machines, then merge the four complete directories into one result with
   `python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.report <dir0> <dir1> <dir2> <dir3> --merge-output <merged>`.
-- **Run detached.** Name the directory up front, let the launcher record its own PID, and put
-  the monitor (2.4) and the supervisor (2.6) beside it; `setsid` gives each its own session, so a
-  closed terminal or a dropped SSH/IDE session cannot reach them:
+- **Run detached.** One command does what the recipe below spells out -- the launcher in its own session with its
+  PID recorded, the monitor (2.4) beside it, and the supervisor (2.6) once the run is past its preflight -- and the
+  *same* command brings the run back after the machine restarted (2.6):
   ```bash
-  OUT=runs/gibson_val_$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$OUT"
+  PROGRESS_ENTRY=docs/progress/entries/028-gibson-val-3b-laptop-run.md \
+      sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/launch_detached.sh runs/gibson_val_$(date -u +%Y%m%dT%H%M%SZ)
+  ```
+  `PROGRESS_ENTRY` is required for a new run (the supervisor closes that entry when it publishes); every variable of
+  section 3 applies; `SUPERVISOR_ARGS=--dry-run` makes the supervisor build the result commit at the end and push
+  nothing. The script makes the output path absolute -- the supervisor finds the run's processes by the `--output`
+  in their command line -- and writes the supervisor's settings to `<output>/launch.env` for the resume.
+  `launch_detached.sh <output> --stop` ends a run for good.
+
+  When the card is unusable until the machine restarts -- the NVIDIA userspace upgraded under the running kernel
+  module, `nvidia-smi` reporting a driver/library mismatch (LESSONS 2026-10-12) -- do **not** launch on the CPU
+  path and hope to move later: the renderer, the detector's device and the LLM's `num_gpu` are part of the frozen
+  configuration, and a resume cannot change them. `--after-reboot` launches the same command at the next boot
+  instead: the variables of the shell that `run_benchmark.sh`, `gpu_plan.py` and the supervisor read are written to
+  `<output>/launch.env`, and a one-shot `@reboot` crontab entry (tagged `# gibson-launch:<output>`) runs the launch once
+  `nvidia-smi` and `docker` answer (it gives up after 15 minutes rather than launch on the CPU; its transcript is
+  `<output>/boot.log`). The entry removes itself when it fires; `--stop` cancels it beforehand; `--after-reboot`
+  again replaces it. A later restart of the machine is the plain `launch_detached.sh <output>` resume as above.
+  ```bash
+  PROGRESS_ENTRY=docs/progress/entries/028-gibson-val-3b-laptop-run.md LLM_REASONING_MODEL=qwen2.5:3b-instruct \
+      LLM_VRAM_MIB=2800 OLLAMA_CONTAINER=ollama-scene-graph-gpu \
+      sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/launch_detached.sh runs/gibson_val_X --after-reboot
+  ```
+  By hand, the launch itself is:
+  ```bash
+  OUT=$PWD/runs/gibson_val_$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$OUT"
   G=sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson
   setsid nohup bash -c 'echo $$ > "$1/launcher.pid"; exec "$2" --output "$1"' _ "$OUT" \
       "$G/run_benchmark.sh" > "$OUT/launcher.log" 2>&1 < /dev/null &
@@ -206,8 +231,8 @@ split. Three ways to make that manageable:
   sleep 60   # the run must be past its preflight before the supervisor snapshots it
   setsid nohup "$G/supervise_benchmark.sh" "$OUT" > /dev/null 2>&1 < /dev/null &
   ```
-  (`bash -c` writes the PID itself because `setsid` forks when it is a group leader, so `$!`
-  would name a process that has already exited.) To stop the run for good, `kill -TERM --
+  (`bash -c` writes the PID itself because `setsid` forks when it is a group leader, so `$!` would name a process
+  that has already exited; `$OUT` is absolute for the reason above.) To stop the run for good, `kill -TERM --
   -$(cat "$OUT/launcher.pid")` ends the whole group -- the run, the detector and the Ollama it
   started -- and the supervisor sees the exit code 130 and does not resume it (or `touch
   "$OUT/STOP"` first). The console output is also in `<output>/run.log`.

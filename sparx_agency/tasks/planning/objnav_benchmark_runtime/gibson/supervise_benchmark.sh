@@ -106,7 +106,10 @@ fi
 
 # -- the run's processes -----------------------------------------------------------------------------
 launcher_pid() { cat "$OUT/launcher.pid" 2>/dev/null || true; }
-alive() { [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null; }
+alive() {   # up, and still this run's launcher: after a reboot the number in launcher.pid may belong to anything
+  [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null && [[ -r "/proc/$1/cmdline" ]] \
+    && tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline" | grep -qF -- "$RUN_NAME"
+}
 launcher_exit_code() {   # the current attempt's code: exit_code.txt newer than launcher.pid; else nothing
   if [[ -f "$OUT/exit_code.txt" && -f "$OUT/launcher.pid" && "$OUT/exit_code.txt" -nt "$OUT/launcher.pid" ]]; then
     cat "$OUT/exit_code.txt"

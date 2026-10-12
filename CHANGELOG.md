@@ -6,6 +6,15 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **The detached Gibson run as one command, and the same command after a reboot**
+  (`objnav_benchmark_runtime/gibson/launch_detached.sh`, 2026-10-12): launcher in its own session, monitor and
+  supervisor beside it, `PROGRESS_ENTRY` required so publishing closes the right entry, the supervisor's settings in
+  `<output>/launch.env`; on an existing run it starts the Ollama container and a fresh supervisor that resumes from the
+  replay snapshot; `--stop` ends a run for good. `--after-reboot` is for a card that is dead until the machine restarts
+  (driver upgraded under the running kernel module): the launch's variables go to `launch.env` and a one-shot `@reboot`
+  crontab entry launches once `nvidia-smi` and `docker` answer -- never on the CPU, since the device layout is frozen
+  into the run. The supervisor's `alive()` now counts a PID only if its command line names the run (PID reuse after a
+  reboot). BENCHMARK.md 2.3 documents both.
 - **The box in the frame drives the camera pitch** (`objnav_benchmark_runtime/methods/bbox_pitch.py`,
   `TargetClosing._servo`, `TargetClosingSettings.bbox_pitch / bbox_pitch_distance_m 1.50 / bbox_pitch_region
   0.25`, 2026-10-11): within 1.5 m of the target, with the LOOK pair and a fresh box, the pitch is an
