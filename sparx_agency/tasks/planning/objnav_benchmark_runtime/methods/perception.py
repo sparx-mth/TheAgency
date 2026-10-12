@@ -7,7 +7,7 @@ import numpy as np
 import requests
 from scipy import ndimage
 
-from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth
+from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth, robust_mask_depth
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import detections_from_json, encode_frame
@@ -105,8 +105,25 @@ class HttpDetector:
             raise ObjNavInternalError("Detector service failed: %s" % exc) from exc
 
 
-def observed_objects(observation, detections, confidence, diagnostics=None):
-    """Yield coherent centroids, not percentile depths attached to centre rays."""
+def observed_objects(observation, detections, confidence, diagnostics=None, masks=None):
+    """Yield coherent centroids, not percentile depths attached to centre rays.
+
+    Args:
+        observation: The frame.
+        detections: The boxes to project.
+        confidence: Boxes below it are recorded as ``low_confidence`` and skipped.
+        diagnostics: Optional list that receives one row per detection.
+        masks: Optional mapping ``detection -> HxW boolean mask`` from the
+            segmenter (the ``segmentation`` setting). A detection WITH a mask
+            is measured on the object's own pixels
+            (:func:`~sparx_agency.core.mapping.objects.geometry.robust_mask_depth`);
+            one mapped to ``None`` was due a mask the service could not
+            deliver this frame and is NOT measured (``segmentation_unavailable``)
+            -- with segmentation on, no box of the target is ever read the old
+            way, so the comparison between the two pipelines stays clean; one
+            absent from the mapping (another class) is measured on its box as
+            always. ``None`` (the default) is the box pipeline throughout.
+    """
     camera = observation.camera
     k = camera.intrinsics
     transform = world_T_camera_optical(observation.pose, camera)
@@ -121,25 +138,56 @@ def observed_objects(observation, detections, confidence, diagnostics=None):
         row["status"] = "invalid_box"
         if not (0 <= x1 < x2 <= k.width and 0 <= y1 < y2 <= k.height):
             continue
-        xyz = _supported_centroid(observation, detection.xyxy, transform, row)
+        mask = None
+        if masks is not None and detection in masks:
+            mask = masks[detection]
+            row["segmented"] = mask is not None
+            if mask is None:
+                row["status"] = "segmentation_unavailable"
+                continue
+        xyz = _supported_centroid(observation, detection.xyxy, transform, row, mask)
         if xyz is not None:
             yield detection.cls, xyz
 
 
-def _supported_centroid(observation, box, transform, row):
-    """Measure connected support before downsampling; a stride can alias holes."""
+def _supported_centroid(observation, box, transform, row, mask=None):
+    """Measure connected support before downsampling; a stride can alias holes.
+
+    Without a mask the depth is the box's (``robust_bbox_depth``: a low
+    percentile of the shrunken box) and the support is sought in the box's
+    central quarter. With a mask the depth is the object's own
+    (``robust_mask_depth``) and the support is sought over the whole box, on
+    the mask's pixels only: the occluder that stands inside the box -- and
+    that the box read takes for the near surface of the object -- is not on
+    the mask, so neither the centroid nor the near range can land on it.
+    """
     camera, k = observation.camera, observation.camera.intrinsics
     row["status"] = "insufficient_depth"
-    depth = robust_bbox_depth(observation.depth_m, box, min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
+    x1, y1, x2, y2 = box
+    if mask is None:
+        depth = robust_bbox_depth(observation.depth_m, box, min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        left, right = int(cx - (x2 - x1) / 4), int(cx + (x2 - x1) / 4)
+        top, bottom = int(cy - (y2 - y1) / 4), int(cy + (y2 - y1) / 4)
+        selected = None
+    else:
+        left, right, top, bottom = int(x1), int(x2), int(y1), int(y2)
+        selected = np.asarray(mask, dtype=bool)
+        if selected.shape != observation.depth_m.shape:
+            raise ValueError("mask shape %s does not match the depth %s" % (selected.shape, observation.depth_m.shape))
+        row["mask_pixels"] = int(np.count_nonzero(selected[top:bottom, left:right]))
+        row["mask_fraction"] = row["mask_pixels"] / max(1, (right - left) * (bottom - top))
+        if row["mask_pixels"] == 0:
+            row["status"] = "empty_mask"
+            return None
+        depth = robust_mask_depth(observation.depth_m, selected, box, min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
     if depth is None:
         return None
-    x1, y1, x2, y2 = box
-    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-    left, right = int(cx - (x2 - x1) / 4), int(cx + (x2 - x1) / 4)
-    top, bottom = int(cy - (y2 - y1) / 4), int(cy + (y2 - y1) / 4)
     stride = max(1, int(math.sqrt((right - left) * (bottom - top) / 900)))
     patch = observation.depth_m[top:bottom, left:right]
     valid = np.isfinite(patch) & (patch > camera.min_depth_m) & (patch < camera.max_depth_m)
+    if selected is not None:
+        valid &= selected[top:bottom, left:right]
     supported = valid & (np.abs(patch - depth) <= max(0.12, depth * 0.06))
     components, count = ndimage.label(supported)
     if not count:
@@ -149,7 +197,12 @@ def _supported_centroid(observation, box, transform, row):
     component = components == int(np.argmax(sizes))
     fraction = float(component.sum()) / max(1, int(valid.sum()))
     row.update(supported_fraction=fraction, valid_pixels=int(valid.sum()), status="mixed_depth")
-    if component.sum() < 8 or fraction < 0.35:
+    # The coherence gate (at least 35 % of the patch within the band) asks the box's
+    # central quarter whether it is ONE surface. The mask has answered that: its pixels
+    # are the object's, and a deep object seen whole -- a bed from its foot, a sofa at an
+    # angle -- spans more than the band, so on the mask path the fraction is recorded
+    # and not gated; the near-surface component still carries the centroid and range.
+    if component.sum() < 8 or (selected is None and fraction < 0.35):
         return None
     v, u = np.nonzero(component[::stride, ::stride])
     if len(v) < 8:

@@ -50,6 +50,18 @@ class RPTSettings:
             every goal on it is refused -- the ``Z_spawn +/- 0.5 m`` plane.
             Larger than the atlas's ``departure_m`` (0.45): a plateau the
             atlas still calls this floor is this floor.
+        segmentation: Whether the TARGET's boxes are segmented (box-prompted
+            Segment Anything, ``methods/segmentation.HttpSegmenter``) and
+            their depth read on the object's own pixels rather than on the
+            box (``perception.observed_objects``). OFF by default -- the
+            experiment of 2026-10-12: a box admits whatever stands in front
+            of the object, so the terminal range to a sofa with a chair
+            before it was the chair's, and the agent STOPped a metre short.
+            With it on, a target box the service could not mask is NOT read
+            the old way (``segmentation_unavailable``), so the two pipelines
+            differ in exactly one thing: which pixels count as the object.
+            The policy needs a segmenter when this is on and refuses to
+            start without one.
     """
 
     map_size_m: float = 80.0
@@ -84,6 +96,7 @@ class RPTSettings:
     warmup_steps: int = 12
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
+    segmentation: bool = False
     target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
     doorway_peek: PeekSettings = field(default_factory=lambda: PeekSettings(enabled=False))
     falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
@@ -97,6 +110,8 @@ class RPTSettings:
                 raise ValueError("%s must be positive and finite" % key)
         if type(self.allow_stair_traversal) is not bool:
             raise ValueError("allow_stair_traversal must be boolean; no silent fallback")
+        if type(self.segmentation) is not bool:
+            raise ValueError("segmentation must be boolean; no silent fallback")
         if (isinstance(self.landmark_footprint_iou, bool) or not math.isfinite(self.landmark_footprint_iou)
                 or not 0 < self.landmark_footprint_iou <= 1):
             raise ValueError("landmark_footprint_iou must lie in (0, 1]")

@@ -6,7 +6,10 @@ not privileged scene annotations.
 
 - `geometry.py`: camera-intrinsic box transforms, robust box depth and world
   projection. Camera optical and body/world frame conventions are documented
-  there; do not substitute unrotated image coordinates.
+  there; do not substitute unrotated image coordinates. `robust_mask_depth`
+  is the box read's mask-aware counterpart: the same low percentile, taken
+  over the pixels a segmenter attributes to the object (bounded by the box),
+  so an occluder standing inside the box cannot carry the read.
 - `landmarks.py`: `ObjectLandmarkMap` with per-class radius association and an
   observation-confirmation threshold. Existing defaults retain the original
   first-in-radius behavior. `nearest_match=True` chooses the closest eligible

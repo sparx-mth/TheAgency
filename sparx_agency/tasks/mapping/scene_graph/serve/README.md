@@ -174,6 +174,39 @@ dedicated GPU host or stop the simulator before this isolated profile:
 records cold start and CUDA allocator peaks, and releases the model on exit.
 Failures are recorded, not replaced with a successful weaker configuration.
 
+## The segmentation service (box-prompted Segment Anything)
+
+`segmentation_server.py` is the detector's sibling for the ObjectNav
+`segmentation` setting (2026-10-12): `POST /segment` takes the detector
+protocol's JPEG frame (base64) plus the boxes to segment and returns one
+lossless PNG mask per box **in box order**, so the client lines masks up with
+its detections by position (`segmentation_contract.py`; the runtime client is
+`objnav_benchmark_runtime/methods/segmentation.HttpSegmenter`). It is a
+**separate process on its own port** on purpose: the detector service pins
+its identity per run and every client refuses drift, so a segmenter inside
+it would have changed that identity for every run, segmentation on or off.
+It serves `core/mapping/segmentation/SamPromptedSegmenter` (ultralytics
+`SAM`; the checkpoint picks the variant) and runs in the same torch venv:
+
+```bash
+# MobileSAM: ~0.3 s per 640 x 480 frame on four CPU threads; sam2.1_t.pt is the stronger small model (~0.6 s).
+CUDA_VISIBLE_DEVICES="" "$DETECT_PY" -m sparx_agency.tasks.mapping.scene_graph.serve.segmentation_server \
+  --model "$HOME/models/objnav/mobile_sam.pt" --device cpu --host 127.0.0.1 --port 18096 --torch-threads 4
+curl -s http://127.0.0.1:18096/health      # "backend": "sam", checkpoint_sha256, segmenter_config, packages
+```
+
+No checkpoint is downloaded: provision `mobile_sam.pt` / `sam2.1_t.pt` from
+the ultralytics assets release (`ultralytics.utils.downloads.attempt_download_asset`)
+into `$HOME/models/objnav/` first; a missing file fails at startup. The same
+GPU rule as the detector applies (`--device cuda:N` refuses a card with
+>512 MiB resident unless `--allow-shared-gpu`; never beside simulator
+rendering). `/health` and every `/segment` reply carry the checkpoint hash,
+configuration, preprocessing, wire codec and package versions atomically; the
+client pins them for the run. The frame is the SAME JPEG bytes the detector
+sees, so the mask is drawn on the image the boxes were drawn on. Tests:
+`tests/test_segmentation_service.py` (the real server with a fake model,
+through the real client; no torch).
+
 ## Reproduce the development comparison
 
 To reproduce the historical **S** baseline, run the explicit S rollback command

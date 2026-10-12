@@ -79,6 +79,7 @@ LOG = logging.getLogger(__name__)
 #: The model services whose failures arm a back-off.
 ROOM_LLM = "room_llm"
 DETECTOR = "detector"
+SEGMENTER = "segmenter"
 
 
 @dataclass(frozen=True)
@@ -240,7 +241,7 @@ class ExplorationFallback:
                       "room_peek": 0, "relocation": 0, "footing": 0, "hold": 0, "failures": 0,
                       "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0,
                       "goal_kept": 0, "goal_switched": 0, "goal_outranked": 0,
-                      ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0}
+                      ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0, SEGMENTER + "_failures": 0}
         self._logged = set()
         self._consecutive = {}
         self.retry_step = {}

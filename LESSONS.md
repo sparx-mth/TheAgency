@@ -11,6 +11,50 @@ Format per entry:
 
 ---
 
+## 2026-10-12 — "unable to find CUDA device 0 among 3 EGL devices": the renderer died because `apt` upgraded the NVIDIA userspace under the running kernel module, and the iGPU is no fallback
+
+**Symptom:** Every `gibson.run` (and the `run_benchmark.sh` smoke) died in two seconds with
+`Platform::WindowlessEglApplication::tryCreateContext(): unable to find CUDA device 0 among 3 EGL devices in
+total / WindowlessContext: Unable to create windowless context`. `nvidia-smi` said `Failed to initialize NVML:
+Driver/library version mismatch (NVML library version: 595.99)`, so `gpu_plan.py` and the `gibson.run` GPU gate
+died too -- while `torch.cuda` in the detector venv allocated on the card without complaint.
+
+**Root cause:** `/var/log/apt/history.log`: `nvidia-driver-595-open` 595.91.07 -> 595.99.02 at 09:46, seventeen
+minutes after boot; `/proc/driver/nvidia/version` still said 595.91.07 and DKMS had the 595.99 module built for the
+next boot. CUDA tolerates the skew, NVML and the NVIDIA EGL vendor do not: with
+`__EGL_VENDOR_LIBRARY_FILENAMES=10_nvidia.json` forced, `eglQueryDevicesEXT` returned **zero** devices, so the three
+EGL devices glvnd listed were all Mesa's (the NVIDIA card through a driverless Mesa device, the Intel iGPU, and
+`EGL_MESA_device_software`), none carrying `EGL_CUDA_DEVICE_NV`, and habitat-sim's `gpu_device_id=0` CUDA match
+had nothing to match. The obvious fallbacks failed for reasons worth knowing: `gpu_device_id=-1` (no CUDA match,
+EGL device 0) created a context on the **Intel iGPU** and rendered **black RGB with valid depth** -- Magnum's GPU
+validation showed `GL_OUT_OF_MEMORY in glTexStorage2D(texture too large)`: a Gibson `.glb` is one mesh with one
+**16384 x 16384 JPEG** texture, which iris cannot allocate (hiding the ASTC extension so Basis transcodes to BC7
+changed nothing: the texture is a JPEG); `LIBGL_ALWAYS_SOFTWARE=1` segfaulted at context creation (kms_swrast over
+the driverless NVIDIA node); and `MAGNUM_DEVICE=2` was ignored -- habitat fixes Magnum's device to 0 (`found 3 EGL
+devices, choosing device 0`), so the software device is unreachable while any hardware device is enumerated.
+
+**Fix / workaround:** The reboot (the DKMS module is built). Until then, `gibson.run --software-render`
+(habitat `gpu_device_id=-1`, GPU gate skipped, `renderer` recorded in `run.json`) under an unprivileged user
+namespace that hides the DRM nodes, so Mesa enumerates ONLY its software device and habitat's device 0 is
+llvmpipe: `unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _ python -m ... gibson.run
+--software-render ...`. `run_benchmark.sh HABITAT_RENDER=software` (with `GPU_PLAN=off`, since the plan needs
+`nvidia-smi`) does exactly that for the run, the preflight and the five-scene campaign, and `record_episodes.sh`
+re-wraps a run whose argv carries `--software-render`. Measured: a Wiconisco frame renders correctly (door,
+refrigerator, textures) at ~30 ms a step on llvmpipe (LLVM 20, 32 threads), with ~1.3 GB of RAM for the texture
+and its mips per simulator process -- the renderer was never the bottleneck, the CPU LLM is. The former
+`HABITAT_SOFTWARE_RENDER=1` path (`LIBGL_ALWAYS_SOFTWARE=1`, device unchanged) never rendered on software and
+now routes to this.
+
+**Don't:** Don't reload the kernel module to "fix" the skew on a laptop whose desktop (gnome-shell on Wayland)
+holds `/dev/nvidia0` -- it needs root and ends the session. Don't trust an RGB frame by `max() == 255`: the alpha
+channel of habitat's RGBA sensor is 255 everywhere; check the mean and std of the first three channels. Don't
+read `torch.cuda.is_available()` as "the GPU stack is fine": CUDA, NVML and EGL are three libraries with three
+tolerances for the same skew. And don't run the Intel iGPU as a renderer for Gibson even when it creates a
+context: the depth comes back plausible and the RGB is black, which the detector reads as an empty scene with
+no error anywhere.
+
+---
+
 ## 2026-10-11 — A more accurate target memory made a success fail: the standoff re-selection threw away a goal that had a path
 
 **Symptom:** The regression check of the toilet closing rules on the nine inspection slots

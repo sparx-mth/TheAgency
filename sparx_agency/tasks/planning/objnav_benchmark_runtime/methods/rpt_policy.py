@@ -51,10 +51,12 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing
 class RPTSearchPolicy:
     name = "sparx-rpt-llm-host-sweep"
 
-    def __init__(self, detector, llm_client, settings=None):
-        self.detector, self.llm_client = detector, llm_client
+    def __init__(self, detector, llm_client, settings=None, segmenter=None):
+        self.detector, self.llm_client, self.segmenter = detector, llm_client, segmenter
         self.settings = settings or RPTSettings()
         s = self.settings
+        if s.segmentation and segmenter is None:
+            raise ValueError("RPTSettings.segmentation is on but no segmenter was given; no silent box fallback")
         if s.local_exploration == "falcon":
             self.name = "sparx-rpt-llm-falcon-planar"
         self.converter_params = ActionConverterParams(heading_hysteresis_deg=1.0)
@@ -152,7 +154,12 @@ class RPTSearchPolicy:
                                      "synchronous frame processing, one full rotation (warm-up scan) before room selection "
                                      "on every storey first entered"
                                      % self.settings.graph_period_steps,
-                "camera_control": asdict(CameraControlSettings()), "perception_fusion": "coherent-depth/floor-qualified-v1",
+                "camera_control": asdict(CameraControlSettings()),
+                "perception_fusion": "coherent-depth/floor-qualified-v1" + ("/target-masked" if self.settings.segmentation else ""),
+                "segmentation": ({"enabled": True, "scope": "target boxes at or above detection_confidence",
+                                  "depth": "robust_mask_depth over the mask within the box; near-surface component, no coherence gate",
+                                  "unmasked_target_box": "not projected (segmentation_unavailable)"}
+                                 if self.settings.segmentation else {"enabled": False, "depth": "robust_bbox_depth over the shrunken box"}),
                 "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
                 "falcon_running": self.settings.local_exploration == "falcon",
                 "falcon_source": dict(FALCON_SOURCE) if self.settings.local_exploration == "falcon" else None,

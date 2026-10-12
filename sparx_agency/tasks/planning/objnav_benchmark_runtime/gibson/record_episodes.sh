@@ -174,6 +174,10 @@ def job_argv(candidate, job_dir, preflight=False):
     scene, index = candidate.split("/")
     argv = [PYTHON, "-u", "-m", MODULE] + BASE + ["--scene", scene, "--shards", "200", "--shard-index", str(int(index)),
                                                    "--limit", "1", "--record", "--output", str(job_dir)]
+    if "--software-render" in BASE:
+        # The run rendered on Mesa's llvmpipe with /dev/dri hidden (run_benchmark.sh HABITAT_RENDER=software):
+        # the re-run must see the same single EGL device, or habitat's device 0 is whatever hardware Mesa finds.
+        argv = ["unshare", "-rm", "sh", "-c", 'mount -t tmpfs none /dev/dri && exec "$@"', "_"] + argv
     return argv + ["--preflight"] if preflight else argv
 
 

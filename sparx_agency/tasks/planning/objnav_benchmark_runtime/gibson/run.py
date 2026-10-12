@@ -70,6 +70,11 @@ def parser():
                         "resume entry and the report says so" % ", ".join(RESUMABLE_CONFIG_CHANGES))
     p.add_argument("--allow-sim-version-mismatch", action="store_true")
     p.add_argument("--allow-shared-gpu", action="store_true")
+    p.add_argument("--software-render", action="store_true",
+                   help="Render with Mesa's software EGL device (llvmpipe) instead of a CUDA GPU: habitat gets no "
+                        "GPU device, the GPU gate is skipped, and the frozen configuration records the renderer. "
+                        "The launcher must leave Mesa no hardware device (run_benchmark.sh hides /dev/dri), or "
+                        "device 0 is whatever hardware Mesa finds first")
     p.add_argument("--target-override", choices=CATEGORIES,
                    help="DIAGNOSTIC: the category the agent searches for instead of the published goal; "
                         "scoring stays against the published goal and the run is marked non-publishable")
@@ -147,6 +152,10 @@ def _method(args, defaults=None):
         if overrides.get("local_exploration", args.explorer) != args.explorer:
             raise ValueError("--explorer disagrees with --policy-config")
         overrides["local_exploration"] = args.explorer
+    if getattr(args, "segmentation", None):
+        if overrides.get("segmentation", True) is not True:
+            raise ValueError("--segmentation disagrees with --policy-config")
+        overrides["segmentation"] = True
     settings = RPTSettings(**dict(defaults or {}, **dict(overrides, seed=args.seed)))
     config = LLMConfig.from_env()
     config.seed = args.seed
@@ -154,15 +163,25 @@ def _method(args, defaults=None):
     detector = HttpDetector(public_service_url(args.detector_url), gibson_label_mapper().vocabulary(),
                             expected_backend=args.detector_backend,
                             timeout_s=getattr(args, "detector_timeout_s", 30.0))
+    services = [("LLM", client), ("detector", detector)]
+    segmenter = None
+    if settings.segmentation:
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.segmentation import HttpSegmenter
+        if not getattr(args, "segmenter_url", None):
+            raise RuntimeError("segmentation is on (--segmentation / policy config) but no --segmenter-url was given; "
+                               "start segmentation_server.py and name it, or turn the setting off")
+        segmenter = HttpSegmenter(public_service_url(args.segmenter_url), timeout_s=getattr(args, "segmenter_timeout_s", 30.0),
+                                  expected_model=getattr(args, "segmenter_model", None))
+        services.append(("segmenter", segmenter))
     problems, identities = [], {}
-    for name, service in (("LLM", client), ("detector", detector)):
+    for name, service in services:
         try:
             identities[name] = service.health()
         except Exception as exc:
             problems.append("%s: %s" % (name, exc))
     if problems:
         raise RuntimeError("; ".join(problems))
-    policy = RPTSearchPolicy(detector, client, settings)
+    policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter)
     emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
     if emitted > min(settings.detection_confidence, policy.door_settings.confidence):
         raise RuntimeError("Detector emission threshold hides door candidates; restart with --conf 0.05")
@@ -171,6 +190,8 @@ def _method(args, defaults=None):
     llm.pop("api_key", None)
     info.update(llm=llm, llm_identity=identities["LLM"], detector=identities["detector"],
                 detector_url=args.detector_url, detector_timeout_s=detector.timeout_s)
+    if segmenter is not None:
+        info.update(segmenter=identities["segmenter"], segmenter_url=args.segmenter_url, segmenter_timeout_s=segmenter.timeout_s)
     return policy, info
 
 
@@ -191,7 +212,7 @@ def _gpu_plan_record():
 
 
 def _gpu_gate(args):
-    if args.allow_shared_gpu:
+    if args.allow_shared_gpu or args.software_render:
         return
     result = subprocess.run(["nvidia-smi", "--id=%d" % args.gpu_device, "--query-gpu=memory.used",
                              "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
@@ -231,7 +252,10 @@ def prepare(args):
     else:
         try:
             dataset = GibsonDataset(args.episodes_dir, args.scenes_dir, full=args.scene is None, scene=args.scene)
-            env = GibsonEnv(dataset, args.seed, args.gpu_device, target_override=args.target_override)
+            # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
+            # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
+            env = GibsonEnv(dataset, args.seed, -1 if args.software_render else args.gpu_device,
+                            target_override=args.target_override)
             ids = select_episodes(env.episode_ids(), args.limit, args.shards, args.shard_index)
             env.validate_starts(ids)
         except (OSError, ValueError, KeyError, ImportError, EOFError, pickle.UnpicklingError) as exc:
@@ -248,6 +272,7 @@ def prepare(args):
               "reference_sim_version_match": version_match, "selected_episode_ids": list(ids),
               "shards": args.shards, "shard_index": args.shard_index, "limit": args.limit,
               "on_agent_error": "record", "allow_shared_gpu": args.allow_shared_gpu,
+              "renderer": "software (Mesa llvmpipe EGL device; --software-render)" if args.software_render else "cuda gpu %d" % args.gpu_device,
               "scene": args.scene, "recording": {"enabled": args.record, "fps": args.video_fps},
               "kinematics": asdict(PROTOCOL.kinematics()),
               "gpu_plan": _gpu_plan_record(),

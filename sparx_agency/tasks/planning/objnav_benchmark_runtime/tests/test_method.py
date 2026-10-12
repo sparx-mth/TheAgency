@@ -51,13 +51,14 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests).
     ``llm`` replaces the neutral :class:`FakeLLM` for every model role."""
     discovery = overrides.pop("discovery", False)
+    segmenter = overrides.pop("segmenter", None)          # with segmentation=True: the fake SAM service
     if not discovery:
         overrides.setdefault("doorway_peek", {"enabled": False})
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
                             camera, PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
     policy = RPTSearchPolicy(FakeDetector(label, duplicate), llm or FakeLLM(),
-                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)))
+                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)), segmenter=segmenter)
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     if not discovery:
         policy.warmup_actions = policy.settings.warmup_steps  # this fixture isolates the existing room/target components

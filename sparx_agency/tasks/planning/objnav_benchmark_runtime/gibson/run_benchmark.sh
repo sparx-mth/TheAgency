@@ -9,6 +9,8 @@
 #   gibson/run_benchmark.sh --status runs/gibson_val_X        # print the live progress of a run and exit
 #   gibson/run_benchmark.sh --five-scene 3                    # 3 recorded episodes per val scene (15), live dashboard
 #   gibson/run_benchmark.sh --five-scene 3 --scenes Darden Markleeville Wiconisco   # ... for a subset of the scenes
+#   SEGMENTATION=1 gibson/run_benchmark.sh --five-scene 1   # + the Segment Anything service: the target's depth is
+#                                                           #   read on the object's own pixels (off by default)
 #
 # The GPU is handed out by gibson/gpu_plan.py before the services start -- LLM first, YOLO second,
 # Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services).
@@ -16,7 +18,7 @@
 # see BENCHMARK.md beside this file for the full list and what each one is for.
 set -euo pipefail
 
-usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +33,13 @@ YOLO_WEIGHTS="${YOLO_WEIGHTS:-$MODELS/yolov8x-worldv2.pt}"
 DETECTOR_HOST="${DETECTOR_HOST:-127.0.0.1}"
 DETECTOR_PORT="${DETECTOR_PORT:-18095}"
 DETECTOR_THREADS="${DETECTOR_THREADS:-4}"
+# The segmentation experiment (2026-10-12): SEGMENTATION=1 starts the box-prompted Segment Anything service
+# beside the detector and runs the policy with its `segmentation` setting on; 0 (the default) is the box pipeline.
+SEGMENTATION="${SEGMENTATION:-0}"
+SAM_WEIGHTS="${SAM_WEIGHTS:-$MODELS/mobile_sam.pt}"
+SEGMENTER_PORT="${SEGMENTER_PORT:-18096}"
+SEGMENTER_DEVICE="${SEGMENTER_DEVICE:-cpu}"        # cpu: ~0.3 s per frame with target boxes (MobileSAM, 4 threads)
+SEGMENTER_THREADS="${SEGMENTER_THREADS:-4}"
 # Ollama: "docker" starts/stops the named container, "native" runs `ollama serve`, "external" only checks it.
 OLLAMA_MODE="${OLLAMA_MODE:-docker}"
 OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-ollama-scene-graph}"
@@ -49,6 +58,11 @@ GPU_DEVICE="${GPU_DEVICE:-0}"
 ALLOW_SHARED_GPU="${ALLOW_SHARED_GPU:-0}"
 # auto: gpu_plan.py decides each process's device from the free VRAM; off: CPU services, Habitat on the GPU.
 GPU_PLAN="${GPU_PLAN:-auto}"
+# gpu (default): habitat renders on the CUDA GPU. software: Mesa's llvmpipe, with /dev/dri hidden from the run in an
+# unprivileged user namespace so that Mesa's software device is the only EGL device (the Gibson 16384^2 texture does
+# not fit an iGPU, and habitat picks EGL device 0) -- for a box whose NVIDIA EGL is unusable, e.g. after a driver
+# upgrade until the reboot that loads the matching kernel module (2026-10-12). ~30 ms a frame; recorded in run.json.
+HABITAT_RENDER="${HABITAT_RENDER:-gpu}"
 CLIP_WEIGHTS="${CLIP_WEIGHTS:-$MODELS/clip/ViT-B-32.pt}"
 RUNS_ROOT="${RUNS_ROOT:-$REPO/runs}"
 
@@ -83,6 +97,7 @@ die() { say "ERROR: $*" >&2; exit 1; }
 [[ -f "$GIBSON_EPISODES_DIR/val_info.pbz2" ]] || die "no val_info.pbz2 under $GIBSON_EPISODES_DIR (set GIBSON_EPISODES_DIR)"
 [[ -d "$GIBSON_SCENES_DIR" ]] || die "no scene directory at $GIBSON_SCENES_DIR (set GIBSON_SCENES_DIR)"
 [[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
+[[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS; mobile_sam.pt or sam2.1_t.pt from the ultralytics assets release)"
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   if [[ -n "$FIVE_SCENE" ]]; then
@@ -124,7 +139,7 @@ for warning in plan["warnings"]:
     print("  WARNING: " + warning)
 PY
   GPU_DEVICE="$HABITAT_GPU_DEVICE"
-  if [[ "$HABITAT_SOFTWARE_RENDER" == 1 ]]; then export LIBGL_ALWAYS_SOFTWARE=1; fi
+  [[ "$HABITAT_SOFTWARE_RENDER" == 1 ]] && HABITAT_RENDER=software
 else
   OBJNAV_LLM_DEVICE=cpu OBJNAV_YOLO_DEVICE=cpu OBJNAV_HABITAT_DEVICE=gpu
   OLLAMA_CUDA_VISIBLE_DEVICES=-1 DETECTOR_DEVICE=cpu DETECTOR_CUDA_VISIBLE_DEVICES=""
@@ -132,12 +147,25 @@ else
   say "GPU plan off: CPU services, Habitat on GPU $GPU_DEVICE" | tee -a "$LOG"
 fi
 
+# -- the renderer -------------------------------------------------------------------------------
+RENDER_WRAP=() RENDER_FLAGS=()
+case "$HABITAT_RENDER" in
+  gpu) ;;
+  software)
+    unshare -rm true 2>/dev/null || die "HABITAT_RENDER=software needs unprivileged user namespaces (unshare -rm) to hide /dev/dri from Mesa"
+    RENDER_WRAP=(unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _)
+    RENDER_FLAGS=(--software-render)
+    say "renderer: Mesa llvmpipe (software), /dev/dri hidden from the run; the GPU gate is skipped" | tee -a "$LOG" ;;
+  *) die "HABITAT_RENDER must be gpu or software" ;;
+esac
+
 # -- services ----------------------------------------------------------------------------------
-STARTED_OLLAMA=0 DETECTOR_PID="" OLLAMA_PID=""
+STARTED_OLLAMA=0 DETECTOR_PID="" SEGMENTER_PID="" OLLAMA_PID=""
 cleanup() {
   code=$?
   trap - EXIT
   if [[ -n "$DETECTOR_PID" ]]; then kill -TERM "$DETECTOR_PID" 2>/dev/null || true; wait "$DETECTOR_PID" 2>/dev/null || true; fi
+  if [[ -n "$SEGMENTER_PID" ]]; then kill -TERM "$SEGMENTER_PID" 2>/dev/null || true; wait "$SEGMENTER_PID" 2>/dev/null || true; fi
   if [[ "$STARTED_OLLAMA" == 1 ]]; then
     case "$OLLAMA_MODE" in
       docker) docker stop --timeout 15 "$OLLAMA_CONTAINER" > /dev/null 2>&1 || true ;;
@@ -212,6 +240,27 @@ else
   wait_for_url "$DETECTOR_URL/health" 300 "the detector"
 fi
 
+# -- the segmentation service (SEGMENTATION=1): Segment Anything prompted with the target's boxes ---------------
+SEGMENTER_FLAGS=()
+if [[ "$SEGMENTATION" == 1 ]]; then
+  SEGMENTER_URL="http://$DETECTOR_HOST:$SEGMENTER_PORT"
+  if curl -fsS --max-time 5 "$SEGMENTER_URL/health" > /dev/null 2>&1; then
+    say "segmenter already up at $SEGMENTER_URL (left running)" | tee -a "$LOG"
+  else
+    SEGMENTER_ARGS=(--model "$SAM_WEIGHTS" --device "$SEGMENTER_DEVICE" --host "$DETECTOR_HOST" --port "$SEGMENTER_PORT"
+                    --torch-threads "$SEGMENTER_THREADS")
+    [[ "$SEGMENTER_DEVICE" == cuda* && "$ALLOW_SHARED_GPU" == 1 ]] && SEGMENTER_ARGS+=(--allow-shared-gpu)
+    SEGMENTER_CUDA=""; [[ "$SEGMENTER_DEVICE" == cuda* ]] && SEGMENTER_CUDA="${SEGMENTER_DEVICE#cuda:}"
+    say "starting the Segment Anything service ($(basename "$SAM_WEIGHTS")) on $SEGMENTER_DEVICE at $SEGMENTER_URL" | tee -a "$LOG"
+    CUDA_VISIBLE_DEVICES="$SEGMENTER_CUDA" "$DETECT_PY" -u -m sparx_agency.tasks.mapping.scene_graph.serve.segmentation_server \
+      "${SEGMENTER_ARGS[@]}" > "$SERVICE_DIR/segmenter.log" 2>&1 &
+    SEGMENTER_PID=$!
+    wait_for_url "$SEGMENTER_URL/health" 300 "the segmenter"
+  fi
+  SEGMENTER_FLAGS=(--segmentation --segmenter-url "$SEGMENTER_URL" --segmenter-model "$(basename "$SAM_WEIGHTS")")
+  say "segmentation ON: the target's depth is read on its SAM mask (policy setting segmentation=true)" | tee -a "$LOG"
+fi
+
 # -- FFmpeg for --record: PATH, then any imageio-ffmpeg binary an environment on this machine ships ------
 if [[ "$RECORD" == 1 && -z "${IMAGEIO_FFMPEG_EXE:-}" ]] && ! command -v ffmpeg > /dev/null 2>&1; then
   FOUND="$("$DETECT_PY" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())' 2>/dev/null || true)"
@@ -233,11 +282,13 @@ if [[ -n "$FIVE_SCENE" ]]; then
              --seed "$SEED" --gpu-device "$GPU_DEVICE" --allow-sim-version-mismatch)
   [[ "$ALLOW_SHARED_GPU" == 1 ]] && FIVE_ARGS+=(--allow-shared-gpu)
   [[ ${#FIVE_SCENES[@]} -gt 0 ]] && FIVE_ARGS+=(--scenes "${FIVE_SCENES[@]}")
+  [[ ${#SEGMENTER_FLAGS[@]} -gt 0 ]] && FIVE_ARGS+=("${SEGMENTER_FLAGS[@]}")
+  [[ ${#RENDER_FLAGS[@]} -gt 0 ]] && FIVE_ARGS+=("${RENDER_FLAGS[@]}")
   FIVE_ARGS+=("${EXTRA[@]}")
   date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"
   say "five-scene campaign: $FIVE_SCENE episode(s) per scene, stairs forbidden; results stream to $OUTPUT/benchmark_results.{json,csv}" | tee -a "$LOG"
   set +e
-  "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene "${FIVE_ARGS[@]}" 2>&1 | tee -a "$LOG"
+  "${RENDER_WRAP[@]}" "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene "${FIVE_ARGS[@]}" 2>&1 | tee -a "$LOG"
   RUN_CODE=${PIPESTATUS[0]}
   set -e
   [[ "$RUN_CODE" == 0 ]] || die "five_scene exited with $RUN_CODE (see $LOG and $OUTPUT/<Scene>/run.log)"
@@ -255,10 +306,12 @@ ARGS=(--episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" --
 [[ "$LEAN" == 1 ]] && ARGS+=(--lean)
 [[ "$ALLOW_SHARED_GPU" == 1 ]] && ARGS+=(--allow-shared-gpu)
 [[ -s "$OUTPUT/episodes.jsonl" ]] && { say "resuming: $OUTPUT already holds episodes" | tee -a "$LOG"; ARGS+=(--resume); }
+[[ ${#SEGMENTER_FLAGS[@]} -gt 0 ]] && ARGS+=("${SEGMENTER_FLAGS[@]}")
+[[ ${#RENDER_FLAGS[@]} -gt 0 ]] && ARGS+=("${RENDER_FLAGS[@]}")
 ARGS+=("${EXTRA[@]}")
 
 say "preflight" | tee -a "$LOG"
-"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run "${ARGS[@]}" --preflight > "$OUTPUT/preflight.json" \
+"${RENDER_WRAP[@]}" "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run "${ARGS[@]}" --preflight > "$OUTPUT/preflight.json" \
   || { cat "$OUTPUT/preflight.json"; die "preflight refused the run (see $OUTPUT/preflight.json)"; }
 "$HAB_PY" - "$OUTPUT/preflight.json" <<'PY'
 import json, sys
@@ -267,13 +320,17 @@ print("  episodes selected: %d%s" % (len(config["selected_episode_ids"]), "  (FU
 print("  method: %s | lean records: %s | publishable: %s" % (config["method"]["method"], config["lean_records"], config["publishable"]))
 print("  llm: %s (labels) + %s (node oracle) at %s" % (config["method"]["llm"]["model"], config["method"]["llm"]["reasoning_model"], config["method"]["llm"]["base_url"]))
 print("  detector: %s" % config["method"]["detector"]["metadata"].get("backend"))
+print("  renderer: %s" % config.get("renderer", "cuda gpu"))
+segmenter = config["method"].get("segmenter")
+print("  segmentation: %s" % ("ON -- %s on %s at %s" % (segmenter["model"], segmenter["device"], config["method"].get("segmenter_url"))
+                              if segmenter else "off (box depth)"))
 PY
 if [[ "$PREFLIGHT" == 1 ]]; then say "preflight only: done"; exit 0; fi
 
 date -u +%FT%TZ > "$OUTPUT/started_utc.txt"
 say "running; progress: $OUTPUT/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
 set +e
-"$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run "${ARGS[@]}" 2>&1 | tee -a "$LOG"
+"${RENDER_WRAP[@]}" "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run "${ARGS[@]}" 2>&1 | tee -a "$LOG"
 RUN_CODE=${PIPESTATUS[0]}
 set -e
 if [[ "$RUN_CODE" != 0 ]]; then die "gibson.run exited with $RUN_CODE (see $LOG); rerun the same command with --output $OUTPUT to resume"; fi

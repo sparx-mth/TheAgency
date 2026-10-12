@@ -129,6 +129,8 @@ def run_scene_job(args, scene, directory, policy_config, on_episode):
         command.append("--allow-sim-version-mismatch")
     if args.allow_shared_gpu:
         command.append("--allow-shared-gpu")
+    if getattr(args, "software_render", False):
+        command.append("--software-render")
     started = time.monotonic()
     tail = EpisodeTail(directory)
     with (directory / "run.log").open("w") as stream:
@@ -161,6 +163,8 @@ def main(argv=None):
     parser.add_argument("--allow-sim-version-mismatch", action="store_true")
     parser.add_argument("--allow-shared-gpu", action="store_true",
                         help="Forwarded to every scene run; needed when GPU 0 also drives a desktop")
+    parser.add_argument("--software-render", action="store_true",
+                        help="Forwarded to every scene run: Mesa llvmpipe instead of a CUDA GPU (see gibson.run)")
     args = parser.parse_args(argv)
     if not 1 <= args.episodes_per_scene <= 200:
         parser.error("--episodes-per-scene must be between 1 and 200")

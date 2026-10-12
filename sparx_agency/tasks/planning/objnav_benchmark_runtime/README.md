@@ -1402,6 +1402,54 @@ confirmed `bed` outvoted (`contradicted_by_map`, `map_rejections`,
 `ObjectLandmarkMap(class_votes=True)` for its other users and reads zero in
 this runtime's diagnostics.
 
+### The target's depth on its own pixels: the `segmentation` setting (2026-10-12, off by default)
+
+A detection box overhangs its object and admits whatever stands **in front**
+of it. The box pipeline reads a detection's range as a low percentile of the
+depth in the box's central quarter (`core/mapping/objects/geometry.py::
+robust_bbox_depth`, then the connected near-surface component in
+`perception._supported_centroid`), so when a nearer object overlaps the
+target's box -- a chair before a sofa -- the percentile is the chair's, the
+centroid and the near edge (`range_near_m`) land on the chair, and the
+terminal test of the closing (`target_closing._fresh_measured`, the smaller
+of the two) reads "arrived" a metre short of the sofa. Frames of exactly this
+kind STOPped wrong in the Gibson recordings.
+
+`RPTSettings.segmentation` (**False** by default; `--segmentation` on the
+`gibson.run` / `five_scene` command line, `SEGMENTATION=1` for
+`run_benchmark.sh`) adds one step: every frame's **target-class boxes** at or
+above `detection_confidence` go, in one call, to the box-prompted Segment
+Anything service (`tasks/mapping/scene_graph/serve/segmentation_server.py`,
+MobileSAM by default, `methods/segmentation.HttpSegmenter` the client,
+`--segmenter-url`), and `perception.observed_objects` reads each of them on
+the returned mask: the depth is `robust_mask_depth` over the mask within the
+box, the near-surface component is sought over the whole box on the mask's
+pixels only, so neither the centroid nor `range_near_m` can land on an
+occluder the mask leaves out. The coherence gate (35 % of the patch within
+the ±6 % band) is not applied on the mask path -- the mask has answered "one
+object?", and a deep object seen whole (a bed from its foot, a sofa at an
+angle) legitimately spans more than the band; `supported_fraction` is still
+recorded. Everything downstream -- association, the 3-D memory, the closing's
+phases -- is unchanged, so the two pipelines differ in exactly one thing:
+**which pixels count as the object.**
+
+Boxes of other classes are read on their box as always. A target box the
+service could not mask this frame -- a transport failure, the back-off it arms
+(`exploration_fallback.SEGMENTER`, the detector's doubling rule) -- is **not**
+read the old way: its row says `segmentation_unavailable`, the frame is
+counted (`segmenter_failures`, `segmenter_skipped`), and the comparison stays
+clean. Identity drift of the service (another checkpoint answering) ends the
+run like the detector's. The policy refuses to start with the setting on and
+no segmenter; `run.json` records the segmenter's checkpoint hash, device,
+configuration and URL under `method.segmenter`, `configuration()` says
+`perception_fusion: .../target-masked`, and the HUD tints each target mask
+magenta on the camera panel. The per-frame cost is one SAM call on frames with
+a target box (0.3 s on four CPU threads with MobileSAM; `steps.jsonl` carries
+it as `segmenter_http`). Tests:
+`tests/test_segmented_projection.py` (the occluder scene with and without the
+mask, the failure families, the HUD), `core/mapping/segmentation/tests`, and
+`tasks/mapping/scene_graph/tests/test_segmentation_service.py`.
+
 ## Models and vocabulary
 
 YOLO-World X-v2 remains the default; pretrained LLMDet Swin-L and explicit S/L

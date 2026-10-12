@@ -10,10 +10,11 @@ import requests
 
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import DETECTOR
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import DETECTOR, SEGMENTER
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import DetectorFrameError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import deduplicate_detections
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box, observed_objects, STAIR_LABELS
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.segmentation import SegmenterFrameError
 
 
 #: Two observations more than this apart in height are different objects
@@ -71,6 +72,11 @@ class PerceptionCycle:
         self.projections = []
         self.counts = Counter()
         self.detector_evidence = {}
+        # ``detection -> HxW bool mask`` for the target's boxes when the ``segmentation``
+        # setting is on (``None`` when it is off): the one input that distinguishes the
+        # two pipelines. A box mapped to None was due a mask the service did not deliver.
+        self.masks = None
+        self.segmenter_evidence = {}
 
     def observe(self, obs):
         """Exactly one synchronous prediction for this RGB/depth/pose tuple.
@@ -86,6 +92,8 @@ class PerceptionCycle:
         p = self.policy
         self.step = obs.step
         self.projections = []
+        self.masks = {} if p.settings.segmentation else None
+        self.segmenter_evidence = {}
         self.counts["raw_frames"] += 1
         if p.fallback.service_unavailable(DETECTOR, obs.step):
             self.raw = self.detections = ()
@@ -115,6 +123,50 @@ class PerceptionCycle:
         p._duplicates_removed += len(self.raw) - len(self.detections)
         if p.building:
             p.building.semantic_stair_hint = any(d.cls in STAIR_LABELS and d.conf >= p.settings.detection_confidence for d in self.raw)
+        if p.settings.segmentation:
+            self._segment(obs)
+
+    def _segment(self, obs):
+        """One segmenter call for the frame's target boxes; a failure leaves them due a mask they do not get.
+
+        Only the target's boxes are prompted: theirs is the depth that ends an
+        episode. Their masks restrict the projection to the object's pixels
+        (``perception.observed_objects``). On a transport or frame failure
+        the back-off is armed like the detector's, every target box of the
+        frame is mapped to None -- ``segmentation_unavailable``, not a box
+        read -- and the frame is counted; identity drift ends the run.
+        """
+        p = self.policy
+        # Every target box the closing may read -- ``track_confidence`` re-sightings included -- gets a mask.
+        floor = min(p.settings.detection_confidence, p.settings.target_closing.track_confidence)
+        targets = [d for d in self.detections if p.target.accepts(d.cls) and d.conf >= floor]
+        if not targets:
+            return
+        if p.fallback.service_unavailable(SEGMENTER, obs.step):
+            self.masks = {d: None for d in targets}
+            self.segmenter_evidence = {"skipped": "segmenter back-off until action %d" % p.fallback.retry_step[SEGMENTER]}
+            self.counts["segmenter_skipped"] += 1
+            return
+        started = time.monotonic()
+        try:
+            masks = p.segmenter.segment(obs.rgb, [d.xyxy for d in targets])
+        except Exception as exc:
+            if isinstance(exc, ObjNavInternalError) and not isinstance(
+                    exc.__cause__, (requests.RequestException, SegmenterFrameError, ValueError, KeyError, TypeError)):
+                raise
+            retry = p.fallback.note_service_failure(obs, SEGMENTER, exc)
+            self.masks = {d: None for d in targets}
+            self.segmenter_evidence = {"failed": "%s: %s" % (type(exc).__name__, exc), "retry_step": retry}
+            self.counts["segmenter_failures"] += 1
+            return
+        finally:
+            p.telemetry.latencies["segmenter_http"].append((time.monotonic() - started) * 1000)
+        p.fallback.note_service_success(SEGMENTER)
+        self.masks = dict(zip(targets, masks))
+        self.segmenter_evidence = {"boxes": len(targets), "mask_pixels": [int(np.count_nonzero(m)) for m in masks],
+                                   "ms": getattr(p.segmenter, "last_inference_ms", None)}
+        self.counts["segmented_frames"] += 1
+        self.counts["segmented_boxes"] += len(targets)
 
     def fuse(self, obs):
         p = self.policy
@@ -129,7 +181,8 @@ class PerceptionCycle:
         confirmed = False
         used = set()
         self.projections = []
-        for label, xyz in observed_objects(obs, self.detections, p.settings.detection_confidence, self.projections):
+        for label, xyz in observed_objects(obs, self.detections, p.settings.detection_confidence, self.projections,
+                                           masks=self.masks):
             row = self.projections[-1]
             if label in DOOR_LABELS or label in STAIR_LABELS:
                 row["status"] = "terrain_or_portal_context"
@@ -224,5 +277,6 @@ class PerceptionCycle:
 
     def diagnostics(self):
         return {"observation_step": self.step, "counts": dict(self.counts),
-                "projections": list(self.projections), "detector_evidence": self.detector_evidence}
+                "projections": list(self.projections), "detector_evidence": self.detector_evidence,
+                "segmenter_evidence": self.segmenter_evidence}
 

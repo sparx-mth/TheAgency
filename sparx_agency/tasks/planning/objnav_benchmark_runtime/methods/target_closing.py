@@ -580,7 +580,7 @@ class TargetClosing:
         for detection in boxes:
             rows = []
             strong = detection.conf >= s.confidence
-            values = list(observed_objects(obs, (detection,), threshold, rows))
+            values = list(observed_objects(obs, (detection,), threshold, rows, masks=p.perception.masks))
             if not values:
                 if strong:
                     kept.append(detection)
@@ -840,7 +840,7 @@ class TargetClosing:
         if not boxes:
             return
         here = (obs.pose.x, obs.pose.y)
-        for label, xyz in observed_objects(obs, boxes, s.track_confidence):
+        for label, xyz in observed_objects(obs, boxes, s.track_confidence, masks=p.perception.masks):
             range_m = math.dist(here, self.xyz[:2])
             radius = s.association_radius_m + s.association_range_gain * max(0.0, range_m - 2.0)
             if supports(self.xyz, xyz, radius):

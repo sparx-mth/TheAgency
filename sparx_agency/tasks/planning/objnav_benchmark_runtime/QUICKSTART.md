@@ -141,6 +141,25 @@ CUDA_VISIBLE_DEVICES="" "$DETECT_PY" -m sparx_agency.tasks.mapping.scene_graph.s
 Check: `curl -s http://127.0.0.1:18095/health` reports `"backend": "yolo_world"`.
 (`--conf 0.05` is the emission floor the door detector needs, not a STOP threshold.)
 
+#### 2.2b Optional: the segmentation service (the `segmentation` experiment, off by default)
+
+The target's depth is read on a Segment Anything mask of its box instead of the box itself,
+so an object standing in front of the target cannot be taken for its near surface
+([README](README.md#the-targets-depth-on-its-own-pixels-the-segmentation-setting-2026-10-12-off-by-default)).
+Same venv as the detector, its own port; MobileSAM weights provisioned first
+(`"$DETECT_PY" -c "from ultralytics.utils.downloads import attempt_download_asset as d; d('$MODELS/mobile_sam.pt')"`):
+
+```bash
+CUDA_VISIBLE_DEVICES="" "$DETECT_PY" -m sparx_agency.tasks.mapping.scene_graph.serve.segmentation_server \
+    --model "$MODELS/mobile_sam.pt" --device cpu --host 127.0.0.1 --port 18096 --torch-threads 4
+```
+
+Check: `curl -s http://127.0.0.1:18096/health` reports `"backend": "sam"`. Then add
+`--segmentation --segmenter-url http://127.0.0.1:18096` to `RUN_FLAGS` (2.4); `gibson.run`,
+`run_development` and `five_scene` all take and forward them, `run.json` records the
+segmenter's identity under `method.segmenter`, and the HUD tints each target mask magenta.
+Without the flags nothing changes. `run_benchmark.sh` does all of this with `SEGMENTATION=1`.
+
 ### 2.3 Generate the frozen episodes (once per campaign)
 
 Deterministic, policy-independent starts in multi-story training buildings; extracts the
@@ -326,6 +345,7 @@ explicitly with `gibson.run --scene <Scene> --limit 1 --shards 200 --shard-index
 | message | fix |
 |---|---|
 | `Rendering GPU is occupied` | stop the other GPU process, or add `--allow-shared-gpu` (recorded in the run identity) |
+| `unable to find CUDA device 0 among N EGL devices in total` | the NVIDIA EGL library cannot see the card (a driver upgrade under the running kernel module: `nvidia-smi` says `Driver/library version mismatch`). Reboot, or render on the CPU meanwhile: `GPU_PLAN=off HABITAT_RENDER=software run_benchmark.sh …` (or `--software-render` to `gibson.run` under `unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _ …`); recorded as `renderer` in `run.json` |
 | `Reference habitat-sim is 0.1.5; installed '0.2.4'` | `--allow-sim-version-mismatch` |
 | `Requested LLM model ... is not provisioned` | `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`; check `LLM_BASE_URL` |
 | `Detector emission threshold hides door candidates` | restart the service with `--conf 0.05` |

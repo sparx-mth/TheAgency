@@ -205,6 +205,26 @@ def method_snapshot(policy):
             "search": search_snapshot(policy)}
 
 
+def _draw_masks(bgr, masks):
+    """Tint the target's segmentation masks (the ``segmentation`` setting) magenta and outline them.
+
+    The pixels the depth was read from, drawn under the boxes: on a frame
+    where the box holds an occluder the tint shows the object around it. A
+    box due a mask it did not get (``None``) draws nothing.
+    """
+    if not masks:
+        return
+    for mask in masks.values():
+        if mask is None or not np.any(mask):
+            continue
+        selected = np.asarray(mask, dtype=bool)
+        if selected.shape != bgr.shape[:2]:
+            continue
+        bgr[selected] = (0.55 * bgr[selected] + 0.45 * np.array((255, 0, 255), np.float32)).astype(np.uint8)
+        contours, _ = cv2.findContours(selected.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(bgr, contours, -1, (255, 0, 255), 1, cv2.LINE_AA)
+
+
 def _text(image, value, origin, width=115, lines=4, color=(230, 230, 230)):
     x, y = origin
     for index, line in enumerate(textwrap.wrap(str(value), width=width)[:lines]):
@@ -230,6 +250,8 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
            len(snapshot.get("floor_atlas", {}).get("floors", [0])),
            len(snapshot.get("floor_atlas", {}).get("connections", []))), (12, 26), width=190, lines=1)
     rgb = np.ascontiguousarray(observation.rgb[..., ::-1])
+    if not final:
+        _draw_masks(rgb, getattr(getattr(policy, "perception", None), "masks", None))
     for detection in snapshot.get("detections", ()) if not final else ():
         x1, y1, x2, y2 = (int(v) for v in detection["xyxy"])
         ground_truth = detection.get("source") == "ground_truth"

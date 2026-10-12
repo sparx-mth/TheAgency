@@ -12,7 +12,7 @@
 # Resume. A resume must reproduce the frozen configuration byte for byte, and run_benchmark.sh cannot:
 # it re-plans the GPU (gpu_plan.json's free/used MiB differ between launches) and that plan is part of
 # the configuration, as is the hash of every .py under sparx_agency/. So the supervisor snapshots the live
-# Ollama, detector and gibson.run (argv, environment, cwd, from /proc) into <output>/replay/ and, when the
+# Ollama, detector, segmenter (when the run has one) and gibson.run (argv, environment, cwd, from /proc) into <output>/replay/ and, when the
 # launcher dies without a summary.json, relaunches *those* with --resume behind a wrapper that plays the
 # launcher's part (launcher.pid, run.log, exit_code.txt) and restarts the monitor. Any .py edit under
 # sparx_agency/ during the run still makes a resume impossible -- refused, by design. A run that died on
@@ -138,13 +138,19 @@ snap() {   # name pid -> replay/<name>.{cmdline,environ,cwd,pid}
 
 snapshot() {   # the live gibson.run, its detector and its Ollama, plus the GPU plan the configuration recorded
   mkdir -p "$REPLAY"
-  local run_pid det_pid oll_pid detector_url llm_url port p
+  local run_pid det_pid seg_pid oll_pid detector_url segmenter_url llm_url port p
   run_pid="$(pgrep -f -- "gibson\.run .*--output ${OUT}( |$)" | head -1 || true)"
   [[ -n "$run_pid" ]] || die "no gibson.run for $OUT is running; a snapshot needs the live run"
   snap run "$run_pid"
   detector_url="$(argv_value run --detector-url)"; port="${detector_url##*:}"
   det_pid="$(pgrep -f -- "detection_server .*--port ${port}( |$)" | head -1 || true)"
   if [[ -n "$det_pid" ]]; then snap detector "$det_pid"; else say "WARNING: no detector process on port $port (external?); it cannot be restarted by a resume"; fi
+  segmenter_url="$(argv_value run --segmenter-url || true)"           # the Segment Anything service, when the run has one
+  if [[ -n "$segmenter_url" ]]; then
+    port="${segmenter_url##*:}"
+    seg_pid="$(pgrep -f -- "segmentation_server .*--port ${port}( |$)" | head -1 || true)"
+    if [[ -n "$seg_pid" ]]; then snap segmenter "$seg_pid"; else say "WARNING: no segmenter process on port $port (external?); it cannot be restarted by a resume"; fi
+  fi
   llm_url="$(env_value run LLM_BASE_URL)"; oll_pid=""
   for p in $(pgrep -x ollama || true); do
     [[ -r "/proc/$p/environ" ]] || continue              # another user's Ollama (the system one) is not ours
@@ -185,6 +191,9 @@ relaunch() {   # the run again, --resume, from the snapshot, behind a wrapper th
   cp "$REPLAY/gpu_plan.json" "$OUT/gpu_plan.json"            # the plan the frozen configuration recorded
   ensure_service ollama "$(env_value run LLM_BASE_URL)/api/tags" 180 "$OUT/ollama.log"
   ensure_service detector "$(argv_value run --detector-url)/health" 300 "$OUT/detector.log"
+  if [[ -n "$(argv_value run --segmenter-url || true)" ]]; then
+    ensure_service segmenter "$(argv_value run --segmenter-url)/health" 300 "$OUT/segmenter.log"
+  fi
   say "relaunching gibson.run --resume${RESUME_ARGS:+ $RESUME_ARGS} (attempt $((ATTEMPT + 1)))"
   setsid nohup bash -c '
     printf "%s\n" "$$" > "$1/launcher.pid"

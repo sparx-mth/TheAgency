@@ -115,6 +115,14 @@ CUDA_VISIBLE_DEVICES="" ~/.venvs/objnav-detector/bin/python \
 
 Override with `MODELS=/path` or `YOLO_WEIGHTS=/path/to/yolov8x-worldv2.pt`.
 
+**Segment Anything (only for `SEGMENTATION=1`, section 3.4):** MobileSAM (39 MB) and/or SAM 2.1-tiny
+(76 MB) from the ultralytics assets release, into the same directory -- the service never downloads:
+
+```bash
+"$DETECT_PY" -c "from ultralytics.utils.downloads import attempt_download_asset as d; import os; \
+  [d(os.path.expanduser('~/models/objnav/' + n)) for n in ('mobile_sam.pt', 'sam2.1_t.pt')]"
+```
+
 ---
 
 ## 2. Run
@@ -385,8 +393,11 @@ every layer, `0` CPU, empty = the server decides) is sent as Ollama's `num_gpu` 
 | `LLM_MODEL` / `LLM_REASONING_MODEL` | `qwen2.5:3b-instruct` / `qwen2.5:14b-instruct` | room labels / the node oracle |
 | `LLM_REASONING_TIMEOUT_S` | `900` | how long one oracle call may take (the search waits rather than guessing) |
 | `DETECTOR_PORT`, `DETECTOR_THREADS` | `18095`, `4` | the detector service |
+| `SEGMENTATION` | `0` | `1` starts the box-prompted Segment Anything service beside the detector and runs the policy with `segmentation=true`: the target's depth is read on its SAM mask, not its box (section 3.4) |
+| `SAM_WEIGHTS`, `SEGMENTER_PORT`, `SEGMENTER_DEVICE`, `SEGMENTER_THREADS` | `$MODELS/mobile_sam.pt`, `18096`, `cpu`, `4` | the segmentation service (`sam2.1_t.pt` is the stronger small checkpoint) |
 | `SEED` | `17` | simulator, policy and LLM seed (per episode, so order does not matter) |
 | `GPU_DEVICE`, `ALLOW_SHARED_GPU` | `0`, `0` | the rendering GPU; `1` accepts a card already in use (the plan sets it whenever more than one process holds the card) |
+| `HABITAT_RENDER` | `gpu` | `software` renders on Mesa's llvmpipe with `/dev/dri` hidden from the run (an unprivileged user namespace, `unshare -rm`), so Mesa's software device is habitat's EGL device 0; passes `--software-render` to `gibson.run`, which skips the GPU gate and records the renderer in `run.json`. For a box whose NVIDIA EGL is unusable (a driver upgrade until the reboot that loads the matching kernel module). About 30 ms a frame; use `GPU_PLAN=off` with it, since the plan needs `nvidia-smi` |
 | `RUNS_ROOT` | `<repo>/runs` | where a run directory is created when `--output` is not given |
 | `OMP_NUM_THREADS` | `4` | numpy/torch threads in the simulator process |
 
@@ -406,6 +417,28 @@ after every episode under `runs/benchmark_15episodes_<UTC stamp>/`, the services
 `gpu_plan.json` beside it in `<output>.services/`. The campaign never resumes: a new
 output directory per attempt. See [../QUICKSTART.md](../QUICKSTART.md) for the flags.
 
+### 3.4 The segmentation experiment (`SEGMENTATION=1`)
+
+Off by default. With `SEGMENTATION=1` the script starts
+`scene_graph/serve/segmentation_server.py` (MobileSAM, `SAM_WEIGHTS`, on `SEGMENTER_DEVICE`,
+port `SEGMENTER_PORT`) beside the detector and passes `--segmentation --segmenter-url
+--segmenter-model` to the run or to every five-scene job, which sets the policy's
+`RPTSettings.segmentation`. Every frame's target-class boxes are then segmented and their
+depth read on the object's own pixels instead of the box's -- the fix for the STOP a metre
+short of a sofa with a chair in front of it (the box pipeline reads the chair's range). Nothing
+else changes, and a target box the service could not mask is *not* read the old way, so a run
+with the switch and one without differ in exactly that. `run.json` records the segmenter's
+checkpoint hash and URL under `method.segmenter`; the HUD tints each target mask magenta;
+`segmenter.log` sits beside `detector.log`. Provision the checkpoint first (section 1.5):
+the service never downloads. The per-frame cost is one SAM call on frames with a target box
+(about 0.3 s on four CPU threads). Compare the two pipelines with two campaigns, one per
+setting, into separate output directories:
+
+```bash
+gibson/run_benchmark.sh --five-scene 1                    # the box pipeline
+SEGMENTATION=1 gibson/run_benchmark.sh --five-scene 1     # the masked pipeline
+```
+
 ---
 
 ## 4. If something refuses to start
@@ -418,6 +451,8 @@ output directory per attempt. See [../QUICKSTART.md](../QUICKSTART.md) for the f
 | `Requested LLM model … is not provisioned` | the pull failed or `LLM_BASE_URL` points at another server; `curl $LLM_BASE_URL/api/tags` |
 | `Detector emission threshold hides door candidates` | a detector started by hand with `--conf` above 0.05 is running on the port; stop it and let the script start its own |
 | `the detector did not answer … within 300s` | first start loads the weights; see `<output>/detector.log` (a torch/CUDA import error means the venv of 1.2 is incomplete) |
+| `unable to find CUDA device 0 among N EGL devices` (habitat) / `Failed to initialize NVML: Driver/library version mismatch` (`nvidia-smi`) | the NVIDIA userspace was upgraded under the running kernel module: reboot (DKMS has the new module), or run on the CPU renderer meanwhile with `GPU_PLAN=off HABITAT_RENDER=software` (section 3.2); the Intel iGPU is no fallback -- the Gibson 16384² texture does not fit it and renders black |
+| `the segmenter did not answer … within 300s` / `SEGMENTATION=1 but no SAM weights` | `<output>/segmenter.log`; provision `mobile_sam.pt` (section 1.5) |
 | `cannot resume … with a different config` | the source, settings, data or models changed since the run started: new `--output` directory |
 | `Room oracle failed` inside episodes | the LLM is too slow for `LLM_REASONING_TIMEOUT_S` or fell over; the run keeps exploring and backs off (`exploration_fallback` in the row); check the container's memory |
 | `--record needs FFmpeg` / `No working FFmpeg` | `apt install ffmpeg`, or `IMAGEIO_FFMPEG_EXE=/path/to/ffmpeg` (any build with libx264; a conda `ffmpeg` can be present yet unloadable) |
