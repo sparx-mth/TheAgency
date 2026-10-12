@@ -6,6 +6,31 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **The box in the frame drives the camera pitch** (`objnav_benchmark_runtime/methods/bbox_pitch.py`,
+  `TargetClosing._servo`, `TargetClosingSettings.bbox_pitch / bbox_pitch_distance_m 1.50 / bbox_pitch_region
+  0.25`, 2026-10-11): within 1.5 m of the target, with the LOOK pair and a fresh box, the pitch is an
+  image-space servo's and not the 3-D memory's -- a box in the lower quarter of the frame, or predicted to be
+  cut by the lower edge on the next step toward it, is looked DOWN at by the rounded number of tilts; one in
+  the upper quarter or about to be cut above, UP; one in the centre band leaves the camera where it is, even
+  where the geometric controller would force a tilt (the two would hunt). No class, height or memory enters:
+  a frame cut by the lower edge biases the memory exactly when the pitch matters, and every terminal STOP of
+  the nine Gibson inspection recordings fired on such a frame. The geometry remains the fallback for a frame
+  without a fresh box; without the LOOK pair (the published Gibson protocol) nothing changes. The band is
+  never narrower than one tilt's rounding dead band, so the servo cannot hunt; pitch limits cut a tilt back.
+- **The terminal STOP is taken on a whole, confident box** (`TargetClosing._before_stop`, `stop_centring`,
+  `stop_confidence` 0.50, `weak_stop_max_holds` 2, 2026-10-11): with the LOOK pair, a fresh in-range box the
+  servo can re-frame earns ONE centring tilt per inspection and the STOP is taken on the next frame -- on the
+  whole box if the detector shows it, on the previous frame's evidence if it does not (the tilt may cost an
+  action, never the STOP); a fresh in-range box under `stop_confidence` (the takeover's own start threshold:
+  detect high, associate low, STOP high) is held for the one frame that keeps it whole at most twice, then the
+  STOP goes ahead on the evidence there is. The STOP's info carries `confidence`, `bbox_region` and
+  `depth_valid`; `bbox_pitch_corrections`, `stop_centring_tilts`, `weak_stop_holds`, `bbox_region`,
+  `bbox_pitch_steps`, `box_drift_rows` and `goal_kept` join the diagnostics.
+- **Regression check of the toilet closing rules on the nine inspection slots** (`runs/gibson_val_20261008T120112Z
+  .inspection-fix`, progress entry 027, 2026-10-11): toilet 2/3 improved (Darden/000193 SR 1 at 129 actions,
+  Wiconisco/000031 SR 1 at 253), couch 3/3 the same outcome (the Wiconisco false positives are the detector's,
+  at 0.72-0.91; 000114 STOPs 31 actions earlier on the same wrong object via the blind-cone rule), bed the same,
+  tv Collierville/000043 the same, tv Collierville/000194 regressed -- traced and fixed below.
 - **Re-record named episodes of a run for failure inspection** (`objnav_benchmark_runtime/gibson/record_episodes.sh`,
   `BENCHMARK.md` 2.7, 2026-10-11): `record_episodes.sh <run> <out> [--after-run] label=Scene/NNNNNN[,fallback...]...`
   re-runs each slot with `--record` under the run's own frozen settings -- the `run.json` argv addressed to one
@@ -98,6 +123,16 @@ future-you, not for a commit log.
   objnav packages; 1891 before).
 
 ### Fixed
+- **A refined target memory no longer throws away a reachable standoff goal** (`objnav_benchmark_runtime/
+  methods/target_path.py`, `TargetApproachPath.kept`, 2026-10-11): a memory shift over `refine_distance_m`
+  (0.15 m) used to drop the standoff goal and re-select one from a bearing-relative ring about the new
+  position -- a different set of points, each needing a navmesh projection and a path. Collierville/000194:
+  the along-ray association refined the television's memory by 0.11 m at 2.5 m, the ring found no path from
+  a spot the old goal was reachable from, and the real television was released twice as "no safe path from
+  here" (SR 1 -> 0 against the baseline, whose un-refined memory kept its goal). A goal that still ends
+  inside `terminal_distance_m` of the refined memory is now kept, the reference is refreshed on every
+  refinement (`goal_refinements` no longer climbs every action after a failed re-selection), and a kept goal
+  a slow drift carries past the terminal radius is re-selected the action it falls out.
 - **The full Gibson run died at episode 919 on a start 3.3 cm outside the navmesh; finishing it is
   explicit and recorded** (`objnav_benchmark/{kinematics,logger,run_info}.py`, `gibson/{protocol,run,
   report}.py`, `gibson/supervise_benchmark.sh`, 2026-10-11): habitat-sim's step filter runs for a turn

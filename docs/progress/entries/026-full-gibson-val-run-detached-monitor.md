@@ -51,9 +51,13 @@ whole split, and a multi-day job needs to survive the operator's session ending.
       at 0.8-0.9 m; two of three on one object at world (0.4, 5.7)), and the low SPLs are the closing's
       `no safe path` / `unverified` releases, not the room order. Visual confirmation of the couch entity
       (`_verify.jpg` / `_stop.jpg`) and of the toilet frames is the remaining human step.
-- [ ] Decide and implement the closing fixes the LESSONS entry lists (bottom-cut acceptance for floor-standing
+- [x] Decide and implement the closing fixes the LESSONS entry lists (bottom-cut acceptance for floor-standing
       classes or a >= 1.5 m inspection stand-off; inspection before a sofa/bed terminal confirmation; `no safe
       path` as a planning repair) and measure them on the 148 toilet failures and the 18 Wiconisco couch STOPs.
+      -> Done as the three tilt-less closing rules of 2026-10-11 (this entry's commit) and measured on the nine
+      slots in entry 027: toilet 2/3 improved, couch/bed unchanged, one tv regression traced to the standoff
+      re-selection and fixed there. The `no safe path` planning repair is the standoff-keeping rule of 027; the
+      sofa/bed inspection-before-confirmation and the 148/18 population-level measurement remain open.
 
 ## Open questions
 - The ask said "200 episodes across 5 scenes"; the paper's protocol is 200 *per* scene (1,000). The

@@ -191,8 +191,16 @@ onto Habitat's local NavMesh when bound, and uses existing collision-qualified
 observed-grid A* to approach. **The selected 3D footpoint and route persist through
 occlusion**: missing detections neither cancel the path nor invoke a scan. Fresh
 associated observations refine the stored target with a 50/50 update; an XY shift
-over `refine_distance_m` (0.15 m) since the goal was selected triggers replanning.
-Small refinements do not move the endpoint every frame. Collision, blockage and
+over `refine_distance_m` (0.15 m) since the goal was selected triggers a refinement
+-- and a refinement **keeps the standoff goal when it still ends inside
+`terminal_distance_m` of the refined memory** (since 2026-10-11, `TargetApproachPath.kept`;
+`goal_kept` in the diagnostics): re-selecting a bearing-relative ring about the new
+position is a different set of points, each needing a navmesh projection and a path,
+and Collierville/000194 traded a reachable goal for a ring with none and released the
+real television as "no safe path from here" the moment the along-ray association made
+its memory 0.11 m more accurate. A kept goal that a slow drift carries past the terminal
+radius is re-selected the action it falls out. Small refinements do not move the endpoint
+every frame. Collision, blockage and
 progress validation remain active; persistence is not permission to cross obstacles.
 Remote or other-floor snaps and unreachable paths
 are rejected. The optional simulator callback contains no target annotations,
@@ -206,7 +214,10 @@ fight the route. The camera is level in transit; **inside `look_down_distance_m`
 (1.30 m) the approach carries the target's own pitch** (since 2026-10-07, the same
 `_pitch` the inspection uses): one tilt step at least in the direction of the
 target's elevation -- down at a toilet, up at a wall-mounted television -- so the
-terminal frames hold the object whole. At `terminal_distance_m` (**1.0 m**),
+terminal frames hold the object whole. **Since 2026-10-11 that geometric controller is
+the fallback**: within `bbox_pitch_distance_m` (1.50 m) with a fresh box, the camera
+pitch is the image-space servo's (next section), and the geometry decides only on a
+frame without a fresh box. At `terminal_distance_m` (**1.0 m**),
 forward motion stops and inspection remains stationary. The inspection pitch is
 the one the target's **measured height** predicts -- a toilet 0.45 m up is low, a
 plant in a metre-tall planter is at eye level and gets no look-down (until
@@ -393,6 +404,61 @@ inside `look_down_distance_m` carries the memory's elevation (`_pitch`): a low t
 stepped toward looking DOWN, an elevated one looking UP, as the approach and the
 inspection already did; the face turn that ends the backing manoeuvre carries it too.
 
+#### The box in the frame drives the pitch, and the STOP is taken on a whole, confident box (since 2026-10-11)
+
+The geometric controller above reads the target's *memory* -- its fused 3-D height
+against the camera's -- and the memory is biased exactly when the pitch matters most: a
+frame cut by the lower edge lands its depth patch on the upper part of the object (the
+toilets of the 1,000-episode run). Every terminal STOP of the nine inspection recordings
+fired on a box cut by the lower edge: at a metre, a level camera 0.88 m up cuts any
+floor-standing object. `methods/bbox_pitch.py` is the **image-space servo** that reads
+the box itself, with no class, no height and no memory involved (`TargetClosing._servo`,
+`bbox_pitch`, `bbox_pitch_distance_m` 1.50 m, `bbox_pitch_region` 0.25):
+
+- **Which frame.** On the approach the verdict is read on the frame the next step will
+  produce (`bbox_pitch.box_after_advance`: every edge row is a ray at a depression below
+  the horizon, met at the fresh surface's near-edge range, and re-projected from one step
+  closer), so a box about to leave through the bottom is looked down at *before* the step;
+  in verification and inspection it is read on the frame as it is.
+- **The verdict** (`bbox_pitch.vertical_fix`). Cut by BOTH the top and the bottom margins:
+  the object fills the frame, nothing helps. Cut by the bottom margin alone: LOOK_DOWN by
+  the rounded steps (one at least) provided the top edge stays inside afterwards -- a bottom
+  cut traded for a top cut is no gain; symmetrically LOOK_UP for a top cut. Whole, with its
+  centre in the lower `bbox_pitch_region` of the rows: LOOK_DOWN provided the whole box stays
+  inside and its centre does not land in the upper region (fewer steps are tried first);
+  symmetrically for the upper region. Otherwise -- the centre band -- the camera stays. The
+  band is never narrower than one tilt's rounding dead band (`fy * tan(tilt / 2)` rows), so
+  the servo cannot hunt; a tilt past the pitch limits is cut back to what they allow.
+- **Who has the camera.** With a fresh box within `bbox_pitch_distance_m` the servo alone:
+  a geometric tilt forced against a centred box would hunt against it (the forced one-tilt
+  rule of `_pitch` inside `look_down_distance_m` says LOOK_DOWN at a toilet whose box is
+  already centred). Without a fresh box -- an occluded approach step -- the geometry decides
+  as before; beyond the distance the approach is level as before; without the LOOK pair
+  (the published Gibson protocol) the servo does not exist and the tilt-less rules above
+  stand (`_step_keeps_box`, `_floor_cut`, `_below_the_frame`). The verification frame
+  (`_verification_view`) asks the servo first and keeps the `look down at a low target` /
+  `look up at a high target` wording, now read off the frame rather than the memory; the
+  elevation-driven looks remain for a frame the servo has no verdict on.
+- **The terminal STOP, with the LOOK pair.** Before the STOP is taken on a fresh in-range
+  frame (`_before_stop`): a box under `stop_confidence` (0.50, the takeover's own start
+  threshold -- detect high, associate low, STOP high) is held for the one frame that keeps
+  it whole, at most `weak_stop_max_holds` (2) times in a row, then the STOP goes ahead on the
+  evidence there is -- or at once when no such frame exists (a box filling the frame); then
+  a box the servo can re-frame earns ONE centring tilt per inspection (`stop_centring`), and
+  the STOP is taken on the next frame: on the whole box if the detector shows it, and on the
+  previous frame's evidence if it does not (`centring_step`) -- the tilt may cost an action,
+  never the STOP (the Hanson toilet's twenty actions of LOOK_UP / LOOK_DOWN after a fresh
+  sighting are what the bounds are for). Not while the box still needs a yaw turn: the
+  converter tilts before it faces. The STOP's info carries `confidence`, `bbox_region` and
+  `depth_valid` (never NULL on this path: a box without a coherent depth projection is never
+  fresh). Counters: `bbox_pitch_corrections`, `stop_centring_tilts`, `weak_stop_holds`;
+  `bbox_region`, `bbox_pitch_steps` and `box_drift_rows` (the fresh box centre's row change
+  since the previous consecutive frame) in the diagnostics.
+
+Verified end to end through the real converter (`tests/test_target_closing.py`: the
+approach, the verification frame, the centring tilt and its safety net, the confidence
+hold, the Gibson path unchanged) and on the pure maths (`tests/test_bbox_pitch.py`).
+
 - `--explorer frontier`: the existing observed-frontier baseline (default).
 - `--explorer falcon`: bounded FALCON 2D/2.5D adaptation, not the unchanged ROS
   aerial binary. Local bursts, target interrupts and the episode ledger remain
@@ -411,6 +477,7 @@ own frozen configurations; changed code does not relabel their outcomes.
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
 | `methods/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
+| `methods/bbox_pitch.py` | The image-space vertical servo: where a box lands after a tilt or a step, and the tilt that keeps it whole and centred (pure functions) |
 | `methods/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |
 | `methods/target_path.py` | Persistent NavMesh standoff goal, meaningful target refinement and continuous collision-qualified A* execution through occlusion |
 | `methods/target_memory.py` | The closing's 3-D memory: the fused, precision-weighted XYZ centroid (near frames dominate), its standard error and spread, the fixed association anchor |

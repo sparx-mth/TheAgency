@@ -191,10 +191,22 @@ def test_reobservation_refines_goal_but_missing_frames_do_not(monkeypatch):
     # Precision-weighted fusion (since 2026-10-08): the three frames already in the memory
     # outweigh one, so a 0.4 m jump moves the estimate ~0.11 m; 0.7 m is a meaningful one.
     p.plan(observation(ep, 3, depth=3.7))  # still associated, meaningful refinement
-    assert p.closing.path.goal_xyz != goal and p.closing.path.refinements == 1
     memory = p.closing.memory
     assert memory.n == 4 and memory.anchor[0] == pytest.approx(3.0, abs=0.05)
     assert 3.1 < memory.xyz[0] < 3.3 and memory.sigma_m < 0.07 and memory.spread_m > 0.2
+    # A refinement that leaves the standoff inside the terminal radius KEEPS it (since 2026-10-11:
+    # Collierville/000194 traded a reachable goal for a ring with no path): counted, re-referenced, same goal.
+    assert p.closing.path.refinements == 1 and p.closing.path.kept == 1
+    assert p.closing.path.goal_xyz == goal and math.dist(goal[:2], memory.xyz[:2]) <= p.settings.target_closing.terminal_distance_m
+    # Two more far frames carry the memory beyond a metre from that goal: the first (3.32 m) is still
+    # inside and kept again; the second (3.43 m) puts the goal 1.08 m out -- stale -- and it is re-selected
+    # the action it falls out, although the memory moved under the refine distance since the last reference.
+    p.plan(observation(ep, 4, depth=4.3))
+    assert p.closing.path.goal_xyz == goal and p.closing.path.refinements == 2 and p.closing.path.kept == 2
+    p.plan(observation(ep, 5, depth=4.3))
+    assert math.dist(goal[:2], p.closing.memory.xyz[:2]) > p.settings.target_closing.terminal_distance_m
+    assert p.closing.path.goal_xyz != goal and p.closing.path.refinements == 3 and p.closing.path.kept == 2
+    assert p.closing.diagnostics()["goal_kept"] == 2
 
 
 def test_expected_closing_failure_is_recordable_not_infrastructure():
@@ -914,7 +926,10 @@ def test_the_legacy_target_evidence_does_not_walk_after_what_the_takeover_refuse
 def test_a_fresh_off_centre_sighting_at_another_pitch_is_centred_not_tilted_away(monkeypatch):
     """A toilet in view at 0 degrees, 20 degrees left of the centre column, where its height predicts a
     30-degree look-down: the converter tilts before it faces, so asking for the predicted pitch LOOKed
-    away from the target and never turned -- LOOK_DOWN / LOOK_UP for the whole 24-action budget."""
+    away from the target and never turned -- LOOK_DOWN / LOOK_UP for the whole 24-action budget. The
+    first move is the TURN. Since 2026-10-11 the centred, bottom-cut box then earns ONE centring
+    LOOK_DOWN toward it before the STOP; this synthetic detector shows nothing once pitched, and the
+    STOP is taken on the previous frame's evidence the very next action -- never a sweep."""
     p, original = setup_policy(target_closing={"context_check": False})      # an eye-level synthetic toilet, see above
     ep = replace(tilt_episode(p, original), target_category="toilet")
     p.reset(ep, gibson_label_mapper().target_labels("toilet"))
@@ -949,9 +964,12 @@ def test_a_fresh_off_centre_sighting_at_another_pitch_is_centred_not_tilted_away
         actions.append(action)
         p.notify_action(obs, action)
         pose = apply_action(pose, action, ep.action_spec)
-    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert command.stop and command.info["reason"].startswith("fresh terminal target confirmation")
     assert DiscreteAction.TURN_LEFT in actions[:2], "the first move centres the target at the pitch it was seen at"
-    assert DiscreteAction.LOOK_DOWN not in actions, "no LOOK away from a target in view"
+    assert actions.count(DiscreteAction.LOOK_DOWN) <= 1 and DiscreteAction.LOOK_UP not in actions, (
+        "at most the one centring tilt toward the bottom-cut box, never a sweep: %r" % (actions,))
+    assert len(actions) <= 3 and p.closing.stop_centring_tilts == 1
+    assert "the centring tilt lost the box, the sighting stands" in command.info["reason"]
 
 
 def test_a_glance_in_force_is_aborted_when_a_takeover_starts(monkeypatch):
@@ -1283,3 +1301,212 @@ def test_the_below_the_frame_stop_needs_a_recent_sighting_an_in_range_memory_and
         with pytest.raises(ValueError):
             TargetClosingSettings(**kwargs)
 
+# -- the image-space pitch servo and the whole-box, confident STOP (2026-10-11) ---------------------------------
+def low_target_locked_with_tilt(monkeypatch, **closing):
+    """``low_target_locked`` under the multi-floor action spec (the LOOK pair, pitch limits -30 / +60)."""
+    p, original = setup_policy(target_closing=closing) if closing else setup_policy()
+    ep = tilt_episode(p, original)
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 300, 360, 400))]
+    p.plan(observation(ep, 0, depth=2))
+    p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and 0.25 < p.closing.xyz[2] < 0.37
+    return p, ep
+def test_the_approach_pitch_inside_the_servo_band_is_the_boxs_not_the_memorys(monkeypatch):
+    """Within 1.5 m with a fresh box the image-space servo has the camera. A box in the lower region of the frame
+    is looked DOWN at; a box in the centre band leaves the camera level even where the geometric controller
+    would force a tilt (the memory 0.24 m below the camera -- outside ``elevation_band_m`` -- inside
+    ``look_down_distance_m``) -- the two would otherwise hunt. Without a fresh box the geometry decides as before."""
+    def locked(**closing):
+        p, original = setup_policy(target_closing=closing) if closing else setup_policy()
+        ep = tilt_episode(p, original)
+        freeze_global(monkeypatch, p)
+        world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+        monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+        p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 240, 360, 330))]      # 0.24 m under the camera at 2 m
+        p.plan(observation(ep, 0, depth=2))
+        p.plan(observation(ep, 1, depth=2))
+        assert p.closing.locked and 0.60 < p.closing.xyz[2] < 0.72
+        return p, ep
+    p, ep = locked()
+    tilt = ep.action_spec.tilt_angle_rad
+    # 1.4 m from the memory: the box of a low object sits in the lower quarter of the frame.
+    low = replace(observation(ep, 2, depth=1.4), pose=AgentPose(0.6, 0, 0, 0))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 380, 360, 450))]
+    command = p.plan(low)
+    assert p.closing.phase == "CLOSE" and command.camera_pitch == pytest.approx(tilt)
+    # Read on the frame the step will produce: already the lower region now, cut by the lower edge after it.
+    assert p.closing.bbox_pitch_corrections == 1 and p.closing.last_fix.region in ("lower", "cut_bottom")
+    assert p.closing.diagnostics()["bbox_region"] == p.closing.last_fix.region and p.closing.diagnostics()["bbox_pitch_steps"] == 1
+    # The same memory, the box drawn in the centre band: the geometry alone would say LOOK_DOWN ...
+    assert p.closing._pitch(low, 1.15) == pytest.approx(tilt), "the geometric controller forces one tilt here"
+    centred = replace(observation(ep, 3, depth=1.4), pose=AgentPose(0.6, 0, 0, 0))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    command = p.plan(centred)
+    assert p.closing.last_seen == 3, "the centred box projects 0.24 m above the memory: a re-sighting"
+    assert p.closing.phase == "CLOSE" and command.camera_pitch == pytest.approx(0.0), "... but the box is centred: the camera stays"
+    assert p.closing.bbox_pitch_corrections == 1 and p.closing.last_fix.region == "centre"
+    # No fresh box: the geometry's prediction, as before.
+    p.detector.detect = lambda rgb: []
+    occluded = replace(observation(ep, 4, depth=1.4), pose=AgentPose(0.6, 0, 0, 0))
+    command = p.plan(occluded)
+    assert p.closing.phase == "CLOSE_OCCLUDED" and command.camera_pitch == pytest.approx(tilt)
+    # The servo switched off: the geometric controller alone decides, and the servo's counter never moves.
+    off, ep_off = locked(bbox_pitch=False)
+    off.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 380, 360, 450))]
+    command = off.plan(replace(observation(ep_off, 2, depth=1.4), pose=AgentPose(0.6, 0, 0, 0)))
+    assert off.closing.last_seen == 2 and command.camera_pitch == pytest.approx(tilt)
+    assert off.closing.bbox_pitch_corrections == 0 and off.closing.last_fix is None
+def test_the_servo_predicts_the_step_and_looks_down_before_the_box_leaves_through_the_bottom(monkeypatch):
+    """From 1.45 m a low box sits whole at rows 300-440; one 0.25 m step would cut it at the lower edge. The step
+    carries LOOK_DOWN -- read off the predicted frame, not the memory."""
+    p, ep = low_target_locked_with_tilt(monkeypatch)
+    tilt = ep.action_spec.tilt_angle_rad
+    frame = replace(observation(ep, 2, depth=1.45), pose=AgentPose(0.55, 0, 0, 0))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 300, 360, 440))]
+    command = p.plan(frame)
+    assert p.closing.phase == "CLOSE" and command.camera_pitch == pytest.approx(tilt)
+    assert p.closing.last_fix.region == "cut_bottom" and "after the step" in p.closing.last_fix.reason
+def test_the_terminal_stop_centres_a_cut_box_with_one_tilt_and_stops_on_the_whole_box(monkeypatch):
+    """A fresh in-range box cut by the lower edge: one LOOK_DOWN, then the STOP on the whole box the next frame
+    (``stop_centring_tilts`` 1, the STOP's ``bbox_region`` centre). The tilt is spent once per inspection, and
+    ``stop_centring=False`` restores the STOP at whatever pitch the box came."""
+    p, ep = low_target_locked_with_tilt(monkeypatch)
+    tilt = ep.action_spec.tilt_angle_rad
+    near = replace(observation(ep, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (250, 300, 390, 480))]
+    command = p.plan(near)
+    assert not command.stop and p.closing.phase == "INSPECT" and p.closing.stop_centring_tilts == 1
+    assert command.camera_pitch == pytest.approx(tilt) and command.final_yaw == pytest.approx(0.0)
+    assert "one centring tilt before the terminal STOP" in command.info["reason"] and command.info["bbox_region"] == "cut_bottom"
+    assert DiscreteActionConverter(ep.action_spec).step(near.pose, command).action == DiscreteAction.LOOK_DOWN
+    pitched = replace(observation(ep, 3, depth=0.9), pose=AgentPose(1.1, 0, 0, 0, camera_pitch=tilt))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (250, 150, 390, 330))]
+    command = p.plan(pitched)
+    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert command.info["bbox_region"] == "centre" and command.info["confidence"] == pytest.approx(0.9)
+    assert command.info["depth_valid"] is True and command.info["measured_m"] is not None
+    assert p.closing.stop_centring_tilts == 1
+    off, ep_off = low_target_locked_with_tilt(monkeypatch, stop_centring=False)
+    off.detector.detect = lambda rgb: [DetectionWire("chair", .9, (250, 300, 390, 480))]
+    command = off.plan(replace(observation(ep_off, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0)))
+    assert command.stop and off.closing.stop_centring_tilts == 0
+def test_the_centring_tilt_is_spent_once_and_a_still_cut_box_stops_the_next_frame(monkeypatch):
+    """If the box is still cut after the one centring tilt (a taller object than predicted), the STOP is not
+    deferred again: the tilt is once per inspection."""
+    p, ep = low_target_locked_with_tilt(monkeypatch)
+    tilt = ep.action_spec.tilt_angle_rad
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (250, 300, 390, 480))]
+    first = p.plan(replace(observation(ep, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0)))
+    assert not first.stop and p.closing.stop_centring_tilts == 1
+    second = p.plan(replace(observation(ep, 3, depth=0.9), pose=AgentPose(1.1, 0, 0, 0, camera_pitch=tilt)))
+    assert second.stop and second.info["reason"] == "fresh terminal target confirmation" and p.closing.stop_centring_tilts == 1
+def test_a_fresh_in_range_box_under_stop_confidence_is_held_for_a_bounded_number_of_frames(monkeypatch):
+    """Detect high, associate low, STOP high: a 0.40 re-sighting of the locked target at terminal range does not
+    end the episode on its own. The closing takes the frame that keeps the box whole for two frames
+    (``weak_stop_max_holds``), then STOPs on the evidence there is; a 0.9 box STOPs at once."""
+    p, ep = low_target_locked_with_tilt(monkeypatch)
+    tilt = ep.action_spec.tilt_angle_rad
+    weak = lambda rgb: [DetectionWire("chair", .4, (250, 150, 390, 330))]      # whole and centred: nothing to re-frame
+    p.detector.detect = weak
+    first = p.plan(replace(observation(ep, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0, camera_pitch=tilt)))
+    assert not first.stop and p.closing.weak_stop_holds == 1 and "under stop_confidence" in first.info["reason"]
+    assert first.info["confidence"] == pytest.approx(0.4) and first.info.get("verify_step")
+    second = p.plan(replace(observation(ep, 3, depth=0.9), pose=AgentPose(1.1, 0, 0, 0, camera_pitch=tilt)))
+    assert not second.stop and p.closing.weak_stop_holds == 2
+    third = p.plan(replace(observation(ep, 4, depth=0.9), pose=AgentPose(1.1, 0, 0, 0, camera_pitch=tilt)))
+    assert third.stop and third.info["reason"] == "fresh terminal target confirmation" and p.closing.weak_stop_holds == 2
+    strong, ep2 = low_target_locked_with_tilt(monkeypatch)
+    strong.detector.detect = lambda rgb: [DetectionWire("chair", .9, (250, 150, 390, 330))]
+    command = strong.plan(replace(observation(ep2, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0, camera_pitch=tilt)))
+    assert command.stop and strong.closing.weak_stop_holds == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(stop_confidence=0.2)                           # under track_confidence
+    for kwargs in ({"weak_stop_max_holds": -1}, {"bbox_pitch": 1}, {"bbox_pitch_region": 0.5},
+                   {"bbox_pitch_distance_m": 0.0}, {"stop_centring": "yes"}):
+        with pytest.raises(ValueError):
+            TargetClosingSettings(**kwargs)
+def test_without_look_actions_the_servo_has_no_say_and_a_weak_box_with_no_frame_to_keep_it_stops_at_once(monkeypatch):
+    """The published Gibson protocol: no LOOK pair, so neither the servo nor the centring tilt exist; the fresh
+    bottom-cut toilet frame STOPs exactly as the floor-cut rule says. A weak box that no TURN keeps whole is
+    not held either -- there is no better frame to wait for."""
+    p, ep = low_target_locked(monkeypatch)
+    assert not ep.action_spec.has_camera_tilt
+    frame, boxes = floor_cut_frame(ep, 2, bottom=480)
+    p.detector.detect = lambda rgb: boxes
+    command = p.plan(frame)
+    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert p.closing.last_fix is None and p.closing.stop_centring_tilts == 0 and p.closing.bbox_pitch_corrections == 0
+    q, ep2 = low_target_locked(monkeypatch)
+    frame, _ = floor_cut_frame(ep2, 2, bottom=480)
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .4, (0, 190, 640, 480))]          # fills the frame: no turn keeps it
+    command = q.plan(frame)
+    assert command.stop and q.closing.weak_stop_holds == 0 and command.info["confidence"] == pytest.approx(0.4)
+# -- an arrived standoff is terminal (Collierville/000194 and /000043, 2026-10-11) ---------------------------------
+def arrived_at_a_kept_standoff(monkeypatch, **closing):
+    """A chair locked two metres ahead (standoff goal at x = 1.35); the memory then refined to 2.3 m -- the goal,
+    0.95 m from it, is kept -- and the agent stands at (1.15, 0): 0.20 m from the goal (inside the executor's
+    0.25 m arrival tolerance) and 1.15 m from the memory, beyond ``terminal_distance_m``."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_memory import TargetMemory3D
+    p, ep, _ = locked_at_two_metres(monkeypatch, **closing) if closing else locked_at_two_metres(monkeypatch)
+    goal = p.closing.path.goal_xyz
+    assert goal is not None and abs(goal[0] - 1.35) < 0.05
+    s = p.settings.target_closing
+    p.closing.memory = TargetMemory3D((2.3, 0.0, 0.88), 2.3, 1, s.memory_noise_floor_m, s.memory_noise_per_m)
+    p.closing.xyz = p.closing.memory.xyz
+    p.detector.detect = lambda rgb: []
+    return p, ep, goal
+def test_an_arrived_standoff_begins_the_inspection_instead_of_spinning_on_the_idle_result(monkeypatch):
+    """Collierville/000194: at a kept standoff 1.15 m from the memory the route was walked, the executor said
+    'arrived', and the headless agent turned left twenty times until the stall clock released the lock with the
+    television in front of it. The arrival is read with the route memory's own rule the action the route completes,
+    and the inspection begins from the standoff: no idle turn, no 'stalled' release."""
+    p, ep, goal = arrived_at_a_kept_standoff(monkeypatch)
+    at_standoff = replace(observation(ep, 2, depth=1.6), pose=AgentPose(1.15, 0, 0, 0))
+    command = p.plan(at_standoff)
+    assert p.closing.path.kept == 1 and p.closing.path.goal_xyz == goal, "the refined memory kept the standoff"
+    assert p.closing.path.arrived and p.closing.path.arrivals == 1, "the route to it is walked"
+    assert p.closing.phase == "INSPECT" and not command.waypoints and not command.stop, "the inspection, not the route"
+    assert p.closing.diagnostics()["standoff_arrived"] is True and p.closing.stall_releases == 0
+    for step in range(3, 8):
+        command = p.plan(replace(observation(ep, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+        assert p.closing.phase == "INSPECT" and not command.stop and p.closing.active, "the sweep, not a release"
+    assert p.closing.stall_releases == 0 and len(p.closing.close_trail) <= 1, (
+        "the stall clock never ran at the standoff (the one entry is the fixture's own CLOSE step)")
+def test_an_arrived_standoff_lets_the_approach_history_stop_within_the_arrival_tolerance(monkeypatch):
+    """The memory STOP of a tracked target measured ``terminal + range_tolerance`` from the memory; from an
+    arrived standoff the executor's ``goal_tolerance_m`` is part of where the agent stands, so 1.15 m completes
+    the trajectory where 1.05 m did not -- the agent of Collierville/000194 stood inside the success region."""
+    p, ep, goal = arrived_at_a_kept_standoff(monkeypatch, approach_history_m=0.5, approach_history_closed_m=0.5)
+    command = None
+    for step in range(2, 7):
+        command = p.plan(replace(observation(ep, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+        assert p.closing._history_qualifies(), "1.15 m walked, 0.85 m closed (recorded by the first frame here)"
+        if command.stop:
+            break
+    assert command.stop and command.info["standoff_reached"] is True and p.closing.history_stops == 1
+    assert "the standoff is reached" in command.info["reason"] and command.info["range_m"] == pytest.approx(1.15, abs=0.02)
+    # The same frames without the arrival: 1.15 m is beyond the memory STOP's reach, as before.
+    q, ep2, _ = arrived_at_a_kept_standoff(monkeypatch, approach_history_m=0.5, approach_history_closed_m=0.5)
+    q.closing.path.drop()
+    monkeypatch.setattr(q.closing.path, "command", lambda *a, **kw: None)          # no standoff at all: the pathless wait
+    monkeypatch.setattr(q.camera_control, "begin_inspection", lambda *a, **kw: False)
+    for step in range(2, 7):
+        command = q.plan(replace(observation(ep2, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+    assert not command.stop and q.closing.history_stops == 0
+def test_a_fresh_range_still_too_far_from_an_arrived_standoff_drops_it_for_a_closer_one(monkeypatch):
+    """From the standoff the fresh box measures 1.3 m: the inspection resumes the approach -- and walking the arrived
+    route again would arrive again, so the standoff is dropped and the next selection is a closer ring about the
+    memory: a route with waypoints, not an idle turn."""
+    p, ep, goal = arrived_at_a_kept_standoff(monkeypatch)
+    p.plan(replace(observation(ep, 2, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+    assert p.closing.phase == "INSPECT" and p.closing.path.arrived
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # the box, 1.3 m off
+    command = p.plan(replace(observation(ep, 3, depth=1.3), pose=AgentPose(1.15, 0, 0, 0)))
+    assert p.closing.inspection_resumptions == 1 and p.closing.path.dropped == 1 and not p.closing.path.arrived
+    assert p.closing.path.goal_xyz is not None and p.closing.path.goal_xyz != goal, "a closer standoff was selected"
+    assert math.dist(p.closing.path.goal_xyz[:2], p.closing.xyz[:2]) < math.dist(goal[:2], p.closing.xyz[:2])
+    assert command.waypoints and p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED"), "the approach walks on"
+    assert p.closing.diagnostics()["standoff_dropped"] == 1

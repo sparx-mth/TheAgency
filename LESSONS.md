@@ -11,6 +11,47 @@ Format per entry:
 
 ---
 
+## 2026-10-11 — A more accurate target memory made a success fail: the standoff re-selection threw away a goal that had a path
+
+**Symptom:** The regression check of the toilet closing rules on the nine inspection slots
+(`runs/gibson_val_20261008T120112Z.inspection` vs `.inspection-fix`) came back 2 improved, 6 identical, and one
+REGRESSED: tv Collierville/000194 went from SR 1 (STOP at action 253, SPL 0.25) to SR 0 (step limit, final DTG
+4.14 m). Nothing about the television, the rooms or the LLM had changed -- the two decision logs are identical
+through action 237.
+
+**Root cause:** From action 238 the along-ray association cylinder (`association_depth_m`) kept the real
+television's frames that the old 0.50 m sphere about the anchor had dropped (`depth_associations` 11), so the
+3-D memory was refined by 0.11 m toward the true position. At action 242 that drift crossed `refine_distance_m`
+(0.15 m) from the reference the standoff goal was selected at, and `TargetApproachPath` did what it always did on
+a refinement: dropped the goal and re-selected one from a bearing-relative ring (8 offsets) about the new
+position. The ring is a *different set of points*, each needing a navmesh projection and an A* path, and from
+(0.94, 1.36) none of the eight had one -- while the dropped goal at (-0.28, 2.51), 0.84 m from the refined
+memory, still did. Five pathless actions later the lock was released as "no safe path from here" (a boxed-in
+release), the agent walked away, re-took the television from 4 m and released it the same way again. The
+baseline only succeeded because its memory never moved: at action 246 a bottom-cut box of something else
+0.95 m away was associated through the anchor, pulled the memory 0.4 m, and the OLD goal walked the agent into
+the success region by luck. Two smaller things on the way: after a failed re-selection `reference_xyz` stayed
+stale, so `goal_refinements` climbed by one every action (3 -> 8 in five actions, meaningless); and the goal
+ring's radius is `terminal_distance_m - goal_tolerance_m - resolution` = 0.70 m, so a 0.15 m memory shift can
+push a goal that was fine past the 0.75 m selection limit by construction -- the rule was tuned for selection,
+not for keeping.
+
+**Fix / workaround:** `TargetApproachPath.command` keeps a standoff goal through a refinement when it still
+lies within `terminal_distance_m` (1.0 m) of the refined memory -- arriving there puts the agent inside the
+terminal radius, which is all a standoff is for, and the inspection reads the fresh range from there
+(`kept`, `goal_kept` in the diagnostics) -- and re-references on every refinement. A kept goal that a slow
+drift carries past the terminal radius is re-selected the action it falls out (`stale`), reference or no
+reference. `test_reobservation_refines_goal_but_missing_frames_do_not` pins all three.
+
+**Don't:** Don't read "the re-run reproduced the original" (`--expect same`) as "the closing behaved the
+same" -- compare the phase timelines; the baseline STOP here was a different mechanism (a history STOP on a
+memory pulled by a stranger's box) from the one the fix would have needed. Don't revert an association
+improvement because a downstream consumer happened to depend on the old memory standing still; find the
+consumer that cannot take a moving input. And don't treat a re-selection as free: every selection needs a
+navmesh projection and a path, and a point that had both is worth more than eight that might.
+
+---
+
 ## 2026-10-11 — Nine failure recordings of the full Gibson run: the toilet was in the frame at 0.92 confidence and the inspection "saw nothing"
 
 **Symptom:** toilet SR 0.288 over 208 episodes (131 of 132 failures were 500-step timeouts, median final DTG

@@ -8,6 +8,8 @@ from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import pitch_action, turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.approach_history import ApproachHistory
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.bbox_pitch import (
+    REGION_CENTRE, REGION_CUT_BOTTOM, REGION_CUT_TOP, REGION_LOWER, REGION_UPPER, vertical_fix)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box, observed_objects
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import contradicted_by_map
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import unknown_around
@@ -152,6 +154,42 @@ class TargetClosingSettings:
     blind_cone_stop: bool = True
     blind_cone_max_missing: int = 6
     blind_cone_min_fraction: float = 0.15
+    # THE BOX IN THE FRAME DRIVES THE PITCH (since 2026-10-11; ``bbox_pitch``, the image-space
+    # servo of ``methods/bbox_pitch``). Within ``bbox_pitch_distance_m`` of the target, with LOOK
+    # actions and a FRESH box, the camera pitch is the servo's and not the geometry's: a box whose
+    # centre lies in the lower ``bbox_pitch_region`` of the frame's rows -- or that the next step
+    # toward the target is predicted to cut at the lower edge -- is looked DOWN at by the rounded
+    # number of tilts (one at least); one in the upper region, or about to be cut by the top, is
+    # looked UP at; one in the centre band leaves the camera where it is. No class, no height and
+    # no 3-D memory enter: the frame-cut toilets of the 1,000-episode run showed the geometric
+    # prediction biased exactly when it mattered (a cut frame lands its depth patch on the upper
+    # part of the object), and a geometric tilt forced against a centred box would hunt against
+    # this one, so when the box is fresh the servo alone has the camera. The geometric pitch
+    # (``_pitch``) is the fallback for a frame WITHOUT a fresh box -- an occluded approach step --
+    # and the whole approach beyond the distance. The verification frame (``_verification_view``)
+    # asks the servo first too. The band is never narrower than one tilt's rounding dead band,
+    # so the servo cannot hunt whatever the region says. ``bbox_pitch=False`` restores the
+    # geometric controller alone.
+    bbox_pitch: bool = True
+    bbox_pitch_distance_m: float = 1.50
+    bbox_pitch_region: float = 0.25
+    # THE TERMINAL STOP IS TAKEN ON A WHOLE, CONFIDENT BOX (since 2026-10-11). Every terminal STOP
+    # of the Gibson recordings fired on a box cut by the frame's lower edge -- at a metre a level
+    # camera 0.88 m up cuts any floor-standing object -- whose depth patch is the upper part's.
+    # With LOOK actions, a fresh in-range box the servo can re-frame (cut, or off-centre) is
+    # centred first: ONE tilt, once per inspection (``stop_centring``), and the STOP is taken on
+    # the next fresh frame, a whole box with a sound measurement; the Hanson toilet's twenty
+    # actions of LOOK_UP / LOOK_DOWN after a fresh sighting are what the once-per-inspection bound
+    # is for. Without LOOK actions the tilt-less rules above stand. And a fresh in-range box under
+    # ``stop_confidence`` (the takeover's own start threshold by default: detect high, associate
+    # low, STOP high -- a 0.30 re-sighting is not the evidence to end an episode on) does not STOP
+    # on its own: the closing takes the one frame that keeps the box whole (a LOOK with the pair,
+    # else a TURN) for at most ``weak_stop_max_holds`` consecutive frames, and STOPs if the detector
+    # has not read it stronger by then, or at once when no such frame exists. The depth is never
+    # NULL on this path by construction: a box without a coherent depth projection is never fresh.
+    stop_centring: bool = True
+    stop_confidence: float = 0.50
+    weak_stop_max_holds: int = 2
     # After a release, no new takeover may START on a far candidate for this
     # many actions: six twelve-step verifications from one spot three metres
     # from the couch (Ranchester attempt 4) were the same failure repeated,
@@ -276,6 +314,20 @@ class TargetClosingSettings:
         if (isinstance(self.blind_cone_min_fraction, bool) or not math.isfinite(self.blind_cone_min_fraction)
                 or not 0 < self.blind_cone_min_fraction < 1):
             raise ValueError("blind_cone_min_fraction must lie in (0, 1)")
+        for key in ("bbox_pitch", "stop_centring"):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError("%s must be a bool" % key)
+        if (isinstance(self.bbox_pitch_distance_m, bool) or not math.isfinite(self.bbox_pitch_distance_m)
+                or self.bbox_pitch_distance_m <= 0):
+            raise ValueError("bbox_pitch_distance_m must be positive and finite")
+        if (isinstance(self.bbox_pitch_region, bool) or not math.isfinite(self.bbox_pitch_region)
+                or not 0 < self.bbox_pitch_region < 0.5):
+            raise ValueError("bbox_pitch_region must lie in (0, 0.5)")
+        if (isinstance(self.stop_confidence, bool) or not math.isfinite(self.stop_confidence)
+                or not self.track_confidence <= self.stop_confidence <= 1):
+            raise ValueError("stop_confidence must lie in [track_confidence, 1]")
+        if type(self.weak_stop_max_holds) is not int or self.weak_stop_max_holds < 0:
+            raise ValueError("weak_stop_max_holds must be a non-negative int")
         if type(self.release_cooldown_actions) is not int or self.release_cooldown_actions < 0:
             raise ValueError("release_cooldown_actions must be a non-negative int")
         if self.terminal_distance_m + self.range_tolerance_m > self.look_down_distance_m:
@@ -354,6 +406,14 @@ class TargetClosing:
     under the frame is STOPped on from the memory it was seen fresh at a
     few actions before (:meth:`_below_the_frame`) -- the tilt-less
     counterpart of the dynamic pitch controller (:meth:`_pitch`).
+
+    Where the protocol HAS the LOOK pair, the pitch within
+    ``bbox_pitch_distance_m`` is the image-space servo's (:meth:`_servo`,
+    ``methods/bbox_pitch``): the fresh box's place in the frame -- lower
+    region or about to be cut below, LOOK_DOWN; upper region or cut above,
+    LOOK_UP; centre band, hold -- with the geometry as the fallback when no
+    box is fresh. The terminal STOP is then taken on a whole box (one
+    centring tilt per inspection) at or above ``stop_confidence``.
     """
 
     def __init__(self, policy):
@@ -395,6 +455,9 @@ class TargetClosing:
         self.floor_cut_frames = 0          # fresh frames the lower edge cut: sightings that did not move the 3-D memory
         self.floor_cut_measurements = 0    # terminal ranges read from the 3-D memory because the frame's lower edge cut the box
         self.blind_cone_stops = 0          # STOPs on a target predicted below the frame, in a protocol without LOOK
+        self.bbox_pitch_corrections = 0    # tilts the image-space servo asked for on the approach and in verification
+        self.stop_centring_tilts = 0       # terminal STOPs deferred one tilt so they are taken on a whole box
+        self.weak_stop_holds = 0           # terminal frames held because the fresh box was under stop_confidence
         self._clear()
 
     def _clear(self):
@@ -432,6 +495,12 @@ class TargetClosing:
         self.top_m = None                  # ... and the highest: the object's measured top, for the below-the-frame test
         self.footprint_m = None            # the anchor frame's footprint half-extent (``perception.footprint_radius_m``)
         self._floor_cut_step = -1          # the last action whose terminal range the memory supplied (counted once)
+        self.conf = None                   # the fresh box's detector confidence
+        self.box_drift_rows = None         # the fresh box centre's row change since the previous consecutive frame (+ down)
+        self.last_fix = None               # the image-space servo's last verdict (``bbox_pitch.VerticalFix``)
+        self.centring_done = False         # this inspection has spent its one centring tilt
+        self.centring_step = -1            # ... and the action it was spent on (the next frame STOPs even without a box)
+        self.weak_holds = 0                # consecutive terminal frames held for a box under stop_confidence
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -677,7 +746,14 @@ class TargetClosing:
             else:
                 self.memory.update(xyz, range_m, obs.step)
             self.xyz = self.memory.xyz
+            if self.box is not None and obs.step == self.last_seen + 1:
+                # The box's vertical motion between consecutive fresh frames (+ down): recorded for the
+                # diagnostics; the servo predicts the next frame from the geometry rather than extrapolating this.
+                self.box_drift_rows = 0.5 * (detection.xyxy[1] + detection.xyxy[3]) - 0.5 * (self.box[1] + self.box[3])
+            else:
+                self.box_drift_rows = None
             self.box, self.label, self.last_seen = detection.xyxy, detection.cls, obs.step
+            self.conf = float(detection.conf)
             if doubt is not None and not self.locked:
                 self.suspect = doubt
             if self.backoff is None or not (self.backoff.state == "pending" or self.backoff.active):
@@ -888,6 +964,33 @@ class TargetClosing:
             desired = min(actions.max_pitch_rad, desired)
         return float(desired)
 
+    def _servo(self, obs, advance_m=0.0):
+        """The image-space servo's verdict on the fresh box, or None when it has no say.
+
+        None without the LOOK pair, with ``bbox_pitch`` off, or on a frame
+        without a fresh box (the geometry decides then). ``advance_m`` is
+        the next action's step toward the target, so the verdict is read on
+        the frame that step will produce (:func:`bbox_pitch.vertical_fix`);
+        the range it is predicted at is the visible near edge of the fresh
+        surface, else the centroid's planar range.
+        """
+        s, actions = self.settings, self.policy.episode.action_spec
+        if not s.bbox_pitch or not actions.has_camera_tilt or self.last_seen != obs.step or self.box is None:
+            return None
+        k = obs.camera.intrinsics
+        range_m = self.observed_near_m
+        if range_m is None and self.observed_xyz is not None:
+            range_m = math.dist((obs.pose.x, obs.pose.y), self.observed_xyz[:2])
+        fix = vertical_fix(self.box, k.width, k.height, k.cy, k.fy, float(obs.pose.camera_pitch), actions.tilt_angle_rad,
+                           s.bbox_pitch_region, s.border_margin_px, actions.min_pitch_rad, actions.max_pitch_rad,
+                           range_m=range_m, advance_m=advance_m)
+        self.last_fix = fix
+        return fix
+
+    def _servo_pitch(self, obs, fix):
+        """The camera pitch the servo's verdict asks for, from the pitch the frame was taken at."""
+        return float(obs.pose.camera_pitch) + fix.steps * self.policy.episode.action_spec.tilt_angle_rad
+
     def _approach_pitch(self, obs, distance):
         """The pitch for a step toward the target: where the target will be AFTER the step.
 
@@ -895,16 +998,28 @@ class TargetClosing:
         a low target that is in the lower half of the frame now leaves it
         through the bottom edge on the next step if the camera stays level
         (Wiconisco toilet, action 430: bottom-cut box at 1.32 m, one
-        MOVE_FORWARD, lost; four times, then released). So the pitch is
-        :meth:`_pitch` at the range one step closer -- the elevation the
-        memory predicts there, quantised to the tilt step, a full tilt at
-        least inside the close band -- for every approach step, not only
-        inside ``look_down_distance_m``; a level target stays level. None
-        without LOOK actions.
+        MOVE_FORWARD, lost; four times, then released). Within
+        ``bbox_pitch_distance_m``, with a fresh box, the verdict is the
+        image-space servo's (since 2026-10-11): the box predicted after the
+        step, in the lower region or cut below -- LOOK_DOWN; upper or cut
+        above -- LOOK_UP; centred -- the camera stays where it is, whatever
+        the geometry would have forced. Otherwise the pitch is :meth:`_pitch`
+        at the range one step closer -- the elevation the memory predicts
+        there, quantised to the tilt step, a full tilt at least inside the
+        close band -- for every approach step; a level target stays level.
+        None without LOOK actions.
         """
-        if not self.policy.episode.action_spec.has_camera_tilt or self.xyz is None:
+        actions = self.policy.episode.action_spec
+        if not actions.has_camera_tilt or self.xyz is None:
             return None
-        ahead = max(0.3, distance - self.policy.episode.action_spec.forward_step_m)
+        if distance < self.settings.bbox_pitch_distance_m:
+            fix = self._servo(obs, advance_m=actions.forward_step_m)
+            if fix is not None:
+                if fix.wanted:
+                    self.bbox_pitch_corrections += 1
+                    return self._servo_pitch(obs, fix)
+                return float(obs.pose.camera_pitch)
+        ahead = max(0.3, distance - actions.forward_step_m)
         return self._pitch(obs, ahead)
 
     def _step_keeps_box(self, obs, distance):
@@ -1086,11 +1201,22 @@ class TargetClosing:
 
         elevation = self._elevation(obs, distance) if tilt is not None else 0
         if tilt is not None:
-            if elevation < 0 or (elevation == 0 and bottom_cut):
+            fix = self._servo(obs)
+            if fix is not None and fix.wanted and pitch_ok(self._servo_pitch(obs, fix)):
+                # The box's own place in the frame says where to look (since 2026-10-11): below the band
+                # or cut by the lower edge, down; above or cut by the top, up -- the same words the
+                # elevation used, now read off the frame rather than the memory.
+                self.bbox_pitch_corrections += 1
+                step = "look down at a low target" if fix.steps > 0 else "look up at a high target"
+                return NavigationCommand.hold(camera_pitch=self._servo_pitch(obs, fix), final_yaw=obs.pose.yaw,
+                                              info=dict(info, verify_step=step, elevation=elevation,
+                                                        bbox_region=fix.region, servo=fix.reason))
+            geometry_decides = fix is None or fix.region != REGION_CENTRE
+            if geometry_decides and (elevation < 0 or (elevation == 0 and bottom_cut)):
                 view = look(+1, "look down at a low target")
                 if view is not None:
                     return view
-            elif elevation > 0 or (elevation == 0 and top_cut):
+            elif geometry_decides and (elevation > 0 or (elevation == 0 and top_cut)):
                 view = look(-1, "look up at a high target")
                 if view is not None:
                     return view
@@ -1153,28 +1279,31 @@ class TargetClosing:
             # too far when the budget runs out; step closer.
             self.inspection_started = None
             self.inspection_resumptions += 1
+            if self.path.arrived:
+                # The inspection was entered from an arrived standoff: walking its route again
+                # would arrive again. Give it up, and the next selection is a closer ring.
+                self.path.drop()
         # A fresh sighting whose NEAR EDGE is already inside the terminal radius is terminal
         # evidence wherever the centroid is (since 2026-10-08): the benchmark measures to the
         # object, and a low object without LOOK actions is still in the frame from here where
         # it may not be from the standoff (the Wiconisco toilet at 0.65 m is below the FOV).
         in_range = measured is not None and measured <= s.terminal_distance_m + s.range_tolerance_m
         if self.inspection_started is not None or in_range or (distance <= s.terminal_distance_m and not out_of_range):
-            command = self._inspect(obs, distance)
-            if command is None:
-                # The lock was wrong: released, the spot remembered. This action is one
-                # turn in place -- the first frame of the resumed search -- and the next
-                # action is the search's own; the closing never explores.
-                turn = p.episode.action_spec.turn_angle_rad
-                return NavigationCommand.hold(
-                    final_yaw=normalize_angle(obs.pose.yaw + turn),
-                    info={"kind": "target_released", "phase": "RELEASED",
-                          "reason": "the inspection from %.1f m saw nothing; the search resumes" % distance})
-            return command
+            return self._inspect_or_release(obs, distance)
         # During transit A* owns heading. A bbox outside the FOV must not replace
         # a collision-qualified path with a centering hold or a reacquisition spin.
         command = self.path.command(self, obs, world)
         if command is None:
             return self._no_path(obs, world, distance)
+        if self.path.arrived and not out_of_range:
+            # The route to the standoff is walked (since 2026-10-11): the executor would report
+            # ``arrived`` and the headless agent would spend the idle result on a TURN -- twenty of
+            # them at a kept standoff 1.15 m from the memory, inside the success region, until the
+            # stall clock released the lock as "went nowhere" (Collierville/000194, /000043). The
+            # standoff is where the inspection happens: begin it here.
+            self.no_path_steps = 0
+            self.pathless_after_footing = 0
+            return self._inspect_or_release(obs, distance)
         self.no_path_steps = 0
         self.pathless_after_footing = 0
         if self._approach_stalled(obs):
@@ -1198,6 +1327,20 @@ class TargetClosing:
         return replace(command, camera_pitch=pitch,
                        info=dict(command.info, target_confirmed=True, persistent_lock=True,
                                  target_visible=visible, range_m=distance, phase=self.phase))
+
+    def _inspect_or_release(self, obs, distance):
+        """The inspection's action -- or, when it released the lock, the one turn that hands the action back."""
+        command = self._inspect(obs, distance)
+        if command is None:
+            # The lock was wrong: released, the spot remembered. This action is one
+            # turn in place -- the first frame of the resumed search -- and the next
+            # action is the search's own; the closing never explores.
+            turn = self.policy.episode.action_spec.turn_angle_rad
+            return NavigationCommand.hold(
+                final_yaw=normalize_angle(obs.pose.yaw + turn),
+                info={"kind": "target_released", "phase": "RELEASED",
+                      "reason": "the inspection from %.1f m saw nothing; the search resumes" % distance})
+        return command
 
     def _blind_frame(self, obs, world):
         """The action for a frame without detector evidence: the clocks stand still, the approach may go on.
@@ -1372,10 +1515,15 @@ class TargetClosing:
         if self.inspection_started is None:
             self.inspection_started, self.inspection_index = obs.step, 0
             self.inspection_sighting = None
+            self.centring_done, self.centring_step, self.weak_holds = False, -1, 0
         self.phase = "INSPECT"
         pitch = self._pitch(obs, distance)
         bearing = math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
         fresh = self.last_seen == obs.step
+        fix = self._servo(obs) if fresh else None
+        if fix is not None:
+            # A fresh box: its place in the frame, not the memory's geometry, says where the camera goes.
+            pitch = self._servo_pitch(obs, fix) if fix.wanted else float(obs.pose.camera_pitch)
         spans_centre = fresh and self.box is not None and self.box[0] <= k.cx <= self.box[2]
         error = 0.0 if spans_centre else self._bbox_error(obs) if fresh else normalize_angle(bearing - obs.pose.yaw)
         yaw = normalize_angle(obs.pose.yaw + error)
@@ -1383,6 +1531,11 @@ class TargetClosing:
         tilting = pitch is not None and pitch_action(obs.pose.camera_pitch, pitch, actions.tilt_angle_rad,
                                                      actions.min_pitch_rad, actions.max_pitch_rad) is not None
         limit = s.terminal_distance_m + s.range_tolerance_m
+        # The memory STOPs below measure the planar range to the memory; from an ARRIVED standoff
+        # (since 2026-10-11) the arrival tolerance is part of where the agent stands -- a kept
+        # standoff ends within the terminal radius of the memory, the executor stops within
+        # ``goal_tolerance_m`` of it -- so the trajectory is complete that much farther out.
+        reach = limit + (self.policy.converter_params.goal_tolerance_m if self.path.arrived else 0.0)
         measured = self._fresh_measured(obs)
         if measured is not None and measured <= limit:
             self.inspection_sighting = obs.step
@@ -1394,14 +1547,23 @@ class TargetClosing:
                 "box_spans_centre": spans_centre, "phase": self.phase, "approach_history": history,
                 "support_surface_fresh": self.support_seen == obs.step,
                 "floor_cut": fresh and self._floor_cut(obs),
+                "confidence": self.conf if fresh else None,
+                "bbox_region": None if fix is None else fix.region,
                 "memory_sigma_m": None if self.memory is None else self.memory.sigma_m}
+        if fresh and measured <= limit and (not turning or history):
+            # The terminal evidence is in this frame. Before the STOP is taken on it: a whole box,
+            # then a confident one (since 2026-10-11; both bounded, see ``_before_stop``).
+            deferred = self._before_stop(obs, distance, fix, turning, info)
+            if deferred is not None:
+                return deferred
         # The pitch the geometry predicts is where to LOOK for the target, not a
         # condition on having seen it: the Hanson toilet projected only at 60 degrees
         # down where the prediction said 30, and twenty actions of LOOK_UP/LOOK_DOWN
         # followed a fresh, centred, in-range sighting before the budget STOPped.
         if fresh and not turning and measured <= limit:
             self.phase = "STOP"
-            return NavigationCommand.stop_here(info=dict(info, phase="STOP", reason="fresh terminal target confirmation"))
+            return NavigationCommand.stop_here(info=dict(info, phase="STOP", depth_valid=True,
+                                                         reason="fresh terminal target confirmation"))
         if history and fresh and measured <= limit:
             # Tracked and approached over metres: a cropped box whose centre says "turn" is
             # still the object, and the benchmark measures range, not heading.
@@ -1410,16 +1572,28 @@ class TargetClosing:
             return NavigationCommand.stop_here(info=dict(
                 info, phase="STOP", reason="fresh in-range sighting after a %.1f m approach; alignment not required"
                 % self.history.path_m))
-        if (history and not fresh and distance <= limit
+        if (history and not fresh and distance <= reach
                 and self.terminal_missing >= s.history_stop_after_missing):
             # The trajectory is complete and the detector has dropped the box for a few
             # frames: the 3-D memory refined over the approach is what we STOP on.
             self.phase = "STOP"
             self.history_stops += 1
             return NavigationCommand.stop_here(info=dict(
-                info, phase="STOP", reason="approach history: target tracked over %.1f m, the 3-D memory stands %.2f m "
-                "away (sigma %.2f m) and %d frames passed without a fresh box"
-                % (self.history.path_m, distance, self.memory.sigma_m, self.terminal_missing)))
+                info, phase="STOP", standoff_reached=self.path.arrived,
+                reason="approach history: target tracked over %.1f m, the 3-D memory stands %.2f m "
+                "away (sigma %.2f m) and %d frames passed without a fresh box%s"
+                % (self.history.path_m, distance, self.memory.sigma_m, self.terminal_missing,
+                   "; the standoff is reached" if self.path.arrived else "")))
+        if (not fresh and self.centring_step == obs.step - 1 and self.inspection_sighting == obs.step - 1
+                and distance <= limit):
+            # The previous frame met the STOP's own conditions -- fresh, in range, confident -- and the
+            # one centring tilt deferred it for a whole box; the detector did not show one. That tilt
+            # may cost an action, never the STOP: it is taken on the evidence of the frame before.
+            self.phase = "STOP"
+            return NavigationCommand.stop_here(info=dict(
+                info, phase="STOP", depth_valid=True,
+                reason="fresh terminal target confirmation one action ago; the centring tilt lost the box, the "
+                       "sighting stands (memory %.2f m away, sigma %.2f m)" % (distance, self.memory.sigma_m)))
         below = None if fresh else self._below_the_frame(obs, distance)
         if below is not None and distance <= limit and obs.step - self.last_seen <= s.blind_cone_max_missing:
             # The camera cannot show the target from here -- it is under the frame's lower
@@ -1440,7 +1614,7 @@ class TargetClosing:
                  and self.last_seen < self.inspection_started and self.inspection_index >= len(views))
         exhausted = obs.step - self.inspection_started >= s.max_reacquire_steps
         if (blank or exhausted) and self.inspection_sighting is None and (history or support):
-            if distance <= limit and (exhausted or history):
+            if distance <= reach and (exhausted or history):
                 # Not "saw nothing": the approach brought us here, or the surface the target
                 # stands on is still measured at the memory's spot. Complete and STOP.
                 self.phase = "STOP"
@@ -1449,14 +1623,17 @@ class TargetClosing:
                 else:
                     self.support_stops += 1
                 return NavigationCommand.stop_here(info=dict(
-                    info, phase="STOP", reason=("approach history: %.1f m walked to this spot; the 3-D memory stands"
-                                                % self.history.path_m) if history else
+                    info, phase="STOP", standoff_reached=self.path.arrived,
+                    reason=("approach history: %.1f m walked to this spot; the 3-D memory stands"
+                            % self.history.path_m) if history else
                     "support surface consistent with the 3-D memory at terminal range; inspection budget spent"))
-            if history and distance > limit:
+            if history and distance > reach:
                 # Too far for a memory STOP: step closer along the trajectory instead of releasing.
                 self.history_holds += 1
                 self.inspection_started = None
                 self.inspection_resumptions += 1
+                if self.path.arrived:
+                    self.path.drop()                 # walking the arrived route again would arrive again
                 return NavigationCommand.hold(camera_pitch=None, final_yaw=yaw, info=dict(
                     info, reason="approach history: resuming the approach from %.2f m instead of releasing" % distance))
             if support and not exhausted:
@@ -1484,6 +1661,49 @@ class TargetClosing:
             # for the whole budget). Centre it at the pitch it was seen at.
             pitch = None
         return NavigationCommand.hold(camera_pitch=pitch, final_yaw=yaw, info=info)
+
+    def _before_stop(self, obs, distance, fix, turning, info):
+        """What to do instead of STOPping on this fresh in-range frame -- or None: STOP.
+
+        Two bounded steps between the terminal evidence and the STOP (since
+        2026-10-11):
+
+        * **a confident box.** A fresh box under ``stop_confidence`` is held
+          for the one frame that keeps it whole (:meth:`_verification_view`:
+          the servo's tilt with the LOOK pair, else a LOOK or TURN that keeps
+          the box in), at most ``weak_stop_max_holds`` times in a row; when
+          no such frame exists, or the holds are spent, the STOP goes ahead
+          on the evidence there is. Not on the approach-history path, which
+          STOPs on the trajectory, not the box.
+        * **a whole box.** With the LOOK pair, when the servo can re-frame the
+          box (cut by an edge, or off the centre band), ONE centring tilt --
+          once per inspection (``stop_centring``, ``centring_done``) -- and
+          the STOP is taken on the next frame: on the whole box if the
+          detector shows it, and on this frame's evidence if it does not
+          (:meth:`_inspect`, ``centring_step``) -- the tilt may cost one
+          action, never the STOP. Not while the box still needs a yaw turn:
+          the converter tilts before it faces.
+        """
+        s = self.settings
+        weak = self.conf is not None and self.conf < s.stop_confidence
+        if weak and not turning and self.weak_holds < s.weak_stop_max_holds:
+            view = self._verification_view(obs, distance)
+            if view is not None:
+                self.weak_holds += 1
+                self.weak_stop_holds += 1
+                return replace(view, info=dict(info, verify_step=view.info.get("verify_step"),
+                                               bbox_region=view.info.get("bbox_region", info.get("bbox_region")),
+                                               reason="fresh in-range box at %.2f, under stop_confidence %.2f: another frame "
+                                                      "(%d of %d) before the STOP"
+                                                      % (self.conf, s.stop_confidence, self.weak_holds, s.weak_stop_max_holds)))
+        if s.stop_centring and not self.centring_done and not turning and fix is not None and fix.wanted:
+            self.centring_done, self.centring_step = True, obs.step
+            self.stop_centring_tilts += 1
+            return NavigationCommand.hold(camera_pitch=self._servo_pitch(obs, fix), final_yaw=obs.pose.yaw, info=dict(
+                info, servo=fix.reason,
+                reason="fresh in-range box in the %s of the frame: one centring tilt before the terminal STOP"
+                       % fix.region.replace("_", " ")))
+        return None
 
     def _approach_stalled(self, obs):
         """Whether the last ``approach_stall_actions`` CLOSE actions left the agent inside a circle of ``approach_stall_m``."""
@@ -1631,6 +1851,13 @@ class TargetClosing:
                 "footprint_m": self.footprint_m, "depth_associations": self.depth_associations,
                 "floor_cut_frames": self.floor_cut_frames, "floor_cut_measurements": self.floor_cut_measurements,
                 "blind_cone_stops": self.blind_cone_stops,
+                "confidence": self.conf, "box_drift_rows": self.box_drift_rows,
+                "bbox_region": None if self.last_fix is None else self.last_fix.region,
+                "bbox_pitch_steps": None if self.last_fix is None else self.last_fix.steps,
+                "bbox_pitch_corrections": self.bbox_pitch_corrections, "stop_centring_tilts": self.stop_centring_tilts,
+                "weak_stop_holds": self.weak_stop_holds, "goal_kept": self.path.kept,
+                "standoff_arrived": self.path.arrived, "standoff_arrivals": self.path.arrivals,
+                "standoff_dropped": self.path.dropped,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}
                              for xy, floor, step in self.boxed_in],
                 "rejected": [{"xyz": list(entry[0]), "floor_id": entry[1], "step": entry[2], "radius_m": entry[3],
