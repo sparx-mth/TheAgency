@@ -280,3 +280,5 @@ sparx_agency/robots/PEGASUS/scenes/
 # still tracked.
 sparx_agency/robots/PEGASUS/scenes/*_augmented.json
 run_state/
+
+runs/*
