@@ -197,7 +197,7 @@ split. Three ways to make that manageable:
   PID recorded, the monitor (2.4) beside it, and the supervisor (2.6) once the run is past its preflight -- and the
   *same* command brings the run back after the machine restarted (2.6):
   ```bash
-  PROGRESS_ENTRY=docs/progress/entries/028-gibson-val-3b-laptop-run.md \
+  PROGRESS_ENTRY=docs/progress/entries/029-gibson-val-3b-laptop-run.md \
       sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/launch_detached.sh runs/gibson_val_$(date -u +%Y%m%dT%H%M%SZ)
   ```
   `PROGRESS_ENTRY` is required for a new run (the supervisor closes that entry when it publishes); every variable of
@@ -216,7 +216,7 @@ split. Three ways to make that manageable:
   `<output>/boot.log`). The entry removes itself when it fires; `--stop` cancels it beforehand; `--after-reboot`
   again replaces it. A later restart of the machine is the plain `launch_detached.sh <output>` resume as above.
   ```bash
-  PROGRESS_ENTRY=docs/progress/entries/028-gibson-val-3b-laptop-run.md LLM_REASONING_MODEL=qwen2.5:3b-instruct \
+  PROGRESS_ENTRY=docs/progress/entries/029-gibson-val-3b-laptop-run.md LLM_REASONING_MODEL=qwen2.5:3b-instruct \
       LLM_VRAM_MIB=2800 OLLAMA_CONTAINER=ollama-scene-graph-gpu \
       sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/launch_detached.sh runs/gibson_val_X --after-reboot
   ```

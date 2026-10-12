@@ -405,7 +405,7 @@ message = subject + "\n\n" + "\n".join([
     "category, beside the published Table 2 rows, with the frozen configuration and provenance." % (gibson_rel, n, run_name),
     "- %s/results/%s/: summary.json, the per-episode scalars as episodes.csv, and run.json, so every table can be recomputed." % (gibson_rel, run_name),
     "- %s: the progress entry closed with the result." % entry_rel,
-    "- CHANGELOG.md: the result under Unreleased."]) + "\n\nProgress: 026-full-gibson-val-run-detached-monitor\n"
+    "- CHANGELOG.md: the result under Unreleased."]) + "\n\nProgress: %s\n" % pathlib.Path(entry_rel).stem
 (out / "publish.commit-msg.txt").write_text(message)
 for path in written:
     print(path.relative_to(tree))

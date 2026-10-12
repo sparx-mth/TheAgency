@@ -10,6 +10,8 @@ entry under `entries/` when work actually starts on it.
 - [ ] ObjectNav robustness: a failed plan or model keeps the agent exploring (nearest frontier, never a spin), stairs from the simulator's ground truth with an explicit up/down decision, YOLO-only detector default → `entries/012-objnav-fallback-gt-stairs-yolo-default.md`
 - [ ] The published Gibson ObjectNav validation benchmark (1,000 episodes, 5 scenes, SR/SPL/DTG) run to completion, detached and monitored → `entries/026-full-gibson-val-run-detached-monitor.md`
 - [ ] ObjectNav target closing: an image-space pitch servo (the box in the frame drives LOOK_DOWN/LOOK_UP), a whole-box confident STOP, and the toilet fixes verified against couch/tv/bed → `entries/027-bbox-pitch-servo-and-closing-regression-check.md`
+- [ ] The published Gibson val benchmark re-run with the toilet closing fixes, SAM off (A) then SAM on (B), and the two compared against each other and the 2026-10-08 baseline → `entries/028-gibson-val-rerun-closing-fixes-sam-off.md`
+- [ ] The published Gibson val benchmark on the 8 GB laptop: `qwen2.5:3b-instruct` in both LLM roles, box depth (SAM off), lean records, resumable across a reboot, with the per-episode data a failure analysis needs → `entries/029-gibson-val-3b-laptop-run.md`
 - [ ] FALCON BEV click-to-fly for Rooster/Sphera, end-to-end and reliable → `entries/001-falcon-rooster-clickfly.md`
 - [ ] Move every Rooster node still running on the bare host into `robotican_dev`/`theagency:robotican` → `entries/002-rooster-full-containerize.md`
 - [ ] Incoming updated FALCON/planning drop from the user — integrate and re-verify → `entries/003-falcon-planning-update.md`

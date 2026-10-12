@@ -1,4 +1,4 @@
-# 028 - The full Gibson validation run on the 8 GB laptop: 3B oracle, box depth, lean records
+# 029 - The full Gibson validation run on the 8 GB laptop: 3B oracle, box depth, lean records
 
 **Branch:** `feat/objnav-habitat-gibson-nadav`
 **Status:** in-progress -- launch tooling and preflight done; `runs/gibson_val_3b_laptop_20261012T142659Z` is scheduled to launch itself at the boot that loads the matching NVIDIA kernel module (`launch_detached.sh --after-reboot`)
