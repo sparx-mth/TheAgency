@@ -38,15 +38,20 @@ YAW_COMPLETE_MARGIN_S = 2.0
 # same device, resolution and MJPG format as auto_capture_interval.py in NanoLLM_VILA_and_OWL
 # (confirmed working via OpenCV inside this container: 640x360 MJPG open+read succeeds -
 # camera_frames_example.py's H264 caps-negotiation issue in this same workspace is specific
-# to its hardware H264 decode path, not plain MJPG capture). Writes into this board's own
-# captures root under its own "rotate_scan_*" subfolder, so comm_manager_vllm.py can process
-# these frames too, without colliding with that pipeline's "latest"-symlinked folder rotation.
+# to its hardware H264 decode path, not plain MJPG capture).
+#
+# /home/iai/captures (the NanoLLM_VILA_and_OWL repo's own convention, used on the host) is
+# NOT mounted into this container - only /home/iai/frames is (-> host's
+# ~/iai_ws/frames, same as camera_frames_example.py already uses), confirmed via
+# `docker inspect iai --format '{{range .Mounts}}...'`. Write there, in a "rotate_scan_*"
+# subfolder so repeated runs don't overwrite each other; the host side copies it into the
+# shared captures root afterward (see run_rotate_scan_test.sh in that repo).
 CAPTURE_DEVICE = "/dev/HD_CAMERA"
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 360
 CAPTURE_MJPG = True
 CAPTURE_INTERVAL_S = 0.5
-CAPTURES_ROOT = "/home/iai/captures"
+FRAMES_ROOT = "/home/iai/frames"
 
 STEP_WAIT_ARM_CONFIRM = 0
 STEP_TAKEOFF = 1
@@ -196,9 +201,8 @@ class TakeoffAndRotate(Node):
         self.cam_thread = threading.Thread(target=self._camera_read_loop, daemon=True)
         self.cam_thread.start()
 
-        root = Path(CAPTURES_ROOT) / self.id
         ts = time.strftime("%Y_%m_%d___%H_%M_%S")
-        self.capture_session_dir = root / f"rotate_scan_{ts}"
+        self.capture_session_dir = Path(FRAMES_ROOT) / f"rotate_scan_{ts}"
         self.capture_session_dir.mkdir(parents=True, exist_ok=True)
         self.capture_count = 0
         self.get_logger().info(f"Capturing rotation scan to {self.capture_session_dir}")
