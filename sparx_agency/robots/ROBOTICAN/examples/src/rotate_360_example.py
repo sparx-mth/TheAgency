@@ -45,6 +45,23 @@ YAW_MAX_WAIT_S = 40.0        # safety fallback if azimuth feedback never confirm
 YAW_SETTLE_TIME_S = 3.0      # hold still after Position mode confirms, before yawing - lets
                              # the optical-flow-based position/velocity hold settle first
 
+# Safety: a flight test hit repeated "ddsi_udp_conn_write ... failed" DDS/multicast errors
+# mid-flight, visible in both this node's and land_and_disarm_example.py's logs at the same
+# moment - a real link dropout, not a bug in either script. State feedback (armed/flight_mode/
+# azimuth) can silently stop updating during one of these without the step machine noticing,
+# which would mean we keep re-issuing commands based on stale data. Track how long it's been
+# since each topic last delivered a message, and stop automated commands rather than trust
+# data that's gone silent - holding is safer than continuing blind.
+STATE_STALE_TIMEOUT_S = 2.0
+
+# Pitch forward slightly during the capture window so the camera (rigidly body-mounted, no
+# separate gimbal) looks more toward the floor/room contents instead of straight ahead at
+# wall height. Sign/magnitude are a first guess, NOT flight-validated - MAVLink's usual
+# convention is manual_control.x = pitch, negative = nose down, but this codebase's actual
+# mapping hasn't been confirmed. Start small and watch closely the first time; if it drifts
+# forward/backward instead of just tilting, the sign or magnitude needs correcting.
+CAPTURE_PITCH_DOWN = -50.0
+
 # Scan capture: runs from Position-mode confirmation through the end of the turn, at the
 # same device, resolution and MJPG format as auto_capture_interval.py in NanoLLM_VILA_and_OWL
 # (confirmed working via OpenCV inside this container: 640x360 MJPG open+read succeeds -
@@ -96,6 +113,8 @@ class TakeoffAndRotate(Node):
         self.arm_wait_start_time = None
         self.position_wait_start_time = None
         self.settle_start_time = None
+        self.last_state_msg_time = None
+        self.last_uav_state_msg_time = None
         self.current_azimuth = None
         self.yaw_last_azimuth = None
         self.yaw_accumulated_deg = 0.0
@@ -187,12 +206,14 @@ class TakeoffAndRotate(Node):
         self.step = STEP_WAIT_ARM_CONFIRM
 
     def state_cb(self, msg):
+        self.last_state_msg_time = time.monotonic()
         if self.armed != msg.armed or self.flight_mode != msg.flight_mode:
             self.armed = msg.armed
             self.flight_mode = msg.flight_mode
             self.get_logger().info(f"RoosterState armed={msg.armed} flight_mode={msg.flight_mode}")
 
     def uav_state_cb(self, msg):
+        self.last_uav_state_msg_time = time.monotonic()
         self.current_altitude = msg.altitude_relative
         if self.yaw_last_azimuth is not None:
             # azimuth wraps at +-pi; a plain subtraction breaks crossing that boundary,
@@ -220,10 +241,18 @@ class TakeoffAndRotate(Node):
             return None
         return self.current_altitude - self.altitude_at_arm
 
+    def comms_stale(self):
+        if self.last_state_msg_time is None or self.last_uav_state_msg_time is None:
+            return False  # nothing received yet at all - a startup condition, not a dropout
+        now = time.monotonic()
+        return (now - self.last_state_msg_time > STATE_STALE_TIMEOUT_S or
+                now - self.last_uav_state_msg_time > STATE_STALE_TIMEOUT_S)
+
     # ---------- camera scan capture ----------
     def start_camera_capture(self):
         if self.cam_thread is not None:
             return
+        self.manual_control.x = CAPTURE_PITCH_DOWN
         self.cam_running = True
         self.cam_thread = threading.Thread(target=self._camera_read_loop, daemon=True)
         self.cam_thread.start()
@@ -283,6 +312,7 @@ class TakeoffAndRotate(Node):
         self.capture_count += 1
 
     def stop_camera_capture(self):
+        self.manual_control.x = 0.0
         if self.capture_timer is not None:
             self.capture_timer.cancel()
             self.capture_timer = None
@@ -294,7 +324,16 @@ class TakeoffAndRotate(Node):
             f"Rotation scan done: {self.capture_count} frame(s) saved to {self.capture_session_dir}")
 
     def step_timer_cb(self):
-        if self.step is None:
+        if self.step is None or self.step == STEP_DONE:
+            return
+
+        if self.comms_stale():
+            self.get_logger().error(
+                f"No state update in over {STATE_STALE_TIMEOUT_S:.1f}s (comms dropout?) -- "
+                "stopping automated commands and holding. Confirm the link is back, then "
+                "run land_and_disarm_example.py.")
+            self.stop_camera_capture()
+            self.step = STEP_DONE
             return
 
         if self.step == STEP_WAIT_ARM_CONFIRM:
@@ -389,9 +428,6 @@ class TakeoffAndRotate(Node):
                                        remaining, YAW_RATE_DEG_S,
                                        YAW_DIRECTION, YAW_RELATIVE)
                 self.yaw_last_resend_time = now
-
-        elif self.step == STEP_DONE:
-            pass
 
     def destroy_node(self):
         self.stop_camera_capture()
