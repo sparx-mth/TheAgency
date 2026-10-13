@@ -3,6 +3,7 @@
 import os
 import time
 import math
+import json
 import threading
 from pathlib import Path
 
@@ -41,6 +42,8 @@ YAW_RELATIVE = 1.0           # 1 = relative to current heading, 0 = absolute
 YAW_TOLERANCE_DEG = 10.0     # consider the turn done within this margin
 YAW_RESEND_INTERVAL_S = 4.0  # re-issue the command for the remaining degrees at this cadence
 YAW_MAX_WAIT_S = 40.0        # safety fallback if azimuth feedback never confirms completion
+YAW_SETTLE_TIME_S = 3.0      # hold still after Position mode confirms, before yawing - lets
+                             # the optical-flow-based position/velocity hold settle first
 
 # Scan capture: runs from Position-mode confirmation through the end of the turn, at the
 # same device, resolution and MJPG format as auto_capture_interval.py in NanoLLM_VILA_and_OWL
@@ -65,9 +68,10 @@ STEP_WAIT_ARM_CONFIRM = 0
 STEP_TAKEOFF = 1
 STEP_MONITOR_ALTITUDE = 2
 STEP_VERIFY_POSITION = 3
-STEP_YAW_360 = 4
-STEP_WAIT_YAW_DONE = 5
-STEP_DONE = 6
+STEP_SETTLE_BEFORE_YAW = 4
+STEP_YAW_360 = 5
+STEP_WAIT_YAW_DONE = 6
+STEP_DONE = 7
 
 
 def get_namespace_id():
@@ -88,6 +92,7 @@ class TakeoffAndRotate(Node):
         self.takeoff_sent_time = None
         self.arm_wait_start_time = None
         self.position_wait_start_time = None
+        self.settle_start_time = None
         self.current_azimuth = None
         self.yaw_last_azimuth = None
         self.yaw_accumulated_deg = 0.0
@@ -254,9 +259,25 @@ class TakeoffAndRotate(Node):
             if self.latest_frame is None:
                 return
             frame = self.latest_frame.copy()
-        img_path = self.capture_session_dir / f"frame_{self.capture_count:03d}.jpg"
-        if cv2.imwrite(str(img_path), frame):
-            self.capture_count += 1
+
+        ts = time.strftime("%Y_%m_%d___%H_%M_%S")
+        idx = self.capture_count
+        img_name = f"frame_{ts}_{idx:03d}.jpg"
+        img_path = self.capture_session_dir / img_name
+        if not cv2.imwrite(str(img_path), frame):
+            return
+
+        meta = {
+            "image": img_name,
+            "timestamp": ts,
+            "index_in_session": idx,
+            "resolution": frame.shape[:2],
+            "session": self.capture_session_dir.name,
+        }
+        with open(self.capture_session_dir / f"frame_{ts}_{idx:03d}.json", "w") as f:
+            json.dump(meta, f, indent=2)
+
+        self.capture_count += 1
 
     def stop_camera_capture(self):
         if self.capture_timer is not None:
@@ -312,13 +333,20 @@ class TakeoffAndRotate(Node):
             if self.flight_mode == KeepAlive.FLIGHT_MODE_POSITION:
                 self.get_logger().info(f"Position mode confirmed (flight_mode={self.flight_mode})")
                 self.start_camera_capture()
-                self.step = STEP_YAW_360
+                self.settle_start_time = time.monotonic()
+                self.step = STEP_SETTLE_BEFORE_YAW
                 return
             if time.monotonic() - self.position_wait_start_time > POSITION_RETRY_INTERVAL:
                 self.get_logger().warn(
                     f"Position not confirmed yet (flight_mode={self.flight_mode}) -- re-requesting")
                 self.request_flight_mode(KeepAlive.FLIGHT_MODE_POSITION)
                 self.position_wait_start_time = time.monotonic()
+
+        elif self.step == STEP_SETTLE_BEFORE_YAW:
+            if time.monotonic() - self.settle_start_time >= YAW_SETTLE_TIME_S:
+                self.get_logger().info(
+                    f"Settled {YAW_SETTLE_TIME_S:.1f}s in Position mode -- starting the turn")
+                self.step = STEP_YAW_360
 
         elif self.step == STEP_YAW_360:
             self.get_logger().info(
