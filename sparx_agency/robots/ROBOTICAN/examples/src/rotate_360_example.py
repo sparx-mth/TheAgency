@@ -2,6 +2,10 @@
 
 import os
 import time
+import threading
+from pathlib import Path
+
+import cv2
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import SetBool
@@ -29,6 +33,18 @@ YAW_RATE_DEG_S = 30.0      # slow/conservative default - tune to taste
 YAW_DIRECTION = 1.0        # 1 = clockwise, -1 = counter-clockwise
 YAW_RELATIVE = 1.0         # 1 = relative to current heading, 0 = absolute
 YAW_COMPLETE_MARGIN_S = 2.0
+
+# Scan capture: runs from Position-mode confirmation through the end of the turn, on the
+# companion computer's own camera (same device auto_capture_interval.py uses in the
+# NanoLLM_VILA_and_OWL repo). Written under its own "rotate_scan_*" subfolder, not the
+# "latest"-symlinked capture root that repo's own scripts manage, so this never collides
+# with that pipeline's folder rotation/cleanup.
+CAPTURE_DEVICE = "/dev/video0"
+CAPTURE_WIDTH = 640
+CAPTURE_HEIGHT = 360
+CAPTURE_MJPG = True
+CAPTURE_INTERVAL_S = 0.5
+CAPTURES_ROOT = "/home/iai/captures"
 
 STEP_WAIT_ARM_CONFIRM = 0
 STEP_TAKEOFF = 1
@@ -60,6 +76,14 @@ class TakeoffAndRotate(Node):
         self.yaw_sent_time = None
         self.yaw_duration_s = None
         self.step = None
+
+        self.cam_thread = None
+        self.cam_running = False
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        self.capture_timer = None
+        self.capture_session_dir = None
+        self.capture_count = 0
 
         # Services
         self.arm_rooster = self.create_client(SetBool, f'/{self.id}/arm_rooster')
@@ -162,6 +186,64 @@ class TakeoffAndRotate(Node):
             return None
         return self.current_altitude - self.altitude_at_arm
 
+    # ---------- camera scan capture ----------
+    def start_camera_capture(self):
+        if self.cam_thread is not None:
+            return
+        self.cam_running = True
+        self.cam_thread = threading.Thread(target=self._camera_read_loop, daemon=True)
+        self.cam_thread.start()
+
+        root = Path(CAPTURES_ROOT) / self.id
+        ts = time.strftime("%Y_%m_%d___%H_%M_%S")
+        self.capture_session_dir = root / f"rotate_scan_{ts}"
+        self.capture_session_dir.mkdir(parents=True, exist_ok=True)
+        self.capture_count = 0
+        self.get_logger().info(f"Capturing rotation scan to {self.capture_session_dir}")
+        self.capture_timer = self.create_timer(CAPTURE_INTERVAL_S, self.capture_frame_cb)
+
+    def _camera_read_loop(self):
+        device = os.path.realpath(CAPTURE_DEVICE) if not CAPTURE_DEVICE.isdigit() else int(CAPTURE_DEVICE)
+        cap = cv2.VideoCapture(device, cv2.CAP_V4L2) if isinstance(device, str) else cv2.VideoCapture(device)
+        if CAPTURE_MJPG:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+
+        if not cap.isOpened():
+            self.get_logger().error(f"Could not open camera {device} for rotation capture")
+            self.cam_running = False
+            return
+
+        while self.cam_running:
+            ret, frame = cap.read()
+            if ret:
+                with self.frame_lock:
+                    self.latest_frame = frame
+            else:
+                time.sleep(0.01)
+        cap.release()
+
+    def capture_frame_cb(self):
+        with self.frame_lock:
+            if self.latest_frame is None:
+                return
+            frame = self.latest_frame.copy()
+        img_path = self.capture_session_dir / f"frame_{self.capture_count:03d}.jpg"
+        if cv2.imwrite(str(img_path), frame):
+            self.capture_count += 1
+
+    def stop_camera_capture(self):
+        if self.capture_timer is not None:
+            self.capture_timer.cancel()
+            self.capture_timer = None
+        self.cam_running = False
+        if self.cam_thread is not None:
+            self.cam_thread.join(timeout=2.0)
+            self.cam_thread = None
+        self.get_logger().info(
+            f"Rotation scan done: {self.capture_count} frame(s) saved to {self.capture_session_dir}")
+
     def step_timer_cb(self):
         if self.step is None:
             return
@@ -204,6 +286,7 @@ class TakeoffAndRotate(Node):
         elif self.step == STEP_VERIFY_POSITION:
             if self.flight_mode == KeepAlive.FLIGHT_MODE_POSITION:
                 self.get_logger().info(f"Position mode confirmed (flight_mode={self.flight_mode})")
+                self.start_camera_capture()
                 self.step = STEP_YAW_360
                 return
             if time.monotonic() - self.position_wait_start_time > POSITION_RETRY_INTERVAL:
@@ -229,6 +312,7 @@ class TakeoffAndRotate(Node):
                 self.get_logger().info(
                     "Turn complete (time-based, no heading feedback available) -- "
                     "hovering in Position mode. Run land_and_disarm_example.py to land.")
+                self.stop_camera_capture()
                 self.step = STEP_DONE
 
         elif self.step == STEP_DONE:
