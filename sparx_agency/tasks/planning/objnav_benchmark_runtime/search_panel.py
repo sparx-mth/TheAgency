@@ -145,9 +145,14 @@ def _order(col, search):
         node = nodes.get(room_id, {"id": room_id})
         peek = search.get("peek") or {}
         scan = search.get("scan") or {}
+        explore = search.get("explore") or {}
         phase = ""
         if node.get("kind") == "opening" or (peek and peek.get("node") == room_id):
             phase = "  peek: look %d/%d (%d turns)" % (peek.get("look", 0), peek.get("of", 0), peek.get("turns", 0))
+        elif explore and explore.get("room") == room_id:
+            left = explore.get("frontier_left")
+            phase = "  frontier walk: goal %d%s" % (explore.get("goals", 0),
+                                                     "" if left is None else ", %d frontier left" % left)
         elif scan:
             phase = "  %s%s" % (scan.get("phase", ""), " (%d turns, %d deg)" % (
                 scan.get("turns", 0), int(round(math.degrees(float(scan.get("swept", 0.0))))))

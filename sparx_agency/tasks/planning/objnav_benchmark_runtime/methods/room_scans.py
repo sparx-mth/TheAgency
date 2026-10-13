@@ -36,7 +36,15 @@ Four tests say whether a room is finished, in order:
   and no confirmed door on it -- the strip behind a bed, the nook beside
   a wardrobe, that the watershed carved into a room of its own
   (``fragment``, since 2026-10-05). A bathroom is small too, but a
-  bathroom has a door or an unseen boundary; a fragment has neither.
+  bathroom has a door or an unseen boundary; a fragment has neither;
+* with :attr:`explored` on (the loop's ``explore`` visit, since
+  2026-10-13), it is **explored**: no live frontier, and the agent has
+  stood inside it -- not on its threshold cell but :attr:`explored_inset_m`
+  in from its edge, or anywhere in it when it is too narrow for that. The
+  explore visit walks a room's frontiers until none is left, so a room
+  whose every floor cell is known and that the agent stood in has had
+  every part of it in the camera's frame; no circle from its middle is
+  owed (``explored``).
 
 A verdict is sticky: a room once finished stays finished for the episode
 (registry ids never recycle), whatever the watershed does to its edges
@@ -48,13 +56,16 @@ through, and then walked into: the room that grows out of it under the same
 number is re-judged on the live map, and a scan point still inside it, or
 a scan that still saw most of it, finishes it again at once. The warm-up's
 own rotation is a scan too: the spawn room is finished before the first
-room is ever chosen.
+room is ever chosen. So is a completed full glance
+(:mod:`~sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.path_glances`,
+``source="glance"``): a circle turned on the way into a room finishes it.
 """
 from __future__ import annotations
 
 import math
 
 import numpy as np
+from scipy.ndimage import binary_erosion
 
 from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_vantage import vantage_point
@@ -65,6 +76,7 @@ SCAN_POINT_INSIDE = "scan_point_inside"
 SEEN_FROM_SCAN = "seen_from_scan"
 SEEN_THROUGH = "seen_through"
 FRAGMENT = "fragment"
+EXPLORED = "explored"
 
 
 def visible_fraction(world, xy, mask, max_range_m, samples=120):
@@ -117,26 +129,40 @@ class RoomScanLedger:
             many times the size its verdict was reached on is re-judged
             rather than read sticky (see the module docstring); 0 keeps
             every verdict sticky whatever the growth.
+        explored: Whether a room with no live frontier that the agent has
+            stood in is finished (``explored``) -- the explore visit's
+            finishing rule, off under the scan visit, whose finishing act
+            is the rotation. None (the default) follows the policy's loop
+            settings (``policy.loop_settings.exploring``) at the time of
+            the verdict; True or False fixes it.
+        explored_inset_m: How far in from the room's edge a pose must lie
+            to count as having stood in it for that verdict (the doorway
+            cell is the threshold, not the room); a room too narrow for the
+            inset accepts any pose inside it.
     """
 
     def __init__(self, policy, seen_fraction=0.5, fragment_max_m2=3.0, walkthrough_clearance_m=0.9, pose_batch=8,
-                 regrow_factor=1.5):
+                 regrow_factor=1.5, explored=None, explored_inset_m=0.5):
         if not 0.0 < float(seen_fraction) <= 1.0:
             raise ValueError("seen_fraction must lie in (0, 1], got %r" % (seen_fraction,))
         for name, value in (("fragment_max_m2", fragment_max_m2), ("walkthrough_clearance_m", walkthrough_clearance_m),
-                            ("regrow_factor", regrow_factor)):
+                            ("regrow_factor", regrow_factor), ("explored_inset_m", explored_inset_m)):
             if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError("%s must be finite and non-negative, got %r" % (name, value))
         if 0.0 < float(regrow_factor) < 1.0:
             raise ValueError("regrow_factor must be 0 or at least 1, got %r" % (regrow_factor,))
         if type(pose_batch) is not int or pose_batch < 1:
             raise ValueError("pose_batch must be a positive integer, got %r" % (pose_batch,))
+        if explored is not None and type(explored) is not bool:
+            raise ValueError("explored must be a bool or None, got %r" % (explored,))
         self.policy = policy
         self.seen_fraction = float(seen_fraction)
         self.fragment_max_m2 = float(fragment_max_m2)
         self.walkthrough_clearance_m = float(walkthrough_clearance_m)
         self.pose_batch = int(pose_batch)
         self.regrow_factor = float(regrow_factor)
+        self._explored = explored
+        self.explored_inset_m = float(explored_inset_m)
         self.records = []
         self._finished = {}       # (floor, pid) -> reason, sticky for the episode
         self._finished_cells = {} # (floor, pid) -> the room's size the verdict was reached on (None: unknown)
@@ -144,6 +170,14 @@ class RoomScanLedger:
         self._cache = {}          # (floor, pid, n_cells, len(records)) -> reason or None
         self._pose_progress = {}  # (floor, pid) -> (n_cells, poses evaluated) for the cone test
         self.regrown = []         # (floor, pid, reason, cells then, cells now) of every verdict re-judged
+
+    @property
+    def explored(self):
+        """Whether the ``explored`` verdict is in force: as fixed at construction, else the loop's visit mode."""
+        if self._explored is not None:
+            return self._explored
+        settings = getattr(self.policy, "loop_settings", None)
+        return bool(getattr(settings, "exploring", False))
 
     # -- recording ----------------------------------------------------------
     def record(self, obs, room=None, source="room_scan"):
@@ -230,7 +264,7 @@ class RoomScanLedger:
         return None
 
     def _status_without_frontier(self, world, pid, room, doored):
-        """The tests for a room with no live frontier: looked into or walked through (``seen_through``), or a fragment."""
+        """The tests for a room with no live frontier: looked into or walked through (``seen_through``), a fragment, or explored."""
         sight = getattr(self.policy, "sight", None)
         if sight is None:
             return None
@@ -243,7 +277,35 @@ class RoomScanLedger:
         area = float(room.n_cells) * world.resolution ** 2
         if self.fragment_max_m2 > 0.0 and area < self.fragment_max_m2 and not doored:
             return FRAGMENT
+        if self.explored and sight.stood_in(world, self._interior(world, room.mask)):
+            return EXPLORED
         return None
+
+    def _interior(self, world, mask):
+        """``mask`` eroded by :attr:`explored_inset_m` -- the room without its threshold cells -- or ``mask`` when that empties it."""
+        mask = np.asarray(mask, dtype=bool)
+        cells = int(round(self.explored_inset_m / world.resolution))
+        if cells <= 0:
+            return mask
+        interior = binary_erosion(mask, iterations=cells, border_value=0)
+        return interior if interior.any() else mask
+
+    def rotation_since(self, world, room, step):
+        """The latest completed rotation inside ``room`` recorded on or after action ``step``, or None.
+
+        The loop's visit in force asks this every action: a full glance
+        turned on the way in (or a room scan) that stood in the room has
+        finished it, and the visit ends there instead of walking on to turn
+        a second circle.
+        """
+        latest = None
+        for record in self.on_floor():
+            if int(record["step"]) < int(step):
+                continue
+            gx, gy = world.world_to_grid(*record["xy"])
+            if world.in_bounds(gx, gy) and room.mask[gy, gx] and (latest is None or record["step"] > latest["step"]):
+                latest = record
+        return latest
 
     def _looked_into(self, world, pid, room, sight):
         """Whether one recorded pose had ``seen_fraction`` of the room in its cone with clear sight.
@@ -325,6 +387,7 @@ class RoomScanLedger:
         floor = getattr(getattr(self.policy, "mapping", None), "floor_id", None)
         return {"seen_fraction": self.seen_fraction, "fragment_max_m2": self.fragment_max_m2,
                 "walkthrough_clearance_m": self.walkthrough_clearance_m, "regrow_factor": self.regrow_factor,
+                "explored": self.explored, "explored_inset_m": self.explored_inset_m,
                 "records": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in r.items()} for r in self.records],
                 "finished": sorted("f%d/r%d:%s" % (f, pid, reason) for (f, pid), reason in self._finished.items()),
                 "finished_here": sorted(pid for (f, pid) in self._finished if f == floor),

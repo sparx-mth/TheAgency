@@ -21,7 +21,11 @@ def discover(p, obs, world, cost):
     chosen: the map gets its first rooms, the detector its first objects,
     and when it ends the agent's position goes into the scan ledger, so the
     room it stands in is finished before the first room is ever chosen. It
-    runs again on every storey the agent first sets foot on.
+    runs again on every storey the agent first sets foot on. Its length is
+    the camera's: as many turns as the field of view needs to have seen
+    every bearing once (``policy.warmup_turns``, ten at the benchmark's
+    30 degrees and 79-degree camera), not the twelve that bring the body
+    back to its start heading.
     """
     if p.hierarchy is not None:
         p.hierarchy.sync_floor(obs, world)
@@ -29,7 +33,8 @@ def discover(p, obs, world, cost):
     if command is not None:
         p._action_owner = "doorway_peek"
         return command
-    if p.warmup_actions < p.settings.warmup_steps:
+    budget = getattr(p, "warmup_turns", p.settings.warmup_steps)
+    if p.warmup_actions < budget:
         p._action_owner = "warmup"
         here = (float(obs.pose.x), float(obs.pose.y))
         anchor = getattr(p, "_warmup_xy", None)
@@ -43,7 +48,7 @@ def discover(p, obs, world, cost):
         turn = p.episode.action_spec.turn_angle_rad
         command = NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + turn), info={"kind": "warmup_scan"})
         return replace(command, info=dict(command.info, kind="warmup", warmup_step=p.warmup_actions + 1,
-                                          warmup_budget=p.settings.warmup_steps))
+                                          warmup_budget=budget))
     if getattr(p, "_warmup_pending", False):
         p._warmup_pending = False
         ledger = getattr(p, "scans", None)

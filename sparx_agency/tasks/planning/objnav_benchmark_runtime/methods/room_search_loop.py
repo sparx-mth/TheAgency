@@ -9,13 +9,21 @@ happens so a recording can be read against this docstring:
   stair climb belongs to the multi-floor policy, which this loop yields to
   before it does anything of its own.
 * **1. One visit, bounded to the room in force** (:meth:`_local`). Under
-  ``visit="scan"`` (the default, specified on 2026-10-04) a visit IS a
-  look-around: walk to the room's vantage point -- the interior cell of
-  greatest clearance -- turn a full circle, and leave. The camera's ray ends
-  at the nearest object, so a 360-degree scan from the open floor shows what
-  a second viewpoint or a walk to the far frontier would, and the room is
-  FINISHED for the first pass (:class:`~room_scans.RoomScanLedger`, which
-  also finishes every room the scan saw more than half of). A finished
+  ``visit="explore"`` (the default since 2026-10-13) a visit IS a frontier
+  walk: enter the room at the frontier that would reveal the most unknown
+  floor per metre walked (:meth:`_explore_goals`, the inventory's clusters
+  re-scored by :func:`~frontier_ranking.rank_by_view_gain`), and when the
+  camera has resolved it walk to the next, until the room has no live
+  frontier left; the room is then FINISHED for the first pass
+  (:class:`~room_scans.RoomScanLedger`, ``explored``: no live frontier and
+  the agent stood in it), and a full rotation completed inside it on the
+  way -- a glance -- finishes it at once. No vantage point, no fixed
+  circle. Under ``visit="scan"`` (the default from 2026-10-04, kept as a
+  mode, and the shape of a second-pass revisit) a visit is a look-around:
+  walk to the room's vantage point -- the interior cell of greatest
+  clearance -- turn the camera's circle (as many turns as its field of view
+  needs, ten at 30 degrees), and leave; the room is finished whatever
+  frontier its mask still shows. Under both, a finished
   room is still SHOWN to the oracle -- ``status=scanned(<how>, <ago>)`` --
   but not offered as a node while the oracle's own ``pass`` verdict says an
   unexplored place is still worth looking at; once it says the home is
@@ -27,7 +35,7 @@ happens so a recording can be read against this docstring:
   (:mod:`room_priors`). Under ``visit="sweep"`` (the former behaviour, kept as an
   ablation) goals come from inside the room's mask for ``local_steps``
   actions, routes planned on a COPY of the map with every other room
-  blocked, and the same room may be chosen straight back. In both modes the
+  blocked, and the same room may be chosen straight back. In every mode the
   re-identification clue rule holds: one confirmed object names the room
   (weakly; two distinct classes strongly), the classifier is re-asked for
   that one room the action a new KIND of object lands in it, and a changed
@@ -65,7 +73,9 @@ happens so a recording can be read against this docstring:
   makes every loop point a fresh solve rather than the next node of a stale
   order. Nothing else decides a floor change: no allowance, no clock.
 * **5. A\\*** -- the weighted A* behind ``policy._navigate``.
-* **6. Direct transit** (:meth:`_transit`) -- under ``scan`` to the chosen
+* **6. Direct transit** (:meth:`_transit`) -- under ``explore`` to the
+  chosen room's most revealing frontier (its vantage point when it has
+  none left, or for a second-pass revisit); under ``scan`` to the chosen
   room's vantage point; under ``sweep`` to the closest frontier INSIDE it
   (one extraction and one Dijkstra give every room its nearest reachable
   frontier; a room with none keeps its centroid); to the foot of the
@@ -76,6 +86,9 @@ happens so a recording can be read against this docstring:
   the unknown, one look to each side, and the opening is retired for the
   storey -- what the peek saw is floor in the partition now, and the room
   behind is a node of its own, named by its objects, or ruled out by them.
+  Openings are read off the live map every action and, under ``explore``,
+  an opening off a room that is itself a node is folded into that room's
+  walk (:meth:`_fold_openings`).
 * **7. Reset** -- arrival is the aircraft's own cell inside the room's mask
   (the supervisor only sees a point); it resets the local counter and the
   loop returns to step 1.
@@ -107,11 +120,13 @@ from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.mapping.topology.search_node_oracle import (
     BUDGET_STEP, HOME_FLOOR, PASS_SECOND, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR)
 from sparx_agency.core.planning.environment import OccupancyGrid2D
-from sparx_agency.core.planning.exploration.frontier_ranking import frontier_goals_by_room
+from sparx_agency.core.planning.exploration.frontier_ranking import (
+    accessible_frontiers, frontier_goals_by_room, rank_by_view_gain)
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
     ALL_VERDICTS, BLOCKED, BUDGET_SPENT, EXHAUSTED, MAPPED, NEUTRAL, SEARCH, SELECT, TRANSIT, TRANSIT_TIMEOUT,
     TRAVERSED, UNREACHABLE, ObjectSearchParams)
 from sparx_agency.core.planning.exploration.room_costs import build_instance
+from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_from_camera
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ROOM_LLM
@@ -134,22 +149,48 @@ class LoopSettings:
     """The loop's own knobs. Counts are actions.
 
     Attributes:
-        visit: What a room visit IS. ``scan`` (the default): walk to the
-            room's vantage point -- the interior cell of greatest clearance
-            -- turn a full circle, and leave; the room is finished for the
-            episode (:class:`~room_scans.RoomScanLedger`), whatever frontier
-            its mask still shows, because the camera's ray ends at the
-            nearest object and a second viewpoint adds little a scan from
-            the open floor did not. ``sweep``: the former bounded frontier
-            sweep -- ``local_steps`` actions chasing the room's frontier
-            clusters, then a loop point, and the same room may be chosen
-            straight back.
+        visit: What a room visit IS. ``explore`` (the default since
+            2026-10-13): walk to the room's frontier that reveals the most
+            unknown floor per metre of walking, and when the camera has
+            resolved it to the next such frontier, until the room has no
+            live frontier left; the room is then finished for the episode
+            (:class:`~room_scans.RoomScanLedger`, ``explored``). No vantage
+            point, no fixed circle: the Darden recording ``ec8d17aeaaaa``
+            walked to the middle of a bedroom it had already walked across
+            and turned twelve times (actions 255-279), and before that
+            turned a full glance on the way into another, walked on to its
+            vantage point and turned the same circle again (61-106).
+            ``scan``: walk to the room's vantage point -- the interior cell
+            of greatest clearance -- turn a full circle, and leave; the
+            room is finished for the episode whatever frontier its mask
+            still shows, because the camera's ray ends at the nearest
+            object and a second viewpoint adds little a scan from the open
+            floor did not. ``sweep``: the former bounded frontier sweep --
+            ``local_steps`` actions chasing the room's frontier clusters,
+            then a loop point, and the same room may be chosen straight
+            back; rooms are never finished.
         local_steps: ``sweep`` -- how many actions a room may be explored
             for before its turn ends and the loop point runs. Also the LLM
             cadence there, and the service time RPT* charges a room for.
+        explore_visit_steps: ``explore`` -- the hard bound on one visit,
+            from arrival: the walks to the room's frontiers together. A
+            visit that overruns it is released ``budget_spent`` (not cooled:
+            the fresh estimate may send the agent straight back to finish).
+        explore_service_steps: ``explore`` -- what RPT* charges a room for
+            as service time when its live frontier count is unknown: the
+            expected visit, a few frontiers at a few actions each, not its
+            bound. With the count known the charge is
+            ``openings.service_steps + explore_frontier_steps`` per frontier
+            (:meth:`RoomSearchLoop._service_steps_for`), so a one-frontier
+            sliver of a room glimpsed through its door costs little more
+            than the peek it replaces, and a room with five frontiers costs
+            a walk.
+        explore_frontier_steps: ``explore`` -- actions one frontier of a
+            room is expected to take: the walk to it and the frame at it.
         scan_visit_steps: ``scan`` -- the hard bound on one visit: the walk
             to the vantage point plus the rotation. A visit that overruns it
-            is released ``budget_spent``.
+            is released ``budget_spent``. Also the bound of a second-pass
+            revisit under ``explore``, which is a scan from a new spot.
         scan_approach_steps: ``scan`` -- actions the walk to the vantage
             point may take before the agent scans from where it stands (if
             inside the room) or gives the room up as unreachable.
@@ -259,8 +300,11 @@ class LoopSettings:
             the camera's cone spans it as the agent walks it; 0 disables.
     """
 
-    visit: str = "scan"
+    visit: str = "explore"
     local_steps: int = 10
+    explore_visit_steps: int = 60
+    explore_service_steps: int = 12
+    explore_frontier_steps: int = 4
     scan_visit_steps: int = 36
     scan_approach_steps: int = 20
     vantage_arrival_m: float = 0.6
@@ -283,9 +327,10 @@ class LoopSettings:
     walkthrough_clearance_m: float = 0.9
 
     def __post_init__(self):
-        if self.visit not in ("scan", "sweep"):
-            raise ValueError("visit must be 'scan' or 'sweep'; no silent fallback")
-        for name in ("local_steps", "supervisor_rounds", "scan_visit_steps", "scan_approach_steps"):
+        if self.visit not in ("explore", "scan", "sweep"):
+            raise ValueError("visit must be 'explore', 'scan' or 'sweep'; no silent fallback")
+        for name in ("local_steps", "supervisor_rounds", "scan_visit_steps", "scan_approach_steps",
+                     "explore_visit_steps", "explore_service_steps", "explore_frontier_steps"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
         if self.scan_approach_steps >= self.scan_visit_steps:
@@ -323,12 +368,26 @@ class LoopSettings:
         """Whether a visit is a scan (vantage point, full rotation, finished for good)."""
         return self.visit == "scan"
 
+    @property
+    def exploring(self):
+        """Whether a visit is the frontier walk (the room's frontiers by view gain, finished when none is left)."""
+        return self.visit == "explore"
+
+    @property
+    def finishing(self):
+        """Whether rooms are FINISHED by the scan ledger -- under ``scan`` and ``explore``; ``sweep`` never finishes one."""
+        return self.visit in ("scan", "explore")
+
     def visit_budget(self):
         """Actions one visit may take before it is released ``budget_spent``."""
+        if self.exploring:
+            return self.explore_visit_steps
         return self.scan_visit_steps if self.scanning else self.local_steps
 
     def service_steps(self):
         """Actions RPT* charges a room for as service time: the expected visit, not its bound."""
+        if self.exploring:
+            return self.explore_service_steps
         return (self.scan_approach_steps // 2 + 12) if self.scanning else self.local_steps
 
     def supervisor_params(self, seed):
@@ -346,16 +405,16 @@ class LoopSettings:
         to the floor-wide frontier instead, so the search goes on without
         re-entering it.
 
-        Under ``scan`` the supervisor's own done-tests stand down: the
-        rotation finishes a room, not a frontier count that happens to read
-        zero three ticks running (``min_frontier_clusters=-1`` never holds),
-        and the stall and budget clocks are set beyond the visit bound so
-        only the loop's own ledger ends a visit.
+        Under ``scan`` and ``explore`` the supervisor's own done-tests stand
+        down: the ledger finishes a room, not a frontier count that happens
+        to read zero three ticks running (``min_frontier_clusters=-1`` never
+        holds), and the stall and budget clocks are set beyond the visit
+        bound so only the loop's own rules end a visit.
         """
         extra = {}
-        if self.scanning:
-            extra = dict(min_frontier_clusters=-1, frontier_stall_s=3.0 * self.scan_visit_steps,
-                         search_timeout_s=3.0 * self.scan_visit_steps)
+        if self.finishing:
+            bound = self.visit_budget()
+            extra = dict(min_frontier_clusters=-1, frontier_stall_s=3.0 * bound, search_timeout_s=3.0 * bound)
         return ObjectSearchParams(
             seed=seed, resolve_on_release=True, min_prob=self.min_prob,
             cooldown_verdicts=tuple(v for v in ALL_VERDICTS if v not in (BUDGET_SPENT, TRAVERSED) + NEUTRAL),
@@ -401,6 +460,11 @@ class RoomSearchLoop:
         self._second_pass_logged = False   # the second_pass event is logged once per stretch of the verdict
         self._exhausted = False       # the floor has no unfinished room, no exit and no reachable frontier left
         self._scan = None             # the visit in force under ``scan``: phase, room, approach actions, swept yaw
+        self._explore = None          # the visit in force under ``explore``: room, started, goals walked, frontier left
+        self._opening_cache = None    # (step, options) -- the openings read this action, shared by the HUD and SELECT
+        self._folded = set()          # opening node ids folded into an unfinished room's own exploration (logged once)
+        self._folded_now = set()      # ... and the ones folded this action, for the HUD
+        self._service_last = {}       # node id -> seconds the last RPT* instance charged it as service
         self._way_back_held_logged = None    # (rooms left, openings left) the last way_back_held event was logged for
         self.estimates = {}
         self.events = []
@@ -419,6 +483,8 @@ class RoomSearchLoop:
                       "entry_reaimed": 0, "entry_lost": 0,
                       "scans_completed": 0, "scans_in_place": 0, "scan_approach_actions": 0,
                       "scan_unreachable": 0, "excluded_scanned": 0, "excluded_type": 0, "finished_in_transit": 0,
+                      "finished_by_rotation": 0, "explore_goals": 0, "explore_visits": 0, "explore_exhausted": 0,
+                      "openings_folded": 0,
                       "second_pass_rounds": 0, "second_pass_forced": 0, "revisits_offered": 0, "revisits_chosen": 0,
                       "revisit_scans": 0, "oracle_calls_skipped": 0,
                       "reconsiders_deferred": 0,
@@ -467,7 +533,7 @@ class RoomSearchLoop:
         where every node is re-valued anyway.
         """
         p, pose = self.policy, obs.pose
-        if self.settings.scanning and p.supervisor.state in (TRANSIT, SEARCH) and p.supervisor.room_id is not None:
+        if self.settings.finishing and p.supervisor.state in (TRANSIT, SEARCH) and p.supervisor.room_id is not None:
             self._needs_reason = True
             self.stats["reconsiders_deferred"] += 1
             self._log(obs, "reconsider_deferred", room=p.supervisor.room_id, state=p.supervisor.state)
@@ -509,6 +575,12 @@ class RoomSearchLoop:
         """The command for this action: in-room exploration, transit, or the exploration fallback."""
         p = self.policy
         cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+        # The openings are read off the live map every action -- for the HUD, and so that an
+        # opening the camera has just resolved is gone the action it is resolved, not at the
+        # next loop point (Darden 2026-10-13: O3 stood on the HUD for fifty actions after the
+        # agent had looked straight through it). The fold here is the HUD's, read against the
+        # last SELECT's exclusions; the SELECT folds again over fresh ones and logs.
+        self._fold_openings(obs, self._opening_options(obs, world, cost), log=False)
         flags = self._budget_flags()
         try:
             for _ in range(self.settings.supervisor_rounds):
@@ -570,6 +642,7 @@ class RoomSearchLoop:
             p.route_memory.clear("room_completed")
             self._entry = None
             self._scan = None
+            self._explore = None
             self._peek = None
             self.stats["rooms_released"] += 1
             self.stats["loop_points"] += 1
@@ -602,7 +675,12 @@ class RoomSearchLoop:
                     self.stats["openings_chosen"] += 1
                 self.stats["entry_peek"] += 1
             else:
-                entry = "vantage" if self.settings.scanning else ("frontier" if self._entry[1] else "centroid")
+                if self.settings.scanning:
+                    entry = "vantage"
+                elif self.settings.exploring:
+                    entry = "frontier" if self._entry[1] else "vantage"
+                else:
+                    entry = "frontier" if self._entry[1] else "centroid"
                 self.stats["entry_" + entry] += 1
                 if state.room_id in self._revisits:
                     self.stats["revisits_chosen"] += 1
@@ -612,6 +690,7 @@ class RoomSearchLoop:
             self.local_steps = 0                            # step 7
             self.room_id = state.room_id
             self._scan = None
+            self._explore = None
             if not is_opening_node(state.room_id):
                 p.sweep.begin_scan((p.mapping.floor_id, state.room_id))
             self.stats["arrivals"] += 1
@@ -677,36 +756,114 @@ class RoomSearchLoop:
         """Everything beside the rooms this action: ``(stairs, openings)`` -- and the rooms withheld.
 
         The openings are read first because the exclusions need them: a
-        weak type label rules a room out only if the room has few openings.
+        weak type label rules a room out only if the room has few openings,
+        and the floor is exhausted only when no exit is left. Under
+        ``explore`` an opening off a room that is itself a node is then
+        FOLDED into that room (:meth:`_fold_openings`): the room's visit
+        walks its frontiers, the opening among them.
         """
         openings = self._opening_options(obs, world, cost)
         self._exclusions(obs, world, openings)
+        openings = self._fold_openings(obs, openings)
         stairs = self._stair_options(obs, world, cost)
         return stairs, openings
 
+    def _fold_openings(self, obs, openings, log=True):
+        """Under ``explore``, drop the openings whose room is an offered node; its frontier walk covers them.
+
+        An opening is a frontier at the edge of the mapped floor, credited
+        to the room it opens from; the explore visit of that room walks
+        exactly those frontiers. Offered beside the room it is the same
+        place twice -- the Darden recording's RPT* order read ``R3 -> O3``,
+        a room and the gap at its far end -- and a peek of it is a visit
+        the room's own visit makes anyway. Openings off FINISHED rooms (and
+        rooms withheld for any reason) stay nodes: they are how the next
+        room is found. Target landmarks are never folded. The folded ids
+        are kept in :attr:`_folded_now` for the HUD; :attr:`_openings`
+        keeps every opening read this action, folded or not, because the
+        transit and the retirement look the chosen node up there.
+        """
+        self._folded_now = set()
+        if not self.settings.exploring or not openings:
+            return openings
+        p = self.policy
+        rooms = p.graph.registry.rooms
+        probs = getattr(p.graph, "probs", {}) or {}
+        kept = []
+        for option in openings:
+            pid = option.opening.room_pid
+            # A room the oracle has valued below the solver's floor is no node, and its
+            # openings must stay nodes of their own (the kitchen at 0.0 whose doorways led on).
+            offered = (pid is not None and pid in rooms and pid not in self._excluded
+                       and (pid not in probs or float(probs[pid]) >= self.settings.min_prob))
+            if option.opening.kind != LANDMARK and offered:
+                self._folded_now.add(option.node_id)
+                if log and option.node_id not in self._folded:
+                    self._folded.add(option.node_id)
+                    self.stats["openings_folded"] += 1
+                    self._log(obs, "opening_folded", node=option.node_id, room=pid)
+                continue
+            kept.append(option)
+        return kept
+
     def _instance(self, obs, world, cost, options, stairs, openings):
-        """Step 3's RPT* instance: every node's probability, the climb on the stairs, a peek's price on an opening."""
+        """Step 3's RPT* instance: every node's probability, the climb on the stairs, a peek's price on an opening.
+
+        Under ``explore`` a room's service time is its own
+        (:meth:`_service_steps_for`): a few actions per live frontier, so a
+        sliver of a room with one frontier is priced like the peek it
+        replaces and a room with many like the walk it will take.
+        """
         p, s = self.policy, self.policy.settings
         values = dict(p.graph.probs)
         values.update(p.graph.stair_probs)
         values.update({o.node_id: self.settings.openings.landmark_prob for o in openings if o.opening.kind == LANDMARK})
         peek = self.settings.openings.service_steps * s.action_time_s
+        service = {o.node_id: peek for o in openings}             # a look from the threshold, not a room's scan
+        if self.settings.exploring:
+            service.update({o.room_id: self._service_steps_for(o.room_id, obs, world) * s.action_time_s
+                            for o in options if o.room_id in p.graph.registry.rooms})
+        self._service_last = dict(service)                        # what each node was charged, for the record
         return build_instance(
             world, cost, {o.room_id: o.xy for o in options}, values,
             depot_xy=(obs.pose.x, obs.pose.y),
             cruise_speed_mps=p.episode.action_spec.forward_step_m / s.action_time_s,
             search_time_s=self.settings.service_steps() * s.action_time_s,
             leaves={o.node_id: o.leaf_m for o in stairs},          # the climb, on every arc touching the stairs
-            service_s={o.node_id: peek for o in openings},         # a look from the threshold, not a room's scan
+            service_s=service,
             preferred_cost=p.preferred_cost(world) if hasattr(p, "preferred_cost") else None)
 
+    def _service_steps_for(self, pid, obs=None, world=None):
+        """Actions RPT* charges room ``pid`` for under ``explore``: a peek's worth plus a few per live frontier.
+
+        A room with no frontier left is a walk in to confirm it (the peek's
+        price); a second-pass revisit is a scan and is charged the scan's
+        expected visit. Bounded by :attr:`LoopSettings.explore_visit_steps`.
+        """
+        settings = self.settings
+        if not settings.exploring:
+            return settings.service_steps()
+        if pid in self._finished:
+            return settings.scan_approach_steps // 2 + self.policy.rotation_turns()
+        frontier = self._live_frontier(pid, obs, world)
+        if frontier is None:
+            return settings.explore_service_steps
+        return min(settings.explore_visit_steps,
+                   settings.openings.service_steps + settings.explore_frontier_steps * int(frontier))
+
     def _opening_options(self, obs, world, cost):
-        """The floor's openings as nodes (:mod:`opening_nodes`): exits not yet peeked, then the target landmarks not yet looked at."""
+        """The floor's openings as nodes (:mod:`opening_nodes`): exits not yet peeked, then the target landmarks not yet looked at.
+
+        Read once per action and cached: :meth:`plan` reads them for the
+        HUD and the fold, SELECT for the nodes, and both see one inventory.
+        """
         p = self.policy
         registry = getattr(p, "openings", None)
         if not self.settings.openings.enabled or registry is None:
             self._openings = {}
             return []
+        if self._opening_cache is not None and self._opening_cache[0] == int(obs.step):
+            return list(self._opening_cache[1])
         openings = detect_openings(p, obs, world, self.settings.openings, registry)
         landmarks = landmark_openings(p, obs, world, cost, self.settings.openings, self._inspected)
         options = opening_options(p, openings + landmarks)
@@ -715,6 +872,7 @@ class RoomSearchLoop:
         self.stats["openings_offered"] += sum(1 for nid in new if offered[nid].opening.kind != LANDMARK)
         self.stats["landmarks_offered"] += sum(1 for nid in new if offered[nid].opening.kind == LANDMARK)
         self._openings = offered
+        self._opening_cache = (int(obs.step), list(options))
         return options
 
     def _stair_options(self, obs, world, cost):
@@ -738,9 +896,9 @@ class RoomSearchLoop:
                 or building.ground_truth is None or building.committed):
             self._stairs = {}
             return []
-        rooms_left = self.settings.scanning and (any(pid not in self._excluded and pid not in self._finished
-                                                     for pid in p.graph.registry.rooms)
-                                                 or bool(self._openings))
+        rooms_left = self.settings.finishing and (any(pid not in self._excluded and pid not in self._finished
+                                                      for pid in p.graph.registry.rooms)
+                                                  or bool(self._openings))
         options = stair_options(building, obs, world, cost, p.floors.save(), p.settings.action_time_s,
                                 rooms_left=rooms_left)
         offered = {o.node_id: o for o in options}
@@ -859,7 +1017,7 @@ class RoomSearchLoop:
         ``exhausted`` is the geometric reading from the last :meth:`_exclusions`
         (no unfinished room, no exit, no reachable frontier) unless given.
         """
-        if not self.settings.second_pass or not self.settings.scanning:
+        if not self.settings.second_pass or not self.settings.finishing:
             return False
         if exhausted is None:
             exhausted = self._exhausted
@@ -880,8 +1038,10 @@ class RoomSearchLoop:
           completed look-around stood in the room or saw most of it
           (``scan_point_inside``, ``seen_from_scan``); or, with no live
           frontier left in it, that the camera looked into it or walked it
-          through (``seen_through``), or that it is a doorless fragment
-          under 3 m2 (``fragment``). Withheld while the oracle's ``pass``
+          through (``seen_through``), that it is a doorless fragment under
+          3 m2 (``fragment``), or -- under ``explore`` -- that the agent
+          stood in it (``explored``: its frontiers were walked until none
+          was left). Withheld while the oracle's ``pass``
           verdict is ``first`` (or missing): the first pass over the home
           comes before any second look. Under ``pass="second"``
           (:attr:`LoopSettings.second_pass`) finished rooms are offered at
@@ -918,9 +1078,9 @@ class RoomSearchLoop:
                 if pid in self._finished:
                     finished[pid] = self._finished[pid]
                 continue
-            if not self.settings.scanning or ledger is None:
+            if not self.settings.finishing or ledger is None:
                 continue
-            how = ledger.status(world, pid, room, frontier=self._live_frontier(pid), doored=pid in doored,
+            how = ledger.status(world, pid, room, frontier=self._live_frontier(pid, obs, world), doored=pid in doored,
                                 step=int(obs.step))
             if how is not None and how != SCAN_POINT_INSIDE and self._home_objects(pid):
                 # Finished by sight from OUTSIDE -- half its floor seen from the
@@ -942,7 +1102,7 @@ class RoomSearchLoop:
         has_exit = any(o.opening.kind != LANDMARK for o in openings)
         # With a storey change allowed the stairs are a move too: there the second
         # pass is the model's verdict alone (the development protocol).
-        exhausted = (self.settings.scanning and bool(verdicts) and not unfinished and not has_exit
+        exhausted = (self.settings.finishing and bool(verdicts) and not unfinished and not has_exit
                      and not self._frontier_left()
                      and not (p.settings.allow_stair_traversal and self.settings.stairs_as_nodes))
         revisiting = self.second_pass(exhausted=exhausted) and bool(verdicts)
@@ -1011,17 +1171,33 @@ class RoomSearchLoop:
                 exits[pid] = exits.get(pid, 0) + 1
         return exits
 
-    def _live_frontier(self, pid):
+    def _live_frontier(self, pid, obs=None, world=None):
         """Accessible, unresolved frontier clusters the scene graph credits to room ``pid``, or None when unknown.
 
         The count behind the oracle's ``frontier=`` and the ledger's
-        ``seen_through`` test: read off the frontier inventory, which is
-        built on the map with the settled unknown written occupied
-        (:class:`~sightlines.SightLedger`), so a railing looked through or
-        a pocket behind a bed is not a boundary left to explore.
+        ``seen_through`` / ``explored`` tests: read off the frontier
+        inventory, which is built on the map with the settled unknown
+        written occupied (:class:`~sightlines.SightLedger`), so a railing
+        looked through or a pocket behind a bed is not a boundary left to
+        explore. Under ``explore``, with the pose given, the clusters are
+        counted through the sweep's ONE admissibility filter
+        (:meth:`~frontier_sweep.FrontierSweep.admissible`): a goal under
+        the agent's feet or beside one already retired is not a frontier
+        the visit can walk to, so it is not one that keeps the room open --
+        the visit and the verdict read the same population, or a room is
+        released with "nothing left" and re-offered with "one left" on the
+        next action.
         """
-        fact = self.policy.graph.facts.get(pid) if getattr(self.policy.graph, "facts", None) else None
-        return None if fact is None else int(fact.frontier_clusters)
+        p = self.policy
+        fact = p.graph.facts.get(pid) if getattr(p.graph, "facts", None) else None
+        if fact is None:
+            return None
+        if self.settings.exploring and obs is not None and world is not None:
+            inventory = getattr(p.graph, "frontier_inventory", None)
+            if inventory is not None:
+                goals = inventory.by_room.get(int(pid) + 1, ())
+                return len(p.sweep.admissible(obs, world, list(goals)))
+        return int(fact.frontier_clusters)
 
     def _home_objects(self, pid):
         """The confirmed home objects of the target in room ``pid`` (``room_priors.HOME_OBJECTS``), sorted."""
@@ -1105,11 +1281,11 @@ class RoomSearchLoop:
         """
         p = self.policy
         where = "transit" if p.supervisor.state == TRANSIT else "search"
-        if self.settings.scanning:
+        if self.settings.finishing:
             label = (p.graph.label_info(pid) or {}).get("label")
             if not self.settings.type_prior or self._ruled_out(obs, pid) is None:
-                # LLM-first: no name ends a scan; the model values the new fact at
-                # the loop point. With the type prior on, only a ruling-out name does.
+                # LLM-first: no name ends a scan or a frontier walk; the model values the new
+                # fact at the loop point. With the type prior on, only a ruling-out name does.
                 self.stats["relabels_kept_visit"] += 1
                 self._log(obs, "relabel_kept_visit", room=pid, label=label, where=where)
                 return False
@@ -1122,17 +1298,21 @@ class RoomSearchLoop:
         """Every node with its entry point; a staircase's is the foot of the flight, an opening's its threshold.
 
         A room's entry is its vantage point under ``scan`` -- the interior
-        cell of greatest clearance the map can reach, else the centroid --
+        cell of greatest clearance the map can reach, else the centroid;
+        under ``explore`` the frontier of the room that reveals the most
+        unknown floor per metre walked (:meth:`_explore_goals`), else the
+        vantage point for a room with no frontier left to confirm on foot
+        (and for a second-pass revisit, which is a scan from a new spot);
         and under ``sweep`` its nearest admissible frontier, else the
-        centroid. Admissible by the sweep's own rule -- not under the agent,
-        not beside a retired goal -- so a room the sweep would find nothing
-        left in is entered at its centroid, never sent back to a frontier
-        the sweep will refuse on arrival. Rooms in :attr:`_excluded` are not
-        offered at all.
+        centroid. Admissible by the sweep's own rule -- not under the
+        agent, not beside a retired goal -- so a room the visit would find
+        nothing left in is entered at its vantage point or centroid, never
+        sent back to a frontier the visit will refuse on arrival. Rooms in
+        :attr:`_excluded` are not offered at all.
         """
         p = self.policy
         by_room = {}
-        if not self.settings.scanning and self.settings.entry_frontier and p.graph.labels is not None:
+        if not self.settings.finishing and self.settings.entry_frontier and p.graph.labels is not None:
             inventory = p.graph.frontier_inventory
             by_room = (inventory.by_room if inventory is not None else
                        frontier_goals_by_room(world, cost, p.graph.labels, (obs.pose.x, obs.pose.y),
@@ -1144,8 +1324,10 @@ class RoomSearchLoop:
                 continue
             xy, from_frontier = option.xy, False
             revisit = option.room_id in self._finished
-            if self.settings.scanning:
-                room = p.graph.registry.rooms.get(option.room_id)
+            room = p.graph.registry.rooms.get(option.room_id)
+            if self.settings.exploring and room is not None:
+                xy, from_frontier = self._explore_entry(obs, world, cost, room, revisit=revisit)
+            elif self.settings.scanning:
                 found = self._vantage(world, cost, room, revisit=revisit) if room is not None else None
                 if found is not None:
                     xy = found[0]
@@ -1198,6 +1380,52 @@ class RoomSearchLoop:
                                   avoid=avoid, avoid_radius_m=standoff)
         return found
 
+    # -- the explore visit's goals: the room's frontiers by what a look from each would reveal ----
+    def _explore_goals(self, obs, world, cost, room):
+        """The room's admissible frontier goals, best first by unknown revealed per metre walked.
+
+        The goals are the frontier inventory's clusters credited to the
+        room (the population the oracle's ``frontier=`` counts), through
+        the sweep's admissibility filter, re-scored by
+        :func:`~frontier_ranking.rank_by_view_gain`: the unknown floor the
+        camera's full circle would reach from the goal's cell -- rays
+        through the unknown, blocked by walls and by what the sight ledger
+        has settled -- over the geodesic distance. "The frontier that
+        reveals the most unknown area" (the user's rule of 2026-10-13), not
+        the longest boundary and not the nearest cell.
+        """
+        p = self.policy
+        inventory = p.graph.frontier_inventory
+        if inventory is None:
+            if p.graph.labels is None:
+                return []
+            inventory = accessible_frontiers(world, cost, p.graph.labels, (obs.pose.x, obs.pose.y), obs.pose.yaw,
+                                             p.sweep.settings.ranking, frontier_world=p.graph.frontier_world(world))
+        goals = p.sweep.admissible(obs, world, list(inventory.by_room.get(int(room.id) + 1, ())))
+        if not goals:
+            return []
+        camera = p.episode.camera
+        k = camera.intrinsics
+        sight = getattr(p, "sight", None)
+        view = UnknownView(world, cone_from_camera(k.width, k.fx, float(camera.max_depth_m), p.glance_settings.blind_m
+                                                   if hasattr(p, "glance_settings") else 0.0),
+                           resolved=sight.resolved(world) if sight is not None else None)
+        return rank_by_view_gain(goals, view, p.sweep.settings.ranking)
+
+    def _explore_entry(self, obs, world, cost, room, revisit=False):
+        """Where a room is entered under ``explore``: ``((x, y), from_frontier)``.
+
+        The best frontier by view gain; a room with none left (or a
+        second-pass revisit, whose visit is a scan from a new spot) is
+        entered at its vantage point, else its centroid.
+        """
+        if not revisit:
+            goals = self._explore_goals(obs, world, cost, room)
+            if goals:
+                return (tuple(float(v) for v in goals[0].xy), True)
+        found = self._vantage(world, cost, room, revisit=revisit)
+        return ((found[0] if found is not None else tuple(room.centroid)), False)
+
     def _record(self, instance, dropped, options):
         """Step 3's record, with the distance step 4 charges each node -- a staircase's includes the climb.
 
@@ -1217,7 +1445,13 @@ class RoomSearchLoop:
                     continue
                 leg = float(instance.C[instance.depot, i])
                 if instance.units == "seconds":
-                    leg = max(0.0, leg - (peek if pid in self._openings else service)) * cruise
+                    if pid in self._openings:
+                        charged = peek
+                    elif self.settings.exploring and pid in self._service_last:
+                        charged = self._service_last[pid]
+                    else:
+                        charged = service
+                    leg = max(0.0, leg - charged) * cruise
                 estimates[pid] = self._estimate(pid, labels, distance_m=leg)
         for pid in dropped:
             estimates[pid] = self._estimate(pid, labels, distance_m=None)
@@ -1252,6 +1486,14 @@ class RoomSearchLoop:
         fact = p.graph.facts.get(pid)
         entry = self._entries.get(pid)
         info = p.graph.label_info(pid) or {}
+        if distance_m is None:
+            how = "unreachable"
+        elif self.settings.scanning:
+            how = "vantage"
+        elif entry is not None and entry[1]:
+            how = "frontier"
+        else:
+            how = "vantage" if self.settings.exploring else "centroid"
         return {"kind": "room", "label": labels.get(pid) or info.get("label", "?"), "strength": info.get("strength"),
                 "prob": float(p.graph.probs.get(pid, 0.0)), "why": why,
                 "objects": p.graph.objects_in(pid),
@@ -1259,8 +1501,7 @@ class RoomSearchLoop:
                 "searched_s": None if fact is None else float(fact.time_in_room_s),
                 "last_inside_step": p.graph.last_inside.get(pid),
                 "distance_m": distance_m,
-                "entry": "unreachable" if distance_m is None else
-                ("vantage" if self.settings.scanning else "frontier" if entry is not None and entry[1] else "centroid")}
+                "entry": how}
 
     # -- step 6: transit ----------------------------------------------------
     def _transit(self, obs, world, cost, state):
@@ -1314,7 +1555,25 @@ class RoomSearchLoop:
             p.route_memory.clear("transit_entry_lost")
             p._route = p._goal = None
             self.stats["entry_lost"] += 1
-            if self.settings.scanning:
+            if self.settings.exploring:
+                # The entry frontier moved out from under the route (resolved, or the mask
+                # re-segmented): re-aim once at the room's best frontier now, else its vantage
+                # point, else the centroid.
+                revisit = state.room_id in self._revisits
+                candidates = []
+                if not revisit:
+                    candidates = [(tuple(float(v) for v in g.xy), True) for g in self._explore_goals(obs, world, cost, room)[:1]]
+                found = self._vantage(world, cost, room, revisit=revisit)
+                candidates += [(c, False) for c in ([found[0]] if found is not None else []) + [tuple(room.centroid)]]
+                candidates = [c for c in candidates if math.dist(c[0], xy_goal) > world.resolution]
+                self._log(obs, "entry_lost", room=state.room_id, goal=[round(v, 2) for v in xy_goal],
+                          reaimed=bool(candidates))
+                if not candidates:
+                    return None, {"route_failed": True}
+                self._entry = candidates[0]
+                self.stats["entry_reaimed"] += 1
+                xy_goal, from_frontier = self._entry
+            elif self.settings.scanning:
                 # The vantage point moved out from under the route (the mask re-segmented):
                 # re-aim at where it is now, once; the centroid is the last resort.
                 found = self._vantage(world, cost, room, revisit=state.room_id in self._revisits)
@@ -1349,21 +1608,22 @@ class RoomSearchLoop:
     def _finished_on_the_way(self, obs, world, pid, room):
         """Whether the room in transit was finished by what the walk showed: nothing left in it to look at.
 
-        Under ``scan`` only. The ledger's ``seen_through`` and ``fragment``
-        verdicts need the room's live frontier count, read from the scene
-        graph's facts (refreshed every action); a room finished so is
-        released ``exhausted`` before it is entered, and the order is
-        re-solved without it. The scan tests themselves (a rotation stood
-        in it, or saw it) are judged here too, so a room another room's
-        scan has since seen is not walked to either.
+        Under ``scan`` and ``explore``. The ledger's ``seen_through``,
+        ``fragment`` and ``explored`` verdicts need the room's live frontier
+        count, read from the scene graph's facts (refreshed every action);
+        a room finished so is released ``exhausted`` before it is entered,
+        and the order is re-solved without it. The scan tests themselves (a
+        rotation stood in it, or saw it) are judged here too, so a room
+        another room's scan -- or a full glance on the way -- has since seen
+        is not walked to either.
         """
         p = self.policy
         ledger = getattr(p, "scans", None)
-        if not self.settings.scanning or ledger is None or pid in self._revisits:
+        if not self.settings.finishing or ledger is None or pid in self._revisits:
             return False       # a second-pass revisit is finished already: that is the point of going
-        frontier = self._live_frontier(pid)
+        frontier = self._live_frontier(pid, obs, world)
         doored = any(int(pid) in (door.get("rooms") or ()) for door in getattr(p.graph, "doors", ()) or ())
-        how = ledger.status(world, pid, room, frontier=frontier, doored=doored)
+        how = ledger.status(world, pid, room, frontier=frontier, doored=doored, step=int(obs.step))
         if how is None:
             return False
         self.stats["finished_in_transit"] += 1
@@ -1371,19 +1631,28 @@ class RoomSearchLoop:
         return True
 
     def _entry_goal(self, obs, world, cost, room, xy_goal, from_frontier):
-        """The committed entry point while it is worth reaching; else the room's nearest frontier; else None."""
+        """The committed entry point while it is worth reaching; else the room's next frontier; else None.
+
+        The next frontier is the best by view gain under ``explore``
+        (:meth:`_explore_goals`) and the nearest along the floor under
+        ``sweep``.
+        """
         if not from_frontier:
             return xy_goal
         gx, gy = world.world_to_grid(*xy_goal)
         if world.in_bounds(gx, gy) and np.isfinite(cost[gy, gx]) and self.policy.sweep.informative(world, gx, gy):
             return xy_goal
-        nearest = self.policy.sweep.nearest(obs, world, cost, room.mask,
-                                            labels=self.policy.graph.labels, label=room.id + 1)
+        if self.settings.exploring:
+            goals = self._explore_goals(obs, world, cost, room)
+            nearest = goals[0] if goals else None
+        else:
+            nearest = self.policy.sweep.nearest(obs, world, cost, room.mask,
+                                                labels=self.policy.graph.labels, label=room.id + 1)
         if nearest is None:
             return None
-        self._entry = (nearest.xy, True)
+        self._entry = (tuple(float(v) for v in nearest.xy), True)
         self.stats["entry_reaimed"] += 1
-        return nearest.xy
+        return self._entry[0]
 
     # -- step 6 for a staircase: the building coordinator takes it from here ------
     def _transit_stairs(self, obs, world, state):
@@ -1561,6 +1830,10 @@ class RoomSearchLoop:
         standoff point moves with where the agent approached from).
         """
         p = self.policy
+        # The inventory read this action is stale the moment an opening is retired: the
+        # SELECT that follows on this same action must not offer it again.
+        self._opening_cache = None
+        self._openings.pop(opening.node_id, None)
         if opening.kind == LANDMARK:
             self._inspected.add(opening.landmark_id)
             self.stats["landmarks_inspected"] += 1
@@ -1642,14 +1915,15 @@ class RoomSearchLoop:
 
     # -- step 1: the visit ----------------------------------------------------
     def _local(self, obs, world, cost, state):
-        """The room in force's visit: a scan (vantage point, full rotation) or the bounded sweep.
+        """The room in force's visit: the frontier walk, a scan (vantage point, full rotation) or the bounded sweep.
 
         The other half of the termination rule -- the visit's action bound --
         is judged in :meth:`_budget_flags` before the first tick of the
         action. The third exit is the clue rule: a room newly named by a new
         kind of object ends its turn so that the estimate and the order are
         redone over the new fact -- and a room the oracle then values at
-        nothing is left for one it values.
+        nothing is left for one it values. Under ``explore`` a second-pass
+        revisit of a finished room is a scan from a new spot.
         """
         p = self.policy
         if is_opening_node(state.room_id):
@@ -1659,7 +1933,9 @@ class RoomSearchLoop:
             return None, {"frontier_exhausted": True}
         if self._reclassify(obs, state.room_id, "search") and self._relabel_ends_turn(obs, state.room_id):
             return None, {"room_reclassified": True}
-        if self.settings.scanning:
+        if self.settings.exploring and state.room_id not in self._revisits:
+            return self._explore_visit(obs, world, cost, state, room)
+        if self.settings.finishing:
             return self._scan_visit(obs, world, cost, state, room)
         planning_world, planning_cost = self._confined(obs, world, cost, room, state.room_id)
         command = p.sweep.explore(obs, world, planning_cost, room.mask, planning_world=planning_world,
@@ -1672,6 +1948,75 @@ class RoomSearchLoop:
         self.stats["exhausted_releases"] += 1
         return None, {"frontier_exhausted": True}
 
+    def _explore_visit(self, obs, world, cost, state, room):
+        """Walk the room's frontiers, best first by what each reveals, until none is left; then the room is done.
+
+        Every action: the room's admissible frontier goals are re-ranked by
+        view gain over distance (:meth:`_explore_goals`) and the sweep
+        drives the best one -- keeping a committed goal while it is still
+        passable, still near the room and still has unknown beside it, and
+        taking the next the action the camera resolves it (the route
+        follower faces each goal as it walks, so the frame at arrival shows
+        what lay behind the boundary). Routes are planned on the
+        room-confined map while the agent stands in the room, on the
+        observed map when the confinement walls the goal off. With no
+        admissible goal left the visit ends ``exhausted`` and the ledger's
+        ``explored`` verdict finishes the room: the agent has stood in it
+        and nothing unknown borders it (:class:`~room_scans.RoomScanLedger`).
+        A full rotation completed inside the room since the visit began --
+        a glance taken on the way -- finishes it at once
+        (``finished_by_rotation``): no circle is turned twice. The whole
+        visit is bounded by :attr:`LoopSettings.explore_visit_steps`.
+        """
+        p = self.policy
+        visit = self._explore
+        if visit is None or visit["room"] != state.room_id:
+            visit = self._explore = dict(room=state.room_id, started=int(obs.step), goals=0, goal=None,
+                                         frontier_left=None)
+            self.stats["explore_visits"] += 1
+            self._log(obs, "explore_begin", room=state.room_id,
+                      frontier=self._live_frontier(state.room_id, obs, world))
+        if self._finished_by_rotation(obs, world, state.room_id, room, visit["started"]):
+            return None, {"frontier_exhausted": True}
+        goals = self._explore_goals(obs, world, cost, room)
+        visit["frontier_left"] = len(goals)
+        if goals:
+            planning_world, planning_cost = self._confined(obs, world, cost, room, state.room_id)
+            command = p.sweep.explore(obs, world, planning_cost, room.mask, planning_world=planning_world,
+                                      ranked=goals)
+            if command is None and planning_world is not world:
+                command = p.sweep.explore(obs, world, cost, room.mask, ranked=goals)   # the confinement walled it off
+            if command is not None:
+                goal = tuple(round(float(v), 2) for v in (p._goal or goals[0].xy))
+                if goal != visit["goal"]:
+                    visit["goal"], visit["goals"] = goal, visit["goals"] + 1
+                    self.stats["explore_goals"] += 1
+                    self._log(obs, "explore_goal", room=state.room_id, goal=list(goal), frontier_left=len(goals),
+                              gain=round(float(goals[0].utility), 3))
+                return command, {}
+            self.stats["plan_failures"] += 1
+        self.stats["explore_exhausted"] += 1
+        self.stats["exhausted_releases"] += 1
+        self._log(obs, "explore_complete", room=state.room_id, goals=visit["goals"],
+                  actions=int(obs.step) - visit["started"], frontier_left=len(goals))
+        self._explore = None
+        return None, {"frontier_exhausted": True}
+
+    def _finished_by_rotation(self, obs, world, pid, room, since_step):
+        """Whether a full rotation completed inside ``room`` since ``since_step`` (a glance on the way) has finished it."""
+        ledger = getattr(self.policy, "scans", None)
+        if ledger is None or not hasattr(ledger, "rotation_since"):
+            return False
+        record = ledger.rotation_since(world, room, since_step)
+        if record is None:
+            return False
+        self.stats["finished_by_rotation"] += 1
+        self.stats["exhausted_releases"] += 1
+        self._log(obs, "finished_by_rotation", room=pid, source=record.get("source"), rotation_step=record.get("step"))
+        self._scan = None
+        self._explore = None
+        return True
+
     def _scan_visit(self, obs, world, cost, state, room):
         """Walk to the room's vantage point, turn a full circle, and finish the room.
 
@@ -1683,11 +2028,15 @@ class RoomSearchLoop:
         refuses, scans from where the agent stands if that is inside the
         room (``scans_in_place``) and otherwise releases the room
         ``unreachable``. ``rotate``: one in-place turn per action until the
-        measured yaw has swept a full circle (or the turn count is two past
-        a circle's worth -- the converter's hysteresis can swallow a degree);
-        then the scan is recorded in the ledger, the room is finished for
-        the episode, and its turn ends ``exhausted`` -- productive, cooled,
-        not repeatable. Nothing in here walks to a frontier.
+        camera's field of view has covered the circle -- as many turns as
+        that takes (``policy.rotation_turns``, ten at 30 degrees with a
+        79-degree camera; or two past that count -- the converter's
+        hysteresis can swallow a degree); then the scan is recorded in the
+        ledger, the room is finished for the episode, and its turn ends
+        ``exhausted`` -- productive, cooled, not repeatable. A full rotation
+        completed inside the room on the way to its vantage point -- a
+        glance -- finishes it without the walk. Nothing in here walks to a
+        frontier.
         """
         p = self.policy
         scan = self._scan
@@ -1701,6 +2050,8 @@ class RoomSearchLoop:
             self._log(obs, "scan_begin", room=state.room_id, revisit=revisit)
         inside = self._inside(obs, world, room)
         if scan["phase"] == "approach":
+            if not scan.get("revisit") and self._finished_by_rotation(obs, world, state.room_id, room, scan["started"]):
+                return None, {"frontier_exhausted": True}
             found = self._vantage(world, cost, room, revisit=scan.get("revisit", False))
             vantage = found[0] if found is not None else None
             scan["vantage"] = None if vantage is None else [round(v, 2) for v in vantage]
@@ -1737,8 +2088,8 @@ class RoomSearchLoop:
         if scan["last_yaw"] is not None:
             scan["swept"] += max(0.0, normalize_angle(obs.pose.yaw - scan["last_yaw"]))
         scan["last_yaw"] = float(obs.pose.yaw)
-        full_circle = int(math.ceil(2 * math.pi / turn - 1e-9))
-        if scan["swept"] >= 2 * math.pi - 0.5 * turn or scan["turns"] >= full_circle + 2:
+        full_circle = p.rotation_turns()
+        if scan["swept"] >= (full_circle - 0.5) * turn - 1e-9 or scan["turns"] >= full_circle + 2:
             p.scans.record(obs, room, source="room_scan")
             self.stats["scans_completed"] += 1
             self.stats["exhausted_releases"] += 1
@@ -1770,7 +2121,7 @@ class RoomSearchLoop:
         return NavigationCommand.hold(
             final_yaw=normalize_angle(obs.pose.yaw + turn),
             info={"kind": "room_scan", "room": scan["room"], "scan_turn": 1,
-                  "scan_budget": int(math.ceil(2 * math.pi / turn - 1e-9)), "swept_degrees": 0.0}), {}
+                  "scan_budget": p.rotation_turns(), "swept_degrees": 0.0}), {}
 
     def _confined(self, obs, world, cost, room, pid):
         """Step 1's constraint: a planning copy of the map with every other room blocked.
@@ -1851,8 +2202,10 @@ class RoomSearchLoop:
                 "finished": {str(pid): {"how": how, "step": step} for pid, (how, step) in sorted(self._finished.items())},
                 "second_pass": self.second_pass(), "revisits_offered_now": sorted(int(pid) for pid in self._revisits),
                 "scan": None if self._scan is None else dict(self._scan),
+                "explore": None if self._explore is None else dict(self._explore),
                 "peek": self.peek_state(),
                 "stairs_offered": sorted(self._stairs), "openings_offered": sorted(self._openings),
+                "openings_folded": sorted(self._folded_now),
                 "events": list(self.events), "estimate_events": list(self.estimate_events)}
 
 

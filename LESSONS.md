@@ -11,6 +11,38 @@ Format per entry:
 
 ---
 
+## 2026-10-13 — ObjectNav Darden/000190: the toilet's bathroom was "not worth a step" -- the sight ledger's pocket rule settled the unseen half of a small room, three runs in a row
+
+**Symptom:** The recorded episode (`runs/benchmark_toilet_15episodes_20261013T110223Z/Darden/recordings/ec8d17aeaaaa`)
+and two re-runs after the efficiency fixes of the day all ended at the 500-action cap with the agent having
+stood *inside the success region* -- at the bathroom door, DTG 0.0 at actions 321-333 of the first re-run,
+0.15 at action 119 of the recording -- without a detection, a frontier or an opening pointing into the room.
+The per-step record showed no `accessible_frontiers` entry anywhere in the bathroom while the final map had
+0.9 m2 of unknown there, walled on three sides, with the toilet in it.
+
+**Root cause:** `methods/sightlines.py::enclosed_pockets`: an unknown component of at most `pocket_max_m2`
+(3 m2) that does not touch the map's edge is a *pocket* and is written OCCUPIED for the frontier logic. The
+rule was written for the strip behind a bed and the blind disk under the spawn point, and its comment argued "a
+toilet does not fit in 3 m2 behind a wardrobe". From the door the camera saw the bathroom's far wall, which
+closed the unseen half of the room off from the rest of the unknown; 92 cells = 0.92 m2 -> pocket -> settled.
+No frontier, no opening, no room with `frontier > 0`, so nothing ever sent the agent through the door, and
+the frames from the threshold showed a towel rail and a mesh hole, never the toilet.
+
+**Fix / workaround:** `SightSettings.pocket_max_width_m` (0.6): a pocket is settled only if nothing could
+stand in it -- its inscribed width (twice the component's largest EDT) is under the bound -- or the agent has
+itself stood on it (the spawn island). With it the bathroom reads as two live frontier clusters of the bedroom
+(`(2.5, 4.8)`, `(3.5, 5.4)` in the re-runs). Beside it `OpeningSettings.min_cells` went 8 -> 5: the bathroom
+door was 7-8 frontier cells wide and flickered in and out of the openings between loop points.
+
+**Don't:** Do not read "the agent stood in the success region and saw nothing" as a detector failure first.
+Check the frontier record for the room the goal is in; a region that is never a frontier was settled by
+something. And do not expect the pocket fix alone to turn this episode green under the 3B oracle: with the
+frontier offered, `qwen2.5:3b-instruct` valued the bedroom holding it at 0.01 ("bedroom, entered, no toilet
+there") on every loop point of the fourth run, below `min_prob`, so RPT* never chose it. The 14B model is the
+benchmark model for a reason.
+
+---
+
 ## 2026-10-12 — "unable to find CUDA device 0 among 3 EGL devices": the renderer died because `apt` upgraded the NVIDIA userspace under the running kernel module, and the iGPU is no fallback
 
 **Symptom:** Every `gibson.run` (and the `run_benchmark.sh` smoke) died in two seconds with

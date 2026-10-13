@@ -63,7 +63,10 @@ def search_snapshot(policy):
                        "approach_m": round(option.approach.distance_m, 2), "distance_m": estimate.get("distance_m"),
                        "portal_id": option.portal["id"], "centroid": [float(v) for v in option.approach.xy]})
     openings = []
+    folded = getattr(loop, "_folded_now", set())
     for nid, option in sorted(getattr(loop, "_openings", {}).items()):
+        if nid in folded:
+            continue                      # one of a room's own frontiers: the room's walk covers it
         estimate = dict(loop.estimates.get(nid, {}))
         o = option.opening
         landmark = o.kind == "landmark"
@@ -89,13 +92,15 @@ def search_snapshot(policy):
             "probability_model": "independent_search_success",
             "accessible_frontiers": [list(goal.xy) for goal in graph.frontier_inventory.goals]
             if graph.frontier_inventory is not None else [],
-            "warmup": {"actions": getattr(policy, "warmup_actions", 0), "budget": policy.settings.warmup_steps},
+            "warmup": {"actions": getattr(policy, "warmup_actions", 0),
+                       "budget": getattr(policy, "warmup_turns", policy.settings.warmup_steps)},
             "doorway_peek": policy.peek.diagnostics() if hasattr(policy, "peek") else {},
             "reading": dict(graph.last_reasoning.get("oracle", {}).get("reading", {})),
             "floor_id": policy.mapping.floor_id,
             "supervisor_state": supervisor.state if supervisor is not None else "?",
             "room_in_force": loop.room_id, "local_steps": loop.local_steps, "local_budget": loop.visit_budget(),
             "visit": loop.settings.visit, "scan": None if loop._scan is None else dict(loop._scan),
+            "explore": None if getattr(loop, "_explore", None) is None else dict(loop._explore),
             "peek": loop.peek_state() if hasattr(loop, "peek_state") else None,
             "glance": policy.glances.state() if hasattr(policy, "glances") else None,
             "excluded": {str(pid): why for pid, why in sorted(loop._excluded.items())},

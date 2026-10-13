@@ -154,6 +154,24 @@ Corozal, Darden, Markleeville and Wiconisco. The reference-floor planar score us
 distance and no mandatory STOP. Preserve its sentinel start and protocol.
 Reference Habitat is 0.1.5; this installation is 0.2.4. The mismatch is explicit.
 
+**The action space is the one declared deviation from the baselines' protocol**
+(`gibson-semexp-v1.1-val/2`, `GibsonProtocol.camera_tilt`, since 2026-10-13): the
+four body actions of the SemExp agents plus Habitat's LOOK_UP / LOOK_DOWN pair,
+30° a step with the camera held between 30° up and 60° down -- the action space
+of habitat-lab's ObjectNav task. A LOOK is an action against the same 500-action
+budget and moves nothing, so the scoring is untouched; what it buys is the
+target closing's box-driven pitch (`methods/bbox_pitch.py`): a low toilet or a
+high television kept whole in the frame on the way in, which the 15-episode
+toilet campaign of 2026-10-13 showed never happening because the protocol had no
+LOOK to fire. `GibsonProtocol(camera_tilt=False)` is the published four-action
+set, and a result recorded under `/1` is a different experiment from one under
+`/2` (`report.py` and the frozen-configuration lock refuse to mix them).
+
+**A re-run of one recorded episode** is `--episode-ids Darden/000190` (any
+published ids, in the given order, from the selected scene and category): the
+same start and goal as the recording, instead of a fresh `--limit`/`--shuffle`
+sample; `run.json` records the explicit selection.
+
 Every published start and goal lie on one storey (all 1,000 rows carry
 `floor_id 0`, and `val_info.pbz2` holds one floor map per scene), as in HM3D
 and the other ZSON benchmarks. The policy therefore runs with

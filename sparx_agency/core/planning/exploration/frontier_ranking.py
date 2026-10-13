@@ -329,6 +329,48 @@ def frontier_goals_by_room(world: OccupancyGrid2D,
     return out
 
 
+def rank_by_view_gain(goals: Sequence[FrontierGoal], view, params: Optional[FrontierRankingParams] = None,
+                      min_gain_cells: int = 0) -> List[FrontierGoal]:
+    """Re-score frontier goals by the unknown floor a look-around FROM each one would reveal.
+
+    The size of a frontier cluster says how long the boundary is; what a
+    robot standing at it would learn is how much unknown lies within the
+    camera's range behind it, and the two differ exactly where it matters:
+    a long boundary along a wall of unknown shows a strip, a short gap in a
+    doorway shows a room. ``view`` is a
+    :class:`~sparx_agency.core.planning.exploration.view_gain.UnknownView`
+    over the current map; the gain of a goal is the unknown its full circle
+    reaches from the goal's cell, in cells, plus the cluster's own size (the
+    cells under the blind radius a ray fan does not count), and the utility
+    is that gain over the geodesic cost with the facing discount of
+    :class:`FrontierRankingParams`.
+
+    Args:
+        goals: Ranked goals from :func:`accessible_frontiers` or
+            :func:`frontier_goals_by_room` (their ``geodesic_m`` and
+            ``heading_error_rad`` are reused).
+        view: The ray caster over the current map.
+        params: Tuning; the distance floor and the heading weight are read.
+        min_gain_cells: Goals whose gain is below this are dropped.
+
+    Returns:
+        The goals with ``utility`` replaced, best first.
+    """
+    params = params or FrontierRankingParams()
+    out: List[FrontierGoal] = []
+    for goal in goals:
+        if not math.isfinite(goal.geodesic_m):
+            continue
+        revealed = int(view.unknown_in_sector(goal.xy, 0.0, math.pi).sum()) + int(goal.size_cells)
+        if revealed < min_gain_cells:
+            continue
+        facing = 1.0 + params.heading_weight * abs(float(goal.heading_error_rad)) / math.pi
+        utility = float(revealed) / ((float(goal.geodesic_m) + params.distance_floor_m) * facing)
+        out.append(replace(goal, utility=float(utility)))
+    out.sort(key=lambda g: (-g.utility, g.geodesic_m))
+    return out
+
+
 def _room_of(labels: np.ndarray, cluster: FrontierCluster) -> Optional[int]:
     """The room label most of the cluster's labelled cells carry, or None."""
     here = labels[cluster.rows, cluster.cols]

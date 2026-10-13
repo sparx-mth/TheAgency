@@ -14,11 +14,12 @@ from __future__ import annotations
 
 from sparx_agency.core.mapping.topology.search_node_oracle import budget_line
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import (
-    FRAGMENT, SCAN_POINT_INSIDE, SEEN_FROM_SCAN, SEEN_THROUGH)
+    EXPLORED, FRAGMENT, SCAN_POINT_INSIDE, SEEN_FROM_SCAN, SEEN_THROUGH)
 
 #: The scan ledger's verdicts in the prompt's words (``status=scanned(<how>, <ago>)``).
 SCAN_WORDS = {SCAN_POINT_INSIDE: "full rotation", SEEN_FROM_SCAN: "seen from another room's scan",
-              SEEN_THROUGH: "looked into, no frontier left", FRAGMENT: "fragment"}
+              SEEN_THROUGH: "looked into, no frontier left", FRAGMENT: "fragment",
+              EXPLORED: "walked, every part of it seen, no frontier left"}
 
 
 def scan_words(how):

@@ -66,11 +66,48 @@ class ViewCone:
         if not (math.isfinite(self.min_range_m) and 0.0 <= self.min_range_m < self.max_range_m):
             raise ValueError("min_range_m must lie in [0, max_range_m), got %r" % (self.min_range_m,))
 
+    def rotation_turns(self, turn_rad: float) -> int:
+        """In-place turns of ``turn_rad`` that sweep this cone over the whole circle.
+
+        A rotation is a look-around, not a dance: it is complete when every
+        bearing has been inside the camera's field of view once, which
+        happens ``turn * k + 2 * half_fov >= 2 pi`` turns in -- the frame
+        before the first turn covers ``+-half_fov`` about the start, and
+        each turn adds one frame a turn further round. Ten turns of 30
+        degrees with a 79-degree field of view (``300 + 79 >= 360``), not
+        the twelve that bring the body back to its start heading; the last
+        two frames would show what the first two already showed.
+
+        Raises:
+            ValueError: On a turn that is not positive and finite.
+        """
+        turn = float(turn_rad)
+        if not (math.isfinite(turn) and turn > 0.0):
+            raise ValueError("turn_rad must be positive and finite, got %r" % (turn_rad,))
+        remaining = 2.0 * math.pi - 2.0 * self.half_fov_rad
+        return max(1, int(math.ceil(remaining / turn - 1e-9)))
+
+    def rotation_complete(self, swept_rad: float, turn_rad: float) -> bool:
+        """Whether a rotation that has swept ``swept_rad`` of measured yaw has shown the camera the whole circle.
+
+        Read off the measured yaw, as the room scan reads its progress, with
+        half a turn of tolerance for the converter's hysteresis: complete
+        once the yaw has swept within half a turn of what
+        :meth:`rotation_turns` turns amount to.
+        """
+        turn = float(turn_rad)
+        return float(swept_rad) >= (self.rotation_turns(turn) - 0.5) * turn - 1e-9
+
 
 def cone_from_camera(width_px: int, fx_px: float, max_range_m: float, min_range_m: float = 0.0) -> ViewCone:
     """A :class:`ViewCone` from a pinhole's width and focal length: ``half_fov = atan(width / (2 fx))``."""
     return ViewCone(half_fov_rad=float(math.atan(0.5 * float(width_px) / float(fx_px))),
                     max_range_m=float(max_range_m), min_range_m=float(min_range_m))
+
+
+def camera_rotation_turns(width_px: int, fx_px: float, turn_rad: float) -> int:
+    """The in-place turns a pinhole of ``width_px`` / ``fx_px`` needs to look all the way round (see :meth:`ViewCone.rotation_turns`)."""
+    return cone_from_camera(width_px, fx_px, max_range_m=1.0).rotation_turns(turn_rad)
 
 
 class UnknownView:

@@ -83,8 +83,13 @@ class OpeningSettings:
         enabled: Offer the floor's openings as nodes (the default). Off, the
             openings are the exploration fallback's business alone.
         min_cells: Fewest frontier cells an opening must hold -- a gap the
-            body cannot pass is not a way anywhere (8 cells = 0.8 m at the
-            map's resolution).
+            body cannot pass is not a way anywhere. 5 cells (0.5 m at the
+            map's resolution, since 2026-10-13): the body is 0.36 m across
+            and a bathroom door 0.6-0.7 m, and at the former 8 (0.8 m) the
+            Darden bathroom's door -- 7 or 8 frontier cells as the map
+            re-snapped -- flickered in and out of the openings from one
+            loop point to the next and was never offered when it mattered
+            (``ec8d17aeaaaa`` and its re-runs; the toilet was behind it).
         merge_m: Exit frontiers within this distance of an opening's seed
             are the same opening.
         match_m: An opening within this distance of one already known keeps
@@ -126,7 +131,7 @@ class OpeningSettings:
     """
 
     enabled: bool = True
-    min_cells: int = 8
+    min_cells: int = 5
     merge_m: float = 1.5
     match_m: float = 1.0
     done_m: float = 1.0

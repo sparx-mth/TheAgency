@@ -255,6 +255,16 @@ def test_shuffle_is_a_seeded_random_sample_of_the_same_pool():
         "two scenes with equally large pools draw different positions (Darden/Markleeville, 39 toilets each)"
 
 
+def test_explicit_episode_ids_are_run_as_given_and_checked_against_the_pool():
+    """A re-run of one recorded episode (Darden/000190, 2026-10-13): the same start, not a fresh sample."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import explicit_episodes
+    pool = tuple("Darden/%06d" % i for i in range(200))
+    assert explicit_episodes(["Darden/000190", "Darden/000034"], pool) == ("Darden/000190", "Darden/000034")
+    for bad in (["Darden/000190", "Darden/000190"], ["Markleeville/000001"], ["Darden/000200"]):
+        with pytest.raises(ValueError):
+            explicit_episodes(bad, pool)
+
+
 def test_category_filter_keeps_only_that_goal_in_split_order():
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import episodes_of_category
     episodes = {"S/%06d" % i: SimpleNamespace(category=("toilet" if i % 3 == 0 else "chair")) for i in range(9)}

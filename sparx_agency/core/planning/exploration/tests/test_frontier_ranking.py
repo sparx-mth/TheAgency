@@ -364,3 +364,41 @@ def test_distances_are_measured_at_the_preferred_standoff_where_it_reaches():
     assert len(only_squeeze.goals) == 1 and only_squeeze.goals[0].geodesic_m == pytest.approx(through.goals[0].geodesic_m)
     with pytest.raises(ValueError):
         accessible_frontiers(world, body, labels, origin, math.pi, preferred_cost=preferred[:3])
+
+
+# -- the explore visit's order: what a look from the frontier would reveal (2026-10-13) ---------
+def test_view_gain_ranks_a_doorway_onto_a_room_above_a_longer_strip_along_a_wall():
+    """Two frontiers at equal distance from the robot at (4, 4), facing +x: a long strip of unknown along the
+    south wall (one cell deep -- walls stand behind it) and a short gap in the north wall onto a whole unknown
+    room. Size says the strip; what a camera standing at each would reveal says the gap."""
+    from sparx_agency.core.planning.exploration.frontier_ranking import rank_by_view_gain
+    from sparx_agency.core.planning.exploration.view_gain import UnknownView, ViewCone
+    rows = [
+        "???????????????",
+        "???????????????",
+        "???????????????",
+        "###########?###",      # the north wall with a one-cell gap at column 11
+        "#.............#",
+        "#.............#",
+        "#.............#",
+        "#.............#",
+        "#.............#",
+        "#??????.......#",      # a strip of unknown along the south wall: six cells, one deep
+        "###############",
+    ]
+    world = world_from(rows)
+    mask = world.grid != OCC
+    goals = ranked_frontier_goals(world, flat_cost(world), mask, origin_xy=at(8, 6), yaw=0.0, min_cluster_cells=1)
+    by_row = {g.cell[1]: g for g in goals}
+    strip, gap = by_row[8], by_row[4]
+    assert strip.size_cells > gap.size_cells, "the strip is the longer boundary"
+    assert goals[0] is strip or goals[0].utility >= gap.utility, "size alone ranks the strip first"
+    view = UnknownView(world, ViewCone(half_fov_rad=math.radians(39.5), max_range_m=3.0))
+    ranked = rank_by_view_gain(goals, view)
+    assert ranked[0].cell == gap.cell, "a look from the gap shows the room beyond; one from the strip shows a wall"
+    assert ranked[0].utility > ranked[1].utility
+    assert all(math.isfinite(g.utility) for g in ranked)
+    unreachable = FrontierGoal(xy=(1.0, 1.0), cell=(2, 2), size_cells=3, geodesic_m=float("inf"),
+                               heading_error_rad=0.0, utility=0.0)
+    assert rank_by_view_gain([unreachable], view) == [], "no path, no goal"
+    assert rank_by_view_gain(goals, view, min_gain_cells=10 ** 6) == [], "a floor on the gain drops every goal"

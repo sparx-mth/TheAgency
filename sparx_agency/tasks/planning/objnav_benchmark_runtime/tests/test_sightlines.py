@@ -82,6 +82,37 @@ def test_a_small_enclosed_unknown_region_is_a_pocket_the_open_ends_and_the_edge_
     assert not enclosed_pockets(OccupancyGrid2D(g, world.params, values=VALUES), 3.0)[25, 75]
 
 
+def test_a_pocket_wide_enough_to_stand_in_is_not_a_pocket_unless_the_agent_stood_on_it():
+    """Darden ``ec8d17aeaaaa`` and both re-runs (2026-10-13): the unseen half of a bathroom -- 0.9 m2, 0.8 m wide,
+    walled on three sides, the toilet in it -- was settled as a pocket from its door, three times. A strip behind a
+    bed is 0.3 m wide; a toilet or a person needs 0.6. The island under the agent's own blind radius is wide too,
+    but the agent is standing on it."""
+    world, _ = two_room_world()
+    g = world.grid.copy()
+    g[52:58, 68:73] = FREE                                  # room B's patch out of the way
+    g[10:13, 70:90] = UNK                                   # a strip behind a bed along the south wall: 0.3 m x 2 m
+    g[30:38, 80:94] = UNK                                   # the bathroom's unseen half: 0.8 m x 1.4 m, 1.1 m2
+    g[45:57, 20:32] = UNK                                   # the blind island under a camera that has not moved: 1.2 m wide
+    world = OccupancyGrid2D(g, world.params, values=VALUES)
+    plain = enclosed_pockets(world, 3.0)
+    assert plain[11, 80] and plain[34, 87] and plain[50, 26], "by area alone all three are pockets"
+    stood = np.zeros(g.shape, dtype=bool)
+    stood[50, 26] = True                                    # the agent stood in the middle of the island
+    pockets = enclosed_pockets(world, 3.0, max_width_m=0.6, stood=stood)
+    assert pockets[11, 80], "the strip behind the bed: nothing stands in 0.3 m"
+    assert not pockets[34, 87], "0.8 m wide: a toilet fits, and so does the agent -- a frontier, not a pocket"
+    assert pockets[50, 26], "the island is wide, but the agent is standing on it"
+    assert not enclosed_pockets(world, 3.0, max_width_m=0.6)[50, 26], "... and without that it would be a frontier too"
+    # The ledger applies the rule with the agent's own poses.
+    policy, episode, _, _, _ = loop_policy(visit="scan")
+    assert policy.sight.settings.pocket_max_width_m == 0.6
+    policy.sight.observe(pitched(episode, 0, world.grid_to_world(26, 50), yaw=0.0), world)
+    ledger_pockets = policy.sight.pockets(world)
+    assert ledger_pockets[11, 80] and ledger_pockets[50, 26] and not ledger_pockets[34, 87]
+    with pytest.raises(ValueError):
+        SightSettings(pocket_max_width_m=-1.0)
+
+
 # -- the look -------------------------------------------------------------------------
 def test_unknown_looked_at_from_two_poses_within_range_without_a_return_is_resolved_and_the_blind_radius_is_not():
     policy, episode, world, rooms, _ = loop_policy(visit="scan")
@@ -134,7 +165,8 @@ def test_the_overlay_writes_resolved_cells_occupied_for_the_frontier_logic_and_l
     assert not any(g.xy[0] < 2.0 for g in goals), "room A's west end is no frontier goal any more"
     assert policy.graph.facts[0].frontier_clusters == 0
     assert not [o for o in openings_of(policy, episode, world) if o.room_pid == 0], "... and no opening"
-    assert policy.graph.facts[1].frontier_clusters == 1, "room B's east end still is (its patch is a pocket)"
+    assert policy.graph.facts[1].frontier_clusters == 2, (
+        "room B's east end still is, and so is its 0.5 x 0.6 m patch: wide enough to stand in, no pocket (2026-10-13)")
     # Without the ledger the same map still shows the gap as a goal and an opening.
     policy.sight.settings = replace(policy.sight.settings, enabled=False)
     refresh(policy, world, IN_A, yaw=math.pi)

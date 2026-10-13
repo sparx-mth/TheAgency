@@ -22,12 +22,14 @@ class RPTSettings:
             and a ten-action-old mask confines routes to a room that has
             since moved. This is not the LLM cadence; the room LLM runs at
             the loop's own points (see ``room_search_loop.LoopSettings``).
-        warmup_steps: Actions of the warm-up rotation taken in place where
-            the agent stands before any room is chosen (and again on every
-            storey first entered). Twelve is one full circle at the
-            benchmark's 30-degree turn; the position is then recorded as a
-            completed scan, so the spawn room is finished before the search
-            begins.
+        warmup_steps: Upper bound on the warm-up rotation taken in place
+            where the agent stands before any room is chosen (and again on
+            every storey first entered). The rotation itself is as long as
+            the camera's field of view needs to have seen every bearing
+            once -- ten turns at the benchmark's 30-degree turn with its
+            79-degree camera (``RPTSearchPolicy.rotation_turns``) -- never
+            more than this; the position is then recorded as a completed
+            scan, so the spawn room is finished before the search begins.
         doorway_peek: The one-shot doorway inspections. OFF by default since
             2026-10-04: under the scan visit a peek -- approach, a half
             turn from the threshold, the walk back -- costs as much as a

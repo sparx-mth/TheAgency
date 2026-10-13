@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 
+from sparx_agency.core.planning.exploration.view_gain import camera_rotation_turns
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 
 
@@ -47,8 +48,11 @@ class CameraControlSettings:
             image's lower edge on the floor 0.47 m out and its upper edge
             just above the horizon, so one circle maps the blind disk
             without losing the room.
-        footing_turns: Turns of a footing sweep -- a full circle at the
-            action spec's turn angle (12 at 30 degrees).
+        footing_turns: Upper bound on the turns of a footing sweep. The
+            sweep itself is as long as the camera's field of view needs to
+            have seen every bearing once (ten at 30 degrees with a
+            79-degree camera, ``view_gain.camera_rotation_turns``), never
+            more than this.
     """
 
     inspection_turns: int = 4
@@ -110,7 +114,12 @@ class CameraController:
         self.inspected.add(key)
         self.last_inspection = obs.step
         footing = reason == "footing"
-        turns = self.settings.footing_turns if footing else self.settings.inspection_turns
+        turns = self.settings.inspection_turns
+        if footing:
+            k = getattr(getattr(obs, "camera", None), "intrinsics", None)
+            turns = self.settings.footing_turns
+            if k is not None:
+                turns = min(turns, camera_rotation_turns(k.width, k.fx, self.actions.turn_angle_rad))
         self.inspection = {"start": obs.step, "yaw": obs.pose.yaw, "turns": 0, "restoring": False, "reason": reason,
                            "pitch_deg": self.settings.footing_pitch_deg if footing else self.settings.inspection_pitch_deg,
                            "turns_budget": turns, "actions_budget": turns + 6 if footing else self.settings.inspection_actions}

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from sparx_agency.core.planning.objnav.camera_intrinsics import intrinsics_from_hfov
 from sparx_agency.core.planning.objnav.types.actions import (
-    DiscreteActionSpec, NAVIGATION_ACTIONS)
+    ALL_ACTIONS, DiscreteActionSpec, NAVIGATION_ACTIONS)
 from sparx_agency.core.planning.objnav.types.camera import CameraSpec
 from sparx_agency.tasks.planning.objnav_benchmark.kinematics import KinematicTolerance
 
@@ -21,9 +21,22 @@ class GibsonProtocol:
     STOP's upstream dummy right turn is omitted: it affects no score, and our
     shared STOP contract requires an unchanged pose. Sliding is enabled in the
     reference, unlike the HM3D/MP3D configurations used by many later papers.
+
+    **The camera tilts** (``camera_tilt``, protocol ``/2`` since 2026-10-13).
+    The published baselines drive the four body actions alone; this protocol
+    adds Habitat's LOOK_UP / LOOK_DOWN pair (30 degrees a step, the camera
+    held between 30 degrees up and 60 degrees down), the action space of
+    habitat-lab's ObjectNav task. It is a deviation from the SemExp action
+    set, recorded in the frozen configuration: the scoring is untouched (a
+    LOOK is an action against the same 500-action budget and moves nothing),
+    and it is what lets the target closing keep a low toilet or a high
+    television whole in the frame on the way in -- the box-driven pitch
+    servo of ``methods/bbox_pitch`` never fired in the 15-episode toilet
+    campaign of 2026-10-13 because the protocol had no LOOK to fire.
+    ``camera_tilt=False`` is the published four-action set.
     """
 
-    protocol_id: str = "gibson-semexp-v1.1-val/1"
+    protocol_id: str = "gibson-semexp-v1.1-val/2"
     benchmark: str = "gibson"
     split: str = "val"
     max_steps: int = 500
@@ -36,6 +49,10 @@ class GibsonProtocol:
     max_depth_m: float = 5.0
     forward_step_m: float = 0.25
     turn_angle_deg: float = 30.0
+    camera_tilt: bool = True
+    tilt_angle_deg: float = 30.0
+    min_pitch_deg: float = -30.0
+    max_pitch_deg: float = 60.0
     success_radius_m: float = 1.0
     map_resolution_m: float = 0.05
     allow_sliding: bool = True
@@ -69,11 +86,17 @@ class GibsonProtocol:
             self.camera_height_m, self.min_depth_m, self.max_depth_m)
 
     def actions(self) -> DiscreteActionSpec:
-        """The four actions used by Gibson baselines; no extra camera sweeps."""
+        """The body actions of the Gibson baselines, plus the LOOK pair when ``camera_tilt`` is on."""
+        if not self.camera_tilt:
+            return DiscreteActionSpec(
+                forward_step_m=self.forward_step_m,
+                turn_angle_deg=self.turn_angle_deg, tilt_angle_deg=self.tilt_angle_deg,
+                actions=NAVIGATION_ACTIONS)
         return DiscreteActionSpec(
             forward_step_m=self.forward_step_m,
-            turn_angle_deg=self.turn_angle_deg, tilt_angle_deg=30.0,
-            actions=NAVIGATION_ACTIONS)
+            turn_angle_deg=self.turn_angle_deg, tilt_angle_deg=self.tilt_angle_deg,
+            min_pitch_deg=self.min_pitch_deg, max_pitch_deg=self.max_pitch_deg,
+            actions=ALL_ACTIONS)
 
     def kinematics(self) -> KinematicTolerance:
         """Permit sliding and one 5 cm navmesh cell of positional correction.

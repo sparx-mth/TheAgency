@@ -16,6 +16,7 @@ import time
 
 from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSolver
+from sparx_agency.core.planning.exploration.view_gain import camera_rotation_turns
 from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCON_SOURCE
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
@@ -91,26 +92,15 @@ class RPTSearchPolicy:
                                 if self.glance_settings.enabled else "none"),
                 "sight": dict(asdict(self.sight_settings),
                               rule="unknown looked through from %d poses within %.1f m without a depth return, and "
-                                   "enclosed unknown pockets under %.1f m2, are settled: not frontier, not openings, "
+                                   "enclosed unknown pockets under %.1f m2 that nothing could stand in (inscribed width "
+                                   "under %.1f m, or stood on by the agent), are settled: not frontier, not openings, "
                                    "not glance gain; the planner and the display keep the real map"
                                    % (self.sight_settings.min_looks, self.sight_settings.far_m,
-                                      self.sight_settings.pocket_max_m2)
+                                      self.sight_settings.pocket_max_m2, self.sight_settings.pocket_max_width_m)
                               if self.sight_settings.enabled else "none: every unknown cell is an exit"),
                 "target_closing": asdict(self.settings.target_closing),
                 "target_navmesh_projection": self.target_projector is not None,
-                "room_visit": ("vantage point + full rotation; a scanned room (or one a scan saw more than half of) "
-                               "is finished for the first pass, and so is a room with no live frontier that the camera "
-                               "looked into or walked through, or that is a doorless fragment under %.1f m2; finished "
-                               "rooms are shown to the oracle with their status and offered again%s once its pass "
-                               "verdict says the home is covered (a revisit scans from a spot at least %.1f m from the "
-                               "earlier scan points); rooms whose STRONG type label cannot hold the target are %s; "
-                               "one signature object (a bed, a toilet, an oven) makes a label strong"
-                               % (self.loop_settings.fragment_max_m2,
-                                  "" if self.loop_settings.second_pass else " (DISABLED: second_pass off)",
-                                  self.loop_settings.revisit_standoff_m,
-                                  "not nodes (type_prior on)" if self.loop_settings.type_prior
-                                  else "valued by the oracle like every other room (type_prior off)")
-                               if self.loop_settings.scanning else "bounded frontier sweep of %d actions" % self.loop_settings.local_steps),
+                "room_visit": self._room_visit_description(),
                 "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
                                   "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
                                   "the nearest room floor; room numbers are unique across the building"
@@ -170,6 +160,36 @@ class RPTSearchPolicy:
                 "floor_plane_bound_m": self.settings.floor_plane_bound_m,
                 "non_metric": False, "clock": "global action ledger; room clock pauses off-floor"}
 
+    def _room_visit_description(self):
+        """The frozen configuration's one-line account of what a room visit is under the loop's ``visit`` mode."""
+        loop = self.loop_settings
+        if not loop.finishing:
+            return "bounded frontier sweep of %d actions" % loop.local_steps
+        finishing = ("finished rooms are shown to the oracle with their status and offered again%s once its pass "
+                     "verdict says the home is covered (a revisit scans from a spot at least %.1f m from the earlier "
+                     "scan points); rooms whose STRONG type label cannot hold the target are %s; one signature object "
+                     "(a bed, a toilet, an oven) makes a label strong"
+                     % ("" if loop.second_pass else " (DISABLED: second_pass off)", loop.revisit_standoff_m,
+                        "not nodes (type_prior on)" if loop.type_prior
+                        else "valued by the oracle like every other room (type_prior off)"))
+        if loop.exploring:
+            return ("frontier walk: the room's frontier that reveals the most unknown floor per metre walked, then the "
+                    "next, until none is left (bounded by %d actions); a room the agent stood in with no live frontier "
+                    "is finished (explored), and so is a room a full rotation stood in or saw more than half of, one "
+                    "with no live frontier the camera looked into or walked through, or a doorless fragment under "
+                    "%.1f m2; every rotation is as many turns as the camera's field of view needs to see the circle%s; "
+                    "openings off a room that is itself a node are folded into its walk; "
+                    % (loop.explore_visit_steps, loop.fragment_max_m2, self._rotation_note())
+                    + finishing)
+        return ("vantage point + full rotation (as many turns as the camera's field of view needs to see the circle%s); "
+                "a scanned room (or one a scan saw more than half of) is finished for the first pass, and so is a room "
+                "with no live frontier that the camera looked into or walked through, or that is a doorless fragment "
+                "under %.1f m2; " % (self._rotation_note(), loop.fragment_max_m2) + finishing)
+
+    def _rotation_note(self):
+        """`` (N)`` once an episode's camera says how many turns that is; empty before the first reset."""
+        return " (%d)" % self.rotation_turns() if getattr(self, "episode", None) is not None else ""
+
     def reset(self, episode, target):
         self.episode, self.target = episode, target
         s = self.settings
@@ -184,6 +204,8 @@ class RPTSearchPolicy:
         self.sight = SightLedger(self, self.sight_settings)
         # Where every completed look-around stood, on every floor: the one memory
         # of "this room is finished" that survives the watershed renumbering rooms.
+        # Under the explore visit a room is finished too when the agent has stood in
+        # it and no live frontier is left (its frontiers were walked until none was).
         self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction,
                                     fragment_max_m2=self.loop_settings.fragment_max_m2,
                                     walkthrough_clearance_m=self.loop_settings.walkthrough_clearance_m)
@@ -218,6 +240,9 @@ class RPTSearchPolicy:
         # Where along the route in force a look to the side (or all round) is worth
         # its actions; performed as a suspended phase when the agent gets there.
         self.glances = GlanceScheduler(self, self.glance_settings)
+        # One look-around is as many turns as the camera's field of view needs to see the
+        # whole circle (ten at 30 degrees with a 79-degree field), bounded by ``warmup_steps``.
+        self.warmup_turns = min(s.warmup_steps, self.rotation_turns())
         self.warmup_actions = 0
         self._warmup_pending = True       # the warm-up rotation's scan has not been recorded yet
         self._action_owner = "search"
@@ -230,6 +255,19 @@ class RPTSearchPolicy:
         self.floors.new()
         self._route = self._goal = self._target_xy = self._target_id = None
         self.route_memory.clear("floor_reset")
+
+    def rotation_turns(self):
+        """In-place turns one full look-around takes: what the camera's field of view needs to cover the circle.
+
+        Every rotation of the method -- the warm-up, a room scan, a full
+        glance, a footing sweep -- is complete when every bearing has been
+        inside the field of view once, not when the body is back at its
+        start heading (:meth:`~sparx_agency.core.planning.exploration.view_gain.ViewCone.rotation_turns`):
+        ten turns at the benchmark's 30 degrees with its 79-degree camera,
+        not twelve.
+        """
+        k = self.episode.camera.intrinsics
+        return camera_rotation_turns(k.width, k.fx, self.episode.action_spec.turn_angle_rad)
 
     def notify_blocked(self, observation):
         if self.closing.active:
@@ -311,7 +349,7 @@ class RPTSearchPolicy:
                 self.supervisor.pause(self.settings.action_time_s)
             elif self.hierarchy is None:
                 self.loop.charge()
-        if external and self.warmup_actions < self.settings.warmup_steps:
+        if external and self.warmup_actions < self.warmup_turns:
             self.warmup_actions += 1
         if self._action_owner == "doorway_peek":
             self.peek.charge()
@@ -440,7 +478,7 @@ class RPTSearchPolicy:
             else:
                 # The look in force: the loop is not ticked and not charged while it
                 # turns; the action it completes on goes to the search below.
-                command = self.glances.continue_look(observation)
+                command = self.glances.continue_look(observation, world)
                 if command is not None:
                     return command
         if self._target_xy is None:
@@ -582,7 +620,7 @@ class RPTSearchPolicy:
 
     def episode_info(self):
         return {"method": self.name, "rooms": len(self.graph.registry.rooms), "landmarks": len(self.landmarks),
-                "warmup": {"actions": self.warmup_actions, "budget": self.settings.warmup_steps},
+                "warmup": {"actions": self.warmup_actions, "budget": self.warmup_turns, "bound": self.settings.warmup_steps},
                 "doorway_peek": self.peek.diagnostics(),
                 "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
                 "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,

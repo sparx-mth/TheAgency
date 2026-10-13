@@ -143,6 +143,7 @@ def test_the_glance_is_performed_at_the_point_one_turn_per_action_then_the_route
     assert done is None, "facing the side: the look is complete and the search resumes this action"
     assert scheduler.active is None and scheduler.stats["completed"] == 1 and scheduler.stats["turns"] == 3
     assert policy.route_memory.pauses == [3], "the committed route's watchdogs are told how long the pause was"
+    assert len(scheduler._looked) == 1 and scheduler._looked[0][0] == point, "the look is remembered: where, and which bearings"
     complete = [e for e in scheduler.events if e["event"] == "glance_complete"][0]
     assert complete["turns"] == 3 and complete["swept_deg"] == pytest.approx(90.0, abs=1.0)
     # The cooldown holds the next glance off for a while, then the route is scored afresh.
@@ -187,10 +188,10 @@ def test_a_full_glance_turns_all_the_way_round_in_the_richer_direction():
         assert nxt.final_yaw == pytest.approx(math.atan2(math.sin(yaw + turn), math.cos(yaw + turn)), abs=1e-6)
         yaw = float(nxt.final_yaw)
         turns += 1
-    assert scheduler.active is None and 12 <= turns <= 14
+    assert scheduler.active is None and 10 <= turns <= 12, "the camera's circle: ten turns of 30 degrees see 379 degrees"
     assert policy.route_memory.pauses == [turns]
     complete = [e for e in scheduler.events if e["event"] == "glance_complete"][0]
-    assert complete["kind"] == FULL and complete["swept_deg"] >= 345.0
+    assert complete["kind"] == FULL and complete["swept_deg"] >= 285.0
 
 
 def test_no_glance_during_the_warmup_a_peek_a_takeover_or_within_a_scanned_spot():
@@ -262,8 +263,9 @@ def test_a_glance_point_walked_past_is_taken_from_where_the_agent_is():
 
 def test_the_policy_wraps_the_loops_transit_in_a_glance_and_resumes_the_search_when_it_ends():
     """End to end on the two-room fixture: the transit east leaves the unexplored west end behind the
-    agent, a full glance is worth its twelve actions, the loop is not charged while it turns, and the
-    action the look completes on goes to the transit again."""
+    agent, a full glance is worth its ten actions (the camera's circle, not the body's), the loop is not
+    charged while it turns, the completed circle goes into the scan ledger, and the action the look
+    completes on goes to the transit again."""
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
         IN_A, loop_policy, obs_at as loop_obs)
     policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), visit="scan")
@@ -284,9 +286,14 @@ def test_the_policy_wraps_the_loops_transit_in_a_glance_and_resumes_the_search_w
         if nxt.info.get("kind") != "glance":
             break
         yaw, turns, step = float(nxt.final_yaw), turns + 1, step + 1
-    assert policy.glances.active is None and 12 <= turns <= 14
+    full = policy.rotation_turns()
+    assert full == 10 and policy.glances.active is None and full <= turns <= full + 2
     assert nxt.waypoints and nxt.info["kind"] == "transit/1", "the look is over: this very action is the transit's"
     assert policy.glances.stats["completed"] == 1 and policy.route_memory.stats["kept"] >= 1
+    assert policy.glances.stats["rotations_recorded"] == 1
+    assert [r["source"] for r in policy.scans.records] == ["glance"], "a full glance is a completed look-around"
+    assert policy.scans.records[0]["room"] == 0 and policy.scans.records[0]["xy"] == IN_A
+    assert policy.glances.stats["turns"] == full, "ten turns of 30 degrees: 300 + 79 degrees of view cover the circle"
 
 
 # -- cue glances (2026-10-05): the object cut off at the edge of the frame -------------------
@@ -408,3 +415,55 @@ def test_cue_settings_reject_nonsense():
                    dict(cue_min_gain_m2=0.0), dict(cue_min_box_frac=1.5)):
         with pytest.raises(ValueError):
             GlanceSettings(**kwargs)
+
+
+# -- a look is not repeated from beside where it was taken (2026-10-13) -----------------------------
+def test_a_side_glance_is_not_scheduled_again_where_a_completed_look_already_swept_its_sector():
+    """The Darden re-run looked left through one doorway twice, 0.25 m apart (actions 60 and 68): the unknown
+    beyond a doorway stays unknown after the look, and the optimistic scorer valued it again."""
+    route = route_east()
+    policy, camera, actions = fake_policy(route)
+    scheduler = GlanceScheduler(policy, GlanceSettings(cooldown_actions=1))
+    world = corridor_world()
+    command = follow(route)
+    scheduler.apply(obs_at(camera, 0, (1.0, 2.5)), world, command)
+    point = scheduler.plan_in_force.candidate.xy
+    yaw = 0.0
+    out = scheduler.apply(obs_at(camera, 10, point, yaw=yaw), world, command)
+    step = 10
+    while scheduler.active is not None:
+        yaw, step = float(out.final_yaw), step + 1
+        out = scheduler.continue_look(obs_at(camera, step, point, yaw=yaw)) or command
+    assert scheduler.stats["completed"] == 1
+    # A step further along the same corridor, the same doorway on the left: not again.
+    further = (point[0] + 0.25, point[1])
+    scheduler.apply(obs_at(camera, step + 2, further, yaw=0.0), world, command)
+    plan = scheduler.plan_in_force
+    assert plan is None or plan.kind != LEFT or math.dist(plan.candidate.xy, point) > GlanceSettings().repeat_m, (
+        "the left sector from beside the first look was swept already")
+    assert scheduler._already_looked(further, math.pi / 4, math.radians(84.5))
+    assert not scheduler._already_looked(further, -math.pi / 4, math.radians(84.5)), "the right side was never looked at"
+    assert not scheduler._already_looked((point[0] + 3.0, point[1]), math.pi / 4, math.radians(84.5)), "three metres on is another place"
+
+
+def test_a_cue_of_an_ordinary_class_must_clear_the_geometric_rate_floor_and_is_not_repeated_over_a_swept_sector():
+    """Nine cue glances of 1.7-2.6 m2 at six actions each in the Darden re-run: a chair or a cabinet at the edge
+    of a room already mapped. A cue buys no less unknown per action than a planned side glance would."""
+    route = route_east()
+    world = corridor_world()
+    box = Box("chair", 0.9, (0.0, 100.0, 60.0, 400.0))          # cut by the left edge, 62 % of the frame's height
+    policy, camera, actions = cue_policy(route, [box])
+    scheduler = GlanceScheduler(policy, GlanceSettings(cue_min_gain_m2=0.1))
+    settings = scheduler.settings
+    turn = actions.turn_angle_rad
+    cue = scheduler._cue(obs_at(camera, 0, (5.4, 2.5), yaw=0.0), world)
+    assert cue is not None and cue[0] == LEFT, "abreast of the doorway the left holds a whole room of unknown"
+    side, cls, conf, turns, gain = cue
+    assert gain >= max(settings.cue_min_gain_m2, settings.min_gain_per_action_m2 * 2 * turns)
+    far = scheduler._cue(obs_at(camera, 0, (1.0, 2.5), yaw=0.0), world)
+    assert far is None and scheduler.stats["cues_without_gain"] >= 1, (
+        "at x = 1 the left is a wall: whatever the box, under the floor the cue is no glance")
+    # The sector memory covers cues too: the same bearings from beside here were just looked at.
+    scheduler._looked.append(((5.4, 2.5), 0.5 * turns * turn, 0.5 * turns * turn + math.radians(39.5), 5))
+    assert scheduler._cue(obs_at(camera, 6, (5.6, 2.5), yaw=0.0), world) is None
+    assert scheduler.stats["cues_repeated"] >= 1

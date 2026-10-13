@@ -27,7 +27,15 @@ step, and a human never takes one toward them:
   floor under its own feet unseen) -- connects to nothing: whatever is in
   it is in it, and there is no room behind it. A connected component of
   unknown cells of at most :attr:`SightSettings.pocket_max_m2` that does
-  not reach the edge of the map is a pocket, and resolved. The same
+  not reach the edge of the map is a pocket, and resolved -- **when
+  nothing could stand in it** (since 2026-10-13): its inscribed width is
+  under :attr:`SightSettings.pocket_max_width_m`, or the agent itself has
+  stood on it (the spawn island). The Darden recording ``ec8d17aeaaaa``
+  and both its re-runs saw a bathroom's walls through its door, which
+  enclosed the unseen half of the bathroom -- 0.9 m2, 0.8 m wide, with the
+  toilet in it -- and the pocket rule settled it: no frontier, no opening,
+  no visit, three times, with the agent a metre away. A strip behind a bed
+  is 0.3 m wide; a toilet needs 0.6. The same
   recording spent actions 51-82 walking back to such an island (the O4
   "gap", valued at 0.01 and visited because it was near) and actions
   150-192 on the strip behind a bed.
@@ -60,6 +68,7 @@ import math
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt, find_objects
 from scipy.ndimage import label as connected_components
 
 from sparx_agency.core.planning.environment import OccupancyGrid2D
@@ -91,6 +100,13 @@ class SightSettings:
         pocket_max_m2: Largest enclosed unknown region that is a pocket. A
             toilet, a bed or a sofa does not fit in 3 m2 behind a wardrobe;
             a cup would, and this is the trade the setting makes.
+        pocket_max_width_m: An enclosed region at least this wide at its
+            widest -- twice the largest distance from one of its cells to
+            its edge -- is not a pocket unless the agent has stood on it: a
+            toilet or a person fits in 0.6 m, a strip behind a bed is 0.3 m
+            wide (since 2026-10-13; the Darden bathroom's unseen half was
+            0.8 m wide and 0.9 m2). 0 disables the width test and every
+            small enclosed region is a pocket as before.
         pose_bin_m: Positions within this of each other are one pose for
             ``min_looks``.
         pose_bin_deg: ... and headings within this.
@@ -102,6 +118,7 @@ class SightSettings:
     far_m: float = 2.5
     depth_cells: int = 3
     pocket_max_m2: float = 3.0
+    pocket_max_width_m: float = 0.6
     pose_bin_m: float = 0.2
     pose_bin_deg: float = 15.0
 
@@ -115,8 +132,10 @@ class SightSettings:
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("sight.%s must be positive and finite" % name)
-        if isinstance(self.near_margin_m, bool) or not math.isfinite(self.near_margin_m) or self.near_margin_m < 0:
-            raise ValueError("sight.near_margin_m must be finite and non-negative")
+        for name in ("near_margin_m", "pocket_max_width_m"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError("sight.%s must be finite and non-negative" % name)
 
 
 @dataclass
@@ -362,11 +381,19 @@ class SightLedger:
         return (state.looked >= self.settings.min_looks) & (world.grid == world.values.unknown)
 
     def pockets(self, world, floor_id=None, step=None):
-        """``(H, W)`` bool: unknown regions of at most ``pocket_max_m2`` enclosed by known cells."""
+        """``(H, W)`` bool: unknown regions of at most ``pocket_max_m2`` enclosed by known cells -- and too narrow to stand in, or stood on."""
         state = self._floor(self._floor_id(floor_id), world.grid.shape)
         if not self.settings.enabled:
             return np.zeros(world.grid.shape, dtype=bool)
-        return self._memo(state, "pockets", self._step(step), lambda: enclosed_pockets(world, self.settings.pocket_max_m2))
+        s = self.settings
+
+        def build():
+            stood = None
+            if s.pocket_max_width_m > 0.0:
+                radius = float(getattr(getattr(self.policy, "settings", None), "body_radius_m", 0.0) or 0.0)
+                stood = self.walked_mask(world, floor_id, radius_m=radius)
+            return enclosed_pockets(world, s.pocket_max_m2, max_width_m=s.pocket_max_width_m, stood=stood)
+        return self._memo(state, "pockets", self._step(step), build)
 
     def resolved(self, world, floor_id=None, step=None):
         """``(H, W)`` bool: the unknown cells the frontier logic should treat as settled."""
@@ -443,8 +470,16 @@ def unknown_around(world, xy, radius_m):
     return float(((window == world.values.unknown) & disk).sum()) / total
 
 
-def enclosed_pockets(world, max_area_m2):
-    """``(H, W)`` bool: the unknown components of at most ``max_area_m2`` that do not touch the map's edge."""
+def enclosed_pockets(world, max_area_m2, max_width_m=0.0, stood=None):
+    """``(H, W)`` bool: the unknown components of at most ``max_area_m2`` that do not touch the map's edge.
+
+    With ``max_width_m`` positive a component is a pocket only when nothing
+    could stand in it -- its inscribed width (twice the largest Euclidean
+    distance from one of its cells to a cell outside it) is under the
+    bound -- or when ``stood`` (an ``(H, W)`` bool of cells the agent has
+    stood on) overlaps it: the island of unknown under a camera's own blind
+    radius is floor the agent is standing on, however wide.
+    """
     unknown = world.grid == world.values.unknown
     if not unknown.any():
         return np.zeros_like(unknown)
@@ -457,6 +492,21 @@ def enclosed_pockets(world, max_area_m2):
     small[0] = False
     border = np.unique(np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]]))
     small[border] = False
+    if not small.any():
+        return np.zeros_like(unknown)
+    if max_width_m and max_width_m > 0.0:
+        slices = find_objects(labels)
+        for index in np.nonzero(small)[0]:
+            box = slices[index - 1]
+            if box is None:
+                continue
+            component = labels[box] == index
+            if stood is not None and bool((stood[box] & component).any()):
+                continue                                   # stood on: the blind disk under the agent's own feet
+            padded = np.pad(component, 1)
+            inscribed = 2.0 * float(distance_transform_edt(padded).max()) * float(world.resolution)
+            if inscribed >= float(max_width_m):
+                small[index] = False                       # wide enough to hold a toilet or a person: not a pocket
     if not small.any():
         return np.zeros_like(unknown)
     return small[labels]

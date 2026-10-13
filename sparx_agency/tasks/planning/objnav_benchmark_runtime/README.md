@@ -406,6 +406,14 @@ inspection already did; the face turn that ends the backing manoeuvre carries it
 
 #### The box in the frame drives the pitch, and the STOP is taken on a whole, confident box (since 2026-10-11)
 
+**The servo needs the LOOK pair, and the Gibson protocol has it since 2026-10-13**
+(`gibson/protocol.py`, `camera_tilt`, protocol `/2`): under the published four-action set
+of `/1` none of the rules below ever fired -- the fifteen toilet episodes of the campaign
+recorded that day show `LOOK_UP 0 / LOOK_DOWN 0` and `bbox_pitch_corrections 0` in every
+one, nine of them locked approaches -- and the tilt-less substitutes (`_step_keeps_box`,
+the blind-cone STOP) stood in. A LOOK is an action against the same budget and moves
+nothing; see `gibson/README.md` for the deviation as recorded in the frozen configuration.
+
 The geometric controller above reads the target's *memory* -- its fused 3-D height
 against the camera's -- and the memory is biased exactly when the pitch matters most: a
 frame cut by the lower edge lands its depth patch on the upper part of the object (the
@@ -521,9 +529,12 @@ facade. No robot's flight controller is changed.
 
 ## Episode discovery and doorway inspection
 
-Both explorers start with **`RPTSettings.warmup_steps=12`** discovery actions
-before normal room selection -- **one full rotation in place** at the
-benchmark's 30-degree turn, taken where the agent stands. RGB-D, YOLO, object
+Both explorers start with **one full look-around in place** before normal room
+selection, taken where the agent stands: as many turns as the camera's field
+of view needs to have seen every bearing once -- **ten** at the benchmark's
+30-degree turn with its 79-degree camera (`RPTSearchPolicy.rotation_turns`;
+`RPTSettings.warmup_steps=12` is the upper bound, since 2026-10-13 no longer
+the length). RGB-D, YOLO, object
 confirmation and scene-graph geometry remain synchronous on every frame, so the
 rotation gives the map its first rooms and the detector its first objects; when
 it ends the agent's position is recorded in the **scan ledger**
@@ -643,37 +654,92 @@ time and remaining frontier clusters per room. No LLM call is part of that
 refresh.
 
 1. **One visit, bounded to the room in force** (`LoopSettings.visit`,
-   default `scan`, specified 2026-10-04). **A visit is a look-around**: walk
-   to the room's **vantage point** -- the interior cell of greatest clearance
-   the observed map can reach (`methods/room_vantage.py`: the Euclidean
-   distance transform of the room mask, so the middle of the open floor, not
-   the doorway and not the far frontier) -- turn a **full circle**, and
-   leave. The camera's ray ends at the nearest object, so a 360-degree scan
-   from the open floor shows what a second viewpoint or a walk to the far
-   frontier would; the room is then **finished for the episode**, whatever
-   frontier its mask still shows. Finishing is the **scan ledger's**
-   verdict (`methods/room_scans.py`): it remembers *where* every rotation was
-   completed, not which room id it was credited to -- the watershed
-   renumbers, splits and merges rooms on every update, and the Ranchester
-   recordings re-entered the same room under a new number three times in a
-   row. A room is finished when a completed scan point lies inside its mask
-   (`scan_point_inside`) **or** when a completed scan *saw* more than
-   `scan_seen_fraction` (0.5) of its cells within the camera's depth range
-   through observed free space (`seen_from_scan`: the small room fully
-   visible from the corridor, the half of a split room the scan stood in;
-   unknown cells end the sightline, so nothing unresolved is credited). The
-   verdict is sticky per `(floor, pid)`. The visit is bounded hard
-   (`scan_visit_steps`, 36 -- released `budget_spent` beyond it) and the
-   walk to the vantage point separately (`scan_approach_steps`, 20; an
-   approach that runs out, or that A* refuses, scans from where the agent
-   stands if that is inside the room -- `scans_in_place` -- and otherwise
-   releases the room `unreachable`). The rotation ends on measured yaw
-   (a full circle swept, or two turns past a circle's worth), the scan is
-   recorded, and the turn ends `exhausted`: productive, cooled, never
-   repeated by the escape hatch. **A clue mid-visit does not switch rooms**
+   default `explore` since 2026-10-13; `scan` was the default from
+   2026-10-04). **A visit is a frontier walk**: enter the room at the
+   frontier that would reveal the most unknown floor per metre walked, and
+   when the camera has resolved it walk to the next such frontier, until the
+   room has no live frontier left -- then the room is **finished for the
+   episode**. The frontiers are the inventory's clusters credited to the
+   room, through the sweep's admissibility filter, re-scored by
+   `core/planning/exploration/frontier_ranking.rank_by_view_gain`: the
+   unknown floor the camera's full circle would reach from the frontier's
+   cell (rays through the unknown, blocked by walls and by what the sight
+   ledger has settled) over the geodesic distance -- "the frontier that
+   reveals the most unknown area", not the longest boundary and not the
+   nearest cell. The route follower faces each goal as it walks, so the
+   frame at arrival shows what lay behind the boundary; the sweep keeps a
+   committed goal while it is passable, still near the room and still has
+   unknown beside it, and the walk itself is where the detector sees the
+   room. No vantage point and no fixed circle: the Darden recording
+   `ec8d17aeaaaa` (2026-10-13) walked to the middle of a bedroom it had
+   already walked across and turned twelve times (actions 255-279), and
+   before that turned a full glance on the way into another room, walked on
+   to its vantage point and turned the same circle again (61-106) -- 33
+   actions for nothing. The visit is bounded hard (`explore_visit_steps`,
+   60 -- released `budget_spent` beyond it, not cooled) and charged to RPT*
+   by its frontiers: a peek's worth (`openings.service_steps`, 4) plus
+   `explore_frontier_steps` (4) per live frontier, so the one-frontier
+   sliver of a room glimpsed through its door is priced like the peek it
+   replaces and a room with five frontiers like the walk it will take
+   (`explore_service_steps`, 12, when the count is unknown; a second-pass
+   revisit is priced as the scan it is). **A full rotation completed inside the
+   room since the visit began -- a glance taken on the way -- finishes it
+   at once** (`finished_by_rotation`): no circle is turned twice.
+
+   Finishing is the **scan ledger's** verdict (`methods/room_scans.py`): it
+   remembers *where* every rotation was completed, not which room id it was
+   credited to -- the watershed renumbers, splits and merges rooms on every
+   update, and the Ranchester recordings re-entered the same room under a
+   new number three times in a row. A room is finished when a completed
+   rotation stood inside its mask (`scan_point_inside`: the warm-up, a room
+   scan, or a **full glance** -- recorded in the ledger since 2026-10-13),
+   when a completed rotation *saw* more than `scan_seen_fraction` (0.5) of
+   its cells within the camera's depth range through observed free space
+   (`seen_from_scan`: the small room fully visible from the corridor, the
+   half of a split room the scan stood in; unknown cells end the sightline,
+   so nothing unresolved is credited), or -- under `explore` -- when it has
+   **no live frontier and the agent has stood in it** (`explored`), at least
+   `explored_inset_m` (0.5 m) in from its edge: the doorway cell is the
+   threshold, not the room; a room too narrow for the inset accepts any pose
+   inside it. Every floor cell of such a room is known, so every part of it
+   has been in the camera's frame; no circle from its middle is owed. The
+   live frontier count behind `explored` (and the `seen_through` and
+   `fragment` verdicts below) is the admissible one -- a goal under the
+   agent's feet or beside one already retired is not a frontier the visit
+   can walk to, so it is not one that keeps the room open; the visit and
+   the verdict read the same population. The verdict is sticky per
+   `(floor, pid)`. **A clue mid-visit does not switch rooms**
    (`reconsiders_deferred`): the Ranchester recording switched at 57, 73
    and 121 and came back to each; the clue is kept for the loop point the
    visit ends on, where every node is re-valued anyway.
+
+   **Every rotation is the camera's, not the body's** (since 2026-10-13):
+   the warm-up, a room scan, a full glance and a footing sweep end when the
+   field of view has covered the circle -- `turns * 30 + 79 >= 360`, ten
+   turns at the benchmark's 30 degrees, not twelve
+   (`view_gain.ViewCone.rotation_turns`, `RPTSearchPolicy.rotation_turns`);
+   the two turns that bring the body back to its start heading show what the
+   first two frames already showed. `RPTSettings.warmup_steps` (12) is now
+   an upper bound on the warm-up, not its length.
+
+   `visit="scan"` is the former default, kept as a mode: walk to the room's
+   **vantage point** -- the interior cell of greatest clearance the observed
+   map can reach (`methods/room_vantage.py`: the Euclidean distance transform
+   of the room mask, so the middle of the open floor, not the doorway and not
+   the far frontier) -- turn a **full circle**, and leave; the room is then
+   finished whatever frontier its mask still shows, because the camera's ray
+   ends at the nearest object and a 360-degree scan from the open floor shows
+   what a second viewpoint would. The visit is bounded hard
+   (`scan_visit_steps`, 36 -- released `budget_spent` beyond it) and the walk
+   to the vantage point separately (`scan_approach_steps`, 20; an approach
+   that runs out, or that A* refuses, scans from where the agent stands if
+   that is inside the room -- `scans_in_place` -- and otherwise releases the
+   room `unreachable`). The rotation ends on measured yaw (the camera's
+   circle swept, or two turns past that count), the scan is recorded, and
+   the turn ends `exhausted`: productive, cooled, never repeated by the
+   escape hatch. Under `explore` a **second-pass revisit** of a finished
+   room is exactly this scan, from a spot `revisit_standoff_m` away from the
+   room's earlier scan points.
 
    **LLM-first (since 2026-10-07).** The node oracle
    (`core/mapping/topology/search_node_oracle.py`, the 14B reasoning model)
@@ -1001,6 +1067,24 @@ refresh.
    once. `openings.enabled=False` is the ablation in which the exits are the
    exploration fallback's alone.
 
+   **The openings are read off the live map every action** (since
+   2026-10-13, `RoomSearchLoop.plan` -> `_opening_options`, cached per
+   action): the HUD and the per-step record show the openings as they stand
+   now, and an opening the camera has just resolved -- looked straight
+   through from its threshold -- is gone the action it is resolved, not at
+   the next loop point. The Darden recording `ec8d17aeaaaa` kept `O3` on the
+   HUD for fifty actions after the agent stood on its threshold looking
+   along its heading. **An opening off a room that is itself a node is
+   folded into that room's walk** under `explore` (`_fold_openings`,
+   `opening_folded` events, `openings_folded` in the HUD and diagnostics):
+   it is one of the room's frontiers, and the room's visit walks exactly
+   those, so offering both is the same place twice -- that recording's
+   order read `R3 -> O3`, a room and the gap at its own far end, and the
+   room's scan resolved the gap before the peek was ever due. Openings off
+   finished rooms, off rooms the oracle valued below `min_prob` (a kitchen
+   at 0.0 whose doorways lead on) and target landmarks stay nodes of their
+   own: they are how the next room is found.
+
    **A confirmed landmark of the target's class is a node too**
    (`kind="landmark"`, `T<n>` on the HUD, `landmarks_enabled`). Ranchester
    attempt 9's downstairs warm-up saw the couch three times at 0.41-0.45 --
@@ -1016,15 +1100,22 @@ refresh.
    close frames for the detector, and the takeover does the rest, or the
    landmark is marked inspected (`landmarks_inspected`).
 5. **A\*** -- the weighted planner behind `_navigate`.
-6. **Direct transit to the chosen room's vantage point** under `scan`
-   (`entry_vantage`; re-aimed once at the vantage point's new position, then
-   the centroid, if the mask re-segments under the route), or **to the
-   closest frontier inside the chosen room** under `sweep`
-   (`LoopSettings.entry_frontier`; a room with no frontier left keeps a
-   centroid entry; a committed entry frontier the camera resolves en route
-   is re-aimed at the room's next one, and a room with none left is
-   released without the visit -- `frontier_exhausted` in transit); or **to
-   the threshold of the chosen opening**, where the peek begins.
+6. **Direct transit to the chosen room's most revealing frontier** under
+   `explore` (`entry_frontier`; the gain-ranked goal of `_explore_goals`,
+   re-aimed at the room's next one when the camera resolves it en route; a
+   room with no frontier left -- to be confirmed on foot -- and a
+   second-pass revisit enter at the vantage point, `entry_vantage`); **to
+   the chosen room's vantage point** under `scan` (`entry_vantage`; re-aimed
+   once at the vantage point's new position, then the centroid, if the mask
+   re-segments under the route); or **to the closest frontier inside the
+   chosen room** under `sweep` (`LoopSettings.entry_frontier`; a room with
+   no frontier left keeps a centroid entry; a committed entry frontier the
+   camera resolves en route is re-aimed at the room's next one, and a room
+   with none left is released without the visit -- `frontier_exhausted` in
+   transit); or **to the threshold of the chosen opening**, where the peek
+   begins. A room the walk finishes before the agent is in it -- its last
+   frontier resolved from the corridor, or a full glance turned inside it
+   -- is released `exhausted` in transit (`finished_in_transit`).
 7. **Reset** -- arrival is the agent's own cell inside the room's mask
    (`arrived`), which restarts the visit counter.
 
@@ -1206,7 +1297,7 @@ the edge of the frame or not at all (Hanson, action 35). Turning in place
 costs no path length -- nothing under SPL -- but under the 500-action
 budget a full circle every few steps is unaffordable, so the question is
 *where* along the route a look pays, and which look. The scheduler scores
-the route in force every `revalue_actions` (3) and whenever it changes:
+the route in force every `revalue_actions` (2) and whenever it changes:
 candidate points one every `stride_m` (0.5 m) up to `horizon_m` (6 m),
 each with the route's heading there; for each, the unknown floor a glance
 would sweep -- left (from the heading's cone out to a right angle), right,
@@ -1216,24 +1307,58 @@ reveals anyway** (the forward cones along the whole route ahead), so a
 doorway's room counts once, at the point it shows best: the user's "one
 step forward and all three areas show; two and the first is hidden
 again". The best gain per action wins -- a side glance costs the turns
-out (the turns back are the follower's), a circle the full count -- if
+out and back (six), a circle the turns the camera's field of view needs to
+see it (ten at 30 degrees with the 79-degree camera, not twelve) -- if
 it clears `min_gain_m2` (3) and `min_gain_per_action_m2` (0.5): six
 forward steps into unknown space sweep the cone over 1.5 m of new floor,
 around 10 m2 in a room, so walking is the better buy wherever the unknown
 is ahead; a doorway beside the route shows the walk nothing and a glance
 5-15 m2 (the Hanson routes replayed on their final maps: 14.8 m2 at
-action 33, 7.6 m2 at 164). When the agent reaches the point the look is
-performed, one in-place turn per action, as a suspended phase like the
-warm-up: the loop is not ticked and not charged, the supervisor's clocks
-pause, and the committed route's watchdogs are told the pause
-(`glance_scheduled` / `glance_started` / `glance_complete` /
+action 33, 7.6 m2 at 164). **A bird in the hand** (`lookahead_discount`,
+0.5, since 2026-10-13): a candidate's rate is discounted by how far along
+the route it lies, down to half at the horizon, because the route and the
+map change before the agent gets there -- the Darden recording
+`ec8d17aeaaaa` scheduled 32 glances and took 4 of the geometric ones, the
+rest re-planned away as the route moved; a look the agent can take now is
+worth more than one of equal rate planned six metres on. When the agent
+reaches the point the look is performed, one in-place turn per action, as
+a suspended phase like the warm-up: the loop is not ticked and not charged,
+the supervisor's clocks pause, and the committed route's watchdogs are told
+the pause (`glance_scheduled` / `glance_started` / `glance_complete` /
 `glance_aborted` events in `episode_info()["glances"]`; the planned and
-active glance in the per-step `search` record and on the HUD). A spot
-where a full rotation already stood (the scan ledger) is never glanced
-from -- whatever is unknown from there is beyond range or behind
-furniture -- and a target sighting or a stair traversal aborts a glance;
-the warm-up, a peek's look, a scan's rotation and the takeover never
-start one. `enabled=False` is the ablation.
+active glance in the per-step `search` record and on the HUD). **A
+completed full glance is a completed look-around** and is recorded in the
+scan ledger (`source="glance"`, `rotations_recorded`, since 2026-10-13):
+the room the agent stood in is finished by it like a room scan finishes a
+room, and the loop's visit in force ends the same action
+(`finished_by_rotation`) -- the Darden recording turned a full glance
+inside the room it was walking into at action 61, then walked on to that
+room's vantage point and turned the same circle again at 94. A spot within
+`scanned_m` (1.5 m) of a completed rotation (the warm-up, a room scan, a
+full glance -- the scan ledger) is never glanced from -- whatever is
+unknown from there is beyond range or behind furniture, and the 4.4 m2
+"right" glance that recording took 1.0 m from its own full glance (actions
+82-85, three turns back after) revealed nothing -- and a target sighting
+or a stair traversal aborts a glance; the warm-up, a peek's look, a scan's
+rotation and the takeover never start one. After a glance no new one
+starts for `cooldown_actions` (4; the former 8 swallowed a 15 m2 right
+glance whose point the agent walked past at action 56 of that recording,
+three actions after a two-turn cue glance), and a cue glance no longer
+discards the geometric plan in force. **A look is not repeated from beside
+where it was taken** (`repeat_m`, 1.0 m, since 2026-10-13): the scheduler
+remembers every completed side and cue glance -- where it stood and the
+bearings its frames covered, the field of view included -- and neither a
+side glance nor a cue whose sector a look from within a metre already
+swept is taken again (the re-run of that recording looked left through the
+same doorway at the same dining room at actions 60 and 68, 0.25 m apart:
+the unknown beyond a doorway stays unknown after the look, beyond range or
+a hole in the mesh, and the optimistic scorer values it again every time).
+**A cue of an ordinary class clears the geometric rate floor** over its
+turns out and back (`max(cue_min_gain_m2, min_gain_per_action_m2 * 2 *
+turns)`: 3 m2 for three turns, 2 m2 for two) -- that re-run took nine cue
+glances of 1.7-2.6 m2 at six actions each, a chair or a cabinet at the
+edge of a room already mapped; the target's own class and its home objects
+still need no gain. `enabled=False` is the ablation.
 
 **Cue glances** (since 2026-10-05, `cue_*` settings): the scorer values
 unknown floor, and a small room beside the route shows it little, but
@@ -1284,7 +1409,17 @@ are not worth a step:
   The same recording spent actions 51-82 walking back to such an island
   (O4, valued 0.01, visited because it was near) and 150-192 on the strip
   behind a bed (O9). A toilet, a bed or a sofa does not fit in 3 m2 behind
-  a wardrobe; a cup would, and that is the trade the bound makes.
+  a wardrobe; a cup would, and that is the trade the bound makes. **But a
+  pocket is settled only when nothing could stand in it** (since
+  2026-10-13, `pocket_max_width_m` 0.6): its inscribed width -- twice the
+  largest distance from one of its cells to its edge -- is under 0.6 m, or
+  the agent has itself stood on it (the spawn island). The Darden
+  recording `ec8d17aeaaaa` and both of its re-runs saw a bathroom's walls
+  through its door, which enclosed the unseen half of the bathroom -- 0.9
+  m2, 0.8 m wide, with the toilet in it -- and the area bound alone settled
+  it: no frontier, no opening, no visit, three times, with the agent
+  standing a metre away inside the success region at the door. A strip
+  behind a bed is 0.3 m wide; a toilet needs 0.6.
 
 Settled unknown is written OCCUPIED on the map the **frontier logic**
 reads (`ObservedSceneGraph.frontier_world`, through `resolved_provider`):

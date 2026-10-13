@@ -18,12 +18,13 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import s
 @pytest.mark.parametrize("explorer", ["frontier", "falcon"])
 def test_the_warmup_is_one_full_rotation_of_discovery_not_llm_decisions(explorer):
     p, episode = setup_policy("bed", discovery=True, local_exploration=explorer, doorway_peek={"enabled": False})
-    budget = p.settings.warmup_steps
-    assert budget == 12, "one full circle at the benchmark's 30-degree turn"
+    budget = p.warmup_turns
+    assert p.settings.warmup_steps == 12 and budget == 10, (
+        "the camera's circle: ten turns of 30 degrees with a 79-degree field of view, bounded by the setting's twelve")
     for step in range(budget):
         obs = observation(episode, step, depth=3)
         command = p.plan(obs)
-        assert command.info["kind"] == "warmup"
+        assert command.info["kind"] == "warmup" and command.info["warmup_budget"] == budget
         assert command.waypoints == () and command.final_yaw is not None, "a turn in place, never a walk"
         assert p.graph.queries == 0 and p.solver.calls == 0
         assert p.plan(obs) is command  # repeated reads neither infer nor spend actions

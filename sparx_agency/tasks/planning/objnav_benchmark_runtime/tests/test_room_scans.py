@@ -208,14 +208,16 @@ def test_a_scan_visit_turns_a_full_circle_at_the_vantage_point_and_finishes_the_
 
     commands, last = turn_through(policy, episode, world, vantage, start_step=2, start_yaw=turn)
     turns = [c for c in commands if c.info.get("kind") == "room_scan"]
-    assert len(turns) == 11, "twelve turns of 30 degrees make the circle; the first was emitted on arrival"
-    assert [c.info["scan_turn"] for c in turns] == list(range(2, 13))
+    full = policy.rotation_turns()
+    assert full == 10, "ten turns of 30 degrees show a 79-degree camera the whole circle (300 + 79 >= 360)"
+    assert len(turns) == full - 1, "the first turn was emitted on arrival; the camera, not the body, says when the circle is done"
+    assert [c.info["scan_turn"] for c in turns] == list(range(2, full + 1))
     assert len(policy.scans.records) == 1 and policy.scans.records[0]["room"] == 1
     assert policy.scans.records[0]["xy"] == tuple(vantage) and policy.scans.records[0]["step"] == last
     assert policy.loop.stats["scans_completed"] == 1 and policy.loop.stats["scans_in_place"] == 0
     assert policy.supervisor.history[-1][:2] == (1, EXHAUSTED), "finished -- productive, cooled, not repeatable"
-    assert policy.loop.events[-4]["event"] == "scan_complete" and policy.loop.events[-4]["turns"] == 12
-    assert policy.loop.events[-4]["swept_degrees"] == pytest.approx(360.0, abs=1.0)
+    assert policy.loop.events[-4]["event"] == "scan_complete" and policy.loop.events[-4]["turns"] == full
+    assert policy.loop.events[-4]["swept_degrees"] == pytest.approx(math.degrees(full * turn), abs=1.0)
     # The loop point on the same action: room B is finished -- shown to the oracle as scanned, not a node
     # of the first pass any more.
     assert reasoned == [0, last]
@@ -501,28 +503,39 @@ def test_scan_settings_reject_nonsense(kwargs):
 
 
 def test_scan_settings_stand_the_supervisors_own_done_tests_down():
-    params = LoopSettings().supervisor_params(seed=1)
+    scan = LoopSettings(visit="scan")
+    params = scan.supervisor_params(seed=1)
     assert params.min_frontier_clusters == -1, "a frontier count of zero never finishes a room; the rotation does"
-    assert params.frontier_stall_s >= 3 * LoopSettings().scan_visit_steps
-    assert params.search_timeout_s >= 3 * LoopSettings().scan_visit_steps
+    assert params.frontier_stall_s >= 3 * scan.scan_visit_steps
+    assert params.search_timeout_s >= 3 * scan.scan_visit_steps
     assert params.min_prob == 0.05
     sweep = LoopSettings(visit="sweep").supervisor_params(seed=1)
     assert sweep.min_frontier_clusters == 0 and sweep.frontier_stall_s == 30.0
-    assert LoopSettings().service_steps() == 22 and LoopSettings(visit="sweep").service_steps() == 10
+    assert scan.service_steps() == 22 and LoopSettings(visit="sweep").service_steps() == 10
+    # The default visit (2026-10-13) is the frontier walk: finished by the ledger like a scan,
+    # bounded by its own budget, charged to RPT* as a few frontiers' worth of actions.
+    explore = LoopSettings()
+    assert explore.visit == "explore" and explore.exploring and explore.finishing and not explore.scanning
+    params = explore.supervisor_params(seed=1)
+    assert params.min_frontier_clusters == -1 and params.frontier_stall_s >= 3 * explore.explore_visit_steps
+    assert explore.visit_budget() == explore.explore_visit_steps and explore.service_steps() == explore.explore_service_steps
+    with pytest.raises(ValueError):
+        LoopSettings(visit="wander")
 
 
 def test_the_policy_reports_the_scan_visit_and_the_open_floor_exit():
     policy, _ = setup_policy()
     configuration = policy.configuration()
-    assert configuration["room_search_loop"]["visit"] == "scan"
-    assert "full rotation" in configuration["room_visit"]
+    assert configuration["room_search_loop"]["visit"] == "explore"
+    assert "frontier walk" in configuration["room_visit"] and "explored" in configuration["room_visit"]
+    assert "(10)" in configuration["room_visit"], "every rotation is the camera's ten turns, not twelve"
     assert configuration["floor_exit_gate"].startswith("none")
     assert "stairs are never a room" in configuration["room_partition"]
     assert policy.settings.doorway_peek.gate_floor_departure is False
     assert policy.settings.doorway_peek.enabled is False, "peeks are off under the scan visit"
-    assert policy.settings.warmup_steps == 12
+    assert policy.settings.warmup_steps == 12 and policy.warmup_turns == 10
     info = policy.episode_info()
-    assert "room_scans" in info
+    assert "room_scans" in info and info["room_scans"]["explored"] is True
     assert "room_search_loop" in info["building"]["floor_contexts"][0], "each storey keeps its loop's record"
 
 

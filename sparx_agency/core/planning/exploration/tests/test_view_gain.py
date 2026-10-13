@@ -82,3 +82,24 @@ def test_the_gain_peaks_abreast_of_the_doorway_and_discounts_what_the_walk_revea
     walk = view.unknown_in_sector((5.4, 2.5), math.pi / 2, math.radians(39.5))
     assert glance_gains(view, (5.4, 2.5), 0.0, math.pi / 2, already=walk).left_m2 < gains[5.4].left_m2 * 0.5
     assert glance_gains(view, (5.4, 2.5), 0.0, math.pi / 2, already=np.ones(view._unknown.shape, bool)).full_m2 == 0.0
+
+
+def test_a_rotation_is_as_many_turns_as_the_field_of_view_needs_to_see_the_circle():
+    """Ten turns of 30 degrees with a 79-degree camera: 300 + 79 >= 360. The two turns that bring the body back
+    to its start heading show what the first two frames already showed (2026-10-13)."""
+    c = cone_from_camera(640, 383.0, 5.0)                     # half_fov ~ 39.9 degrees
+    turn = math.radians(30.0)
+    assert c.rotation_turns(turn) == 10
+    assert ViewCone(half_fov_rad=math.radians(45.0), max_range_m=5.0).rotation_turns(turn) == 9, "a 90-degree camera: 270 + 90"
+    assert ViewCone(half_fov_rad=math.radians(30.0), max_range_m=5.0).rotation_turns(turn) == 10, "a 60-degree camera: 300 + 60"
+    assert ViewCone(half_fov_rad=math.radians(10.0), max_range_m=5.0).rotation_turns(turn) == 12, "a narrow camera needs the full circle of the body"
+    assert ViewCone(half_fov_rad=math.pi, max_range_m=5.0).rotation_turns(turn) == 1, "an all-round camera needs one frame; never zero turns"
+    assert c.rotation_turns(math.radians(15.0)) == 19
+    # Completion is read off the measured yaw with half a turn of tolerance.
+    assert not c.rotation_complete(9 * turn, turn) and c.rotation_complete(10 * turn, turn)
+    assert c.rotation_complete(10 * turn - 0.4 * turn, turn) and not c.rotation_complete(10 * turn - 0.6 * turn, turn)
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            c.rotation_turns(bad)
+    from sparx_agency.core.planning.exploration.view_gain import camera_rotation_turns
+    assert camera_rotation_turns(640, 383.0, turn) == 10

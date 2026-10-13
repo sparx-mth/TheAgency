@@ -66,6 +66,10 @@ def parser():
                    help="Shuffle the selection with --seed before --limit applies, so --limit N is a seeded random "
                         "sample of the (scene's, category's) published episodes instead of the first N in split "
                         "order; requires --limit")
+    p.add_argument("--episode-ids", nargs="+", metavar="ID",
+                   help="Run exactly these published episodes (e.g. Darden/000190), in this order, instead of a "
+                        "--limit / --shuffle sample: the same start, the same goal, for a re-run after a change. "
+                        "Each id must be in the scene (and category) selected; --limit is not required")
     p.add_argument("--record", action="store_true")
     p.add_argument("--video-fps", type=int, default=6)
     p.add_argument("--shards", type=int, default=1)
@@ -114,6 +118,21 @@ def episodes_of_category(ids, episodes, category):
     if not kept:
         raise ValueError("No published %s episode in the selection" % category)
     return kept
+
+
+def explicit_episodes(ids, pool):
+    """``ids`` as given, each checked against ``pool`` (the scene's and category's published ids).
+
+    Raises:
+        ValueError: On a duplicate, or an id outside the pool.
+    """
+    chosen = tuple(str(episode_id) for episode_id in ids)
+    if len(set(chosen)) != len(chosen):
+        raise ValueError("--episode-ids repeats an episode")
+    missing = [episode_id for episode_id in chosen if episode_id not in set(pool)]
+    if missing:
+        raise ValueError("--episode-ids not in the selected scene/category: %s" % ", ".join(missing))
+    return chosen
 
 
 def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None):
@@ -267,11 +286,11 @@ def prepare(args):
     issues = []
     if args.seed < 0 or args.gpu_device < 0:
         issues.append("--seed and --gpu-device must be non-negative")
-    if args.agent == "stop" and args.limit is None:
+    if args.agent == "stop" and args.limit is None and not args.episode_ids:
         issues.append("The stop diagnostic requires an explicit --limit")
-    if args.scene and (args.limit is None or not 1 <= args.limit <= 200):
-        issues.append("A single-scene run requires --limit between 1 and 200")
-    if args.shuffle and args.limit is None:
+    if args.scene and not args.episode_ids and (args.limit is None or not 1 <= args.limit <= 200):
+        issues.append("A single-scene run requires --limit between 1 and 200 (or explicit --episode-ids)")
+    if args.shuffle and args.limit is None and not args.episode_ids:
         issues.append("--shuffle is a seeded random sample and needs --limit N")
     if not 1 <= args.video_fps <= 60:
         issues.append("--video-fps must be between 1 and 60")
@@ -300,9 +319,12 @@ def prepare(args):
             # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
             env = GibsonEnv(dataset, args.seed, -1 if args.software_render else args.gpu_device,
                             target_override=args.target_override)
-            ids = select_episodes(episodes_of_category(env.episode_ids(), dataset.episodes, args.category),
-                                  args.limit, args.shards, args.shard_index,
-                                  shuffle_seed=args.seed if args.shuffle else None)
+            pool = episodes_of_category(env.episode_ids(), dataset.episodes, args.category)
+            if args.episode_ids:
+                ids = explicit_episodes(args.episode_ids, pool)
+            else:
+                ids = select_episodes(pool, args.limit, args.shards, args.shard_index,
+                                      shuffle_seed=args.seed if args.shuffle else None)
             env.validate_starts(ids)
         except (OSError, ValueError, KeyError, ImportError, EOFError, pickle.UnpicklingError) as exc:
             issues.append("Dataset/scorer: %s" % exc)
@@ -321,9 +343,11 @@ def prepare(args):
               "renderer": "software (Mesa llvmpipe EGL device; --software-render)" if args.software_render else "cuda gpu %d" % args.gpu_device,
               "scene": args.scene, "recording": {"enabled": args.record, "fps": args.video_fps},
               "category": args.category, "shuffle": bool(args.shuffle),
+              "episode_ids": list(args.episode_ids) if args.episode_ids else None,
               "kinematics": asdict(PROTOCOL.kinematics()),
               "gpu_plan": _gpu_plan_record(),
-              "full_split": args.scene is None and args.limit is None and args.shards == 1 and args.category is None,
+              "full_split": (args.scene is None and args.limit is None and args.shards == 1 and args.category is None
+                             and not args.episode_ids),
               "target_override": args.target_override,
               "publishable": args.target_override is None and method.get("publishable", True),
               "lean_records": bool(args.lean),
