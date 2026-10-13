@@ -2,6 +2,7 @@
 
 import os
 import time
+import math
 import threading
 from pathlib import Path
 
@@ -25,14 +26,21 @@ SWITCH_ALTITUDE = 1.0
 POSITION_RETRY_INTERVAL = 3.0
 MANUAL_CONTROL_NEUTRAL_Z = 540.0
 
-# Rotation: no heading telemetry is available here, so completion is time-based -
-# the duration is derived from the commanded rate, plus a margin. If it visibly
-# over/under-rotates on a real flight, tune YAW_RATE_DEG_S, not the logic.
+# Rotation: completion is tracked from UAVState.azimuth (real heading feedback, radians,
+# 0=North, positive CW), not a time estimate - a first flight test showed MAV_CMD_CONDITION_YAW
+# achieves only a fraction of the requested deg/s in Position mode here (~90 deg actually
+# turned in the ~14s a clean 360 deg at 30 deg/s should have taken - probably the continuously
+# published manual_control stream's neutral r=0.0 damping the commanded rate, since
+# manual_control is a live, continuously-effective input in this codebase, not inert - see
+# force_arm_and_roll_example.py). Rather than guess a corrected rate, re-send the command
+# with whatever's left to turn until the real accumulated azimuth confirms the turn is done.
 YAW_TURN_DEGREES = 360.0
-YAW_RATE_DEG_S = 30.0      # slow/conservative default - tune to taste
-YAW_DIRECTION = 1.0        # 1 = clockwise, -1 = counter-clockwise
-YAW_RELATIVE = 1.0         # 1 = relative to current heading, 0 = absolute
-YAW_COMPLETE_MARGIN_S = 2.0
+YAW_RATE_DEG_S = 30.0        # requested rate; actual rate may be lower - see above
+YAW_DIRECTION = 1.0          # 1 = clockwise, -1 = counter-clockwise
+YAW_RELATIVE = 1.0           # 1 = relative to current heading, 0 = absolute
+YAW_TOLERANCE_DEG = 10.0     # consider the turn done within this margin
+YAW_RESEND_INTERVAL_S = 4.0  # re-issue the command for the remaining degrees at this cadence
+YAW_MAX_WAIT_S = 40.0        # safety fallback if azimuth feedback never confirms completion
 
 # Scan capture: runs from Position-mode confirmation through the end of the turn, at the
 # same device, resolution and MJPG format as auto_capture_interval.py in NanoLLM_VILA_and_OWL
@@ -80,8 +88,11 @@ class TakeoffAndRotate(Node):
         self.takeoff_sent_time = None
         self.arm_wait_start_time = None
         self.position_wait_start_time = None
-        self.yaw_sent_time = None
-        self.yaw_duration_s = None
+        self.current_azimuth = None
+        self.yaw_last_azimuth = None
+        self.yaw_accumulated_deg = 0.0
+        self.yaw_wait_start_time = None
+        self.yaw_last_resend_time = None
         self.step = None
 
         self.cam_thread = None
@@ -175,6 +186,14 @@ class TakeoffAndRotate(Node):
 
     def uav_state_cb(self, msg):
         self.current_altitude = msg.altitude_relative
+        if self.yaw_last_azimuth is not None:
+            # azimuth wraps at +-pi; a plain subtraction breaks crossing that boundary,
+            # so normalize the per-sample delta into (-pi, pi] before accumulating.
+            delta = msg.azimuth - self.yaw_last_azimuth
+            delta = (delta + math.pi) % (2 * math.pi) - math.pi
+            self.yaw_accumulated_deg += math.degrees(delta)
+        self.yaw_last_azimuth = msg.azimuth
+        self.current_azimuth = msg.azimuth
 
     # ---------- helpers ----------
     def send_command_long(self, command, p1=0.0, p2=0.0, p3=0.0, p4=0.0, p5=0.0, p6=0.0, p7=0.0):
@@ -308,18 +327,37 @@ class TakeoffAndRotate(Node):
             self.send_command_long(MAV_CMD_CONDITION_YAW,
                                    YAW_TURN_DEGREES, YAW_RATE_DEG_S,
                                    YAW_DIRECTION, YAW_RELATIVE)
-            self.yaw_sent_time = time.monotonic()
-            self.yaw_duration_s = YAW_TURN_DEGREES / YAW_RATE_DEG_S + YAW_COMPLETE_MARGIN_S
+            self.yaw_accumulated_deg = 0.0
+            self.yaw_last_azimuth = self.current_azimuth
+            now = time.monotonic()
+            self.yaw_wait_start_time = now
+            self.yaw_last_resend_time = now
             self.step = STEP_WAIT_YAW_DONE
 
         elif self.step == STEP_WAIT_YAW_DONE:
-            elapsed = time.monotonic() - self.yaw_sent_time
-            if elapsed >= self.yaw_duration_s:
+            now = time.monotonic()
+            done = abs(self.yaw_accumulated_deg) >= YAW_TURN_DEGREES - YAW_TOLERANCE_DEG
+            timed_out = now - self.yaw_wait_start_time > YAW_MAX_WAIT_S
+
+            if done or timed_out:
+                reason = "azimuth feedback confirms" if done else \
+                    f"safety timeout after {YAW_MAX_WAIT_S:.0f}s, giving up"
                 self.get_logger().info(
-                    "Turn complete (time-based, no heading feedback available) -- "
+                    f"Turn complete ({reason}: {self.yaw_accumulated_deg:.1f} deg accumulated) -- "
                     "hovering in Position mode. Run land_and_disarm_example.py to land.")
                 self.stop_camera_capture()
                 self.step = STEP_DONE
+                return
+
+            if now - self.yaw_last_resend_time > YAW_RESEND_INTERVAL_S:
+                remaining = YAW_TURN_DEGREES - abs(self.yaw_accumulated_deg)
+                self.get_logger().info(
+                    f"Re-sending yaw for the remaining {remaining:.1f} deg "
+                    f"({self.yaw_accumulated_deg:.1f} deg done so far)")
+                self.send_command_long(MAV_CMD_CONDITION_YAW,
+                                       remaining, YAW_RATE_DEG_S,
+                                       YAW_DIRECTION, YAW_RELATIVE)
+                self.yaw_last_resend_time = now
 
         elif self.step == STEP_DONE:
             pass
