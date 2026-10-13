@@ -34,12 +34,14 @@ YAW_DIRECTION = 1.0        # 1 = clockwise, -1 = counter-clockwise
 YAW_RELATIVE = 1.0         # 1 = relative to current heading, 0 = absolute
 YAW_COMPLETE_MARGIN_S = 2.0
 
-# Scan capture: runs from Position-mode confirmation through the end of the turn, on the
-# companion computer's own camera (same device auto_capture_interval.py uses in the
-# NanoLLM_VILA_and_OWL repo). Written under its own "rotate_scan_*" subfolder, not the
-# "latest"-symlinked capture root that repo's own scripts manage, so this never collides
-# with that pipeline's folder rotation/cleanup.
-CAPTURE_DEVICE = "/dev/video0"
+# Scan capture: runs from Position-mode confirmation through the end of the turn, at the
+# same device, resolution and MJPG format as auto_capture_interval.py in NanoLLM_VILA_and_OWL
+# (confirmed working via OpenCV inside this container: 640x360 MJPG open+read succeeds -
+# camera_frames_example.py's H264 caps-negotiation issue in this same workspace is specific
+# to its hardware H264 decode path, not plain MJPG capture). Writes into this board's own
+# captures root under its own "rotate_scan_*" subfolder, so comm_manager_vllm.py can process
+# these frames too, without colliding with that pipeline's "latest"-symlinked folder rotation.
+CAPTURE_DEVICE = "/dev/HD_CAMERA"
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 360
 CAPTURE_MJPG = True
@@ -317,6 +319,10 @@ class TakeoffAndRotate(Node):
 
         elif self.step == STEP_DONE:
             pass
+
+    def destroy_node(self):
+        self.stop_camera_capture()
+        return super().destroy_node()
 
 
 def main(args=None):
