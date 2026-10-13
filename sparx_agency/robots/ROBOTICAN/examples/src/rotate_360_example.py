@@ -1,4 +1,10 @@
 #!/usr/bin/python3
+#
+# Arm, takeoff, hold in Position mode, turn ~360 deg while capturing camera frames, then
+# hover for land_and_disarm_example.py to take over. Full design rationale and open
+# questions from two R3 flight tests (yaw completion tracking, a settle period and
+# pitch-down added after the drone drifted near a wall, a comms-dropout safety hold, and
+# why a literal second MAVLink/FCU connection wasn't added) are in ../TODO.md, not here.
 
 import os
 import time
@@ -27,62 +33,31 @@ SWITCH_ALTITUDE = 1.0
 POSITION_RETRY_INTERVAL = 3.0
 MANUAL_CONTROL_NEUTRAL_Z = 540.0
 
-# Rotation: completion is tracked from UAVState.azimuth (real heading feedback, radians,
-# 0=North, positive CW), not a time estimate - a first flight test showed MAV_CMD_CONDITION_YAW
-# achieves only a fraction of the requested deg/s in Position mode here (~90 deg actually
-# turned in the ~14s a clean 360 deg at 30 deg/s should have taken - probably the continuously
-# published manual_control stream's neutral r=0.0 damping the commanded rate, since
-# manual_control is a live, continuously-effective input in this codebase, not inert - see
-# force_arm_and_roll_example.py). Rather than guess a corrected rate, re-send the command
-# with whatever's left to turn until the real accumulated azimuth confirms the turn is done.
+# Completion tracked from UAVState.azimuth, not a time estimate - see ../TODO.md item 1.
 YAW_TURN_DEGREES = 360.0
-YAW_RATE_DEG_S = 30.0        # requested rate; actual rate may be lower - see above
+YAW_RATE_DEG_S = 30.0        # requested rate; actual achieved rate is unconfirmed
 YAW_DIRECTION = 1.0          # 1 = clockwise, -1 = counter-clockwise
 YAW_RELATIVE = 1.0           # 1 = relative to current heading, 0 = absolute
 YAW_TOLERANCE_DEG = 10.0     # consider the turn done within this margin
 YAW_RESEND_INTERVAL_S = 4.0  # re-issue the command for the remaining degrees at this cadence
 YAW_MAX_WAIT_S = 40.0        # safety fallback if azimuth feedback never confirms completion
-YAW_SETTLE_TIME_S = 3.0      # hold still after Position mode confirms, before yawing - lets
-                             # the optical-flow-based position/velocity hold settle first
+YAW_SETTLE_TIME_S = 3.0      # hold still after Position mode confirms, before yawing
 
-# Safety: a flight test hit repeated "ddsi_udp_conn_write ... failed" DDS/multicast errors
-# mid-flight, visible in both this node's and land_and_disarm_example.py's logs at the same
-# moment - a real link dropout, not a bug in either script. State feedback (armed/flight_mode/
-# azimuth) can silently stop updating during one of these without the step machine noticing,
-# which would mean we keep re-issuing commands based on stale data. Track how long it's been
-# since each topic last delivered a message, and stop automated commands rather than trust
-# data that's gone silent - holding is safer than continuing blind.
+# Holds (rather than keeps commanding) if state feedback goes quiet - see ../TODO.md item 2.
 STATE_STALE_TIMEOUT_S = 2.0
 
-# Pitch forward slightly during the capture window so the camera (rigidly body-mounted, no
-# separate gimbal) looks more toward the floor/room contents instead of straight ahead at
-# wall height. Sign/magnitude are a first guess, NOT flight-validated - MAVLink's usual
-# convention is manual_control.x = pitch, negative = nose down, but this codebase's actual
-# mapping hasn't been confirmed. Start small and watch closely the first time; if it drifts
-# forward/backward instead of just tilting, the sign or magnitude needs correcting.
+# Pitch during capture so the gimbal-less camera looks toward the floor/room, not the wall.
+# Sign/magnitude unconfirmed - see ../TODO.md item 1.
 CAPTURE_PITCH_DOWN = -50.0
 
-# Scan capture: runs from Position-mode confirmation through the end of the turn, at the
-# same device, resolution and MJPG format as auto_capture_interval.py in NanoLLM_VILA_and_OWL
-# (confirmed working via OpenCV inside this container: 640x360 MJPG open+read succeeds -
-# camera_frames_example.py's H264 caps-negotiation issue in this same workspace is specific
-# to its hardware H264 decode path, not plain MJPG capture).
-#
-# /home/iai/captures (the NanoLLM_VILA_and_OWL repo's own convention, used on the host) is
-# NOT mounted into this container - only /home/iai/frames is (-> host's
-# ~/iai_ws/frames, same as camera_frames_example.py already uses), confirmed via
-# `docker inspect iai --format '{{range .Mounts}}...'`. Write there, in a "rotate_scan_*"
-# subfolder so repeated runs don't overwrite each other; the host side copies it into the
-# shared captures root afterward (see run_rotate_scan_test.sh in that repo).
+# Camera device/mount for the capture window - see ../TODO.md item 1 and item 4 (per-board).
 CAPTURE_DEVICE = "/dev/HD_CAMERA"
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 360
 CAPTURE_MJPG = True
-# 0.5s produced 79 frames over a 40s run - more than comm_manager_vllm.py (1-9s/frame VLM
-# calls) could process in a reasonable time. 1.5s keeps decent coverage across a ~14-40s
-# turn (9-27 frames) while actually finishing before someone gives up waiting.
-CAPTURE_INTERVAL_S = 1.5
-FRAMES_ROOT = "/home/iai/frames"
+CAPTURE_INTERVAL_S = 1.5     # 0.5s produced more frames than comm_manager_vllm.py could
+                             # process in reasonable time (79 frames, 1-9s VLM call each)
+FRAMES_ROOT = "/home/iai/frames"  # NOT /home/iai/captures - unmounted in this container
 
 STEP_WAIT_ARM_CONFIRM = 0
 STEP_TAKEOFF = 1
@@ -179,9 +154,8 @@ class TakeoffAndRotate(Node):
         self.keep_alive_pub.publish(msg)
 
     def request_flight_mode(self, mode):
-        # While in Takeoff, rooster_manager only acts on a request that differs from the
-        # previous one, and that previous request persists across flights. Sending NONE
-        # first (maps to Invalid, ignored) guarantees the real request counts as a change.
+        # rooster_manager only acts on a request that differs from the last one (which
+        # persists across flights) - sending NONE first guarantees this one counts as a change.
         self.keep_alive_is_active = True
         self.keep_alive_mode = KeepAlive.FLIGHT_MODE_NONE
         self.publish_keep_alive()
