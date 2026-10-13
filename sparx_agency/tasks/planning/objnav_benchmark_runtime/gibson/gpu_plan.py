@@ -17,6 +17,15 @@ conda ``habitat-sim`` headless build renders through EGL on a GPU device;
 software rendering (``HABITAT_CPU_RENDER=1``, Mesa's EGL on llvmpipe) is an
 experiment the operator opts into, not a default this planner may assume.
 
+The operator may also **pin** a component instead of letting the free VRAM
+decide: ``GPU_PLAN_LLM``, ``GPU_PLAN_YOLO``, ``GPU_PLAN_HABITAT`` = ``auto``
+(the default), ``gpu`` or ``cpu``. A ``cpu`` pin takes nothing off the budget
+(for Habitat it *is* the software-rendering opt-in, and the launcher hides
+``/dev/dri`` for it); a ``gpu`` pin is served before every auto-placed
+component and, like a GPU-only one, is placed with a warning when its
+estimate does not fit. ``GPU_PLAN_LLM=gpu GPU_PLAN_HABITAT=cpu`` is "the LLM
+on the card, the renderer on the CPU, YOLO wherever the VRAM left allows".
+
 Every footprint is an explicit, dated estimate (``*_VRAM_MIB`` environment
 overrides exist for each) and is written into the plan with the measurement
 it was decided on; the plan goes into the run directory and the frozen run
@@ -45,6 +54,10 @@ HABITAT_RENDER_MIB = 1536        # habitat-sim 0.2.4 headless, one agent, 640x48
 DEFAULT_RESERVE_MIB = 512        # the display / driver headroom the ``gibson.run`` GPU gate also keeps
 PARTIAL_FRACTION = 0.5           # an LLM whose estimate fits at least this far is offloaded partially, not pushed to the CPU
 
+#: What an operator may pin a component to (``GPU_PLAN_<COMPONENT>``); ``auto`` leaves it to the free VRAM.
+PINS = ("auto", "gpu", "cpu")
+COMPONENT_NAMES = ("llm", "yolo", "habitat")
+
 
 @dataclass(frozen=True)
 class Component:
@@ -55,6 +68,14 @@ class Component:
     cpu_capable: bool
     partial: bool = False         # may split layers between GPU and CPU (Ollama)
     note: str = ""
+    pin: str = "auto"             # "auto": the budget decides; "gpu" / "cpu": the operator did (GPU_PLAN_<NAME>)
+
+    def __post_init__(self):
+        if self.pin not in PINS:
+            raise ValueError("%s: GPU_PLAN_%s must be one of %s, got %r"
+                             % (self.name, self.name.upper(), "/".join(PINS), self.pin))
+        if self.pin == "cpu" and not self.cpu_capable:
+            raise ValueError("%s is pinned to the CPU but cannot run there" % self.name)
 
 
 @dataclass
@@ -77,6 +98,7 @@ class GpuPlan:
     placements: List[Placement] = field(default_factory=list)
     shared: bool = False          # more than one of ours on the card: ``gibson.run`` needs --allow-shared-gpu
     warnings: List[str] = field(default_factory=list)
+    pins: Dict[str, str] = field(default_factory=dict)   # the operator's word per component, for the record
 
     def placement(self, name: str) -> Placement:
         for item in self.placements:
@@ -149,62 +171,92 @@ def llm_need_mib(models: Sequence[str], models_dir: Path, override: Optional[int
 
 
 def components(llm_mib: int, llm_note: str, yolo_mib: int = YOLO_WORLD_X_MIB, habitat_mib: int = HABITAT_RENDER_MIB,
-               habitat_cpu_render: bool = False) -> Tuple[Component, ...]:
-    return (Component("llm", 1, llm_mib, cpu_capable=True, partial=True, note=llm_note),
-            Component("yolo", 2, yolo_mib, cpu_capable=True, note="YOLO-World X-v2 + CLIP text encoder, 640x480"),
-            Component("habitat", 3, habitat_mib, cpu_capable=habitat_cpu_render,
-                      note="habitat-sim headless EGL renderer; CPU only with HABITAT_CPU_RENDER=1 (software EGL, experimental)"))
+               habitat_cpu_render: bool = False, pins: Optional[Dict[str, str]] = None) -> Tuple[Component, ...]:
+    """The three processes; ``pins`` maps a component name to ``auto`` / ``gpu`` / ``cpu`` (``GPU_PLAN_<NAME>``).
+
+    Pinning Habitat to the CPU is the software-rendering opt-in itself, so it
+    needs no ``HABITAT_CPU_RENDER=1`` beside it.
+    """
+    pins = dict(pins or {})
+    unknown = sorted(set(pins) - set(COMPONENT_NAMES))
+    if unknown:
+        raise ValueError("No such component to pin: %s (known: %s)" % (", ".join(unknown), ", ".join(COMPONENT_NAMES)))
+    habitat_pin = pins.get("habitat", "auto")
+    return (Component("llm", 1, llm_mib, cpu_capable=True, partial=True, note=llm_note, pin=pins.get("llm", "auto")),
+            Component("yolo", 2, yolo_mib, cpu_capable=True, note="YOLO-World X-v2 + CLIP text encoder, 640x480",
+                      pin=pins.get("yolo", "auto")),
+            Component("habitat", 3, habitat_mib, cpu_capable=habitat_cpu_render or habitat_pin == "cpu", pin=habitat_pin,
+                      note="habitat-sim headless EGL renderer; CPU only with HABITAT_CPU_RENDER=1 or GPU_PLAN_HABITAT=cpu "
+                           "(software EGL on Mesa llvmpipe)"))
 
 
 def plan(parts: Sequence[Component], gpu_index: int, gpu_name: str, total_mib: int, used_mib: int,
          reserve_mib: int = DEFAULT_RESERVE_MIB) -> GpuPlan:
-    """Hand out the free VRAM: GPU-only components first (they have no alternative), then by priority.
+    """Hand out the free VRAM: pinned-to-GPU and GPU-only components first (they have no alternative), then by priority.
 
     A component that fits takes its estimate off the budget; one that does
     not goes to the CPU -- except an LLM whose estimate fits at least
     ``PARTIAL_FRACTION`` of the way, which is loaded partially (Ollama
     splits layers between the card and the CPU itself) and takes the rest of
-    the budget.
+    the budget. A component pinned to the CPU never enters the budget; one
+    pinned to the GPU is placed there even when it does not fit, with a
+    warning, as a GPU-only component is.
     """
     free = max(0, int(total_mib) - int(used_mib) - int(reserve_mib))
-    result = GpuPlan(gpu_index, gpu_name, int(total_mib), int(used_mib), int(reserve_mib), free)
+    result = GpuPlan(gpu_index, gpu_name, int(total_mib), int(used_mib), int(reserve_mib), free,
+                     pins={part.name: part.pin for part in parts})
     budget = free
-    order = sorted(parts, key=lambda c: (c.cpu_capable, c.priority))
+    order = sorted(parts, key=lambda c: (c.pin != "gpu", c.cpu_capable, c.priority))
     on_gpu = 0
     for part in order:
-        if part.need_mib <= budget:
+        pinned = " -- pinned (GPU_PLAN_%s=%s)" % (part.name.upper(), part.pin) if part.pin != "auto" else ""
+        if part.pin == "cpu":
+            result.placements.append(Placement(part.name, "cpu", part.need_mib, 0,
+                                               "on the CPU by the operator's word%s; takes nothing off the budget" % pinned))
+        elif part.need_mib <= budget:
             result.placements.append(Placement(part.name, "gpu", part.need_mib, part.need_mib,
-                                               "fits: %d MiB of %d left (%s)" % (part.need_mib, budget, part.note)))
+                                               "fits: %d MiB of %d left (%s)%s" % (part.need_mib, budget, part.note, pinned)))
             budget -= part.need_mib
             on_gpu += 1
         elif part.partial and budget >= PARTIAL_FRACTION * part.need_mib:
             result.placements.append(Placement(part.name, "gpu-partial", part.need_mib, budget,
-                                               "partial: %d MiB of the %d MiB estimate fit; Ollama keeps the rest on the CPU"
-                                               % (budget, part.need_mib)))
+                                               "partial: %d MiB of the %d MiB estimate fit; Ollama keeps the rest on the CPU%s"
+                                               % (budget, part.need_mib, pinned)))
             budget = 0
             on_gpu += 1
-        elif part.cpu_capable:
+        elif part.cpu_capable and part.pin != "gpu":
             result.placements.append(Placement(part.name, "cpu", part.need_mib, 0,
                                                "offloaded: needs %d MiB, %d MiB left" % (part.need_mib, budget)))
         else:
+            kind = "pinned to the GPU" if part.pin == "gpu" else "GPU-only component"
             result.placements.append(Placement(part.name, "gpu", part.need_mib, max(0, budget),
-                                               "GPU-only component placed with %d MiB left; expect allocation failure"
-                                               % budget))
-            result.warnings.append("%s needs %d MiB but only %d MiB is free: stop whatever holds the card, or raise the "
-                                   "reserve on another machine" % (part.name, part.need_mib, budget))
+                                               "%s placed with %d MiB left; expect allocation failure%s"
+                                               % (kind, budget, pinned)))
+            result.warnings.append("%s needs %d MiB but only %d MiB is free: stop whatever holds the card, %s"
+                                   % (part.name, part.need_mib, budget,
+                                      "or unpin it (GPU_PLAN_%s=auto)" % part.name.upper() if part.pin == "gpu"
+                                      else "or raise the reserve on another machine"))
             budget = 0
             on_gpu += 1
     result.placements.sort(key=lambda item: [c.name for c in parts].index(item.component))
     result.shared = on_gpu > 1 or int(used_mib) > reserve_mib
     for item in result.placements:
         if item.component == "habitat" and item.device == "cpu":
-            result.warnings.append("habitat on the CPU is software EGL rendering: slow, and unsupported by the conda headless build")
+            result.warnings.append("habitat on the CPU is software EGL rendering on Mesa llvmpipe: ~30 ms a 640x480 frame and "
+                                   "~1.3 GB of RAM per simulator (measured 2026-10-12); the launcher must hide /dev/dri from "
+                                   "the run (run_benchmark.sh HABITAT_RENDER=software does), or Mesa's device 0 is whatever "
+                                   "hardware it finds first")
     return result
+
+
+def pins_from_environment(env: Dict[str, str]) -> Dict[str, str]:
+    """``GPU_PLAN_LLM`` / ``GPU_PLAN_YOLO`` / ``GPU_PLAN_HABITAT`` as a name -> pin mapping (``auto`` when unset)."""
+    return {name: (env.get("GPU_PLAN_%s" % name.upper(), "auto").strip().lower() or "auto") for name in COMPONENT_NAMES}
 
 
 def plan_from_environment(gpu_index: int = 0, run: Callable[[Sequence[str]], str] = None,
                           env: Optional[Dict[str, str]] = None) -> GpuPlan:
-    """The plan for this machine, from nvidia-smi and the ``LLM_*`` / ``*_VRAM_MIB`` environment."""
+    """The plan for this machine, from nvidia-smi and the ``LLM_*`` / ``*_VRAM_MIB`` / ``GPU_PLAN_*`` environment."""
     env = os.environ if env is None else env
     name, total, used = nvidia_smi_memory(gpu_index, run)
     models = [env.get("LLM_MODEL", "qwen2.5:3b-instruct"), env.get("LLM_REASONING_MODEL", "qwen2.5:14b-instruct")]
@@ -213,7 +265,7 @@ def plan_from_environment(gpu_index: int = 0, run: Callable[[Sequence[str]], str
     llm_mib, note = llm_need_mib(models, models_dir, int(override) if override else None)
     parts = components(llm_mib, note, int(env.get("YOLO_VRAM_MIB", YOLO_WORLD_X_MIB)),
                        int(env.get("HABITAT_VRAM_MIB", HABITAT_RENDER_MIB)),
-                       env.get("HABITAT_CPU_RENDER", "0") == "1")
+                       env.get("HABITAT_CPU_RENDER", "0") == "1", pins_from_environment(env))
     return plan(parts, gpu_index, name, total, used, int(env.get("GPU_RESERVE_MIB", DEFAULT_RESERVE_MIB)))
 
 

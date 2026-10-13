@@ -309,10 +309,12 @@ Same services and flags; `gibson.run` reads the `val/` split and the original sc
     --explorer frontier --output "$HOME/objnav_benchmark/val" $RUN_FLAGS --preflight   # drop --preflight to run
 ```
 
-#### Five-scene campaign: the first N recorded episodes per validation scene
+#### Five-scene campaign: N recorded episodes per validation scene
 
-`gibson.five_scene` runs the first `--episodes-per-scene` published episodes (default 1) of
-each of the five scenes sequentially, in official `val` split order, each scene as its own
+`gibson.five_scene` runs `--episodes-per-scene` published episodes (default 1) of each of the
+five scenes sequentially -- the first N in official `val` split order, or with `--shuffle` a
+random N seeded with `--seed`, and with `--category <goal>` only the episodes whose published
+goal is that category (the toilet scenario in every building) -- each scene as its own
 recorded `gibson.run` job. While a job runs it tails that scene's `episodes.jsonl`, so the
 moment an episode is scored it prints `EPISODE COMPLETE` (scene, goal, SR, SPL, DTG, runtime,
 steps, termination, video path) and a `RUNNING MEAN` line over every episode so far, and
@@ -323,14 +325,17 @@ A scene whose job ends without a scored row prints `EPISODE FAILED` and points a
 
 Stair traversal is forbidden explicitly: the campaign writes `<output>/policy_config.json`
 (`{"allow_stair_traversal": false}`), passes it to every job, and refuses a scene whose frozen
-`run.json` records anything else. It forwards `--explorer`, `--allow-shared-gpu`,
-`--gpu-device`, `--video-fps` and the `--detector-*` options to every job. The 5 x 3 benchmark:
+`run.json` records anything else. It forwards `--explorer`, `--category`, `--shuffle`,
+`--allow-shared-gpu`, `--gpu-device`, `--video-fps` and the `--detector-*` options to every
+job. The 5 x 3 benchmark:
 
 ```bash
 "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
     --episodes-dir "$DATA/objectnav/objectnav/gibson/v1.1/val" --scenes-dir "$DATA/gibson/val/scenes" \
     --output runs/benchmark_15episodes_$(date -u +%Y%m%dT%H%M%SZ) --episodes-per-scene 3 \
     --explorer frontier $RUN_FLAGS
+# the toilet scenario, three random published starts per scene (the same three for the same --seed):
+#   ... --episodes-per-scene 3 --category toilet --shuffle --seed 17
 ```
 
 Known data property: some published v1.1 starts lie off the shipped navmesh surface (Darden/000000

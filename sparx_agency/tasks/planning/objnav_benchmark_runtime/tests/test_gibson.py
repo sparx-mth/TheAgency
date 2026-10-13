@@ -7,6 +7,7 @@ import gzip
 import json
 import math
 import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -235,6 +236,35 @@ def test_shards_partition_and_invalid_selection_refused():
     for kwargs in ({"limit": 0}, {"shards": 0}, {"shards": 2, "shard_index": 2}):
         with pytest.raises(ValueError):
             select_episodes(ids, **kwargs)
+
+
+def test_shuffle_is_a_seeded_random_sample_of_the_same_pool():
+    """The toilet scenario in every building (2026-10-13): three random published starts per scene, the same
+    three on every launch with the same seed, a different three with another, never an id from outside the pool."""
+    ids = tuple("Darden/%06d" % i for i in range(33))
+    first = select_episodes(ids, limit=3, shuffle_seed=17)
+    assert first == select_episodes(ids, limit=3, shuffle_seed=17) and len(set(first)) == 3
+    assert set(first) <= set(ids) and first != ids[:3], "a sample, not the split order"
+    assert select_episodes(ids, limit=3, shuffle_seed=18) != first
+    assert sorted(select_episodes(ids, shuffle_seed=17)) == sorted(ids), "without a limit only the order changes"
+    sharded = select_episodes(ids, limit=2, shards=2, shard_index=1, shuffle_seed=17)
+    assert set(sharded) <= set(ids[1::2]), "the shard is fixed before the shuffle"
+    other_scene = tuple("Markleeville/%06d" % i for i in range(33))
+    positions = lambda picked, pool: [pool.index(p) for p in picked]
+    assert positions(select_episodes(other_scene, limit=3, shuffle_seed=17), other_scene) != positions(first, ids), \
+        "two scenes with equally large pools draw different positions (Darden/Markleeville, 39 toilets each)"
+
+
+def test_category_filter_keeps_only_that_goal_in_split_order():
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import episodes_of_category
+    episodes = {"S/%06d" % i: SimpleNamespace(category=("toilet" if i % 3 == 0 else "chair")) for i in range(9)}
+    ids = tuple(episodes)
+    assert episodes_of_category(ids, episodes, None) == ids
+    assert episodes_of_category(ids, episodes, "toilet") == ("S/000000", "S/000003", "S/000006")
+    with pytest.raises(ValueError, match="No published bed episode"):
+        episodes_of_category(ids, episodes, "bed")
+    with pytest.raises(ValueError, match="Unknown Gibson category"):
+        episodes_of_category(ids, episodes, "sofa")
 
 
 class StructuredLineSimulator(LineSimulator):

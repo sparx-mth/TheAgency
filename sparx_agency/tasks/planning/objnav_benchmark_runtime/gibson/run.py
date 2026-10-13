@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import pickle
+import random
 import subprocess
 
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
@@ -58,6 +59,13 @@ def parser():
     p.add_argument("--gpu-device", type=int, default=0)
     p.add_argument("--limit", type=int)
     p.add_argument("--scene", choices=SCENES)
+    p.add_argument("--category", choices=CATEGORIES,
+                   help="Only the published episodes whose goal is this category (toilet, ...). The scoring is "
+                        "unchanged and the goal is the published one; the run is a subset, never the full split")
+    p.add_argument("--shuffle", action="store_true",
+                   help="Shuffle the selection with --seed before --limit applies, so --limit N is a seeded random "
+                        "sample of the (scene's, category's) published episodes instead of the first N in split "
+                        "order; requires --limit")
     p.add_argument("--record", action="store_true")
     p.add_argument("--video-fps", type=int, default=6)
     p.add_argument("--shards", type=int, default=1)
@@ -87,13 +95,47 @@ def parser():
     return p
 
 
-def select_episodes(ids, limit=None, shards=1, shard_index=0):
-    """Stable sharding before the explicit per-shard subset limit."""
+def episodes_of_category(ids, episodes, category):
+    """The ids among ``ids`` whose published goal is ``category``, in the given order; all of them when None.
+
+    Args:
+        ids: Episode ids, in split order.
+        episodes: ``id -> GibsonEpisode`` (the dataset's mapping).
+        category: A Gibson category name, or None for no filter.
+
+    Raises:
+        ValueError: The category is unknown, or no selected episode has it.
+    """
+    if category is None:
+        return tuple(ids)
+    if category not in CATEGORIES:
+        raise ValueError("Unknown Gibson category %r (one of %s)" % (category, ", ".join(CATEGORIES)))
+    kept = tuple(episode_id for episode_id in ids if episodes[episode_id].category == category)
+    if not kept:
+        raise ValueError("No published %s episode in the selection" % category)
+    return kept
+
+
+def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None):
+    """Stable sharding, then an optional seeded shuffle, before the explicit per-shard subset limit.
+
+    Args:
+        shuffle_seed: When given, the shard's ids are shuffled by a generator seeded from this
+            seed *and the ids themselves* (so two scenes with equally large pools draw different
+            positions) before ``limit`` applies: the limit is then a reproducible random sample
+            rather than the first ids in split order. The same seed over the same pool selects
+            the same ids.
+    """
     if shards < 1 or not 0 <= shard_index < shards:
         raise ValueError("Need shards >= 1 and 0 <= shard-index < shards")
     if limit is not None and limit <= 0:
         raise ValueError("--limit must be positive")
     selected = tuple(ids)[shard_index::shards]
+    if shuffle_seed is not None:
+        tag = "%d\0%s" % (int(shuffle_seed), "\0".join(selected))
+        shuffled = list(selected)
+        random.Random(int.from_bytes(hashlib.sha256(tag.encode()).digest()[:8], "big")).shuffle(shuffled)
+        selected = tuple(shuffled)
     if limit is not None:
         selected = selected[:limit]
     if not selected:
@@ -229,6 +271,8 @@ def prepare(args):
         issues.append("The stop diagnostic requires an explicit --limit")
     if args.scene and (args.limit is None or not 1 <= args.limit <= 200):
         issues.append("A single-scene run requires --limit between 1 and 200")
+    if args.shuffle and args.limit is None:
+        issues.append("--shuffle is a seeded random sample and needs --limit N")
     if not 1 <= args.video_fps <= 60:
         issues.append("--video-fps must be between 1 and 60")
     if args.record:
@@ -256,7 +300,9 @@ def prepare(args):
             # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
             env = GibsonEnv(dataset, args.seed, -1 if args.software_render else args.gpu_device,
                             target_override=args.target_override)
-            ids = select_episodes(env.episode_ids(), args.limit, args.shards, args.shard_index)
+            ids = select_episodes(episodes_of_category(env.episode_ids(), dataset.episodes, args.category),
+                                  args.limit, args.shards, args.shard_index,
+                                  shuffle_seed=args.seed if args.shuffle else None)
             env.validate_starts(ids)
         except (OSError, ValueError, KeyError, ImportError, EOFError, pickle.UnpicklingError) as exc:
             issues.append("Dataset/scorer: %s" % exc)
@@ -274,9 +320,10 @@ def prepare(args):
               "on_agent_error": "record", "allow_shared_gpu": args.allow_shared_gpu,
               "renderer": "software (Mesa llvmpipe EGL device; --software-render)" if args.software_render else "cuda gpu %d" % args.gpu_device,
               "scene": args.scene, "recording": {"enabled": args.record, "fps": args.video_fps},
+              "category": args.category, "shuffle": bool(args.shuffle),
               "kinematics": asdict(PROTOCOL.kinematics()),
               "gpu_plan": _gpu_plan_record(),
-              "full_split": args.scene is None and args.limit is None and args.shards == 1,
+              "full_split": args.scene is None and args.limit is None and args.shards == 1 and args.category is None,
               "target_override": args.target_override,
               "publishable": args.target_override is None and method.get("publishable", True),
               "lean_records": bool(args.lean),
@@ -308,9 +355,10 @@ def main(argv=None, *, configuration_guard=None):
         agent_class = LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent
         with MetricsLogger(output, config, resume=args.resume,
                            accept_changes=tuple(args.resume_accepting_changes)) as logger:
+            scope = ", ".join(part for part in (args.scene, args.category) if part)
             tracker = ProgressTracker(args.progress_file or (output / "progress.json"),
                                       len(config["selected_episode_ids"]), completed=logger.records,
-                                      label="gibson val%s" % (" (%s)" % args.scene if args.scene else ""))
+                                      label="gibson val%s" % (" (%s)" % scope if scope else ""))
             scored = env                                  # the scorer underneath every wrapper
             env = ProgressEnv(env, tracker)
             recorder = None

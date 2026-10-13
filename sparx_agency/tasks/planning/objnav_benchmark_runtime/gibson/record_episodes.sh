@@ -58,8 +58,10 @@ import time
 import urllib.request
 
 MODULE = "sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run"
-STRIP_FLAGS = {"--lean", "--resume", "--record", "--preflight", "--print-vocabulary"}
-STRIP_VALUED = {"--output", "--limit", "--scene", "--shards", "--shard-index", "--progress-file", "--video-fps"}
+# The selection switches go: --shards 200 --shard-index k addresses S/00000k in the scene's FULL list, so a
+# run's --category filter or --shuffle (a seeded sample) would move or empty the slot it is meant to address.
+STRIP_FLAGS = {"--lean", "--resume", "--record", "--preflight", "--print-vocabulary", "--shuffle"}
+STRIP_VALUED = {"--output", "--limit", "--scene", "--shards", "--shard-index", "--progress-file", "--video-fps", "--category"}
 STRIP_MANY = {"--resume-accepting-changes"}
 CLOSING_FRAMES = (("verify", "VERIFY"), ("inspect", "INSPECT"), ("stop", "STOP"))
 

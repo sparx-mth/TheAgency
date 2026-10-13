@@ -197,6 +197,37 @@ def test_a_job_that_allowed_stairs_is_refused(tmp_path, monkeypatch):
                          "--poll-s", "0"])
 
 
+def test_a_category_and_a_shuffle_reach_every_job_and_the_selection_is_described_honestly(tmp_path, monkeypatch, capsys):
+    """The toilet scenario in every building: three seeded-random published toilet episodes per scene."""
+    commands = []
+
+    def on_benchmark(command):
+        commands.append(command)
+        scene = command[command.index("--scene") + 1]
+        write_scored_episodes(Path(command[command.index("--output") + 1]), [record(scene, index=i) for i in range(3)])
+        return 0
+
+    benchmark_run_fake(monkeypatch, on_benchmark)
+    output = tmp_path / "campaign"
+    code = five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(output),
+                            "--episodes-per-scene", "3", "--category", "toilet", "--shuffle", "--seed", "17", "--poll-s", "0"])
+    assert code == 0 and len(commands) == 5
+    for command in commands:
+        assert command[command.index("--category") + 1] == "toilet" and "--shuffle" in command
+        assert command[command.index("--limit") + 1] == "3" and command[command.index("--seed") + 1] == "17"
+    out = capsys.readouterr().out
+    assert ("FIVE-SCENE SUMMARY (15/15 episodes scored; 3 published toilet episode(s) per scene, a seeded random sample "
+            "(seed 17); Collierville") in out
+    campaign = json.loads((output / "campaign.json").read_text())
+    assert campaign["category"] == "toilet" and campaign["shuffle"] is True
+    assert campaign["selection"] == "3 published toilet episode(s) per scene, a seeded random sample (seed 17)"
+    assert "a seeded random sample (seed 17), NOT the 1,000-episode benchmark" in (output / "index.html").read_text()
+    assert five_scene.selection_text(3) == "the first 3 published episode(s) per scene"
+    assert five_scene.selection_text(2, "bed") == "the first 2 published bed episode(s) per scene"
+    with pytest.raises(SystemExit):
+        five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "x"), "--category", "sofa"])
+
+
 def test_a_scene_subset_runs_only_those_scenes_in_the_given_order(tmp_path, monkeypatch, capsys):
     seen = []
 

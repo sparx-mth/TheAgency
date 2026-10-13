@@ -1,12 +1,15 @@
-"""Five-scene Gibson campaign: the first N published val episodes per scene, sequential recordings.
+"""Five-scene Gibson campaign: N published val episodes per scene, sequential recordings.
 
-Each scene is one recorded ``gibson.run`` job over the first ``--episodes-per-scene``
-episodes of that scene in official ``val`` split order. Episodes are reported the
-moment they are scored (``EPISODE COMPLETE`` + ``RUNNING MEAN``), and
-``benchmark_results.json`` / ``benchmark_results.csv`` are rewritten after each one.
-Stair traversal is explicitly forbidden: every job receives a written
-``policy_config.json`` with ``allow_stair_traversal: false`` and the frozen run
-configuration is checked to say so.
+Each scene is one recorded ``gibson.run`` job over ``--episodes-per-scene``
+published episodes of that scene -- the first N in official ``val`` split order,
+or with ``--shuffle`` a seeded random sample of N, and with ``--category`` only
+the episodes whose published goal is that category (the toilet scenario in
+every building, say). Episodes are reported the moment they are scored
+(``EPISODE COMPLETE`` + ``RUNNING MEAN``), and ``benchmark_results.json`` /
+``benchmark_results.csv`` are rewritten after each one. Stair traversal is
+explicitly forbidden: every job receives a written ``policy_config.json`` with
+``allow_stair_traversal: false`` and the frozen run configuration is checked to
+say so.
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ import subprocess
 import sys
 import time
 
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES
 from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows, strict_json, write_atomically
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import STYLE
@@ -62,9 +66,26 @@ def assert_stairs_forbidden(directory):
                            % (directory, allowed))
 
 
-def report(root, episodes_per_scene=1, scenes=SCENES):
-    """Summarise actual completed scene rows, with links to every recording."""
+def selection_text(episodes_per_scene, category=None, shuffle=False, seed=0):
+    """How the N episodes of each scene were chosen, in words, for the report and the summary line.
+
+    Examples: ``the first 3 published episode(s) per scene``;
+    ``3 published toilet episode(s) per scene, a seeded random sample (seed 17)``.
+    """
+    goal = " %s" % category if category else ""
+    if shuffle:
+        return "%d published%s episode(s) per scene, a seeded random sample (seed %d)" % (episodes_per_scene, goal, seed)
+    return "the first %d published%s episode(s) per scene" % (episodes_per_scene, goal)
+
+
+def report(root, episodes_per_scene=1, scenes=SCENES, selection=None):
+    """Summarise actual completed scene rows, with links to every recording.
+
+    Args:
+        selection: The selection in words (``selection_text``); the first N published episodes when None.
+    """
     root = Path(root)
+    selection = selection or selection_text(episodes_per_scene)
     records, rows = [], []
     for scene in scenes:
         for record in scene_records(root, scene, episodes_per_scene):
@@ -86,12 +107,12 @@ def report(root, episodes_per_scene=1, scenes=SCENES):
     overall = summary.overall
     text = ('<!doctype html><meta charset="utf-8"><title>Gibson five-scene campaign</title><style>%s</style>'
             '<h1>Gibson: door-aware, revisable-room campaign</h1><p class="warning">%d episodes completed; '
-            'the first %d published episode(s) per scene, NOT the 1,000-episode benchmark. '
+            '%s, NOT the 1,000-episode benchmark. '
             'SR may be credited at the step limit without STOP. Label changes include resets to unknown '
             'after room partition changes; they are not a semantic-accuracy score.</p>'
             '<p>Mean SR %.3f · SPL %.4f · DTG %s m · SoftSPL %.4f</p>'
             '<p><a href="metrics.csv">All metrics CSV</a> · <a href="summary.json">Summary JSON</a></p>'
-            '<table>%s</table>') % (STYLE, len(records), episodes_per_scene, overall.success_rate, overall.spl,
+            '<table>%s</table>') % (STYLE, len(records), html.escape(selection), overall.success_rate, overall.spl,
                                    overall.distance_to_goal_m, overall.soft_spl, table)
     write_atomically(root / "index.html", text)
     return rows
@@ -125,6 +146,10 @@ def run_scene_job(args, scene, directory, policy_config, on_episode):
                "--output", str(directory)] + detector_flags(args)
     if args.explorer is not None:
         command += ["--explorer", args.explorer]
+    if getattr(args, "category", None):
+        command += ["--category", args.category]
+    if getattr(args, "shuffle", False):
+        command.append("--shuffle")
     if args.allow_sim_version_mismatch:
         command.append("--allow-sim-version-mismatch")
     if args.allow_shared_gpu:
@@ -152,9 +177,15 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     add_detector_options(parser, url_default="http://127.0.0.1:18092")
     parser.add_argument("--episodes-per-scene", type=int, default=1,
-                        help="The first N published val episodes of every scene, in split order")
+                        help="N published val episodes of every scene: the first N in split order, or a seeded "
+                             "random N with --shuffle")
     parser.add_argument("--scenes", nargs="+", choices=SCENES, default=list(SCENES), metavar="SCENE",
                         help="A subset of the five val scenes, run in this order (default: all five)")
+    parser.add_argument("--category", choices=CATEGORIES,
+                        help="Only the episodes whose published goal is this category (forwarded to every job)")
+    parser.add_argument("--shuffle", action="store_true",
+                        help="Each scene's N episodes are a random sample seeded with --seed, not the first N "
+                             "(forwarded to every job)")
     parser.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gpu-device", type=int, default=0)
@@ -173,11 +204,13 @@ def main(argv=None):
     args.output.mkdir(parents=True, exist_ok=False)
     scenes = list(args.scenes)
     per_scene, total = args.episodes_per_scene, args.episodes_per_scene * len(scenes)
+    selection = selection_text(per_scene, args.category, args.shuffle, args.seed)
     policy_config = args.output / "policy_config.json"
     write_atomically(policy_config, strict_json({"allow_stair_traversal": False}, "policy config", indent=2))
     fingerprint = source_fingerprint()
     status = {"source_sha256": fingerprint, "episodes_per_scene": per_scene, "episodes_total": total,
               "allow_stair_traversal": False, "split": "val", "scenes": scenes, "seed": args.seed,
+              "category": args.category, "shuffle": bool(args.shuffle), "selection": selection,
               "explorer": args.explorer, "completed": [], "failed": []}
     write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
     records, rows = [], []
@@ -207,7 +240,7 @@ def main(argv=None):
         status["completed" if code == 0 else "failed"].append(scene)
         status["running"] = None
         write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
-        report(args.output, per_scene, scenes)
+        report(args.output, per_scene, scenes, selection)
         if not scored:
             print(failure_line(scene, code, directory / "run.log"), flush=True)
         else:
@@ -216,8 +249,8 @@ def main(argv=None):
     if records:
         table = summary_table(records)
         write_atomically(args.output / "summary.txt", table)
-        print("\nFIVE-SCENE SUMMARY (%d/%d episodes scored; the first %d published episode(s) per scene; %s)\n%s"
-              % (len(records), total, per_scene, ", ".join(scenes), table), flush=True)
+        print("\nFIVE-SCENE SUMMARY (%d/%d episodes scored; %s; %s)\n%s"
+              % (len(records), total, selection, ", ".join(scenes), table), flush=True)
     else:
         print("\nFIVE-SCENE SUMMARY: no scene produced a scored episode", flush=True)
     return int(bool(status["failed"]) or len(records) != total)

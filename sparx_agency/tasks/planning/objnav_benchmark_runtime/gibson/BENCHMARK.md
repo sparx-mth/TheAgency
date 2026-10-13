@@ -147,10 +147,16 @@ configuration (`preflight.json` in the output directory). Any refusal names the 
 ```bash
 run_benchmark.sh --scene Darden --limit 1              # the first published Darden episode, lean record
 run_benchmark.sh --scene Corozal --limit 3 --record    # three Corozal episodes with video + HUD + per-step log
+run_benchmark.sh --scene Wiconisco --limit 3 --record --category toilet --shuffle   # three random published toilet episodes
 ```
 
 `--limit N` takes the first N published episodes of the scene (`--shards 200 --shard-index k`
-after the script's own options picks episode k alone). An episode takes 10-20 minutes with
+after the script's own options picks episode k alone). `--category <goal>` keeps only the
+episodes whose published goal is that category (`chair`, `couch`, `potted plant`, `bed`,
+`toilet`, `tv`; about a sixth of a scene's 200) -- the scoring and the goal are unchanged, the
+run is marked a subset -- and `--shuffle` makes `--limit N` a random sample of the pool, seeded
+with `SEED`, instead of the first N in split order: the same seed selects the same episodes, and
+`run.json` / `preflight.json` list them (`selected_episode_ids`). An episode takes 10-20 minutes with
 CPU services (most of it the 14B oracle's calls, ~1 min each on a 32-thread CPU); `--record`
 adds a video (`recordings/<key>/video.mp4`), the per-step `steps.jsonl` and a live HTML page
 (`live.html`) and costs some speed. Recording needs an FFmpeg with libx264: `apt install
@@ -384,6 +390,18 @@ footprints are explicit, dated estimates: Ollama weights from the pulled manifes
 (KV cache and buffers), 2 GB for YOLO-World X + CLIP, 1.5 GB for the renderer; override
 any of them when your measurement differs.
 
+An operator may **pin** a process instead of letting the budget decide: `GPU_PLAN_LLM`,
+`GPU_PLAN_YOLO`, `GPU_PLAN_HABITAT` = `auto` (default), `gpu` or `cpu`. A `cpu` pin takes
+nothing off the budget -- for Habitat it *is* the software-rendering opt-in, and the script
+sets `HABITAT_RENDER=software` for it (below) -- and a `gpu` pin is served before the auto
+components and placed with a warning, like a GPU-only component, when its estimate does not
+fit. The pins are recorded in the plan (`pins`) and in every placement's reason. The 8 GB
+laptop's "LLM on the card, renderer on the CPU, YOLO if the VRAM left allows" is
+
+```bash
+GPU_PLAN_LLM=gpu GPU_PLAN_HABITAT=cpu LLM_VRAM_MIB=2800 run_benchmark.sh --five-scene 3 --category toilet --shuffle
+```
+
 ```bash
 # the plan alone, for this machine
 ~/miniconda3/envs/habitat/bin/python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan
@@ -392,9 +410,10 @@ any of them when your measurement differs.
 | variable | default | meaning |
 |---|---|---|
 | `GPU_PLAN` | `auto` | `off` restores CPU services with the renderer alone on the GPU |
-| `LLM_VRAM_MIB`, `YOLO_VRAM_MIB`, `HABITAT_VRAM_MIB` | manifests x 1.35, `2048`, `1536` | the footprint estimates |
+| `GPU_PLAN_LLM`, `GPU_PLAN_YOLO`, `GPU_PLAN_HABITAT` | `auto` | `gpu` / `cpu` pins that process regardless of the budget (a Habitat `cpu` pin is software rendering) |
+| `LLM_VRAM_MIB`, `YOLO_VRAM_MIB`, `HABITAT_VRAM_MIB` | manifests x 1.35, `2048`, `1536` | the footprint estimates (`LLM_VRAM_MIB` is required in docker mode: the manifests live in the container's volume) |
 | `GPU_RESERVE_MIB` | `512` | headroom left for the driver / a desktop |
-| `HABITAT_CPU_RENDER` | `0` | `1` lets the plan offload the renderer to software EGL (experimental) |
+| `HABITAT_CPU_RENDER` | `0` | `1` lets the plan offload the renderer to software EGL when the card is short (experimental) |
 | `CLIP_WEIGHTS` | `$MODELS/clip/ViT-B-32.pt` | the detector's local text encoder, passed when present |
 | `OLLAMA_MODELS_DIR` | `$MODELS/ollama` | where the manifests the LLM estimate reads live (native mode's model store) |
 
@@ -422,7 +441,7 @@ every layer, `0` CPU, empty = the server decides) is sent as Ollama's `num_gpu` 
 | `SAM_WEIGHTS`, `SEGMENTER_PORT`, `SEGMENTER_DEVICE`, `SEGMENTER_THREADS` | `$MODELS/mobile_sam.pt`, `18096`, `cpu`, `4` | the segmentation service (`sam2.1_t.pt` is the stronger small checkpoint) |
 | `SEED` | `17` | simulator, policy and LLM seed (per episode, so order does not matter) |
 | `GPU_DEVICE`, `ALLOW_SHARED_GPU` | `0`, `0` | the rendering GPU; `1` accepts a card already in use (the plan sets it whenever more than one process holds the card) |
-| `HABITAT_RENDER` | `gpu` | `software` renders on Mesa's llvmpipe with `/dev/dri` hidden from the run (an unprivileged user namespace, `unshare -rm`), so Mesa's software device is habitat's EGL device 0; passes `--software-render` to `gibson.run`, which skips the GPU gate and records the renderer in `run.json`. For a box whose NVIDIA EGL is unusable (a driver upgrade until the reboot that loads the matching kernel module). About 30 ms a frame; use `GPU_PLAN=off` with it, since the plan needs `nvidia-smi` |
+| `HABITAT_RENDER` | `gpu` | `software` renders on Mesa's llvmpipe with `/dev/dri` hidden from the run (an unprivileged user namespace, `unshare -rm`), so Mesa's software device is habitat's EGL device 0; passes `--software-render` to `gibson.run`, which skips the GPU gate and records the renderer in `run.json`. About 30 ms a frame and ~1.3 GB of RAM per simulator. Set by the plan itself when Habitat lands on the CPU (`GPU_PLAN_HABITAT=cpu`, or `HABITAT_CPU_RENDER=1` on a short card); set it by hand with `GPU_PLAN=off` when the NVIDIA EGL is unusable and `nvidia-smi` with it (a driver upgrade until the reboot that loads the matching kernel module) |
 | `RUNS_ROOT` | `<repo>/runs` | where a run directory is created when `--output` is not given |
 | `OMP_NUM_THREADS` | `4` | numpy/torch threads in the simulator process |
 
@@ -435,12 +454,16 @@ script's own switch for the full diagnostics, `--video-fps`, …).
 `run_benchmark.sh --five-scene 3` brings the services up under the same GPU plan and runs
 `gibson.five_scene`: the first 3 published `val` episodes of each of the five scenes (15),
 one recorded `gibson.run` job per scene, stair traversal explicitly forbidden
-(`policy_config.json`, checked against every job's `run.json`). Each episode prints
-`EPISODE COMPLETE` (scene, goal, SR, SPL, DTG, runtime, steps, termination, video) and a
-`RUNNING MEAN` line the moment it is scored; `benchmark_results.json` / `.csv` are rewritten
-after every episode under `runs/benchmark_15episodes_<UTC stamp>/`, the services' logs and
-`gpu_plan.json` beside it in `<output>.services/`. The campaign never resumes: a new
-output directory per attempt. See [../QUICKSTART.md](../QUICKSTART.md) for the flags.
+(`policy_config.json`, checked against every job's `run.json`). With `--category toilet` the
+pool of each scene is its published toilet episodes alone, and with `--shuffle` the 3 are a
+random sample of that pool seeded with `SEED` rather than the first 3 -- the toilet scenario
+in every building, three starts each, the same three on every launch with the same seed; the
+campaign's `campaign.json` and `index.html` say which selection was made (`selection`). Each
+episode prints `EPISODE COMPLETE` (scene, goal, SR, SPL, DTG, runtime, steps, termination,
+video) and a `RUNNING MEAN` line the moment it is scored; `benchmark_results.json` / `.csv`
+are rewritten after every episode under `runs/benchmark_[<category>_]15episodes_<UTC stamp>/`,
+the services' logs and `gpu_plan.json` beside it in `<output>.services/`. The campaign never
+resumes: a new output directory per attempt. See [../QUICKSTART.md](../QUICKSTART.md) for the flags.
 
 ### 3.4 The segmentation experiment (`SEGMENTATION=1`)
 

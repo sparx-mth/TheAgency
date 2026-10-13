@@ -74,6 +74,47 @@ def test_habitat_may_be_offloaded_only_when_the_operator_allows_software_renderi
     assert any("software EGL" in w for w in result.warnings)
 
 
+def test_a_cpu_pin_takes_nothing_off_the_budget_and_pinning_habitat_is_the_software_rendering_opt_in():
+    """The 8 GB laptop, 2026-10-13: the 3B LLM on the card, the renderer on the CPU by the operator's word, YOLO
+    wherever the VRAM left allows -- here it does; without the pin Habitat's 1536 MiB would have been counted."""
+    pinned = components(2800, "LLM_VRAM_MIB override", 2048, 1536, pins={"llm": "gpu", "habitat": "cpu"})
+    result = plan(pinned, 0, "RTX 5070 Laptop", 8151, 80)
+    assert devices(result) == {"llm": "gpu", "yolo": "gpu", "habitat": "cpu"}
+    assert result.pins == {"llm": "gpu", "yolo": "auto", "habitat": "cpu"}
+    assert "GPU_PLAN_HABITAT=cpu" in result.placement("habitat").reason and result.placement("habitat").granted_mib == 0
+    assert "GPU_PLAN_LLM=gpu" in result.placement("llm").reason
+    assert result.placement("yolo").granted_mib == 2048 and "pinned" not in result.placement("yolo").reason
+    env = result.environment()
+    assert env["HABITAT_SOFTWARE_RENDER"] == "1" and env["DETECTOR_DEVICE"] == "cuda:0" and env["LLM_NUM_GPU"] == "-1"
+    assert result.shared, "two of ours on the card"
+    # YOLO still goes by the budget: on a card with room for the LLM alone it is offloaded, the pins untouched
+    small = plan(pinned, 0, "card", 4000, 0)
+    assert devices(small) == {"llm": "gpu", "yolo": "cpu", "habitat": "cpu"}
+
+
+def test_a_gpu_pin_is_served_before_the_auto_components_and_warns_when_it_cannot_fit():
+    """Pinning YOLO to the card puts it ahead of the (auto) LLM: the LLM then takes the partial path. A pin the
+    budget cannot honour is placed anyway, with a warning naming the way out -- as a GPU-only component is."""
+    result = plan(components(4000, "test", 2048, 1536, pins={"yolo": "gpu"}), 0, "card", 7000, 0)
+    assert devices(result) == {"llm": "gpu-partial", "yolo": "gpu", "habitat": "gpu"}
+    too_big = plan(components(1000, "test", 9000, 1536, pins={"yolo": "gpu"}), 0, "card", 4096, 0)
+    assert devices(too_big)["yolo"] == "gpu" and "pinned to the GPU" in too_big.placement("yolo").reason
+    assert any("GPU_PLAN_YOLO=auto" in w for w in too_big.warnings)
+
+
+def test_pins_are_read_from_the_environment_and_validated(tmp_path):
+    env = {"LLM_VRAM_MIB": "2800", "GPU_PLAN_LLM": "GPU", "GPU_PLAN_HABITAT": " cpu "}
+    result = plan_from_environment(0, run=lambda cmd: "card, 8151, 80\n", env=env)
+    assert devices(result) == {"llm": "gpu", "yolo": "gpu", "habitat": "cpu"}, "case and whitespace are forgiven"
+    assert gpu_plan.pins_from_environment({}) == {"llm": "auto", "yolo": "auto", "habitat": "auto"}
+    with pytest.raises(ValueError, match="GPU_PLAN_YOLO must be one of auto/gpu/cpu"):
+        plan_from_environment(0, run=lambda cmd: "card, 8151, 80\n", env={"LLM_VRAM_MIB": "2800", "GPU_PLAN_YOLO": "maybe"})
+    with pytest.raises(ValueError, match="No such component"):
+        components(1000, "test", pins={"renderer": "cpu"})
+    with pytest.raises(ValueError, match="cannot run there"):
+        Component("habitat", 3, 1536, cpu_capable=False, pin="cpu")
+
+
 def test_an_occupied_card_marks_the_run_shared_even_with_one_component_on_it():
     result = plan(parts(llm=20000, yolo=5000, habitat=1536), 0, "card", 8192, 2000)
     assert devices(result) == {"llm": "cpu", "yolo": "cpu", "habitat": "gpu"}

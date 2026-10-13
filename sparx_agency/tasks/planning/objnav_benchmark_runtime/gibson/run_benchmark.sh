@@ -9,16 +9,20 @@
 #   gibson/run_benchmark.sh --status runs/gibson_val_X        # print the live progress of a run and exit
 #   gibson/run_benchmark.sh --five-scene 3                    # 3 recorded episodes per val scene (15), live dashboard
 #   gibson/run_benchmark.sh --five-scene 3 --scenes Darden Markleeville Wiconisco   # ... for a subset of the scenes
+#   gibson/run_benchmark.sh --five-scene 3 --category toilet --shuffle   # the toilet scenario in every scene: 3 seeded-
+#                                                           #   random published toilet episodes per scene (15), recorded
 #   SEGMENTATION=1 gibson/run_benchmark.sh --five-scene 1   # + the Segment Anything service: the target's depth is
 #                                                           #   read on the object's own pixels (off by default)
 #
 # The GPU is handed out by gibson/gpu_plan.py before the services start -- LLM first, YOLO second,
-# Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services).
+# Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services). An operator
+# pin overrides the budget per process: GPU_PLAN_LLM / GPU_PLAN_YOLO / GPU_PLAN_HABITAT = auto | gpu | cpu
+# (GPU_PLAN_LLM=gpu GPU_PLAN_HABITAT=cpu: the LLM on the card, software rendering, YOLO where the VRAM allows).
 # Everything else is read from the environment, with defaults for the development laptop;
 # see BENCHMARK.md beside this file for the full list and what each one is for.
 set -euo pipefail
 
-usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,7 +71,7 @@ CLIP_WEIGHTS="${CLIP_WEIGHTS:-$MODELS/clip/ViT-B-32.pt}"
 RUNS_ROOT="${RUNS_ROOT:-$REPO/runs}"
 
 # -- the command line -----------------------------------------------------------------------
-OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" FIVE_SCENES=() EXTRA=()
+OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" FIVE_SCENES=() CATEGORY="" EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) OUTPUT="$2"; shift 2 ;;
@@ -75,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --limit) LIMIT="$2"; shift 2 ;;
     --five-scene) FIVE_SCENE="$2"; RECORD=1; shift 2 ;;
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do FIVE_SCENES+=("$1"); shift; done ;;   # a subset, five-scene mode
+    --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
     --record) RECORD=1; shift ;;
     --full-records) LEAN=0; shift ;;
     --preflight) PREFLIGHT=1; shift ;;
@@ -100,10 +105,11 @@ die() { say "ERROR: $*" >&2; exit 1; }
 [[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS; mobile_sam.pt or sam2.1_t.pt from the ultralytics assets release)"
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+  TAG="${CATEGORY:+${CATEGORY}_}"
   if [[ -n "$FIVE_SCENE" ]]; then
     SCENE_COUNT=${#FIVE_SCENES[@]}; [[ $SCENE_COUNT -gt 0 ]] || SCENE_COUNT=5
-    OUTPUT="$RUNS_ROOT/benchmark_$((FIVE_SCENE * SCENE_COUNT))episodes_${STAMP}"
-  elif [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/gibson_${SCENE}_${STAMP}"; else OUTPUT="$RUNS_ROOT/gibson_val_${STAMP}"; fi
+    OUTPUT="$RUNS_ROOT/benchmark_${TAG}$((FIVE_SCENE * SCENE_COUNT))episodes_${STAMP}"
+  elif [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/gibson_${SCENE}_${TAG}${STAMP}"; else OUTPUT="$RUNS_ROOT/gibson_val_${TAG}${STAMP}"; fi
 fi
 if [[ -n "$FIVE_SCENE" ]]; then
   [[ -e "$OUTPUT" ]] && die "--five-scene needs a new output directory; $OUTPUT exists (the campaign never resumes)"
@@ -286,7 +292,7 @@ if [[ -n "$FIVE_SCENE" ]]; then
   [[ ${#RENDER_FLAGS[@]} -gt 0 ]] && FIVE_ARGS+=("${RENDER_FLAGS[@]}")
   FIVE_ARGS+=("${EXTRA[@]}")
   date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"
-  say "five-scene campaign: $FIVE_SCENE episode(s) per scene, stairs forbidden; results stream to $OUTPUT/benchmark_results.{json,csv}" | tee -a "$LOG"
+  say "five-scene campaign: $FIVE_SCENE ${CATEGORY:+$CATEGORY }episode(s) per scene, stairs forbidden; results stream to $OUTPUT/benchmark_results.{json,csv}" | tee -a "$LOG"
   set +e
   "${RENDER_WRAP[@]}" "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene "${FIVE_ARGS[@]}" 2>&1 | tee -a "$LOG"
   RUN_CODE=${PIPESTATUS[0]}
