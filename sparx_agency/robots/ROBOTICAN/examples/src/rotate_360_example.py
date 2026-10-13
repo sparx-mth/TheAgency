@@ -61,7 +61,10 @@ CAPTURE_DEVICE = "/dev/HD_CAMERA"
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 360
 CAPTURE_MJPG = True
-CAPTURE_INTERVAL_S = 0.5
+# 0.5s produced 79 frames over a 40s run - more than comm_manager_vllm.py (1-9s/frame VLM
+# calls) could process in a reasonable time. 1.5s keeps decent coverage across a ~14-40s
+# turn (9-27 frames) while actually finishing before someone gives up waiting.
+CAPTURE_INTERVAL_S = 1.5
 FRAMES_ROOT = "/home/iai/frames"
 
 STEP_WAIT_ARM_CONFIRM = 0
