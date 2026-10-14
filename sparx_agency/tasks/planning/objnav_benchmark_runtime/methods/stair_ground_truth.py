@@ -7,6 +7,13 @@ which way each one goes, and whether an unplanned change of height happened
 ON a staircase or on a step. It holds geometry only -- no decision, no
 motion; those are ``floor_decision.py`` and ``ground_truth_traversal.py``.
 
+**Knowing the geometry is not knowing the stairs.** The coordinator learns
+that a staircase exists only when the perfect detector
+(:mod:`stair_sightings`) has seen it in a frame; until then a connector here
+is the detector's instrument, not a portal, not a node, not an explanation.
+:meth:`GroundTruthStairs.touching` and :meth:`GroundTruthStairs.nearest`
+take an ``among`` filter so callers ask only about the stairs they have seen.
+
 Floor ids stay the atlas's discovery ids: a connector names storey HEIGHTS,
 and the atlas floor at a height is looked up when it is needed, so a storey
 the agent has never stood on has no id yet -- which is exactly what
@@ -16,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 Xyz = Tuple[float, float, float]
 
@@ -31,8 +38,17 @@ class Connector:
         top: Floor anchor at the upper storey.
         bottom_z: Lower storey height.
         top_z: Upper storey height.
-        polyline: Walkable points from ``bottom`` to ``top``.
+        polyline: Walkable centreline from ``bottom`` to ``top``.
         length_m: Polyline length.
+        surface: A sample of the stair surface, for the detector's visibility
+            test; empty when the metadata carried none (the polyline stands in).
+        bottom_exit: Flat floor off the foot of the flight, walkable from
+            ``bottom``, where the atlas can confirm the lower storey; None
+            when the extraction found none.
+        top_exit: The same off the head of the flight.
+        traversable: False when the extraction found the flight split
+            across navmesh islands -- a staircase to look at, never to
+            climb: the simulator lets no agent across such a gap.
     """
 
     id: int
@@ -42,6 +58,10 @@ class Connector:
     top_z: float
     polyline: Tuple[Xyz, ...]
     length_m: float
+    surface: Tuple[Xyz, ...] = ()
+    bottom_exit: Optional[Xyz] = None
+    top_exit: Optional[Xyz] = None
+    traversable: bool = True
 
     def touches(self, height: float, tolerance_m: float) -> bool:
         """Does either end of this staircase stand on a storey at ``height``?"""
@@ -63,6 +83,14 @@ class Connector:
             return 1, self.bottom, self.top, self.top_z, self.polyline
         if abs(self.top_z - height) <= tolerance_m:
             return -1, self.top, self.bottom, self.bottom_z, tuple(reversed(self.polyline))
+        raise ValueError("Connector %d does not touch a storey at %.2f m" % (self.id, height))
+
+    def far_exit(self, height: float, tolerance_m: float) -> Optional[Xyz]:
+        """The verified exit point on the OTHER storey, as seen from the storey at ``height``; None when unknown."""
+        if abs(self.bottom_z - height) <= tolerance_m:
+            return self.top_exit
+        if abs(self.top_z - height) <= tolerance_m:
+            return self.bottom_exit
         raise ValueError("Connector %d does not touch a storey at %.2f m" % (self.id, height))
 
     def distance_xy(self, x: float, y: float) -> float:
@@ -106,21 +134,36 @@ class GroundTruthStairs:
             polyline = tuple(tuple(float(v) for v in point[:3]) for point in row["polyline_xyz"])
             if len(polyline) < 2:
                 raise ValueError("Stair connector %r needs a polyline of at least two points" % (row.get("id"),))
+            surface = tuple(tuple(float(v) for v in point[:3]) for point in row.get("surface_xyz", ()) or ())
+            exits = [None if row.get(key) is None else tuple(float(v) for v in row[key][:3])
+                     for key in ("bottom_exit_xyz", "top_exit_xyz")]
             connectors.append(Connector(
                 id=int(row["id"]), bottom=tuple(float(v) for v in row["bottom_xyz"][:3]),
                 top=tuple(float(v) for v in row["top_xyz"][:3]), bottom_z=float(row["bottom_z"]),
-                top_z=float(row["top_z"]), polyline=polyline, length_m=float(row.get("length_m", 0.0))))
+                top_z=float(row["top_z"]), polyline=polyline, length_m=float(row.get("length_m", 0.0)),
+                surface=surface, bottom_exit=exits[0], top_exit=exits[1],
+                traversable=bool(row.get("traversable", True))))
         levels = [float(level["height_m"]) for level in metadata.get("floor_levels", [])]
         return cls(connectors, levels, available=True)
 
-    def touching(self, height: float, tolerance_m: float) -> List[Connector]:
-        """Connectors with an end on the storey at ``height``."""
-        return [c for c in self.connectors if c.touches(height, tolerance_m)]
+    def by_id(self, connector_id: int) -> Optional[Connector]:
+        return next((c for c in self.connectors if c.id == int(connector_id)), None)
+
+    def touching(self, height: float, tolerance_m: float,
+                 among: Optional[Callable[[int], bool]] = None) -> List[Connector]:
+        """Traversable connectors with an end on the storey at ``height`` -- only those ``among`` admits, when given."""
+        return [c for c in self.connectors
+                if c.traversable and c.touches(height, tolerance_m) and (among is None or among(c.id))]
 
     def nearest(self, x: float, y: float, height: float, tolerance_m: float,
-                within_m: float) -> Optional[Connector]:
-        """The connector touching this storey whose polyline passes within ``within_m`` of ``(x, y)``."""
-        candidates = [(c.distance_xy(x, y), c) for c in self.touching(height, tolerance_m)]
+                within_m: float, among: Optional[Callable[[int], bool]] = None) -> Optional[Connector]:
+        """The connector touching this storey whose polyline passes within ``within_m`` of ``(x, y)``.
+
+        ``among`` restricts the candidates -- the coordinator passes "seen",
+        so a change of height on stairs the agent has never looked at is not
+        explained by them.
+        """
+        candidates = [(c.distance_xy(x, y), c) for c in self.touching(height, tolerance_m, among)]
         candidates = [(d, c) for d, c in candidates if d <= within_m]
         return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
@@ -128,5 +171,6 @@ class GroundTruthStairs:
         return {"available": self.available, "levels_m": list(self.levels),
                 "connectors": [{"id": c.id, "bottom_z": c.bottom_z, "top_z": c.top_z,
                                 "bottom_xy": list(c.bottom[:2]), "top_xy": list(c.top[:2]),
-                                "length_m": c.length_m} for c in self.connectors]}
+                                "length_m": c.length_m, "surface_points": len(c.surface),
+                                "traversable": c.traversable} for c in self.connectors]}
 

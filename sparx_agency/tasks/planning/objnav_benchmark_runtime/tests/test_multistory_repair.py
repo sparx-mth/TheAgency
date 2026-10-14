@@ -76,7 +76,7 @@ def test_stop_never_carries_nonexecutable_camera_pitch(owner):
 
 
 def test_raw_perception_continues_on_stairs_without_fusing_or_stopping(monkeypatch):
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(label="bed")
     obs = observation(episode, 0)
     policy.plan(obs)
     before = len(policy.landmarks), policy.graph.queries
@@ -95,7 +95,7 @@ def test_raw_perception_continues_on_stairs_without_fusing_or_stopping(monkeypat
     assert building.active is not None
 
 
-def test_committed_approach_preempts_target_reasoning(monkeypatch):
+def test_verified_target_preempts_committed_stair_approach(monkeypatch):
     policy, episode = setup_policy()
     obs = observation(episode, 0)
     policy.plan(obs)
@@ -103,7 +103,8 @@ def test_committed_approach_preempts_target_reasoning(monkeypatch):
     building.active = building._portal(obs, -1, [(3, 0, 0), (4, 0, -0.6)])
     monkeypatch.setattr(policy, "_navigate", lambda *args: NavigationCommand.hold(info={"kind": "portal/0"}))
     command = policy.plan(observation(episode, 1))
-    assert command.info["phase"] == "APPROACH_STAIRS" and not command.stop
+    assert command.info["phase"] == "target_stop" and command.stop
+    assert policy.closing.active and policy.closing.locked
 
 
 def test_projection_uses_actual_supported_pixels_not_box_center_ray():
@@ -151,7 +152,7 @@ def test_wrong_floor_support_rejected_but_real_bed_not_blacklisted():
 
 
 def test_three_dimensional_association_cannot_walk_a_landmark(monkeypatch):
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(label="bed")
     policy.plan(observation(episode, 0))
     original = policy.landmarks.all_landmarks()[0]
     policy._object_geometry[original.id] = (original.xy[0], original.xy[1], -1.0)
@@ -280,8 +281,10 @@ def test_unknown_panels_are_independent_gray_and_do_not_teach_policy(tmp_path):
     first = panels.slots[0]["grid"].copy()
     assert len(policy.mapping.maps) == 1 and len(policy.mapping.atlas.floors) == 1
     image = panels.render(0)
-    assert np.all(image[60:280, 600:800] == UNKNOWN_GRAY)
+    # Layout follows the house aspect ratio rather than fixed square panels.
+    assert np.count_nonzero(np.all(image == UNKNOWN_GRAY, axis=-1)) > image.shape[0] * image.shape[1] / 10
     assert np.all(panels.slots[1]["grid"] == -1)
+    assert not panels.slots[1]["room_labels"].any()
     policy.floors.activate(1)
     panels.capture(policy, obs)
     np.testing.assert_array_equal(panels.slots[0]["grid"], first)
@@ -343,3 +346,57 @@ def test_source_floor_slab_does_not_rise_with_base_and_reblock_treads():
     assert not terrain.permits(pose, 0.25)
 
 
+
+
+# -- the footing sweep (2026-10-05) -----------------------------------------------------------
+def test_a_footing_sweep_is_a_full_circle_at_a_shallow_pitch_that_the_target_takeover_does_not_clear():
+    actions = MULTIFLOOR_PROTOCOL.actions()
+    camera, converter = CameraController(actions), DiscreteActionConverter(actions)
+    pose = AgentPose(0, 0, 0, 0)
+    obs = SimpleNamespace(pose=pose, step=1)
+    assert camera.begin_inspection(obs, 0, reason="footing"), "allowed before action 6 and under any cooldown"
+    assert camera.footing and not camera.begin_inspection(obs, 0, reason="footing"), "one at a time"
+    emitted, owners = [], set()
+    for step in range(1, 40):
+        obs = SimpleNamespace(pose=pose, step=step)
+        command = camera.inspection_command(obs)
+        if command is None:
+            break
+        assert command.info["kind"] == "footing_sweep"
+        command = camera.apply(obs, command, "TARGET_CLOSING")          # the takeover owns the camera, the sweep survives
+        owners.add(command.info["camera"]["owner"])
+        action = converter.step(pose, command).action
+        emitted.append(action)
+        if action == DiscreteAction.LOOK_DOWN:
+            pose = replace(pose, camera_pitch=pose.camera_pitch + actions.tilt_angle_rad)
+        elif action == DiscreteAction.LOOK_UP:
+            pose = replace(pose, camera_pitch=pose.camera_pitch - actions.tilt_angle_rad)
+        elif action == DiscreteAction.TURN_LEFT:
+            pose = replace(pose, yaw=pose.yaw + actions.turn_angle_rad)
+        elif action == DiscreteAction.TURN_RIGHT:
+            pose = replace(pose, yaw=pose.yaw - actions.turn_angle_rad)
+    assert emitted.count(DiscreteAction.LOOK_DOWN) == 1 and emitted.count(DiscreteAction.LOOK_UP) == 1, "30 degrees: one tilt"
+    assert emitted.count(DiscreteAction.TURN_LEFT) == 12, "a full circle"
+    assert owners == {"FOOTING", "RESTORE"} and camera.inspection is None and pose.camera_pitch == pytest.approx(0)
+    assert not camera.begin_inspection(SimpleNamespace(pose=pose, step=40), 0, reason="footing"), "once per spot"
+    assert camera.begin_inspection(SimpleNamespace(pose=replace(pose, x=2.0), step=41), 0, reason="footing")
+    # A stair inspection is still cleared by the takeover's camera ownership.
+    camera = CameraController(actions)
+    assert camera.begin_inspection(SimpleNamespace(pose=pose, step=10), 0)
+    camera.apply(SimpleNamespace(pose=pose, step=10), NavigationCommand.hold(), "TARGET_CLOSING")
+    assert camera.inspection is None
+
+
+def test_distractor_classes_are_in_the_vocabulary_and_never_a_goal_nor_a_home_object():
+    """Hanson/000001 (2026-10-05): a child's ride-on horse read as 'chair' at 0.9 and the episode
+    stopped on it 11.7 m from the nearest chair. An open-vocabulary detector lands on the nearest
+    prompt it was given; a toy prompt gives the wrong match somewhere else to go."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object, signature_type
+    mapper = gibson_label_mapper()
+    vocabulary = set(mapper.vocabulary())
+    assert {"toy", "rocking horse", "stuffed animal", "bathtub"} <= vocabulary
+    for cls in ("toy", "rocking horse", "stuffed animal"):
+        assert all(not mapper.target_labels(c).accepts(cls) for c in ("chair", "couch", "bed", "toilet", "tv", "potted plant"))
+        assert not any(home_object(target, cls) for target in ("chair", "sofa", "bed", "toilet", "television", "potted plant"))
+        assert signature_type(cls) is None
+    assert home_object("toilet", "bathtub") and signature_type("bathtub") == "bathroom"

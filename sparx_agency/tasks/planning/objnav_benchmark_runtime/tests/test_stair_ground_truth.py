@@ -67,20 +67,73 @@ def test_a_single_storey_has_no_connectors_and_the_block_is_json():
     assert full["stair_source"] == "navmesh" and len(full["stair_connectors"]) == 1
 
 
-def test_the_navmesh_path_is_preferred_over_the_sampled_polyline_when_available():
+def test_the_route_is_the_centreline_and_the_pathfinder_only_repairs_a_leg_the_agent_cannot_walk():
+    """A navmesh shortest path hugs the walls; the route is the middle of the flight, band by band.
+
+    The pathfinder's path is asked for only when the simulator's own stride
+    check says a leg cannot be walked -- and then only for that leg.
+    """
     tris = triangles(two_storey_house())
-    seen = []
+    levels = floor_levels(tris)
+    asked = []
 
     def path_between(start, end):
-        seen.append((start, end))
-        return [start, [7.0, 1.35, 3.0], end]
+        asked.append((start, end))
+        return [start, [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2, 2.5], end]
 
-    c = stair_connectors(tris, floor_levels(tris), path_between)[0]
-    assert len(seen) == 1 and len(c["polyline_xyz"]) == 3
-    assert c["polyline_xyz"][1] == pytest.approx(habitat_to_enu([7.0, 1.35, 3.0]))
-    # A pathfinder that cannot connect the anchors falls back to the sampled polyline.
-    c = stair_connectors(tris, floor_levels(tris), lambda s, e: None)[0]
-    assert len(c["polyline_xyz"]) > 3
+    walkable = lambda start, end: end                      # every stride lands where it aimed
+    c = stair_connectors(tris, levels, path_between, None, walkable)[0]
+    assert asked == [], "every leg walkable: the pathfinder is never consulted"
+    # One vertex per 0.2 m height band of the flight, plus the two floor anchors.
+    inner = c["polyline_xyz"][1:-1]
+    assert len(inner) >= 10 and all(abs(p[0] + 3.0) < 0.15 for p in inner), "the middle of a 2 m wide flight is x = -3"
+    heights = [p[2] for p in c["polyline_xyz"]]
+    assert all(b >= a - 0.05 for a, b in zip(heights, heights[1:]))
+    assert c["walkability"]["checked"] > 0 and c["walkability"]["repaired"] == 0
+
+    def blocked_midway(start, end):
+        # A stride that crosses z = 3.0 (Habitat) is stopped short: a banister in the way.
+        if (start[2] - 3.0) * (end[2] - 3.0) < 0 and abs(end[2] - start[2]) > 0.02:
+            return [end[0], end[1], start[2]]
+        return end
+
+    asked.clear()
+    d = stair_connectors(tris, levels, path_between, None, blocked_midway)[0]
+    assert d["walkability"]["repaired"] >= 1 and len(asked) == d["walkability"]["repaired"], (
+        "only the legs the stride check refused were handed to the pathfinder")
+    assert any(abs(p[0] + 2.5) < 1e-6 for p in d["polyline_xyz"]), "the repair's own vertex (Habitat z=2.5: ENU x=-2.5) is in the route"
+
+
+def test_a_connector_carries_a_sample_of_its_surface_for_the_detector():
+    tris = triangles(two_storey_house())
+    c = stair_connectors(tris, floor_levels(tris))[0]
+    surface = np.asarray(c["surface_xyz"], dtype=float)
+    assert len(surface) >= 20
+    assert surface[:, 2].min() > 0.3 and surface[:, 2].max() < 2.4, "the treads, not the floors"
+    assert np.all(np.abs(surface[:, 0] + 3.0) < 1.2), "on the flight (Habitat z 2..4 is ENU x -4..-2)"
+
+
+def three_storey_house():
+    """Habitat frame: floors at y=0, 2.7 and 5.4 with ONE stairwell (same XZ footprint) serving both intervals."""
+    vertices = quad(0, 6, 0, 6, 0.0) + quad(8, 14, 0, 6, 2.7) + quad(0, 6, 8, 14, 5.4)
+    for i in range(4):
+        vertices += quad(6 + 0.5 * i, 6.5 + 0.5 * i, 2, 4, 2.7 * i / 4, 2.7 * (i + 1) / 4)
+    for i in range(4):
+        vertices += quad(6.5 - 0.5 * i, 7.0 - 0.5 * i, 6, 8, 2.7 + 2.7 * i / 4, 2.7 + 2.7 * (i + 1) / 4)
+    return np.asarray(vertices, dtype=float).reshape(-1)
+
+
+def test_a_stairwell_serving_three_storeys_is_two_connectors_between_adjacent_storeys():
+    """Pomaria's stairwell read as ONE 5.4 m connector from the basement straight to the top storey."""
+    tris = triangles(three_storey_house())
+    levels = floor_levels(tris)
+    assert [round(level["height_m"], 1) for level in levels] == [0.0, 2.7, 5.4]
+    connectors = stair_connectors(tris, levels)
+    assert [(round(c["bottom_z"], 1), round(c["top_z"], 1)) for c in connectors] == [(0.0, 2.7), (2.7, 5.4)]
+    assert all(c["rise_m"] == pytest.approx(2.7, abs=0.1) for c in connectors)
+    for c in connectors:
+        heights = [p[2] for p in c["polyline_xyz"]]
+        assert heights[0] == pytest.approx(c["bottom_z"], abs=0.2) and heights[-1] == pytest.approx(c["top_z"], abs=0.2)
 
 
 # -- the policy's reading -------------------------------------------------------

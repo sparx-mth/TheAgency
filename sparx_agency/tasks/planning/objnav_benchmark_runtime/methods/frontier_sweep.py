@@ -33,7 +33,7 @@ import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.exploration.frontier_ranking import (
-    FrontierRankingParams, frontier_goals_by_room, ranked_frontier_goals)
+    FrontierRankingParams, accessible_frontiers, ranked_frontier_goals)
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 
 
@@ -47,7 +47,8 @@ class SweepSettings:
         room_scan_turns: In-place turns a room may spend looking around once
             nothing reachable is left in it, per visit. ``0`` (the default)
             leaves at once, which is the loop's termination rule; ``-1``
-            means one full rotation at the benchmark's turn angle.
+            means one full look-around -- as many turns as the camera's
+            field of view needs to see the circle.
         informative_radius_m: A committed goal stays committed while unknown
             cells remain within this radius of it.
         informative_cells: ... at least this many of them.
@@ -94,7 +95,8 @@ class FrontierSweep:
         self.stats = {"scan_turns": 0, "plan_failures": 0, "goals_resolved": 0}
 
     # -- frontier goals -----------------------------------------------------
-    def explore(self, obs, world, cost, mask, kind="frontier", planning_world=None, labels=None, label=None):
+    def explore(self, obs, world, cost, mask, kind="frontier", planning_world=None, labels=None, label=None,
+                ranked=None):
         """Navigate to the first ranked goal the planner accepts, or None.
 
         Frontier goals are read off ``world`` -- the map as observed -- and
@@ -113,8 +115,12 @@ class FrontierSweep:
         clearance, so a room's boundary cells sit just outside its mask and
         a mask-only sweep finds nothing while the count still says three.
         ``mask`` still governs the committed goal's persistence.
+
+        ``ranked`` hands the sweep the caller's own ordered goals instead
+        (the explore visit's gain ranking); the committed goal's lifetime
+        and the admissibility filter apply to them as to any other.
         """
-        for goal in self._goals(obs, world, cost, mask, labels, label):
+        for goal in self._goals(obs, world, cost, mask, labels, label, ranked):
             command = self.policy._navigate(obs, planning_world if planning_world is not None else world,
                                             goal, kind)
             if command is not None:
@@ -130,8 +136,11 @@ class FrontierSweep:
     def _ranked(self, obs, world, cost, mask, labels=None, label=None):
         """The room's ranked frontier goals, by label vote when labels are given, else by mask."""
         xy, yaw, ranking = (obs.pose.x, obs.pose.y), obs.pose.yaw, self.settings.ranking
+        inventory = self.policy.graph.frontier_inventory
+        if labels is None and inventory is not None and np.asarray(mask).all():
+            return list(inventory.goals)
         if labels is not None and label is not None:
-            return frontier_goals_by_room(world, cost, labels, xy, yaw, ranking).get(int(label), [])
+            return accessible_frontiers(world, cost, labels, xy, yaw, ranking).by_room.get(int(label), [])
         return ranked_frontier_goals(world, cost, mask, xy, yaw, ranking)
 
     def admissible(self, obs, world, goals):
@@ -162,7 +171,7 @@ class FrontierSweep:
         turn = self.policy.episode.action_spec.turn_angle_rad
         budget = self.settings.room_scan_turns
         if budget < 0:
-            budget = int(math.ceil(2 * math.pi / turn - 1e-9))
+            budget = self.policy.rotation_turns()           # the camera's field of view says when the circle is seen
         spent = self.scans.get(key, 0)
         if spent >= budget:
             return None
@@ -174,14 +183,15 @@ class FrontierSweep:
                   "scan_turn": spent + 1, "scan_budget": budget})
 
     # -- the committed goal -------------------------------------------------
-    def _goals(self, obs, world, cost, mask, labels=None, label=None):
+    def _goals(self, obs, world, cost, mask, labels=None, label=None, ranked=None):
         """The committed goal while it is still worth reaching, else fresh ranked ones."""
         p, s = self.policy, self.settings
         arrival = p.converter_params.goal_tolerance_m + world.resolution
         current = self._current_goal(obs, world, cost, mask, arrival)
         if current is not None:
             return [current]
-        ranked = self._ranked(obs, world, cost, mask, labels, label)
+        if ranked is None:
+            ranked = self._ranked(obs, world, cost, mask, labels, label)
         return [g.xy for g in self.admissible(obs, world, ranked)][:s.plan_attempts]
 
     def _current_goal(self, obs, world, cost, mask, arrival):

@@ -30,6 +30,7 @@ import numpy as np
 from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
+from sparx_agency.core.mapping.depth.depth_holes import fill_depth_holes
 
 # Measured reconciliations were 0.021-0.050 m; past this it's a mismatched
 # navmesh, not a reconciliation -- refuse it instead of fixing it quietly.
@@ -56,14 +57,27 @@ def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
                                 math.hypot(camera_forward[0], camera_forward[2])))
 
 
-def metric_depth(raw, camera, normalized=False):
-    """Decode Lab normalized depth or raw Sim metres; preserve clip semantics."""
+def metric_depth(raw, camera, normalized=False, depth_holes=None, stats=None):
+    """Decode Lab normalized depth or raw Sim metres; preserve clip semantics.
+
+    ``depth_holes`` (a :class:`DepthHoleFill`) fills the enclosed no-return
+    pixels -- raw ``0``, the scan's missing geometry -- from their valid
+    neighbours before the near/far clipping, so a mirror or a black screen
+    projects as the wall around it; the remaining holes are ``NaN``, no
+    reading, as every baseline treats them. ``stats`` (a dict) receives the
+    fill's counts when given.
+    """
     depth = np.asarray(raw, dtype=np.float32)
     if depth.ndim == 3 and depth.shape[2] == 1:
         depth = depth[..., 0]
     depth = depth.copy()
+    holes = depth <= 0 if not normalized else np.zeros(depth.shape, dtype=bool)
     if normalized:
         depth = depth * (camera.max_depth_m - camera.min_depth_m) + camera.min_depth_m
+    if depth_holes is not None and depth_holes.enabled and holes.any():
+        depth, counts = fill_depth_holes(depth, holes, depth_holes)
+        if stats is not None:
+            stats.update(counts)
     near = (depth <= camera.min_depth_m) | (depth <= 0)
     far = depth >= camera.max_depth_m
     depth[near] = np.nan
@@ -101,6 +115,9 @@ class HabitatRGBDSimulator:
         self.height_m = height_m
         self.allow_sliding = allow_sliding
         self.gpu_device = gpu_device
+        self.depth_holes = depth_holes          # DepthHoleFill or None (every hole dropped, as the baselines do)
+        self.depth_hole_stats = {"frames": 0, "frames_with_holes": 0, "holes": 0, "filled": 0,
+                                 "pixels_filled": 0, "pixels_left": 0}
         self._sim = None
         self._scene = None
         self._structure = None  # per-scene navmesh storeys and stair connectors
@@ -121,6 +138,7 @@ class HabitatRGBDSimulator:
         import habitat_sim
         import quaternion
 
+        self.depth_hole_stats = {key: 0 for key in self.depth_hole_stats}     # per episode
         if self._scene != str(scene_path):
             self.close()
             self._sim = habitat_sim.Simulator(self._configuration(scene_path))
@@ -247,6 +265,27 @@ class HabitatRGBDSimulator:
                 "navigable_area_m2": float(pathfinder.navigable_area),
                 "islands": int(pathfinder.num_islands)}
 
+    def project_target(self, point):
+        """Project a requested ENU footpoint onto the local NavMesh.
+
+        This explicitly privileged geometry service reads neither semantic
+        annotations nor evaluator targets. Reject other floors, remote snaps
+        and invalid geometry; observed-map A* decides reachability.
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; cannot project a target approach")
+        point = np.asarray(point, dtype=float)
+        if point.shape != (3,) or not np.isfinite(point).all():
+            raise ValueError("Target approach projection needs a finite ENU xyz point")
+        native = np.array([-point[1], point[2], -point[0]], dtype=np.float32)
+        snapped = np.asarray(self._sim.pathfinder.snap_point(native), dtype=float)
+        if snapped.shape != (3,) or not np.isfinite(snapped).all():
+            return None
+        enu = np.array([-snapped[2], -snapped[0], snapped[1]])
+        if abs(enu[2] - point[2]) > 0.2 or np.linalg.norm(enu[:2] - point[:2]) > 0.5:
+            return None
+        return tuple(float(v) for v in enu)
+
     def step(self, action):
         """STOP preserves the final view; other actions use native collision tests."""
         if self._sim is None or not self.actions.allows(action):
@@ -282,7 +321,15 @@ class HabitatRGBDSimulator:
         snapped = self._sim.pathfinder.snap_point(state.position)
         self.last_pose_on_navmesh = bool(abs(float(snapped[1]) - float(state.position[1])) <= _NAVMESH_CONFIRM_M)
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
-        return rgb, metric_depth(raw["depth"], self.camera), pose
+        counts = {}
+        depth = metric_depth(raw["depth"], self.camera, depth_holes=self.depth_holes, stats=counts)
+        totals = self.depth_hole_stats
+        totals["frames"] += 1
+        if counts:
+            totals["frames_with_holes"] += 1
+            for key in ("holes", "filled", "pixels_filled", "pixels_left"):
+                totals[key] += int(counts.get(key, 0))
+        return rgb, depth, pose
 
     def close(self):
         """Release rendering memory before another scene/process takes it."""

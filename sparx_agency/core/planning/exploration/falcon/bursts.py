@@ -55,18 +55,19 @@ class BurstMachine:
         self.history.append(self.burst)
         self.transition(EXPLORE, "selected region entered")
 
-    def charge(self, step):
+    def charge(self, step, external_phase=None):
         if step == self.last_step:
             return
         if step < self.last_step or self.actions >= self.global_limit:
             raise RuntimeError("Action clock regressed or global budget exceeded")
-        local = self.burst is not None and self.burst.status == "partial" and self.phase in (EXPLORE, VERIFY, RECOVER)
+        local = external_phase is None and self.burst is not None and self.burst.status == "partial" and self.phase in (EXPLORE, VERIFY, RECOVER)
         if local and self.burst.actions >= self.params.burst_actions:
             raise RuntimeError("Local burst action budget exceeded")
         self.last_step = step
-        self.allocation[self.phase] += 1
+        self.allocation[external_phase or self.phase] += 1
         self.actions += 1
-        self.phase_actions += 1
+        if external_phase is None:
+            self.phase_actions += 1
         if local:
             self.burst.actions += 1
 

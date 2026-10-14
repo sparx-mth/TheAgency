@@ -42,9 +42,10 @@ See [runtime architecture](../README.md), [FALCON mapping](BOUNDED_FALCON.md),
 
 ## Data and running
 
-End-to-end setup and the exact command sequence (environments, downloads, services,
-episodes, campaign) are in [../QUICKSTART.md](../QUICKSTART.md); this section holds the
-protocol detail behind them.
+The one-click benchmark -- install, one episode, all 1,000, progress, results -- is
+[BENCHMARK.md](BENCHMARK.md) (`run_benchmark.sh`). The step-by-step command sequence for
+the development campaigns is in [../QUICKSTART.md](../QUICKSTART.md); this section holds
+the protocol detail behind both.
 
 Use licensed local Gibson meshes/navmeshes and the released ObjectNav episode
 annotations. `.glb.json.gz` rows in scene archives are dummy PointNav metadata,
@@ -57,8 +58,16 @@ sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.demo`; saved setting
 are in `~/.config/sparx/gibson-demo.json`. It does not download licensed scenes.
 
 Run simulator jobs with the existing Habitat conda interpreter; use `.venv`
-only for lightweight tests/tools. Before rendering, check GPU ownership. Detector
-and room-language services run on CPU on this workstation.
+only for lightweight tests/tools. Before rendering, check GPU ownership;
+`gpu_plan.py` decides which services share it ([BENCHMARK.md](BENCHMARK.md)).
+
+**Depth holes.** The scan's missing geometry -- glass, mirrors, glossy screens
+-- renders as depth 0. The baselines drop those pixels; this bridge fills a hole
+enclosed by valid depth (half its rim, at most half the frame) from its nearest
+valid pixels so it projects as the surface around it, and drops the rest
+(`GibsonProtocol.depth_hole_*`, per-episode counts in
+`evaluation_diagnostics.jsonl` under `depth_holes`). The citations and the
+Markleeville measurement are in [PROTOCOL_AND_TUNING.md](PROTOCOL_AND_TUNING.md).
 
 ### Detector setup
 
@@ -144,6 +153,34 @@ Corozal, Darden, Markleeville and Wiconisco. The reference-floor planar score us
 5 cm cells, two-cell free dilation, a 1 m category dilation, final zero FMM
 distance and no mandatory STOP. Preserve its sentinel start and protocol.
 Reference Habitat is 0.1.5; this installation is 0.2.4. The mismatch is explicit.
+
+**The action space is the one declared deviation from the baselines' protocol**
+(`gibson-semexp-v1.1-val/2`, `GibsonProtocol.camera_tilt`, since 2026-10-13): the
+four body actions of the SemExp agents plus Habitat's LOOK_UP / LOOK_DOWN pair,
+30° a step with the camera held between 30° up and 60° down -- the action space
+of habitat-lab's ObjectNav task. A LOOK is an action against the same 500-action
+budget and moves nothing, so the scoring is untouched; what it buys is the
+target closing's box-driven pitch (`methods/bbox_pitch.py`): a low toilet or a
+high television kept whole in the frame on the way in, which the 15-episode
+toilet campaign of 2026-10-13 showed never happening because the protocol had no
+LOOK to fire. `GibsonProtocol(camera_tilt=False)` is the published four-action
+set, and a result recorded under `/1` is a different experiment from one under
+`/2` (`report.py` and the frozen-configuration lock refuse to mix them).
+
+**A re-run of one recorded episode** is `--episode-ids Darden/000190` (any
+published ids, in the given order, from the selected scene and category): the
+same start and goal as the recording, instead of a fresh `--limit`/`--shuffle`
+sample; `run.json` records the explicit selection.
+
+Every published start and goal lie on one storey (all 1,000 rows carry
+`floor_id 0`, and `val_info.pbz2` holds one floor map per scene), as in HM3D
+and the other ZSON benchmarks. The policy therefore runs with
+`RPTSettings.allow_stair_traversal: false` by default: seen staircases and
+observed drops are impassable, no goal leaves the spawn plane
+(`floor_plane_bound_m`, 0.5 m), and no staircase is ever a node, a fallback or
+a climb (`methods/spawn_floor_guard.py`, [../README.md](../README.md)).
+`gibson.run` keeps that default; pass `--policy-config` with
+`{"allow_stair_traversal": true}` only for an explicitly multi-storey experiment.
 
 The separate **multi-story development/2** protocol uses 3D travel and
 height-qualified reference-floor goals. Its audited native vertical bound remains

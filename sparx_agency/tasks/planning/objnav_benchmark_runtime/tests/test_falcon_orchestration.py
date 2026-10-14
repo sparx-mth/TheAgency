@@ -23,6 +23,7 @@ def rig(monkeypatch, **settings):
                              replace(old.settings, local_exploration="falcon", falcon=FalconParams(**settings)))
     agent = HeadlessObjNavAgent(policy, gibson_label_mapper())
     agent.reset(episode)
+    policy.warmup_actions = policy.settings.warmup_steps  # isolate post-discovery FALCON orchestration
     world, cost, scope, request = open_fixture()
     monkeypatch.setattr(policy.mapping, "update", lambda obs, **kwargs: world)
     monkeypatch.setattr(policy, "_perceive", lambda obs: False)

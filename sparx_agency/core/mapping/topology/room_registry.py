@@ -1,22 +1,60 @@
 # core/mapping/topology/room_registry.py
-"""Persistent room identities across segmentation ticks (IoU matching).
+"""Persistent room identities across segmentation ticks (IoU and containment matching, with a short memory).
 
 :func:`~sparx_agency.core.mapping.topology.room_segmentation.compute_rooms`
 relabels rooms 1..N fresh every tick, so label 2 this tick need not be
 label 2 the next. ``RoomRegistry`` matches each fresh room mask against
 the previous tick's masks by greedy best-IoU 1:1 assignment and hands
 out persistent ids (pids). Pids increase monotonically and are never
-reused, so a vanished room's identity stays retired.
+handed to a DIFFERENT room.
 
-Ported from the flown SJTU ``semantic_mapper_node.py``; the matching
-math is unchanged.
+Ported from the flown SJTU ``semantic_mapper_node.py``; the IoU matching
+math is unchanged. Since 2026-10-05 a pair that fails the IoU threshold
+still matches when one mask mostly **contains** the other
+(:attr:`RoomRegistry.containment_threshold` of the smaller mask's cells
+lie in the larger): a room seen through its door is a sliver that grows
+tenfold as the agent walks in, and IoU alone retired its number at every
+growth spurt -- the Hanson ObjectNav recording renumbered one bedroom
+R11 -> R14 -> R16 while standing in it, and with the number went the
+record of having stood in it ("entered=no" to the oracle). IoU matches
+are consumed first; containment matches only fill what IoU left, so a
+split's larger half keeps the number and the smaller gets a new one, and
+a merge's survivor is the old room with the larger overlap.
+
+Also since 2026-10-05, a room that VANISHES for a tick keeps its number
+for :attr:`RoomRegistry.memory_ticks` updates: its mask is kept in a
+retired memory, and a fresh room no live room claims is matched against
+that memory by the same scores before it is given a new pid. A room
+absorbed into its neighbour for one tick -- a door cut that wobbles, a
+merge at the dynamics threshold -- used to come back under a new number
+on the next, because the neighbour's pid had already been consumed by
+its own IoU match and nothing else remembered the room: the Ranchester
+recording of 2026-10-05 numbered the room behind one door R23, R26, R28
+and R52. A pid that leaves the memory is retired for good.
+
+Since 2026-10-07 a room also carries its **birth anchor** -- the cell it
+was first instantiated at (its centroid then, or the nearest cell of its
+mask) -- and a fresh mask that holds a previous room's anchor and overlaps
+it is matched to that room FIRST, before any IoU score (tier 2; the
+lowest pid wins when one fresh mask holds several anchors, so a merge's
+survivor is the oldest room). The IoU rule alone hands a split room's
+number to the LARGER half, which is whichever side the agent has mapped
+more of: the Allensville couch run's spawn room was R0 at step 0, became
+R1 when a door 0.5 m away cut it off at step 8 (the far side was bigger),
+merged back as R0 at step 10 and re-split as R2 at step 44 -- while the
+hallway the agent had just walked into carried R0, and with it the spawn
+room's record of having been stood in. With the anchor the spawn room is
+R0 throughout and the hallway is R1 from the moment it separates. The
+memory is bounded by :attr:`RoomRegistry.memory_rooms` masks as well as by
+ticks, so an episode-long memory (``memory_ticks`` of several hundred)
+costs a few dozen masks at most.
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -34,35 +72,144 @@ class TrackedRoom:
         n_cells: Number of cells in the mask.
         centroid: World-frame ``(wx, wy)`` centroid, produced by the
             ``cell_to_world`` callable passed to :meth:`RoomRegistry.update`.
+        anchor: ``(cx, cy)`` cell the room was first instantiated at -- its
+            birth centroid when that lies in the mask, else the mask cell
+            nearest it; the identity a split or a merge is resolved by.
+            None on rooms created before the anchor existed.
     """
 
     id: int
     mask: np.ndarray
     n_cells: int
     centroid: Tuple[float, float]
+    anchor: Optional[Tuple[int, int]] = None
+
+
+def birth_anchor(mask: np.ndarray, centroid_cells: Tuple[float, float]) -> Tuple[int, int]:
+    """The ``(cx, cy)`` cell a new room is anchored at: its centroid if in the mask, else the nearest mask cell."""
+    cx, cy = int(round(centroid_cells[0])), int(round(centroid_cells[1]))
+    h, w = mask.shape
+    if 0 <= cy < h and 0 <= cx < w and mask[cy, cx]:
+        return cx, cy
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return cx, cy
+    nearest = int(np.argmin((xs - cx) ** 2 + (ys - cy) ** 2))
+    return int(xs[nearest]), int(ys[nearest])
 
 
 class RoomRegistry:
-    """Greedy best-IoU 1:1 matcher of fresh rooms to the previous tick.
+    """Greedy best-IoU 1:1 matcher of fresh rooms to the previous tick, with containment as the fallback and a short memory.
 
     Attributes:
         iou_threshold: Minimum IoU for a fresh room to inherit a
             previous room's pid. The flown default parameter was 0.15
             (tolerant to mask drift while exploring); the class default
-            mirrors the source's constructor default of 0.25.
+            mirrors the source's constructor default of 0.25 (the
+            ObjectNav scene graph passes 0.15, with containment at 0.6).
+        containment_threshold: A pair below the IoU threshold still
+            matches when at least this share of the SMALLER mask's cells
+            lie inside the larger one; 1.0 or more disables the fallback
+            (the historical IoU-only matcher).
+        memory_ticks: How many updates a vanished room's mask stays
+            eligible for re-adoption by a fresh room no live room claims
+            (see the module docstring); 0 retires a pid the tick its room
+            vanishes (the historical behaviour).
+        memory_rooms: At most this many vanished masks are kept, oldest
+            dropped first; bounds the memory of a long ``memory_ticks``.
+        anchors: Whether a fresh mask holding a previous room's birth
+            anchor is matched to it before the IoU scores (the module
+            docstring); False is the historical IoU-then-containment order.
         rooms: ``OrderedDict[int, TrackedRoom]`` — the current rooms
             keyed by pid, replaced wholesale on every update.
     """
 
-    def __init__(self, iou_threshold: float = 0.25) -> None:
+    def __init__(self, iou_threshold: float = 0.25, first_pid: int = 0, containment_threshold: float = 0.6,
+                 memory_ticks: int = 10, memory_rooms: int = 64, anchors: bool = True) -> None:
         """Initialize an empty registry.
 
         Args:
             iou_threshold: Minimum IoU to keep a pid across ticks.
+            first_pid: The first pid this registry hands out. A building
+                keeps one registry per storey; starting each new storey's
+                registry after the highest pid any storey has used keeps a
+                room number unique across the building, so "R0" names one
+                room in the recording, not one per floor.
+            containment_threshold: See the class attribute.
+            memory_ticks: See the class attribute.
+            memory_rooms: See the class attribute.
+            anchors: See the class attribute.
         """
         self.iou_threshold = float(iou_threshold)
+        if not 0.0 < float(containment_threshold):
+            raise ValueError("containment_threshold must be positive, got %r" % (containment_threshold,))
+        self.containment_threshold = float(containment_threshold)
+        if type(memory_ticks) is not int or memory_ticks < 0:
+            raise ValueError("memory_ticks must be a non-negative integer, got %r" % (memory_ticks,))
+        self.memory_ticks = int(memory_ticks)
+        if type(memory_rooms) is not int or memory_rooms < 0:
+            raise ValueError("memory_rooms must be a non-negative integer, got %r" % (memory_rooms,))
+        self.memory_rooms = int(memory_rooms)
+        self.anchors = bool(anchors)
         self.rooms = OrderedDict()  # type: "OrderedDict[int, TrackedRoom]"
-        self._next = 0
+        self._retired = OrderedDict()  # type: "OrderedDict[int, Tuple[TrackedRoom, int]]"
+        self._tick = 0
+        self.readopted = 0
+        self.anchored = 0
+        if int(first_pid) < 0:
+            raise ValueError("first_pid must be non-negative, got %r" % (first_pid,))
+        self._next = int(first_pid)
+
+    @property
+    def next_pid(self) -> int:
+        """The pid the next unmatched room will receive; every pid below it is used or retired."""
+        return self._next
+
+    @property
+    def remembered(self) -> Tuple[int, ...]:
+        """The pids of vanished rooms still eligible for re-adoption, oldest first."""
+        return tuple(self._retired)
+
+    def _score(self, fresh: RoomStats, previous: TrackedRoom):
+        """``(tier, score, overlap)`` of a candidate pair, or None when the pair does not match.
+
+        Tier 2 is an anchor match (the fresh mask holds the previous
+        room's birth anchor and overlaps it by the IoU threshold or holds
+        more than half its cells; scored by age, oldest pid first), tier 1
+        an IoU match, tier 0 a containment match; the overlap in cells
+        breaks ties (containment ties at exactly 1.0 are the common case,
+        every sliver lying wholly inside a previous room).
+        """
+        if previous.mask.shape != fresh.mask.shape:
+            return None
+        inter = int(np.logical_and(fresh.mask, previous.mask).sum())
+        if inter == 0:
+            return None
+        prev_cells = int(previous.mask.sum())
+        union = fresh.n_cells + prev_cells - inter
+        iou = inter / max(1, union)
+        if self.anchors and previous.anchor is not None:
+            ax, ay = previous.anchor
+            if (fresh.mask[ay, ax] and (iou >= self.iou_threshold or inter > 0.5 * prev_cells)):
+                return (2, -int(previous.id), inter)
+        if iou >= self.iou_threshold:
+            return (1, iou, inter)
+        containment = inter / max(1, min(fresh.n_cells, prev_cells))
+        if containment >= self.containment_threshold:
+            return (0, containment, inter)
+        return None
+
+    @staticmethod
+    def _assign(pairs, i2id, used, taken=None):
+        """Consume candidate pairs greedily, best first; each fresh room and each pid at most once."""
+        pairs.sort(reverse=True)
+        for _, _, _, i, pid in pairs:
+            if i in i2id or pid in used:
+                continue
+            i2id[i] = pid
+            used.add(pid)
+            if taken is not None:
+                taken.append(pid)
 
     def update(
         self,
@@ -74,8 +221,16 @@ class RoomRegistry:
         Every (fresh, previous) pair with any mask overlap and IoU at
         or above the threshold becomes a candidate; candidates are
         consumed greedily in descending IoU order, each fresh room and
-        each pid used at most once. Unmatched fresh rooms get new,
-        never-reused pids.
+        each pid used at most once. Pairs under the IoU threshold whose
+        smaller mask lies at least ``containment_threshold`` inside the
+        larger are candidates of a second tier, consumed after every IoU
+        candidate, in descending containment. With ``anchors`` a pair
+        whose fresh mask holds the previous room's birth anchor (and
+        overlaps it) is consumed before either, oldest pid first. A fresh
+        room still unmatched is then matched the same way against the
+        masks of rooms that vanished within the last ``memory_ticks``
+        updates, and re-adopts the pid it matches, anchor included. The
+        rest get new, never-reused pids, anchored where they are born.
 
         Args:
             stats: Fresh rooms from ``compute_rooms`` (label order).
@@ -86,26 +241,31 @@ class RoomRegistry:
             The new ``rooms`` mapping (also stored on the registry),
             keyed by pid in ``stats`` order.
         """
+        self._tick += 1
+        i2id, used = {}, set()
         pairs = []
         for i, s in enumerate(stats):
             for pid, prev in self.rooms.items():
-                if prev.mask.shape != s.mask.shape:
+                score = self._score(s, prev)
+                if score is not None:
+                    pairs.append(score + (i, pid))
+        self._assign(pairs, i2id, used)
+        self.anchored += sum(1 for tier, _, _, i, pid in pairs if tier == 2 and i2id.get(i) == pid)
+        previous = dict(self.rooms)
+        if self._retired:
+            pairs, readopted = [], []
+            for i, s in enumerate(stats):
+                if i in i2id:
                     continue
-                inter = int(np.logical_and(s.mask, prev.mask).sum())
-                if inter == 0:
-                    continue
-                union = s.n_cells + int(prev.mask.sum()) - inter
-                iou = inter / max(1, union)
-                if iou >= self.iou_threshold:
-                    pairs.append((iou, i, pid))
-
-        pairs.sort(reverse=True)
-        i2id, used = {}, set()
-        for _, i, pid in pairs:
-            if i in i2id or pid in used:
-                continue
-            i2id[i] = pid
-            used.add(pid)
+                for pid, (prev, _) in self._retired.items():
+                    score = self._score(s, prev)
+                    if score is not None:
+                        pairs.append(score + (i, pid))
+            self._assign(pairs, i2id, used, taken=readopted)
+            for pid in readopted:
+                previous[pid] = self._retired[pid][0]
+                del self._retired[pid]
+            self.readopted += len(readopted)
         for i in range(len(stats)):
             if i not in i2id:
                 i2id[i] = self._next
@@ -115,7 +275,19 @@ class RoomRegistry:
         for i, s in enumerate(stats):
             pid = i2id[i]
             wx, wy = cell_to_world(*s.centroid_cells)
+            inherited = previous.get(pid)
+            anchor = inherited.anchor if inherited is not None and inherited.anchor is not None else None
+            if anchor is None:
+                anchor = birth_anchor(s.mask, s.centroid_cells)
             new[pid] = TrackedRoom(id=pid, mask=s.mask,
-                                   n_cells=s.n_cells, centroid=(wx, wy))
+                                   n_cells=s.n_cells, centroid=(wx, wy), anchor=anchor)
+        if self.memory_ticks > 0:
+            for pid, room in self.rooms.items():
+                if pid not in new:
+                    self._retired[pid] = (room, self._tick)
+            self._retired = OrderedDict((pid, entry) for pid, entry in self._retired.items()
+                                        if self._tick - entry[1] <= self.memory_ticks)
+            while len(self._retired) > self.memory_rooms:
+                self._retired.popitem(last=False)
         self.rooms = new
         return self.rooms

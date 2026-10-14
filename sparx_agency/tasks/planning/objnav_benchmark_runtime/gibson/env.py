@@ -7,6 +7,7 @@ from functools import lru_cache
 
 from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.core.planning.objnav.interfaces.env import ObjNavEnv
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.measurement import EpisodeMeasurement, TERMINATION_STOP, TERMINATION_STEP_LIMIT
@@ -19,13 +20,24 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator impo
 class GibsonEnv(ObjNavEnv):
     name = "habitat/gibson-semexp-v1.1"
 
-    def __init__(self, dataset, seed=0, gpu_device=0, simulator=None, protocol=PROTOCOL):
+    def __init__(self, dataset, seed=0, gpu_device=0, simulator=None, protocol=PROTOCOL, target_override=None):
+        """
+        Args:
+            target_override: Diagnostic only. A Gibson category the AGENT is told to
+                search for instead of the episode's published goal; the evaluator
+                keeps scoring against the published goal, so success is not
+                meaningful and such a run is never publishable. Used to stress a
+                search whose target is absent from the spawn storey.
+        """
+        if target_override is not None and target_override not in CATEGORIES:
+            raise ValueError("target_override must be one of %r, got %r" % (CATEGORIES, target_override))
+        self.target_override = target_override
         self._dataset, self._seed = dataset, seed
         self.protocol = protocol
         self._camera, self._actions = protocol.camera(), protocol.actions()
         self._simulator = simulator if simulator is not None else HabitatRGBDSimulator(
             self._camera, self._actions, protocol.agent_radius_m, protocol.allow_sliding, gpu_device,
-            height_m=protocol.agent_height_m)
+            depth_holes=protocol.depth_holes())
         self._episode = None
         self._steps, self._stopped = 0, False
         self.sentinel_start_ids = []
@@ -33,7 +45,12 @@ class GibsonEnv(ObjNavEnv):
     def episode_ids(self):
         return tuple(self._dataset.episodes)
 
-    @lru_cache(maxsize=4)
+    @property
+    def target_projector(self):
+        """Optional local NavMesh geometry service, separate from evaluator data."""
+        return getattr(self._simulator, "project_target", None)
+
+    @lru_cache(maxsize=8)      # six categories per scene: every field of a scene stays resident
     def _field(self, scene, floor_id, category_index):
         episode = next(e for e in self._dataset.episodes.values()
                        if (e.scene, e.floor_id, e.category_index) == (scene, floor_id, category_index))
@@ -74,8 +91,8 @@ class GibsonEnv(ObjNavEnv):
                                       self._dataset.scenes_dir / (row.scene + ".navmesh"),
                                       row.start_position, row.start_rotation, seed)
         self._episode = ObjNavEpisode(episode_id, row.scene, self.protocol.benchmark, self.protocol.split,
-                                     row.category, self._camera, self._actions, self.protocol.max_steps,
-                                     metadata=self._scene_metadata())
+                                     self.target_override or row.category, self._camera, self._actions,
+                                     self.protocol.max_steps, metadata=self._scene_metadata())
         self._observation = self._observation_from(frame)
         if any(abs(a - b) > 1e-4 for a, b in zip(self._habitat_position(), row.start_position)):
             raise EnvContractError("Simulator changed the published episode start")
@@ -133,7 +150,8 @@ class GibsonEnv(ObjNavEnv):
                 "path_length_m": self._path, "shortest_path_m": self._shortest,
                 "start_uses_reference_sentinel": self._start_sentinel,
                 "collisions": self._collisions if self._collision_available else None,
-                "first_success_action": self._first_success_action}
+                "first_success_action": self._first_success_action,
+                "depth_holes": dict(getattr(self._simulator, "depth_hole_stats", None) or {})}
 
     def measure(self):
         if not self.episode_over:

@@ -7,12 +7,23 @@ import numpy as np
 import requests
 from scipy import ndimage
 
-from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth
+from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth, robust_mask_depth
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import detections_from_json, encode_frame
 
 STAIR_LABELS = frozenset(("stairs", "staircase"))
+
+
+class DetectorFrameError(ValueError):
+    """One frame's reply was unusable (shape, hash, a malformed box): the frame fails, the run goes on.
+
+    Distinct from the identity drift ``HttpDetector`` raises as
+    ``ObjNavInternalError`` (another vocabulary, model or configuration
+    answering), which ends the run: a malformed box in one of half a million
+    frames is a frame failure for the detector back-off, not a reason to
+    abandon a thousand episodes (review of 2026-10-07).
+    """
 
 
 class HttpDetector:
@@ -51,39 +62,68 @@ class HttpDetector:
     def detect(self, rgb):
         self.last_detections, self.last_diagnostics = (), {}
         try:
-            self.health()
+            if self._identity is None:
+                # One identity check; every /detect reply echoes classes and metadata,
+                # which are checked below, so a GET per frame bought nothing.
+                self.health()
             body = encode_frame(np.ascontiguousarray(rgb[..., ::-1]))
             response = self.session.post(self.url + "/detect", data=body,
                                          headers={"Content-Type": "image/jpeg"}, timeout=self.timeout_s)
             response.raise_for_status()
             data = response.json()
-            if (data.get("h"), data.get("w")) != rgb.shape[:2]:
-                raise ValueError("Detector boxes do not refer to the submitted frame")
+            if not isinstance(data, dict):
+                raise DetectorFrameError("Detector reply is not a JSON object")
             if tuple(data.get("classes", ())) != self.vocabulary or data.get("metadata") != self._identity["metadata"]:
-                raise ValueError("Detector was reconfigured during inference")
+                # Identity drift: another vocabulary, model or configuration is answering.
+                raise ObjNavInternalError("Detector service failed: Detector was reconfigured during inference "
+                                          "(vocabulary or model configuration changed)")
+            if (data.get("h"), data.get("w")) != rgb.shape[:2]:
+                raise DetectorFrameError("Detector boxes do not refer to the submitted frame")
             request_hash = data.get("request_sha256")
             verified = self._identity["metadata"].get("backend") in ("grounded_vlm", "hybrid")
             if (verified or request_hash is not None) and request_hash != hashlib.sha256(body).hexdigest():
-                raise ValueError("Detector verification belongs to a different submitted frame")
+                raise DetectorFrameError("Detector verification belongs to a different submitted frame")
             diagnostics = data.get("diagnostics", {})
             if not isinstance(diagnostics, dict) or (verified and diagnostics.get("mode") != self._identity["metadata"]["backend"]):
-                raise ValueError("Invalid detector verification diagnostics")
-            detections = detections_from_json(data["detections"])
+                raise DetectorFrameError("Invalid detector verification diagnostics")
+            try:
+                detections = detections_from_json(data["detections"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DetectorFrameError("Malformed detections in the reply: %s" % exc) from exc
             for detection in detections:
                 if (detection.cls not in self.vocabulary or not math.isfinite(detection.conf)
                         or not 0 <= detection.conf <= 1 or not all(math.isfinite(v) for v in detection.xyxy)):
-                    raise ValueError("Invalid detection or unexpected vocabulary")
+                    raise DetectorFrameError("Invalid detection or unexpected vocabulary")
             self.last_detections = tuple(detections)
             self.last_diagnostics = dict(diagnostics, request_sha256=request_hash) if diagnostics else {}
             self.last_inference_ms = data.get("ms")
             self.last_peak_rss_mib = data.get("peak_rss_mib")
             return detections
-        except (requests.RequestException, ValueError, KeyError) as exc:
+        except ObjNavInternalError:
+            raise
+        except (requests.RequestException, DetectorFrameError, ValueError, KeyError) as exc:
             raise ObjNavInternalError("Detector service failed: %s" % exc) from exc
 
 
-def observed_objects(observation, detections, confidence, diagnostics=None):
-    """Yield coherent centroids, not percentile depths attached to centre rays."""
+def observed_objects(observation, detections, confidence, diagnostics=None, masks=None):
+    """Yield coherent centroids, not percentile depths attached to centre rays.
+
+    Args:
+        observation: The frame.
+        detections: The boxes to project.
+        confidence: Boxes below it are recorded as ``low_confidence`` and skipped.
+        diagnostics: Optional list that receives one row per detection.
+        masks: Optional mapping ``detection -> HxW boolean mask`` from the
+            segmenter (the ``segmentation`` setting). A detection WITH a mask
+            is measured on the object's own pixels
+            (:func:`~sparx_agency.core.mapping.objects.geometry.robust_mask_depth`);
+            one mapped to ``None`` was due a mask the service could not
+            deliver this frame and is NOT measured (``segmentation_unavailable``)
+            -- with segmentation on, no box of the target is ever read the old
+            way, so the comparison between the two pipelines stays clean; one
+            absent from the mapping (another class) is measured on its box as
+            always. ``None`` (the default) is the box pipeline throughout.
+    """
     camera = observation.camera
     k = camera.intrinsics
     transform = world_T_camera_optical(observation.pose, camera)
@@ -98,25 +138,56 @@ def observed_objects(observation, detections, confidence, diagnostics=None):
         row["status"] = "invalid_box"
         if not (0 <= x1 < x2 <= k.width and 0 <= y1 < y2 <= k.height):
             continue
-        xyz = _supported_centroid(observation, detection.xyxy, transform, row)
+        mask = None
+        if masks is not None and detection in masks:
+            mask = masks[detection]
+            row["segmented"] = mask is not None
+            if mask is None:
+                row["status"] = "segmentation_unavailable"
+                continue
+        xyz = _supported_centroid(observation, detection.xyxy, transform, row, mask)
         if xyz is not None:
             yield detection.cls, xyz
 
 
-def _supported_centroid(observation, box, transform, row):
-    """Measure connected support before downsampling; a stride can alias holes."""
+def _supported_centroid(observation, box, transform, row, mask=None):
+    """Measure connected support before downsampling; a stride can alias holes.
+
+    Without a mask the depth is the box's (``robust_bbox_depth``: a low
+    percentile of the shrunken box) and the support is sought in the box's
+    central quarter. With a mask the depth is the object's own
+    (``robust_mask_depth``) and the support is sought over the whole box, on
+    the mask's pixels only: the occluder that stands inside the box -- and
+    that the box read takes for the near surface of the object -- is not on
+    the mask, so neither the centroid nor the near range can land on it.
+    """
     camera, k = observation.camera, observation.camera.intrinsics
     row["status"] = "insufficient_depth"
-    depth = robust_bbox_depth(observation.depth_m, box, min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
+    x1, y1, x2, y2 = box
+    if mask is None:
+        depth = robust_bbox_depth(observation.depth_m, box, min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        left, right = int(cx - (x2 - x1) / 4), int(cx + (x2 - x1) / 4)
+        top, bottom = int(cy - (y2 - y1) / 4), int(cy + (y2 - y1) / 4)
+        selected = None
+    else:
+        left, right, top, bottom = int(x1), int(x2), int(y1), int(y2)
+        selected = np.asarray(mask, dtype=bool)
+        if selected.shape != observation.depth_m.shape:
+            raise ValueError("mask shape %s does not match the depth %s" % (selected.shape, observation.depth_m.shape))
+        row["mask_pixels"] = int(np.count_nonzero(selected[top:bottom, left:right]))
+        row["mask_fraction"] = row["mask_pixels"] / max(1, (right - left) * (bottom - top))
+        if row["mask_pixels"] == 0:
+            row["status"] = "empty_mask"
+            return None
+        depth = robust_mask_depth(observation.depth_m, selected, box, min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
     if depth is None:
         return None
-    x1, y1, x2, y2 = box
-    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-    left, right = int(cx - (x2 - x1) / 4), int(cx + (x2 - x1) / 4)
-    top, bottom = int(cy - (y2 - y1) / 4), int(cy + (y2 - y1) / 4)
     stride = max(1, int(math.sqrt((right - left) * (bottom - top) / 900)))
     patch = observation.depth_m[top:bottom, left:right]
     valid = np.isfinite(patch) & (patch > camera.min_depth_m) & (patch < camera.max_depth_m)
+    if selected is not None:
+        valid &= selected[top:bottom, left:right]
     supported = valid & (np.abs(patch - depth) <= max(0.12, depth * 0.06))
     components, count = ndimage.label(supported)
     if not count:
@@ -126,7 +197,12 @@ def _supported_centroid(observation, box, transform, row):
     component = components == int(np.argmax(sizes))
     fraction = float(component.sum()) / max(1, int(valid.sum()))
     row.update(supported_fraction=fraction, valid_pixels=int(valid.sum()), status="mixed_depth")
-    if component.sum() < 8 or fraction < 0.35:
+    # The coherence gate (at least 35 % of the patch within the band) asks the box's
+    # central quarter whether it is ONE surface. The mask has answered that: its pixels
+    # are the object's, and a deep object seen whole -- a bed from its foot, a sofa at an
+    # angle -- spans more than the band, so on the mask path the fraction is recorded
+    # and not gated; the near-surface component still carries the centroid and range.
+    if component.sum() < 8 or (selected is None and fraction < 0.35):
         return None
     v, u = np.nonzero(component[::stride, ::stride])
     if len(v) < 8:
@@ -135,5 +211,70 @@ def _supported_centroid(observation, box, transform, row):
     optical = np.stack(((left + u * stride - k.cx) * d / k.fx, (top + v * stride - k.cy) * d / k.fy, d), axis=1)
     points = optical @ transform[:3, :3].T + transform[:3, 3]
     xyz = np.median(points, axis=0)
-    row.update(status="projected", xyz=xyz.tolist(), height_range_m=[float(np.min(points[:, 2])), float(np.max(points[:, 2]))])
+    # The range to the object's NEAR surface, not to its middle: a 10th-percentile
+    # horizontal distance of the supported points, robust to a few stray pixels.
+    # The benchmark's success radius is measured to the object, so the terminal
+    # test of the target closing reads this beside the centroid.
+    pose = observation.pose
+    near = float(np.percentile(np.hypot(points[:, 0] - pose.x, points[:, 1] - pose.y), 10))
+    row.update(status="projected", xyz=xyz.tolist(), height_range_m=[float(np.min(points[:, 2])), float(np.max(points[:, 2]))],
+               radius_m=footprint_radius_m(box, float(depth), k.fx), range_near_m=near)
     return xyz
+
+
+def clipped_box(box, intrinsics, margin_px, min_fraction=0.3, floor_cut_min_fraction=0.15):
+    """Whether ``box`` is a SLIVER at an image edge: touching it within ``margin_px`` AND narrow.
+
+    The one test behind both target gates -- the takeover's start and the
+    legacy target evidence -- so a sliver the one refuses the other cannot
+    pursue. A clipped box's depth centroid is the centroid of what is in
+    frame, not of the object, and the clipped end of a bed reads as a sofa
+    (the Ranchester bed: 84 x 210 px on the left edge of a 640 x 480 frame).
+    A box that touches an edge but spans at least ``min_fraction`` of the
+    frame in both dimensions is the opposite case -- a big object close up,
+    filling the view (the Ranchester couch from 0.7 m: 392 x 379 px) -- and
+    is not clipped in this sense: refusing it meant the takeover never
+    started from beside the couch.
+
+    **The bottom edge alone is the camera's floor cutoff, not a sliver**
+    (since 2026-10-07). A level camera 0.88 m up sees the floor from about
+    1.4 m out, so a LOW object -- a toilet, a chair seat -- at 1-2 m is cut
+    by the bottom edge on every frame while standing whole in the frame
+    laterally; its depth centroid and near edge are on the object. The
+    Allensville toilet run refused twenty-three such frames of a 0.97
+    toilet at 1.2-1.7 m, never counted two in a row and released the
+    candidate twice. A box that touches ONLY the bottom edge, whose top lies
+    in the lower half of the frame and which spans at least
+    ``floor_cut_min_fraction`` of the frame in BOTH dimensions (the toilet:
+    113 x 187 px of 640 x 480; a 60 px sliver is still a sliver), is not
+    clipped; a box also touching a side edge, or the top, is judged as before.
+    """
+    m = int(margin_px)
+    x1, y1, x2, y2 = box
+    lateral = bool(x1 < m or x2 > intrinsics.width - m)
+    top = bool(y1 < m)
+    bottom = bool(y2 > intrinsics.height - m)
+    if not (lateral or top or bottom):
+        return False
+    narrow = (x2 - x1) < min_fraction * intrinsics.width or (y2 - y1) < min_fraction * intrinsics.height
+    if not narrow:
+        return False
+    floor_cut = (bottom and not lateral and not top and y1 >= intrinsics.cy
+                 and (y2 - y1) >= floor_cut_min_fraction * intrinsics.height
+                 and (x2 - x1) >= floor_cut_min_fraction * intrinsics.width)
+    return not floor_cut
+
+
+def footprint_radius_m(box, depth_m, fx, floor_m=0.15, ceiling_m=1.5):
+    """Half the box's width at its depth, as the object's footprint half-extent.
+
+    A disc, not a box: the detector's box is an image-plane extent and the
+    agent sees the object from one side, so the plan-view shape is unknown;
+    the half-width at the measured depth is the one footprint figure the
+    frame supports. Clamped so a sliver and a wall-to-wall box both stay
+    inside the range of indoor furniture.
+    """
+    x1, _, x2, _ = box
+    radius = 0.5 * max(0.0, float(x2) - float(x1)) * float(depth_m) / float(fx)
+    return float(min(ceiling_m, max(floor_m, radius)))
+

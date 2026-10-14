@@ -110,7 +110,8 @@ def test_detector_checks_atomic_vocabulary_and_frozen_model():
 
 def test_llm_port_health_is_not_model_readiness():
     cfg = SimpleNamespace(backend="ollama", base_url="http://localhost:11434",
-                          timeout_s=3.0, model="test-model")
+                          timeout_s=3.0, model="test-model", reasoning_model="big-model",
+                          models=lambda: ("test-model", "big-model"))
     payload = {"models": []}
     raw = SimpleNamespace(cfg=cfg, sess=SimpleNamespace(get=lambda *a, **k: Response(payload)),
                           _auth_header=lambda: {}, chat_json=lambda *a, **k: {"ok": True})
@@ -118,9 +119,14 @@ def test_llm_port_health_is_not_model_readiness():
     with pytest.raises(ObjNavInternalError, match="not provisioned"):
         client.health()
     payload["models"] = [{"name": "test-model:latest", "digest": "version-one"}]
-    assert client.health()["immutable_revision_exposed"]
+    with pytest.raises(ObjNavInternalError, match="'big-model' is not provisioned"):
+        client.health()                                   # the reasoning model is checked too
+    payload["models"].append({"name": "big-model:latest", "digest": "big-one"})
+    identity = client.health()
+    assert identity["immutable_revision_exposed"] and identity["reasoning_model"] == "big-model"
+    assert identity["models"]["big-model"]["digest"] == "big-one"
     assert client.chat_json("system", "user") == {"ok": True}
-    payload["models"] = [{"name": "test-model:latest", "digest": "version-two"}]
+    payload["models"][0] = {"name": "test-model:latest", "digest": "version-two"}
     with pytest.raises(ObjNavInternalError, match="changed"):
         client.chat_json("system", "user")
 

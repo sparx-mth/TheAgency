@@ -21028,3 +21028,9 @@ Desktop.ini
 !**/tests/fixtures/**/*.log
 !**/tests/fixtures/**/*.log.*
 
+# IDE run configurations and scratch briefs. `.run/` is PyCharm's run-config
+# folder (the same per-developer state as the ignored `.idea/`) and has also
+# held one-off report generators and their rendered HTML/PNG/JPG output; the
+# docs that mention it call it unrelated to the tracked work. Nothing in it is
+# needed to run or test the repo.
+/.run/

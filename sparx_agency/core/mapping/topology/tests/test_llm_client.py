@@ -78,7 +78,9 @@ def _client(backend: str, replies: List[Any], **cfg_kw) -> LLMClient:
 def test_from_env_defaults(monkeypatch):
     for var in ("LLM_BACKEND", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY",
                 "LLM_TEMPERATURE", "LLM_TIMEOUT_S", "LLM_SEED",
-                "LLM_KEEP_ALIVE", "LLM_MAX_TOKENS"):
+                "LLM_KEEP_ALIVE", "LLM_MAX_TOKENS", "LLM_REASONING_MODEL",
+                "LLM_REASONING_TIMEOUT_S", "LLM_REASONING_MAX_TOKENS",
+                "LLM_REASONING_NUM_CTX"):
         monkeypatch.delenv(var, raising=False)
     cfg = LLMConfig.from_env()
     assert cfg.backend == "ollama"
@@ -92,6 +94,61 @@ def test_from_env_defaults(monkeypatch):
     assert cfg.seed == 0
     assert cfg.keep_alive == "30m"
     assert cfg.max_tokens == 768
+    # The reasoning route: a model the small one cannot stand in for, and the
+    # room it needs. Both models must be provisioned; the runtime checks.
+    assert cfg.reasoning_model == "qwen2.5:14b-instruct"
+    assert cfg.reasoning_timeout_s == pytest.approx(600.0)
+    assert cfg.reasoning_max_tokens == 2048
+    assert cfg.reasoning_num_ctx == 8192
+    assert cfg.models() == ("qwen2.5:3b-instruct", "qwen2.5:14b-instruct")
+
+
+def test_an_empty_reasoning_model_falls_back_to_the_default_model(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "llama3")
+    monkeypatch.setenv("LLM_REASONING_MODEL", "  ")
+    cfg = LLMConfig.from_env()
+    assert cfg.reasoning_model == "llama3" and cfg.models() == ("llama3",)
+    assert LLMConfig(model="m", reasoning_model="m").models() == ("m",), "deduplicated"
+
+
+def test_the_reasoning_route_uses_its_own_model_timeout_cap_and_context():
+    client = _client("ollama", [_ollama_reply('{"a": 1}'), _ollama_reply('{"b": 2}')],
+                     reasoning_model="big:14b", reasoning_timeout_s=900.0,
+                     reasoning_max_tokens=1500, reasoning_num_ctx=6000)
+    assert client.chat_json("s", "u") == {"a": 1}
+    assert client.chat_json("s", "u", reasoning=True) == {"b": 2}
+    small, big = client.sess.posts
+    assert small["payload"]["model"] == "qwen2.5:3b-instruct" and small["timeout"] == pytest.approx(30.0)
+    assert small["payload"]["options"]["num_predict"] == 768 and "num_ctx" not in small["payload"]["options"]
+    assert big["payload"]["model"] == "big:14b" and big["timeout"] == pytest.approx(900.0)
+    assert big["payload"]["options"]["num_predict"] == 1500
+    assert big["payload"]["options"]["num_ctx"] == 6000, "asked for explicitly: a window outgrown is truncated from the front"
+    assert big["payload"]["options"]["seed"] == 0 and big["payload"]["keep_alive"] == "30m"
+
+
+def test_num_gpu_is_sent_to_ollama_only_when_the_placement_plan_sets_it(monkeypatch):
+    client = _client("ollama", [_ollama_reply('{"a": 1}')])
+    client.chat_json("s", "u")
+    assert "num_gpu" not in client.sess.posts[0]["payload"]["options"], "None leaves the split to the server"
+    client = _client("ollama", [_ollama_reply('{"a": 1}'), _ollama_reply('{"b": 2}')], num_gpu=-1)
+    client.chat_json("s", "u")
+    client.chat_json("s", "u", reasoning=True)
+    assert all(post["payload"]["options"]["num_gpu"] == -1 for post in client.sess.posts), "every layer, both routes"
+    monkeypatch.setenv("LLM_NUM_GPU", "0")
+    assert LLMConfig.from_env().num_gpu == 0, "0 keeps inference on the CPU of a server that has a card"
+    monkeypatch.setenv("LLM_NUM_GPU", "  ")
+    assert LLMConfig.from_env().num_gpu is None
+    with pytest.raises(ValueError):
+        LLMConfig(num_gpu=-2)
+
+
+def test_the_reasoning_route_on_an_openai_backend_sets_the_model_and_the_cap():
+    client = _client("openai", [_openai_reply('{"b": 2}')], base_url="https://api.example.com/v1",
+                     reasoning_model="gpt-big", reasoning_timeout_s=120.0, reasoning_max_tokens=1200)
+    assert client.chat_json("s", "u", reasoning=True) == {"b": 2}
+    [post] = client.sess.posts
+    assert post["payload"]["model"] == "gpt-big" and post["payload"]["max_tokens"] == 1200
+    assert post["timeout"] == pytest.approx(120.0)
 
 
 def test_seed_can_be_disabled_from_the_environment(monkeypatch):
@@ -212,10 +269,20 @@ def test_retry_once_then_success(monkeypatch):
 def test_retry_exhausted_raises(monkeypatch):
     monkeypatch.setattr(llm_client_mod.time, "sleep", lambda _t: None)
     client = _client("ollama", [requests.ConnectionError("a"),
-                                requests.Timeout("b")])
+                                requests.ConnectionError("b")])
     with pytest.raises(RuntimeError, match="failed after 2 tries"):
         client.chat_text("s", "u")
     assert len(client.sess.posts) == 2
+
+
+def test_a_timeout_is_never_retried(monkeypatch):
+    """A request that ran into its timeout is still generating or wedged; a second try costs the whole
+    timeout again (20 minutes per node-oracle call at the reasoning route's 600 s)."""
+    monkeypatch.setattr(llm_client_mod.time, "sleep", lambda _t: None)
+    client = _client("ollama", [requests.Timeout("slow"), _ollama_reply('{"ok": 1}')])
+    with pytest.raises(RuntimeError, match="timed out after 30s \\(not retried\\)"):
+        client.chat_text("s", "u")
+    assert len(client.sess.posts) == 1, "one attempt: the caller's back-off takes it from here"
 
 
 def test_http_error_status_is_retried(monkeypatch):

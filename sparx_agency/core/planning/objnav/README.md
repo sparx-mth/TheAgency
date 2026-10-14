@@ -60,6 +60,13 @@ while that brings the agent closer → face the requested heading at the end.
 
 How it follows a path, and why:
 
+- **Optional heading hysteresis never narrows the geometric deadband.**
+  `ActionConverterParams.heading_hysteresis_deg` defaults to 0, with a validated
+  range of 0–2 degrees. After forward progress or an opposite turn on an unchanged
+  path, this margin can favor a forward step that reduces distance to the aim
+  over an immediate reversing turn. It never overrides blocked recovery, a new
+  path, pitch, final facing, STOP or downstream safety filters. The ObjectNav
+  runtime enables 1 degree; other callers keep the legacy behavior by default.
 - **Progress only moves forward, and stays on the leg being walked.** It is a
   high-water mark in arc length, kept on the first leg within
   `parallel_offset` (0.134 m for Habitat) of the agent, so a later leg that
@@ -83,10 +90,16 @@ How it follows a path, and why:
   still the policy's decision, taken in advance, and the only way to stop right
   after facing something without an idle turn in between.
 
-A MOVE_FORWARD that does not move the agent is reported (`forward_blocked`, one
-definition, on every result). Until a forward step moves again (or `reset()`),
-the converter aims one step ahead instead of `lookahead_m`, so a corner cut into
-a wall is not simply repeated. It never plans a detour, and it cannot rescue a
+A MOVE_FORWARD that does not advance the agent is reported (`forward_blocked`,
+one definition, on every result). Advance is measured ALONG THE HEADING the step
+was emitted with, against `blocked_epsilon_m` (5 cm, a fifth of a Habitat step):
+a simulator that slides the agent along a wall it walked into
+(`allow_sliding`, the Gibson protocol's default) moves it 4-9 cm sideways per
+step while it gains 1-3 cm forward, and a threshold on total displacement never
+fired -- 463 actions grinding on a stair-well wall in the first recorded
+multi-story campaign. Until a forward step advances again (or `reset()`), the
+converter aims one step ahead instead of `lookahead_m`, so a corner cut into a
+wall is not simply repeated. It never plans a detour, and it cannot rescue a
 path that hugs the navigable boundary: its heading is quantised to half a turn,
 so a zero-clearance route still gets blocked (on the fake building a
 zero-clearance geodesic route livelocked in 15 of 90 episodes; a

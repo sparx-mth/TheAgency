@@ -49,21 +49,28 @@ class MultiFloorDataset(DevelopmentDataset):
         generation = self.definition["generation"]
         if generation.get("policy_feedback_used") is not False:
             raise ValueError("Cross-floor generation must disclose policy independence")
+        self.start_storey = str(generation.get("start_storey", "other"))
+        if self.start_storey not in ("other", "same"):
+            raise ValueError("Unknown start_storey %r; the manifest says 'other' or 'same'" % (self.start_storey,))
         for episode in self.episodes.values():
             key = str(episode.category_index)
             region = self.definition["goal_regions"][episode.scene][key]
             points = np.asarray(region["points"], dtype=float)
             if points.ndim != 2 or points.shape[1] != 3 or not len(points) or not np.isfinite(points).all():
                 raise ValueError("Invalid frozen 3D goal region")
-            if abs(float(episode.start_position[1]) - region["height_m"]) < 1.5:
+            apart = abs(float(episode.start_position[1]) - region["height_m"])
+            if self.start_storey == "other" and apart < 1.5:
                 raise ValueError("A cross-floor episode must start on a distinct storey")
+            if self.start_storey == "same" and apart >= 1.5:
+                raise ValueError("A same-storey episode must start on the goals' storey")
             if int(region["floor_id"]) != episode.floor_id:
                 raise ValueError("Goal annotation floor does not match episode")
 
     def manifest(self):
         result = super().manifest()
         result.update(semantic_coverage="reference floor only; not complete full-building ObjectNav ground truth",
-                      cross_floor_required=True, published_benchmark_comparable=False,
+                      cross_floor_required=self.start_storey == "other", start_storey=self.start_storey,
+                      published_benchmark_comparable=False,
                       scene_audits=self.definition["generation"]["scene_audits"])
         return result
 

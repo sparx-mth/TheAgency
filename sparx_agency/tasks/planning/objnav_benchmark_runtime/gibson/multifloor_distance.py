@@ -29,8 +29,13 @@ class MultiFloorDistance:
         self._cached_position = self._cached_distance = None
 
     def success(self, position):
-        # XY overlap upstairs must never count as success downstairs.
-        if abs(float(position[1]) - self.goal_height) > 0.40:
+        # XY overlap upstairs must never count as success downstairs. The gate is
+        # the NEAREST goal sample's height, not the region's median: a split-level
+        # reference floor (Klickitat, 2026-10-05: chair samples at +0.18 m and
+        # -0.41 m) holds goal samples on both of its levels, and a STOP beside the
+        # lower-level chair read as a failure 4 cm from the region under a median
+        # gate. Storeys lie 1.5 m or more apart, so the upstairs guard still holds.
+        if float(np.min(np.abs(self.goals[:, 1] - float(position[1])))) > 0.40:
             return False
         try:
             return self.floor.distance(position) == 0.0
