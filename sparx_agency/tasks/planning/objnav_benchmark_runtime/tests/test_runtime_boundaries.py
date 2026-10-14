@@ -63,6 +63,13 @@ def test_robot_geometry_is_required_and_not_derived_from_camera_height():
         HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=float("nan"))
 
 
+def test_bridge_accepts_depth_hole_policy_alongside_body_height():
+    holes = object()
+    bridge = HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=0.7, depth_holes=holes)
+    assert bridge.depth_holes is holes
+    assert HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=0.7).depth_holes is None
+
+
 def test_habitat_pose_and_depth_conversion_use_shared_units():
     pose = habitat_pose((1, 2, 3), np.eye(3), np.eye(3))
     assert (pose.x, pose.y, pose.z, pose.yaw) == (-3, -1, 2, 0)

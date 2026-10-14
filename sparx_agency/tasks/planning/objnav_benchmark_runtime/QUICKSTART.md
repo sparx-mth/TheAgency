@@ -1,5 +1,10 @@
 # Gibson ObjectNav — end-to-end quick start
 
+> **Running the published 1,000-episode Gibson val benchmark?** Use the one-click script
+> and its guide instead: [`gibson/BENCHMARK.md`](gibson/BENCHMARK.md)
+> (`gibson/run_benchmark.sh`). This file is the step-by-step manual behind it and the
+> guide to the multi-storey *development* campaigns.
+
 Run the full ObjectNav pipeline in the Habitat simulator on licensed Gibson
 buildings: observed RGB-D mapping → YOLO-World detections → room scene graph →
 room LLM (P(target) per room) → RPT\* room order → room-search loop with A\*
@@ -136,6 +141,25 @@ CUDA_VISIBLE_DEVICES="" "$DETECT_PY" -m sparx_agency.tasks.mapping.scene_graph.s
 Check: `curl -s http://127.0.0.1:18095/health` reports `"backend": "yolo_world"`.
 (`--conf 0.05` is the emission floor the door detector needs, not a STOP threshold.)
 
+#### 2.2b Optional: the segmentation service (the `segmentation` experiment, off by default)
+
+The target's depth is read on a Segment Anything mask of its box instead of the box itself,
+so an object standing in front of the target cannot be taken for its near surface
+([README](README.md#the-targets-depth-on-its-own-pixels-the-segmentation-setting-2026-10-12-off-by-default)).
+Same venv as the detector, its own port; MobileSAM weights provisioned first
+(`"$DETECT_PY" -c "from ultralytics.utils.downloads import attempt_download_asset as d; d('$MODELS/mobile_sam.pt')"`):
+
+```bash
+CUDA_VISIBLE_DEVICES="" "$DETECT_PY" -m sparx_agency.tasks.mapping.scene_graph.serve.segmentation_server \
+    --model "$MODELS/mobile_sam.pt" --device cpu --host 127.0.0.1 --port 18096 --torch-threads 4
+```
+
+Check: `curl -s http://127.0.0.1:18096/health` reports `"backend": "sam"`. Then add
+`--segmentation --segmenter-url http://127.0.0.1:18096` to `RUN_FLAGS` (2.4); `gibson.run`,
+`run_development` and `five_scene` all take and forward them, `run.json` records the
+segmenter's identity under `method.segmenter`, and the HUD tints each target mask magenta.
+Without the flags nothing changes. `run_benchmark.sh` does all of this with `SEGMENTATION=1`.
+
 ### 2.3 Generate the frozen episodes (once per campaign)
 
 Deterministic, policy-independent starts in multi-story training buildings; extracts the
@@ -191,7 +215,9 @@ package versions and the GPU gate, and writes the frozen configuration:
 ```
 
 It exits 0 after writing the JSON (`method.detector.metadata.backend` must read `yolo_world`,
-`method.ground_truth_stairs` `true`); any refusal names the missing piece.
+`method.ground_truth_stairs` `true`, and for a multi-storey manifest `method.allow_stair_traversal`
+`true` -- `run_development` lifts the benchmark default, which forbids stairs, for that schema);
+any refusal names the missing piece.
 
 ### 2.6 Smoke run: one recorded episode
 
@@ -204,12 +230,23 @@ It exits 0 after writing the JSON (`method.detector.metadata.backend` must read 
 One line per episode is printed (`success=`, `SPL=`, `steps=`); a 500-action episode takes
 ~10 minutes with CPU services. Watch it live in `$HOME/objnav_benchmark/smoke/live.html`.
 
-#### Office GPU visual verification
+#### The GPU: let the plan decide
 
-Check `nvidia-smi` before sharing the GPU. On a sufficiently spacious office GPU,
-start the detector with `CUDA_VISIBLE_DEVICES=0`, `--device cuda:0`,
-`--clip-model "$MODELS/clip/ViT-B-32.pt"` and `--allow-shared-gpu` instead of the
-CPU settings above. Habitat uses `--gpu-device 0 --allow-shared-gpu`.
+`gibson/gpu_plan.py` hands the free VRAM out in the order the processes bottleneck --
+the LLM first, the detector second, the renderer third -- and offloads what does not
+fit to the CPU ([BENCHMARK.md section 3.1](gibson/BENCHMARK.md)); `run_benchmark.sh`
+applies it before starting the services. By hand, print it and follow it:
+
+```bash
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan --format env
+```
+
+With `OLLAMA_CUDA_VISIBLE_DEVICES=0` start `ollama serve` without `CUDA_VISIBLE_DEVICES=-1`
+(and export `LLM_NUM_GPU` as printed); with `DETECTOR_DEVICE=cuda:0` start the detector with
+`CUDA_VISIBLE_DEVICES=0 --device cuda:0 --clip-model "$MODELS/clip/ViT-B-32.pt"`; with
+`ALLOW_SHARED_GPU=1` add `--allow-shared-gpu` to the Habitat run. Check `nvidia-smi` first:
+the plan reads the card as it is, and a process that holds it after the plan was made is
+not in the plan.
 The active RPT* policy uses Python/NumPy/SciPy, not ZSON embeddings or navigation
 PyTorch tensors; CLIP here is YOLO-World's text encoder. Do not change the policy
 just to claim every component is CUDA. Ollama may also use GPU 0 when sufficient
@@ -272,6 +309,40 @@ Same services and flags; `gibson.run` reads the `val/` split and the original sc
     --explorer frontier --output "$HOME/objnav_benchmark/val" $RUN_FLAGS --preflight   # drop --preflight to run
 ```
 
+#### Five-scene campaign: N recorded episodes per validation scene
+
+`gibson.five_scene` runs `--episodes-per-scene` published episodes (default 1) of each of the
+five scenes sequentially -- the first N in official `val` split order, or with `--shuffle` a
+random N seeded with `--seed`, and with `--category <goal>` only the episodes whose published
+goal is that category (the toilet scenario in every building) -- each scene as its own
+recorded `gibson.run` job. While a job runs it tails that scene's `episodes.jsonl`, so the
+moment an episode is scored it prints `EPISODE COMPLETE` (scene, goal, SR, SPL, DTG, runtime,
+steps, termination, video path) and a `RUNNING MEAN` line over every episode so far, and
+rewrites `<output>/benchmark_results.json` (campaign identity, per-episode rows, running
+`BenchmarkSummary`) and `benchmark_results.csv`. Each scene ends with `SCENE DONE`, the campaign
+with a consolidated table (`summary.txt`, plus `metrics.csv`, `summary.json`, `index.html`).
+A scene whose job ends without a scored row prints `EPISODE FAILED` and points at its `run.log`.
+
+Stair traversal is forbidden explicitly: the campaign writes `<output>/policy_config.json`
+(`{"allow_stair_traversal": false}`), passes it to every job, and refuses a scene whose frozen
+`run.json` records anything else. It forwards `--explorer`, `--category`, `--shuffle`,
+`--allow-shared-gpu`, `--gpu-device`, `--video-fps` and the `--detector-*` options to every
+job. The 5 x 3 benchmark:
+
+```bash
+"$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene \
+    --episodes-dir "$DATA/objectnav/objectnav/gibson/v1.1/val" --scenes-dir "$DATA/gibson/val/scenes" \
+    --output runs/benchmark_15episodes_$(date -u +%Y%m%dT%H%M%SZ) --episodes-per-scene 3 \
+    --explorer frontier $RUN_FLAGS
+# the toilet scenario, three random published starts per scene (the same three for the same --seed):
+#   ... --episodes-per-scene 3 --category toilet --shuffle --seed 17
+```
+
+Known data property: some published v1.1 starts lie off the shipped navmesh surface (Darden/000000
+is 0.10 m below it), so habitat-sim 0.2.4 lifts the agent on its first action and the kinematic
+contract refuses the episode. Starts are never snapped; select another episode of that scene
+explicitly with `gibson.run --scene <Scene> --limit 1 --shards 200 --shard-index <k>`.
+
 ---
 
 ## If something refuses to start
@@ -279,6 +350,7 @@ Same services and flags; `gibson.run` reads the `val/` split and the original sc
 | message | fix |
 |---|---|
 | `Rendering GPU is occupied` | stop the other GPU process, or add `--allow-shared-gpu` (recorded in the run identity) |
+| `unable to find CUDA device 0 among N EGL devices in total` | the NVIDIA EGL library cannot see the card (a driver upgrade under the running kernel module: `nvidia-smi` says `Driver/library version mismatch`). Reboot, or render on the CPU meanwhile: `GPU_PLAN=off HABITAT_RENDER=software run_benchmark.sh …` (or `--software-render` to `gibson.run` under `unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _ …`); recorded as `renderer` in `run.json` |
 | `Reference habitat-sim is 0.1.5; installed '0.2.4'` | `--allow-sim-version-mismatch` |
 | `Requested LLM model ... is not provisioned` | `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`; check `LLM_BASE_URL` |
 | `Detector emission threshold hides door candidates` | restart the service with `--conf 0.05` |

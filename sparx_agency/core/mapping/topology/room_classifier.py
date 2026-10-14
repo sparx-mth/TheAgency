@@ -133,7 +133,9 @@ class RoomTypeClassifier:
         system = SYSTEM_PROMPT_TEMPLATE.format(label_set=", ".join(self._label_set))
         user = USER_PROMPT_TEMPLATE.format(obj_list=format_object_list(classes))
         reply = self._client.chat_json(system, user)
-        label = str(reply.get("label", "unknown")).strip().lower()
+        # "living room" / "Living-Room" are the set's ``living_room``: a model
+        # that writes the type in prose must not read as ``unknown``.
+        label = "_".join(str(reply.get("label", "unknown")).strip().lower().replace("-", " ").split())
         if label not in self._label_set:
             label = "unknown"
         try:

@@ -179,3 +179,12 @@ def test_llm_failure_propagates_and_is_not_cached():
 def test_default_label_set_has_15_labels_incl_unknown():
     assert len(DEFAULT_LABEL_SET) == 15
     assert "unknown" in DEFAULT_LABEL_SET
+
+
+def test_a_label_written_in_prose_is_read_as_the_sets_label():
+    """'Living Room' and 'living-room' are the set's ``living_room``, not ``unknown``."""
+    for spelled in ("Living Room", "living-room", " living_room "):
+        client = FakeClient([{"label": spelled, "confidence": 0.8, "reasoning": "sofa"}])
+        assert RoomTypeClassifier(client).classify(["sofa", "television"]).label == "living_room", spelled
+    client = FakeClient([{"label": "ballroom", "confidence": 0.8, "reasoning": "?"}])
+    assert RoomTypeClassifier(client).classify(["sofa", "television"]).label == "unknown"

@@ -53,7 +53,9 @@ def test_the_look_around_is_off_by_default_and_bounded_when_on(monkeypatch):
 
     policy.sweep.settings = replace(policy.sweep.settings, room_scan_turns=-1)
     policy.sweep.begin_scan(key)
-    turns = int(math.ceil(2 * math.pi / episode.action_spec.turn_angle_rad))
+    turns = policy.rotation_turns()
+    assert turns == 10 < int(math.ceil(2 * math.pi / episode.action_spec.turn_angle_rad)), (
+        "one look-around is what the camera's field of view needs to see the circle, not a body's full turn")
     commands = [policy.sweep.scan_turn(observation(episode, step), key) for step in range(1, turns + 1)]
     assert all(c.info.get("kind") == "room_scan" and c.final_yaw is not None for c in commands)
     assert [c.info["scan_turn"] for c in commands] == list(range(1, turns + 1))

@@ -7,6 +7,7 @@ import gzip
 import json
 import math
 import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -111,7 +112,12 @@ def test_fmm_matches_reference_computation(semantic):
     assert field.distance((1, 0, 0)) == 0  # exactly on success boundary
     assert field.map_cell((1, 0, 1)) == (60, 60)
     with pytest.raises(ValueError, match="outside"):
-        field.distance((-2.001, 0, 1))  # never numpy negative-index wrapping
+        field.map_cell((-2.001, 0, 1))  # never numpy negative-index wrapping
+    with pytest.raises(ValueError, match="outside"):
+        field.distance((-2.001, 0, 1), start=True)  # a published start off the map is a data error
+    sentinel = float(np.max(reference)) * PROTOCOL.map_resolution_m
+    assert field.distance((-2.001, 0, 1)) == sentinel, "an agent off the map reads unreachable, never aborts the run"
+    assert field.map_cell_or_none((-2.001, 0, 1)) is None
 
 
 def test_depth_encoding_and_coordinate_axes():
@@ -124,6 +130,15 @@ def test_depth_encoding_and_coordinate_axes():
     assert np.isnan(decoded[0, 5])
     np.testing.assert_allclose(metric_depth(np.array([[0, 1 / 3, 1.0]]), camera, True),
                                [[np.nan, 2.0, np.inf]], equal_nan=True)
+    # Depth holes (raw 0, the scan's missing geometry): enclosed ones take the surface around them BEFORE the
+    # clipping, so a screen in a wall 2 m away reads 2 m; without the rule they are no reading, as the baselines'.
+    frame = np.full((12, 16), 2.0, np.float32)
+    frame[4:8, 5:11] = 0.0
+    stats = {}
+    filled = metric_depth(frame, camera, depth_holes=PROTOCOL.depth_holes(), stats=stats)
+    assert np.all(filled == 2.0) and stats["filled"] == 1 and stats["pixels_filled"] == 24
+    assert np.isnan(metric_depth(frame, camera)[5, 6]), "no rule: dropped"
+    assert PROTOCOL.depth_hole_fill and PROTOCOL.depth_holes().max_fraction == 0.5
     p = habitat_pose((3, 2, 1), np.eye(3), np.eye(3))
     assert (p.x, p.y, p.z, p.yaw) == (-1, -3, 2, 0)
     theta = math.pi / 6
@@ -223,6 +238,45 @@ def test_shards_partition_and_invalid_selection_refused():
             select_episodes(ids, **kwargs)
 
 
+def test_shuffle_is_a_seeded_random_sample_of_the_same_pool():
+    """The toilet scenario in every building (2026-10-13): three random published starts per scene, the same
+    three on every launch with the same seed, a different three with another, never an id from outside the pool."""
+    ids = tuple("Darden/%06d" % i for i in range(33))
+    first = select_episodes(ids, limit=3, shuffle_seed=17)
+    assert first == select_episodes(ids, limit=3, shuffle_seed=17) and len(set(first)) == 3
+    assert set(first) <= set(ids) and first != ids[:3], "a sample, not the split order"
+    assert select_episodes(ids, limit=3, shuffle_seed=18) != first
+    assert sorted(select_episodes(ids, shuffle_seed=17)) == sorted(ids), "without a limit only the order changes"
+    sharded = select_episodes(ids, limit=2, shards=2, shard_index=1, shuffle_seed=17)
+    assert set(sharded) <= set(ids[1::2]), "the shard is fixed before the shuffle"
+    other_scene = tuple("Markleeville/%06d" % i for i in range(33))
+    positions = lambda picked, pool: [pool.index(p) for p in picked]
+    assert positions(select_episodes(other_scene, limit=3, shuffle_seed=17), other_scene) != positions(first, ids), \
+        "two scenes with equally large pools draw different positions (Darden/Markleeville, 39 toilets each)"
+
+
+def test_explicit_episode_ids_are_run_as_given_and_checked_against_the_pool():
+    """A re-run of one recorded episode (Darden/000190, 2026-10-13): the same start, not a fresh sample."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import explicit_episodes
+    pool = tuple("Darden/%06d" % i for i in range(200))
+    assert explicit_episodes(["Darden/000190", "Darden/000034"], pool) == ("Darden/000190", "Darden/000034")
+    for bad in (["Darden/000190", "Darden/000190"], ["Markleeville/000001"], ["Darden/000200"]):
+        with pytest.raises(ValueError):
+            explicit_episodes(bad, pool)
+
+
+def test_category_filter_keeps_only_that_goal_in_split_order():
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import episodes_of_category
+    episodes = {"S/%06d" % i: SimpleNamespace(category=("toilet" if i % 3 == 0 else "chair")) for i in range(9)}
+    ids = tuple(episodes)
+    assert episodes_of_category(ids, episodes, None) == ids
+    assert episodes_of_category(ids, episodes, "toilet") == ("S/000000", "S/000003", "S/000006")
+    with pytest.raises(ValueError, match="No published bed episode"):
+        episodes_of_category(ids, episodes, "bed")
+    with pytest.raises(ValueError, match="Unknown Gibson category"):
+        episodes_of_category(ids, episodes, "sofa")
+
+
 class StructuredLineSimulator(LineSimulator):
     """The Habitat bridge's contract: the navmesh's storeys and stairs, read once per scene."""
 
@@ -252,3 +306,22 @@ def test_reset_attaches_the_navmesh_structure_when_the_simulator_provides_it(tmp
     plain.close()
 
 
+
+
+def test_target_override_changes_only_what_the_agent_is_told(tmp_path, semantic):
+    import pytest
+    paths = write_dataset(tmp_path, semantic)
+    env = GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator())
+    episode_id = env.episode_ids()[0]
+    published = env.reset(episode_id)[0].target_category
+    published_start_dtg = env._start_dtg
+    env.close()
+    other = next(c for c in ("bed", "tv", "toilet") if c != published)
+    diagnostic = GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator(), target_override=other)
+    episode, observation = diagnostic.reset(episode_id)
+    assert episode.target_category == other and observation.target_category == other
+    # The evaluator still measures against the published goal: the start distance is unchanged.
+    assert diagnostic._start_dtg == published_start_dtg
+    diagnostic.close()
+    with pytest.raises(ValueError):
+        GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator(), target_override="car")

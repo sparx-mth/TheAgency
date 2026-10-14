@@ -33,7 +33,7 @@ def run(args):
         raise ValueError("Need exactly one recorded start-step pose")
     row = matches[0]
     x, y, z, yaw = (float(row[key]) for key in ("x", "y", "z", "yaw"))
-    policy, config = _method(args)
+    policy, config = _method(args, defaults={"allow_stair_traversal": True})   # a stair-component test takes stairs
     episode = ObjNavEpisode("diagnostic/" + args.scene, args.scene, "gibson", "stair-component-diagnostic",
                             args.target, PROTOCOL.camera(), PROTOCOL.actions(), args.steps)
     probe = PolicyProbe(policy)

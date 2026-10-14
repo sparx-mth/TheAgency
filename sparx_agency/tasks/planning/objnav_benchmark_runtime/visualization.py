@@ -62,8 +62,25 @@ def search_snapshot(policy):
                        "arrived_by": option.node.arrived_by, "leaf_m": round(option.leaf_m, 2),
                        "approach_m": round(option.approach.distance_m, 2), "distance_m": estimate.get("distance_m"),
                        "portal_id": option.portal["id"], "centroid": [float(v) for v in option.approach.xy]})
+    openings = []
+    folded = getattr(loop, "_folded_now", set())
+    for nid, option in sorted(getattr(loop, "_openings", {}).items()):
+        if nid in folded:
+            continue                      # one of a room's own frontiers: the room's walk covers it
+        estimate = dict(loop.estimates.get(nid, {}))
+        o = option.opening
+        landmark = o.kind == "landmark"
+        openings.append({"id": nid, "kind": "landmark" if landmark else "opening", "label": option.node.label,
+                         "via": option.node.via, "room_pid": o.room_pid, "door_id": o.door_id, "glimpsed": list(o.glimpsed),
+                         "landmark_id": o.landmark_id,
+                         "landmark_xy": None if o.landmark_xy is None else [float(v) for v in o.landmark_xy],
+                         "size_cells": int(o.size_cells), "heading_deg": round(math.degrees(o.heading), 1),
+                         "prob": estimate.get("prob", loop.settings.openings.landmark_prob if landmark
+                                              else graph.stair_probs.get(nid)),
+                         "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
+                         "distance_m": estimate.get("distance_m"), "centroid": [float(v) for v in o.xy]})
     objects = [{"id": lm.id, "class": lm.class_name, "count": lm.count, "xy": list(lm.xy),
-                "room": graph.room_at(world, lm.xy) if world is not None else None}
+                "room": graph.object_room(world, lm) if world is not None else None}
                for lm in policy.landmarks.confirmed()] if hasattr(policy, "landmarks") else []
     building = getattr(policy, "building", None)
     floor = {}
@@ -75,14 +92,20 @@ def search_snapshot(policy):
             "probability_model": "independent_search_success",
             "accessible_frontiers": [list(goal.xy) for goal in graph.frontier_inventory.goals]
             if graph.frontier_inventory is not None else [],
-            "warmup": {"actions": getattr(policy, "warmup_actions", 0), "budget": policy.settings.warmup_steps},
+            "warmup": {"actions": getattr(policy, "warmup_actions", 0),
+                       "budget": getattr(policy, "warmup_turns", policy.settings.warmup_steps)},
             "doorway_peek": policy.peek.diagnostics() if hasattr(policy, "peek") else {},
             "reading": dict(graph.last_reasoning.get("oracle", {}).get("reading", {})),
             "floor_id": policy.mapping.floor_id,
             "supervisor_state": supervisor.state if supervisor is not None else "?",
-            "room_in_force": loop.room_id, "local_steps": loop.local_steps, "local_budget": loop.settings.local_steps,
+            "room_in_force": loop.room_id, "local_steps": loop.local_steps, "local_budget": loop.visit_budget(),
+            "visit": loop.settings.visit, "scan": None if loop._scan is None else dict(loop._scan),
+            "explore": None if getattr(loop, "_explore", None) is None else dict(loop._explore),
+            "peek": loop.peek_state() if hasattr(loop, "peek_state") else None,
+            "glance": policy.glances.state() if hasattr(policy, "glances") else None,
+            "excluded": {str(pid): why for pid, why in sorted(loop._excluded.items())},
             "order": list(loop.order), "order_index": loop.order_index, "next_room": loop.next_room,
-            "rooms": rooms, "stairs": stairs, "objects": objects,
+            "rooms": rooms, "stairs": stairs, "openings": openings, "objects": objects,
             "floor": floor, "events": list(loop.events[-6:])}
 
 
@@ -183,7 +206,28 @@ def method_snapshot(policy):
             "doors": policy.doors.diagnostics() if hasattr(policy, "doors") else {},
             "rooms": len(graph.registry.rooms) if graph is not None else 0,
             "solver": str(solver.last.reason) if solver is not None else "not called",
+            "fallback": policy.fallback.snapshot() if hasattr(policy, "fallback") and hasattr(policy.fallback, "snapshot") else {},
             "search": search_snapshot(policy)}
+
+
+def _draw_masks(bgr, masks):
+    """Tint the target's segmentation masks (the ``segmentation`` setting) magenta and outline them.
+
+    The pixels the depth was read from, drawn under the boxes: on a frame
+    where the box holds an occluder the tint shows the object around it. A
+    box due a mask it did not get (``None``) draws nothing.
+    """
+    if not masks:
+        return
+    for mask in masks.values():
+        if mask is None or not np.any(mask):
+            continue
+        selected = np.asarray(mask, dtype=bool)
+        if selected.shape != bgr.shape[:2]:
+            continue
+        bgr[selected] = (0.55 * bgr[selected] + 0.45 * np.array((255, 0, 255), np.float32)).astype(np.uint8)
+        contours, _ = cv2.findContours(selected.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(bgr, contours, -1, (255, 0, 255), 1, cv2.LINE_AA)
 
 
 def _text(image, value, origin, width=115, lines=4, color=(230, 230, 230)):
@@ -211,6 +255,8 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
            len(snapshot.get("floor_atlas", {}).get("floors", [0])),
            len(snapshot.get("floor_atlas", {}).get("connections", []))), (12, 26), width=190, lines=1)
     rgb = np.ascontiguousarray(observation.rgb[..., ::-1])
+    if not final:
+        _draw_masks(rgb, getattr(getattr(policy, "perception", None), "masks", None))
     for detection in snapshot.get("detections", ()) if not final else ():
         x1, y1, x2, y2 = (int(v) for v in detection["xyxy"])
         ground_truth = detection.get("source") == "ground_truth"

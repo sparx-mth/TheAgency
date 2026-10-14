@@ -11,6 +11,654 @@ Format per entry:
 
 ---
 
+## 2026-10-13 — ObjectNav Darden/000190: the toilet's bathroom was "not worth a step" -- the sight ledger's pocket rule settled the unseen half of a small room, three runs in a row
+
+**Symptom:** The recorded episode (`runs/benchmark_toilet_15episodes_20261013T110223Z/Darden/recordings/ec8d17aeaaaa`)
+and two re-runs after the efficiency fixes of the day all ended at the 500-action cap with the agent having
+stood *inside the success region* -- at the bathroom door, DTG 0.0 at actions 321-333 of the first re-run,
+0.15 at action 119 of the recording -- without a detection, a frontier or an opening pointing into the room.
+The per-step record showed no `accessible_frontiers` entry anywhere in the bathroom while the final map had
+0.9 m2 of unknown there, walled on three sides, with the toilet in it.
+
+**Root cause:** `methods/sightlines.py::enclosed_pockets`: an unknown component of at most `pocket_max_m2`
+(3 m2) that does not touch the map's edge is a *pocket* and is written OCCUPIED for the frontier logic. The
+rule was written for the strip behind a bed and the blind disk under the spawn point, and its comment argued "a
+toilet does not fit in 3 m2 behind a wardrobe". From the door the camera saw the bathroom's far wall, which
+closed the unseen half of the room off from the rest of the unknown; 92 cells = 0.92 m2 -> pocket -> settled.
+No frontier, no opening, no room with `frontier > 0`, so nothing ever sent the agent through the door, and
+the frames from the threshold showed a towel rail and a mesh hole, never the toilet.
+
+**Fix / workaround:** `SightSettings.pocket_max_width_m` (0.6): a pocket is settled only if nothing could
+stand in it -- its inscribed width (twice the component's largest EDT) is under the bound -- or the agent has
+itself stood on it (the spawn island). With it the bathroom reads as two live frontier clusters of the bedroom
+(`(2.5, 4.8)`, `(3.5, 5.4)` in the re-runs). Beside it `OpeningSettings.min_cells` went 8 -> 5: the bathroom
+door was 7-8 frontier cells wide and flickered in and out of the openings between loop points.
+
+**Don't:** Do not read "the agent stood in the success region and saw nothing" as a detector failure first.
+Check the frontier record for the room the goal is in; a region that is never a frontier was settled by
+something. And do not expect the pocket fix alone to turn this episode green under the 3B oracle: with the
+frontier offered, `qwen2.5:3b-instruct` valued the bedroom holding it at 0.01 ("bedroom, entered, no toilet
+there") on every loop point of the fourth run, below `min_prob`, so RPT* never chose it. The 14B model is the
+benchmark model for a reason.
+
+---
+
+## 2026-10-12 — "unable to find CUDA device 0 among 3 EGL devices": the renderer died because `apt` upgraded the NVIDIA userspace under the running kernel module, and the iGPU is no fallback
+
+**Symptom:** Every `gibson.run` (and the `run_benchmark.sh` smoke) died in two seconds with
+`Platform::WindowlessEglApplication::tryCreateContext(): unable to find CUDA device 0 among 3 EGL devices in
+total / WindowlessContext: Unable to create windowless context`. `nvidia-smi` said `Failed to initialize NVML:
+Driver/library version mismatch (NVML library version: 595.99)`, so `gpu_plan.py` and the `gibson.run` GPU gate
+died too -- while `torch.cuda` in the detector venv allocated on the card without complaint.
+
+**Root cause:** `/var/log/apt/history.log`: `nvidia-driver-595-open` 595.91.07 -> 595.99.02 at 09:46, seventeen
+minutes after boot; `/proc/driver/nvidia/version` still said 595.91.07 and DKMS had the 595.99 module built for the
+next boot. CUDA tolerates the skew, NVML and the NVIDIA EGL vendor do not: with
+`__EGL_VENDOR_LIBRARY_FILENAMES=10_nvidia.json` forced, `eglQueryDevicesEXT` returned **zero** devices, so the three
+EGL devices glvnd listed were all Mesa's (the NVIDIA card through a driverless Mesa device, the Intel iGPU, and
+`EGL_MESA_device_software`), none carrying `EGL_CUDA_DEVICE_NV`, and habitat-sim's `gpu_device_id=0` CUDA match
+had nothing to match. The obvious fallbacks failed for reasons worth knowing: `gpu_device_id=-1` (no CUDA match,
+EGL device 0) created a context on the **Intel iGPU** and rendered **black RGB with valid depth** -- Magnum's GPU
+validation showed `GL_OUT_OF_MEMORY in glTexStorage2D(texture too large)`: a Gibson `.glb` is one mesh with one
+**16384 x 16384 JPEG** texture, which iris cannot allocate (hiding the ASTC extension so Basis transcodes to BC7
+changed nothing: the texture is a JPEG); `LIBGL_ALWAYS_SOFTWARE=1` segfaulted at context creation (kms_swrast over
+the driverless NVIDIA node); and `MAGNUM_DEVICE=2` was ignored -- habitat fixes Magnum's device to 0 (`found 3 EGL
+devices, choosing device 0`), so the software device is unreachable while any hardware device is enumerated.
+
+**Fix / workaround:** The reboot (the DKMS module is built). Until then, `gibson.run --software-render`
+(habitat `gpu_device_id=-1`, GPU gate skipped, `renderer` recorded in `run.json`) under an unprivileged user
+namespace that hides the DRM nodes, so Mesa enumerates ONLY its software device and habitat's device 0 is
+llvmpipe: `unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _ python -m ... gibson.run
+--software-render ...`. `run_benchmark.sh HABITAT_RENDER=software` (with `GPU_PLAN=off`, since the plan needs
+`nvidia-smi`) does exactly that for the run, the preflight and the five-scene campaign, and `record_episodes.sh`
+re-wraps a run whose argv carries `--software-render`. Measured: a Wiconisco frame renders correctly (door,
+refrigerator, textures) at ~30 ms a step on llvmpipe (LLVM 20, 32 threads), with ~1.3 GB of RAM for the texture
+and its mips per simulator process -- the renderer was never the bottleneck, the CPU LLM is. The former
+`HABITAT_SOFTWARE_RENDER=1` path (`LIBGL_ALWAYS_SOFTWARE=1`, device unchanged) never rendered on software and
+now routes to this.
+
+**Don't:** Don't reload the kernel module to "fix" the skew on a laptop whose desktop (gnome-shell on Wayland)
+holds `/dev/nvidia0` -- it needs root and ends the session. Don't trust an RGB frame by `max() == 255`: the alpha
+channel of habitat's RGBA sensor is 255 everywhere; check the mean and std of the first three channels. Don't
+read `torch.cuda.is_available()` as "the GPU stack is fine": CUDA, NVML and EGL are three libraries with three
+tolerances for the same skew. And don't run the Intel iGPU as a renderer for Gibson even when it creates a
+context: the depth comes back plausible and the RGB is black, which the detector reads as an empty scene with
+no error anywhere.
+
+---
+
+## 2026-10-11 — A more accurate target memory made a success fail: the standoff re-selection threw away a goal that had a path
+
+**Symptom:** The regression check of the toilet closing rules on the nine inspection slots
+(`runs/gibson_val_20261008T120112Z.inspection` vs `.inspection-fix`) came back 2 improved, 6 identical, and one
+REGRESSED: tv Collierville/000194 went from SR 1 (STOP at action 253, SPL 0.25) to SR 0 (step limit, final DTG
+4.14 m). Nothing about the television, the rooms or the LLM had changed -- the two decision logs are identical
+through action 237.
+
+**Root cause:** From action 238 the along-ray association cylinder (`association_depth_m`) kept the real
+television's frames that the old 0.50 m sphere about the anchor had dropped (`depth_associations` 11), so the
+3-D memory was refined by 0.11 m toward the true position. At action 242 that drift crossed `refine_distance_m`
+(0.15 m) from the reference the standoff goal was selected at, and `TargetApproachPath` did what it always did on
+a refinement: dropped the goal and re-selected one from a bearing-relative ring (8 offsets) about the new
+position. The ring is a *different set of points*, each needing a navmesh projection and an A* path, and from
+(0.94, 1.36) none of the eight had one -- while the dropped goal at (-0.28, 2.51), 0.84 m from the refined
+memory, still did. Five pathless actions later the lock was released as "no safe path from here" (a boxed-in
+release), the agent walked away, re-took the television from 4 m and released it the same way again. The
+baseline only succeeded because its memory never moved: at action 246 a bottom-cut box of something else
+0.95 m away was associated through the anchor, pulled the memory 0.4 m, and the OLD goal walked the agent into
+the success region by luck. Two smaller things on the way: after a failed re-selection `reference_xyz` stayed
+stale, so `goal_refinements` climbed by one every action (3 -> 8 in five actions, meaningless); and the goal
+ring's radius is `terminal_distance_m - goal_tolerance_m - resolution` = 0.70 m, so a 0.15 m memory shift can
+push a goal that was fine past the 0.75 m selection limit by construction -- the rule was tuned for selection,
+not for keeping.
+
+**Fix / workaround:** `TargetApproachPath.command` keeps a standoff goal through a refinement when it still
+lies within `terminal_distance_m` (1.0 m) of the refined memory -- arriving there puts the agent inside the
+terminal radius, which is all a standoff is for, and the inspection reads the fresh range from there
+(`kept`, `goal_kept` in the diagnostics) -- and re-references on every refinement. A kept goal that a slow
+drift carries past the terminal radius is re-selected the action it falls out (`stale`), reference or no
+reference. `test_reobservation_refines_goal_but_missing_frames_do_not` pins all three.
+
+**Don't:** Don't read "the re-run reproduced the original" (`--expect same`) as "the closing behaved the
+same" -- compare the phase timelines; the baseline STOP here was a different mechanism (a history STOP on a
+memory pulled by a stranger's box) from the one the fix would have needed. Don't revert an association
+improvement because a downstream consumer happened to depend on the old memory standing still; find the
+consumer that cannot take a moving input. And don't treat a re-selection as free: every selection needs a
+navmesh projection and a path, and a point that had both is worth more than eight that might.
+
+---
+
+## 2026-10-11 — Nine failure recordings of the full Gibson run: the toilet was in the frame at 0.92 confidence and the inspection "saw nothing"
+
+**Symptom:** toilet SR 0.288 over 208 episodes (131 of 132 failures were 500-step timeouts, median final DTG
+4.5 m), couch SR 0.41 in Wiconisco against >= 0.86 elsewhere, tv/bed successes with SPL 0.07-0.25. Nine
+representative episodes were re-run with `--record` (`runs/gibson_val_20261008T120112Z.inspection/`, all nine
+reproduced on the first attempt) to look for corridor bottlenecks and skipped doorways (toilet), the misleading
+entity (couch) and bad RPT* room orders (tv/bed). The decision logs answered before the videos were watched.
+
+**Root causes (from `steps.jsonl` + the evaluator's `trajectory.csv`, which has the true DTG per step):**
+- **Toilet timeouts are not search failures.** In all three, the agent found the toilet, walked up to it
+  (true DTG 0.00 -- standing inside the success region), ran INSPECT and released it with `inspection saw
+  nothing in any view`, then spent the remaining 315-458 actions elsewhere (Darden/000193 did it twice, at 132
+  and 409). The detector had the toilet in every one of those frames at confidence 0.90-0.96. What the
+  inspection counted as nothing is a box touching the **bottom edge of the frame** (`y2 >= 479`): a toilet is
+  ~0.4 m tall, the camera is at 0.88 m with a 63-degree vertical field and the Gibson action set has no
+  LOOK_DOWN, so at the closing's inspection range (1.2-1.6 m) the toilet's base is always below the frame and
+  its box is always bottom-cut; the border rule (meant for things half out of the picture) then rejects every
+  view. Whole run: 93 of the 148 toilet failures (63 %) had locked on and released a candidate -- 40 with this
+  exact release as the last one, 23+11+7 with the `unverified` family -- and only 53 (36 %) never sighted a
+  toilet at all. A STOP at the moment of release would have made all three recordings successes.
+- **Couch false positives: no inspection happened.** Wiconisco/000123 STOPped at action 2 and /000010 eight
+  actions after the sighting, both on `fresh terminal target confirmation` at 0.8-0.9 m -- the terminal path
+  accepts a 'sofa' box without the inspection the toilet gets; /000114 ran 27 INSPECT frames, could not decide
+  and STOPped on `inspection exhausted` = accept-by-default. Two of the three (000123, 000114) locked on the
+  **same object** at world (0.4, 5.7), 0.35-0.63 m high, 2.7-9.8 m from any annotated couch; 000010 on another
+  at (5.5, -3.6). The detector reports it as 'sofa' at 0.81-0.93 (and 'couch' 0.78-0.91): the frames
+  (`_verify.jpg`/`_stop.jpg`) decide whether it is a bench/daybed or a real sofa the SemExp annotation lacks.
+- **Low SPL is not RPT* ordering.** Collierville/000043: the *real* TV was in view from action 1 at 3.9 m and
+  the closing released it four times with `no safe path from here` (the success is incidental: inside 1 m when
+  the budget ran out). Collierville/000194 and Corozal/000133: three false candidates each (a 'television' at
+  2.6-4.7 m from the real one; three 'beds' at 0.6-0.8 m range, all at 0.72-0.84 m height -- table height, not
+  bed height), each costing a 13-action BACK_OFF plus a 13-action VERIFY before an `unverified` release
+  (~75 actions per episode), the real target found at 222 / 448. In 000194 the real TV was also seen at action 3
+  and released `unverified`. The rooms the oracle ordered were few and mislabelled (Corozal: 7 of 12
+  `living_room`); the time went to the closing, not to the order.
+
+**Fix / workaround:** pending -- the recordings exist so the fix is chosen on evidence, not on this entry.
+The candidates, in order of expected yield: (1) in the inspection, accept a box cut **only at the bottom** when
+its top edge is well inside the frame -- for a floor-standing object at close range that cut is geometry, not
+occlusion; the bearing is sound and the range can be read from the box's upper part (or inspect low classes
+from >= 1.5 m, where the toilet fits); (2) make the terminal confirmation of a sofa/bed-height candidate go
+through the same inspection a toilet does, and never accept on `inspection exhausted`; (3) treat `no safe path
+from here` to a visible target as a planning problem (goal projection / inflation), not a release. Measure each
+on the 148 toilet failures and the 18 Wiconisco couch STOPs before touching defaults.
+
+**Don't:** Don't take a timeout with a far final DTG as "never found it" -- the lean record's `target_closing`
+counters (`releases`, `inspection_releases`, `last_release`) say whether it was found and let go, at no cost.
+Don't read the recording's `decision.info.distance_to_goal_m` as the score: it is the agent's own number
+(0.00 at action 0); the evaluator's is `trajectory.csv`. Don't infer "the agent reached it" from the closing's
+range alone either -- cross it with the true DTG, as above. And don't widen the border rule globally: it exists
+because a box cut at the top or the sides has no trustworthy centre.
+
+---
+
+## 2026-10-11 — The full Gibson run died at episode 919 of 1,000: one published start lies 3.3 cm outside the navmesh, and a turn "moved" the agent
+
+**Symptom:** `runs/gibson_val_20261008T120112Z`, 36 h in, 918/1000 done (SR 0.666): `EnvContractError: episode
+'Wiconisco/000118', action 1: TURN_LEFT should turn in place (move at most 0.020 m), but the agent moved 0.033 m
+(0.033 m across the floor at -73.3 deg from its heading, +0.000 m up)`. The supervisor replayed the run with
+`--resume`; it died on the same line, and -- correctly -- was not relaunched a third time. The launcher's
+exit trap had also killed the detector and the Ollama; the supervisor restarted both from its snapshot.
+
+**Root cause:** The 2026-10-07 fix for off-mesh published starts excused the *vertical* placement
+(`settle_m`, 0.30 m) and kept "the horizontal bounds stand". Measured against all 1,000 starts with the
+shipped navmeshes (`PathFinder.snap_point` / `try_step(start, start)`), exactly one, Wiconisco/000118, lies
+**outside the mesh horizontally** -- 0.033 m, the only start `is_navigable` rejects; the other 999 are on it
+to the millimetre. In habitat-sim 0.2.4 `turn_left`/`turn_right` are registered as *body* actions, so the
+step filter runs for a turn too and `try_step(start, start)` returns the nearest point *of the mesh*: the
+warm-up turn pulled the agent 3.3 cm onto the edge (and 6.4 cm down -- excused). A kinematic self-check
+refusal is an `EnvContractError`, not an agent error, so it leaves `run_benchmark` and ends the run. Two
+things the earlier entry got wrong on the way: "turns bypass the navmesh filter" (they do not -- Darden/000000
+is lifted 0.10 m by its first *turn*, which the runner's "first action that displaces the agent" rule
+absorbed by luck of phrasing), and that the start validation at preflight would catch a bad start (it
+audits the FMM field, not the navmesh).
+
+**Fix / workaround:** `KinematicTolerance.settle_xy_m` -- the horizontal counterpart of `settle_m`, taken off
+the first action that moves the agent along its own direction, up to the bound; Gibson sets 0.05 m (one map
+cell, the width `forward_overshoot_m` already allows a step), measured: 0.033 m is the only non-zero value
+in the split. Finishing the run then needed a resume whose frozen configuration differed from the recorded
+one in `kinematics` and `source_sha256` -- which the harness refuses, rightly, by default. The honest path
+was an *explicit, bounded, recorded* exception: `MetricsLogger(accept_changes=...)` /
+`gibson.run --resume --resume-accepting-changes kinematics source_sha256` (choices limited to
+`RESUMABLE_CONFIG_CHANGES`: `kinematics`, `source_sha256`, `gpu_plan` -- provenance, or a self-check that
+only refuses an episode, never an input to a decision or a score). The recorded config stays the run's;
+the resume's `run.json` entry carries `config_changes` with both values; `comparison.md` / `audit.json`
+title and disclose it; the supervisor passes it via `RESUME_ARGS`. Verified before relaunch: the replayed
+preflight differed in exactly those two keys and the logger accepted the resume without writing. The run
+continued past 000118 (chair, SR 1, 32 actions) on 2026-10-11 05:07Z.
+
+**Don't:** Don't excuse a first-action displacement without a bound -- the point of the contract is to catch
+a sim that moves on a turn. Don't widen `position_m` (the turn-in-place bound) instead: every turn of every
+episode would then tolerate 5 cm of drift. Don't make the resume comparison lenient by default or silently
+drop keys from it -- the override is named per key, per resume, in the record. Don't trust a protocol
+docstring's account of the simulator's mechanics without measuring: `try_step(start, start)` takes one line.
+Follow-up: a preflight check that reports starts off the mesh beyond `settle_xy_m` *before* a day of compute
+(the measurement script is three loops over `PathFinder`).
+
+---
+
+## 2026-10-08 — A Gibson run cannot be resumed by the script that launched it, and three edits that would kill a day-long run
+
+**Symptom:** Preparing to supervise the 1,000-episode `runs/gibson_val_20261008T120112Z` unattended, the
+documented resume -- `run_benchmark.sh --output <dir>` -- would have been refused as "cannot resume with a
+different config (gpu_plan differ)" the moment the run died, although nothing about the experiment had changed.
+
+**Root cause:** `MetricsLogger._resume` compares the *entire* config text to the recorded one, and the config
+embeds the whole `gpu_plan.json` -- `free_mib`, `used_mib` and the "fits: N MiB of M left" reasons. The
+launcher re-runs `gpu_plan.py` on every start, so the numbers are whatever the card happens to hold at
+that second (949/23103 MiB at 12:01, 916/23136 at 12:06 for the same machine). The config also embeds
+`source_sha256`, the hash of **every `.py` under `sparx_agency/`** (`run.py::source_fingerprint`), tests
+and tools included. Two consequences nobody had written down: (1) under `GPU_PLAN=auto` the script's
+resume essentially never passes; `GPU_PLAN=off` does not help either (its plan record is `source: none`,
+which differs too); (2) adding or editing *any* `.py` in the package while a run is going -- a new helper,
+a test -- makes that run unresumable, forever. And a third hazard found on the way: bash reads a running
+script incrementally, so editing `run_benchmark.sh` while its `bash` is blocked in the `gibson.run | tee`
+pipeline corrupts what it executes after the pipeline (the summary step, the exit code).
+
+**Fix / workaround:** The resume that reproduces the configuration byte for byte replays the *original
+processes*: `gibson/supervise_benchmark.sh` snapshots the live `gibson.run`, detector and Ollama (argv,
+environment, cwd from `/proc/<pid>/`) into `<output>/replay/`, restores `gpu_plan.json` to the recorded
+one, and relaunches the saved argv + `--resume` under the saved environment via `os.execvpe`. Verified
+non-destructively: the replayed argv with `--preflight --resume` produced a `configuration` identical to
+`run.json`'s. Rules for the run's lifetime: no `.py` edits under `sparx_agency/` (the supervisor itself is
+a `.sh` for exactly this reason), no edits to a `.sh` that a live bash is executing (restart the stateless
+supervisor instead), and a new `.py` only once `summary.json` exists. The proper fix -- `_gpu_plan_record`
+dropping the volatile keys, or the resume comparison excluding provenance -- is a `.py` change and so waits
+for the run to finish.
+
+**Don't:** Don't read "It resumes" in BENCHMARK.md (before 2026-10-08) as tested for the auto-plan path --
+it held only for `GPU_PLAN=off` runs whose services were still answering. Don't `cp /proc/<pid>/cmdline`
+and expect to overwrite it later: the copy inherits the `r--r--r--` mode (`cp --no-preserve=mode`). Don't
+expect `tr ... < /proc/<pid>/environ 2>/dev/null` to be silent for another user's process: the
+redirection fails before `2>` applies; test `-r` first.
+
+---
+
+## 2026-10-08 — The 3x3 on Darden/Markleeville/Wiconisco: a manoeuvre that looped, a capsule that closed a corridor, a toilet that left through the floor
+
+**Symptom:** `runs/benchmark_9episodes_20261008T082632Z`: SR 6/9. Markleeville/000000 and /000001 (bed)
+spent 106-114 actions in `target_back_off` and 69-97 in `target_verify` -- six to eight backing manoeuvres,
+each ending `action bound reached`, each followed by an `unverified` release and a re-takeover of the same
+0.73 m-high surface read as a bed -- then STOPped on it, 5-6 m from the real bed. In /000000 the stair
+capsule also cut the 0.55 m corridor between the stairwell and the wall to a 0.25 m gap (75 free cells
+beyond it unreachable). Wiconisco/000000 (toilet) saw a bottom-cut box at 1.32 m, took the verification
+step toward it, lost it through the bottom of the frame, and repeated that four times before releasing.
+
+**Root causes and fixes:** (a) the manoeuvre's arrival test (0.25 m) was tighter than the converter's, so
+at 0.25 m from the goal the route read complete, the idle result became a TURN, and eleven turns on the
+spot spent the bound -- arrival is now the converter's tolerance plus half a step, or three idle actions
+while facing the goal, with a retreat budget of two half-turns plus the steps. (b) The re-verification swept
+without re-seeing the box; the release was `unverified`, which `override_confidence` (0.80) bypasses, and
+the search walked two steps back to the same spot -- the loop. One manoeuvre per anchor
+(`backoff_repeats`), and a candidate the wider perspective never confirmed is released as
+`unverified from a wider perspective`: the failed-inspection radius, no override, refused from twice the
+same-spot radius. The re-fly then showed two more holes in the same wall: the *legacy* target pursuit
+walked to the disproved table and STOPped on it nine actions after the closing had given it back
+(`refuses_far_candidate` only bound far candidates -- now every release that disproved its candidate from
+close binds it at any range), and without a manoeuvre to spend, the same surface was re-taken 35 times
+through the `unverified` override (the second unverified release of one anchor now escalates to
+`unverified again`, non-overridable). With both, Markleeville/000001 found the real bed (SR 1, 331
+actions); /000000 still STOPped on a `bed` whose surface stands 0.56 m above the base -- a mattress
+height, inside every band -- which no geometry check separates from a bed. (c) The fixed capsule margin (0.6 m plus a cell) double-counts the body radius the
+planner inflates by anyway; `adaptive_capsule` shrinks it per flight until no body-passable region is
+split or erased (0.3 m there). (d) `_approach_pitch` on every step toward the target -- the pitch for
+where it will be after the step -- and, in the LOOK-less Gibson protocol, no verification step that
+pushes a bottom-cut box out of the frame (`_step_keeps_box`); a fresh near edge inside the terminal
+radius is terminal evidence wherever the centroid is, and a fresh centred reading beyond it resumes the
+approach instead of spinning out the budget. The false `bed` itself -- a table top at 0.73 m -- stands:
+`target_context.CLASS_HEIGHT_BANDS` flags a bed surface too LOW (a counter), not too high.
+
+**Don't:** don't let a manoeuvre's own arrival rule disagree with the converter's -- the converter decides
+when a route is done and what idle looks like. Don't make a release overridable when it came from a second
+viewpoint; the override exists for *far* flickers. Don't trust a 40 px synthetic box at 0.8 m in a test:
+a real detector's box reaches the floor and is cut by the bottom edge, and `clipped_box` has a rule for
+exactly that. And don't predict a turn's effect on a box horizontally only: a low box stretches toward the
+bottom edge by cos(b)/cos(b').
+
+---
+
+## 2026-10-08 — The stair mask trapped the agent: a capsule of "genuine" obstacles with the agent inside it
+
+**Symptom:** `runs/smoke_gpu_plan_20261008T070438Z` (Collierville/000000, toilet): the agent
+walked a doorway peek past the foot of a staircase, the connector was placed at action 190, and from
+action 191 the exploration fallback printed `off the observed passable map; the idle turn is the
+only move` for the remaining 309 actions -- `hold: 309` in `exploration_fallback.stats`, `footing: 0`
+(the floor around the agent was *known*, so no footing sweep), the closing never engaged, SR 0 at
+the step limit. The recorded planning grid showed the agent's cell `occupied`, inside a smooth
+1.3 m-wide capsule running along the flight's centreline and 0.65 m past its foot into the room.
+
+**Root cause:** `peek_stairs.stair_peek_mask` rasterises each seen connector polyline clipped to
+`height ± departure_m` (0.45 m) with a capsule radius of body radius + arrival tolerance + one cell
+(0.53 m -> 6 cells of 0.1 m = ±0.65 m), and `SpawnFloorGuard.observe` writes that into the planning
+world as `occupied`. The polyline begins *on the floor* at the foot anchor (z = storey height), so the
+floor in front of the stairs was in the band, and the capsule covered the corridor the agent used to
+pass the foot 0.60 m from the centreline. The weighted A* relaxes a blocked start only for its own
+cell and its inflation *skirt* -- cells "lethal but not truly occupied" -- and the mask cells are
+truly occupied by construction, so every plan from inside the capsule returned `NO_PATH`;
+`peek_planning_world` re-applied the same capsule for the fallback's own plans. The hold rung has no
+recovery: the idle turn does not change the map, so the episode was over at action 191.
+
+**Fix:** two rules in `peek_stairs` (and the guard, which combines stairs with observed drops):
+the floor run of a flight within `FLOOR_RUN_M` (0.10 m) of the storey plane is not drawn (the treads
+above and below still are), and the cells within body radius + one cell of every pose the agent has
+taken on the storey -- `SightLedger.walked_mask`, plus the current pose, which the ledger records only
+after the world is confined -- are carved out of the mask (`walked_exemption`, counted as
+`walked_exempt_cells`). The agent was physically there; nothing written for planning may outvote
+that. Regression: `test_spawn_floor_guard.py::test_an_agent_inside_the_stair_capsule_...`.
+
+**Don't:** don't widen `_clear_start_footprint` to open "genuine" obstacles around the start -- that
+is the one guarantee that A* never threads a real wall; the mask had to stop claiming the cell
+instead. Don't read `footing: 0` as "the agent could see its feet": a mask makes the blind disk
+*known*, which is why the footing sweep -- the rung meant for exactly this -- never ran. And don't
+compare this run's SR with the morning's CPU run of the same episode as evidence about the closing
+changes made the same day: the detector on CUDA and the LLM on the GPU give different numerics,
+the search diverged before any target was seen, and the failure was in a module neither change
+touched.
+
+---
+
+## 2026-10-07 — The Allensville frame-by-frame audit: four failures that were not where the video said they were
+
+**Symptom:** Three recordings of the 5x3 benchmark (`runs/zson-benchmark-5x3-20261005/campaign/frontier/
+Allensville`) read as: table objects not registered; a room graph with R0 alone for 30 actions, then R0
+and R2 with no R1; a kitchen island STOPped on as a `bed`; a strong bathroom valued 0 for a toilet; a
+0.95 toilet ignored at 2.4 m; the approach to it turning in place and reverting to exploration.
+
+**Root causes (from `steps.jsonl`, not from the video):**
+- The table's vases projected with valid depth and were dropped as `same_frame_association`: the
+  landmark map associated ANY class within 0.70 m of a landmark's centroid, and the fused cabinet had
+  already been fed that frame. The same rule voted a toilet (4 votes) and the bathtub 0.5 m beside it
+  into one landmark, which flipped to `bathtub`, released the toilet's lock as "contradicted by the
+  map" with a 2 m rejection radius -- which is why the 0.95-0.97 toilet in plain view at 2.39 m was
+  refused nine frames running (beyond `rejection_min_range_m`).
+- The pid followed the LARGER half of a split (the IoU rule): the spawn room was R0, became R1 when a
+  door 0.5 m away cut it off, merged back as R0, and re-split as R2 after the 10-tick memory had
+  expired, while the hallway the agent had just walked into carried R0 and the spawn room's
+  "entered" record. The step-40 "doorway" is a uniformly narrow hallway (0.30-0.50 m clearance for
+  forty actions on the saved map) -- no partition could have split it there; the far rooms appear at
+  step 80 when their floor is first seen.
+- The counter front read as `bed` had its supported points 0.67-0.70 m above the agent base (every
+  real bed of the run: 0.11-0.52 m) inside a STRONG kitchen, and locked on two frames from one spot.
+- The bathroom's 0 was not the type prior: the warm-up spin at the spawn point "saw" >50 % of its
+  cells through the door (`scanned:seen_from_scan`) and finished it with the bathtub inside.
+- Within 2 m a toilet's box always touches the BOTTOM image edge; `clipped_box` called that a
+  sliver (`border_rejections` 3 -> 26), no fresh frame counted, the ±30-degree sweep ran for 12
+  actions and released `unverified`, twice. And at 1.18 m a centred, counted frame was followed by
+  TURN_LEFT: the hold was satisfied, idle, and the headless agent executes idle as a turn.
+
+**Fixes:** classes never merge in the landmark map (no class vote; a cup on a table is two instances),
+same-class instances told apart by size (0.35 m centroid floor, footprint IoU 0.25); a height-aware
+same-frame rule; the bottom-edge floor cutoff is not a sliver; birth anchors and an episode-long memory
+in the room registry; walked-through clearance dips carved like snapped doors; the home-object floor
+and the no-finish-from-outside guard; `override_confidence` 0.80 past the unverified/map memory; the
+context check (room type, height band) with a four-frame, two-viewpoint lock; a verification frame
+that keeps the box whole with the pitch following the target's elevation (LOOK_DOWN below the camera,
+LOOK_UP above -- a fixed look-down drove a wall-mounted television out of the frame), and the same
+dynamic pitch on the close approach inside 1.3 m. Progress entry 024.
+
+**Don't:** read "the lock was wrong" off a map release without checking what landmark the anchor fell
+on -- a neighbour of another class within 0.70 m was enough to outvote it. Don't let classes merge in
+the object memory at all: every cross-class rule the map had (centroid radius, then footprint overlap)
+collapsed something resting on or beside something else. Don't take `scanned:*` for the type prior in
+the HUD; `excluded` says which. Don't hand a VERIFY candidate a hold that is already satisfied -- in
+Habitat idle is a turn -- and don't hardcode the direction of the LOOK that replaces it: the target's
+elevation decides. And on this machine `.venv/bin/python` has no pytest; the shell's `venv/bin/python`
+(3.12, pytest 7.4, numpy 1.26) is the one that runs the suites.
+
+---
+
+## 2026-10-07 — Before the 1,000-episode run: the harness itself would have ended it, and the budget went to peeks
+
+**Symptom:** a review of the Gibson adapter before the full val split found that the kinematic
+contract -- our own self-check, not the scorer -- raised `EnvContractError` out of `run_benchmark` on
+(a) a published start settled onto the navmesh by habitat-sim on the first translation (starts lie up
+to 0.28 m below the mesh; Darden/000000 0.10 m) and (b) an on-mesh forward step that climbs more than
+0.20 m, which the shipped Collierville/Wiconisco navmeshes do about once in 300 steps (treads, split
+levels inside the storey). Either ends the run, and a `--resume` replays the same refusal for ever.
+Two smoke episodes then spent 247 of 500 actions on ten doorway peeks and 120 on target verification
+(18 and 10 releases) for one bed.
+
+**Root causes and fixes:** `KinematicTolerance.settle_m` (0.30, additive, on the first action that
+moves the agent -- turns bypass the navmesh filter, so with a warm-up rotation that is action ~13,
+not action 1) and `climb_m` 0.60 for Gibson; a near candidate released from the spot the agent still
+stands on is the same evidence and is refused until it moves; a completed peek covers the cone it
+looked into so the frontier it reveals through the same door is not a new opening; the oracle is told
+that unexplored places share the chance of the rooms still missing (0.35 on each of fourteen doorways
+became 0.20 on each of six -- still generous; the peek's real price is the walk, charged as travel).
+
+**Don't:** key a "first action" excuse to `sent == 1`; trust that a 14B on a 32-thread CPU is cheap --
+64 s median per oracle call, 14 calls, 15 of a 21-minute episode; or read a `pass` verdict the model
+never wrote: a missing key is the first pass, never the second.
+
+## 2026-10-05 — The 5x3 same-storey benchmark: eight failures, five mechanisms, none of them the reasoning
+
+**Symptom:** `runs/zson-benchmark-5x3-20261005`: SR 7/15, SPL 0.27, DTG 3.6 m. Every success was a
+STOP at an annotated instance in 59-299 actions. The failures: two STOPs at a kitchen counter front
+read as `bed` from 0.55 m (one at action 2, the real bed in view behind it); 160 actions of
+MOVE_FORWARD into an obstacle the map did not show, locked on a real sofa, until the closing's
+160-action bound raised an agent error; 350 actions wedged on a transit, the pose jittering 5-10 cm;
+a loop transit that walked down an unseen staircase into the basement; two Klickitat episodes in a
+split-level house standing on a half-level the floor band did not recognise (361 idle turns; 319
+relocations); two large floors that ran out of budget peeking openings.
+
+**Root causes and fixes:** (a) the STOP rule takes two frames of a target-class box at terminal range
+and the map had no other landmark at the counter to outvote it -- a detector limit, left as the
+user's design call (a VLM look, or a first sighting from farther away); (b) the closing had no
+stall clock -- added (`approach_stall_actions`); (c) the policy's blocked clock was reset by any
+5 cm displacement, which a collision slide provides -- now 60 % of a forward step; and a BLOCKED
+opening was re-chosen by the supervisor's escape hatch at one oracle call per seven actions -- now
+retired; (d) the stair-blocked planning world covers seen stairs on fallback routes only; (e) the
+floor band is anchored to one storey height, so a half-level 0.5 m down is neither floor nor obstacle.
+
+**Don't:** read "an upper floor" off a storey's rank alone -- the first launch of this campaign said
+so for every storey above the lowest and had the 14B send the couch search upstairs from a ground
+floor with a living room found on it; Newfields, Leonardo and Klickitat all have a basement. Give
+the rank from both ends and let the rooms decide. Don't poll a wedged episode by its oracle calls:
+with the 14B each costs 40 s, and 34 of them made a 500-action episode take 58 minutes.
+
+## 2026-10-05 — End-to-end review before the 5x3 benchmark: the room numbers churned because a snapped door did not cut the floor
+
+**Symptom:** Ranchester couch recording (`runs/zson-couch-crossfloor-3x-20261005-b`): the room behind
+one door was numbered R23, R26, R28 and R52 across ticks; pids reached 56 for ~10 rooms;
+`partition_revision` 86 in 290 actions. Earlier, Hanson renumbered one bedroom R11 -> R14 -> R16
+while the agent stood in it, and a corridor swallowed a room for a tick and spat out a new one.
+
+**Root cause (two layers, found by replaying the watershed on the saved map along the trajectory):**
+`door_carve_mask` snaps a detected door to the nearest medial-axis choke and carves a disk sized to
+the clearance there. Near the frontier the clearance at a skeleton cell is the distance to an
+UNKNOWN cell, so the disk is narrower than the passage and does not sever the floor -- 47 % of the
+snapped disks in the replay. Such a disk is not in the merge barrier (the design relied on the two
+rooms lying on different sides of the carved mask), so the room behind the door merged into the
+hallway on the ticks the snap found a choke (`depth 0.00 < 0.2`) and split off again on the ticks it
+did not (the skeleton changes every action; one door toggled 44 times). Then the registry: it
+compares fresh rooms to the PREVIOUS tick only, so a room absent for one tick is retired for good,
+and when it re-separates the only containment candidate -- the hallway -- is already consumed by its
+IoU match, so a new pid is issued. Replay: 36 pids for 10 rooms, 26 deaths.
+
+**Fix:** a snapped disk that leaves the floor around it in one 4-connected piece falls back to the
+plain barring disk (`_severs`); the registry keeps a vanished room's mask for ten updates and a fresh
+room nobody claims re-adopts its pid (`RoomRegistry(memory_ticks=10)`), ties broken by overlap.
+Replay: 11 pids for 11 rooms, 3 deaths. The scan ledger re-judges a sticky verdict when the room
+grows past 1.5x the size it was reached on (a sliver finished as a fragment, walked into under the
+same number).
+
+**Don't:** diagnose churn from `room_partitions.npz` -- it holds only the final partition per storey;
+replay the segmentation along `trajectory.csv` on `floor_maps.npz` instead (the reviewer's scripts
+grew a 3 m disc of the final map along the path -- a proxy, but it reproduced the numbers).
+Don't make the choke sticky per door first: it treats the symptom; the non-severing disk is the cause.
+
+## 2026-10-05 — Three more from the same review: a storey measured on the stairs, a tilt that never turned, an evaluator gate on the median height
+
+**Symptom / cause / fix, briefly:**
+- The atlas created Hanson's upper storey at 0.277 m (navmesh 0.108 m) from the three poses it settled
+  on -- the eased last treads -- and 218 of 300 later poses read 0.10 m, outside `stable_height_m`
+  (0.12): no staircase seen up there ever became a portal, the map's floor-clear mask never fired, and
+  the oracle's storey line said rank 2 of 3. A storey first reached by a ground-truth traversal is now
+  pinned to the connector's navmesh height when within `floor_match_m` (`storey_height_pinned`).
+- A fresh, in-range sighting 20 degrees off the centre column at a pitch other than the one the
+  target's height predicted produced LOOK_DOWN/LOOK_UP for the whole 24-action inspection budget: the
+  converter tilts before it faces, so asking for the predicted pitch never let the centring turn
+  happen. A fresh off-centre sighting is centred at the pitch it was seen at (`camera_pitch=None`).
+- `MultiFloorDistance.success` gated on the goal region's MEDIAN height; Klickitat's chair samples
+  lie at +0.18 m and -0.41 m (a split-level floor), so a STOP beside the lower chair scored 0 four
+  centimetres from the region. The gate is the nearest goal sample's height now. Signature in any
+  finished run: `success: false` with `distance_to_goal_m < 1.0`.
+- The 3B oracle copies the worked example's words as well as its numbers ("home: living room,
+  sometimes a bedroom" for a CHAIR). The 14B does not, and it is the model the prompt was written
+  for; on this CPU it answers in ~40 s (generation-bound, ~6 tok/s; the system prompt is prefix-cached).
+  Given only "(this one at +3.1 m)" it read an upper storey as the ground floor: tell it the storey's
+  rank in words (`storey_position`), not its height.
+
+**Don't:** run a review of this size serially -- five read-only reviewers over disjoint layers,
+each with the records to confirm against, took an hour and found eleven real defects; reading the
+same 25k lines alone would not have.
+
+## 2026-10-05 — Ranchester couch from upstairs: the model said "downstairs" sixteen times and the agent peeked thirteen doors instead
+
+**Symptom:** `runs/zson-couch-crossfloor-3x-20261005`, Ranchester, couch, start on the upper storey.
+The oracle's STEP 2 read "upper floor (bedroom found); no living room here; living rooms are
+downstairs" at all sixteen loop points; the staircase, once seen (action 166), was valued 0.60 with
+"unvisited ground floor holds the living room"; the agent stood 0.9 m from its foot at action 171
+and walked away. Every RPT* order put the stairs LAST behind 0.25-valued gaps; thirteen peeks at
+~25 actions each (one 85, a 13 m walk to a gap); 500 actions, never downstairs. Also: "Source
+changed during the frozen comparison" aborted the campaign after the first episode.
+
+**Root cause:** The 3B model copies the worked example's numbers -- 25 on every unexplored node,
+60 on the stairs -- whatever its own STEP 2 says, so rule 2b's "less (10-20) when the home type does
+not belong on this storey" was never applied, and the code's uncertainty floor (0.25) could not tell
+the two cases apart. Under RPT*'s expected-time objective five cheap nodes at 0.25 beat one far node
+at 0.60 every time (and rightly, for those numbers). The campaign abort: the runner fingerprints
+every `.py` under `sparx_agency/` at start and per episode; I edited the generator and its tests
+while the campaign flew.
+
+**Fix / workaround:** Ask for the STEP 2 verdict as a field (`home_here`: found / missing /
+elsewhere) -- small models answer it reliably in words -- and let the code apply rule 2b's
+arithmetic: `elsewhere` reads every unexplored node at `unexplored_elsewhere` (0.10) exactly;
+`found` / `missing` keep the 0.25 floor. Documented in `search_node_oracle.py`, `LoopSettings`,
+the README and progress entry 022. Do not edit Python under `sparx_agency/` while a frozen
+campaign runs; Markdown is not fingerprinted.
+
+**Don't:**
+- Don't lower the floor globally to fix this: the 0.25 floor exists because the same model wrote
+  0-1 on every door of the Hanson toilet storey (bathrooms DO belong upstairs) and left at action 27.
+- Don't parse the free-text `storey` line for "downstairs": it is right in words and the numbers
+  still disagree with it; the structured field is what the code can act on.
+- Don't make the stairs cheaper (the 8 m floor-change leaf) to win the order: the leaf is what a
+  storey change costs, and the problem was the gaps' worth, not the stairs' price.
+
+---
+
+## 2026-10-05 — Hanson re-fly: a railing is not an exit, a pocket is not a room, and a spawn beside a bed is a 160-action spin
+
+**Symptom:** `runs/zson-hanson-3x-20261005` (the three Hanson episodes after the door-cut /
+floor / glance changes). The toilet episode reached its toilet at action 359 but spent most of
+them on places a person would not have gone: the two ends of a balcony it had seen whole from
+the threshold (O2 and O6, actions 25-51), an island of unknown between the spawn point and the
+bed in front of it (O4, "GAP", actions 51-82 -- back to within a metre of where it started), a
+strip behind a bed segmented as its own room (R13/O9, actions 150-192), the balcony again
+(R5, offered at 0.25 as "never entered" at action 206, 158 actions after the agent had stood
+at its far end), and a bedroom it had seen the bed and the television of through the door
+(R10, actions 270-289). At action 101 a bathroom vanity (`cabinet 0.84`) was cut off at the left
+edge of the frame and the scheduler glanced right. At action 150 a room labelled `bedroom
+strong` was still valued by the oracle at 0.10. Room numbers churned (R11 -> R14 -> R16 for one
+bedroom) and each new number read `entered=no`. The potted-plant episode spawned beside a bed
+with the plant in view 4.4 m away and spun 159 actions on "no safe target path" to an agent
+error. The chair episode stopped at action 14 on a child's ride-on horse read as `chair` 0.9.
+
+**Root cause:**
+1. The frontier is "free beside unknown", and every unknown cell counted. A balcony railing
+   (the depth returns nothing at floor height beyond it), a window and a mesh hole are frontier
+   for ever; so is an unknown island enclosed by known cells. Nothing in the method said
+   "I looked there and there is nothing to resolve".
+2. A room was finished only by a full rotation inside it (or a scan point that saw half of
+   it). Standing at the end of a balcony after walking its length finishes nothing; a 3-step
+   peek is not a scan.
+3. The watershed carved the strip behind the bed into a room; nothing recognised a doorless
+   2 m2 region with no unknown boundary as a fragment.
+4. The loop computed the exclusions, THEN re-classified the rooms inside the oracle call: a
+   label that became strong on that action was excluded one loop point late.
+5. One kind of object was by rule a weak label (the 2026-10-05 merge guard). A bed is not a
+   guess.
+6. The glance scorer values unknown floor only; a small room beside the route shows it little,
+   and optimistic rays through a window value the garden.
+7. `RoomRegistry` matched by IoU >= 0.15; a room seen through its door grows tenfold as the
+   agent walks in and loses its number -- and with it `last_inside` and `searched`.
+8. A level camera 0.88 m up sees the floor from 1.4 m; the spawn footprint is the only known
+   free around an agent that has not moved; unknown is impassable; the locked target waited for
+   A* for ever. Nothing ever looked down.
+9. YOLO-World lands on the nearest prompt it was given; there was no toy in the vocabulary.
+
+**Fix / workaround:** The sight ledger (`methods/sightlines.py`: looked-through unknown within
+2.5 m from two poses, pockets under 3 m2, written OCCUPIED for the frontier logic only); the
+`seen_through` and `fragment` verdicts in `room_scans.py` (no live frontier, and looked into /
+walked through if narrow, or doorless and under 3 m2); `ObservedSceneGraph.refresh_labels`
+before the exclusions; `SIGNATURE_OBJECTS` making a bed/toilet/oven label strong on its own;
+cue glances toward a confident box cut off by the frame's edge; containment matching in the
+registry; the footing sweep (LOOK_DOWN 30 degrees, a circle, LOOK_UP) for a pathless lock and
+for the fallback's boxed-in case, with a no-rejection release of the lock after six more
+pathless actions; a 0.35 m start-clearance rule in the samplers; `toy` / `rocking horse` /
+`stuffed animal` / `bathtub` in the vocabulary. Progress entry 022.
+
+**Don't:**
+- Don't resolve unknown by range alone: beyond ~2.5 m the floor samples of a stride-8 depth
+  image are 0.2-0.3 m apart, and an unknown cell between two seen rows is a sampling hole, not
+  a railing. The looked-through band stops at 2.5 m for that reason.
+- Don't write settled unknown into the planner's map: occupied is inflated by the body radius,
+  unknown is not, and a settled railing would shrink the balcony the agent can still stand on.
+- Don't finish a wide room because the agent stepped into it: the walls beside its door are
+  behind the camera. Narrow rooms (clearance under 0.9 m) are walked through; wide ones need a
+  pose that saw half of them, or the scan.
+- Don't read a per-pixel "no return" as a settled cell in Gibson: the meshes have holes, and a
+  ray through a hole in a wall lands in the next room's floor and would settle it from the
+  wrong side. The 2-D cast through known free cells stops at the wall.
+- Don't make the one-signature-object rule general: a chair, a cabinet, a desk, a plant names
+  nothing on its own; the Ranchester hallway named "bathroom" by a toilet glimpsed through a
+  door is still the reason weak labels never exclude.
+
+---
+
+## 2026-10-05 — Hanson/000000: a bedroom in two halves, furniture in no room, every door valued at zero, a peek cancelled on its own route
+
+**Symptom:** Nine-episode campaign of 2026-10-04 (`runs/zson-campaign-3x3-20261004`). In the
+Hanson toilet episode the HUD showed R0 and R6 as separate rooms for one bedroom while R7 and
+the corridor were split correctly at a door; the bed, the desks and the wardrobe appeared in no
+room's object list (the bedroom was "living room?" from its one chair); at action 27 the agent
+walked to the stairs with two never-entered rooms and six doorways still unlooked-into
+(`order: [stairs]`); at 164 it stood in front of a doorway with a sink through it and the oracle
+had not even been asked about the room; and the one peek it did commit to (166) was cancelled at
+196, "approach budget of 30 spent 5.8 m short", while the route it was following was fine.
+
+**Root cause:** Four unrelated ones, all visible in `steps.jsonl` once decoded:
+1. The door cut is a 0.75 m disk at the *detected* door position. YOLO's door landmark sat
+   0.6 m off its doorway, in the bedroom's own floor at a junction; the disk severed the room
+   around its bed (every border through the disk was "barred", so the merge could not repair
+   it) and missed nothing it should have cut.
+2. `_room_objects` credited a landmark to the room whose mask holds its *cell*. Furniture
+   stands on cells the map reads OCCUPIED; the watershed labels free cells only; so beds,
+   desks and wardrobes were `room: null` and rooms were named by whatever stood on free floor.
+3. The 3B oracle wrote "small unknown room, no toilet fits" on every never-entered room and
+   "no toilet glimpsed through gap" on every doorway -- the *words of the prompt's own example*
+   (`"bathroom-sized room, no television fits","p":1`) -- and `min_prob` (0.05) then dropped
+   them from the order, leaving the stairs alone. Later a sofa made the room with the sink a
+   weak "living room" and the type prior ruled it out for the toilet beside the sink.
+4. The peek's approach bound was sized from the frontier inventory's geodesic (a Dijkstra on
+   the cost grid at the *body* radius, 3.5 m), but A* plans at the *preferred* clearance and
+   relaxes only when nothing else gets through, so its route went 12.5 m round a squeeze. The
+   RPT* instance used the same optimistic distances.
+
+**Fix / workaround:** (1) `room_watershed`: a detected door's cut is snapped to the nearest
+*choke* within 0.9 m -- the medial-axis cell of least clearance whose disk parts the skeleton
+into two substantial pieces -- and sized to the passage; basins on different sides of the
+carved mask never merge, basins on one side still may; plain disk when no choke is in reach.
+Checked on all 15 recorded floors: fixed the one, moved the rest by at most a room. (2) The
+nearest room floor within the footprint plus 0.6 m is the object's room. (3) An **uncertainty
+floor** (`unexplored_floor`, 0.25): a never-entered unknown room or an opening with nothing
+glimpsed is never read below it, whatever the model wrote; `entered=no` is in the prompt; the
+example no longer writes anything off for its size; a weak (one-kind) label never excludes; a
+room holding a *home object* of the target (a sink, for a toilet) is never excluded. (4) The
+approach bound follows the route the planner actually adopted; the inventory and the RPT*
+instance measure distances at the preferred standoff where it reaches, body radius elsewhere.
+
+**Don't:** Do not "fix" (1) by shrinking the disk: at 0.45 m the misplaced door cut nothing
+and R7 merged into the bedroom; at 0.5 m and above it severed the bedroom. No disk radius
+works when the landmark is 0.6 m off; the cut has to move. Do not fix (3) by raising
+`min_prob` or adding a "peek before you descend" rule: the user's model is that the LLM's
+probability expresses it, and the floor keeps the unexplored nodes in RPT*'s hands, where
+distance decides. Do not read `distance_m` in a recording as the route length: until this
+change it was the body-radius geodesic.
+
+---
+
 ## 2026-09-28 — `git stash` during a half-resolved merge drops MERGE_HEAD
 
 **Symptom:** After resolving ~25 conflicts of `git merge feat/objnav-habitat-gibson-nadav`
@@ -30,6 +678,9 @@ revision mid-merge, use `git worktree add /tmp/wt <rev>` instead of stashing.
 
 **Don't:** don't stash mid-merge; don't trust "the files look right" as proof the merge
 state is right.
+
+---
+
 ## 2026-10-01 — a peek route across a stair head becomes a coverage-veto rotation loop
 
 **Symptom:** Sofa same-spawn run: a visible path near steps 297–303, then stationary

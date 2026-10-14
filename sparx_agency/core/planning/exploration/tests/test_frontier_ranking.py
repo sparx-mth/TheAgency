@@ -317,3 +317,88 @@ def test_a_cluster_in_unlabelled_space_is_dropped_and_shape_is_checked():
                                   min_cluster_cells=1, params=off_graph) == {}
 
 
+
+
+# -- distances the way the planner flies them (2026-10-05) ------------------------------
+def squeeze_world():
+    """A wall with a one-cell squeeze near the robot and a wide gap far from it.
+
+    The frontier lies on the far side of the wall. At the body radius the
+    squeeze at row 1 is passable and the boundary is two cells away; at
+    the preferred standoff only the gap at row 4 is, and the walk is round
+    through it. Returns ``(world, body_cost, preferred_cost)``.
+    """
+    world = world_from([
+        "###########",
+        "#?........#",
+        "#?...#....#",
+        "#?...#....#",
+        "#?...#....#",
+        "#.........#",
+        "###########",
+    ])
+    body = flat_cost(world)
+    preferred = flat_cost(world)
+    preferred[1, 5] = np.inf                           # the squeeze at row 1: lethal at the preferred standoff
+    return world, body, preferred
+
+
+def test_distances_are_measured_at_the_preferred_standoff_where_it_reaches():
+    from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
+    world, body, preferred = squeeze_world()
+    labels = np.ones(world.grid.shape, dtype=np.int32)
+    origin = at(6, 1)
+    through = accessible_frontiers(world, body, labels, origin, math.pi)
+    around = accessible_frontiers(world, body, labels, origin, math.pi, preferred_cost=preferred)
+    assert len(through.goals) == len(around.goals) == 1
+    assert through.goals[0].geodesic_m < 6 * RES, "through the squeeze: a few cells"
+    assert around.goals[0].geodesic_m > through.goals[0].geodesic_m + 3 * RES, (
+        "the route A* will fly goes round through the gap, and that is what the goal is charged")
+    assert around.goals[0].cell == through.goals[0].cell, "the same boundary, measured differently"
+    gx, gy = through.goals[0].cell
+    assert around.distance_m[gy, gx] == pytest.approx(around.goals[0].geodesic_m)
+    # A cell reachable only through the squeeze keeps its body-radius distance rather than reading unreachable.
+    world2, body2, preferred2 = squeeze_world()
+    preferred2[5, 5] = np.inf                           # the gap at row 5 is a squeeze too
+    only_squeeze = accessible_frontiers(world2, body2, labels, origin, math.pi, preferred_cost=preferred2)
+    assert len(only_squeeze.goals) == 1 and only_squeeze.goals[0].geodesic_m == pytest.approx(through.goals[0].geodesic_m)
+    with pytest.raises(ValueError):
+        accessible_frontiers(world, body, labels, origin, math.pi, preferred_cost=preferred[:3])
+
+
+# -- the explore visit's order: what a look from the frontier would reveal (2026-10-13) ---------
+def test_view_gain_ranks_a_doorway_onto_a_room_above_a_longer_strip_along_a_wall():
+    """Two frontiers at equal distance from the robot at (4, 4), facing +x: a long strip of unknown along the
+    south wall (one cell deep -- walls stand behind it) and a short gap in the north wall onto a whole unknown
+    room. Size says the strip; what a camera standing at each would reveal says the gap."""
+    from sparx_agency.core.planning.exploration.frontier_ranking import rank_by_view_gain
+    from sparx_agency.core.planning.exploration.view_gain import UnknownView, ViewCone
+    rows = [
+        "???????????????",
+        "???????????????",
+        "???????????????",
+        "###########?###",      # the north wall with a one-cell gap at column 11
+        "#.............#",
+        "#.............#",
+        "#.............#",
+        "#.............#",
+        "#.............#",
+        "#??????.......#",      # a strip of unknown along the south wall: six cells, one deep
+        "###############",
+    ]
+    world = world_from(rows)
+    mask = world.grid != OCC
+    goals = ranked_frontier_goals(world, flat_cost(world), mask, origin_xy=at(8, 6), yaw=0.0, min_cluster_cells=1)
+    by_row = {g.cell[1]: g for g in goals}
+    strip, gap = by_row[8], by_row[4]
+    assert strip.size_cells > gap.size_cells, "the strip is the longer boundary"
+    assert goals[0] is strip or goals[0].utility >= gap.utility, "size alone ranks the strip first"
+    view = UnknownView(world, ViewCone(half_fov_rad=math.radians(39.5), max_range_m=3.0))
+    ranked = rank_by_view_gain(goals, view)
+    assert ranked[0].cell == gap.cell, "a look from the gap shows the room beyond; one from the strip shows a wall"
+    assert ranked[0].utility > ranked[1].utility
+    assert all(math.isfinite(g.utility) for g in ranked)
+    unreachable = FrontierGoal(xy=(1.0, 1.0), cell=(2, 2), size_cells=3, geodesic_m=float("inf"),
+                               heading_error_rad=0.0, utility=0.0)
+    assert rank_by_view_gain([unreachable], view) == [], "no path, no goal"
+    assert rank_by_view_gain(goals, view, min_gain_cells=10 ** 6) == [], "a floor on the gain drops every goal"

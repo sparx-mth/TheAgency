@@ -179,6 +179,8 @@ class FloorAtlas:
         self._approach = deque(maxlen=20)
         self.destination_height_m = None
         self.completion_reason = None
+        #: Consecutive ``update`` calls spent in the transition in force (0 outside one).
+        self.transition_ticks = 0
 
     @property
     def elevation_m(self):
@@ -213,6 +215,7 @@ class FloorAtlas:
             self._trail = list(self._approach) or [self._previous]
             self._samples.clear()
         if self.in_transition:
+            self.transition_ticks += 1
             if not self._trail or moved > 0.04:
                 self._trail.append(xyz)
             if moved > 0.04:
@@ -311,6 +314,7 @@ class FloorAtlas:
             self.floors[destination].visits += 1
             self.revision += 1
         self.in_transition = False
+        self.transition_ticks = 0
         self.destination_height_m = None
         self._samples.clear()
         self._approach.clear()
@@ -335,8 +339,36 @@ class FloorAtlas:
                     heapq.heappush(queue, (cost + edge.length_m, other, edge.id if first < 0 else first))
         return None
 
+    def adopt_level(self, pose, height):
+        """Make ``height`` a floor of its own INSIDE the separation rule and arrive on it.
+
+        For a caller that may not climb stairs and has stood on a settled
+        plateau neither floor nor storey -- a half-level of a split-level
+        house, 0.5-1.5 m off the storey it spawned on -- long enough for the
+        transition to be evidently never going to resolve (Klickitat
+        2026-10-05: 361 idle turns on one). Mapping and planning resume on
+        the new level; the storey below stays a floor the agent can step
+        back down to, which the atlas reads as an ordinary arrival.
+
+        Returns:
+            The new floor id.
+        """
+        xyz = (float(pose.x), float(pose.y), float(pose.z))
+        if not self.in_transition:
+            self.in_transition = True
+            self._trail = list(self._approach) or [xyz]
+        if not self._trail or self._trail[-1] != xyz:
+            self._trail.append(xyz)
+        destination = len(self.floors)
+        self.floors[destination] = ObservedFloor(destination, float(height), visits=0)
+        self.destination_height_m = float(height)
+        self._arrive(destination)
+        self.completion_reason = "half_level_adopted"
+        return destination
+
     def diagnostics(self):
         return {"active_floor": self.active_id, "in_transition": self.in_transition,
+                "transition_ticks": self.transition_ticks,
                 "destination_height_m": self.destination_height_m, "completion_reason": self.completion_reason,
                 "revision": self.revision, "floors": [asdict(f) for f in self.floors.values()],
                 "connections": [dict(asdict(e), length_m=e.length_m) for e in self.connections]}

@@ -528,7 +528,10 @@ class ObjectSearchSupervisor:
                 :data:`UNREACHABLE` -- there is nothing to wait
                 :attr:`ObjectSearchParams.plan_grace_s` for when the answer is
                 already no. Arrival still wins if the aircraft is inside the
-                arrival tolerance. Ignored in every other state.
+                arrival tolerance. In :data:`SEARCH` (since 2026-10-07) it
+                means the visit cannot reach its own point inside the room
+                and ends the turn :data:`UNREACHABLE` too, after
+                ``frontier_exhausted``. Ignored in every other state.
             arrived: The caller's own arrival test -- it can read the room
                 mask, this machine only sees a point. True in
                 :data:`TRANSIT` enters :data:`SEARCH` whatever the distance
@@ -576,7 +579,7 @@ class ObjectSearchSupervisor:
         if self._state == TRANSIT:
             return self._transit(xy, now, last_plan_s, blocked_since, route_failed,
                                  arrived, frontier_exhausted, room_reclassified)
-        return self._search(now, frontier_exhausted, budget_spent, room_reclassified)
+        return self._search(now, frontier_exhausted, budget_spent, room_reclassified, route_failed)
 
     def pause(self, seconds):
         """Exclude an explicit inspection from task deadlines, never visit cooldowns."""
@@ -738,9 +741,19 @@ class ObjectSearchSupervisor:
         return self._snapshot(
             Hold("flying to R%d, %.2f m to run" % (self._room_id, distance)), now)
 
-    def _search(self, now, frontier_exhausted=False, budget_spent=False, room_reclassified=False):
-        # type: (float, bool, bool, bool) -> ObjectSearchState
-        """Map the room under its budget, and decide when its turn is over."""
+    def _search(self, now, frontier_exhausted=False, budget_spent=False, room_reclassified=False,
+                route_failed=False):
+        # type: (float, bool, bool, bool, bool) -> ObjectSearchState
+        """Map the room under its budget, and decide when its turn is over.
+
+        ``route_failed`` in SEARCH (since 2026-10-07): the caller's visit
+        could not reach the point it needs inside the room -- the scan's
+        vantage point unreachable with the agent outside the mask, which
+        the supervisor's own arrival tolerance lets happen -- and ends the
+        turn :data:`UNREACHABLE` at once, attempts charged, so the room is
+        deferred after ``max_attempts`` instead of staying in force for the
+        whole visit bound while the fallback drives.
+        """
         params = self.params
         elapsed = now - self._goal_s if self._goal_s is not None else 0.0
         left = max(0.0, (self._search_end_s or now) - now)
@@ -769,6 +782,11 @@ class ObjectSearchSupervisor:
             self.stats["exhausted"] += 1
             return self._end_room(
                 EXHAUSTED, "R%d swept -- nothing reachable left to look at "
+                "after %.0f s" % (self._room_id, since_arrival), now)
+        if route_failed:
+            self.stats["plan_fails"] += 1
+            return self._end_room(
+                UNREACHABLE, "R%d: the visit's own point in the room is unreachable "
                 "after %.0f s" % (self._room_id, since_arrival), now)
         if room_reclassified:
             self.stats["reclassified"] += 1

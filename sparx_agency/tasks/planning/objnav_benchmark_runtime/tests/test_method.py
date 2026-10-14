@@ -1,6 +1,7 @@
 """Headless method regressions; fake services, real geometry and core algorithms."""
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 
 import numpy as np
@@ -13,6 +14,11 @@ from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
+
+#: The published four-action set. The component fixtures below isolate the room and target
+#: machinery on it; the benchmark protocol itself carries the LOOK pair (``camera_tilt``), and the
+#: tests of the pitch servo ask for a tilt-enabled spec explicitly (``MULTIFLOOR_PROTOCOL``).
+BODY_ACTIONS_PROTOCOL = replace(PROTOCOL, camera_tilt=False)
 
 
 class FakeLLM:
@@ -51,16 +57,18 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests).
     ``llm`` replaces the neutral :class:`FakeLLM` for every model role."""
     discovery = overrides.pop("discovery", False)
+    segmenter = overrides.pop("segmenter", None)          # with segmentation=True: the fake SAM service
     if not discovery:
         overrides.setdefault("doorway_peek", {"enabled": False})
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
-                            camera, PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
+                            camera, BODY_ACTIONS_PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
     policy = RPTSearchPolicy(FakeDetector(label, duplicate), llm or FakeLLM(),
-                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)))
+                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)), segmenter=segmenter)
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     if not discovery:
         policy.warmup_actions = policy.settings.warmup_steps  # this fixture isolates the existing room/target components
+        policy._warmup_pending = False                        # ... and records no warm-up scan for the spawn room
         # Stair/solver unit fixtures start after mandatory discovery. Tests of
         # the actual coverage gate use discovery=True or install a fresh peek.
         policy.peek.floor_ready = lambda: True

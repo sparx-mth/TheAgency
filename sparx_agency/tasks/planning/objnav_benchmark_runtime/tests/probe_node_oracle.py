@@ -1,4 +1,4 @@
-"""Probe the node oracle against a REAL model: latency, schema, and whether the rules are followed.
+"""Probe the node oracle against a REAL model: latency, schema, and whether the judgement is the one asked for.
 
 Not a test -- it needs a live Ollama and takes minutes on a CPU. Run from the
 repo root with the CPU service up::
@@ -6,21 +6,31 @@ repo root with the CPU service up::
     LLM_BASE_URL=http://127.0.0.1:11434 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
         .venv/bin/python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.probe_node_oracle
 
-Three scenarios, each a judgement the prompt is supposed to produce and the
-3B model could not:
+Five single-storey scenarios (the standard benchmarks never offer stairs), each
+a judgement the LLM-first prompt of 2026-10-07 is supposed to produce:
 
-1. **bed, ground floor mapped** -- a fully observed kitchen, the living room
-   the robot stands in, a large unknown room, stairs up. Expected: kitchen ~0,
-   stairs and the unknown room carry the mass, living room low.
-2. **frying pan, upstairs** -- two bedrooms, a bathroom named from a sink only
-   (``bathroom?``), a small unknown room, stairs down to a storey where a
-   kitchen was found but barely searched. Expected: bathroom ~0 whatever the
-   ``?``, bedrooms ~0, the known kitchen downstairs at least matches the
-   unknown room that merely might be one.
-3. **toilet, just came up** -- a bedroom, a bathroom-sized unknown room and a
-   large unknown room, stairs down the robot arrived by 10 s ago. Expected:
-   the unknown rooms carry the mass, the small one at least matches the
-   bedroom (a toilet is not in a bedroom), the way back is not first.
+1. **toilet, no bathroom yet, early** -- kitchen and living room scanned, a
+   bedroom never entered, a 5 m2 unknown room never entered, a hallway with an
+   unlooked doorway, action ~150 of 500. Expected: pass "first"; the small
+   unknown room and the doorway carry the mass; the bedroom keeps a real share
+   (an en-suite opens off it); the scanned kitchen and living room ~0.
+2. **sofa, living room already found and scanned, early** -- the one living
+   room is scanned without a sofa, two unknown rooms never entered (14 and
+   9 m2), a bedroom scanned. Expected: the unknown rooms are NOT valued as a
+   second living room (each under 40) and the scanned living room, where the
+   sofa may have been missed, is at least a quarter of the best unknown room;
+   the bedroom low.
+3. **television, kitchen vs bedroom** -- a scanned kitchen, a never-entered
+   bedroom, a never-entered unknown room, a scanned bathroom. Expected: the
+   bedroom clearly above the kitchen and the bathroom; the bathroom ~0.
+4. **toilet, late, everything scanned** -- a bathroom scanned 4 min ago with a
+   sink and a bathtub, a bedroom scanned, a kitchen scanned, no opening, no
+   frontier, action ~430 of 500. Expected: pass "second"; the bathroom is the
+   best node at 15 or more; the kitchen ~0.
+5. **chair, early, unexplored places left** -- a scanned living room with a
+   sofa, a never-entered unknown 12 m2 room, an unlooked doorway off the
+   hallway, action ~60 of 500. Expected: pass "first"; the unknown room and
+   the doorway each at least 10; the scanned living room under the unknown room.
 
 Prints the model's distribution and reasons, the wall time, and a PASS/FAIL
 against those expectations. The expectations are coarse on purpose: this
@@ -34,47 +44,75 @@ import time
 
 from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    ROOM, STAIRS, SearchContext, SearchNode, SearchNodeOracle)
+    OPENING, PASS_FIRST, PASS_SECOND, ROOM, SearchContext, SearchNode, SearchNodeOracle)
 
-UP, DOWN = 100000, 100001
+DOOR = 200001
+
+
+def house(*parts):
+    return "; ".join(parts)
+
 
 SCENARIOS = [
-    ("bed",
-     SearchContext("storey F0: rooms found: kitchen, living_room; 1 unknown; searched 2min; "
-                   "2 rooms with frontier left; 2 storeys known to the building (this one at +0.0 m)"),
-     [SearchNode(0, ROOM, "kitchen", area_m2=12, frontier_clusters=0, searched_s=40, last_inside_ago_s=30,
-                 objects=("fridge", "sink", "oven")),
-      SearchNode(1, ROOM, "living_room", area_m2=25, frontier_clusters=1, searched_s=20, last_inside_ago_s=0,
-                 here=True, objects=("sofa", "television")),
-      SearchNode(2, ROOM, "unknown", area_m2=18, frontier_clusters=3),
-      SearchNode(UP, STAIRS, "stairs up", direction=1)],
-     lambda p: p[0] <= 0.05 and p[UP] + p[2] >= 0.6 and p[1] <= 0.15),
-    ("frying pan",
-     SearchContext("storey F1: rooms found: bedroom, bedroom, bathroom; 1 unknown; searched 3min; "
-                   "2 rooms with frontier left; 2 storeys known to the building (this one at +2.7 m)",
-                   ("storey F0: rooms found: kitchen, hallway; 1 unknown; searched 20s; 3 rooms with frontier left",)),
-     [SearchNode(0, ROOM, "bedroom", area_m2=14, frontier_clusters=0, searched_s=50, last_inside_ago_s=120,
-                 objects=("bed", "wardrobe")),
-      SearchNode(1, ROOM, "bedroom", area_m2=11, frontier_clusters=1, searched_s=30, last_inside_ago_s=60,
-                 objects=("bed",)),
-      SearchNode(2, ROOM, "bathroom", tentative=True, area_m2=6, frontier_clusters=1, searched_s=0,
-                 objects=("sink",)),
-      SearchNode(3, ROOM, "unknown", area_m2=9, frontier_clusters=2, here=True),
-      SearchNode(DOWN, STAIRS, "stairs down", direction=-1, destination_visited=True,
-                 destination="storey F0: rooms found: kitchen, hallway; 1 unknown; searched 20s; 3 rooms with frontier left")],
-     lambda p: p[2] <= 0.05 and p[0] <= 0.05 and p[1] <= 0.05 and p[DOWN] >= 0.4 and p[DOWN] >= p[3]),
     ("toilet",
-     SearchContext("storey F1: rooms found: bedroom; 2 unknown; searched 10s; 3 rooms with frontier left; "
-                   "2 storeys known to the building (this one at +2.7 m)",
-                   ("storey F0: rooms found: kitchen, living_room; searched 40s; 2 rooms with frontier left",)),
-     [SearchNode(0, ROOM, "bedroom", area_m2=14, frontier_clusters=1, searched_s=10, last_inside_ago_s=0, here=True,
-                 objects=("bed",)),
-      SearchNode(1, ROOM, "unknown", area_m2=5, frontier_clusters=2),
-      SearchNode(2, ROOM, "unknown", area_m2=16, frontier_clusters=3),
-      SearchNode(DOWN, STAIRS, "stairs down", direction=-1, destination_visited=True,
-                 destination="storey F0: rooms found: kitchen, living_room; searched 40s; 2 rooms with frontier left",
-                 arrived_by=True, arrived_ago_s=10)],
-     lambda p: p[1] + p[2] >= 0.45 and p[1] >= p[0] and p[DOWN] < max(p[1], p[2])),
+     SearchContext(house("rooms found: hallway (entered), kitchen (scanned), living_room (scanned), bedroom (never entered)",
+                         "1 room unidentified", "1 opening not yet looked into", "unexplored frontier still reachable",
+                         "actions used about 150 of 500")),
+     [SearchNode(2, ROOM, "kitchen", area_m2=12, frontier_clusters=0, searched_s=30, last_inside_ago_s=120,
+                 objects=("oven", "refrigerator", "sink"), scanned="full rotation", scanned_ago_s=120),
+      SearchNode(3, ROOM, "living_room", area_m2=24, frontier_clusters=1, searched_s=40, last_inside_ago_s=60,
+                 objects=("sofa", "television"), scanned="full rotation", scanned_ago_s=60),
+      SearchNode(5, ROOM, "bedroom", area_m2=14, frontier_clusters=1, objects=("bed",)),
+      SearchNode(6, ROOM, "unknown", area_m2=5, frontier_clusters=1),
+      SearchNode(7, ROOM, "hallway", area_m2=6, frontier_clusters=1, searched_s=10, last_inside_ago_s=0, here=True),
+      SearchNode(DOOR, OPENING, "doorway", via="room 7 (type=hallway)")],
+     lambda r: (r.pass_verdict == PASS_FIRST and r.probs[6] + r.probs[DOOR] >= 0.5 and r.probs[6] >= r.probs[5]
+                and r.probs[5] >= 0.08 and r.probs[2] <= 0.05 and r.probs[3] <= 0.05)),
+    ("sofa",
+     SearchContext(house("rooms found: bedroom (scanned), living_room (scanned)", "2 rooms unidentified",
+                         "0 openings not yet looked into", "unexplored frontier still reachable",
+                         "actions used about 175 of 500")),
+     [SearchNode(1, ROOM, "living_room", area_m2=22, frontier_clusters=0, searched_s=35, last_inside_ago_s=90,
+                 objects=("television", "coffee table", "potted plant"), scanned="full rotation", scanned_ago_s=90),
+      SearchNode(2, ROOM, "bedroom", area_m2=13, frontier_clusters=0, searched_s=30, last_inside_ago_s=40,
+                 objects=("bed", "wardrobe"), scanned="full rotation", scanned_ago_s=40),
+      SearchNode(3, ROOM, "unknown", area_m2=14, frontier_clusters=2),
+      SearchNode(4, ROOM, "unknown", area_m2=9, frontier_clusters=1)],
+     lambda r: (r.probs[3] < 0.4 and r.probs[4] < 0.4 and r.probs[2] <= 0.05
+                and r.probs[1] >= 0.25 * max(r.probs[3], r.probs[4]))),
+    ("television",
+     SearchContext(house("rooms found: bathroom (scanned), bedroom (never entered), kitchen (scanned)", "1 room unidentified",
+                         "0 openings not yet looked into", "unexplored frontier still reachable",
+                         "actions used about 100 of 500")),
+     [SearchNode(1, ROOM, "kitchen", area_m2=11, frontier_clusters=0, searched_s=30, last_inside_ago_s=80,
+                 objects=("oven", "sink", "refrigerator"), scanned="full rotation", scanned_ago_s=80),
+      SearchNode(2, ROOM, "bedroom", area_m2=15, frontier_clusters=1, objects=("bed",)),
+      SearchNode(3, ROOM, "unknown", area_m2=20, frontier_clusters=2),
+      SearchNode(4, ROOM, "bathroom", area_m2=5, frontier_clusters=0, searched_s=15, last_inside_ago_s=30,
+                 objects=("toilet", "sink"), scanned="full rotation", scanned_ago_s=30)],
+     lambda r: r.probs[2] > r.probs[1] and r.probs[2] > r.probs[4] and r.probs[4] <= 0.03 and r.probs[3] >= 0.2),
+    ("toilet",
+     SearchContext(house("rooms found: bathroom (scanned), bedroom (scanned), kitchen (scanned)", "every known room identified",
+                         "0 openings not yet looked into", "no unexplored frontier left", "actions used about 425 of 500")),
+     [SearchNode(1, ROOM, "bathroom", area_m2=5, frontier_clusters=0, searched_s=20, last_inside_ago_s=240,
+                 objects=("sink", "bathtub"), scanned="full rotation", scanned_ago_s=240),
+      SearchNode(2, ROOM, "bedroom", area_m2=14, frontier_clusters=0, searched_s=30, last_inside_ago_s=150,
+                 objects=("bed", "wardrobe"), scanned="full rotation", scanned_ago_s=150),
+      SearchNode(3, ROOM, "kitchen", area_m2=12, frontier_clusters=0, searched_s=30, last_inside_ago_s=60,
+                 objects=("oven", "sink"), scanned="full rotation", scanned_ago_s=60)],
+     lambda r: (r.pass_verdict == PASS_SECOND and r.probs[1] >= 0.15 and r.probs[1] > r.probs[2] > r.probs[3]
+                and r.probs[3] <= 0.05)),
+    ("chair",
+     SearchContext(house("rooms found: hallway (entered), living_room (scanned)", "1 room unidentified",
+                         "1 opening not yet looked into", "unexplored frontier still reachable",
+                         "actions used about 50 of 500")),
+     [SearchNode(1, ROOM, "living_room", area_m2=20, frontier_clusters=0, searched_s=25, last_inside_ago_s=20,
+                 objects=("sofa", "television"), scanned="full rotation", scanned_ago_s=20),
+      SearchNode(2, ROOM, "unknown", area_m2=12, frontier_clusters=2),
+      SearchNode(3, ROOM, "hallway", area_m2=5, frontier_clusters=1, searched_s=5, last_inside_ago_s=0, here=True),
+      SearchNode(DOOR, OPENING, "doorway", via="room 3 (type=hallway)")],
+     lambda r: (r.pass_verdict == PASS_FIRST and r.probs[2] >= 0.10 and r.probs[DOOR] >= 0.10
+                and r.probs[1] < r.probs[2])),
 ]
 
 
@@ -96,13 +134,13 @@ def main():
         started = time.monotonic()
         result = oracle.probabilities(target, nodes, context)
         seconds = time.monotonic() - started
-        print("--- %.1f s | source=%s | p_present=%.2f elsewhere=%.2f | omitted=%s" % (
-            seconds, result.source, result.p_present, result.elsewhere, list(result.omitted)))
+        print("--- %.1f s | source=%s | p_present=%.2f | pass=%s | omitted=%s" % (
+            seconds, result.source, result.p_present, result.pass_verdict, list(result.omitted)))
         for key, value in result.reading.items():
             print("  %s: %s" % (key, value))
         for node in nodes:
             print("  id=%-7d p=%.2f  %s" % (node.id, result.probs.get(node.id, 0.0), result.reasons.get(node.id, "")))
-        ok = result.source == "llm" and expectation(result.probs)
+        ok = result.source == "llm" and expectation(result)
         print("  ->", "PASS" if ok else "FAIL (expectation not met)")
         failures += 0 if ok else 1
     print("\n%d of %d scenarios as expected" % (len(SCENARIOS) - failures, len(SCENARIOS)))
@@ -111,7 +149,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-
-

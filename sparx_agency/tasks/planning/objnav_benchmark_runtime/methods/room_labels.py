@@ -6,9 +6,14 @@ should act on it; when the next object says otherwise the label changes
 (a sink read as a kitchen becomes a bathroom once a toilet shows). So the
 gate is ONE confirmed landmark by default, and every label carries its
 STRENGTH: ``weak`` from a single class of evidence or a hesitant model,
-``strong`` from two or more distinct classes the model is confident about.
-The consumers decide what a weak clue may do -- the room-search loop lets
-one end a room's visit only when the model is confident in it.
+``strong`` from two or more distinct classes the model is confident about
+-- or from one **signature object** (:data:`room_priors.SIGNATURE_OBJECTS`:
+a bed, a toilet, an oven) whose room type the model agrees with, since
+2026-10-05: a bed seen through a door IS a bedroom, and the Hanson
+recording walked in to scan one for a toilet because one kind of object
+was by rule a weak label. The consumers decide what a weak clue may do --
+the room-search loop lets one end a room's visit only when the model is
+confident in it.
 """
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 
 from sparx_agency.core.mapping.topology.room_classifier import RoomLabel, RoomTypeClassifier
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import generic_object, signature_type
 
 WEAK = "weak"
 STRONG = "strong"
@@ -37,6 +43,22 @@ class RoomLabelSettings:
             ``strong`` -- with the model's confidence at or above
             ``strong_confidence``.
         strong_confidence: See ``strong_classes``.
+        signature_objects: One object of a kind that names its room type on
+            its own (:data:`room_priors.SIGNATURE_OBJECTS`) makes the label
+            ``strong`` when the model's label is that type and its
+            confidence clears ``strong_confidence``. ``False`` restores the
+            two-kinds rule alone.
+        distinctive_required: The ``strong_classes`` kinds must include at
+            least one that is not generic (:data:`room_priors.GENERIC_OBJECTS`:
+            a cabinet, a plant, a book ...), since 2026-10-05 -- a cabinet
+            and a potted plant made an upstairs room a strong "living_room".
+            ``False`` counts every kind.
+        generic_evidence_gate: A room whose only evidence is generic objects
+            is not classified at all -- it stays ``unknown`` and the model
+            is not asked (since 2026-10-05: one cabinet made a "kitchen" at
+            0.9 on an upper storey, which the storey summary then showed the
+            node oracle as a kitchen found). The objects are still shown to
+            the oracle on the room's line. ``False`` asks the model.
     """
 
     min_objects: int = 1
@@ -45,6 +67,9 @@ class RoomLabelSettings:
     refresh_steps: int = 50
     strong_classes: int = 2
     strong_confidence: float = 0.65
+    signature_objects: bool = True
+    distinctive_required: bool = True
+    generic_evidence_gate: bool = True
 
     def __post_init__(self):
         for name in ("min_objects", "min_classes", "min_evidence_updates", "refresh_steps", "strong_classes"):
@@ -52,6 +77,9 @@ class RoomLabelSettings:
                 raise ValueError("%s must be a positive integer" % name)
         if not 0.0 <= float(self.strong_confidence) <= 1.0:
             raise ValueError("strong_confidence must lie in [0, 1]")
+        for name in ("signature_objects", "distinctive_required", "generic_evidence_gate"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError("%s must be a bool" % name)
 
 
 class RevisableRoomLabels:
@@ -152,6 +180,8 @@ class RevisableRoomLabels:
 
     def _ready(self, pid, classes):
         s = self.settings
+        if s.generic_evidence_gate and classes and all(generic_object(name) for name in classes):
+            return False
         return (len(classes) >= s.min_objects and len(set(classes)) >= s.min_classes
                 and self._evidence_updates.get(pid, 0) >= s.min_evidence_updates)
 
@@ -202,9 +232,13 @@ class RevisableRoomLabels:
                                  "previous": previous.label if previous else None,
                                  "label": result.label, "trigger": reason,
                                  "objects": dict(signature)})
-        strength = (STRONG if len(set(classes)) >= s.strong_classes
-                    and result.confidence >= s.strong_confidence and result.label != "unknown" else WEAK)
-        self.metadata[pid] = dict(asdict(result), strength=strength,
+        kinds = set(classes)
+        confident = result.confidence >= s.strong_confidence and result.label != "unknown"
+        signed = s.signature_objects and any(signature_type(name) == result.label for name in kinds)
+        distinctive = not s.distinctive_required or any(not generic_object(name) for name in kinds)
+        agreeing = len(kinds) >= s.strong_classes and distinctive
+        strength = STRONG if confident and (agreeing or signed) else WEAK
+        self.metadata[pid] = dict(asdict(result), strength=strength, signature=bool(confident and signed),
                                   provisional=(result.label == "unknown" or result.confidence < s.strong_confidence
                                                or self._agreement.get(pid, 0) < 2),
                                   evidence_objects=len(classes), evidence_classes=len(set(classes)),

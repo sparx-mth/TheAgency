@@ -12,9 +12,21 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs im
 
 @dataclass(frozen=True)
 class PeekSettings:
-    """A peek is local, finite and optional; distances are metres, budgets actions."""
+    """A peek is local, finite and optional; distances are metres, budgets actions.
+
+    Attributes:
+        gate_floor_departure: Hold every floor change -- planned, fallback
+            or accidental -- until no unknown room on the storey is still
+            eligible for its one-time peek. OFF by default since 2026-10-04:
+            the Ranchester recordings held a descent fourteen times while
+            re-partitioning kept producing new "pending" rooms, and the
+            storey the target was on was never reached. On, the former
+            behaviour, kept as an ablation. The peeks themselves are
+            governed by ``enabled`` either way.
+    """
 
     enabled: bool = True
+    gate_floor_departure: bool = False
     trigger_distance_m: float = 3.0
     door_radius_m: float = 1.25
     inset_m: float = 1.0
@@ -25,8 +37,8 @@ class PeekSettings:
     max_attempts: int = 1
 
     def __post_init__(self):
-        if type(self.enabled) is not bool:
-            raise ValueError("doorway_peek.enabled must be boolean")
+        if type(self.enabled) is not bool or type(self.gate_floor_departure) is not bool:
+            raise ValueError("doorway_peek.enabled and gate_floor_departure must be boolean")
         for name in ("trigger_distance_m", "door_radius_m", "inset_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:

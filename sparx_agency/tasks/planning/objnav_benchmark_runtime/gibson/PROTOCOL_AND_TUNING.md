@@ -51,11 +51,27 @@ OSG reproduction.
    motion tolerances. A resumed run cannot quietly change those quantities.
 5. Provides an explicit configuration lock before a full validation run.
    It is a reproducibility guard, **not proof of unseen validation**.
+6. **Fills enclosed depth holes** (since 2026-10-08; `GibsonProtocol.depth_hole_*`,
+   `core/mapping/depth/depth_holes.py`). Habitat renders the scan's missing geometry --
+   glass, mirrors, glossy screens -- as depth 0; Markleeville/000000's spawn view holds
+   holes of 5-10 k pixels in most headings and enclosed voids of 30-125 k (up to 44 % of
+   the frame). The cited baselines all **drop** such pixels: SemExp and L3MVN push them to
+   100 m (`agents/sem_exp.py:_preprocess_depth`), SG-Nav sets `depth == 0.5` to 100 m
+   (`SG_Nav.py`), OSG-Nav's home-robot map module zero-weights them at the camera origin,
+   ApexNav culls them as radius outliers; VLFM alone inpaints (IP-Basic, `fill_small_holes`
+   under 100 000 px) and then excludes the filled pixels from its obstacle cloud. Dropped,
+   a mirror is unknown beside free floor -- a frontier. This implementation fills a hole
+   that is enclosed by valid depth on at least half its rim and no larger than half the
+   frame with its nearest valid pixel's depth, so it projects as the surface around it;
+   open or larger voids stay no reading, as in the baselines. A deviation from their
+   sensor handling, in the frozen configuration; `depth_hole_fill: false` restores theirs.
 
 ## Our own contamination must be disclosed
 
 The first episode in each validation scene, plus a short raw-view probe in
-Collierville, has already been inspected during development. These are
+Collierville, has already been inspected during development; so have the
+first three episodes of every scene (the 5 x 3 runs of 2026-10-08) and the
+depth frames of Markleeville/000000's spawn view. These are
 **development smoke examples**, not an untouched test set. No later flag or
 renaming can undo that. The five-example averages must not be compared as if
 they were the paper's complete validation result.

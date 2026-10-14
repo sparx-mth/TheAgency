@@ -32,8 +32,10 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_decision
     Approach, approach_points, floor_at, stair_cost_m)
 
 #: Room pids count up from zero; stair node ids start here. A registry would
-#: need a hundred thousand rooms before the two could meet.
+#: need a hundred thousand rooms before the two could meet. The band above
+#: (``opening_nodes.OPENING_NODE_BASE``) belongs to the floor's openings.
 STAIR_NODE_BASE = 100_000
+STAIR_NODE_LIMIT = 200_000
 
 
 def stair_node_id(portal_id: int) -> int:
@@ -42,8 +44,8 @@ def stair_node_id(portal_id: int) -> int:
 
 
 def is_stair_node(node_id) -> bool:
-    """Whether a supervisor room id names a staircase rather than a room."""
-    return node_id is not None and int(node_id) >= STAIR_NODE_BASE
+    """Whether a supervisor room id names a staircase rather than a room or an opening."""
+    return node_id is not None and STAIR_NODE_BASE <= int(node_id) < STAIR_NODE_LIMIT
 
 
 def portal_id_of(node_id: int) -> int:
@@ -86,9 +88,15 @@ def summarise_floor(context: Optional[Dict], floor_id: Optional[int] = None) -> 
         return "unvisited"
     graph = context.get("graph")
     rooms = getattr(getattr(graph, "registry", None), "rooms", {}) or {}
-    labels = getattr(getattr(graph, "label_tracker", None), "labels", {}) or {}
+    tracker = getattr(graph, "label_tracker", None)
+    labels = getattr(tracker, "labels", {}) or {}
+    metadata = getattr(tracker, "metadata", {}) or {}
     facts = getattr(graph, "facts", {}) or {}
-    named = sorted(label.label for pid, label in labels.items() if pid in rooms and label.label != "unknown")
+    # A weak label (one kind of object) is marked as the node lines mark it,
+    # ``kitchen?``: a cabinet alone made a "kitchen" on an upper storey and the
+    # oracle's STEP 2 read a ground floor off the summary (Ranchester 2026-10-05).
+    named = sorted(label.label + ("?" if (metadata.get(pid) or {}).get("strength") == "weak" else "")
+                   for pid, label in labels.items() if pid in rooms and label.label != "unknown")
     unknown = sum(1 for pid in rooms if pid not in labels or labels[pid].label == "unknown")
     parts: List[str] = []
     if named:
@@ -110,19 +118,26 @@ def _coarse(seconds: float) -> str:
     return "%dmin" % int(round(seconds / 60.0))
 
 
-def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: float = 1.0) -> List[StairOption]:
+def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: float = 1.0,
+                  rooms_left: bool = False) -> List[StairOption]:
     """Every eligible staircase on the floor in force, as a node the loop can offer.
 
     Eligible: a ground-truth connector's portal on this floor -- a SEEN
     staircase, the coordinator makes portals of no other -- that is not
     cooling (a failed approach defers it for a while), whose entry the
     observed passable map has reached, and that is not the staircase the
-    agent arrived by while :meth:`~multifloor_policy.MultiFloorSearch
-    .way_back_held`: a storey is looked at for ``arrival_grace_actions``
-    before the way back is a choice again (Pomaria: offered on the arrival
-    action, it was taken three times in a row on one room's evidence).
-    Nothing else here is a clock: a portal the map cannot reach yet simply
-    is not a node this action and comes back when the map grows to it.
+    agent arrived by while the way back is held: for
+    ``arrival_grace_actions`` after the arrival
+    (:meth:`~multifloor_policy.MultiFloorSearch.way_back_held`; Pomaria:
+    offered on the arrival action, it was taken three times in a row on one
+    room's evidence), and -- since 2026-10-04 -- while ``rooms_left`` says
+    this storey still has a room that is neither finished nor ruled out. A
+    storey is looked at before "not here" means anything: the 3B oracle sent
+    the Ranchester agent straight back up twice with "living room found; no
+    couch here", three unscanned rooms on the list each time. Any OTHER
+    staircase is offered at once. Nothing else here is a clock: a portal the
+    map cannot reach yet simply is not a node this action and comes back when
+    the map grows to it.
 
     Args:
         building: The :class:`~multifloor_policy.MultiFloorSearch`.
@@ -132,12 +147,13 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
         contexts: Saved per-floor policy state, keyed by atlas floor id
             (``policy.floors.save()``), for the destination summaries.
         action_time_s: Seconds per action, to phrase "arrived N ago".
+        rooms_left: Whether a room of this storey is still a node of the search.
     """
     if building is None or building.ground_truth is None:
         return []
     if not building.can_leave_floor(obs):
         return []
-    held = getattr(building, "way_back_held", lambda step: False)(obs.step)
+    held = getattr(building, "way_back_held", lambda step: False)(obs.step) or bool(rooms_left)
     portals = [q for q in building.portals if q["floor_id"] == building.floor_id
                and q.get("connector_id") is not None and obs.step >= q.get("cooldown_until", 0)
                and not (held and q.get("connector_id") == building.arrived_by)]
@@ -168,8 +184,46 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
     return options
 
 
-def search_context(building, policy, contexts: Dict) -> SearchContext:
-    """What the prompt says about this storey and the others."""
+def storey_position(building, elevation_m: float) -> str:
+    """Where this storey lies in the building, in the prompt's words -- geometry, not judgement.
+
+    The storey's rank from both ends: ``the lowest of 2 known storeys``,
+    ``the highest of 3 known storeys, 2 above the lowest``, ``1 above the
+    lowest and 1 below the highest of 3 known storeys``. No floor name:
+    the node oracle's STEP 2 reads the storey from this rank AND the rooms
+    found, with the rooms decisive. On 2026-10-05 the 14B model read a
+    storey given only as ``(this one at +3.1 m)`` as a ground floor and kept
+    the couch's living room "here"; the same evening a line that called
+    every storey above the lowest "an upper floor" had it say the living
+    room lives elsewhere on the Newfields ground floor -- whose lowest
+    storey is a basement -- with a living room found on it. Which storeys
+    exist is the building's ground-truth stair data; the match tolerance
+    is the atlas's.
+    """
+    levels = sorted(float(z) for z in building.ground_truth.levels)
+    if not levels:
+        return ""
+    tolerance = float(getattr(building.params, "floor_match_m", 1.0) or 1.0)   # storeys lie 1.5 m or more apart
+    below = sum(1 for z in levels if z < elevation_m - tolerance)
+    above = sum(1 for z in levels if z > elevation_m + tolerance)
+    n = len(levels)
+    if n == 1:
+        return "this storey is the only one known"
+    if below == 0:
+        return "this storey is the lowest of %d known storeys" % n
+    if above == 0:
+        return "this storey is the highest of %d known storeys, %d above the lowest" % (n, below)
+    return "this storey is %d above the lowest and %d below the highest of %d known storeys" % (below, above, n)
+
+
+def search_context(building, policy, contexts: Dict, house: str = "") -> SearchContext:
+    """What the prompt says about this home: the HOUSE line, and the storeys when more than one is known.
+
+    ``house`` is the big-picture line (:func:`~house_context.house_line`);
+    the storey lines are kept for the multi-storey development protocol and
+    are shown only when another storey is known or a staircase is offered
+    (the standard single-storey benchmarks never see them).
+    """
     here = {key: getattr(policy, key) for key in ("graph", "_floor_time")}
     floor_id = policy.mapping.floor_id
     storey = summarise_floor(here, floor_id)
@@ -177,7 +231,9 @@ def search_context(building, policy, contexts: Dict) -> SearchContext:
         elevation = policy.mapping.atlas.elevation_m if policy.mapping.atlas.floors else 0.0
         storey += "; %d storey%s known to the building" % (
             len(building.ground_truth.levels), "" if len(building.ground_truth.levels) == 1 else "s")
-        storey += " (this one at %+.1f m)" % (elevation - min(building.ground_truth.levels)) if building.ground_truth.levels else ""
+        position = storey_position(building, elevation)
+        if position:
+            storey += "; " + position
     others = tuple(summarise_floor(context, other) for other, context in sorted(contexts.items()) if other != floor_id)
-    return SearchContext(storey=storey, others=others)
+    return SearchContext(house=house or storey, storey=storey, others=others)
 

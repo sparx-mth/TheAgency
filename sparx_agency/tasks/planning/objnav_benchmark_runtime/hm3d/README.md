@@ -195,14 +195,19 @@ is rejected here, by design.)
 
 ```bash
 export LLM_BACKEND=ollama LLM_BASE_URL=http://127.0.0.1:11435 LLM_MODEL=qwen2.5:3b-instruct LLM_TIMEOUT_S=120
+export LLM_REASONING_MODEL=qwen2.5:14b-instruct LLM_REASONING_TIMEOUT_S=600   # the search's one judgement per loop point
 export HM3D_EPISODES_DIR="$DATA/objectnav/hm3d/v2/val"
 export HM3D_SCENES_DIR="$DATA/scene_datasets"
 RUN_FLAGS="--version v2 --detector-url http://127.0.0.1:18092 --seed 17 --explorer frontier"
 ```
 
+`LLM_REASONING_MODEL` defaults to `qwen2.5:14b-instruct` (~9 GB; `ollama pull` it like the 3B) and the
+run refuses to start without it. A 3B stand-in (`LLM_REASONING_MODEL=qwen2.5:3b-instruct`) is only for plumbing
+checks: the recorded configuration names the model, and a 3B double-counts search effort (see `llm_client.py`).
 `LLM_TIMEOUT_S=120`: the CPU model needs ~2 s per room in the prompt. Add
 `--allow-shared-gpu` to `RUN_FLAGS` when GPU 0 also drives a desktop (the run
-otherwise refuses a card with > 512 MiB already in use). For v1, point
+otherwise refuses a card with > 512 MiB already in use). Scenes: v2 episodes need the name `scene_datasets/hm3d_v0.2`; when the downloader only made `hm3d`
+(pointing at the v0.2 release), `ln -s <that release's hm3d dir> "$DATA/scene_datasets/hm3d_v0.2"`. For v1, point
 `HM3D_EPISODES_DIR` at `.../hm3d/v1/val` and use `--version v1`.
 
 ### 2.4 Preflight (no rendering, no actions, no GPU)
@@ -217,7 +222,7 @@ would carry:
 ```
 
 It exits 0 with `{"ready": true, ...}` — check `method.detector.metadata.backend`
-reads `yolo_world`, `method.ground_truth_stairs` is `true`, and
+reads `yolo_world`, `method.allow_stair_traversal` is `false`, and
 `method.adaptation.local_exploration` is `frontier`. Any refusal names the missing
 piece. Add `--validate-starts` to also load the scene and measure every `l`
 against the publisher's own geodesic (slow; the only way to find an unreachable
@@ -231,10 +236,12 @@ start before the run stops at it).
     --output "$HOME/objnav_benchmark/hm3d_v2/smoke"
 ```
 
-One line per finished episode is printed
-(`1/1 <episode> <target> SR=… SPL=… DTG=… SoftSPL=…`); a 500-action episode
-takes ~10 minutes with CPU services. **Watch it live** by opening
-`$HOME/objnav_benchmark/hm3d_v2/smoke/live.html` in a browser — it polls
+One progress line per finished episode is printed (a bar, the running SR / SPL / DTG, the ETA and the
+last episode's outcome); a 500-action episode
+takes ~10 minutes with CPU services. **Watch it live** (optional; the recording is written either way, so skip this to save the CPU and
+review `index.html` and the videos afterwards) by serving the folder --
+`python3 -m http.server 8765 --bind 127.0.0.1 --directory "$HOME/objnav_benchmark/hm3d_v2/smoke"` -- and opening
+`http://127.0.0.1:8765/live.html`; a `file://` page cannot poll its JSON and stays on "Waiting for first recorded frame" — it polls
 `latest.jpg` (the dashboard frame: RGB with boxes, metric depth, the persistent
 per-floor observed maps with rooms, trail and committed route, the decision and
 the LLM's room reasons) and `live.json`.
@@ -258,6 +265,19 @@ To inspect a recording as a collapsed phase/room/command timeline:
 .venv/bin/python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.timeline_room_search_loop \
     "$HOME/objnav_benchmark/hm3d_v2/smoke/recordings/<key>"
 ```
+
+Development flags, all subset runs (scoring is unchanged, the goal is always the published one):
+`--episode-ids <id>…` re-runs exactly those episodes (same start and goal) after a change;
+`--shuffle --limit N` takes a seeded random sample instead of the first N in split order;
+`--category toilet` keeps one goal category; `--lean` keeps ~a few KB per episode row instead of ~100 KB
+(no per-action series); `--progress-file` moves the live `progress.json`, otherwise `<output>/progress.json`.
+`<output>/evaluation_diagnostics.jsonl` holds the evaluator-only distance and path values per episode and is
+never shown to the policy.
+
+**Single floor.** The papers compared against search one storey and never take stairs, and so does this
+runtime: `method.allow_stair_traversal` is `false` (the `RPTSettings` default) and the preflight prints it.
+`method.ground_truth_stairs: true` only says the navmesh's stair connectors are *known to the policy*, not
+used to change floors; do not turn `allow_stair_traversal` on for a number you compare with them.
 
 ### 2.6 Smooth first-person replay (visualization only)
 
@@ -534,7 +554,7 @@ issue.
 | `geodesic.py` | habitat-lab's `DistanceToGoal` to view points, on habitat-sim's pathfinder |
 | `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance |
 | `assets.py` | what is installed, what is missing, and the commands that would fix it |
-| `run.py` | preflight and the run, on the shared `run_evaluation`; builds the shared `RPTSearchPolicy` from this protocol's agent |
+| `run.py` | preflight and the run, on the shared `run_evaluation` (progress, lean rows and diagnostics via its `wrap_env` / `agent_class` hooks); builds the shared `RPTSearchPolicy` from this protocol's agent |
 | `campaign.py` | one child process per scene, then an aggregate over what finished |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
 | `sota.py` | the published numbers, with the table each came from |

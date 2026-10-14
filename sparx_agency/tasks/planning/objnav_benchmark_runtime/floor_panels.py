@@ -13,10 +13,19 @@ import math
 import cv2
 import numpy as np
 
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OPENING_NODE_BASE
+
 UNKNOWN_GRAY = 128
+#: Unknown the search has settled -- looked through without a depth return, or an enclosed
+#: pocket (``methods/sightlines.py``): drawn darker than the unknown still worth a step.
+SETTLED_GRAY = 92
 LABEL_SCALE = 0.38
 #: Colour of a seen staircase's entry marker (BGR).
 STAIRS_COLOR = (60, 140, 255)
+#: Colour of an opening offered as a node: its threshold and the way the unknown lies (BGR).
+OPENING_COLOR = (200, 90, 200)
+#: Colour of a target landmark offered as a node: the standoff point and the way the landmark lies (BGR).
+LANDMARK_COLOR = (0, 200, 220)
 
 
 class FloorPanels:
@@ -43,7 +52,7 @@ class FloorPanels:
 
     def _unknown(self):
         return {"floor_id": None, "grid": np.full(self.shape, -1, np.int8), "objects": [], "trail": [],
-                "room_labels": np.zeros(self.shape, np.int32),
+                "room_labels": np.zeros(self.shape, np.int32), "settled": np.zeros(self.shape, bool),
                 "stairs": [], "rooms": 0, "search_time_s": 0.0, "pose": None}
 
     def capture(self, policy, observation):
@@ -62,6 +71,12 @@ class FloorPanels:
             if world.grid.shape != self.shape or not np.allclose((world.origin_x, world.origin_y), self.origin):
                 raise ValueError("Floor map identity/scale changed inside an episode")
             np.copyto(slot["grid"], world.grid)
+            sight = getattr(policy, "sight", None)
+            settled = sight.resolved(world, floor_id) if sight is not None else None
+            if settled is not None and settled.shape == self.shape:
+                np.copyto(slot["settled"], settled)
+            else:
+                slot["settled"].fill(False)
             context = policy.floors.contexts.get(floor_id)
             if floor_id == policy.floors.active:
                 context = {key: getattr(policy, key) for key in ("landmarks", "graph", "_floor_time")}
@@ -132,6 +147,7 @@ class FloorPanels:
         return [{"slot": i, "floor_id": s["floor_id"], "unknown": s["floor_id"] is None,
                  "shape": list(s["grid"].shape), "origin": list(self.origin), "resolution_m": self.resolution,
                  "known_cells": int(np.count_nonzero(s["grid"] >= 0)), "rooms": s["rooms"],
+                 "settled_cells": int(np.count_nonzero(s["settled"])),
                  "objects": list(s["objects"]), "search_time_s": s["search_time_s"],
                  "stairs": [dict({k: v for k, v in st.items() if k != "footprint"}, footprint_points=len(st["footprint"]))
                             for st in s["stairs"]],
@@ -167,6 +183,7 @@ class FloorPanels:
             x, y = left + (panel_w - width) // 2, top + 32 + (panel_h - 64 - height) // 2
             grid = slot["grid"][y0:y1, x0:x1]
             colors = np.full((*grid.shape, 3), UNKNOWN_GRAY, np.uint8)
+            colors[slot["settled"][y0:y1, x0:x1] & (grid == -1)] = SETTLED_GRAY
             colors[grid == 0] = 242
             colors[grid == 100] = 35
             canvas = cv2.resize(np.flipud(colors), (width, height), interpolation=cv2.INTER_NEAREST)
@@ -252,10 +269,26 @@ class FloorPanels:
                 row, col = np.unravel_index(int(depth.argmax()), depth.shape)
                 cls._label(canvas, "R%d" % (int(value) - 1), (int(col), int(row)), (65, 70, 75), placed)
 
-    @staticmethod
-    def _draw_search(canvas, pixel, search):
-        """Only current/next-room emphasis; verbose search facts stay off the map."""
-        nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("stairs", ())) if n.get("centroid")}
+    @classmethod
+    def _draw_search(cls, canvas, pixel, search):
+        """Current/next-node emphasis and the openings offered as nodes; verbose search facts stay off the map."""
+        placed = []
+        for opening in search.get("openings", ()):
+            if not opening.get("centroid"):
+                continue
+            at = pixel(opening["centroid"])
+            heading = math.radians(float(opening.get("heading_deg") or 0.0))
+            landmark = opening.get("kind") == "landmark"
+            color = LANDMARK_COLOR if landmark else OPENING_COLOR
+            tip = (int(at[0] + 9 * math.cos(heading)), int(at[1] - 9 * math.sin(heading)))
+            cv2.arrowedLine(canvas, at, tip, color, 1, cv2.LINE_AA, tipLength=0.5)
+            cv2.circle(canvas, at, 3, color, -1, cv2.LINE_AA)
+            index = int(opening["id"]) - OPENING_NODE_BASE
+            name = ("T%d" % int(opening["landmark_id"]) if landmark and opening.get("landmark_id") is not None
+                    else "O%d" % index)
+            cls._label(canvas, name, at, color, placed)
+        nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("stairs", ()))
+                 + list(search.get("openings", ())) if n.get("centroid")}
         for key, color in (("room_in_force", (40, 170, 235)), ("next_room", (75, 160, 75))):
             node = nodes.get(search.get(key))
             if node is not None:

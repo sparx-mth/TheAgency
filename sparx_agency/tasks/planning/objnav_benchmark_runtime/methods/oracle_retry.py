@@ -1,7 +1,8 @@
 """One bounded schema repair around the node oracle's own scoring."""
 from __future__ import annotations
 
-from sparx_agency.core.mapping.topology.search_node_oracle import SearchNodeOracle
+from sparx_agency.core.mapping.topology.search_node_oracle import (
+    HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, SearchNodeOracle, system_prompt)
 
 
 class RepairingNodeOracle(SearchNodeOracle):
@@ -13,8 +14,10 @@ class RepairingNodeOracle(SearchNodeOracle):
     runtime raises rather than flying on a flat distribution.
     """
 
-    def __init__(self, client):
-        super().__init__(client)
+    def __init__(self, client, unexplored_floor=UNEXPLORED_FLOOR, unexplored_elsewhere=UNEXPLORED_ELSEWHERE,
+                 home_floor=HOME_FLOOR):
+        super().__init__(client, unexplored_floor=unexplored_floor, unexplored_elsewhere=unexplored_elsewhere,
+                         home_floor=home_floor)
         self.repair_attempts = 0
         self.repair_successes = 0
 
@@ -25,14 +28,15 @@ class RepairingNodeOracle(SearchNodeOracle):
         self.repair_attempts += 1
         user = self.prompt(target, nodes, context)
         user += ('\nYour previous answer did not satisfy the schema. Return exactly '
-                 '{"nodes":[{"id":0,"why":"brief reason","p":50}, ...]} '
+                 '{"home":"...","house":"...","stage":"...","pass":"first|second",'
+                 '"nodes":[{"id":0,"why":"brief reason","p":50}, ...]} '
                  'with one entry per actual node id from the input (not the example id), '
                  'independent integer p values in 0-100 (do not normalise across nodes), '
                  'and nothing outside the JSON object.')
         reply, repaired = None, None
         try:
-            reply = self.ask(user)
-            repaired = self.score(reply, nodes)
+            reply = self.ask(user, system_prompt(nodes, context))
+            repaired = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
         except Exception:
             repaired = None
         if repaired is not None and reply is not None:

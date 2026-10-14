@@ -116,6 +116,13 @@ class LLMConfig:
             FRONT, which would silently drop the system prompt's rules, so
             the window is asked for explicitly rather than left to the
             server's default.
+        num_gpu: Ollama ``num_gpu`` per request: how many layers the server
+            may place on the GPU. None leaves it to the server (every layer
+            that fits); ``-1`` asks for all of them, ``0`` keeps inference
+            on the CPU even on a server that has a card. The Gibson
+            runtime's GPU placement plan (``gibson/gpu_plan.py``) sets it
+            through ``LLM_NUM_GPU`` so the LLM -- the slowest process by an
+            order of magnitude -- is the first to get the card.
     """
 
     backend: str = "ollama"
@@ -131,10 +138,13 @@ class LLMConfig:
     reasoning_timeout_s: float = 600.0
     reasoning_max_tokens: int = 2048
     reasoning_num_ctx: int = 8192
+    num_gpu: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not str(self.reasoning_model).strip():
             self.reasoning_model = self.model
+        if self.num_gpu is not None and (isinstance(self.num_gpu, bool) or int(self.num_gpu) < -1):
+            raise ValueError("num_gpu must be None, -1 (all layers) or a non-negative layer count")
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -157,6 +167,7 @@ class LLMConfig:
             reasoning_timeout_s=float(get("LLM_REASONING_TIMEOUT_S", "600")),
             reasoning_max_tokens=int(get("LLM_REASONING_MAX_TOKENS", "2048")),
             reasoning_num_ctx=int(get("LLM_REASONING_NUM_CTX", "8192")),
+            num_gpu=int(get("LLM_NUM_GPU", "").strip()) if get("LLM_NUM_GPU", "").strip() else None,
         )
 
     def models(self) -> Tuple[str, ...]:
@@ -251,6 +262,8 @@ class LLMClient:
             options["num_ctx"] = int(route.num_ctx)
         if self.cfg.seed is not None:
             options["seed"] = int(self.cfg.seed)
+        if self.cfg.num_gpu is not None:
+            options["num_gpu"] = int(self.cfg.num_gpu)
         payload = {
             "model": route.model,
             "stream": False,
@@ -301,6 +314,14 @@ class LLMClient:
     def _post_with_retry(self, url: str, payload: Dict[str, Any],
                          extra_headers: Optional[Dict[str, str]] = None,
                          tries: int = 2, timeout_s: Optional[float] = None):
+        """POST ``payload``; a transient transport error is retried once, a timeout never.
+
+        A request that ran into its timeout was not a blip: the model is
+        still generating (or the server is wedged), and a second attempt
+        costs the whole timeout again -- 20 minutes per node-oracle call at
+        the reasoning route's 600 s (review of 2026-10-07). The caller's
+        back-off handles a slow or dead service; here the timeout is final.
+        """
         headers = {"Content-Type": "application/json"}
         if extra_headers:
             headers.update(extra_headers)
@@ -313,6 +334,8 @@ class LLMClient:
                                    timeout=timeout)
                 r.raise_for_status()
                 return r
+            except requests.Timeout as e:
+                raise RuntimeError(f"LLM request timed out after {timeout:.0f}s (not retried): {e}") from e
             except requests.RequestException as e:
                 last_err = e
                 if attempt + 1 < tries:

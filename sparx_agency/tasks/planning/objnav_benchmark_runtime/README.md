@@ -3,7 +3,13 @@ Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order
 local exploration and A*/WA* paths → existing discrete actions. Both explorers
 retain persistent floor contexts; stair connectors come from the simulator's
 navmesh by default (`RPTSettings.multifloor.stair_source`, see
-[MULTISTORY.md](gibson/MULTISTORY.md)). Habitat target closing additionally uses
+[MULTISTORY.md](gibson/MULTISTORY.md)). **Taking them is off by default**
+(`RPTSettings.allow_stair_traversal: false`): the standard ZSON benchmarks
+score an episode on its spawn storey, so the search is confined to it --
+seen staircases and observed drops are impassable, no goal off the spawn
+plane is accepted, and no staircase is a node, a fallback or a climb
+(`methods/spawn_floor_guard.py`; the multi-storey development entrypoints
+lift the flag explicitly). Habitat target closing additionally uses
 declared local NavMesh projection (`target_navmesh_projection` in run configuration).
 This is an experimental multi-story algorithm, **not a claim of solved navigation**.
 ## Layout: one navigation core, one task per dataset
@@ -20,19 +26,177 @@ algorithm once, in `methods/`, and both benchmarks pick it up.
 **To set up and run Gibson end to end, start with [QUICKSTART.md](QUICKSTART.md)**;
 for HM3D, with [hm3d/README.md](hm3d/README.md). This file is the architecture
 reference for the shared core.
+
+**To run the published Gibson val benchmark end to end, start with
+[gibson/BENCHMARK.md](gibson/BENCHMARK.md)** (one script: services, preflight, the 1,000
+episodes with lean records and live progress, the summary). [QUICKSTART.md](QUICKSTART.md)
+is the step-by-step manual and the guide to the multi-storey development campaigns. This
+file is the architecture reference.
+
 ## Exploration selection
 
 ### High-priority target closing
 
 Both explorers yield **before any room/LLM/RPT* decision** when a target-category
-YOLO detection reaches `target_closing.confidence` (default **0.50**). The first
-candidate latches ownership in `VERIFY`; at least **two consecutive distinct
-frames** with coherent depth and the same fixed 3D association anchor (0.50 m
-tolerance) are required to lock `CLOSE`. Duplicate boxes and repeated calls for
-the same frame do not count. Context detections below this threshold cannot enter
-legacy target pursuit. Neither a timeout nor a rejected route can release ownership;
-**only episode reset clears it**. Room reasoning, stair decisions, doorway peeks,
-FALCON masks and exploration fallback remain suspended.
+YOLO detection reaches `target_closing.confidence` (default **0.50**) **and projects
+to a coherent 3-D position** -- a confident box the depth sensor cannot place has
+nothing a second frame can be checked against, and the twelve-step verifications
+such boxes bought ("waiting for valid target depth" from 3.8 m, Ranchester attempts
+4 and 5) released every time. The first such candidate latches ownership in
+`VERIFY`; at least **two consecutive distinct frames** with coherent depth and the
+same fixed 3D association anchor (0.50 m tolerance) are required to lock `CLOSE`.
+Duplicate boxes and repeated calls for the same frame do not count. Context
+detections below this threshold cannot enter legacy target pursuit.
+
+**Detect high, associate low.** A detector's confidence in one object swings with
+the view: the Ranchester couch read 0.68 from the stair foot at one heading, 0.42
+one 30-degree turn later with the same object centred, 0.52 clipped at the next --
+and the agent's own centring turn broke the consecutive run on every cycle
+(twenty-four frames with the couch in view, two releases). Once a candidate is
+active, a box of the target's class that projects onto its anchor counts from
+`track_confidence` (**0.30**); a weak box anywhere else, or before any takeover,
+counts for nothing (`weak_resightings` in the diagnostics).
+
+**What may start a takeover.** A box within `border_margin_px` (**8 px**) of any
+image edge is a partial view — its depth centroid is unreliable, and the clipped
+end of a bed reads as a sofa (the Ranchester couch-downstairs run of 2026-10-04
+ended on exactly such an 84 px sliver) — unless it fills 30 % of the frame in
+both dimensions, the big object at terminal range that no frame holds whole
+(`clipped_box`). **A box cut only by the bottom edge is not a sliver** (since
+2026-10-07): a level camera 0.88 m up sees the floor from about 1.4 m out, so a
+LOW object at 1-2 m -- a toilet, a chair seat -- is cut by the bottom edge on
+every frame while standing whole laterally, and its near edge and centroid are
+on the object. The Allensville toilet run refused twenty-three such frames of a
+0.97 toilet at 1.2-1.7 m, never counted two in a row and released the candidate
+twice; a box touching only the bottom edge, with its top in the lower half of
+the frame and at least 15 % of the frame in both dimensions, counts. Clipped
+boxes cannot start or count
+towards a lock; once locked, the approach tolerates spill-over. A box projecting
+within `rejection_radius_m` (**1.0 m**) of a spot already released as unverified
+on the same floor is ignored before a lock -- **unless it is seen from within
+`rejection_min_range_m` (2.0 m)**: the memory stops the same far flicker from
+restarting the takeover from the same place, and a close view is new evidence
+(the Ranchester couch released at 3.8 m from the stair head was never
+re-verified from 1 m, twice, until this) -- **or it reaches `override_confidence`
+(0.80)** (since 2026-10-07): the detector's word at that level is not a flicker,
+and the same toilet run refused nine frames of a 0.95-0.97 toilet in plain view
+at 2.4 m because a lock the map had wrongly outvoted was remembered 2 m around
+it. The override passes the memory of `unverified` and `contradicted by the map`
+releases and the release cooldown; a spot released by a **failed inspection**
+(the closing looked from close and saw nothing), a stalled approach or a
+boxed-in spot still holds, and border clipping, incoherent depth and the map's
+own contradiction are not overridden (`overrides` in the diagnostics; the
+rejection memory records `why`). The 3-D association radius for the
+consecutive-frame lock grows with range (`association_range_gain`, 0.15 m per
+metre beyond 2 m: 0.77 m at 3.8 m), because the visible centroid of a long
+object seen from far moves more than half a metre between two frames.
+
+**The part of the object a frame shows moves along the line of sight** (since
+2026-10-11; the toilets of the 1,000-episode validation run, 63 % of whose 148
+failures had locked on and released a candidate). From 2 m a toilet's box holds
+the whole object and the depth patch lands on the bowl (0.38 m up); from 1.3 m
+the frame's lower edge cuts the box, the patch lands on what is left in view --
+the tank -- and the centroid jumps 0.47-0.49 m BACK along the viewing ray (and
+0.2 m up) with 2-3 cm of lateral error. Against a 0.50 m sphere about the anchor
+that is 0.50-0.53 m: every 0.92-0.94 frame of the toilet the agent was standing
+beside was discarded as another object, the inspection released it as "saw
+nothing in any view" with the agent inside the success region, and a 2 m
+rejection around the toilet followed. Three rules of `TargetClosing` answer it:
+
+- **Association is a cylinder, not a sphere** (`_associated`,
+  `association_depth_m` 0.60 m): `association_radius_m` across the ray and in
+  height, that plus the object's depth -- 0.60 m or the anchor frame's footprint
+  diameter, whichever is larger -- along it. Two chairs side by side stay two
+  chairs (`depth_associations` counts what the sphere would have dropped).
+- **A floor-cut frame is a sighting, not a position** (`_floor_cut_box`,
+  `floor_cut_terminal`, `floor_cut_min_hidden_m` 0.05 m): when the box reaches
+  the lower margin, the target is below the camera and the lowest point in view
+  stands higher than the lowest point the lock has measured, the frame counts as
+  fresh but is NOT fused into the 3-D memory (its centroid is the upper part's,
+  a biased reading of the object's; fused, it walked the memory and the standoff
+  measured from it back toward the tank frame by frame), and the terminal range
+  is the smaller of the visible near edge and the planar range to the memory:
+  the part under the frame -- bowl, seat -- stands in front of the part in view
+  for the furniture of this benchmark, and the memory is the centroid the
+  approach's standoff was measured from (`floor_cut_frames`,
+  `floor_cut_measurements`; `floor_cut` in the STOP's info).
+- **Below the field of view, without LOOK actions, the memory completes the
+  STOP** (`_below_the_frame`, `blind_cone_stop`, `blind_cone_max_missing` 6,
+  `blind_cone_min_fraction` 0.15): the Wiconisco toilet, 0.47 m high, showed
+  under 40 px of its rim from 0.9 m, the detector read 0.12-0.18 and no yaw
+  sweep brings back what no yaw puts in the frame. When the geometry (the
+  camera's height, pitch and lower edge; the target's measured top and
+  remembered range) predicts fewer than 15 % of the frame's rows of the target
+  in view -- the sliver `clipped_box` will not accept -- with its bearing inside
+  the horizontal field, the target seen fresh within six actions and the memory
+  within the terminal range, the closing STOPs: the missing box is explained,
+  and the one action that would bring the object back does not exist. The rule
+  is off whenever the action spec has the tilt pair -- there the dynamic pitch
+  controller (below) is its counterpart (`blind_cone_stops`).
+
+**The context check** (`methods/target_context.py`, `context_check`, since
+2026-10-07). A detector's confidence is a score over the crop; it knows nothing
+about the room the crop was taken in or how high the surface it fired on is.
+Allensville/2 and Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter
+front read as `bed` from 0.55 m -- its supported points 0.67-0.70 m above the
+agent's base where every real bed of the recording measured 0.11-0.52 m, inside
+a room the map had made a STRONG kitchen from its refrigerator and oven -- after
+two frames from one spot. A candidate is **suspect** when its footprint lies in
+a room whose strong type is one the target is not searched for in
+(`room_priors.IMPLAUSIBLE_ROOMS`, `room:kitchen`) or when its measured centroid
+height contradicts its class (`CLASS_HEIGHT_BANDS`, calibrated on the Allensville
+recordings: a bed's or a toilet's surface under 0.60 m above the base,
+`height:0.69`). A suspect box counts `context_penalty` (0.70) of its confidence
+toward the start threshold (0.60 x 0.70 is no takeover; 0.75 is), and its lock
+needs `context_confirmation_frames` (4) consecutive frames from at least two
+viewpoints `context_baseline_m` (0.30 m) apart -- a turn in place is not a
+second viewpoint (`suspect`, `context_rejections`, `suspect_locks_held` in the
+diagnostics and the HUD). It is a penalty, not a refusal: a bed in a room the
+partition merged with a kitchen is still locked, from two places.
+
+**Before the lock, ownership is provisional.** A fresh candidate within one
+turn of the image centre is *stepped toward*, not centred (since 2026-10-05):
+the box stays in the frame after a step and the next frame can be the
+consecutive one, where the centring turn moved the box across the image and
+the detector dropped it on the other side, four cycles running, at a chair
+3.5 m off; a candidate farther off-centre is faced first. **A candidate too
+close to step toward gets a frame that keeps its box whole**
+(`verify_keep_in_frame`, since 2026-10-07): the hold that used to follow was
+already satisfied -- idle -- and the headless agent executes an idle result as
+a TURN, which moved the centred Allensville toilet out of the frame at 1.18 m
+(action 77) and reset the count. **The pitch follows the target's elevation**
+(`TargetClosing._elevation`, `elevation_band_m` 0.15 m): a target whose
+measured 3-D centroid stands below the camera -- or, without one, whose box
+centre bears below the horizon once the camera's own pitch is taken out -- is
+looked DOWN at, one above the camera (a wall-mounted television, the top of a
+wardrobe) is looked UP at, and a box cut by the bottom or the top edge says
+the same thing; never a fixed direction (a hardcoded LOOK_DOWN drove high
+targets out of the frame). Level with the camera, the LOOK whose predicted
+shift (`fy * tan(tilt)` pixels) leaves the box inside the frame margins, down
+before up; failing both, the TURN whose shift (`fx * tan(turn)`) keeps it,
+toward the box's side before away (`verify_step` and `elevation` in the command
+info). If `max_verify_steps` (12) pass
+without the lock, `release_unverified` (default **true**) hands control back to
+exploration in phase `RELEASED`, records the anchor in the rejection memory and
+clears the legacy target hint; the room/stair search resumes where it was
+interrupted. **What the takeover refuses, the legacy pursuit does not walk
+after** (`TargetClosing.refuses_far_candidate`, read by `perception_cycle.fuse`):
+a far landmark within the rejection memory, one seen during the release
+cooldown, or one seen from a spot given up for want of a path, sets no legacy
+target hint (`refused_by_takeover` on the projection row) -- the second Hanson
+fly walked nine actions toward a chair the takeover had released a frame
+earlier, and the move restarted the warm-up where it ended. `release_unverified: false` restores the historical behaviour, where
+the exhausted verification raises the recordable method error. **After the lock**
+neither a timeout nor a rejected route releases ownership; the four releases a
+locked target does have are the ones below -- an inspection that saw nothing from
+close, a map whose class vote at the anchor outvotes the lock, a spot with no
+path out of it, and an approach that goes nowhere (`approach_stall_actions` CLOSE
+actions inside `approach_stall_m`: A* finds a path, the follower pushes into
+something the map does not show) -- and episode reset. Room reasoning, stair decisions, doorway peeks,
+glances, FALCON masks and exploration fallback remain suspended while the takeover
+owns the action (a glance in force is aborted the action it starts); the landmark
+map keeps voting on the frames the takeover sees, so the map release can fire,
+while the legacy target evidence stands down.
 
 The closing sub-policy reuses coherent RGB-D backprojection with the actual camera
 pitch. It samples standoff footpoints around the observed target, projects them
@@ -40,8 +204,16 @@ onto Habitat's local NavMesh when bound, and uses existing collision-qualified
 observed-grid A* to approach. **The selected 3D footpoint and route persist through
 occlusion**: missing detections neither cancel the path nor invoke a scan. Fresh
 associated observations refine the stored target with a 50/50 update; an XY shift
-over `refine_distance_m` (0.15 m) since the goal was selected triggers replanning.
-Small refinements do not move the endpoint every frame. Collision, blockage and
+over `refine_distance_m` (0.15 m) since the goal was selected triggers a refinement
+-- and a refinement **keeps the standoff goal when it still ends inside
+`terminal_distance_m` of the refined memory** (since 2026-10-11, `TargetApproachPath.kept`;
+`goal_kept` in the diagnostics): re-selecting a bearing-relative ring about the new
+position is a different set of points, each needing a navmesh projection and a path,
+and Collierville/000194 traded a reachable goal for a ring with none and released the
+real television as "no safe path from here" the moment the along-ray association made
+its memory 0.11 m more accurate. A kept goal that a slow drift carries past the terminal
+radius is re-selected the action it falls out. Small refinements do not move the endpoint
+every frame. Collision, blockage and
 progress validation remain active; persistence is not permission to cross obstacles.
 Remote or other-floor snaps and unreachable paths
 are rejected. The optional simulator callback contains no target annotations,
@@ -51,28 +223,262 @@ without NavMesh projection, explicitly reported as such.
 
 A* owns heading during transit, including doorway/corner turns that put the target
 outside the FOV. Bbox yaw servoing is confined to terminal inspection so it cannot
-fight the route. At `terminal_distance_m` (**1.0 m**), forward motion stops and
-inspection remains stationary. Low objects request LOOK_DOWN; missed detections
+fight the route. The camera is level in transit; **inside `look_down_distance_m`
+(1.30 m) the approach carries the target's own pitch** (since 2026-10-07, the same
+`_pitch` the inspection uses): one tilt step at least in the direction of the
+target's elevation -- down at a toilet, up at a wall-mounted television -- so the
+terminal frames hold the object whole. **Since 2026-10-11 that geometric controller is
+the fallback**: within `bbox_pitch_distance_m` (1.50 m) with a fresh box, the camera
+pitch is the image-space servo's (next section), and the geometry decides only on a
+frame without a fresh box. At `terminal_distance_m` (**1.0 m**),
+forward motion stops and inspection remains stationary. The inspection pitch is
+the one the target's **measured height** predicts -- a toilet 0.45 m up is low, a
+plant in a metre-tall planter is at eye level and gets no look-down (until
+2026-10-05 "a potted plant is low" by label sent the camera 30 degrees down at
+exactly such a plant for 24 actions), a television above the camera gets LOOK_UP;
+missed detections
 trigger bounded pitch-up/down and yaw views referenced to the stored target bearing,
-not accumulating turns from the current yaw. The camera owner is `TARGET_CLOSING`,
+not accumulating turns from the current yaw. The predicted pitch is where to
+*look* for a target not in view, never a condition on having seen it: a fresh,
+aligned sighting within range STOPs at whatever pitch it came at (the Hanson
+toilet projected at 60 degrees where its height predicted 30, and twenty actions
+of LOOK_UP / LOOK_DOWN followed the sighting before the budget STOPped). The camera owner is `TARGET_CLOSING`,
 so level-view restoration cannot override inspection. The original no-tilt Gibson
 protocol cannot emit LOOK_DOWN; multi-story development has tilt-enabled actions.
 Turns retain the protocol's fixed increments (30 degrees in Habitat) and its
 half-turn dead band, not arbitrary micro-turns.
 
-STOP requires a **fresh**, associated detection, completed verification, centered
-yaw, satisfied pitch and both filtered and freshly measured horizontal range
-within the terminal radius plus `range_tolerance_m` (**0.05 m**, for pitch-dependent
-projection noise). No STOP from remembered distance alone is allowed. This terminal
-radius replaces legacy `stop_distance_m` for the closing sub-policy. Verification
-is bounded at 12 actions, terminal inspection at 24 (`max_reacquire_steps`), and
-total closing at 160 by default. Occlusion during transit has no separate timeout.
-Exhaustion raises a recordable method error, **not** `ObjNavInternalError`: the harness
-can finalize failed metrics. Its forced STOP is not a successful policy STOP and
-appears as `termination=agent_error`. Global exploration never resumes.
+STOP requires a **fresh**, associated detection, completed verification, an aligned
+box (its centre within half a turn, or a box that spans the image's centre column)
+and a **freshly measured** horizontal range -- the near edge of the detected
+surface -- within the terminal radius plus `range_tolerance_m` (**0.05 m**, for
+pitch-dependent projection noise), at whatever pitch the sighting came. No STOP
+from remembered distance alone is allowed, with three earned exceptions: the
+approach history (below), the support surface (below), and -- without LOOK
+actions -- a target the geometry puts under the frame, seen fresh a few actions
+before (`_below_the_frame`, above). For a box the frame's lower edge cut, the
+"freshly measured" range is the smaller of the visible near edge and the range
+to the 3-D memory (`_floor_cut`, above): the box is fresh, the range is not
+read from the part of the object that happens to be in view. The pitch the target's height predicts
+is where the inspection LOOKS for it when it is not in view; a fresh off-centre
+sighting is centred at the pitch it was seen at. An inspection the filtered
+estimate entered while every fresh frame measures the surface beyond the limit is
+ended and the approach resumed (`inspection_resumptions`). This terminal radius
+replaces legacy `stop_distance_m` for the closing sub-policy. Verification is
+bounded at 12 actions (`max_verify_steps`, released as above), terminal inspection
+at 24 (`max_reacquire_steps`), and total closing at 160 by default.
+Occlusion during transit has no separate timeout. **The terminal inspection on a
+big object at close range** (the Ranchester couch, 2026-10-04, actions 172-196):
+a fresh box that *spans the image centre column* counts as aligned whatever its
+centre says (a clipped box's centre is not the object's centre, and centring it
+turned the agent off the couch twelve times); the terminal range is the
+**near edge** of the freshly measured surface (`range_near_m`, the 10th
+percentile horizontal distance of the supported depth points) or the centroid,
+whichever is nearer -- the benchmark's success radius is measured to the
+object, not to its middle; and when the inspection budget runs out after the
+locked target *was* seen fresh within terminal range from this spot, the
+closing **STOPs** (`stop_on_exhausted_inspection`, default true) instead of
+raising. Exhaustion of a **locked** target that was *never* seen from the
+inspection spot means the lock was wrong -- a sofa from four metres that is
+nothing from one (the Ranchester same-storey run of 2026-10-04 ended as an agent
+error on exactly that, with the real couch 2.85 m away) -- so since 2026-10-04 the
+candidate is **released** (`release_on_failed_inspection`, default true): its
+anchor goes into the rejection memory with twice the radius
+(`failed_inspection_radius_factor`), the release action is one turn in place,
+and the search resumes on the next action with the spot excluded from the
+takeover and from the target-landmark nodes. The release comes as soon as every
+inspection view (three yaws, up to three pitches) has been tried once with
+nothing seen -- not after the 24-action budget -- and, under the library's
+class-voting map only, *at once* when the map's class vote at the anchor outvotes
+the lock (`map_releases`: the sofa from four metres that the map has since
+confirmed as a bed from two; this runtime's map never merges classes since
+2026-10-07, so the vote and the release read zero here). `release_on_failed_inspection:
+false` restores the historical recordable method error (**not**
+`ObjNavInternalError`: the harness finalizes failed metrics; its forced STOP is
+not a successful policy STOP and appears as `termination=agent_error`).
+**A locked target with no safe path** (since 2026-10-05). Hanson/000002 spawned
+beside a bed with the potted plant in view 4.4 m away and spent 159 actions
+turning on "no safe target path": the floor under the camera's blind radius
+(a level camera 0.88 m up sees the floor from about 1.4 m out) was unknown,
+unknown is impassable, and the lock waited for A* until the 160-action
+closing bound ended the episode as an agent error. After
+`footing_after_steps` (2) pathless actions, while at least
+`footing_unknown_fraction` (0.25) of the cells within `footing_radius_m`
+(1.2 m) of the agent are unknown, the closing asks the camera
+controller for a **footing sweep** -- one LOOK_DOWN to `footing_pitch_deg`
+(30: the image's lower edge on the floor 0.47 m out, its upper edge just
+above the horizon), a full circle, one LOOK_UP; phase `FOOTING`, the
+takeover keeps the camera, the target stays in the record -- which maps
+the disk and lets the path exist or show that it does not. The sweep is
+cut short the action a path exists (one LOOK_UP, then the approach, level):
+the second Hanson fly of 2026-10-05 found its path at the third turn and
+kept the sweep's 30 degrees for the whole approach and the first
+inspection, where the plant's foliage never projected. If
+`release_after_footing_steps` (6) more pathless actions follow, the lock is
+**released without a rejection** (`boxed_releases`, `last_release="no safe
+path from here"`): the target was never disproved, the spot was. The spot
+is remembered as boxed in, and no far candidate may start a takeover from
+within `boxed_in_radius_m` (1.0 m) of it, so the search -- which can walk --
+carries on and the same plant is locked again from somewhere a path exists.
+`footing_sweep: false` drops the sweep alone (a protocol without LOOK
+actions never has it); the release after the bound stands either way.
 All thresholds are configurable under `RPTSettings.target_closing`; the phase,
 persistent lock, visibility, target xyz, projected goal, refinements, occluded path
-steps, bbox and failures are included in episode/frame diagnostics and the HUD.
+steps, bbox, failures, release counts (`releases`, `inspection_releases`,
+`boxed_releases`), footing sweeps, boxed-in spots, border
+rejections and the rejected spots with their radii
+are included in episode/frame diagnostics and the HUD.
+
+#### Close range: the 3-D memory, the approach history and the sudden-proximity manoeuvre (since 2026-10-08)
+
+**The 3-D memory** (`methods/target_memory.py`). The target's XYZ centroid is saved the
+moment a takeover starts and fused, precision-weighted, with every frame that projects
+onto it: a frame from `r` metres enters with sigma `0.03 + 0.03 r` (depth noise and the
+visible-part shift of a big object both grow with range), so the near frames of the
+approach dominate and the estimate's standard error shrinks frame by frame (`memory` in
+the diagnostics: `xyz`, `frames`, `sigma_m`, `spread_m`). The first centroid stays the
+association anchor. Everything else in the closing reads the memory -- the elevation the
+pitch follows, the range the approach and the terminal test measure, the spot a support
+surface must sit at -- which replaced the former 50/50 update.
+
+**Two close-range situations look alike to the detector and are opposites to the
+closing** (`methods/approach_history.py`, the ledger of the planar path walked since the
+takeover began and the range it closed):
+
+- *Extended approach history* -- at least `approach_history_m` (3 m) walked and
+  `approach_history_closed_m` (1 m) closed: the target was tracked and walked toward
+  over metres, and inside the terminal range a cropped box, a detector drop or a budget
+  run down is **not** a reason to release it. A fresh in-range sighting STOPs whatever
+  its alignment (the benchmark measures range, not heading), and after
+  `history_stop_after_missing` (3) consecutive terminal frames without a fresh box the
+  closing completes on the 3-D memory and STOPs -- the one deliberate exception to "no
+  STOP from remembered range alone", earned by the path; an inspection that would
+  release from beyond the terminal range steps closer instead (`history_holds`,
+  `history_stops`).
+- *Sudden close proximity* -- a candidate first seen inside `sudden_proximity_m`
+  (1.3 m) with no history: the agent turned and there it was, a single viewpoint, and a
+  single viewpoint at 0.7 m is exactly where a counter front read as a bed. Before the
+  lock the **backing manoeuvre** (`methods/target_backoff.py`, phase `BACK_OFF`) takes
+  the agent `backoff_steps` (3) forward steps back into space it knows to be clear --
+  its own trail on this storey, the observed grid, the floor guard, collision-qualified
+  A*, the NavMesh when bound -- turns it to face the remembered coordinates and resets
+  the consecutive-frame count, so the lock needs fresh frames from the wider
+  perspective; then the approach and the terminal inspection follow as usual. The
+  manoeuvre is bounded (`backoff_max_actions`, 20), its actions do not count against the
+  verification budget, and with no clear space known it is skipped and recorded
+  (`backoffs`, `backoff_skips`, `backoff.skipped`): verification proceeds in place as
+  before. `backoff: false` disables it. Two rules keep it from becoming a loop
+  (Markleeville 2026-10-08: eight manoeuvres on one table read as a bed from 0.9 m): the
+  manoeuvre is made **once per object** -- a later close sighting on an anchor already
+  backed off from is verified in place (`backoff_repeats`) -- and a candidate the wider
+  perspective never re-saw is released as `unverified from a wider perspective`
+  (`wider_releases`): the failed-inspection radius, no confidence override, and refused
+  again from twice `boxed_in_radius_m` of the spot. The retreat arrives by the converter's
+  own tolerance (plus half a step, or three idle actions while facing the goal), so it
+  does not spin on the spot. Two more rules from the re-fly: the **second `unverified`
+  release of one anchor escalates** the same way (`unverified again`, `repeat_releases`:
+  the override exists for far flickers, and 35 takeovers of one surface in 450 actions
+  were the same evidence 35 times), and every release that **disproved its candidate
+  from close** (`DISPROVED_RELEASES`: the wider perspective, the second look, an
+  inspection that saw nothing) binds the legacy target pursuit at any range
+  (`refuses_far_candidate`, `disproved_refusals`) -- Markleeville/000000 re-flown: the
+  closing gave the table back at action 41 and the legacy pursuit STOPped on it at 50.
+
+**Proactive pitch, and no step that loses the box** (Wiconisco toilet, 2026-10-08:
+bottom-cut box at 1.32 m, one MOVE_FORWARD, gone -- four times). Every approach step and
+every verification step toward the candidate carries `_approach_pitch`: the pitch the
+memory predicts for *after* the step (atan of the height difference over the range one
+step closer, quantised to the tilt step, a full tilt at least inside the close band), so
+a low target is stepped toward looking DOWN from the moment the predicted angle is
+nearer a tilt step than level, and an elevated one looking UP, all the way in. The
+published Gibson protocol has no LOOK actions at all; there `_step_keeps_box` predicts
+the box's rows after the step (and `_verification_view` the vertical stretch a TURN
+gives a low box) and a verification step that would push a bottom-cut box out of the
+frame is withheld (`no_step_holds`) -- the lock comes from the next frame where the
+agent stands. And since the benchmark measures to the object, a **fresh sighting whose
+near edge is inside the terminal radius is terminal evidence wherever the centroid is**:
+the inspection starts, and STOPs, from there, where a low object is still in the frame;
+a fresh *centred* reading beyond the limit resumes the approach rather than spinning
+through the budget.
+
+**Support-surface resilience** (`methods/support_surface.py`). At close range a mounted
+or supported object leaves the frame before its support does -- the television on a
+dresser becomes the dresser. A box of a `support_surface_classes` label (cabinet, desk,
+dining table, shelf, ...) whose coherent centroid lies under the memory's footprint and
+at or below its height is spatial evidence that the tracked thing is still there
+(`support_sightings`): the inspection is not released as "saw nothing" while that
+evidence is fresh (the dynamic pitch brings the object back into the frame), the map's
+vote for the surface is not a contradiction, and once the inspection budget is spent
+with the evidence fresh and the memory inside the terminal range the closing STOPs
+(`support_stops`). It never counts toward the lock or the terminal test on its own.
+
+**Dynamic pitch during close verification.** The verification step toward a candidate
+inside `look_down_distance_m` carries the memory's elevation (`_pitch`): a low target is
+stepped toward looking DOWN, an elevated one looking UP, as the approach and the
+inspection already did; the face turn that ends the backing manoeuvre carries it too.
+
+#### The box in the frame drives the pitch, and the STOP is taken on a whole, confident box (since 2026-10-11)
+
+**The servo needs the LOOK pair, and the Gibson protocol has it since 2026-10-13**
+(`gibson/protocol.py`, `camera_tilt`, protocol `/2`): under the published four-action set
+of `/1` none of the rules below ever fired -- the fifteen toilet episodes of the campaign
+recorded that day show `LOOK_UP 0 / LOOK_DOWN 0` and `bbox_pitch_corrections 0` in every
+one, nine of them locked approaches -- and the tilt-less substitutes (`_step_keeps_box`,
+the blind-cone STOP) stood in. A LOOK is an action against the same budget and moves
+nothing; see `gibson/README.md` for the deviation as recorded in the frozen configuration.
+
+The geometric controller above reads the target's *memory* -- its fused 3-D height
+against the camera's -- and the memory is biased exactly when the pitch matters most: a
+frame cut by the lower edge lands its depth patch on the upper part of the object (the
+toilets of the 1,000-episode run). Every terminal STOP of the nine inspection recordings
+fired on a box cut by the lower edge: at a metre, a level camera 0.88 m up cuts any
+floor-standing object. `methods/bbox_pitch.py` is the **image-space servo** that reads
+the box itself, with no class, no height and no memory involved (`TargetClosing._servo`,
+`bbox_pitch`, `bbox_pitch_distance_m` 1.50 m, `bbox_pitch_region` 0.25):
+
+- **Which frame.** On the approach the verdict is read on the frame the next step will
+  produce (`bbox_pitch.box_after_advance`: every edge row is a ray at a depression below
+  the horizon, met at the fresh surface's near-edge range, and re-projected from one step
+  closer), so a box about to leave through the bottom is looked down at *before* the step;
+  in verification and inspection it is read on the frame as it is.
+- **The verdict** (`bbox_pitch.vertical_fix`). Cut by BOTH the top and the bottom margins:
+  the object fills the frame, nothing helps. Cut by the bottom margin alone: LOOK_DOWN by
+  the rounded steps (one at least) provided the top edge stays inside afterwards -- a bottom
+  cut traded for a top cut is no gain; symmetrically LOOK_UP for a top cut. Whole, with its
+  centre in the lower `bbox_pitch_region` of the rows: LOOK_DOWN provided the whole box stays
+  inside and its centre does not land in the upper region (fewer steps are tried first);
+  symmetrically for the upper region. Otherwise -- the centre band -- the camera stays. The
+  band is never narrower than one tilt's rounding dead band (`fy * tan(tilt / 2)` rows), so
+  the servo cannot hunt; a tilt past the pitch limits is cut back to what they allow.
+- **Who has the camera.** With a fresh box within `bbox_pitch_distance_m` the servo alone:
+  a geometric tilt forced against a centred box would hunt against it (the forced one-tilt
+  rule of `_pitch` inside `look_down_distance_m` says LOOK_DOWN at a toilet whose box is
+  already centred). Without a fresh box -- an occluded approach step -- the geometry decides
+  as before; beyond the distance the approach is level as before; without the LOOK pair
+  (the published Gibson protocol) the servo does not exist and the tilt-less rules above
+  stand (`_step_keeps_box`, `_floor_cut`, `_below_the_frame`). The verification frame
+  (`_verification_view`) asks the servo first and keeps the `look down at a low target` /
+  `look up at a high target` wording, now read off the frame rather than the memory; the
+  elevation-driven looks remain for a frame the servo has no verdict on.
+- **The terminal STOP, with the LOOK pair.** Before the STOP is taken on a fresh in-range
+  frame (`_before_stop`): a box under `stop_confidence` (0.50, the takeover's own start
+  threshold -- detect high, associate low, STOP high) is held for the one frame that keeps
+  it whole, at most `weak_stop_max_holds` (2) times in a row, then the STOP goes ahead on the
+  evidence there is -- or at once when no such frame exists (a box filling the frame); then
+  a box the servo can re-frame earns ONE centring tilt per inspection (`stop_centring`), and
+  the STOP is taken on the next frame: on the whole box if the detector shows it, and on the
+  previous frame's evidence if it does not (`centring_step`) -- the tilt may cost an action,
+  never the STOP (the Hanson toilet's twenty actions of LOOK_UP / LOOK_DOWN after a fresh
+  sighting are what the bounds are for). Not while the box still needs a yaw turn: the
+  converter tilts before it faces. The STOP's info carries `confidence`, `bbox_region` and
+  `depth_valid` (never NULL on this path: a box without a coherent depth projection is never
+  fresh). Counters: `bbox_pitch_corrections`, `stop_centring_tilts`, `weak_stop_holds`;
+  `bbox_region`, `bbox_pitch_steps` and `box_drift_rows` (the fresh box centre's row change
+  since the previous consecutive frame) in the diagnostics.
+
+Verified end to end through the real converter (`tests/test_target_closing.py`: the
+approach, the verification frame, the centring tilt and its safety net, the confidence
+hold, the Gibson path unchanged) and on the pure maths (`tests/test_bbox_pitch.py`).
 
 - `--explorer frontier`: the existing observed-frontier baseline (default).
 - `--explorer falcon`: bounded FALCON 2D/2.5D adaptation, not the unchanged ROS
@@ -92,21 +498,34 @@ own frozen configurations; changed code does not relabel their outcomes.
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
 | `methods/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
+| `methods/bbox_pitch.py` | The image-space vertical servo: where a box lands after a tilt or a step, and the tilt that keeps it whole and centred (pure functions) |
+| `methods/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |
 | `methods/target_path.py` | Persistent NavMesh standoff goal, meaningful target refinement and continuous collision-qualified A* execution through occlusion |
-| `methods/room_search_loop.py` | The seven-step room-search loop: bounded, room-confined local exploration; re-classify → re-estimate → re-order at each loop point; transit to the chosen room's nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
-| `core/mapping/topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room and staircase -- P(going there next finds the target) per node plus "elsewhere" |
+| `methods/target_memory.py` | The closing's 3-D memory: the fused, precision-weighted XYZ centroid (near frames dominate), its standard error and spread, the fixed association anchor |
+| `methods/approach_history.py` | The path walked and the range closed since the takeover began: what separates an extended approach (complete and STOP) from a sudden close sighting (back off and re-verify) |
+| `methods/target_backoff.py` | The backing manoeuvre for a target seen suddenly at arm's length: a verified clear spot two or three steps back (trail, grid, floor guard, A*, NavMesh), the turn back, the hand-off to re-verification |
+| `methods/support_surface.py` | Whether a box of another class is the surface the target stands on: exact class membership and strict geometry under the memory's footprint |
+| `gibson/gpu_plan.py` | Who gets the one GPU -- LLM, then YOLO-World, then Habitat -- from the free VRAM and explicit footprints; the rest on the CPU; the plan recorded in every run |
+| `methods/room_search_loop.py` | The seven-step room-search loop: one scan visit per room (vantage point, full rotation, finished for the episode) or the bounded room-confined sweep; re-classify → re-estimate → re-order at each loop point over the rooms that are still nodes; transit to the chosen room's vantage point / nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
+| `methods/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
+| `methods/sightlines.py` | The sight ledger: unknown looked through without a depth return (within 2.5 m, from two poses) and enclosed unknown pockets under 3 m2 are settled -- written occupied for the frontier logic alone -- and every camera pose per storey |
+| `methods/room_vantage.py` | Where to stand in a room to see it: the reachable interior cell of greatest clearance (distance transform of the room mask) |
+| `methods/room_priors.py` | Where a target cannot be: the room types a search need not enter for it (exclusions, not permissions; `unknown` never excluded) |
+| `core/mapping/topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room still a node and every staircase -- P(going there next finds the target) per node plus "elsewhere" |
 | `methods/stair_nodes.py` | Staircases as nodes of the loop's RPT* instance: ids above every room pid, the facts the oracle values them by, the climb as a leaf charged on every arc |
-| `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: nearest floor-wide frontier, the stairs by the explicit fallback rule, a retired frontier, a relocation -- a move, never an idle spin; failure records and service back-off |
-| `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around |
-| `methods/peek_stairs.py` | Floor-local seen-connector exclusion for peek viewpoints and A* routes; ordinary stair navigation is unchanged |
-| `methods/camera_control.py` | Sole pitch owner; bounded inspection, long unprompted cadence and safe restoration |
-| `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection and floor-qualified fusion |
+| `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: the best floor-wide exit (object shadows and frontiers of rooms the target cannot be in wait behind it), the stairs by the explicit fallback rule, the demoted frontiers, a retired frontier, a relocation, a footing sweep -- a move, never an idle spin; failure records and service back-off |
+| `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
+| `methods/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: the world every decision plans on has every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied (so no frontier, opening, peek or route reaches a flight), and `_navigate` refuses a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`), so the mask cannot leave A* without a start; inert when traversal is allowed |
+| `methods/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run (`FLOOR_RUN_M`, the floor in front of the stairs is not the stairs) and off the agent's own trail, its capsule margin bounded per flight so it never splits or erases a body-passable corridor (`adaptive_capsule`: preferred 0.65 m down to the body radius, judged as the planner judges passability; Markleeville's stair-head corridor needed 0.3 m); excluded from the room partition (stairs are never a room), from peek viewpoints and from a peek-only A* copy; ordinary stair navigation is unchanged |
+| `methods/camera_control.py` | Sole pitch owner; bounded stair inspection, the footing sweep (a circle at 30 degrees down that maps the blind radius, for a pathless lock or a boxed-in fallback), long unprompted cadence and safe restoration |
+| `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association within a class with a height check |
+| `core/mapping/objects/landmarks.py` | The landmark map: per-class association (a tight dedupe radius or footprint-disc IoU; classes never merge), confirmation by observation count; the class vote of 2026-10-04 kept behind `class_votes=True` |
 | `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks |
 | `methods/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
-| `methods/floor_departure.py` | Mandatory room-peek coverage before any floor choice, approach revalidation, movement guard and safe recovery from accidental early stair entry |
+| `methods/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
 | `methods/stair_ground_truth.py`, `floor_decision.py`, `ground_truth_traversal.py` | Ground-truth stairs (default): the navmesh connectors as the policy reads them, the fallback rule's up/down choice (worth per metre of approach, flight and fixed change cost), and the committed polyline traversal |
 | `methods/stair_traversal.py`, `stair_terrain.py` | Observed stairs (`stair_source: "observed"`): RGB-D support surfaces, step-connected paths, native-heading safety checks and the committed transition lifecycle |
-| `habitat/stair_connectors.py` | Evaluator side: storeys and stair connectors read once per scene from the navmesh in force, attached to the episode metadata by both tasks (`gibson/stair_connectors.py` is a re-export shim) |
+| `gibson/stair_connectors.py` | Evaluator side: storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
 | `methods/falcon_policy.py`, `falcon_regions.py` | Bounded hierarchy and persistent local region history |
 | `methods/falcon_motion.py`, `falcon_routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
 | `methods/object_evidence.py` | Alias/frame deduplication, separated-view target evidence and bounded rejection |
@@ -123,21 +542,39 @@ facade. No robot's flight controller is changed.
 
 ## Episode discovery and doorway inspection
 
-Both explorers start with **`RPTSettings.warmup_steps=10`** emitted discovery
-actions before normal room selection. RGB-D, YOLO, object confirmation and
-scene-graph geometry remain synchronous on every frame. Warm-up uses reachable
-floor-wide frontier gain/geodesic/heading utility; with no usable frontier yet,
-a bounded turn acquires another view. Target pursuit and committed stair safety
-take priority. Warm-up is episode-local, not repeated on each floor. Early peek
-actions count toward it; the first global room decision waits for its completion.
+Both explorers start with **one full look-around in place** before normal room
+selection, taken where the agent stands: as many turns as the camera's field
+of view needs to have seen every bearing once -- **ten** at the benchmark's
+30-degree turn with its 79-degree camera (`RPTSearchPolicy.rotation_turns`;
+`RPTSettings.warmup_steps=12` is the upper bound, since 2026-10-13 no longer
+the length). RGB-D, YOLO, object
+confirmation and scene-graph geometry remain synchronous on every frame, so the
+rotation gives the map its first rooms and the detector its first objects; when
+it ends the agent's position is recorded in the **scan ledger**
+(`methods/room_scans.py`), which finishes the spawn room before the first room
+is ever chosen. Target pursuit and committed stair safety take priority; a
+warm-up interrupted by one and resumed more than 0.5 m away starts its circle
+again, so the ledger's record lands where the whole circle was turned. The
+warm-up is repeated on every storey the agent first sets foot on (the stair
+head is scanned before any room there is chosen). The first global room
+decision waits for its completion.
 
-**`RPTSettings.doorway_peek.enabled=true`** enables opportunistic inspection.
-Disable opportunistic interruptions with `"doorway_peek": {"enabled": false}` in the JSON passed through
-`--policy-config`; `"warmup_steps": 10` sets the mandatory positive warm-up budget.
-This does not waive mandatory peeks before leaving a floor. These settings
-and the floor-exit invariant are included in the frozen method configuration.
+**Doorway peeks are OFF by default since 2026-10-04.** Under the scan visit a
+peek -- approach, a half turn from the threshold, the walk back -- costs about
+as much as a room's own scan and finishes nothing (its half turn is not a
+ledger scan), and the four peeks of the last Ranchester recording were all
+cancelled. `"doorway_peek": {"enabled": true}` in the JSON passed through
+`--policy-config` restores them with the behaviour below. **The floor-exit
+gate they fed is OFF too** (`doorway_peek.gate_floor_departure`, default
+false): a floor change is the RPT* order's or the fallback rule's to take
+whenever it is chosen, with the 40-action arrival-return guard the only hold.
+The Ranchester recording of 2026-10-04 held its descent fourteen times while
+re-partitioning kept producing new "pending" rooms, and never reached the
+storey the couch was on. `gate_floor_departure: true` restores the former
+behaviour as an ablation. Both settings are included in the frozen method
+configuration (`room_visit`, `floor_exit_gate`, `room_partition`).
 
-For a room with an entrance within **3 m of reachable travel**, the policy plans
+When enabled: for a room with an entrance within **3 m of reachable travel**, the policy plans
 **a further metre inside** (`doorway_peek.inset_m=1.0`), beyond the safe threshold
 and allowing for the converter's early stopping tolerance. Door proximity
 constrains the entrance, not the deeper viewpoint. Small rooms use the deepest
@@ -158,14 +595,15 @@ during a peek cancels the rest of that inspection. `unknown` alone is not a labe
 exemption. `done=True` still means an actual measured scan completed, not simply
 that the one-time allowance was consumed.
 
-The floor-exit gate now asks whether any **eligible unclassified non-stair rooms**
-still lack their one-time attempt, not whether exempt rooms completed a scan.
-This is an eligibility policy, not a full semantic-coverage guarantee. Zero known
-rooms remains incomplete. A genuinely new unknown room can revoke a stair approach;
-classified/scanned/attempted rooms cannot force forbidden repeat peeks. A vetoed
-ordinary room transit is released as unreachable rather than repeatedly replanned
-through the same gated tread. Native collision checks and committed-traversal
-safety remain in force.
+With `gate_floor_departure` on, the floor-exit gate asks whether any **eligible
+unclassified non-stair rooms** still lack their one-time attempt, not whether
+exempt rooms completed a scan. This is an eligibility policy, not a full
+semantic-coverage guarantee. Zero known rooms remains incomplete. A genuinely
+new unknown room can revoke a stair approach; classified/scanned/attempted
+rooms cannot force forbidden repeat peeks. A vetoed ordinary room transit is
+released as unreachable rather than repeatedly replanned through the same
+gated tread. Native collision checks and committed-traversal safety remain in
+force whether the gate is on or off.
 
 Peeks cannot start or continue during a committed stair approach, traversal, atlas
 transition, or target takeover. Seen connector geometry near the current elevation
@@ -228,41 +666,297 @@ room geometry, object→room association, confirmed doors, cumulative search
 time and remaining frontier clusters per room. No LLM call is part of that
 refresh.
 
-1. **Local exploration, bounded to the room in force.** Goals are the frontier
-   clusters the room label image credits to the room (the same majority vote
-   the scene graph's `frontier_clusters` count uses), ranked by
-   `core/planning/exploration/frontier_ranking.py` -- gain over *geodesic*
-   cost, facing as a discount. Each route is planned on a **copy of the map in
-   which every other room's cells are written unknown**, so no in-room route
-   crosses a door or takes the stairs (`LoopSettings.confine_routes`; lifted
-   while the agent's own cell is outside the room, so a doorway or a moved
-   mask cannot wall it out). The burst ends after `LoopSettings.local_steps`
-   actions (10), when nothing reachable is left, **or when the room is
-   re-identified** -- whichever first -- and the supervisor is told so
-   through its `budget_spent` / `frontier_exhausted` / `room_reclassified`
-   exits on that same action. The third exit is **the clue rule**: one
-   confirmed object names the room (`RoomLabelSettings.min_objects = 1`; a
-   single class is a *weak* label, shown to the oracle as `type=kitchen?`,
-   two or more confident classes a *strong* one), the classifier is re-asked
-   for the room in force or in transit **the action a new kind of object
-   lands in it** (`relabel` events; a second chair is not a clue, and a set
-   of kinds already judged is never bought twice), and a changed name ends
-   the room's turn as `reclassified` -- neutral: not cooled, no attempt
-   charged -- so that steps 2-4 run over the new fact. Whether a bathroom
-   is still worth sweeping for a frying pan is then the oracle's call, and
-   it says so with a probability of about zero; the sink first taken for a
+1. **One visit, bounded to the room in force** (`LoopSettings.visit`,
+   default `explore` since 2026-10-13; `scan` was the default from
+   2026-10-04). **A visit is a frontier walk**: enter the room at the
+   frontier that would reveal the most unknown floor per metre walked, and
+   when the camera has resolved it walk to the next such frontier, until the
+   room has no live frontier left -- then the room is **finished for the
+   episode**. The frontiers are the inventory's clusters credited to the
+   room, through the sweep's admissibility filter, re-scored by
+   `core/planning/exploration/frontier_ranking.rank_by_view_gain`: the
+   unknown floor the camera's full circle would reach from the frontier's
+   cell (rays through the unknown, blocked by walls and by what the sight
+   ledger has settled) over the geodesic distance -- "the frontier that
+   reveals the most unknown area", not the longest boundary and not the
+   nearest cell. The route follower faces each goal as it walks, so the
+   frame at arrival shows what lay behind the boundary; the sweep keeps a
+   committed goal while it is passable, still near the room and still has
+   unknown beside it, and the walk itself is where the detector sees the
+   room. No vantage point and no fixed circle: the Darden recording
+   `ec8d17aeaaaa` (2026-10-13) walked to the middle of a bedroom it had
+   already walked across and turned twelve times (actions 255-279), and
+   before that turned a full glance on the way into another room, walked on
+   to its vantage point and turned the same circle again (61-106) -- 33
+   actions for nothing. The visit is bounded hard (`explore_visit_steps`,
+   60 -- released `budget_spent` beyond it, not cooled) and charged to RPT*
+   by its frontiers: a peek's worth (`openings.service_steps`, 4) plus
+   `explore_frontier_steps` (4) per live frontier, so the one-frontier
+   sliver of a room glimpsed through its door is priced like the peek it
+   replaces and a room with five frontiers like the walk it will take
+   (`explore_service_steps`, 12, when the count is unknown; a second-pass
+   revisit is priced as the scan it is). **A full rotation completed inside the
+   room since the visit began -- a glance taken on the way -- finishes it
+   at once** (`finished_by_rotation`): no circle is turned twice.
+
+   Finishing is the **scan ledger's** verdict (`methods/room_scans.py`): it
+   remembers *where* every rotation was completed, not which room id it was
+   credited to -- the watershed renumbers, splits and merges rooms on every
+   update, and the Ranchester recordings re-entered the same room under a
+   new number three times in a row. A room is finished when a completed
+   rotation stood inside its mask (`scan_point_inside`: the warm-up, a room
+   scan, or a **full glance** -- recorded in the ledger since 2026-10-13),
+   when a completed rotation *saw* more than `scan_seen_fraction` (0.5) of
+   its cells within the camera's depth range through observed free space
+   (`seen_from_scan`: the small room fully visible from the corridor, the
+   half of a split room the scan stood in; unknown cells end the sightline,
+   so nothing unresolved is credited), or -- under `explore` -- when it has
+   **no live frontier and the agent has stood in it** (`explored`), at least
+   `explored_inset_m` (0.5 m) in from its edge: the doorway cell is the
+   threshold, not the room; a room too narrow for the inset accepts any pose
+   inside it. Every floor cell of such a room is known, so every part of it
+   has been in the camera's frame; no circle from its middle is owed. The
+   live frontier count behind `explored` (and the `seen_through` and
+   `fragment` verdicts below) is the admissible one -- a goal under the
+   agent's feet or beside one already retired is not a frontier the visit
+   can walk to, so it is not one that keeps the room open; the visit and
+   the verdict read the same population. The verdict is sticky per
+   `(floor, pid)`. **A clue mid-visit does not switch rooms**
+   (`reconsiders_deferred`): the Ranchester recording switched at 57, 73
+   and 121 and came back to each; the clue is kept for the loop point the
+   visit ends on, where every node is re-valued anyway.
+
+   **Every rotation is the camera's, not the body's** (since 2026-10-13):
+   the warm-up, a room scan, a full glance and a footing sweep end when the
+   field of view has covered the circle -- `turns * 30 + 79 >= 360`, ten
+   turns at the benchmark's 30 degrees, not twelve
+   (`view_gain.ViewCone.rotation_turns`, `RPTSearchPolicy.rotation_turns`);
+   the two turns that bring the body back to its start heading show what the
+   first two frames already showed. `RPTSettings.warmup_steps` (12) is now
+   an upper bound on the warm-up, not its length.
+
+   `visit="scan"` is the former default, kept as a mode: walk to the room's
+   **vantage point** -- the interior cell of greatest clearance the observed
+   map can reach (`methods/room_vantage.py`: the Euclidean distance transform
+   of the room mask, so the middle of the open floor, not the doorway and not
+   the far frontier) -- turn a **full circle**, and leave; the room is then
+   finished whatever frontier its mask still shows, because the camera's ray
+   ends at the nearest object and a 360-degree scan from the open floor shows
+   what a second viewpoint would. The visit is bounded hard
+   (`scan_visit_steps`, 36 -- released `budget_spent` beyond it) and the walk
+   to the vantage point separately (`scan_approach_steps`, 20; an approach
+   that runs out, or that A* refuses, scans from where the agent stands if
+   that is inside the room -- `scans_in_place` -- and otherwise releases the
+   room `unreachable`). The rotation ends on measured yaw (the camera's
+   circle swept, or two turns past that count), the scan is recorded, and
+   the turn ends `exhausted`: productive, cooled, never repeated by the
+   escape hatch. Under `explore` a **second-pass revisit** of a finished
+   room is exactly this scan, from a spot `revisit_standoff_m` away from the
+   room's earlier scan points.
+
+   **LLM-first (since 2026-10-07).** The node oracle
+   (`core/mapping/topology/search_node_oracle.py`, the 14B reasoning model)
+   is shown **every room of the storey** -- finished and type-excluded ones
+   included, each with a `status=` of `never_entered`, `entered` or
+   `scanned(<how>, <ago>)` -- together with a **HOUSE line**
+   (`methods/house_context.py`): every room type found so far with its
+   status, the rooms still unidentified, the openings not yet looked into,
+   whether unexplored frontier is still reachable, and the budget
+   (`actions used about 150 of 500`, in 25-action steps so an unchanged map
+   keeps an unchanged prompt). The prompt asks the model to reason as a
+   person who knows homes does, in three written steps before any number:
+   **home** (where the target lives: a toilet in a bathroom, separate or an
+   en-suite reached through a bedroom; a television in a living room, then
+   a bedroom, rarely a kitchen, never a bathroom), **house** (a home has one
+   kitchen and one living room, so a living room found makes a sofa
+   unlikely in the unidentified rooms; a bathroom still missing makes the
+   small unidentified rooms and the unlooked doorways where the toilet must
+   be -- exploration first), and **stage** (early: the unexplored first,
+   scanned rooms low; late, with the home type found and the target not
+   seen: the detector may have MISSED it in a scanned room of the right
+   type, and the chance that an unseen room holds it falls with every place
+   looked at). It writes a structured **`pass` verdict** -- `first` while an
+   unexplored place is still worth looking at before any scanned room is
+   re-checked, `second` once the home is covered -- which the loop reads to
+   decide whether finished rooms are **offered as nodes again**
+   (`LoopSettings.second_pass`): a revisit is a scan from a spot at least
+   `revisit_standoff_m` (1.5 m) from the room's earlier scan points, and
+   a floor with no unfinished room, no exit and no reachable frontier
+   forces the second pass whatever the verdict (`second_pass_forced`). The
+   three arithmetic floors below (`unexplored_floor`, `unexplored_elsewhere`,
+   `home_floor`) and the hard type exclusion (`type_prior`) are **off by
+   default** -- they were the 3B era's defaults, and the model is given the
+   facts they encoded instead; each stays a knob. The storey/stairs
+   reasoning of the multi-storey development protocol is a supplement to
+   the prompt shown only when a staircase is a node. With nothing to offer
+   -- the spawn room finished by the warm-up, no doorway seen yet -- the
+   reasoning model is not spent (`oracle_calls_skipped`); the fallback
+   carries the search until a node appears.
+   `tests/probe_node_oracle.py` runs five single-storey scenarios against
+   the live model and checks the judgement (all five pass on
+   `qwen2.5:14b-instruct`, ~30 s per call on a 32-thread CPU).
+
+   **What is not a node (the first pass).** At every loop point the loop
+   withholds finished rooms from the solver and the transit while the
+   oracle's verdict is `first`, and records why (`excluded` in the events,
+   estimates and HUD); with `LoopSettings.type_prior` switched on it also
+   withholds a room whose identified type **cannot hold the target**
+   (`methods/room_priors.py`: a sofa is not
+   searched for in a bedroom, a bathroom or a kitchen; a toilet not in a
+   bedroom; the table is exclusions, not permissions, so a hallway stays
+   searchable and `unknown` is never excluded). Since 2026-10-05 the type
+   rule has three guards (`room_priors.ruled_out`): it applies to a
+   **strong** label only (two or more kinds of object agree -- a weak
+   label is a guess the oracle sees as `type=bedroom?` and values itself,
+   `weak_type_kept` events); never when an object of the target's own
+   class has been confirmed in the room; and never when a **home object**
+   of the target stands in it (`HOME_OBJECTS`: a sink or a shower where a
+   toilet lives -- the Hanson recording merged a bathroom's sink into a
+   "living room" of sofas and ruled it out for the toilet a metre from
+   the sink; `home_object_kept` events). **One signature object makes a
+   label strong** (`room_priors.SIGNATURE_OBJECTS`,
+   `RoomLabelSettings.signature_objects`, since 2026-10-05): a bed is a
+   bedroom, a toilet, a shower or a bathtub a bathroom, an oven, a stove or
+   a refrigerator a kitchen, with no second kind of object needed, when the
+   classifier's label agrees -- the Hanson re-fly of 2026-10-05 saw a bed
+   and a television through a doorway at action 270, kept the "bedroom?"
+   weak and walked in to scan it for a toilet (actions 270-289). A chair,
+   a cabinet, a desk or a plant names nothing on its own and stays weak;
+   the home-object guard still holds (a bed in a room with a sink keeps
+   the room a node for a toilet). The two kinds that make a label strong
+   must include one that is **distinctive**
+   (`RoomLabelSettings.distinctive_required`, `room_priors.GENERIC_OBJECTS`:
+   a cabinet, a plant, a book, a vase, a clock, a cup, a bottle describe no
+   room): the Ranchester couch search had a cabinet and a potted plant make
+   an upstairs room a strong "living_room" at 0.95, which put a living room
+   on the storey summary the node oracle reads and wobbled its verdict on
+   where living rooms are. **A home object is a prior, not only a guard**
+   (`LoopSettings.home_floor`, off by default since the LLM-first change;
+   0.60 restores it): a room holding a
+   confirmed home object of the target is handed to the oracle with
+   `SearchNode.home` set and, with the floor on, is never read below it,
+   whatever the model wrote and whatever its storey verdict says -- a
+   bathtub on this storey IS the toilet's home type, found -- and such a
+   room is **never finished by sight from outside it** (this guard stands
+   regardless): the scan ledger's `seen_from_scan`
+   and `seen_through` verdicts (half its floor seen through its door) do not
+   exclude it, only a scan the agent stood in does (`home_object_kept` events
+   with `scanned`). The Allensville toilet run's warm-up spin at the spawn
+   point saw more than half of the bathroom's floor through its door,
+   finished it with the bathtub inside and the toilet behind the jamb, valued
+   it 0 and peeked twenty openings before coming back to it at action 283.
+   **The labels are read before the nodes
+   are chosen** (`ObservedSceneGraph.refresh_labels` at the loop point):
+   until 2026-10-05 the re-classification ran inside the oracle call,
+   after the exclusions, so a room that became a strong bedroom on that
+   very action was shown to the oracle, valued at 0.10 ("bedroom, fully
+   seen, no toilet") and kept in the order for one more loop point (Hanson
+   action 150). Withheld rooms keep the oracle's own probability for the
+   record and the HUD but are not offered; when nothing is left to offer
+   and no staircase is a node, no model call is made and the exploration
+   fallback carries the search. `LoopSettings.min_prob` (0.05) keeps the
+   oracle's "1" for a bedroom in a search for a couch out of the order.
+
+   **Two more ways a room is finished** (`methods/room_scans.py`, since
+   2026-10-05), both for a room with **no live frontier** -- no accessible
+   unexplored boundary the sight ledger has not settled (below): it is
+   `seen_through` when the camera **looked into it** (one recorded pose,
+   not only a scan point, had `scan_seen_fraction` of its cells inside the
+   camera's cone with a clear line of sight: the balcony seen whole from
+   its threshold, the closet from its door) or **walked through it** (a
+   pose lies inside it and it is narrow -- its widest point under
+   `LoopSettings.walkthrough_clearance_m` (0.9 m) of clearance, a corridor
+   or a balcony the cone spans as the agent walks; a wide room merely
+   stepped into is not finished so, the walls beside its door being behind
+   the camera); and it is a `fragment` when it is under
+   `LoopSettings.fragment_max_m2` (3 m2) with no confirmed door on it -- the
+   strip behind a bed the watershed carved into a room of its own (Hanson
+   R13, action 150: valued 0.25 as "a bathroom perhaps"). A bathroom is
+   small too, but a bathroom has a door or an unseen boundary. The Hanson
+   re-fly put its balcony (R5) back in the order at 0.25, "never entered",
+   at action 206 -- 158 actions after the agent had stood at its far end.
+   A room finished by what the walk to it showed is released `exhausted`
+   before it is entered (`finished_in_transit` events).
+
+   **The uncertainty floor** (`LoopSettings.unexplored_floor`, applied in
+   `search_node_oracle.SearchNodeOracle`, since 2026-10-05; **0 -- off --
+   by default since 2026-10-07**, when the rule moved into the prompt and
+   the 14B model was found to apply it; 0.25 restores the arithmetic). A
+   room never entered and still `unknown`, or an opening nothing was
+   glimpsed through, is a place the search knows *nothing* about, and the
+   least it owes such a place is a look: its probability is never read
+   below the floor, whatever the model wrote (`floored` in the estimate
+   events). The Hanson recording of 2026-10-04 had the 3B model write
+   "small unknown room, no toilet fits" on two never-entered rooms and
+   "no toilet glimpsed through gap" on six doorways -- the words of the
+   prompt's own example, applied to a toilet -- `min_prob` dropped them
+   all, the order was `[stairs]`, and the agent left the storey at action
+   27 with every door on it unlooked into. With the floor the unexplored
+   nodes stay in RPT*'s hands, where distance decides: two unknown rooms
+   3 m away at 0.25 come before a staircase 21 m away at 0.6, and the
+   user's "peek into the rooms before you descend" is a probability, not
+   a rule. A room with a *weak* type, or an opening with a glimpse, has a
+   preliminary classification and is the model's to value; the room line
+   now says `entered=no` instead of `ago=never`, and the prompt's rules
+   2b and 2c say what that means (an unexplored place owes a look, never
+   "too small"; a home-type object in a room of another type is the map's
+   merge showing). **The floor has one condition** (`LoopSettings.
+   unexplored_elsewhere`, since the Ranchester couch search of
+   2026-10-05; off by default since 2026-10-07, 0.10 restores it; only the
+   multi-storey supplement ever produces the verdict): the model's own
+   storey step, asked for as a structured verdict
+   `home_here` -- `found` (a room of the home type is on this storey),
+   `missing` (none yet, but it belongs here) or `elsewhere` (it lives on
+   another storey). The 3B model answers that reliably ("living rooms are
+   downstairs" at every loop point) and then writes the worked example's 25
+   on every upstairs gap all the same, so thirteen peeks (~25 actions each)
+   outranked the staircase it stood 0.9 m from at 0.60, and the 500 actions
+   ended upstairs. With `elsewhere` an unexplored place is read at 0.10
+   exactly (`capped` / `floored` in the estimate events, the verdict on the
+   HUD): rule 2b's "less", applied by the code because the model does not
+   apply it; the stairs come first and a door beside the route is still a
+   cheap peek. `found` and `missing` keep the 0.25 floor, and a reply
+   without the field (an older model's) is read as before.
+
+   **The clue rule holds in both modes**: one confirmed object names the
+   room (`RoomLabelSettings.min_objects = 1`; a single class is a *weak*
+   label, shown to the oracle as `type=kitchen?`, two or more confident
+   classes a *strong* one), the classifier is re-asked for the room in
+   force or in transit **the action a new kind of object lands in it**
+   (`relabel` events; a second chair is not a clue, and a set of kinds
+   already judged is never bought twice), and a changed name ends the
+   room's turn as `reclassified` -- neutral: not cooled, no attempt charged
+   -- so that steps 2-4 run over the new fact; the sink first taken for a
    kitchen is re-valued the action the toilet shows.
+
+   `visit="sweep"` is the former behaviour, kept as an ablation: goals are
+   the frontier clusters the room label image credits to the room, ranked
+   by `core/planning/exploration/frontier_ranking.py`, each route planned
+   on a **copy of the map in which every other room's cells are written
+   unknown** (`LoopSettings.confine_routes`; lifted while the agent's own
+   cell is outside the room); the burst ends after `local_steps` actions
+   (10), when nothing reachable is left, or on the clue rule, and the same
+   room may be chosen straight back.
 2. **Global re-classification.** At the loop point `graph.reason` re-labels
-   every known room from every confirmed object observed so far.
+   every known room from every confirmed object observed so far. **Stairs are
+   never a room**: the footprint of every seen staircase near the storey's
+   level is removed from the free mask before the watershed runs
+   (`ObservedSceneGraph.update(..., exclude=policy.room_exclusion(world))`),
+   so no "room" is carved on a landing, labelled, valued or waited on; a
+   staircase enters the search only as a STAIRS node (below).
 3. **Probability per node** -- the same call, to
    `core/mapping/topology/search_node_oracle.py`. The model is shown every
-   ROOM of the floor -- type or `unknown`, size, frontier clusters left,
-   time searched and how long ago it was last inside, objects seen, whether
-   the robot stands in it -- and every STAIRCASE off the floor -- up or
+   ROOM of the floor **that is still a node** (not finished, not ruled out
+   by type) -- type or `unknown`, size, frontier clusters left, time
+   searched and how long ago it was last inside, objects seen, whether the
+   robot stands in it -- and every STAIRCASE off the floor -- up or
    down, whether the other storey was visited and what was found and
-   searched there, whether the robot arrived by it -- plus one line on this
-   storey and each other storey known. It answers, for each node, the
-   probability in percent that **going there and searching finds the target**.
+   searched there, whether the robot arrived by it -- and every **OPENING**
+   of the floor (below) -- a doorway or gap to space not yet seen, the
+   mapped room it opens from and the objects glimpsed through it -- plus
+   one line on this storey and each other storey known. It answers, for
+   each node, the probability in percent that **going there and searching
+   finds the target**.
    These are independent search-success estimates, **not mutually exclusive
    location shares**, and are not restricted to the ten-action burst. Each is
    converted to a fraction and clamped below 1, without cross-node normalisation.
@@ -276,7 +970,10 @@ refresh.
    right type is the best bet; an `unknown` room is an **exploration node**
    valued by its size, its frontier and the room types the target needs
    that are still missing on this storey; a hallway with frontier is valued
-   by what it may lead to; a staircase is the whole set of rooms the other
+   by what it may lead to; an opening is valued by the room likely **behind**
+   it -- a toilet glimpsed through it makes it a bathroom's door, nothing
+   glimpsed makes it the unknown room this storey may still owe the target;
+   a staircase is the whole set of rooms the other
    storey may hold, read from what this storey turned out to be (a kitchen
    and a living room make a ground floor, so the bedrooms are upstairs),
    discounted when that storey was searched, and not taken straight back
@@ -285,9 +982,13 @@ refresh.
    judgement per loop point the search cannot afford to get wrong, so the
    runtime routes it to the LLM client's reasoning model
    (`LLM_REASONING_MODEL`, default `qwen2.5:14b-instruct`, with its own
-   timeout and context window -- a 3B double-counts effort into semantics
-   and cannot weigh a staircase against an unknown room; the 14B follows
-   the rules and answers in ~25 s on the laptop's CPU once loaded) and
+   timeout and context window; the 14B follows the rules and answers in
+   ~25 s on the laptop's CPU once loaded, and is the model for the
+   benchmark runs. Development runs since 2026-10-04 set it to
+   `qwen2.5:3b-instruct` for turnaround -- the type prior and the finished
+   ledger now take the exclusions the 3B used to get wrong out of its
+   hands, so what it is left to weigh is the unknown rooms against the
+   stairs) and
    waits for it. The oracle
    reuses the model's last reply when the prompt it would show is
    byte-identical (effort numbers are shown in coarse steps for exactly
@@ -301,12 +1002,26 @@ refresh.
    .floor_change_cost_m` (8 m, about thirty actions) charged on every arc
    into and out of it -- so going upstairs puts every room down here that
    much further away, which is exactly what the expected-time-to-find
-   objective must see. The local budget is folded in as per-node service
-   time; the order is re-solved at every loop point
+   objective must see. The expected visit is folded in as per-node service
+   time (`LoopSettings.service_steps()`: half the approach bound plus the
+   rotation under `scan`, `local_steps` under `sweep`); the order is
+   re-solved at every loop point
    (`ObjectSearchParams.resolve_on_release`) and on semantic discovery events,
-    not merely on a timer. Floor choices become eligible only after all observed
-    rooms have completed their interior peeks, then remain the LLM/RPT* decision;
-    the existing 40-action arrival-return guard and fallback rule still apply.
+   not merely on a timer. **A floor change is never gated on room coverage**
+   (unless `doorway_peek.gate_floor_departure` is turned on): the staircase
+   is a node like the rooms, taken when the order puts it first; the
+   existing 40-action arrival-return guard and the fallback rule still apply.
+   **All of this presumes `allow_stair_traversal: true`.** Under the benchmark
+   default (false) no staircase is offered to the oracle or the solver, `commit`
+   and the fallback's explicit rule refuse, an unplanned height departure starts
+   no traversal, and the spawn-floor guard keeps every goal on the spawn plane.
+   **The way back is the one exception**: under `scan` the staircase the
+   agent arrived by is withheld while this storey still has a room that is
+   neither finished nor ruled out (`way_back_held` events) -- the storey is
+   looked at before "not here" means anything. The 3B oracle sent the
+   Ranchester agent straight back up twice with "living room found; no
+   couch here", three unscanned rooms on its list each time; once every
+   room is finished the way back is offered, marked `arrived_by`.
    When the order puts a staircase first the loop commits it to the
    building coordinator, which approaches the foot of the flight and
    climbs; the node's turn ends `traversed` the action the climb begins,
@@ -314,15 +1029,189 @@ refresh.
    comes back down -- with the way back up a node like any other, marked
    `arrived_by`. The order and its head are kept on the loop (`order`,
    `order_index`, `next_room`) for the recording and the dashboard.
+
+   **Openings are nodes too** (`methods/opening_nodes.py`,
+   `LoopSettings.openings`, since 2026-10-04). The room partition is a
+   watershed over *observed* free space, so a room the agent has only
+   glimpsed through its door is not a room yet: its few seen cells hang off
+   the hallway's region, and whatever object stood in the glimpse names the
+   hallway. In the Ranchester recording of 2026-10-04 (attempt 7, action 75)
+   the agent stood in a hallway facing three doors; the toilet seen through
+   one of them made the whole west half of the storey a "bathroom", every
+   door off the hallway was demoted with it, and nothing was left to value
+   but the stairs it happened to turn towards. The decision to descend was
+   right; the reasoning that produced it was not, and in a search for
+   something on *this* storey it would have been fatal. So every genuine
+   **exit** of the mapped floor -- a frontier that is not an object's
+   shadow, not the floor under the agent's feet, at least `min_cells` (8,
+   0.8 m) wide after merging within `merge_m` (1.5 m), not at the foot of a
+   seen staircase, not toward unknown the **sight ledger** has settled (an
+   enclosed pocket, or unknown looked through without a depth return; see
+   below) -- is an **opening**: a node with a sticky building-wide id
+   (`O<n>` on the HUD, `OpeningRegistry`), described to the oracle by the
+   room it opens from, whether a confirmed door frame stands at it
+   (`doorway` / `gap`) and the objects glimpsed through it so far
+   (confirmed landmarks 0.3-3 m beyond the threshold *inside a 35-degree
+   cone* around its heading; the heading is the direction from the known
+   floor around the frontier cell toward the unknown -- the mean of the
+   unknown cells alone pointed the stair passage back into the hallway in
+   attempt 8, and a half-plane glimpse then credited a hallway bed to it,
+   so the passage read as a bedroom door for sixty actions), and priced
+   to RPT* at a **peek's** few actions (`service_steps`, 4; `build_instance
+   (service_s=...)`), not a room's scan. Its visit is the peek
+   (`entry_peek`, `peek_look` / `peek_complete` events): walk to the
+   threshold (bounded by `approach_bound`: the distance's worth of forward
+   steps times 1.6 plus six turns, at least `approach_steps` 20; a walk
+   that runs out looks from within `merge_m` or retires the opening; a
+   refused threshold is re-aimed once at a passable cell on the agent's
+   side), face the unknown, and sweep `2 * look_turns + 1` headings a turn
+   apart from the side nearer the agent's yaw, one in-place turn per
+   action; then the opening is retired for the storey and the node's turn
+   ends `exhausted`.
+   What the look saw is floor in the partition now: the room behind
+   separates, is named by its objects, and is excluded by type or scanned
+   like any other. **A weak type label does not rule out a room with more
+   than `weak_type_max_openings` (1) openings** (`weak_type_kept` events):
+   the one object that named it may belong to a room behind one of them.
+   Openings count as "rooms left" for the way-back hold, so the agent does
+   not go back upstairs with doors on this storey unlooked-into. A new
+   opening appearing while nothing is in force buys the oracle a call at
+   most every `revalue_actions` (6); a new room or staircase is valued at
+   once. `openings.enabled=False` is the ablation in which the exits are the
+   exploration fallback's alone.
+
+   **The openings are read off the live map every action** (since
+   2026-10-13, `RoomSearchLoop.plan` -> `_opening_options`, cached per
+   action): the HUD and the per-step record show the openings as they stand
+   now, and an opening the camera has just resolved -- looked straight
+   through from its threshold -- is gone the action it is resolved, not at
+   the next loop point. The Darden recording `ec8d17aeaaaa` kept `O3` on the
+   HUD for fifty actions after the agent stood on its threshold looking
+   along its heading. **An opening off a room that is itself a node is
+   folded into that room's walk** under `explore` (`_fold_openings`,
+   `opening_folded` events, `openings_folded` in the HUD and diagnostics):
+   it is one of the room's frontiers, and the room's visit walks exactly
+   those, so offering both is the same place twice -- that recording's
+   order read `R3 -> O3`, a room and the gap at its own far end, and the
+   room's scan resolved the gap before the peek was ever due. Openings off
+   finished rooms, off rooms the oracle valued below `min_prob` (a kitchen
+   at 0.0 whose doorways lead on) and target landmarks stay nodes of their
+   own: they are how the next room is found.
+
+   **A confirmed landmark of the target's class is a node too**
+   (`kind="landmark"`, `T<n>` on the HUD, `landmarks_enabled`). Ranchester
+   attempt 9's downstairs warm-up saw the couch three times at 0.41-0.45 --
+   under the takeover's 0.50, the far frames without depth -- put a `sofa`
+   landmark on the map 3.8 m away, and the search then walked *west for
+   forty actions* chasing frontiers while the one object it was looking for
+   stood confirmed on its own map. Such a landmark -- not yet looked at
+   from close on this storey, not within the takeover's rejection memory --
+   is offered to RPT* at a fixed `landmark_prob` (0.85; the detector's word
+   is the evidence, the oracle is not asked) at a standoff point
+   `landmark_standoff_m` (1.5 m) from it on the agent's side, and visited by
+   the same peek: walk there facing it, one look to each side -- a few
+   close frames for the detector, and the takeover does the rest, or the
+   landmark is marked inspected (`landmarks_inspected`).
 5. **A\*** -- the weighted planner behind `_navigate`.
-6. **Direct transit to the closest frontier inside the chosen room**
-   (`LoopSettings.entry_frontier`); a room with no frontier left keeps a
-   centroid entry so the detector can still get a close look. A committed
-   entry frontier that the camera resolves en route is re-aimed at the
-   room's next one; a room with none left is released without the visit
-   (`frontier_exhausted` in transit).
+6. **Direct transit to the chosen room's most revealing frontier** under
+   `explore` (`entry_frontier`; the gain-ranked goal of `_explore_goals`,
+   re-aimed at the room's next one when the camera resolves it en route; a
+   room with no frontier left -- to be confirmed on foot -- and a
+   second-pass revisit enter at the vantage point, `entry_vantage`); **to
+   the chosen room's vantage point** under `scan` (`entry_vantage`; re-aimed
+   once at the vantage point's new position, then the centroid, if the mask
+   re-segments under the route); or **to the closest frontier inside the
+   chosen room** under `sweep` (`LoopSettings.entry_frontier`; a room with
+   no frontier left keeps a centroid entry; a committed entry frontier the
+   camera resolves en route is re-aimed at the room's next one, and a room
+   with none left is released without the visit -- `frontier_exhausted` in
+   transit); or **to the threshold of the chosen opening**, where the peek
+   begins. A room the walk finishes before the agent is in it -- its last
+   frontier resolved from the corridor, or a full glance turned inside it
+   -- is released `exhausted` in transit (`finished_in_transit`).
 7. **Reset** -- arrival is the agent's own cell inside the room's mask
-   (`arrived`), which restarts the local counter.
+   (`arrived`), which restarts the visit counter.
+
+**Room numbers are unique across the building** (since 2026-10-04): each
+storey keeps its own registry, and a storey first entered starts numbering
+after the highest pid any storey has handed out
+(`RoomRegistry(first_pid=...)`, `FloorContextBank.new`), so `R0` names one
+room in a recording, not one per floor. **A room that grows keeps its
+number** (since 2026-10-05): the registry matched fresh masks to the last
+tick's by IoU alone, and a room seen through its door is a sliver that
+grows tenfold as the agent walks in -- the Hanson re-fly renumbered one
+bedroom R11 -> R14 -> R16 while standing in it, and with the number went
+the record of having stood in it (`entered=no` to the oracle). A pair
+under the IoU threshold now matches when `containment_threshold` (0.6) of
+the smaller mask lies inside the larger; IoU matches are consumed first,
+so a split's larger half keeps the number and a merge's survivor is the
+old room with the larger overlap. **A room keeps its number by where it
+was born** (since 2026-10-07, `RoomRegistry(anchors=True)`): each room
+carries its birth anchor -- the cell it was first instantiated at -- and
+a fresh mask holding a previous room's anchor is matched to it before any
+IoU score, oldest pid first. The IoU rule alone handed a split room's
+number to the LARGER half, which is whichever side the agent has mapped
+more of: the Allensville couch run's spawn room was R0 at step 0, became
+R1 when a door 0.5 m away cut it off at step 8, merged back as R0 at step
+10 and re-split as R2 at step 44 while the hallway the agent had just
+walked into carried R0 -- and with it the spawn room's record of having
+been stood in. The registry's memory of vanished rooms is the episode's
+(`REGISTRY_MEMORY_TICKS`, bounded by `REGISTRY_MEMORY_ROOMS` masks), not
+ten ticks, so the hallway comes back as R1 after a 34-tick merge instead of
+as R2.
+
+**Where a door cuts, and whose room the furniture is** (since 2026-10-05).
+The partition is a clearance watershed over observed free space with a
+confirmed door as an absolute boundary
+(`core/mapping/topology/room_watershed.py`). A door *detected* from RGB-D
+sits where the box's depth put it, and the Hanson recording had one 0.6 m
+off its doorway, on the bedroom's own floor at a junction: the 0.75 m disk
+carved there severed the bedroom around its bed into R0 and R6 and cut
+nothing it should have. So the ObjectNav segmentation
+(`scene_graph.DEFAULT_SEGMENTATION`, `door_snap_reach_m=0.9`) **snaps each
+door's cut to the nearest choke** -- the medial-axis cell of least
+clearance within reach whose disk parts the skeleton into two substantial
+pieces (a dead-end notch is narrow too, but cutting it severs nothing) --
+and sizes the disk to the passage; a door with no choke in reach (walls not
+yet observed) keeps the plain disk. The merge then never joins basins that
+lie on *different sides* of the carved mask and may still join two basins
+of one room beside the cut (`merge_basins_by_dynamics(basin_sides=)`),
+where before any border through the disk was unmergeable. Replayed on the
+fifteen recorded floors of 2026-10-04 the change fixed the one it was
+written for (bedroom whole, R7 and the corridor apart) and moved the
+others by at most a room; it is a heuristic over the observed geometry --
+a furniture passage narrower than the doorway within reach of the door
+would be taken for it. **A threshold the agent walked through is a cut too**
+(since 2026-10-07, `room_watershed.trail_thresholds`,
+`threshold_snap_reach_m=0.5`): the scene graph keeps the agent's recent
+trail and reads the clearance along it; a dip to 0.55 m or less with 0.30 m
+more clearance within 1.5 m of travel on BOTH sides is a doorway, carved at
+the severing choke within reach exactly as a snapped door is -- never a plain
+disk, since no detection vouches for it -- so the room beyond separates the
+tick the agent is through, not when its floor has grown a clearance peak.
+A uniformly narrow corridor never dips and is never cut (the Allensville
+hallway: 0.30-0.50 m for forty actions). Thresholds are sticky for the
+storey (`ObservedSceneGraph.thresholds`, `threshold_events`). Objects are
+credited to rooms by
+`ObservedSceneGraph.object_room`: the landmark's cell when it is room
+floor, else the nearest room floor within its footprint radius plus 0.6 m
+-- furniture stands on cells the map reads OCCUPIED, which the watershed
+never labels, so the bed, the desks and the wardrobe of that bedroom were
+`room: null` and the room was a "living room?" from its one chair.
+
+**Distances are measured the way A\* flies them** (since 2026-10-05).
+The planner plans at the preferred standoff (`preferred_clearance_m`,
+0.30 m) and relaxes to the body radius (0.18 m) only when nothing else
+gets through; the frontier inventory and the RPT* instance used to
+measure every distance on the body-radius graph, so a threshold 3.5 m
+away through a 0.5 m squeeze read as 3.5 m while the route around the
+squeeze was 12.5 m (Hanson, actions 166-196: a 30-action approach bound
+spent 5.8 m short on a route still being followed). Now
+`accessible_frontiers(preferred_cost=)` and `build_instance(preferred_cost=)`
+measure at the preferred standoff where it reaches and fall back to the
+body radius where only a squeeze connects (`RPTSearchPolicy.preferred_cost`),
+and a peek's approach bound is raised to what the route the planner
+actually adopted needs (`peek_approach_extended` events).
 
 Steps 2–6 run on the action a room's turn ends, so a released room is
 replaced by a transit at once -- never by a throwaway floor-wide route. A
@@ -346,9 +1235,29 @@ from 22 classifier calls in 60 actions to 5 with identical decisions).
 Every way the decision pipeline can fail lands in one place,
 `methods/exploration_fallback.py`, and comes out as a command that moves:
 
-1. the **highest-utility reachable frontier anywhere on the floor** -- not confined to
+1. the **highest-utility reachable EXIT anywhere on the floor** -- not confined to
    the room in force, so a room whose routes all fail is left rather than
-   spun in;
+   spun in. Two kinds of frontier are not exits and wait for rung 3
+   (`exits_first`, default **true**): an **object's shadow** -- the camera's
+   ray ends at the nearest object, so behind every bed and cabinet a scan
+   leaves a strip of unknown whose frontier sits beside the object
+   (`shadow_margin_m` 0.30 beyond its footprint radius) and is no longer than
+   the object could cast (`shadow_length_factor` 3 halo radii) -- and a
+   frontier of a **room the target cannot be in** (the loop's `type:`
+   exclusion). The 2026-10-04 Ranchester recording spent actions 61-102
+   walking from one strip between the beds to the next (ten goal changes, a
+   150-degree spin, back within 6 cm of where it started) while the passage
+   to the stairs stood two metres away as a frontier the whole time,
+   outranked because the strips were nearer. A finished room's opening is
+   NOT demoted: it is how the next room is found. A frontier inside the
+   camera's **blind radius** (`near_blind_m`, 1.2 m -- a level camera 0.88 m
+   up sees the floor from about there) is demoted too: it appears under the
+   agent wherever it stops, and no step toward it resolves it. Within a rung
+   the fallback **commits**: the goal in force is driven until it is gone or
+   refused unless another goal is worth `goal_switch_gain` (2x) its current
+   utility -- the greedy per-action order, re-ranked by the agent's own
+   turning, once produced a 180-degree turn toward one goal and a 210-degree
+   turn back (`goal_kept` / `goal_switched` / `goal_outranked` in the stats);
 2. the **stairs** by the explicit fallback rule (`floor_decision.py`:
    eligible, reachable now, storey worth visiting, worth per metre of
    approach, flight and fixed change cost), when the floor is exhausted.
@@ -358,12 +1267,23 @@ Every way the decision pipeline can fail lands in one place,
    nothing left -- the room LLM is away, or no node is worth anything and
    the frontier is gone -- and a climb it makes is recorded
    `rule: fallback`;
-3. a **retired frontier** -- a goal dropped for a transient plan failure is
-   still unknown space;
-4. a **relocation** to the farthest reachable known cell, for a vantage point
+3. the **demoted frontiers** of rung 1 (`frontier_demoted`): a shadow is still
+   unknown space once every exit is spent, and so is the bathroom;
+4. a **retired frontier** -- a goal dropped for a transient plan failure is
+   still unknown space (a goal under the agent's feet is not retired but
+   unreachable by construction: the converter has no action for a waypoint
+   inside its arrival tolerance, and would spend an idle turn on it);
+5. a **relocation** to the farthest reachable known cell, for a vantage point
    the map may show a frontier from;
-5. a single hold only when the agent stands off the observed passable map,
-   where the idle turn is the one action that changes anything.
+6. a **footing sweep** (since 2026-10-05) when nothing on the observed map is
+   reachable and at least `footing_unknown_fraction` (0.25) of the cells
+   within `footing_radius_m` (1.2 m) of the agent are unknown: an agent that
+   has not moved stands on a disk of unknown under the camera's blind
+   radius, and unknown is impassable; one LOOK_DOWN, a circle and a LOOK_UP
+   map it (`CameraController.begin_inspection(reason="footing")`, once per
+   spot; a protocol without LOOK actions skips it);
+7. a single hold only when even that has been done here, where the idle
+   turn is the one action that changes anything.
 
 It is reached from the loop whenever no room is in force, and from
 `RPTSearchPolicy.plan` whenever the decision itself raises -- an A* with no
@@ -380,6 +1300,153 @@ counted, kept with its type, message and origin under
 type. Before this, an empty hold cost one idle `TURN_LEFT` per action until
 the step budget ran out -- the "camera spinning in place" of the Ranchester
 recordings -- and a model failure was an agent error.
+
+## Glances: where along a route a look to the side pays
+
+`methods/path_glances.py` (`GlanceSettings` on the policy, since 2026-10-05).
+The camera's cone is narrow and the map is what it saw: an agent walking a
+corridor sees the corridor, and a door a step to the side passes through
+the edge of the frame or not at all (Hanson, action 35). Turning in place
+costs no path length -- nothing under SPL -- but under the 500-action
+budget a full circle every few steps is unaffordable, so the question is
+*where* along the route a look pays, and which look. The scheduler scores
+the route in force every `revalue_actions` (2) and whenever it changes:
+candidate points one every `stride_m` (0.5 m) up to `horizon_m` (6 m),
+each with the route's heading there; for each, the unknown floor a glance
+would sweep -- left (from the heading's cone out to a right angle), right,
+or the full circle -- by optimistic rays through the unknown that stop at
+walls (`core/planning/exploration/view_gain.py`), **minus what the walk
+reveals anyway** (the forward cones along the whole route ahead), so a
+doorway's room counts once, at the point it shows best: the user's "one
+step forward and all three areas show; two and the first is hidden
+again". The best gain per action wins -- a side glance costs the turns
+out and back (six), a circle the turns the camera's field of view needs to
+see it (ten at 30 degrees with the 79-degree camera, not twelve) -- if
+it clears `min_gain_m2` (3) and `min_gain_per_action_m2` (0.5): six
+forward steps into unknown space sweep the cone over 1.5 m of new floor,
+around 10 m2 in a room, so walking is the better buy wherever the unknown
+is ahead; a doorway beside the route shows the walk nothing and a glance
+5-15 m2 (the Hanson routes replayed on their final maps: 14.8 m2 at
+action 33, 7.6 m2 at 164). **A bird in the hand** (`lookahead_discount`,
+0.5, since 2026-10-13): a candidate's rate is discounted by how far along
+the route it lies, down to half at the horizon, because the route and the
+map change before the agent gets there -- the Darden recording
+`ec8d17aeaaaa` scheduled 32 glances and took 4 of the geometric ones, the
+rest re-planned away as the route moved; a look the agent can take now is
+worth more than one of equal rate planned six metres on. When the agent
+reaches the point the look is performed, one in-place turn per action, as
+a suspended phase like the warm-up: the loop is not ticked and not charged,
+the supervisor's clocks pause, and the committed route's watchdogs are told
+the pause (`glance_scheduled` / `glance_started` / `glance_complete` /
+`glance_aborted` events in `episode_info()["glances"]`; the planned and
+active glance in the per-step `search` record and on the HUD). **A
+completed full glance is a completed look-around** and is recorded in the
+scan ledger (`source="glance"`, `rotations_recorded`, since 2026-10-13):
+the room the agent stood in is finished by it like a room scan finishes a
+room, and the loop's visit in force ends the same action
+(`finished_by_rotation`) -- the Darden recording turned a full glance
+inside the room it was walking into at action 61, then walked on to that
+room's vantage point and turned the same circle again at 94. A spot within
+`scanned_m` (1.5 m) of a completed rotation (the warm-up, a room scan, a
+full glance -- the scan ledger) is never glanced from -- whatever is
+unknown from there is beyond range or behind furniture, and the 4.4 m2
+"right" glance that recording took 1.0 m from its own full glance (actions
+82-85, three turns back after) revealed nothing -- and a target sighting
+or a stair traversal aborts a glance; the warm-up, a peek's look, a scan's
+rotation and the takeover never start one. After a glance no new one
+starts for `cooldown_actions` (4; the former 8 swallowed a 15 m2 right
+glance whose point the agent walked past at action 56 of that recording,
+three actions after a two-turn cue glance), and a cue glance no longer
+discards the geometric plan in force. **A look is not repeated from beside
+where it was taken** (`repeat_m`, 1.0 m, since 2026-10-13): the scheduler
+remembers every completed side and cue glance -- where it stood and the
+bearings its frames covered, the field of view included -- and neither a
+side glance nor a cue whose sector a look from within a metre already
+swept is taken again (the re-run of that recording looked left through the
+same doorway at the same dining room at actions 60 and 68, 0.25 m apart:
+the unknown beyond a doorway stays unknown after the look, beyond range or
+a hole in the mesh, and the optimistic scorer values it again every time).
+**A cue of an ordinary class clears the geometric rate floor** over its
+turns out and back (`max(cue_min_gain_m2, min_gain_per_action_m2 * 2 *
+turns)`: 3 m2 for three turns, 2 m2 for two) -- that re-run took nine cue
+glances of 1.7-2.6 m2 at six actions each, a chair or a cabinet at the
+edge of a room already mapped; the target's own class and its home objects
+still need no gain. `enabled=False` is the ablation.
+
+**Cue glances** (since 2026-10-05, `cue_*` settings): the scorer values
+unknown floor, and a small room beside the route shows it little, but
+the detector sees the room's furniture at the edge of the frame. A box
+of at least `cue_confidence` (0.4), spanning at least `cue_min_box_frac`
+(30 %) of the frame's height, cut off by the frame's left or right
+edge (`cue_border_px`) is a cue to turn that way -- enough turns to centre
+the object and one more, at most `cue_max_turns` (3), not a right angle.
+The target's own class and its home objects are cues outright (the
+takeover refuses a border box, so turning is how it starts); any other
+class only while that side still holds `cue_min_gain_m2` (1.5) of unknown
+floor; a class already glanced at on that side within `cue_repeat_m` (2 m)
+is not a cue again (`cues`, `cues_repeated`, `cues_without_gain` in the
+stats; `cue` on the glance's events and HUD line). Hanson 2026-10-05,
+action 101: a bathroom vanity read as `cabinet 0.84` on the left edge of
+the frame, the scheduler glanced right twice toward a larger unknown, and
+the toilet beside the vanity was reached 250 actions later. The unknown
+the scorer counts excludes what the sight ledger has settled: a window is
+no longer worth a look for the garden behind it.
+
+## The sight ledger: unknown that is not worth a step
+
+`methods/sightlines.py` (`SightSettings` on the policy, `sight` in the
+configuration and the episode record, since 2026-10-05). The frontier --
+free beside unknown -- is where exploration goes, and two kinds of unknown
+are not worth a step:
+
+- **Looked-through unknown.** Every action, after the map has taken the
+  frame, the camera's cone is cast over it: a ray runs through known free
+  cells and ends at the first occupied or unknown one; an unknown cell it
+  ends at inside the floor's visible band -- beyond the blind radius under
+  the camera (from the pitch and the vertical field of view) plus
+  `near_margin_m`, within `far_m` (2.5 m: past that the depth image's floor
+  samples thin out and an unknown cell between two seen rows is a sampling
+  hole) -- is a cell the depth should have resolved and did not: a balcony
+  railing with the garden below, a window, a glass door, a hole in the
+  mesh. Looked through from `min_looks` (2) distinct poses (binned by
+  `pose_bin_m` / `pose_bin_deg`) it is **settled**; about a cell and a half
+  behind it (`depth_cells`, 3 half-cell samples) with it, so the free cell on
+  the boundary stops being a frontier cell. The Hanson re-fly walked to both ends of a balcony it
+  had seen whole from its threshold (actions 25-51, two openings, two
+  peeks).
+- **Pockets.** A connected component of unknown of at most `pocket_max_m2`
+  (3 m2) that does not reach the edge of the map is enclosed by known
+  cells and leads nowhere: the strip behind a bed against an observed
+  wall, the island between the spawn point and the bed in front of it
+  (the blind radius leaves the floor under the camera's own feet unseen).
+  The same recording spent actions 51-82 walking back to such an island
+  (O4, valued 0.01, visited because it was near) and 150-192 on the strip
+  behind a bed (O9). A toilet, a bed or a sofa does not fit in 3 m2 behind
+  a wardrobe; a cup would, and that is the trade the bound makes. **But a
+  pocket is settled only when nothing could stand in it** (since
+  2026-10-13, `pocket_max_width_m` 0.6): its inscribed width -- twice the
+  largest distance from one of its cells to its edge -- is under 0.6 m, or
+  the agent has itself stood on it (the spawn island). The Darden
+  recording `ec8d17aeaaaa` and both of its re-runs saw a bathroom's walls
+  through its door, which enclosed the unseen half of the bathroom -- 0.9
+  m2, 0.8 m wide, with the toilet in it -- and the area bound alone settled
+  it: no frontier, no opening, no visit, three times, with the agent
+  standing a metre away inside the success region at the door. A strip
+  behind a bed is 0.3 m wide; a toilet needs 0.6.
+
+Settled unknown is written OCCUPIED on the map the **frontier logic**
+reads (`ObservedSceneGraph.frontier_world`, through `resolved_provider`):
+the frontier inventory, the per-room `frontier=` counts the oracle sees,
+the openings, the exploration fallback's exits and the glance scorer's
+rays. The planner keeps the real map (unknown is never inflated, occupied
+is; a settled railing must not shrink the balcony the agent may still
+stand on), and so does the display, which draws settled unknown a darker
+grey (`settled_cells` in the panel metadata). A settled cell that later
+turns out to be floor is known from then on and the mark is void by
+itself. The ledger also keeps every pose the camera stood at on each
+storey, which is what the scan ledger's `seen_through` verdict reads.
+`enabled=False` is the ablation, in which every unknown cell is an exit
+again.
 
 ## Frontier sweep and the action economy
 
@@ -433,12 +1500,119 @@ and takes priority even over committed stair tasks. Coherent depth pixels are
 projected at their actual image coordinates, with frame/floor/association
 rejection reasons recorded. No bed/sofa proximity blacklist is used.
 
+**Object identity is per class, and same-class instances are told apart by
+size** (since 2026-10-07; `core/mapping/objects/landmarks.py` with
+`class_votes=False`, wired in `methods/floor_context.py` from
+`RPTSettings.landmark_dedupe_radius_m` / `landmark_footprint_iou`, and
+`methods/perception_cycle.py`). Every projected detection carries a
+**footprint**: a disc around its world centroid, half the box's width at its
+depth (`perception.footprint_radius_m`, clamped to 0.15-1.5 m). **Classes
+never merge**: a detection associates only with a landmark of its own class,
+whatever the proximity or the footprint overlap -- a cup on a table and the
+table are two instances in memory, a toilet and the bathtub beside it are
+two, a vase on a cabinet is its own landmark. Every cross-class rule the map
+ever had collapsed distinct objects resting on or beside one another into
+one and cost a target lock: the two vases on the cabinet in the first frame
+of the Allensville couch run (dropped as `same_frame_association` on every
+frame by the 0.70 m centroid radius), and the toilet and bathtub 0.5 m apart
+in the toilet run, voted into one landmark that flipped to `bathtub` and had
+the toilet's lock released as contradicted by the map. **Two observations of
+one class are one instance** when their centroids lie within
+`landmark_dedupe_radius_m` (**0.35 m**, re-observation jitter -- the ported
+0.70 m merged two dining chairs) or when both carry a measured footprint and
+the discs overlap by IoU ≥ `landmark_footprint_iou` (**0.25**, `landmarks.
+disc_iou`, the lens formula: about one radius apart for equal discs, so a
+bed re-seen from its other side with the centroids 0.8 m apart is one bed and
+two chairs 0.3 m apart are two chairs), and when the height is within 0.35 m
+of the landmark's first measured height (two of a kind stacked in plan view
+on different levels are two; the band stays at 0.35 m because one object's
+measured centroid height swings that much with viewing range -- the
+Allensville toilet read 0.33 m from 5 m and 0.64 m from 1 m). A second box
+of the same object in one frame is `same_frame_association`; a box of
+another class over the same pixels is its own landmark. The per-frame alias
+filter (`object_evidence.deduplicate_detections`: a box of another class
+over the **same pixels**, IoU ≥ 0.9 -- one crop, two prompt names) is the
+one cross-class rule kept, and it acts on the detector's output of a frame,
+not on the map. The detection floor (`RPTSettings.detection_confidence`) is
+0.30, the takeover's own tracking threshold -- a landmark needs two
+observations to be confirmed, so a weak box costs nothing alone, and the
+former 0.35 dropped a cup at 0.34 on that table. A landmark is **confirmed**
+-- shown to the room classifier, the node oracle and the HUD, and allowed to
+start target evidence -- once it has `min_observations` (2) observations; a
+lone detector flicker of a wrong class is a one-observation landmark the
+search never acts on. Target evidence is judged on the landmark's class --
+the box's own now -- and the takeover verifies a candidate on two consecutive
+frames of its own and the context check (above), not on the map's word.
+**The class vote** of 2026-10-04 -- co-located detections of any class
+folded into one landmark as votes, the plurality naming it, a `sofa` box on a
+confirmed `bed` outvoted (`contradicted_by_map`, `map_rejections`,
+`map_releases`, `outvoted_detections`) -- stays in the library behind
+`ObjectLandmarkMap(class_votes=True)` for its other users and reads zero in
+this runtime's diagnostics.
+
+### The target's depth on its own pixels: the `segmentation` setting (2026-10-12, off by default)
+
+A detection box overhangs its object and admits whatever stands **in front**
+of it. The box pipeline reads a detection's range as a low percentile of the
+depth in the box's central quarter (`core/mapping/objects/geometry.py::
+robust_bbox_depth`, then the connected near-surface component in
+`perception._supported_centroid`), so when a nearer object overlaps the
+target's box -- a chair before a sofa -- the percentile is the chair's, the
+centroid and the near edge (`range_near_m`) land on the chair, and the
+terminal test of the closing (`target_closing._fresh_measured`, the smaller
+of the two) reads "arrived" a metre short of the sofa. Frames of exactly this
+kind STOPped wrong in the Gibson recordings.
+
+`RPTSettings.segmentation` (**False** by default; `--segmentation` on the
+`gibson.run` / `five_scene` command line, `SEGMENTATION=1` for
+`run_benchmark.sh`) adds one step: every frame's **target-class boxes** at or
+above `detection_confidence` go, in one call, to the box-prompted Segment
+Anything service (`tasks/mapping/scene_graph/serve/segmentation_server.py`,
+MobileSAM by default, `methods/segmentation.HttpSegmenter` the client,
+`--segmenter-url`), and `perception.observed_objects` reads each of them on
+the returned mask: the depth is `robust_mask_depth` over the mask within the
+box, the near-surface component is sought over the whole box on the mask's
+pixels only, so neither the centroid nor `range_near_m` can land on an
+occluder the mask leaves out. The coherence gate (35 % of the patch within
+the ±6 % band) is not applied on the mask path -- the mask has answered "one
+object?", and a deep object seen whole (a bed from its foot, a sofa at an
+angle) legitimately spans more than the band; `supported_fraction` is still
+recorded. Everything downstream -- association, the 3-D memory, the closing's
+phases -- is unchanged, so the two pipelines differ in exactly one thing:
+**which pixels count as the object.**
+
+Boxes of other classes are read on their box as always. A target box the
+service could not mask this frame -- a transport failure, the back-off it arms
+(`exploration_fallback.SEGMENTER`, the detector's doubling rule) -- is **not**
+read the old way: its row says `segmentation_unavailable`, the frame is
+counted (`segmenter_failures`, `segmenter_skipped`), and the comparison stays
+clean. Identity drift of the service (another checkpoint answering) ends the
+run like the detector's. The policy refuses to start with the setting on and
+no segmenter; `run.json` records the segmenter's checkpoint hash, device,
+configuration and URL under `method.segmenter`, `configuration()` says
+`perception_fusion: .../target-masked`, and the HUD tints each target mask
+magenta on the camera panel. The per-frame cost is one SAM call on frames with
+a target box (0.3 s on four CPU threads with MobileSAM; `steps.jsonl` carries
+it as `segmenter_http`). Tests:
+`tests/test_segmented_projection.py` (the occluder scene with and without the
+mask, the failure families, the HUD), `core/mapping/segmentation/tests`, and
+`tasks/mapping/scene_graph/tests/test_segmentation_service.py`.
+
 ## Models and vocabulary
 
 YOLO-World X-v2 remains the default; pretrained LLMDet Swin-L and explicit S/L
 checkpoints remain selectable. The Gibson context vocabulary includes `stairs`
 and `staircase`, neither a goal category nor a navigation oracle. Semantics can
 request inspection; observed step geometry must independently support a portal.
+Since 2026-10-05 it also carries **distractor prompts** -- `toy`, `rocking
+horse`, `stuffed animal` -- and `bathtub` (a home object of the toilet the
+vocabulary lacked): an open-vocabulary detector scores every prompt it was
+given against the crop and lands on the nearest, and Hanson/000001 stopped at
+action 14 on a child's ride-on horse read as `chair` at 0.9, 11.7 m from the
+nearest chair. A distractor is never a goal, never a home object and names no
+room; it only gives the wrong match somewhere else to go. **A detector
+service started before this change must be restarted** with the new
+`--print-vocabulary` output; the health check pins the class list.
 
 Restart a dedicated detector with the exact `gibson.run --print-vocabulary`
 (or `hm3d.run --print-vocabulary`) output. A former 24-prompt service is intentionally rejected. HTTP checks pin

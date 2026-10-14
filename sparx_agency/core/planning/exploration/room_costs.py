@@ -286,6 +286,39 @@ def cost_matrix(world: OccupancyGrid2D,
     return out
 
 
+def prefer_cost_matrix(world: OccupancyGrid2D,
+                       full: np.ndarray,
+                       preferred_cost: np.ndarray,
+                       cells: Sequence[Tuple[int, int]]) -> np.ndarray:
+    """``full`` with every pair measured at the preferred standoff where that graph connects them.
+
+    Args:
+        world: The grid, for its resolution.
+        full: The all-pairs matrix at the body radius, ``[N, N]`` metres.
+        preferred_cost: The cost array at the preferred standoff.
+        cells: ``(gx, gy)`` per vertex, in ``full``'s order.
+
+    Returns:
+        A copy of ``full`` where ``full[i, j]`` is the preferred-standoff
+        distance for every pair of vertices on the preferred graph with a
+        finite path between them; other entries are unchanged.
+    """
+    if full.shape != (len(cells), len(cells)):
+        raise ValueError("full %r does not match %d cells" % (full.shape, len(cells)))
+    ids, graph = passable_graph(preferred_cost)
+    on = [i for i, (gx, gy) in enumerate(cells) if ids[gy, gx] >= 0]
+    if len(on) < 2:
+        return full
+    sub = cost_matrix(world, graph, ids, [cells[i] for i in on])
+    out = np.array(full, dtype=np.float64, copy=True)
+    index = np.array(on, dtype=np.int64)
+    block = out[np.ix_(index, index)]
+    finite = np.isfinite(sub)
+    block[finite] = sub[finite]
+    out[np.ix_(index, index)] = block
+    return out
+
+
 def build_instance(world: OccupancyGrid2D,
                    cost: np.ndarray,
                    centroids: Mapping[int, Tuple[float, float]],
@@ -297,7 +330,9 @@ def build_instance(world: OccupancyGrid2D,
                    frontier_weight: float = 0.0,
                    frontier_counts: Optional[Mapping[int, int]] = None,
                    p_clamp: float = P_CLAMP_DEFAULT,
-                   leaves: Optional[Mapping[int, float]] = None
+                   leaves: Optional[Mapping[int, float]] = None,
+                   service_s: Optional[Mapping[int, float]] = None,
+                   preferred_cost: Optional[np.ndarray] = None
                    ) -> Tuple[HppPtInstance, List[int]]:
     """Assemble the complete, finite, metric instance RPT* takes.
 
@@ -347,6 +382,20 @@ def build_instance(world: OccupancyGrid2D,
             further away. A leaf is a graph edge, so the matrix stays
             metric: ``c'(u,w) = c(u,w) + l_u + l_w <= c(u,v) + l_u + l_v +
             c(v,w) + l_v + l_w = c'(u,v) + c'(v,w)``.
+        service_s: ``{pid: seconds}`` -- a node whose visit costs a
+            different time than ``search_time_s``: an opening the search
+            only looks into from the threshold is a few actions, not a
+            room's scan. Folded into the node's entering arcs exactly as
+            ``search_time_s`` is, so the same triangle-inequality argument
+            holds. Nodes absent here keep ``search_time_s``.
+        preferred_cost: Optional cost array at the planner's PREFERRED
+            standoff beside ``cost`` at the body radius. A* flies the
+            preferred route wherever one exists and squeezes only when it
+            must, so with this given every arc between two nodes both
+            reachable at the preferred standoff is measured there; the
+            body-radius distance stands only where the preferred graph
+            does not connect them. Reachability (which nodes are kept) is
+            the body radius's, as before.
 
     Returns:
         ``(instance, dropped_pids)``. Dropped covers both rooms with no
@@ -383,6 +432,9 @@ def build_instance(world: OccupancyGrid2D,
     depot = len(all_nodes) - 1 if depot_node is not None else 0
 
     full = cost_matrix(world, graph, ids, [nd.cell for nd in all_nodes])
+    if preferred_cost is not None:
+        full = prefer_cost_matrix(world, full, np.asarray(preferred_cost, dtype=float),
+                                  [nd.cell for nd in all_nodes])
 
     # RPT* needs a complete finite graph. Keep the depot and everything it
     # can reach; withhold the rest and say which.
@@ -413,8 +465,12 @@ def build_instance(world: OccupancyGrid2D,
     if cruise_speed_mps and cruise_speed_mps > 0.0:
         C = C / float(cruise_speed_mps)
         units = "seconds"
-        if search_time_s and search_time_s > 0.0:
-            budget = np.full(C.shape[1], float(search_time_s))
+        if (search_time_s and search_time_s > 0.0) or service_s:
+            budget = np.full(C.shape[1], max(0.0, float(search_time_s or 0.0)))
+            if service_s:
+                for i, nd in enumerate(kept_nodes):
+                    if nd.pid >= 0 and nd.pid in service_s:
+                        budget[i] = max(0.0, float(service_s[nd.pid]))
             budget[depot_idx] = 0.0
             C = C + budget[None, :]
             np.fill_diagonal(C, 0.0)

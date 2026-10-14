@@ -293,6 +293,29 @@ def test_a_leaf_hangs_a_node_off_its_map_point_and_is_charged_both_ways():
     assert np.allclose(ignored.C, plain.C), "a negative leaf reads as none; a leaf for an absent node is dropped"
 
 
+def test_a_nodes_own_service_time_replaces_the_search_budget_on_its_entering_arcs():
+    """An opening is looked into from the threshold, not searched: it costs a peek's few seconds, not a
+    room's scan, on every arc into it -- and the matrix stays metric because the fold is per column."""
+    plain, _ = three_room_instance(cruise_speed_mps=0.5)
+    priced, _ = three_room_instance(cruise_speed_mps=0.5, search_time_s=30.0, service_s={3: 4.0})
+    index = {pid: i for i, pid in enumerate(priced.index_to_pid)}
+    a, b, o = index[1], index[2], index[3]
+    assert priced.C[a, o] == pytest.approx(plain.C[a, o] + 4.0) and priced.C[b, o] == pytest.approx(plain.C[b, o] + 4.0)
+    assert priced.C[a, b] == pytest.approx(plain.C[a, b] + 30.0), "the rooms keep the search budget"
+    assert priced.C[o, b] == pytest.approx(plain.C[o, b] + 30.0), "... on arcs INTO them, whatever they come from"
+    assert priced.C[o, a] == pytest.approx(plain.C[o, a]), "room A is the depot: never charged"
+    assert np.allclose(np.diag(priced.C), 0.0)
+    for i in range(priced.n):
+        for j in range(priced.n):
+            for k in range(priced.n):
+                assert priced.C[i, j] <= priced.C[i, k] + priced.C[k, j] + 1e-9
+    alone, _ = three_room_instance(cruise_speed_mps=0.5, service_s={3: 4.0})
+    assert alone.C[a, o] == pytest.approx(plain.C[a, o] + 4.0), "a service time without a search budget still charges"
+    assert alone.C[a, b] == pytest.approx(plain.C[a, b]), "... and the rooms nothing"
+    unpriced, _ = three_room_instance(cruise_speed_mps=0.5, service_s={9: 4.0})
+    assert np.allclose(unpriced.C, plain.C), "a service time for an absent node is dropped"
+
+
 def test_an_unreachable_room_is_dropped_not_given_a_fake_weight():
     world = corridor_world()
     g = world.grid.copy()
@@ -419,3 +442,40 @@ def test_hospital_instance_builds_inside_a_control_tick(hospital):
                              {pid: 1.0 / len(cents) for pid in cents})
     assert inst.build_ms < 1000.0, (
         "arc weights took %.0f ms; the replan tick is 1 s" % inst.build_ms)
+
+
+def test_the_instance_charges_the_preferred_route_where_one_exists():
+    """A squeeze passable at the body radius only: the arc between two rooms is the walk round through
+    the gap, as A* will fly it; a node only the squeeze reaches keeps its body-radius arc (2026-10-05)."""
+    from sparx_agency.core.planning.exploration.room_costs import build_instance, prefer_cost_matrix
+    from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+    values = OccupancyValues(free=0, occupied=100, unknown=-1)
+    rows = ["###########",
+            "#.........#",
+            "#....#....#",
+            "#....#....#",
+            "#....#....#",
+            "#.........#",
+            "###########"]
+    table = {".": 0, "#": 100}
+    g = np.array([[table[c] for c in row] for row in rows], dtype=np.int16)
+    world = OccupancyGrid2D(g, OccupancyGrid2DParams(0.5, 0.0, 0.0, "world"), values=values)
+    body = np.where(g == 0, 1.0, np.inf)
+    preferred = np.where(g == 0, 1.0, np.inf)
+    preferred[1, 5] = np.inf                                   # the squeeze at row 1: lethal at the preferred standoff
+    centroids = {0: (1.25, 0.75), 1: (3.25, 0.75)}             # (col 2, row 1) and (col 6, row 1), either side of the squeeze
+    through, _ = build_instance(world, body, centroids, {0: 0.5, 1: 0.5}, cruise_speed_mps=0.0)
+    around, _ = build_instance(world, body, centroids, {0: 0.5, 1: 0.5}, cruise_speed_mps=0.0, preferred_cost=preferred)
+    i, j = around.index_to_pid.index(0), around.index_to_pid.index(1)
+    assert through.C[i, j] == pytest.approx(2.0, abs=0.01), "four cells through the squeeze"
+    assert around.C[i, j] > through.C[i, j] + 2.0, "round through the gap at row 5"
+    assert around.C[j, i] == around.C[i, j], "still symmetric"
+    # The squeeze's own cell as a node: on the body graph only, so its arcs stay body-radius ones.
+    preferred_blocked = preferred.copy()
+    preferred_blocked[1, 5] = np.inf
+    cells = [(2, 1), (6, 1), (5, 1)]
+    full = np.array([[0.0, 2.0, 1.5], [2.0, 0.0, 0.5], [1.5, 0.5, 0.0]])
+    out = prefer_cost_matrix(world, full, preferred_blocked, cells)
+    assert out[0, 1] > 4.0 and out[0, 2] == 1.5 and out[1, 2] == 0.5
+    with pytest.raises(ValueError):
+        prefer_cost_matrix(world, full[:2, :2], preferred_blocked, cells)

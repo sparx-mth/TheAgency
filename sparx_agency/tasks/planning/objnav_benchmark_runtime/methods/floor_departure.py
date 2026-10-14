@@ -13,6 +13,10 @@ class FloorDepartureGuard:
     Only observed rooms and seen stair portals are used. A floor with no room
     geometry yet is not complete. Classified/scanned/previously attempted rooms
     do not demand a forbidden repeat. Eligibility is not a semantic coverage claim.
+
+    The whole gate is an option (``doorway_peek.gate_floor_departure``), OFF
+    by default: a floor change is then the RPT* order's or the fallback
+    rule's to take whenever it is chosen, and :meth:`ready` is always True.
     """
 
     def __init__(self, building):
@@ -20,9 +24,13 @@ class FloorDepartureGuard:
         self._last_pending = None
         self.vetoes = 0
 
+    @property
+    def enabled(self):
+        return bool(self.building.policy.settings.doorway_peek.gate_floor_departure)
+
     def ready(self, obs=None):
         p = self.building.policy
-        if p.peek.floor_ready():
+        if not self.enabled or p.peek.floor_ready():
             self._last_pending = None
             return True
         pending = p.peek.pending_rooms()
