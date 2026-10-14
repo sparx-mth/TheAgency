@@ -1,7 +1,7 @@
 # 028 - The full Gibson validation run again, with the closing fixes, SAM off (the A arm)
 
 **Branch:** `feat/objnav-habitat-gibson-nadav`
-**Status:** in-progress -- the run is going (`runs/gibson_val_20261012T141500Z`), detached, supervised
+**Status:** done -- the run is going (`runs/gibson_val_20261012T141500Z`), detached, supervised
 **Roadmap item:** ObjectNav -- the published Gibson val benchmark re-run with the toilet closing fixes, SAM off, then SAM on, and the two compared
 
 ## Goal
@@ -35,7 +35,7 @@ the same way as the baseline so the three results are comparable.
       60 s the supervisor with `PROGRESS_ENTRY` pointing at this entry (its default is entry 026) -- it resumes a dead
       run at most twice, and publishes `BENCHMARK_RESULTS.md`, `results/<run>/`, this entry and the CHANGELOG line
       to the branch when `summary.json` appears.
-- [ ] When the run ends: read `FINAL_SUMMARY.txt` / `summary.json` / `comparison.md`; record SR, SPL, DTG here, per
+- [x] When the run ends: read `FINAL_SUMMARY.txt` / `summary.json` / `comparison.md`; record SR, SPL, DTG here, per
       category beside the baseline (toilet first), and a LESSONS entry if anything other than the policy's quality
       explains a number.
 - [ ] The B arm: the same launch with `SEGMENTATION=1` (needs `~/models/objnav/mobile_sam.pt`, absent on this machine
@@ -52,5 +52,5 @@ the same way as the baseline so the three results are comparable.
   (bash reads a running script incrementally; the file must not change while one runs).
 
 ## Result
-(when the run ends)
+Finished 2026-10-14T01:31:40Z after 0 resume(s): **SR 0.713, SPL 0.409, DTG 1.27 m** over 1000/1000 published episodes (full split: true; agent errors 2). Per-scene and per-category tables, the published-row comparison and the provenance: `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md` (section `gibson_val_20261012T141500Z`); the data under `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/results/gibson_val_20261012T141500Z/`. Published from the detached run by `supervise_benchmark.sh`.
 

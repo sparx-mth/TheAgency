@@ -6,6 +6,7 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261012T141500Z/`, 2026-10-14): SR 0.713, SPL 0.409, DTG 1.27 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **The detached Gibson run as one command, and the same command after a reboot**
   (`objnav_benchmark_runtime/gibson/launch_detached.sh`, 2026-10-12): launcher in its own session, monitor and
   supervisor beside it, `PROGRESS_ENTRY` required so publishing closes the right entry, the supervisor's settings in
