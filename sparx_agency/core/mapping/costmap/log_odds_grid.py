@@ -38,11 +38,13 @@ class LogOddsGridCostmap(Costmap):
 
         self._L = np.zeros((self.height, self.width), dtype=np.float32)  # log-odds
         self._seen = np.zeros((self.height, self.width), dtype=np.bool_) # was ever updated?
+        self._observed = np.zeros((self.height, self.width), dtype=np.bool_)  # sensed, not seeded
         self._last_stamp_sec: Optional[float] = None
 
     def reset(self) -> None:
         self._L.fill(0.0)
         self._seen.fill(False)
+        self._observed.fill(False)
         self._last_stamp_sec = None
 
     def _world_to_grid(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -80,11 +82,26 @@ class LogOddsGridCostmap(Costmap):
 
         self._L[hit_mask] = np.clip(self._L[hit_mask] + dL[hit_mask], self.cfg.l_min, self.cfg.l_max)
         self._seen[hit_mask] = True
+        self._observed[hit_mask] = True
 
     def apply_free_mask(self, mask: np.ndarray) -> None:
         """Decrement log-odds for every True cell in mask (ray-cast free space)."""
         self._L[mask] = np.clip(self._L[mask] + self.cfg.l_free, self.cfg.l_min, self.cfg.l_max)
         self._seen[mask] = True
+        self._observed[mask] = True
+
+    @property
+    def observed_mask(self) -> np.ndarray:
+        return self._observed
+
+    def seed(self, free_mask: np.ndarray, occupied_mask: np.ndarray) -> None:
+        """Prior evidence worth one update, so a few real observations overturn it."""
+        for mask in (free_mask, occupied_mask):
+            if mask.shape != self._L.shape:
+                raise ValueError("seed mask shape %s != grid shape %s" % (mask.shape, self._L.shape))
+        self._L[free_mask] = self.cfg.l_free
+        self._L[occupied_mask] = self.cfg.l_occ
+        self._seen[free_mask | occupied_mask] = True
 
     def get_grid(self) -> Tuple[GridSpec, np.ndarray]:
         spec = GridSpec(

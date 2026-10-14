@@ -1,0 +1,16 @@
+{
+  "map_resolution_m": 0.1,
+  "map_size_m": 79.8,
+  "local_exploration": "falcon",
+  "stay_on_start_floor": true,
+  "stair_exclusion_margin_m": 0.8,
+  "multifloor": {
+    "enabled": false
+  },
+  "falcon": {
+    "scope_radius_m": 4.0,
+    "max_grid_nodes": 60000,
+    "max_order_nodes": 128,
+    "planning_deadline_s": 3.0
+  }
+}

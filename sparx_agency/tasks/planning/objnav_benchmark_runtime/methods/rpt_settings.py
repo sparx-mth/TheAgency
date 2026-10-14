@@ -36,6 +36,8 @@ class RPTSettings:
     body_height_m: float = 0.88
     body_radius_m: float = 0.18
     preferred_clearance_m: float = 0.30
+    free_log_odds: float = -0.40
+    obstacle_min_height_m: float = 0.15
     local_exploration: str = "frontier"
     stay_on_start_floor: bool = False
     stair_exclusion_margin_m: float = 0.8
@@ -52,6 +54,10 @@ class RPTSettings:
                 raise ValueError("%s must be a positive integer" % key)
         if not 0 <= self.detection_confidence <= 1 or type(self.seed) is not int:
             raise ValueError("Invalid confidence or seed")
+        if not self.free_log_odds < 0 or not math.isfinite(self.free_log_odds):
+            raise ValueError("free_log_odds must be negative and finite")
+        if not 0 < self.obstacle_min_height_m < self.body_height_m:
+            raise ValueError("obstacle_min_height_m must lie between the floor and the body height")
         if self.preferred_clearance_m < self.body_radius_m:
             raise ValueError("Preferred clearance cannot be smaller than the robot radius")
         if self.local_exploration not in ("frontier", "falcon"):

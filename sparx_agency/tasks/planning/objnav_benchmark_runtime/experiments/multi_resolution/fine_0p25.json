@@ -1,0 +1,12 @@
+{
+  "map_resolution_m": 0.25,
+  "local_exploration": "falcon",
+  "stay_on_start_floor": true,
+  "stair_exclusion_margin_m": 0.8,
+  "multifloor": {
+    "enabled": false
+  },
+  "falcon": {
+    "scope_radius_m": 12.0
+  }
+}

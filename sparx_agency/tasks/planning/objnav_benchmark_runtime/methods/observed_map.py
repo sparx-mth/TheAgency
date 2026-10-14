@@ -19,8 +19,16 @@ class ObservedMap:
     bounds, surveyed heights or configured display-slot count are policy inputs.
     """
 
-    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18, multifloor=None):
-        self.grid = LogOddsGridCostmap(LogOddsGridConfig(size_m=size_m, resolution_m=resolution_m))
+    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18, multifloor=None,
+                 origin_xy=None, free_log_odds=None, obstacle_min_height_m=0.15):
+        config = LogOddsGridConfig(size_m=size_m, resolution_m=resolution_m)
+        if free_log_odds is not None:
+            config.l_free = free_log_odds
+        self.grid = LogOddsGridCostmap(config)
+        self.obstacle_min_height_m = obstacle_min_height_m
+        self._fixed_origin = origin_xy
+        if origin_xy is not None:
+            self.grid.origin_x, self.grid.origin_y = origin_xy
         self.stride = stride
         self.body_height_m = body_height_m
         self.body_radius_m = body_radius_m
@@ -34,8 +42,9 @@ class ObservedMap:
         pose, camera = observation.pose, observation.camera
         if self._anchor is None:
             self._anchor = pose.z
-            self.grid.origin_x = pose.x - self.grid.cfg.size_m / 2
-            self.grid.origin_y = pose.y - self.grid.cfg.size_m / 2
+            if self._fixed_origin is None:
+                self.grid.origin_x = pose.x - self.grid.cfg.size_m / 2
+                self.grid.origin_y = pose.y - self.grid.cfg.size_m / 2
         if self.atlas.params.enabled:
             floor_id = self.atlas.update(pose, arrival_allowed=arrival_allowed)
             if floor_id not in self.maps:
@@ -68,7 +77,7 @@ class ObservedMap:
         matrix = np.array([[k.fx, 0, k.cx], [0, k.fy, k.cy], [0, 0, 1]])
         update_grid_from_depth(
             self.grid, observation.depth_m, matrix, world_T_camera_optical(pose, camera),
-            z_min_world=self._anchor + 0.15, z_max_world=self._anchor + self.body_height_m + 0.05,
+            z_min_world=self._anchor + self.obstacle_min_height_m, z_max_world=self._anchor + self.body_height_m + 0.05,
             depth_min_m=camera.min_depth_m, depth_max_m=camera.max_depth_m,
             downsample=self.stride, stamp_sec=float(observation.step), raytrace=True, raytrace_stride=1)
         spec, probabilities = self.grid.get_grid()
@@ -103,6 +112,18 @@ class ObservedMap:
                                 values=OccupancyValues(free=0, occupied=100, unknown=-1))
         self.worlds[self.floor_id] = world
         return world
+
+    def seed_prior(self, prior):
+        """Seed weak free/occupied evidence from an earlier map of the same frame."""
+        spec = self.grid.get_grid()[0]
+        if abs(prior.resolution - spec.resolution_m) > 1e-9:
+            raise ValueError("prior resolution %.3f != map resolution %.3f" % (prior.resolution, spec.resolution_m))
+        if prior.grid.shape != (spec.height, spec.width):
+            raise ValueError("prior shape %s != map shape %s" % (prior.grid.shape, (spec.height, spec.width)))
+        if abs(prior.origin_x - spec.origin_x) > 1e-9 or abs(prior.origin_y - spec.origin_y) > 1e-9:
+            raise ValueError("prior origin (%.3f, %.3f) != map origin (%.3f, %.3f)"
+                             % (prior.origin_x, prior.origin_y, spec.origin_x, spec.origin_y))
+        self.grid.seed(prior.grid == prior.values.free, prior.grid == prior.values.occupied)
 
     def notify_blocked(self, observation, forward_step_m):
         """Record a failed forward step as local evidence, not a GT wall lookup."""
