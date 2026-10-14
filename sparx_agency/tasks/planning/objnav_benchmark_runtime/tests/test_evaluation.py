@@ -184,3 +184,24 @@ def test_a_caller_may_watch_episodes_finish_without_displacing_the_recorder(tmp_
     assert [(index, total) for index, total, _ in seen] == [(1, 2), (2, 2)]
     assert {episode for _, _, episode in seen} == set(env.episode_ids())
     assert summary.overall.n_episodes == 2
+
+
+def test_wrapped_env_and_agent_class_are_used_and_the_wrapper_sees_the_logger(tmp_path):
+    from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import ProgressEnv, ProgressTracker
+    seen, built = {}, []
+
+    class Marked(HeadlessObjNavAgent):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    def wrap(env, logger):
+        seen["records"] = list(logger.records)
+        return ProgressEnv(env, ProgressTracker(tmp_path / "progress.json", 1, completed=logger.records))
+
+    env = Env()
+    run_evaluation(env, LinePolicy(), fake_label_mapper(), output=tmp_path / "run", config={},
+                   settings=EvaluationSettings(), episode_ids=("one",), wrap_env=wrap, agent_class=Marked)
+    assert seen["records"] == [] and len(built) == 1 and env.closed
+    assert json.loads((tmp_path / "progress.json").read_text())["total"] == 1

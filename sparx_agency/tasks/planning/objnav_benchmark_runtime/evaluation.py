@@ -53,7 +53,8 @@ def evaluation_configuration(config, episode_ids, settings=None, *, policy):
 def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                    episode_ids=None, resume=False, frozen_lock=None,
                    expected_episode_ids=None, record=False, video_fps=6,
-                   writer_factory=None, dashboard=True, progress=None):
+                   writer_factory=None, dashboard=True, progress=None,
+                   wrap_env=None, agent_class=HeadlessObjNavAgent):
     """Run the exact prepared policy, optionally locked/recorded, and close the env.
 
     Adapters own data loading, published episode identities, model provisioning,
@@ -61,6 +62,10 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
     No simulator or model is launched/downloaded here. A frozen lock is checked
     against THIS execution configuration before output creation or environment
     reset, never only against an earlier preflight.
+
+    ``wrap_env(env, logger)`` may return a pass-through wrapper (live progress, say) applied
+    beneath the recorder; ``agent_class`` swaps the headless agent for a variant with the
+    same constructor (the lean-record one). Neither can change what the policy sees.
 
     Extra evaluator telemetry is recorder-only and optional. The policy sees
     only ObjNavObservation. Recording preserves the converter settings used by
@@ -82,6 +87,8 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
         output = Path(output).expanduser()
         # MetricsLogger claims the output/resume lock before any video is written.
         with MetricsLogger(output, prepared, resume=resume) as logger:
+            if wrap_env is not None:
+                active_env = wrap_env(env, logger)
             if record:
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_live_page
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import (
@@ -91,11 +98,11 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                 recorder = EpisodeRecorder(output, policy, fps=video_fps,
                                            writer_factory=writer_factory or VideoSink)
                 probe = PolicyProbe(policy)
-                agent = RecordingAgent(HeadlessObjNavAgent(probe, label_mapper, params, name=policy.name),
+                agent = RecordingAgent(agent_class(probe, label_mapper, params, name=policy.name),
                                        probe, recorder)
-                active_env = RecordingEnv(env, recorder)
+                active_env = RecordingEnv(active_env, recorder)
             else:
-                agent = HeadlessObjNavAgent(policy, label_mapper, params, name=policy.name)
+                agent = agent_class(policy, label_mapper, params, name=policy.name)
 
             def on_episode(index, total, row):
                 """The recorder's own hook, and the caller's, in that order.

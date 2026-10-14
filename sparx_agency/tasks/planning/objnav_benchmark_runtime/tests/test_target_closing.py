@@ -302,14 +302,14 @@ def test_bbox_servo_does_not_interrupt_astar_corner_heading(monkeypatch):
 
 @pytest.mark.parametrize("snap", [(float("nan"), 0, 0), (-2, 4, -1), (-20, 3, -1)])
 def test_navmesh_rejects_invalid_remote_or_other_floor_snaps(snap):
-    sim = HabitatRGBDSimulator(None, None, .18, True)
+    sim = HabitatRGBDSimulator(None, None, .18, True, height_m=.88)
     sim._sim = SimpleNamespace(pathfinder=SimpleNamespace(snap_point=lambda point: snap))
     assert sim.project_target((1, 2, 3)) is None
 
 
 def test_navmesh_round_trip_enu_native_coordinates():
     received = []
-    sim = HabitatRGBDSimulator(None, None, .18, True)
+    sim = HabitatRGBDSimulator(None, None, .18, True, height_m=.88)
     sim._sim = SimpleNamespace(pathfinder=SimpleNamespace(snap_point=lambda point: received.append(point) or point))
     assert sim.project_target((1, 2, 3)) == (1, 2, 3)
     np.testing.assert_allclose(received[0], [-2, 3, -1])

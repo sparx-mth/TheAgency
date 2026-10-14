@@ -99,9 +99,9 @@ one run and why every reported row carries a `notes` field.
 
 ## Our own exposure must be disclosed
 
-Nothing in this package has yet been run against HM3D — the scene meshes are not
-provisioned — so at the time of writing there is **no HM3D development
-contamination to disclose**. That is a fact with a shelf life: the moment a
+The only HM3D validation episode run so far is `00877-4ok3usBNeis/000000` (2026-10-14), a one-episode
+plumbing smoke test of the merged pipeline (success, 170 actions); nothing was tuned on it. Beyond that there is
+**no HM3D development contamination to disclose**. That is a fact with a shelf life: the moment a
 validation episode is inspected while tuning, it stops being untouched, and no
 later flag or rename undoes it.
 

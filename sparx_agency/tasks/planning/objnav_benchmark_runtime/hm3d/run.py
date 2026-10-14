@@ -15,6 +15,7 @@ from dataclasses import asdict
 import importlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -23,9 +24,12 @@ from sparx_agency.core.planning.objnav.labels.datasets.hm3d import hm3d_label_ma
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
+from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
+    LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
-    select_episodes, source_fingerprint)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import HM3DDataset
+    episodes_of_category, explicit_episodes, select_episodes, source_fingerprint)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import CATEGORIES, HM3DDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.env import HM3DEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
     PROTOCOLS, protocol_for)
@@ -97,6 +101,21 @@ def parser():
     p.add_argument("--episodes-per-scene", type=int,
                    help="Keep only the first N episodes of each scene. Required "
                         "for a development split: HM3D train is millions of rows")
+    p.add_argument("--category", choices=CATEGORIES,
+                   help="Only the published episodes whose goal is this category. Scoring is "
+                        "unchanged; the run is a subset, never the full split")
+    p.add_argument("--shuffle", action="store_true",
+                   help="Shuffle the selection with --seed before --limit applies, so --limit N is a "
+                        "seeded random sample instead of the first N in split order; requires --limit")
+    p.add_argument("--episode-ids", nargs="+", metavar="ID",
+                   help="Run exactly these published episodes (e.g. 00877-4ok3usBNeis/000003), in this "
+                        "order: the same start and goal for a re-run after a change")
+    p.add_argument("--lean", action="store_true",
+                   help="Keep only the counters that explain an outcome in each episode row (no "
+                        "per-action series or event logs); the scores are untouched")
+    p.add_argument("--progress-file", type=Path,
+                   help="Where the live progress JSON is rewritten after every episode "
+                        "(default: <output>/progress.json)")
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--shard-index", type=int, default=0)
     p.add_argument("--record", action="store_true")
@@ -242,7 +261,7 @@ def prepare(args):
     protocol = protocol_for(args.version).with_split(args.split)
     development = protocol.split != "val"
     subset = bool(args.scenes or args.limit or args.shards > 1 or development
-                  or args.episodes_per_scene)
+                  or args.episodes_per_scene or args.category or args.episode_ids)
     unbounded_development = development and args.episodes_per_scene is None
     if unbounded_development:
         issues.append("A development split needs --episodes-per-scene: HM3D's "
@@ -251,6 +270,8 @@ def prepare(args):
         issues.append("--seed and --gpu-device must be non-negative")
     if args.agent == "stop" and args.limit is None:
         issues.append("The stop diagnostic requires an explicit --limit")
+    if args.shuffle and args.limit is None and not args.episode_ids:
+        issues.append("--shuffle is a seeded random sample and needs --limit N")
     if not 1 <= args.video_fps <= 60:
         issues.append("--video-fps must be between 1 and 60")
     if args.exclude_unreachable and not args.validate_starts:
@@ -284,8 +305,13 @@ def prepare(args):
                                   episodes_per_scene=args.episodes_per_scene)
             manifest = dataset.manifest(hash_scenes=not args.skip_scene_hashes)
             env = HM3DEnv(dataset, protocol, args.seed, args.gpu_device)
-            ids = select_episodes(env.episode_ids(), args.limit, args.shards,
-                                  args.shard_index)
+            pool = episodes_of_category(env.episode_ids(), dataset.episodes, args.category,
+                                        CATEGORIES)
+            if args.episode_ids:
+                ids = explicit_episodes(args.episode_ids, pool)
+            else:
+                ids = select_episodes(pool, args.limit, args.shards, args.shard_index,
+                                      shuffle_seed=args.seed if args.shuffle else None)
             if args.validate_starts:
                 start_distances = env.validate_starts(ids)
                 excluded = list(env.unreachable_episode_ids)
@@ -317,6 +343,10 @@ def prepare(args):
         "limit": args.limit,
         "scenes": list(args.scenes or ()),
         "episodes_per_scene": args.episodes_per_scene,
+        "category": args.category,
+        "shuffle": bool(args.shuffle),
+        "episode_ids": list(args.episode_ids) if args.episode_ids else None,
+        "lean_records": bool(args.lean),
         "allow_shared_gpu": args.allow_shared_gpu,
         "recording": {"enabled": args.record, "fps": args.video_fps},
         "split": protocol.split,
@@ -359,6 +389,33 @@ def prepare(args):
     return env, policy, hm3d_label_mapper(), config, issues
 
 
+def _finite_or_none(value):
+    return None if isinstance(value, float) and not math.isfinite(value) else value
+
+
+def _live_hooks(args, output, scored_env, total, label):
+    """The ``wrap_env`` and per-episode callback that keep ``progress.json`` and the diagnostics sidecar.
+
+    The sidecar holds evaluator-only values and is never injected into observations or ``agent_info``.
+    """
+    live = {}
+
+    def wrap_env(env, logger):
+        live["tracker"] = ProgressTracker(
+            args.progress_file or output / "progress.json", total,
+            completed=logger.records, label=label)
+        return ProgressEnv(env, live["tracker"])
+
+    def progress(index, total_count, row):
+        diagnostics = {key: _finite_or_none(value)
+                       for key, value in scored_env.evaluation_diagnostics().items()}
+        with (output / "evaluation_diagnostics.jsonl").open("a") as stream:
+            stream.write(json.dumps(dict(diagnostics, episode_id=row.episode_id), allow_nan=False) + "\n")
+        print(live["tracker"].update(index, total_count, row), flush=True)
+
+    return live, wrap_env, progress
+
+
 def main(argv=None, *, frozen_lock=None, expected_episode_ids=None):
     args = parser().parse_args(argv)
     if args.print_vocabulary:
@@ -382,19 +439,18 @@ def main(argv=None, *, frozen_lock=None, expected_episode_ids=None):
         selected = tuple(config["selected_episode_ids"])
         total = len(selected)
 
-        def progress(index, total_count, row):
-            """One line per finished episode; a 1000-episode run runs for hours."""
-            print("%d/%d %s %s SR=%d SPL=%.3f DTG=%s SoftSPL=%.3f"
-                  % (index, total_count, row.episode_id, row.target_category,
-                     row.success, row.spl, row.distance_to_goal_m, row.soft_spl),
-                  flush=True)
-
+        scope = ", ".join(part for part in (args.category, *(args.scenes or ())) if part)
+        live, wrap_env, progress = _live_hooks(
+            args, output, env, total, "hm3d %s %s%s" % (
+                args.version, protocol.split, " (%s)" % scope if scope else ""))
         summary = run_evaluation(
             env, policy, label_mapper, output=output, config=config,
             settings=protocol.evaluation_settings(), episode_ids=selected,
             resume=args.resume, frozen_lock=frozen_lock,
             expected_episode_ids=expected_episode_ids, record=args.record,
-            video_fps=args.video_fps, progress=progress)
+            video_fps=args.video_fps, progress=progress, wrap_env=wrap_env,
+            agent_class=LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent)
+        live["tracker"].finish()
         closed = True  # run_evaluation closes the environment itself
         from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.report import write_report
         write_report(output)

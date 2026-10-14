@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import random
 
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import strict_json
 
@@ -29,8 +30,12 @@ def source_fingerprint(package_root=None):
     return digest.hexdigest()
 
 
-def select_episodes(ids, limit=None, shards=1, shard_index=0):
-    """Preserve publisher order; shard before applying an explicit subset limit."""
+def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None):
+    """Preserve publisher order; shard, optionally shuffle by seed, then apply an explicit subset limit.
+
+    The shuffle is seeded from ``shuffle_seed`` and the shard's own ids, so equally large pools
+    draw different positions and the same seed over the same pool picks the same ids.
+    """
     ids = tuple(ids)
     if not ids or any(not isinstance(i, str) or not i.strip() for i in ids) or len(set(ids)) != len(ids):
         raise ValueError("Episode identities must be nonempty, unique strings")
@@ -39,11 +44,47 @@ def select_episodes(ids, limit=None, shards=1, shard_index=0):
     if limit is not None and (type(limit) is not int or limit <= 0):
         raise ValueError("limit must be a positive integer")
     selected = ids[shard_index::shards]
+    if shuffle_seed is not None:
+        tag = "%d\0%s" % (int(shuffle_seed), "\0".join(selected))
+        shuffled = list(selected)
+        random.Random(int.from_bytes(hashlib.sha256(tag.encode()).digest()[:8], "big")).shuffle(shuffled)
+        selected = tuple(shuffled)
     if limit is not None:
         selected = selected[:limit]
     if not selected:
         raise ValueError("Selection contains no episodes")
     return selected
+
+
+def explicit_episodes(ids, pool):
+    """``ids`` as given, each checked against ``pool``.
+
+    Raises:
+        ValueError: On a duplicate, or an id outside the pool.
+    """
+    chosen = tuple(str(episode_id) for episode_id in ids)
+    if len(set(chosen)) != len(chosen):
+        raise ValueError("--episode-ids repeats an episode")
+    missing = [episode_id for episode_id in chosen if episode_id not in set(pool)]
+    if missing:
+        raise ValueError("--episode-ids not in the selected scenes/category: %s" % ", ".join(missing))
+    return chosen
+
+
+def episodes_of_category(ids, episodes, category, categories):
+    """The ids whose published goal is ``category`` in the given order; all of them when None.
+
+    Raises:
+        ValueError: The category is not in ``categories``, or no selected episode has it.
+    """
+    if category is None:
+        return tuple(ids)
+    if category not in categories:
+        raise ValueError("Unknown category %r (one of %s)" % (category, ", ".join(categories)))
+    kept = tuple(episode_id for episode_id in ids if episodes[episode_id].category == category)
+    if not kept:
+        raise ValueError("No published %s episode in the selection" % category)
+    return kept
 
 
 def _configuration(config):

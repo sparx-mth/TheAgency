@@ -102,7 +102,7 @@ class HabitatRGBDSimulator:
     """
 
     def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, *,
-                 height_m, navmesh="published"):
+                 height_m, navmesh="published", depth_holes=None):
         if any(isinstance(v, bool) or not math.isfinite(v) or v <= 0
                for v in (radius_m, height_m)):
             raise ValueError("Explicit positive finite body radius and height are required")
