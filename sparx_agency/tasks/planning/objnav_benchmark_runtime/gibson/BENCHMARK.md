@@ -148,10 +148,13 @@ configuration (`preflight.json` in the output directory). Any refusal names the 
 run_benchmark.sh --scene Darden --limit 1              # the first published Darden episode, lean record
 run_benchmark.sh --scene Corozal --limit 3 --record    # three Corozal episodes with video + HUD + per-step log
 run_benchmark.sh --scene Wiconisco --limit 3 --record --category toilet --shuffle   # three random published toilet episodes
+run_benchmark.sh --scene Darden --record --episode-ids Darden/000190 Darden/000072     # exactly these published episodes
 ```
 
 `--limit N` takes the first N published episodes of the scene (`--shards 200 --shard-index k`
-after the script's own options picks episode k alone). `--category <goal>` keeps only the
+after the script's own options picks episode k alone); `--episode-ids <id ...>` runs exactly
+those published episodes in that order, the same start and goal as a campaign's row -- the
+re-run of a failure after a change, or of the episodes a campaign's job did not reach. `--category <goal>` keeps only the
 episodes whose published goal is that category (`chair`, `couch`, `potted plant`, `bed`,
 `toilet`, `tv`; about a sixth of a scene's 200) -- the scoring and the goal are unchanged, the
 run is marked a subset -- and `--shuffle` makes `--limit N` a random sample of the pool, seeded
@@ -463,7 +466,16 @@ episode prints `EPISODE COMPLETE` (scene, goal, SR, SPL, DTG, runtime, steps, te
 video) and a `RUNNING MEAN` line the moment it is scored; `benchmark_results.json` / `.csv`
 are rewritten after every episode under `runs/benchmark_[<category>_]15episodes_<UTC stamp>/`,
 the services' logs and `gpu_plan.json` beside it in `<output>.services/`. The campaign never
-resumes: a new output directory per attempt. See [../QUICKSTART.md](../QUICKSTART.md) for the flags.
+resumes: a new output directory per attempt. A job that stops recording actions -- its
+`live.json` (rewritten every action) and `episodes.jsonl` unchanged for `--stall-minutes`
+(20, longer than `LLM_REASONING_TIMEOUT_S`; forwarded through `run_benchmark.sh` as any other
+`gibson.five_scene` flag) -- is killed
+and its scene reported failed with a `STALLED` line, and the campaign moves on: on 2026-10-13
+a `gibson.run` job died mid-episode with its renderer threads alive, a zombie whose `poll()`
+never returned, and the campaign waited on it for half an hour. The episodes such a job did
+not reach are re-run by hand with `--scene <S> --episode-ids <ids>` (section 2.2) and added to
+the table; the aggregate of a campaign with a failed scene is over the scored episodes only
+(`FIVE-SCENE SUMMARY (12/15 episodes scored ...)`). See [../QUICKSTART.md](../QUICKSTART.md) for the flags.
 
 ### 3.4 The segmentation experiment (`SEGMENTATION=1`)
 

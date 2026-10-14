@@ -64,9 +64,17 @@ def search_snapshot(policy):
                        "portal_id": option.portal["id"], "centroid": [float(v) for v in option.approach.xy]})
     openings = []
     folded = getattr(loop, "_folded_now", set())
-    for nid, option in sorted(getattr(loop, "_openings", {}).items()):
-        if nid in folded:
-            continue                      # one of a room's own frontiers: the room's walk covers it
+    factors = getattr(loop, "_value_factors", {})
+    live = dict(getattr(loop, "_openings", {}))
+    # Every opening read off the live map THIS action -- folded ones flagged, not hidden -- and the
+    # one a peek is walking to even when the inventory has lost it (the record and the HUD say
+    # where the agent is going until the loop itself decides it was resolved).
+    peek = getattr(loop, "_peek", None)
+    targeted = None
+    if peek is not None and peek.get("opening") is not None:
+        targeted = peek["node"]
+        live.setdefault(targeted, loop._openings.get(targeted) or _PeekOption(peek))
+    for nid, option in sorted(live.items()):
         estimate = dict(loop.estimates.get(nid, {}))
         o = option.opening
         landmark = o.kind == "landmark"
@@ -75,6 +83,8 @@ def search_snapshot(policy):
                          "landmark_id": o.landmark_id,
                          "landmark_xy": None if o.landmark_xy is None else [float(v) for v in o.landmark_xy],
                          "size_cells": int(o.size_cells), "heading_deg": round(math.degrees(o.heading), 1),
+                         "gain_m2": round(float(getattr(o, "gain_m2", 0.0)), 2), "factor": factors.get(nid, 1.0),
+                         "folded": nid in folded, "targeted": nid == targeted, "live": nid in loop._openings,
                          "prob": estimate.get("prob", loop.settings.openings.landmark_prob if landmark
                                               else graph.stair_probs.get(nid)),
                          "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
@@ -107,6 +117,20 @@ def search_snapshot(policy):
             "order": list(loop.order), "order_index": loop.order_index, "next_room": loop.next_room,
             "rooms": rooms, "stairs": stairs, "openings": openings, "objects": objects,
             "floor": floor, "events": list(loop.events[-6:])}
+
+
+class _PeekOption:
+    """The peek in force's carried opening, shaped like the ``OpeningOption`` the inventory no longer holds."""
+
+    def __init__(self, peek):
+        self.opening = peek["opening"]
+        self.node = _PeekNode(self.opening)
+
+
+class _PeekNode:
+    def __init__(self, opening):
+        self.label = opening.label
+        self.via = None if opening.room_pid is None else "room %d" % int(opening.room_pid)
 
 
 def visual_state(policy, observation, trail):

@@ -207,6 +207,9 @@ class PerceptionCycle:
             landmark = p.landmarks.observe(label, tuple(float(v) for v in xyz[:2]), frame_id=obs.step,
                                            radius_m=radius, landmark=landmark)
             p._object_geometry.setdefault(landmark.id, tuple(float(v) for v in xyz))
+            # The best confidence the landmark was ever observed at: a single sighting at the
+            # closing's threshold makes a target landmark a node (``opening_nodes.target_landmarks``).
+            p._landmark_best_conf[landmark.id] = max(p._landmark_best_conf.get(landmark.id, 0.0), float(row["confidence"]))
             used.add(landmark.id)
             row.update(status="fused", floor_id=p.mapping.floor_id, landmark_id=landmark.id,
                        landmark_class=landmark.class_name, votes=dict(landmark.votes))
@@ -263,8 +266,14 @@ class PerceptionCycle:
                                           (y + 0.5) * terrain.resolution - xyz[1]) <= 0.75
                 and value[0] <= xyz[2] + 0.1]
         if len(near) >= 6:
+            # The lowest sample within 0.75 m of the object. The floor itself when the camera saw
+            # it; the object's own base or bowl when it did not (a toilet seen from a metre with
+            # the floor in front inside the camera's blind zone and its base under the frame's
+            # lower edge read 0.2-0.45 m here and was refused on every frame, Collierville/000023,
+            # 2026-10-14). A storey is 2.5 m and more away: anything within 0.60 m of this
+            # storey's floor level stands on it.
             floor = min(near)
-            return None if height - 0.40 <= floor <= height + 0.18 else "unsupported_floor_association"
+            return None if height - 0.40 <= floor <= height + 0.60 else "unsupported_floor_association"
         # A frontal object can occlude the floor itself. Previously observed
         # free cells near its surface support membership; unknown is not free.
         world = p.mapping.worlds[p.mapping.floor_id]

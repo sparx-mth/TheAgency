@@ -1510,3 +1510,156 @@ def test_a_fresh_range_still_too_far_from_an_arrived_standoff_drops_it_for_a_clo
     assert math.dist(p.closing.path.goal_xyz[:2], p.closing.xyz[:2]) < math.dist(goal[:2], p.closing.xyz[:2])
     assert command.waypoints and p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED"), "the approach walks on"
     assert p.closing.diagnostics()["standoff_dropped"] == 1
+
+
+# -- the toilet re-run of 2026-10-13: four ways a seen target was not locked or not STOPped on (2026-10-14) ----
+def test_a_resighting_of_the_active_candidate_counts_past_the_rejection_memory():
+    """Markleeville/000188, actions 34-45: a takeover begun on a 0.84 override past an 'unverified' memory had
+    every 0.60-0.79 re-sighting of the same toilet dropped BY that memory, and the consecutive count never
+    reached two. The memory judges whether a takeover may start, not whether the one in force counts its frame."""
+    p, ep = setup_policy(target_closing={"max_verify_steps": 2, "release_cooldown_actions": 10})
+    p.plan(observation(ep, 0, depth=3.5))
+    p.detector.detect = lambda rgb: []
+    p.plan(observation(ep, 1, depth=3.5))
+    p.plan(observation(ep, 2, depth=3.5))
+    assert not p.closing.active and p.closing.last_release == "unverified"
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    p.plan(observation(ep, 3, depth=3.5))
+    assert p.closing.active and p.closing.overrides == 1 and p.closing.count == 1
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]     # the same spot, under the override
+    p.plan(observation(ep, 4, depth=3.5))
+    assert p.closing.locked and p.closing.count == 2
+    assert p.closing.resighting_exemptions == 1 and p.episode_info()["target_closing"]["resighting_exemptions"] == 1
+
+
+def test_a_depthless_box_on_the_candidates_bearing_is_approached_and_carries_the_chain():
+    """Markleeville/000188, actions 20-31: the toilet at 5 m read 0.62 with depth at the frame's edge and 0.49
+    without depth once centred; the sweep turned away from the centred frame every other action, twice through
+    the budget. A box of the class on the anchor's bearing without a usable depth is the candidate in view:
+    face it, step toward it, carry the chain across the frame, and do not count the step against the clock."""
+    p, ep = setup_policy()
+    p.plan(observation(ep, 0, depth=3.5))                               # the anchor 3.5 m ahead, count 1
+    assert p.closing.active and p.closing.count == 1
+    started = p.closing.started
+    glimpse = p.plan(observation(ep, 1, depth=float("nan")))            # the same box, no usable depth
+    assert glimpse.info.get("verify_step") == "towards the glimpsed candidate" and glimpse.waypoints
+    assert glimpse.info["target_visible"] is True and glimpse.info["target_measured"] is False
+    assert p.closing.count == 1 and p.closing.glimpse_steps == 1 and p.closing.started == started + 1
+    assert DiscreteActionConverter(ep.action_spec).step(AgentPose(0, 0, 0, 0), glimpse).action == DiscreteAction.MOVE_FORWARD
+    p.plan(observation(ep, 2, depth=3.25))                              # measured again: the second consecutive frame
+    assert p.closing.locked and p.closing.count == 2 and p.closing.verify_pauses == 1
+    # A box of the class elsewhere in the frame, without depth, is not a glimpse of this candidate.
+    q, _ = setup_policy()
+    q.plan(observation(ep, 0, depth=3.5))
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (20, 200, 100, 280))]    # 34 degrees off the bearing
+    sweep = q.plan(observation(ep, 1, depth=float("nan")))
+    assert sweep.info["target_visible"] is False and q.closing.count == 0 and q.closing.glimpse_steps == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(max_verify_approach_steps=-1)
+
+
+def test_the_inspection_steps_when_the_fresh_range_is_a_step_beyond_the_limit_and_does_not_oscillate(monkeypatch):
+    """Wiconisco/000193, actions 476-499: the toilet's near edge at 1.0505 m against the 1.05 m limit, its box
+    16-17 degrees off the centre on alternating sides, and twenty-four TURN_LEFT/TURN_RIGHT at the step limit.
+    A turn back that would undo the last turn is the dead band, not a correction; and a fresh range one step
+    out, faced within a turn, is one MOVE_FORWARD from the STOP."""
+    p, ep, goal = arrived_at_a_kept_standoff(monkeypatch)
+    here = AgentPose(1.15, 0, 0, 0)
+    k = ep.camera.intrinsics
+    right = int(k.cx + k.fx * math.tan(math.radians(17)))             # 17 degrees right of the centre
+    left = int(k.cx - k.fx * math.tan(math.radians(17)))
+    boxes = {"right": [DetectionWire("chair", .9, (right - 40, 200, right + 40, 280))],
+             "left": [DetectionWire("chair", .9, (left - 40, 200, left + 40, 280))]}
+
+    def frame(step, depth, side=None):
+        p.detector.detect = lambda rgb: boxes[side] if side else []
+        return replace(observation(ep, step, depth=depth), pose=here)
+    converter = DiscreteActionConverter(ep.action_spec)
+    p.plan(frame(2, 1.6))
+    assert p.closing.phase == "INSPECT", "the arrived standoff: the inspection begins"
+    # In range, 17 degrees right: the centring turn.
+    turning = p.plan(frame(3, 0.97, "right"))
+    assert not turning.stop and turning.waypoints == () and converter.step(here, turning).action == DiscreteAction.TURN_RIGHT
+    # A step out of range, 17 degrees LEFT: a turn back would recreate the frame before (the dead band), and the
+    # range says one step -- not another turn.
+    stepping = p.plan(frame(4, 1.10, "left"))
+    assert not stepping.stop and stepping.waypoints and "one step" in stepping.info["inspect_step"]
+    assert p.closing.dead_band_alignments == 1 and p.closing.inspection_steps == 1
+    assert converter.step(here, stepping).action == DiscreteAction.MOVE_FORWARD
+    assert p.closing.inspection_started is not None and p.closing.inspection_resumptions == 0, "still the inspection"
+    # In range, 17 degrees right again (the chain of turns broke at the step): a turn ...
+    turning = p.plan(frame(5, 0.97, "right"))
+    assert not turning.stop and converter.step(here, turning).action == DiscreteAction.TURN_RIGHT
+    # ... and 17 degrees left, in range: aligned by the dead band, the STOP.
+    stopping = p.plan(frame(6, 0.97, "left"))
+    assert stopping.stop and p.closing.dead_band_alignments == 2
+    assert p.episode_info()["target_closing"]["dead_band_alignments"] == 2
+    with pytest.raises(ValueError):
+        TargetClosingSettings(inspection_max_steps=-1)
+
+
+def test_a_locked_target_with_no_route_on_the_known_floor_is_walked_to_through_the_unknown(monkeypatch):
+    """Collierville/000023, action 375: the toilet locked at 2.8 m in plain view, the floor between the corridor
+    and its doorway unknown (a level camera sees the floor from 1.4 m out), no standoff route, a footing sweep,
+    and the lock released as boxed in -- the spot then refused the 0.82-0.88 re-sightings. With no route on
+    the known floor the ring is planned through the unknown; the committed route is re-checked as the map fills."""
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    # A band of unknown floor across the whole map between the agent (x=0) and the target (x=2).
+    data = np.zeros((200, 200), np.int8)
+    params = OccupancyGrid2DParams(.1, -10, -10)
+    gx0, _ = OccupancyGrid2D(data, params).world_to_grid(0.6, 0.0)
+    gx1, _ = OccupancyGrid2D(data, params).world_to_grid(1.3, 0.0)
+    data[:, gx0:gx1] = -1
+    world = OccupancyGrid2D(data, params)
+    assert int((world.grid == world.values.unknown).sum()) == 200 * (gx1 - gx0)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    command = p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1
+    assert command.waypoints and command.info.get("through_unknown") is True
+    assert p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED") and p.closing.through_unknown_routes == 1
+    assert p.closing.path.through_unknown == 1 and p.closing.no_path_steps == 0 and p.closing.footing_sweeps == 0
+    assert any(gx0 <= world.world_to_grid(x, y)[0] < gx1 for x, y in command.waypoints), "the route crosses the band"
+    assert p.episode_info()["target_closing"]["through_unknown_routes"] == 1
+    # Switched off: the pathless wait as before.
+    q, ep2 = setup_policy(target_closing={"through_unknown": False})
+    freeze_global(monkeypatch, q)
+    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
+    q.plan(observation(ep2, 0, depth=2))
+    pathless = q.plan(observation(ep2, 1, depth=2))
+    assert q.closing.locked and pathless.waypoints == () and q.closing.no_path_steps == 1
+    assert q.closing.through_unknown_routes == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(through_unknown_cost=0.5)
+
+
+def test_a_fruitless_sweep_cycle_releases_the_verification_before_its_budget():
+    """Wiconisco/000014, actions 231-241: the toilet seen once at 3.2 m, one step toward it, and eleven in-place
+    turns at the bearing and one turn to each side -- the step had put the toilet behind a jamb, and the same three
+    headings cannot bring back what none of them shows. After ``verify_sweep_max_actions`` (6) sweep actions without
+    a frame of the candidate the verification is released as at its budget; the rest of the budget is the search's."""
+    p, ep = setup_policy()
+    p.plan(observation(ep, 0, depth=3.5))
+    assert p.closing.active and p.closing.count == 1
+    p.detector.detect = lambda rgb: []
+    step = 1
+    while p.closing.active and step < 12:
+        command = p.plan(observation(ep, step, depth=3.5))
+        if p.closing.active:
+            assert command.info["target_visible"] is False and command.info["sweep_action"] == step
+        step += 1
+    assert not p.closing.active and p.closing.last_release == "unverified" and p.closing.sweep_releases == 1
+    assert step == 8, "six sweep actions, the release on the seventh frame: five actions short of the twelve"
+    assert p.episode_info()["target_closing"]["sweep_releases"] == 1
+    # Off: the budget alone ends the sweep, as before.
+    q, _ = setup_policy(target_closing={"verify_sweep_max_actions": 0})
+    q.plan(observation(ep, 0, depth=3.5))
+    q.detector.detect = lambda rgb: []
+    for step in range(1, 12):
+        q.plan(observation(ep, step, depth=3.5))
+        assert q.closing.active
+    q.plan(observation(ep, 12, depth=3.5))
+    assert not q.closing.active and q.closing.sweep_releases == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(verify_sweep_max_actions=-1)

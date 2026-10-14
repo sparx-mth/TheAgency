@@ -115,6 +115,20 @@ def test_a_scan_finishes_the_room_it_stood_in_and_the_rooms_it_saw_most_of():
     assert ledger.records[0]["room"] == 0 and ledger.records[0]["source"] == "room_scan"
 
 
+def test_a_room_seen_from_a_scan_with_a_live_frontier_left_is_not_finished_until_the_frontier_is_gone():
+    """Corozal/000076 (``c7a4c81d4dee``, 2026-10-13): the spawn point's warm-up saw half of a room the agent never
+    entered; it was finished with three frontier clusters open, and the bathroom behind one of them was never offered."""
+    policy, episode = setup_policy()
+    world, labels = open_hall()
+    west, narrow = room_of(labels, 1, world), room_of(labels, 2, world)
+    ledger = RoomScanLedger(policy, seen_fraction=0.5)
+    ledger.record(obs_at(episode, 5, (4.0, 3.0)), west)
+    assert ledger.status(world, 1, narrow, frontier=3) is None, "an unexplored boundary: the unknown beyond it was never in view"
+    assert ledger.status(world, 0, west, frontier=3) == SCAN_POINT_INSIDE, "the circle was turned inside it: finished regardless"
+    assert ledger.status(world, 1, narrow, frontier=0) == SEEN_FROM_SCAN, "no frontier left: the scan saw all there is"
+    assert ledger.status(world, 1, narrow, frontier=3) == SEEN_FROM_SCAN, "... and the verdict is sticky once reached"
+
+
 def test_the_two_room_world_is_not_finished_through_its_door():
     policy, episode = setup_policy()
     world, labels = two_room_world()
@@ -221,7 +235,7 @@ def test_a_scan_visit_turns_a_full_circle_at_the_vantage_point_and_finishes_the_
     # The loop point on the same action: room B is finished -- shown to the oracle as scanned, not a node
     # of the first pass any more.
     assert reasoned == [0, last]
-    assert policy.reasoned_with[-1]["exclude"] == (), "every room is shown to the oracle"
+    assert policy.reasoned_with[-1]["exclude"] == (1,), "the finished room is no node: left off the oracle's list"
     assert policy.reasoned_with[-1]["scanned"] == {1: ("full rotation", 0.0)}
     assert "rooms found" in policy.reasoned_with[-1]["context"].house and "actions used about 0 of 500" in policy.reasoned_with[-1]["context"].house
     assert policy.loop._excluded == {1: "scanned:" + SCAN_POINT_INSIDE}
@@ -296,7 +310,7 @@ def test_the_warmup_scan_finishes_the_spawn_room_before_the_first_room_is_chosen
     policy.scans.record(obs_at(episode, 12, IN_A), rooms[0], source="warmup")
     command = policy.loop.plan(obs_at(episode, 12, IN_A), world)
     assert policy.loop._excluded == {0: "scanned:" + SCAN_POINT_INSIDE}
-    assert policy.reasoned_with[-1]["exclude"] == () and policy.reasoned_with[-1]["scanned"] == {0: ("full rotation", 0.0)}
+    assert policy.reasoned_with[-1]["exclude"] == (0,) and policy.reasoned_with[-1]["scanned"] == {0: ("full rotation", 0.0)}
     assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "room A is not a node; room B is next"
     assert policy.loop.estimates[0]["entry"] == "excluded"
 
@@ -655,21 +669,48 @@ def test_finished_rooms_are_shown_to_the_oracle_but_withheld_from_the_solver_dur
                                                      "1": {"how": SCAN_POINT_INSIDE, "step": 9}}
 
 
-def test_the_oracles_second_pass_verdict_offers_the_finished_rooms_and_a_revisit_scans_from_a_new_spot():
+def test_the_oracles_second_verdict_alone_does_not_open_the_second_pass_while_a_frontier_is_worth_a_walk():
+    """Corozal/000076 (2026-10-13), action 159: ``qwen2.5:3b`` wrote "no unexplored places or frontier left"
+    with six openings on its HOUSE line, and the agent walked back across the storey to re-scan living rooms.
+    The geometry decides: a reachable frontier an exit wide keeps the first pass."""
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), openings={"enabled": False})
     _frontier_somewhere(policy)
     policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
-    first_spot = policy.loop._vantage(world, policy.navigation_cost(world), rooms[1])[0]
-    policy.scans.record(obs_at(episode, 9, first_spot), rooms[1], source="room_scan")
+    policy.scans.record(obs_at(episode, 9, IN_B), rooms[1], source="room_scan")
     policy.graph.last_reasoning = {"oracle": {"pass_verdict": "second"}}       # the model: the home is covered
+    command = policy.loop.plan(obs_at(episode, 200, IN_A), world)
+    assert not policy.loop.second_pass() and policy.loop._revisits == set()
+    assert policy.loop._excluded == {0: "scanned:" + SCAN_POINT_INSIDE, 1: "scanned:" + SCAN_POINT_INSIDE}
+    assert policy.loop.oracle_pass() == "second" and policy.loop.diagnostics()["oracle_pass"] == "second"
+    assert command.info.get("fallback") is not None, "the frontier is walked, not the scanned rooms"
+
+
+def test_a_covered_storey_offers_the_finished_rooms_and_a_revisit_scans_from_a_new_spot():
+    """Every room finished, no exit, nothing left worth a walk (a two-cell frontier sliver with no unknown in
+    range): the storey is covered, the finished rooms are nodes again, and a revisit is a scan from a new spot."""
+    from sparx_agency.core.planning.environment import OccupancyGrid2D
+    from sparx_agency.core.planning.exploration.frontier_ranking import FrontierGoal, FrontierInventory
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), visit="explore", openings={"enabled": False},
+                                                          second_pass=True)         # the mode, off by default since 2026-10-14
+    sliver = FrontierGoal(xy=(1.2, 3.0), cell=(12, 30), size_cells=2, geodesic_m=3.0, heading_error_rad=0.0, utility=1.0)
+    policy.graph.frontier_inventory = FrontierInventory(goals=(sliver,), by_room={}, cells=np.zeros((1, 1), bool),
+                                                        distance_m=None)
+    data = world.grid.copy()
+    data[data == UNK] = OCC                                   # nothing unknown anywhere: the sliver reveals nothing
+    sealed = OccupancyGrid2D(data, world.params, values=world.values)
+    policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
+    first_spot = policy.loop._vantage(sealed, policy.navigation_cost(sealed), rooms[1])[0]
+    policy.scans.record(obs_at(episode, 9, first_spot), rooms[1], source="room_scan")
     obs = obs_at(episode, 200, IN_A)
-    command = policy.loop.plan(obs, world)
+    command = policy.loop.plan(obs, sealed)
+    assert policy.loop._covered and not policy.loop._exhausted, "a reachable frontier remains, but none worth a walk"
     assert policy.loop.second_pass() and policy.loop._excluded == {}
     assert policy.loop._revisits == {0, 1} and policy.loop.stats["revisits_offered"] == 2
     assert policy.loop.stats["second_pass_rounds"] == 1 and policy.loop.stats["second_pass_forced"] == 0
     assert [e for e in policy.loop.events if e["event"] == "second_pass"][0] == {
-        "step": 200, "floor_id": 0, "event": "second_pass", "rooms": [0, 1], "forced": False}
+        "step": 200, "floor_id": 0, "event": "second_pass", "rooms": [0, 1], "forced": False, "oracle_pass": None}
     assert reasoned == [200], "the finished rooms are valued afresh as nodes"
+    world = sealed
     assert policy.reasoned_with[-1]["scanned"] == {0: ("full rotation", 195.0), 1: ("full rotation", 191.0)}
     assert "rooms found" in policy.reasoned_with[-1]["context"].house
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1"
@@ -688,8 +729,9 @@ def test_the_oracles_second_pass_verdict_offers_the_finished_rooms_and_a_revisit
 
 def test_an_exhausted_floor_forces_the_second_pass_whatever_the_verdict():
     """No unfinished room, no exit to look into, no reachable frontier: re-checking the scanned rooms is
-    the only move there is, so the finished rooms are nodes and the oracle is asked to value them."""
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0))
+    the only move there is, so the finished rooms are nodes and the oracle is asked to value them (with the
+    second pass switched on; off by default since 2026-10-14, when the exploration fallback carries the search)."""
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), second_pass=True)
     assert policy.graph.frontier_inventory is None, "the fixture has no frontier inventory: nothing reachable"
     policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
     policy.scans.record(obs_at(episode, 9, IN_B), rooms[1], source="room_scan")

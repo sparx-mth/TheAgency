@@ -15,6 +15,14 @@ class RPTSettings:
     """Method configuration.
 
     Attributes:
+        detour_factor: The planner's "squeeze or detour" rule
+            (``WeightedAStarParams.detour_factor``): a route at the preferred
+            clearance more than this many times longer than the route the
+            body radius allows is a detour, and the squeeze is walked
+            instead. 1.5 since 2026-10-13: the agent walked 12.7 m round a
+            room because a 0.5 m pinch on the 7.5 m way read as 0.25 m
+            short of the preferred standoff (Corozal/000076, actions
+            394-486). 0 restores "the safest feasible route first".
         graph_period_steps: How often the scene graph's GEOMETRY is refreshed
             -- rooms, object->room association, doors, per-room search time
             and frontier counts. Every action by default: the room-search
@@ -94,6 +102,7 @@ class RPTSettings:
     body_height_m: float = 0.88
     body_radius_m: float = 0.18
     preferred_clearance_m: float = 0.30
+    detour_factor: float = 1.5
     local_exploration: str = "frontier"
     warmup_steps: int = 12
     allow_stair_traversal: bool = False
@@ -124,6 +133,8 @@ class RPTSettings:
             raise ValueError("Invalid confidence or seed")
         if self.preferred_clearance_m < self.body_radius_m:
             raise ValueError("Preferred clearance cannot be smaller than the robot radius")
+        if isinstance(self.detour_factor, bool) or not math.isfinite(self.detour_factor) or self.detour_factor < 0:
+            raise ValueError("detour_factor must be finite and non-negative (0 disables the squeeze rule)")
         if self.local_exploration not in ("frontier", "falcon"):
             raise ValueError("local_exploration must be frontier or falcon; no silent fallback")
         if isinstance(self.target_closing, dict):

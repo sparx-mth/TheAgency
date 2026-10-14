@@ -6,6 +6,26 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **The toilet re-run's nine behaviours, fixed from their traces** (`objnav_benchmark_runtime/methods/target_closing.py`,
+  `target_path.py`, `room_search_loop.py`, `exploration_fallback.py`, `opening_nodes.py`, `perception_cycle.py`;
+  `core/mapping/topology/search_node_oracle.py`, 2026-10-14). Target closing: a re-sighting of the ACTIVE candidate
+  counts past the rejection memory (it judges a start, not a frame; `resighting_exemptions`); a depthless box on the
+  anchor's bearing is a `glimpse` that carries the chain, is faced and stepped toward without running the verify clock
+  (`max_verify_approach_steps` 24); the inspection takes one step when the fresh range is a step beyond the limit
+  (`inspection_max_steps` 3) and reads a turn that would undo the last turn as aligned (`dead_band_alignments`);
+  a locked target with no route on the known floor is walked to through the unknown before the spot is given up
+  (`through_unknown`, `through_unknown_cost` 8, the policy's `optimistic_planner`); a candidate first read at
+  `backoff_trust_confidence`, or one the detector had been firing on (`backoff_persistence_frames` 2 of
+  `backoff_persistence_window` 6), is not backed off from; a fruitless sweep cycle releases the verification
+  (`verify_sweep_max_actions` 6). The map: a target landmark seen once at `landmark_sighting_confidence` 0.50 is a
+  `T` node, only a release that DISPROVED a candidate hides one (`landmark_refused`), and the floor-support band
+  is 0.60 m. The loop: `second_pass` and `scanned_to_oracle` off (a room scanned once is finished and is no node of
+  the oracle's), `lingered_discount` 0.2 for an entered room searched 20+ actions with at most one significant
+  frontier (and the prompt says so), and a frontier-less room is entered at its doorstep, not its vantage point.
+  The fallback: exits ranked by the unknown a look from each reveals, slivers under `explore_min_gain_m2`
+  demoted, and the goal in force kept across a glance (`goal_memory_actions` 12). The same 10 toilet episodes
+  (2 per scene, seed 17) went from SR 0.700 / SPL 0.425 / DTG 0.94 m to SR 0.900 / SPL 0.489 / DTG 0.23 m
+  (`runs/benchmark_toilet_10episodes_20261014T085618Z`, before round 2); LESSONS 2026-10-14 has the traces.
 - **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261012T141500Z/`, 2026-10-14): SR 0.713, SPL 0.409, DTG 1.27 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **The detached Gibson run as one command, and the same command after a reboot**
   (`objnav_benchmark_runtime/gibson/launch_detached.sh`, 2026-10-12): launcher in its own session, monitor and

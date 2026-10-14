@@ -30,6 +30,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RoomLabelSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute, RouteSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidenceSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.escape_probe import EscapeProbe, EscapeSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ExplorationFallback, FallbackSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context import FloorContextBank
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import FrontierSweep, SweepSettings
@@ -61,8 +62,11 @@ class RPTSearchPolicy:
         if s.local_exploration == "falcon":
             self.name = "sparx-rpt-llm-falcon-planar"
         self.converter_params = ActionConverterParams(heading_hysteresis_deg=1.0)
+        # A ground agent squeezes rather than detours: a route at the preferred standoff more than
+        # ``detour_factor`` times the body-radius route is a detour, and the squeeze is walked.
         self.planner_params = WeightedAStarParams(
             inflate_radius_m=s.preferred_clearance_m, inflate_floor_m=s.body_radius_m,
+            detour_factor=s.detour_factor,
             unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
             start_skip_m=0.0, search_margin_m=s.map_size_m)
         self.loop_settings = LoopSettings()
@@ -71,6 +75,7 @@ class RPTSearchPolicy:
         self.route_settings, self.target_settings = RouteSettings(), TargetEvidenceSettings()
         self.sweep_settings = SweepSettings()
         self.fallback_settings = FallbackSettings()
+        self.escape_settings = EscapeSettings()
         self.glance_settings = GlanceSettings()
         self.sight_settings = SightSettings()
         self.target_projector = None  # optional simulator-local geometry, never goal annotations
@@ -83,6 +88,7 @@ class RPTSearchPolicy:
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
                 "frontier_sweep": asdict(self.sweep_settings), "room_search_loop": asdict(self.loop_settings),
                 "exploration_fallback": asdict(self.fallback_settings),
+                "escape_probe": asdict(self.escape_settings),
                 "glances": dict(asdict(self.glance_settings),
                                 rule="at most one in-place glance per route, where along the route a left, right or full "
                                      "look reveals the most unknown floor the walk itself will not, if that clears the "
@@ -196,8 +202,15 @@ class RPTSearchPolicy:
         self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m, s.multifloor)
         self.solver = RptStarRoomSolver(rng=random.Random("%s/%s" % (s.seed, episode.episode_id)), max_rooms=s.max_rooms)
         self.planner = WeightedAStarPlanner2D(self.planner_params)
+        # The LOCKED target's last resort before a boxed-in release: the same planner with unknown
+        # cells passable at a price (``target_closing.through_unknown``), for the standoff ring alone.
+        self.optimistic_planner = WeightedAStarPlanner2D(replace(
+            self.planner_params, unknown_blocked=False, unknown_cost=s.target_closing.through_unknown_cost))
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
         self.fallback = ExplorationFallback(self, self.fallback_settings)
+        # The fallback's rung before its idle turn: boxed in on the inflated map, one
+        # probing step through the thinnest barrier -- the simulator says what the body passes.
+        self.escape = EscapeProbe(self, self.escape_settings)
         # Where the camera has looked and what it looked through without a
         # return, per floor: settled unknown is not frontier, and the poses say
         # which rooms were walked through or looked into.
@@ -282,6 +295,7 @@ class RPTSearchPolicy:
             return
         self.mapping.notify_blocked(observation, self.episode.action_spec.forward_step_m)
         self._blocked += 1
+        self.escape.note_blocked(observation)
         if self._blocked_since is None:
             self._blocked_since = self._floor_time
         if self._goal is not None and not self._action_owner.startswith("doorway_peek"):
@@ -347,6 +361,12 @@ class RPTSearchPolicy:
             self._floor_time += self.settings.action_time_s
             if external or released:
                 self.supervisor.pause(self.settings.action_time_s)
+                # The blocked clock pauses with the supervisor's deadlines: a glance or a peek's
+                # look turned in place after a blocked step is not the follower still blocked.
+                # Corozal/000142 (``51eff3fa1637``, 2026-10-13): one blocked step, a ten-turn
+                # glance, and the next four transits were released ``blocked`` one action in.
+                if self._blocked_since is not None:
+                    self._blocked_since += self.settings.action_time_s
             elif self.hierarchy is None:
                 self.loop.charge()
         if external and self.warmup_actions < self.warmup_turns:
@@ -556,19 +576,21 @@ class RPTSearchPolicy:
             self.mapping.worlds[self.mapping.floor_id] = confined
         return confined
 
-    def _navigate(self, observation, world, goal, kind, final_yaw=None):
+    def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None):
+        planner = self.planner if planner is None else planner
         if not self.floor_guard.goal_allowed(observation, world, goal, kind):
             self._visited_frontiers.append(tuple(goal))
             self.route_memory.clear("goal off the spawn floor")
             self._route = self._goal = None
             return None
-        if not self.route_memory.reusable(observation, world, self.planner, goal, kind):
+        if not self.route_memory.reusable(observation, world, planner, goal, kind):
             if self.route_memory.reason == "no_progress":
                 self._visited_frontiers.append(tuple(goal))
                 self._route = self._goal = None
                 self._blocked_since = self._floor_time
                 return None
-            path = self._plan_to(observation, world, goal)
+            path = (self._plan_to(observation, world, goal) if planner is self.planner
+                    else self._plan_to(observation, world, goal, planner=planner))
             if path is None:
                 self._visited_frontiers.append(tuple(goal))
                 self._route = self._goal = None
@@ -576,6 +598,8 @@ class RPTSearchPolicy:
             self.route_memory.adopt(path, goal, kind, observation)
         self._route, self._goal = self.route_memory.path, self.route_memory.goal
         info = {"route": self.route_memory.reason, "kind": kind}
+        if planner is not self.planner:
+            info["through_unknown"] = True
         if self.route_memory.reason == "new_goal_or_invalid_route":
             info["route_replaced"] = self.route_memory.replaced
         return NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)
@@ -606,11 +630,12 @@ class RPTSearchPolicy:
             self._target_xy = self._target_id = None
         return command
 
-    def _plan_to(self, observation, world, goal):
+    def _plan_to(self, observation, world, goal, planner=None):
         p = observation.pose
+        planner = self.planner if planner is None else planner
         self._plan_calls += 1
         started = time.monotonic()
-        result = self.planner.plan(PlanRequest(Pose2D(p.x, p.y, p.yaw), Pose2D(*goal), frame_id="world"), world)
+        result = planner.plan(PlanRequest(Pose2D(p.x, p.y, p.yaw), Pose2D(*goal), frame_id="world"), world)
         self.telemetry.latencies["astar"].append((time.monotonic() - started) * 1000)
         self._plan_step = observation.step
         if not result.ok:
@@ -640,6 +665,7 @@ class RPTSearchPolicy:
                 "openings": self.openings.diagnostics(),
                 "glances": self.glances.diagnostics(),
                 "exploration_fallback": self.fallback.diagnostics(),
+                "escape_probe": self.escape.diagnostics(),
                 "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,
                 "oracle_repair_successes": self.graph.oracle.repair_successes}

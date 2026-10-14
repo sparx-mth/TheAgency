@@ -7,6 +7,7 @@ the Ranchester recordings.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import numpy as np
@@ -85,12 +86,18 @@ def test_a_goal_the_planner_refuses_is_dropped_for_one_it_accepts_not_spun_on():
     assert math.dist(IN_A, command.waypoints[-1]) <= 4.0
 
 
-def test_a_dead_planner_is_one_hold_per_action_with_the_reason_recorded_not_an_exception():
+def test_a_dead_planner_is_one_probing_step_per_action_with_the_reason_recorded_not_an_exception():
+    """Every plan refused on open floor: the escape probe's forward step is the move left (before 2026-10-13, a hold)."""
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
     policy._plan_to = lambda obs, world_, goal: None
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert command.info["kind"] == "escape" and command.info["fallback"] == "no room in force"
+    assert policy.fallback.stats["escape"] == 1 and policy.fallback.stats["hold"] == 0
+    assert policy.fallback.stats["invocations"] == 1
+    policy.escape.settings = replace(policy.escape.settings, enabled=False)
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
     assert not command.waypoints and command.info["kind"] == "fallback_hold"
-    assert policy.fallback.stats["hold"] == 1 and policy.fallback.stats["invocations"] == 1
+    assert policy.fallback.stats["hold"] == 1 and policy.fallback.stats["invocations"] == 2
 
 
 # -- nothing left ---------------------------------------------------------------------
@@ -160,10 +167,10 @@ def test_boxed_in_with_a_camera_that_tilts_the_fallback_maps_its_footing_before_
     assert not command.waypoints and command.info["kind"] == "footing_sweep" and command.info["fallback_stage"] == "footing"
     assert policy.fallback.stats["footing"] == 1 and policy.fallback.stats["hold"] == 0
     assert policy.camera_control.footing, "the camera controller carries the sweep from here, one action at a time"
-    # The sweep done at this spot, the hold is what is left.
+    # The sweep done at this spot, a probing step into the unknown is what is left (the hold, before 2026-10-13).
     policy.camera_control.inspection = None
     command = policy.loop.plan(obs_at(episode, 20, IN_A), boxed)
-    assert command.info["kind"] == "fallback_hold" and policy.fallback.stats["hold"] == 1
+    assert command.info["kind"] == "escape" and policy.fallback.stats["escape"] == 1 and policy.fallback.stats["hold"] == 0
     # Walled in by KNOWN cells there is nothing a sweep would map: the hold at once.
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
     episode = replace(episode, action_spec=MULTIFLOOR_PROTOCOL.actions())
@@ -358,8 +365,8 @@ def test_a_commitment_does_not_survive_an_action_the_loop_owned():
     no_rooms(policy)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.fallback.goal_step == 0
-    policy.loop.plan(obs_at(episode, 5, IN_A), world)       # four actions elsewhere in between
-    assert policy.fallback.goal_step == 5 and policy.fallback.stats["goal_switched"] == 0, "a fresh choice, not a switch"
+    policy.loop.plan(obs_at(episode, 20, IN_A), world)      # nineteen actions elsewhere in between (> goal_memory_actions)
+    assert policy.fallback.goal_step == 20 and policy.fallback.stats["goal_switched"] == 0, "a fresh choice, not a switch"
 
 
 def test_a_goal_worth_twice_as_much_takes_over_a_lesser_one_in_force():
@@ -437,7 +444,51 @@ def test_the_snapshot_names_this_actions_rung_including_a_hold():
     assert policy.fallback.snapshot()["stage"] == "frontier"
     boxed = OccupancyGrid2D(np.full(world.grid.shape, UNK, np.int8), world.params, values=world.values)
     command = policy.loop.plan(obs_at(episode, 1, IN_A), boxed)
-    if command.info.get("kind") == "fallback_hold":
-        assert policy.fallback.snapshot()["stage"] == "hold"
-    else:
-        assert policy.fallback.snapshot()["stage"] == "footing"
+    stage = {"fallback_hold": "hold", "footing_sweep": "footing", "escape": "escape"}[command.info["kind"]]
+    assert policy.fallback.snapshot()["stage"] == stage
+
+
+# -- 2026-10-14: a sliver is not an exit, and a glance does not forget the goal ----------------------------
+def test_a_sliver_that_reveals_too_little_is_not_an_exit_and_the_exits_are_ranked_by_what_they_reveal():
+    """The shadow world WITHOUT the bed on the landmark map, plus a four-cell notch of unknown in the room's far
+    corner. Until 2026-10-14 the inventory's size-based order made the 1.2 m strip behind the bed the first exit
+    (Collierville/000036, actions 99-113: one sliver after another, each resolved by the step toward it, the next
+    behind the agent). Now the exits are ranked by the unknown a look from each reveals: the doorway, whose rays
+    reach the whole next room, comes first; the strip, which still sees through the door, stays an exit; and the
+    notch, which reveals nothing but itself, is demoted as a sliver."""
+    policy, episode, _, rooms, _ = loop_policy(order=(1, 0))
+    base = shadow_world()
+    g = base.grid.copy()
+    g[1:3, 1:3] = UNK                                       # the notch: 0.04 m2 in the south-west corner
+    world = OccupancyGrid2D(g, base.params, values=base.values)
+    no_rooms(policy)
+    here = (3.0, 3.0)
+    command = policy.loop.plan(obs_at(episode, 0, here), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier"
+    assert command.waypoints[-1][0] > 5.0, "the doorway in the east wall, not the strip behind the bed"
+    demoted = policy.fallback.last_demoted
+    assert demoted and all(d["why"].startswith("reveals under") for d in demoted), demoted
+    assert all(d["xy"][0] < 1.0 and d["xy"][1] < 1.0 for d in demoted), "the notch, not the strip"
+    assert policy.fallback.stats["slivers_demoted"] == len(demoted) >= 1
+    # Switched off (0): the inventory's size-based order stands and the nearer strip is the exit, as before.
+    policy.fallback.settings = replace(policy.fallback.settings, min_gain_m2=0.0)
+    policy.fallback.goal = None
+    command = policy.loop.plan(obs_at(episode, 1, here), world)
+    assert command.waypoints[-1][0] < 5.0 and policy.fallback.stats["slivers_demoted"] == len(demoted)
+    with pytest.raises(ValueError):
+        FallbackSettings(min_gain_m2=-1.0)
+
+
+def test_a_commitment_survives_a_glance_in_between_but_not_a_long_absence():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    first = policy.loop.plan(obs_at(episode, 0, IN_A, yaw=0.0), world)
+    goal = first.waypoints[-1]
+    # Ten turns of a glance in between, facing the other way at the end of it: the goal in force stands.
+    second = policy.loop.plan(obs_at(episode, 10, IN_A, yaw=math.pi), world)
+    assert second.waypoints[-1] == goal and policy.fallback.stats["goal_kept"] == 1
+    # Twenty actions elsewhere: forgotten, and the fresh choice is not counted as a switch.
+    policy.loop.plan(obs_at(episode, 31, IN_A, yaw=0.0), world)
+    assert policy.fallback.goal_step == 31 and policy.fallback.stats["goal_switched"] == 0
+    with pytest.raises(ValueError):
+        FallbackSettings(goal_memory_actions=0)

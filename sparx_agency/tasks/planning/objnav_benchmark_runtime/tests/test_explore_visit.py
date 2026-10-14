@@ -88,12 +88,19 @@ def test_the_default_visit_enters_a_room_at_its_most_revealing_frontier_not_its_
     assert policy.loop.estimates[1]["frontier_clusters"] == 2
 
 
-def test_a_room_with_no_frontier_left_is_entered_at_its_vantage_point_to_be_confirmed_on_foot():
+def test_a_room_with_no_frontier_left_is_entered_at_its_doorstep_not_its_vantage_point():
+    """Since 2026-10-14: a room with nothing left to walk to is confirmed from its nearest passable cell -- the
+    doorstep -- not from the middle of the room (the user's rule: no walk to the centre without a reason)."""
     policy, episode, world, rooms, _ = explore_policy(order=(1, 0), room_b_resolved=True)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.supervisor.room_id == 1 and policy.loop.events[-1]["entry"] == "vantage"
+    assert policy.supervisor.room_id == 1 and policy.loop.events[-1]["entry"] == "doorstep"
     cost = policy.navigation_cost(world)
-    assert policy.route_memory.goal == policy.loop._vantage(world, cost, rooms[1])[0]
+    goal = policy.route_memory.goal
+    vantage = policy.loop._vantage(world, cost, rooms[1])[0]
+    assert goal == policy.loop._nearest_entry(obs_at(episode, 0, IN_A), world, cost, rooms[1])
+    assert cell_in(world, rooms[1], goal), "inside room B's mask"
+    assert math.dist(goal, IN_A) < math.dist(vantage, IN_A), "nearer the agent than the vantage point"
+    assert policy.loop.estimates[1]["entry"] == "doorstep" and policy.loop.stats["entry_doorstep"] == 1
 
 
 # -- the visit: frontier after frontier, then the room is explored ---------------------------------------
@@ -203,7 +210,10 @@ def test_an_opening_off_a_room_that_is_a_node_is_folded_into_the_rooms_walk():
     assert {e["room"] for e in policy.loop.events if e["event"] == "opening_folded"} == {0, 1}
     assert policy.reasoned_with[0]["stairs"] == [], "the oracle was shown the rooms, not the gaps"
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import search_snapshot
-    assert search_snapshot(policy)["openings"] == [], "and the HUD shows none"
+    shown = search_snapshot(policy)["openings"]
+    assert {o["id"] for o in shown} == {o.node_id for o in before} and all(o["folded"] for o in shown), (
+        "the HUD shows every live opening, the folded ones flagged -- never hidden (2026-10-13)")
+    assert all(not o["targeted"] and o["live"] for o in shown)
     assert policy.loop.diagnostics()["openings_folded"] == sorted(policy.loop._folded_now)
     # A room the ledger has finished is no node, and its openings are nodes again.
     policy.scans.record(obs_at(episode, 1, IN_A), rooms[0], source="warmup")
@@ -269,3 +279,39 @@ def test_a_rooms_service_time_is_a_peeks_worth_per_frontier_so_a_sliver_is_price
         policy.loop.estimates[1]["distance_m"]) and policy.loop.estimates[1]["distance_m"] > 0, "the leg is backed out of the charge"
     scan_mode = loop_policy(visit="scan")[0]
     assert scan_mode.loop._service_steps_for(1) == scan_mode.loop.settings.service_steps()
+
+
+# -- a refused plan is re-aimed, not a room released -------------------------------------------------------
+def test_a_plan_the_planner_refuses_re_aims_at_the_rooms_next_entry_instead_of_releasing_it_unreachable():
+    """Darden/000034 (``4ae716bacfab``, 2026-10-13): the bathroom was released ``unreachable`` twice on one refused
+    plan each, the second time 2.4 m from it after a 65-action walk; the toilet stood 1.3 m away at the step limit."""
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    obs = obs_at(episode, 0, IN_A)
+    policy.loop.plan(obs, world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
+    committed = tuple(policy.route_memory.goal)
+    navigate = policy._navigate
+
+    def refusing(observation, planning_world, goal, kind, final_yaw=None):
+        if tuple(goal) == committed:
+            policy.route_memory.clear("test refusal")
+            policy._route = policy._goal = None
+            return None
+        return navigate(observation, planning_world, goal, kind, final_yaw)
+
+    policy._navigate = refusing
+    policy.loop.charge()
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1, "the room is kept"
+    assert command.waypoints and command.info["kind"] == "transit/1"
+    assert tuple(policy.route_memory.goal) != committed, "a different entry of the same room"
+    assert policy.loop.stats["route_reaimed"] == 1 and policy.loop.stats["plan_failures"] == 0
+    event = [e for e in policy.loop.events if e["event"] == "route_reaimed"][-1]
+    assert event["room"] == 1 and tuple(event["failed"]) == tuple(round(v, 2) for v in committed)
+    assert policy.loop._entry[0] == tuple(policy.route_memory.goal)
+    # Every entry refused: only then is the room released unreachable.
+    policy._navigate = lambda *args, **kwargs: None
+    policy.loop.charge()
+    policy.loop.plan(obs_at(episode, 2, IN_A), world)
+    assert policy.loop.stats["plan_failures"] >= 1, "the room, then whatever the re-solved order put next"
+    assert [e for e in policy.loop.events if e["event"] == "release"][-1]["verdict"] == "unreachable"

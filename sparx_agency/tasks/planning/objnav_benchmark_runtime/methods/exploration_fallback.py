@@ -30,6 +30,12 @@ raised, it produces a command that MOVES, in this order:
    * a frontier of a room the **target cannot be in** (the loop's
      ``type:`` exclusion, :mod:`room_priors`): even a large unexplored
      bathroom is not where a couch is;
+   * a **sliver** (since 2026-10-14): a frontier from whose cell a look
+     round would reveal less than ``min_gain_m2`` of unknown floor (the
+     loop's ``explore_min_gain_m2`` by default) -- the strip beside a wall,
+     the gap behind a chair. The exits that remain are ranked by that gain
+     over the walk to them, as the explore visit ranks a room's frontiers,
+     not by the length of their boundary;
 2. the building coordinator, when the floor is exhausted: the ground-truth
    stairs by the explicit fallback rule (up or down, ``floor_decision``).
    The NORMAL way to the stairs is not this: the room-search loop offers
@@ -48,7 +54,16 @@ raised, it produces a command that MOVES, in this order:
    radius -- an agent that has not moved stands on a disk of unknown, and
    unknown is impassable. One LOOK_DOWN, a circle and a LOOK_UP map it
    (``camera_control.begin_inspection(reason="footing")``), once per spot;
-7. only when even that has been done here, one hold -- the idle turn is
+7. an **escape probe** (since 2026-10-13, :mod:`escape_probe`): boxed in by
+   KNOWN cells -- the strip behind a sofa, the ring a counter's top draws
+   round the agent -- the inflated map has no way out of the pocket while
+   the body may well have one. The grid is read without inflation along
+   every turn heading; the heading with the thinnest occupied band and the
+   most floor beyond it gets one forward step, and the simulator decides.
+   A step that moves re-maps the pocket; a blocked one is remembered for
+   that cell and heading. Collierville/000036 spent 488 actions on the
+   hold below, twice, with the toilet 5.6 m away;
+8. only when even that has been done here, one hold -- the idle turn is
    then the only action that changes anything.
 
 A failure is never silent: each one is counted, its type, message and origin
@@ -63,11 +78,12 @@ from dataclasses import asdict, dataclass, replace
 import logging
 import math
 import traceback
+from typing import Optional
 
 import numpy as np
 from scipy.sparse.csgraph import dijkstra
 
-from sparx_agency.core.planning.exploration.frontier_ranking import ranked_frontier_goals
+from sparx_agency.core.planning.exploration.frontier_ranking import rank_by_view_gain, ranked_frontier_goals
 from sparx_agency.core.planning.exploration.room_costs import passable_graph, snap_cell
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
@@ -127,6 +143,23 @@ class FallbackSettings:
         goal_match_m: The goal in force is "still there" when a current goal
             of its rung lies within this distance -- clusters re-snap as the
             frontier shrinks.
+        goal_memory_actions: The goal in force is forgotten when the fallback
+            did not drive it for more than this many actions: the loop had
+            the action in between and walked the agent elsewhere, so the
+            old goal would be a stale pull. A glance (ten turns at most) or
+            a peek's look in between is not that: until 2026-10-14 the goal
+            was forgotten after ONE action without it, every glance re-ranked
+            the frontier greedily, and the agent's own turning re-ranked it
+            back (Collierville/000036, actions 99-113: six turns left to one
+            sliver, six right to another, 180 degrees and back).
+        min_gain_m2: A frontier reveals at least this much unknown floor
+            from its cell (rays through the unknown, as the loop's
+            ``explore_min_gain_m2``) to be an EXIT of rung 1; a sliver that
+            reveals less -- the strip beside a wall, the gap behind a chair
+            -- waits with the shadows for rung 3 (since 2026-10-14: the
+            fallback walked from one such sliver to the next, each resolved
+            by the step toward it, the next one behind the agent). 0
+            disables; by default the loop's own threshold is read.
         footing_radius_m: The footing sweep is taken only where at least
             ``footing_unknown_fraction`` of the cells within this of the
             agent are unknown -- the blind disk under a camera that has not
@@ -146,14 +179,19 @@ class FallbackSettings:
     near_blind_m: float = 1.2
     goal_switch_gain: float = 2.0
     goal_match_m: float = 0.6
+    goal_memory_actions: int = 12
+    min_gain_m2: Optional[float] = None
     footing_radius_m: float = 1.2
     footing_unknown_fraction: float = 0.25
 
     def __post_init__(self):
         for name in ("frontier_attempts", "relocation_candidates", "service_backoff_actions",
-                     "service_backoff_max_actions"):
+                     "service_backoff_max_actions", "goal_memory_actions"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
+        if self.min_gain_m2 is not None and (isinstance(self.min_gain_m2, bool) or not math.isfinite(self.min_gain_m2)
+                                             or self.min_gain_m2 < 0):
+            raise ValueError("min_gain_m2 must be None (the loop's threshold), 0 (off) or a positive area")
         if isinstance(self.relocation_min_m, bool) or not math.isfinite(self.relocation_min_m) or self.relocation_min_m <= 0:
             raise ValueError("relocation_min_m must be positive and finite")
         if self.service_backoff_max_actions < self.service_backoff_actions:
@@ -238,8 +276,8 @@ class ExplorationFallback:
         self.settings = settings or FallbackSettings()
         self.failures = []
         self.stats = {"invocations": 0, "frontier": 0, "stairs": 0, "frontier_demoted": 0, "frontier_retired": 0,
-                      "room_peek": 0, "relocation": 0, "footing": 0, "hold": 0, "failures": 0,
-                      "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0,
+                      "room_peek": 0, "relocation": 0, "footing": 0, "escape": 0, "hold": 0, "failures": 0,
+                      "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0, "slivers_demoted": 0,
                       "goal_kept": 0, "goal_switched": 0, "goal_outranked": 0,
                       ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0, SEGMENTER + "_failures": 0}
         self._logged = set()
@@ -301,14 +339,14 @@ class ExplorationFallback:
                                         (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
                                         ids=ids, graph=graph))
         admissible = p.sweep.admissible(obs, world, ranked)
-        if self.goal is not None and obs.step - self.goal_step > 1:
-            self.goal = self.goal_stage = None                # the loop had the action in between: no stale pull
+        if self.goal is not None and obs.step - self.goal_step > self.settings.goal_memory_actions:
+            self.goal = self.goal_stage = None                # the loop walked the agent elsewhere: no stale pull
         # Routes are planned with every seen staircase written occupied: a floor-wide
         # frontier beyond a stairwell walked the Pomaria agent down a flight it had not
         # chosen (2026-10-04, actions 262-316), and the first treads into the storey's map.
         # Taking the stairs is the coordinator's rung below, on the plain world.
         planning = peek_planning_world(p, world) if p.building is not None else world
-        exits, demoted = self._exits(world, admissible, inventory)
+        exits, demoted = self._exits(world, admissible, inventory, obs=obs)
         command = self._frontiers(obs, planning, exits, "frontier")
         if command is not None:
             return self._tag(command, "frontier", reason)
@@ -348,6 +386,13 @@ class ExplorationFallback:
             command = camera.inspection_command(obs)
             if command is not None:
                 return self._tag(command, "footing", reason)
+        # Boxed in by KNOWN cells: the inflated map has no way out of the pocket, the body
+        # may well have one. One probing step through the thinnest barrier; the simulator
+        # decides, a step that moves re-maps the pocket, a blocked one is remembered.
+        escape = getattr(p, "escape", None)
+        command = escape.plan(obs, world) if escape is not None else None
+        if command is not None:
+            return self._tag(command, "escape", reason)
         self.stats["hold"] += 1
         self.last_stage = "hold"
         return NavigationCommand.hold(info={"kind": "fallback_hold", "fallback": reason,
@@ -397,15 +442,19 @@ class ExplorationFallback:
             return list(goals)
         return [in_force] + [g for g in goals if g is not in_force]
 
-    def _exits(self, world, goals, inventory):
+    def _exits(self, world, goals, inventory, obs=None):
         """Split the admissible goals, utility order kept, into exits and demoted frontiers.
 
         Demoted: an object's shadow (:func:`object_shadow`, against this
         storey's confirmed landmarks), a frontier inside the camera's blind
-        radius, or a frontier the inventory credits to a room the loop
-        withheld as ``type:`` -- one the target cannot be in. ``scanned:``
-        exclusions do not demote: a finished room's opening is how the next
-        room is found.
+        radius, a frontier the inventory credits to a room the loop
+        withheld as ``type:`` -- one the target cannot be in -- or, with
+        the pose given, a frontier that reveals less than ``min_gain_m2``
+        of unknown floor from its cell (the loop's ``explore_min_gain_m2``
+        by default); the exits that remain are then ordered by that gain
+        over the walk to them, as the explore visit orders a room's
+        frontiers (:meth:`_by_view_gain`). ``scanned:`` exclusions do not
+        demote: a finished room's opening is how the next room is found.
         """
         p, s = self.policy, self.settings
         self.last_demoted = []
@@ -415,6 +464,11 @@ class ExplorationFallback:
         excluded = getattr(getattr(p, "loop", None), "excluded", None) or {}
         exits, demoted = split_exits(goals, landmarks, world.resolution, s, excluded=excluded,
                                      room_of=goal_rooms(inventory), type_rule=True)
+        if obs is not None and exits:
+            ranked, slivers = self._by_view_gain(obs, world, exits)
+            if ranked is not None:
+                exits = ranked
+                demoted = demoted + [(g, "reveals under %.1f m2" % self._min_gain_m2()) for g in slivers]
         for goal, why in demoted:
             if why.startswith("inside the camera"):
                 self.stats["blind_demoted"] += 1
@@ -427,11 +481,41 @@ class ExplorationFallback:
                     self.goal = self.goal_stage = None
             elif why.startswith("room "):
                 self.stats["type_demoted"] += 1
+            elif why.startswith("reveals under"):
+                self.stats["slivers_demoted"] += 1
             else:
                 self.stats["shadows_demoted"] += 1
             self.last_demoted.append({"xy": [round(float(v), 2) for v in goal.xy],
                                       "size_cells": int(goal.size_cells), "why": why})
         return exits, [goal for goal, _ in demoted]
+
+    def _min_gain_m2(self):
+        """The significance threshold in force: the setting, else the loop's ``explore_min_gain_m2``."""
+        if self.settings.min_gain_m2 is not None:
+            return float(self.settings.min_gain_m2)
+        loop = getattr(self.policy, "loop", None)
+        return float(getattr(getattr(loop, "settings", None), "explore_min_gain_m2", 0.0) or 0.0)
+
+    def _by_view_gain(self, obs, world, goals):
+        """``(ranked, slivers)``: the exits re-scored by the unknown floor a look from each would reveal, best first.
+
+        The loop's own ray caster (``RoomSearchLoop._unknown_view``, cached
+        per action) scores each goal as :func:`rank_by_view_gain` does for
+        the explore visit -- the unknown within the camera's range from the
+        goal's cell over the walk to it, not the length of the boundary --
+        and a goal under the threshold is a sliver, returned apart.
+        ``(None, [])`` when the threshold is off or the loop has no caster:
+        the inventory's order stands.
+        """
+        min_gain = self._min_gain_m2()
+        loop = getattr(self.policy, "loop", None)
+        if min_gain <= 0.0 or loop is None or not hasattr(loop, "_unknown_view"):
+            return None, []
+        view = loop._unknown_view(obs, world)
+        cells = int(round(min_gain / view.cell_area_m2))
+        ranked = rank_by_view_gain(list(goals), view, self.policy.sweep.settings.ranking, min_gain_cells=cells)
+        kept = {tuple(g.cell) for g in ranked}
+        return ranked, [g for g in goals if tuple(g.cell) not in kept]
 
 
     def _relocate(self, obs, world, ids, graph):

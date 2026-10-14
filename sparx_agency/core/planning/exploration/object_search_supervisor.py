@@ -218,6 +218,15 @@ class ObjectSearchParams:
             cooldown is dropped for that selection rather than the aircraft
             standing still.
         visit_cooldown_s: How long that skip lasts.
+        failure_cooldown_s: How long the skip lasts instead after a turn
+            that ended ``unreachable``, ``blocked`` or ``transit_timeout``
+            -- the planner's or the follower's failure, not a verdict on
+            the room. None (the default) keeps ``visit_cooldown_s``. The
+            room-search loop sets it short: a room unreachable on the map
+            as it stood is routinely reachable once the agent has moved and
+            the map has grown, and 120 s of cooling kept the room that held
+            the target out of the order for the rest of the search
+            (Darden/000034, 2026-10-13, action 217).
         max_attempts: How many unproductive turns a room may take before it is
             deferred for :attr:`defer_s`. Three unreachable attempts is a room
             the map cannot currently route to, not a room worth a fourth try.
@@ -291,6 +300,7 @@ class ObjectSearchParams:
     seed: int = -1
     visit_cooldown: bool = True
     visit_cooldown_s: float = 120.0
+    failure_cooldown_s: Optional[float] = None
     max_attempts: int = 3
     defer_s: float = 180.0
     arrival_tol_m: float = 0.6
@@ -313,6 +323,8 @@ class ObjectSearchParams:
             unknown = [v for v in getattr(self, name) if v not in ALL_VERDICTS]
             if unknown:
                 raise ValueError("%s holds no such verdict: %s" % (name, unknown))
+        if self.failure_cooldown_s is not None and not (self.failure_cooldown_s >= 0.0):
+            raise ValueError("failure_cooldown_s must be non-negative or None")
 
 
 @dataclass(frozen=True)
@@ -582,8 +594,18 @@ class ObjectSearchSupervisor:
         return self._search(now, frontier_exhausted, budget_spent, room_reclassified, route_failed)
 
     def pause(self, seconds):
-        """Exclude an explicit inspection from task deadlines, never visit cooldowns."""
-        for name in ("_goal_s", "_plan_s_at_goal", "_search_end_s", "_frontier_low_s"):
+        """Exclude an explicit inspection from task deadlines, never visit cooldowns.
+
+        The deadlines are the transit's and the search's clocks (``_goal_s``,
+        ``_search_end_s``, ``_frontier_low_s``). ``_plan_s_at_goal`` is NOT
+        one: it is the ordinal mark "a plan newer than this was made for the
+        goal in force", and shifting it past a plan made before the pause
+        un-planned a committed route -- every transit long enough to pass
+        ``plan_grace_s`` was released ``unreachable`` by the first glance
+        turned on the way (Darden/000034 at action 493, Corozal/000076 at
+        282, 2026-10-13).
+        """
+        for name in ("_goal_s", "_search_end_s", "_frontier_low_s"):
             value = getattr(self, name)
             if value is not None:
                 setattr(self, name, value + seconds)
@@ -912,9 +934,15 @@ class ObjectSearchSupervisor:
 
     def _is_cooling(self, room_id, now):
         # type: (int, float) -> bool
-        """Whether this room's turn ended too recently to choose it again."""
+        """Whether this room's turn ended too recently to choose it again (a failed turn cools for ``failure_cooldown_s``)."""
         ended = self._cooling.get(int(room_id))
-        return ended is not None and (now - ended) < self.params.visit_cooldown_s
+        if ended is None:
+            return False
+        duration = self.params.visit_cooldown_s
+        if (self.params.failure_cooldown_s is not None
+                and self._cooling_verdict.get(int(room_id)) in (UNREACHABLE, BLOCKED, TRANSIT_TIMEOUT)):
+            duration = self.params.failure_cooldown_s
+        return (now - ended) < duration
 
     def _is_deferred(self, room_id, now):
         # type: (int, float) -> bool

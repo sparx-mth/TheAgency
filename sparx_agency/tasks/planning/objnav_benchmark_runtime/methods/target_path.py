@@ -34,6 +34,19 @@ class TargetApproachPath:
     route completes, so the closing inspects from the standoff instead; a
     fresh range that still says "too far" drops the goal (:meth:`drop`) and
     the next selection is a closer ring about the memory.
+
+    **The ring is planned through the unknown before the spot is given up**
+    (since 2026-10-14, ``TargetClosingSettings.through_unknown``). The
+    planner blocks unknown cells and a level camera leaves the floor under
+    its view unknown for 1.4 m ahead, so the floor between a corridor and a
+    toilet seen through its doorway routinely has no known route; the lock
+    was then released as boxed in with the target in plain view
+    (Collierville/000023, action 375). When no ring point has a route on the
+    known floor the same ring is tried with the policy's
+    ``optimistic_planner`` -- the strict planner with unknown passable at
+    ``through_unknown_cost`` times open floor -- and the committed route is
+    re-checked against the map as it fills in like any other
+    (``through_unknown`` counts them).
     """
 
     def __init__(self, policy):
@@ -44,6 +57,7 @@ class TargetApproachPath:
         self.arrived = False               # the route to the current standoff is walked (the executor's rule)
         self.arrivals = 0                  # standoffs reached over this lock
         self.dropped = 0                   # arrived standoffs given up for a closer one
+        self.through_unknown = 0           # standoffs planned through unknown cells (no route on the known floor)
 
     def drop(self):
         """Give up the current standoff so the next :meth:`command` selects one anew, closer to the memory."""
@@ -84,20 +98,31 @@ class TargetApproachPath:
         limit = s.terminal_distance_m - p.converter_params.goal_tolerance_m
         radius = max(p.settings.body_radius_m, limit - world.resolution)
         bearing = math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0])
-        for offset in (0, 30, -30, 60, -60, 90, -90, 180):
-            angle = bearing + math.radians(offset)
-            goal = (target.xyz[0] + radius * math.cos(angle), target.xyz[1] + radius * math.sin(angle), obs.pose.z)
-            if p.target_projector is not None:
-                goal = p.target_projector(goal)
-                if goal is None:
+        planners = [None]
+        if s.through_unknown and getattr(p, "optimistic_planner", None) is not None:
+            # No route on the known floor: the ring again with unknown cells passable at a price.
+            # The target was seen along this line of sight, and a level camera leaves the floor
+            # under its view unknown for 1.4 m ahead; the committed route is re-checked against
+            # the map as it fills in like any other (since 2026-10-14).
+            planners.append(p.optimistic_planner)
+        for planner in planners:
+            for offset in (0, 30, -30, 60, -60, 90, -90, 180):
+                angle = bearing + math.radians(offset)
+                goal = (target.xyz[0] + radius * math.cos(angle), target.xyz[1] + radius * math.sin(angle), obs.pose.z)
+                if p.target_projector is not None:
+                    goal = p.target_projector(goal)
+                    if goal is None:
+                        continue
+                if abs(goal[2] - obs.pose.z) > 0.2 or math.dist(goal[:2], target.xyz[:2]) > limit:
                     continue
-            if abs(goal[2] - obs.pose.z) > 0.2 or math.dist(goal[:2], target.xyz[:2]) > limit:
-                continue
-            command = p._navigate(obs, world, goal[:2], "target_closing")
-            if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= limit:
-                self.goal_xyz, self.reference_xyz = tuple(goal), tuple(target.xyz)
-                self.arrived = p.route_memory.arrived(obs)      # a ring point the agent already stands on
-                if self.arrived:
-                    self.arrivals += 1
-                return command
+                command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
+                if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= limit:
+                    self.goal_xyz, self.reference_xyz = tuple(goal), tuple(target.xyz)
+                    self.arrived = p.route_memory.arrived(obs)      # a ring point the agent already stands on
+                    if self.arrived:
+                        self.arrivals += 1
+                    if planner is not None:
+                        self.through_unknown += 1
+                        target.through_unknown_routes += 1
+                    return command
         return None

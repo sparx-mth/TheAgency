@@ -11,6 +11,328 @@ Format per entry:
 
 ---
 
+## 2026-10-14 — The seen toilet that was not locked, the reached toilet that was not STOPped on, and the search that re-scanned, walked to room centres and spun between slivers
+
+**Symptom:** The user read the recordings of `runs/benchmark_toilet_15episodes_20261013T233505Z` (SR 0.800 / SPL
+0.433 / DTG 0.62 m) and listed nine behaviours: the robot not looking down at a toilet it had reached; toilets spotted
+but not locked; returns to rooms already scanned; no `O`/`T` marker for a seen toilet on the HUD; spinning in place
+without a planned path; walks to the centre of rooms instead of to a frontier; rooms scanned a second and third time;
+and routes changed mid-way. The per-step traces (`steps.jsonl` -> `method.target_closing`, `method.search`,
+`method.fallback`; `metrics.json` -> `room_search_loop.events`) gave one mechanism per complaint:
+
+1. **Markleeville/000188, actions 34-45** -- a takeover begun on a 0.84 override past an `unverified` memory had every
+   0.60-0.79 re-sighting of the same toilet dropped BY that memory in `_candidates` (the memory ran on every unlocked
+   frame, the active candidate's included); `consecutive_frames` never reached 2.
+2. **Markleeville/000188, actions 20-31** -- the toilet at 5 m read 0.62 with depth at the frame's edge and 0.49
+   WITHOUT depth once centred (beyond what the projection accepts); the depthless frame counted as "nothing seen", the
+   count reset, and the sweep turned AWAY from the centred box every other action, twice through the 12-step budget.
+3. **Wiconisco/000193, actions 476-499** -- locked, standing 1.0505 m from the toilet's near edge against a 1.05 m
+   limit, the box 16-17 degrees off the centre on alternating sides (both just outside `turn_action`'s half-turn dead
+   band, the detector drawing the box a few degrees differently at the two headings): TURN_LEFT/TURN_RIGHT to the
+   step limit, SR 1 by the distance alone.
+4. **Collierville/000023, action 375** -- the toilet locked at 2.8 m through its WC doorway; the floor between (a
+   level camera sees the floor from 1.4 m out) was unknown, the planner blocks unknown, the standoff ring had no
+   route, a footing sweep (11 actions) mapped only the feet, and the lock was released as boxed in -- which then
+   refused the 0.82-0.88 re-sightings from the spot (actions 376-392).
+5. **Collierville/000023 (180-202) and /000036 (241-265)** -- a 0.88-0.95 toilet seen at 1.5 m backed off, 10-12
+   actions of retreat and 13 of verification from a spot the jamb hid it from, then a trusted release; 23-25 actions
+   per candidate, and one toilet lost.
+6. **Collierville/000023, actions 237-420** -- the storey "covered", the second pass re-offered the scanned rooms and
+   the agent re-scanned room 0 from its vantage point twice (237-263, 403-420) and room 1 once, with the toilet's WC
+   unentered 3 m away; the 3B oracle was also shown every scanned room as a node on every call (48 calls in
+   Darden/000190).
+7. **Collierville/000036, actions 99-113** -- `order=[]`, the fallback's exits in the inventory's size order: a 1.2 m
+   sliver first, resolved by the step toward it, the next sliver behind the agent: six turns left, six right. And the
+   goal in force was forgotten after ONE action the fallback did not own, so every glance re-ranked greedily.
+8. **Darden/000190 (room 8) and the "vantage" entries** -- a room with no significant frontier was entered at its
+   vantage point (the middle of the room); the walk across showed nothing the doorway did not, and an unreachable
+   vantage point released the room `unreachable` on every loop point.
+9. The landmark node (`T<n>`) of a seen toilet was hidden whenever ANY release lay within range of it
+   (`landmark_openings` asked `rejected_near`), a 12-step verification failed from 4 m included.
+
+**Fix:** (1) a box ASSOCIATED with the active candidate's anchor is a re-sighting: the memory, cooldown and boxed-in
+spot judge a START only (`resighting_exemptions`). (2) A box of the class within one turn of the anchor's bearing
+without a usable depth is a `glimpse`: it carries the consecutive chain, is faced, then stepped toward, and the step
+does not run the verify clock (`max_verify_approach_steps` 24; `glimpse_steps`, `verify_pauses`). (3) A fresh range
+beyond the limit by less than a forward step, faced within a turn, is one MOVE_FORWARD (`inspection_max_steps` 3);
+a centring turn that would undo the previous action's turn with the error under a whole turn is read as aligned
+(`dead_band_alignments`). (4) `TargetApproachPath` plans the ring again with unknown passable at 8x the cost of open
+floor when the known floor has no route (`through_unknown`, the policy's `optimistic_planner`; `_navigate(planner=)`).
+(5) A candidate FIRST READ at `backoff_trust_confidence` (0.92) skips the manoeuvre (`backoff_trusted_skips`).
+(6) `LoopSettings.second_pass=False` and `scanned_to_oracle=False`: finished rooms are no node and are left off the
+oracle's list (the HOUSE line still names their types); `lingered_discount` 0.2 for an entered room searched 20+
+actions with <=1 significant frontier; the prompt says "searched 20s or longer with frontier 0 or 1 is as good as
+scanned: 0-5". (7) The fallback's exits are ranked by view gain and a sliver under `explore_min_gain_m2` is demoted
+(`slivers_demoted`); the goal in force survives `goal_memory_actions` (12) without the fallback. (8) A room with no
+frontier left is entered at its DOORSTEP, the passable cell nearest the agent along the floor (`_nearest_entry`,
+`entry_doorstep`), in `_explore_entry`, `_reaim_after_refusal` and the entry-lost re-aim. (9) `landmark_refused`:
+only a release that DISPROVED the candidate from close hides the landmark node.
+Tests: `test_target_closing.py` (the four closing rules, from "the toilet re-run of 2026-10-13"),
+`test_target_backoff.py` (the trusted skip), `test_opening_nodes.py` (the landmark), `test_search_economy.py`
+(lingered, the oracle's list), `test_exploration_fallback.py` (slivers, goal memory), `test_explore_visit.py`
+(the doorstep).
+
+**Result (round 1):** the same 10 episodes (2 per scene, seed 17; `runs/benchmark_toilet_10episodes_20261014T085618Z`)
+went from SR 0.700 / SPL 0.425 / DTG 0.94 m (their scores in the 15-episode run of 2026-10-13) to **SR 0.900 /
+SPL 0.489 / DTG 0.23 m**, mean 230 actions (302). Corozal/000019 and Darden/000190, never sighted before, succeeded;
+Collierville/000036 149 actions (277), Corozal/000142 251 (408), Wiconisco/000193 179 (500). Two went the other way,
+and their traces gave round 2:
+
+10. **Collierville/000023** (the one failure, DTG 2.3 m): the toilet at 0.95 on four border-cut frames (no takeover
+    can start on a cut box), the takeover on the fifth at 0.84 -- "sudden" by the range alone -- the 25-action
+    retreat to a spot the jamb hid it from, and a 2 m `wider perspective` rejection that refused eleven more frames
+    at 0.86-0.91. And every one of its frames read `unsupported_floor_association`: seen from a metre with the floor
+    in front inside the camera's blind zone and the base under the frame's lower edge, the lowest sample near the
+    toilet was its bowl at 0.2-0.45 m, outside the 0.18 m band -- never a landmark, never a `T` node.
+11. **Wiconisco/000014** (129 -> 320 actions): the toilet seen once at 0.54 from 3.2 m; the one step toward it put
+    it behind a jamb and eleven in-place turns at the same three headings never brought it back; the landmark had
+    one observation, which the map does not confirm, so no `T` node drew the search back for 65 actions.
+12. **Darden/000034 (round 2), actions 112-124** -- a wedged peek walk (two blocked MOVE_FORWARDs, slides under the
+    0.15 m progress threshold) released its opening `blocked` at 119, correctly; then the NEXT FIVE nodes were
+    released `blocked` on their first action each (120, 121, 122, 123, 124): `policy._blocked_since` is the agent's
+    motion clock, reset only by a forward step's worth of displacement, and the supervisor reads it per transit --
+    so every node selected after the release inherited "blocked for 7 s" and four openings were retired for good.
+
+**Fix (round 2):** (10) `backoff_persistence_frames` 2 / `backoff_persistence_window` 6: a class in the frame on two
+of the six actions before the takeover is persistent, not sudden, and is verified where it stands
+(`backoff_persistence_skips`); the floor-support band is 0.60 m (a storey is 2.5 m away). (11)
+`OpeningSettings.landmark_sighting_confidence` 0.50: a target landmark seen once at the closing's threshold is a `T`
+node (`target_landmarks`, `_landmark_best_conf`); `verify_sweep_max_actions` 6: a fruitless sweep cycle releases the
+verification before its budget (`sweep_releases`). (12) `RoomSearchLoop._tick` resets `_blocked_since` on every
+release: the clock was the released node's. Tests: `test_target_backoff.py` (persistence),
+`test_perception_association.py` (the band), `test_opening_nodes.py` (the single sighting; the clean clock after a
+blocked release), `test_target_closing.py` (the sweep cap).
+
+**Result (round 2, the same 10 episodes, `runs/benchmark_toilet_10episodes_20261014T100437Z`):** SR 0.800 / SPL
+0.388 / DTG 1.45 m, mean 262 actions. Collierville/000023 succeeded (223 actions; the persistence skip fired once and
+the toilet was locked where it was seen), Wiconisco/000014 came back to 183 actions (320), and the two Darden
+episodes went the other way -- and neither on this entry's rules:
+- Darden/000190 ran bit-identical to round 1 for 193 actions, up to the same `exhausted` release; at that loop point
+  the SAME prompt (same HOUSE line, same four nodes, same two openings) drew 0.01 for both openings in one run and
+  0.10 in the other from `qwen2.5:3b`, so one run peeked and the other fell to the fallback. It ended 1.24 m from
+  the goal at the cap. This is the 3B oracle's non-reproducibility at temperature 0 (the LESSONS entry below says
+  not to read two campaigns' means as a code difference); the 14B model is the office's.
+- Darden/000034 (55 actions in both earlier runs) was sent by the order into the house's sunken level: `transit/10`
+  walked the agent from z 0.02 to -0.45 m, the spawn-floor guard adopted the height as a half level after 45
+  actions (`half_level_adopted`, a fresh floor context, a fresh map, a new warm-up), a far fallback frontier then
+  took it down again to -0.78 m (a second adoption at 368), and the last 130 actions were footing sweeps (48) and
+  escape probes (86) in a map that knew nothing but the cells around the agent's feet. DTG 13.2 m. **Open item:**
+  a half-level adoption on a split-level storey should keep the map and the search (the storey is the same), not
+  start the search over; and a fallback frontier 12 m away across a level change should not be an exit while the
+  spawn plane has frontier left.
+Across the three runs of these ten episodes the code's own effect is read per episode, not from the means:
+Collierville/000023 (0 -> 0 -> 1), Corozal/000019 (0 -> 1 -> 1), Wiconisco/000193 (500 -> 179 -> 179 actions),
+Collierville/000036 (277 -> 149 -> 143) are the fixes; Darden is the model and the split level.
+
+**Don't:**
+- Don't run a start-of-takeover gate (memory, cooldown, boxed-in spot) on the active candidate's own frames; the
+  Markleeville toilet was in view and associated on eleven of twelve frames and never locked.
+- Don't read a depthless box on the candidate's bearing as absence, and don't sweep away from a centred box.
+- Don't trust a half-turn dead band against a detector that draws the box a few degrees differently per heading:
+  remember the last centring turn.
+- Don't let the standoff ring fail on unknown floor the target was seen across: plan through it and let the map
+  re-check the route.
+- Don't re-scan (`second_pass`) while unknown slivers remain; the fallback's ranked exits are the second pass.
+- Don't enter a frontier-less room at its vantage point; its doorstep finishes it (`explored`) for the same evidence.
+- Don't call a candidate "sudden" by its range alone: four border-cut frames of the class before the takeover are
+  not a surprise, and the retreat that re-verifies a surprise costs 25 actions and the line of sight.
+- Don't sweep the same three headings for twelve actions: a candidate none of them shows after one cycle is
+  behind something, and only a position change -- the `T` node's standoff walk -- brings it back.
+- Don't require two observations of the TARGET class before its landmark is a node; the second frame of a toilet
+  glimpsed through a doorway is the one the search has to go and get.
+- Don't let a motion clock outlive the node it condemned: the supervisor's `blocked` verdict is per transit, and a
+  clock that is not reset at the release judges every later node by a walk it never made. (Also: never edit a
+  `.py` under `sparx_agency/` while `five_scene` runs -- it hashes every one and aborts the campaign.)
+
+---
+
+## 2026-10-13 (night) — Backtracking in the toilet re-run: the model's "second pass" with doors unpeeked, exits valued blind, a walked room valued over an unknown one, a 120-action cooldown on the toilet's room, and a planner that walks round the house rather than squeeze
+
+**Symptom:** The user read six recordings of `runs/benchmark_toilet_15episodes_20261013T184541Z` and listed eleven
+places where the agent went back to rooms it had already walked, chose a gap beside a scanned area over openings onto
+unseen space, abandoned a route through unvisited rooms for one back through visited ones, or stood with no `O` on the
+HUD while openings were in its order. Per-episode traces (`steps.jsonl` → `method.search`, `metrics.json` →
+`room_search_loop.events` / `estimate_events` / `solver_records`) gave one mechanism per complaint:
+
+1. **Corozal/000076 action 159, Darden/000034 action 321, Wiconisco/000014 action 238** — the oracle (`qwen2.5:3b`)
+   wrote `pass: second` ("no unexplored places or frontier left") with six openings on its own HOUSE line, and the loop
+   re-offered every scanned room; RPT* sent the agent back across the storey to re-scan living rooms while the
+   bathroom's door stood unpeeked.
+2. **Corozal/000076 action 126** — O3 (10 cells, 1 m2 behind it, 4.6 m away) chosen over O13 (148 cells, the unseen
+   half of the storey, 6.4 m): both "nothing glimpsed", both 0.10 from the model; RPT* takes the nearer.
+3. **Darden/000034 action 139** — R7, a "bathroom" walked THROUGH at action 103, valued 0.6 ("known to contain a
+   toilet") over R5, unknown, bathroom-sized, never entered, 0.2 and 6 m away; the agent walked 11 m back to R7.
+4. **Darden/000034 action 217** — R5 (the toilet's room) released `unreachable` on one refused plan at 112 was still
+   on the supervisor's 120-action visit cooldown at 217, when the agent stood 4 m from it; the order went north.
+5. **Corozal/000076 action 394** — the committed route to O13 (7.5 m, through unvisited space) was `route_obstructed`
+   by a cell that appeared 0.25 m from it, and the re-plan at the preferred 0.30 m standoff was a 12.7 m loop back
+   through visited rooms, because the planner relaxes to the body radius only when NO route exists at the standoff.
+6. **Corozal/000076 actions 168-255** — O23 was offered before the staircase beside it was placed (action 203); the
+   capsule then stood between the agent and the threshold 1.8 m away, and the peek walked an 87-action loop round it.
+   `detect_openings` excluded exits near the portal's points only, and a peek in force was never re-checked.
+7. **Corozal/000142 action 69** — two openings in the RPT* order vanished from the HUD: the fold was computed BEFORE
+   the oracle call with the old probabilities (room 0 under `min_prob`, its openings kept as nodes), and the HUD's
+   fold the next action read the new ones (room 0 a node, its openings folded -- hidden). The targeted opening
+   vanished too whenever the inventory lost it mid-walk.
+8. **Wiconisco/000014 actions 177-238** — a living room's explore visit walked four frontiers for 61 actions; the
+   user's rule is "scan the doors and the large areas, skip the slivers, leave and do not come back".
+9. **Collierville/000036 (run C) action 213** — the toilet at 0.93-0.95, 1.5 m inside its doorway; the sudden-proximity
+   back-off retreated to a spot the jamb hid it from, the detector never fired again, and the candidate was released
+   as DISPROVED with twice the rejection radius -- the toilet landmark on the map was never a node again.
+
+**Fix:** (1) `RoomSearchLoop.second_pass` is gated on coverage -- no unfinished room, no exit, no reachable frontier
+worth a walk -- and the model's verdict is recorded (`oracle_pass`) but decides nothing. (2) `Opening.gain_m2` (the
+camera's cone from the threshold along the heading, through the unknown) and `opening_value_factor` scale the model's
+number, `clamp(gain / 4 m2, 0.25, 1)`, a `doorway` in full. (3) `LoopSettings.entered_discount` 0.5 on a room stood in
+but not finished, and the prompt's rules rewritten (an entered room at most half of an unexplored one of its type;
+"never write known to contain"; prefer places not been near). (4) `ObjectSearchParams.failure_cooldown_s` (the loop:
+30 actions) for `unreachable` / `blocked` / `transit_timeout`. (5) `WeightedAStarParams.detour_factor` (the policy:
+1.5): a standoff route more than that times the floor route is a detour and the squeeze is returned. (6) exits within
+`stair_exclusion_m` of the guard's mask are not openings, and a peek whose threshold the mask reaches is retired at
+once. (7) the fold is recomputed after the oracle call; the HUD lists every live opening with `folded` / `targeted` /
+`live` flags and the peek's opening is kept on it. (8) `explore_min_gain_m2` 1 m2: only frontiers revealing that much
+are goals, keep a room open or count for `frontier=`; a peek is ended when its opening is resolved on the way
+(`vanish_actions`). (9) `backoff_trust_confidence` 0.92: a candidate read that well is released without a rejection
+when the wider perspective misses it. Tests: `tests/test_search_economy.py`, `test_room_scans.py` (the covered storey),
+`test_target_backoff.py` (the trusted release).
+
+**Result:** the same 15 episodes (`runs/benchmark_toilet_15episodes_20261013T233505Z`, all scored, no native crash)
+went from SR 0.667 / SPL 0.293 / DTG 2.19 m (run C) to **SR 0.800 / SPL 0.433 / DTG 0.62 m**, mean 252 actions
+(C: 302). Six episodes improved, two of them to SPL 1.0 (Darden/000034 in 55 actions after 251; Darden/000072 in 49
+after 91); Collierville/000036 and Wiconisco/000193, failed in every earlier run, succeeded. Two regressed:
+Collierville/000023 (C: 131 actions) ended 0.58 m from the goal at the step limit, and Corozal/000019 (C: 477) ended
+2.4 m away. The /000023 trace is a target-closing failure, not a search one, and is the open item:
+- action 180: the toilet seen at 1.5 m through its WC doorway; the wider-perspective back-off retreated along the
+  trail to a spot the jamb hid it from (no line-of-sight test on the retreat goal), the verification oscillated
+  TURN_LEFT/TURN_RIGHT at that spot for 13 actions without a sighting, and the trusted release followed. The toilet
+  never entered the landmark registry (its boxes failed the depth association), so nothing drew the search back.
+- action 357: seen again from 2.8 m; the two "towards the candidate" viewpoint steps wedged the agent against the
+  corridor wall, and the standoff ring had no path -- the floor in front of the WC was still unknown (a level camera
+  sees the floor from ~1.4 m out, and the agent had only ever stood 0.6-0.9 m from those cells) and the planner
+  blocks the unknown. `_no_path` released the lock as boxed in, which refuses a new takeover within 1 m of the spot,
+  so the full glance there a step later -- through the heading the toilet had just been seen on -- re-engaged nothing.
+  Replaying the ring on the FINAL map from the same pose finds a route (offset 30, 0.60 m from the target).
+  Candidate fixes: a line-of-sight test on the back-off goal (the sight ledger has the rays); return to the sighting
+  pose instead of hunting when the retreat lost the target; plan the standoff ring through the unknown, or walk to the
+  reachable cell nearest the target, before calling the spot boxed in.
+The two never-sighted failures (Corozal/000019, Darden/000190) spent 141 / 92 actions on peeks and 73 / 83 on
+glances; the toilets sit in small WCs the search never looked into. Glance cost is the number to watch next.
+
+**Don't:**
+- Don't let the model open the second pass. It cannot count the openings on the line it was just shown.
+- Don't value an exit by its frontier's cell count: a long boundary onto a strip is many cells; a doorway onto a room
+  is few. Rays through the unknown from the threshold are the measure; a confirmed door frame is exempt.
+- Don't keep `keep_size_cells` as a significance exemption for in-room frontiers: a strip behind a cabinet is 20 cells
+  wide and reveals 0.2 m2. The exemption was tried and removed the same evening.
+- Don't widen the planner's preferred standoff to fix a detour, and don't let the planner relax by default -- the
+  factor is the rule: a squeeze only when the standoff route is a multiple of it.
+- Don't trust `seen_from_scan` or `pass: second` on a storey with an unpeeked door. The door is where the target is.
+
+---
+
+## 2026-10-13 — The 15-episode toilet re-run: five step sinks the per-episode trace exposed (a blocked clock that ran through a glance, a bump the map forgot, a room "seen" with its door unexplored, a spawn behind a sofa, a pause that un-planned committed routes)
+
+**Symptom:** The same 15 published toilet episodes (`--five-scene 3 --category toilet --shuffle`, seed 17,
+`qwen2.5:3b-instruct` for both models) run before and after the day's efficiency work went from SR 0.600 /
+SPL 0.258 / DTG 2.02 m to SR 0.533 / SPL 0.233 / DTG 3.01 m, with five episodes flipping each way. The
+per-step records (`steps.jsonl`, `metrics.json` → `room_search_loop.events`) of the four worst showed four
+distinct mechanisms, none of them the day's changes and none of them the LLM:
+
+1. **Corozal/000142** (`51eff3fa1637`): one blocked `MOVE_FORWARD` at action 274, a ten-turn glance in place,
+   and the next four transits were released `blocked` one action after they began (285→286, 316→327,
+   327→328, 328→330). Then, at 327-336, ten `MOVE_FORWARD`s into the same wall at (7.91, -0.72), heading 134°,
+   `forward_blocked` every time, and again at 349-350. The toilet was first seen at action 494 of 500.
+2. **Corozal/000076** (`c7a4c81d4dee`, a success in 88 actions before): the room holding the bathroom door
+   (`office`, centroid (5.7, 2.7), `last_inside_step: None`, `frontier_clusters: 3`) was excluded at action
+   168 as `scanned:seen_from_scan` -- the warm-up at the spawn point had half of its then-known cells in view
+   -- and valued 0.01 ("office, scanned, no toilet there") on every loop point after. Its door frontier at
+   (7.5, 3.4) never formed an opening node. The agent peeked nine openings elsewhere (two of them 82- and
+   99-action approaches) and the toilet's cells were still unknown at action 500.
+3. **Darden/000034** (`4ae716bacfab`, a 53-action success in the validation re-run): the bathroom (room 5) was
+   released `unreachable` twice on ONE refused plan each -- at 112 after 16 actions and at 493 after a
+   65-action walk that had brought the agent from 11.7 m to 2.4 m of it -- with the agent 0.5 m from the
+   spot the validation run had first seen the toilet from, facing the other way. DTG 1.33 m at the cap.
+4. **Collierville/000036** (`6bc7ace42dcf`): 488 of 500 actions as `fallback_hold` ("off the observed passable
+   map; the idle turn is the only move"), 0.0 m walked, in both runs. The agent spawned in the strip behind a
+   sofa; the depth camera ringed its 0.5 m pocket with occupied cells and no inflated route left it.
+5. **Both of the "unreachable" releases above happened on the action a glance began** (Darden/000034 at 493,
+   Corozal/000076's peek toward (-3.3, 4.4) at 282, 1.5 m short after a 51-action walk on a committed route),
+   and the re-run with fixes 1-4 still lost ~150 actions of Corozal/000076 to peeks that ended `unreachable`
+   30-62 actions into a walk that was making progress.
+
+**Root cause:**
+1. `RPTSearchPolicy._blocked_since` is reset only by a forward step's worth of displacement (the Leonardo
+   wedge lesson of 2026-10-05) and is NOT paused with the supervisor's deadlines during a suspended phase
+   (`supervisor.pause` shifts `_goal_s`, `_search_end_s`, ... through a glance, a peek's look, the warm-up;
+   the blocked clock ran on), so after a ten-turn glance any new transit was 6 s "blocked" at once. The
+   repeated wall-pushing: `ObservedMap.notify_blocked` added ONE hit (`l_occ` 0.85) to a cell the floor rays
+   had driven to `l_min` (-4); it needed ten bumps to cross the 65 % threshold, decayed again under the rays
+   during the next glance, and meanwhile the body-footprint clearing forced it free for the planner.
+2. `RoomScanLedger._status` reached `seen_from_scan` without reading the room's live frontier: "unknown cells
+   block sight, so nothing unresolved is credited" was true of the room's KNOWN cells and said nothing about
+   the unknown beyond its open boundary. Only the frontier-free tests (`seen_through`, `fragment`,
+   `explored`) required `frontier == 0`.
+3. `_transit` turned the first `_navigate` refusal into `route_failed`, which the supervisor ends as
+   `UNREACHABLE` the same action. The committed entry was a frontier cell beside the door jamb that the map
+   re-snapped under (or swallowed in the inflation) as the agent closed in; the room's other frontiers, its
+   vantage point and its centroid were never asked about.
+4. The fallback's last rung was the hold. LESSONS 2026-10-08 already said "the hold rung has no recovery: the
+   idle turn does not change the map" -- and rightly forbade opening "genuine" obstacles around the start in
+   the planner's map. Nothing physical was ever tried: the simulator's collision check, not the 0.1 m grid
+   with a 0.18 m inflation, is what says whether the body passes a 0.4 m gap.
+5. `ObjectSearchSupervisor.pause` shifted `_plan_s_at_goal` with the deadlines. That stamp is the ordinal
+   mark "a plan newer than this was made for the goal in force" (`planned = last_plan_s > _plan_s_at_goal`);
+   a committed route is planned once and followed without re-planning, so `last_plan_s` stays put, a pause
+   of a glance's length moved the mark past it, and with `elapsed > plan_grace_s` (5 s) the next update
+   released the node "no route in 5 s -- unreachable". Every transit longer than the grace was one glance
+   away from release.
+
+**Fix:** (1) `notify_action` shifts `_blocked_since` by the action time whenever it pauses the supervisor
+(external or released actions), and `notify_blocked` → `LogOddsGridCostmap.mark_occupied` sets the cell a
+forward step would have reached to `l_max` outright (it decays like any evidence, but it flips at once and
+the footprint clearing keeps occupied cells). (2) `status()` withholds `seen_from_scan` while the known live
+frontier count is above zero; `scan_point_inside` stands. (3) `_reaim_after_refusal`: the room's next three
+view-gain frontiers under `explore`, then the vantage point, then the centroid, before `route_failed`
+(`route_reaimed` events; the route memory's `no_progress` refusal still releases). (4) `methods/escape_probe.py`
+as rung 7 of the fallback: the grid read WITHOUT inflation along every turn heading, the heading with the
+thinnest occupied band (≤ 0.4 m) and the most floor beyond it (≥ 0.5 m) gets a turn or one forward step;
+a blocked probe is remembered per cell and heading for 80 actions. Collierville/000036 was out of the
+pocket in 12 actions. (5) `pause` leaves `_plan_s_at_goal` alone; the deadlines still shift. Regressions: `test_blocked_evidence.py`, `test_escape_probe.py`,
+`test_room_scans.py::test_a_room_seen_from_a_scan_with_a_live_frontier_left_...`,
+`test_explore_visit.py::test_a_plan_the_planner_refuses_re_aims_...`,
+`test_object_search_supervisor.py::test_a_pause_does_not_unplan_a_committed_route`.
+
+**Don't:**
+- Don't compare two 15-episode campaigns of the 3B model by their means and call the difference a
+  regression or a gain: the same episode went 53 actions / SPL 1.0 → 500 actions / DTG 1.33 with identical
+  code, diverging at the first loop point (Ollama is not bit-reproducible at temperature 0). Read the
+  per-episode traces; the four mechanisms above were each visible in one.
+- Don't reset the blocked clock on a glance (a wedged agent that glances every few actions would never trip
+  the verdict) -- pause it, exactly as the supervisor's deadlines are paused.
+- Don't make the bump mark permanent: a cell the agent clipped entering a 0.7 m door would close that door
+  for the episode under the inflation. Saturate it and let the free-space rays wear it down.
+- Don't write the probe's judgement into the planning map; it is an action, and the simulator answers it.
+- Don't shift an ordinal timestamp when you pause a clock: a deadline moves with the pause, a "since when"
+  mark does not. Look for releases that coincide with the first action of a glance, a peek look or the
+  warm-up; the supervisor's note says "no route in N s" about a route the follower is standing on.
+
+**Result and an open item:** with the five fixes the same 15 episodes scored SR 0.667 / SPL 0.293 / DTG 2.19 m
+(mean 301 actions), against 0.600 / 0.258 / 2.02 m before the day's work and 0.533 / 0.233 / 3.01 m after its
+first half; Corozal/000076, Darden/000034 and Wiconisco/000062 came back as successes, Collierville/000036 left
+its pocket. Three of the four remaining failures are the 3B oracle's order (Darden/000190 as in the entry below;
+Wiconisco/000014's bathtub room kept offered but ranked behind a re-scan; Markleeville/000131 first saw its toilet
+at action 493 and was mid-approach at the cap). The open item is infrastructural: that evening three `gibson.run`
+jobs died natively on the software renderer -- one left a `Zl` zombie (main thread gone, 32 Mesa/Magnum threads
+alive, `ffmpeg` child waiting) at action 40, two were SIGSEGV at actions 388 and 108 of the same episode, none
+reproduced under `PYTHONFAULTHANDLER=1`, no core (`apport` ignores a conda python, `dmesg` is restricted).
+`five_scene` now kills a job whose `live.json` is `--stall-minutes` (20) old (`STALLED`, scene failed) instead of
+waiting on the zombie, and the unreached episodes are re-run with `--episode-ids`. If it recurs, run the job
+under `catchsegv`/`gdb -batch -ex run -ex bt` or set `kernel.core_pattern` for the user before guessing.
+- Don't judge the probe by this spawn alone: with a dead planner on open floor it walks straight until a
+  wall, which the fallback tests now expect (`test_a_dead_planner_is_one_probing_step_per_action...`).
+
+---
+
 ## 2026-10-13 — ObjectNav Darden/000190: the toilet's bathroom was "not worth a step" -- the sight ledger's pocket rule settled the unseen half of a small room, three runs in a row
 
 **Symptom:** The recorded episode (`runs/benchmark_toilet_15episodes_20261013T110223Z/Darden/recordings/ec8d17aeaaaa`)

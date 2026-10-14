@@ -523,9 +523,16 @@ def test_a_confirmed_landmark_of_the_targets_class_is_a_node_at_a_fixed_probabil
     assert node.xy[0] < chair[0], "... on the agent's side (the agent is west, in room A)"
     assert abs(normalize(node.heading - math.atan2(chair[1] - node.xy[1], chair[0] - node.xy[0]))) < 1e-6, "facing the chair"
     assert landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, policy.loop.settings.openings, {lid}) == [], "inspected: not again"
-    policy.closing.rejected.append(((chair[0] + 0.3, chair[1], 0.0), policy.mapping.floor_id, 7, 1.0))
+    # A far verification that failed ("unverified") does not hide the landmark: the map fused it from several
+    # frames, and the peek brings the agent to a close view, which is new evidence (since 2026-10-14).
+    policy.closing.rejected.append(((chair[0] + 0.3, chair[1], 0.0), policy.mapping.floor_id, 7, 1.0, "unverified"))
+    assert len(landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, policy.loop.settings.openings, set())) == 1
+    policy.closing.rejected.clear()
+    # A release that DISPROVED the candidate from close does: the closing looked from near and saw nothing.
+    policy.closing.rejected.append(((chair[0] + 0.3, chair[1], 0.0), policy.mapping.floor_id, 7, 2.0,
+                                    "inspection saw nothing in any view"))
     assert landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, policy.loop.settings.openings, set()) == [], (
-        "the takeover verified a candidate there and released it: not worth another look")
+        "the takeover looked at it from close and saw nothing: not worth another look")
     policy.closing.rejected.clear()
     # In the loop: offered beside the exits at the fixed probability, never shown to the oracle, first in the order.
     policy.supervisor.inner._solver = lambda candidates, instance=None: sorted((c.room_id for c in candidates),
@@ -682,6 +689,14 @@ def test_an_opening_released_blocked_is_retired_rather_than_re_chosen():
     assert policy.loop.stats["peeks_abandoned"] == 1
     assert [e for e in policy.loop.events if e["event"] == "peek_abandoned"][-1]["reason"] == "released blocked"
     assert policy.supervisor.room_id != gap.node_id and gap.node_id not in policy.loop._openings, "not chosen again"
+    # The blocked clock was the released node's (since 2026-10-14): the node chosen in its place starts clean,
+    # and is NOT released blocked on its first action. Darden/000034 (2026-10-14, actions 119-124) released six
+    # nodes in six actions on one wedged walk's clock, four of them openings retired for good.
+    assert policy._blocked_since is None, "a release resets the blocked clock"
+    chosen = policy.supervisor.room_id
+    policy.loop.plan(obs_at(episode, 2, IN_A), world)
+    assert policy.supervisor.room_id == chosen and policy.supervisor.history[-1][:2] == (gap.node_id, BLOCKED)
+    assert policy.supervisor.stats["blocked"] == 1, "one blocked release, not a chain"
 
 
 def test_a_completed_look_covers_the_frontier_it_reveals_through_the_same_door():
@@ -704,3 +719,32 @@ def test_a_completed_look_covers_the_frontier_it_reveals_through_the_same_door()
     assert plain.peeked(0, (5.5, 5.0)) and not plain.peeked(0, (7.5, 5.0))
     assert plain.diagnostics()["peeked"]["0"][0]["heading"] is None
     assert registry.diagnostics()["peeked"]["0"][0]["heading"] == 0.0
+
+
+def test_a_target_landmark_seen_once_at_the_closings_confidence_is_a_node_a_weaker_one_is_not():
+    """Wiconisco/000014 (2026-10-14): the toilet seen once at 0.54 from 3.2 m was fused as a landmark with one
+    observation, which the map does not confirm; no `T` node, and the search went elsewhere for 65 actions. A
+    single sighting at ``landmark_sighting_confidence`` (the closing's 0.50) is a node; a 0.35 glimpse is not."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import LANDMARK, landmark_openings, target_landmarks
+    policy, episode, world, rooms, reasoned = opening_policy(order=(1, 0))
+    chair = (8.5, 1.5)
+    weak = (8.5, 3.5)
+    policy.landmarks.observe("chair", chair, frame_id=0, radius_m=0.3)          # one observation: unconfirmed
+    policy.landmarks.observe("chair", weak, frame_id=0, radius_m=0.3)
+    lid = next(lm.id for lm in policy.landmarks.all_landmarks() if lm.xy == chair)
+    wid = next(lm.id for lm in policy.landmarks.all_landmarks() if lm.xy == weak)
+    assert policy.landmarks.confirmed() == []
+    policy._landmark_best_conf = {lid: 0.54, wid: 0.35}
+    settings = policy.loop.settings.openings
+    assert [lm.id for lm in target_landmarks(policy, settings)] == [lid]
+    cost = policy.navigation_cost(world)
+    nodes = landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, settings, set())
+    assert [n.landmark_id for n in nodes] == [lid] and nodes[0].kind == LANDMARK
+    # Disabled (1.0): confirmed landmarks only, as before.
+    from dataclasses import replace as dc_replace
+    strict = dc_replace(settings, landmark_sighting_confidence=1.0)
+    assert target_landmarks(policy, strict) == []
+    policy.landmarks.observe("chair", chair, frame_id=1, radius_m=0.3)          # the second observation confirms it
+    assert [lm.id for lm in target_landmarks(policy, strict)] == [lid]
+    with pytest.raises(ValueError):
+        dc_replace(settings, landmark_sighting_confidence=0.0)

@@ -105,10 +105,20 @@ class ObservedMap:
         return world
 
     def notify_blocked(self, observation, forward_step_m):
-        """Record a failed forward step as local evidence, not a GT wall lookup."""
+        """Record a failed forward step as local evidence, not a GT wall lookup.
+
+        The cell a forward step would have put the agent's centre on is set
+        occupied outright (:meth:`LogOddsGridCostmap.mark_occupied`): the body
+        touched what is there. A single hit's increment could not outvote the
+        free-space rays that had cleared the cell, and the planner kept routing
+        through it -- Corozal/000142 (``51eff3fa1637``, 2026-10-13) pushed into
+        the same wall ten actions running before the cell flipped. A cell at
+        ``l_max`` also survives the body-footprint clearing below, which keeps
+        occupied cells.
+        """
         p = observation.pose
         ahead = [[p.x + forward_step_m * math.cos(p.yaw), p.y + forward_step_m * math.sin(p.yaw)]]
-        self.grid.update_from_points_xy(np.repeat(ahead, 20, axis=0))
+        self.grid.mark_occupied(np.asarray(ahead))
 
     def integrity(self):
         """Observed map identities for recording; no surveyed geometry or levels."""

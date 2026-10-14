@@ -17,7 +17,7 @@ class FloorContextBank:
     FIELDS = ("graph", "doors", "landmarks", "target_evidence", "supervisor", "loop",
               "_target_xy", "_target_id", "_target_step", "_last_door_revision",
               "_visited_frontiers", "_last_graph_step", "_last_plan_s",
-              "_blocked_since", "_floor_time", "_object_geometry", "_target_floor_id")
+              "_blocked_since", "_floor_time", "_object_geometry", "_landmark_best_conf", "_target_floor_id")
 
     def __init__(self, policy):
         self.policy = policy
@@ -59,6 +59,7 @@ class FloorContextBank:
         p.loop = RoomSearchLoop(p, p.loop_settings)
         p._target_xy = p._target_id = p._target_floor_id = None
         p._object_geometry = {}
+        p._landmark_best_conf = {}        # landmark id -> the best detector confidence it was observed at
         p._target_step = -p.settings.target_memory_steps - 1
         p._last_door_revision = 0
         p._visited_frontiers = []
