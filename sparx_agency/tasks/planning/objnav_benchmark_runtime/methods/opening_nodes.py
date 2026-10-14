@@ -61,7 +61,8 @@ from sparx_agency.core.mapping.topology.search_node_oracle import OPENING, Searc
 from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_from_camera
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DOOR_LABELS
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import goal_rooms, split_exits
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import (
+    goal_rooms, shadow_exemption, split_exits)
 
 #: Opening node ids start here, above the stair band (100 000 - 199 999).
 OPENING_NODE_BASE = 200_000
@@ -124,6 +125,23 @@ class OpeningSettings:
         approach_factor: See ``approach_steps``.
         look_turns: Turns to each side of the heading the look takes (1 =
             straight, left, right).
+        step_through: After the look from the standoff, walk ON TO the
+            threshold and look again, wider (since 2026-10-14). A frontier
+            cell borders unknown, unknown inflates, so the planner's route
+            ends up to 0.6 m behind the threshold and the first look sees
+            the room beyond through a wedge the jambs leave -- Collierville/
+            000023 looked from 0.58 m behind its doorway at three headings
+            and saw nothing of the room. Once the first look has mapped the
+            floor just beyond, the threshold cell is passable: the peek
+            walks to it (``through_steps`` actions at most) and takes a
+            second look of ``through_look_turns`` to each side of the way
+            it came through -- left and right, standing in the door. Only
+            when the first look stood more than the arrival tolerance short
+            of the threshold; off, the peek is the one look as before.
+        through_look_turns: Turns to each side of the second look (2 = five
+            headings, +-60 degrees, +-100 with the camera's half field).
+        through_steps: Actions the walk from the standoff to the threshold
+            may take before the peek is retired with the first look alone.
         visit_steps: Hard bound on the look, from arrival.
         service_steps: What RPT* charges a peek for.
         revalue_actions: While nothing is in force, a NEW opening buys the
@@ -131,6 +149,29 @@ class OpeningSettings:
             once for a new room or staircase; openings appear and re-snap
             with every step of the fallback, and attempt 8 asked thirty
             times in sixty actions).
+        unvalued_prob: What an exit the oracle has NOT valued is handed to
+            RPT* with, until it is asked (since 2026-10-14). The oracle's
+            numbers are replaced wholesale at every call, so an exit that
+            was folded into its room's walk at the call (the room offered,
+            :meth:`RoomSearchLoop._fold_openings`) and unfolded by the
+            reply (the room dropped under ``min_prob``) comes out of the
+            call with no number at all -- it was not shown -- and read 0.0:
+            no node, under the floor, until the next call, which comes at
+            the next SELECT, after whatever the solver chose instead is
+            done. Corozal/000142 (2026-10-14, action 446): the toilet's own
+            doorway, 12 m2 unseen behind it and 6 m away, was unfolded by
+            the reply that rated the room it opened from "office, entered"
+            at 1 %, read 0.0, and the search walked 12 m the other way to a
+            gap the model gave 10 %; no SELECT came in the 54 actions left.
+            An exit the model has not been shown is worth what the model
+            gives an unseen doorway it has (10 % that action). The oracle's
+            own last number for the exit is used first when it has one from
+            an earlier call; the provisional value is only for an exit it
+            has never seen. The next call values it (a node without a
+            number still buys the call). 0 disables: unvalued exits read
+            0.0 as before. (0.05 -- the floor -- was tried on 2026-10-14 and
+            cost two episodes that 0.10 had won: the user's verdict was the
+            run with 0.10, ``benchmark_toilet_10episodes_20261014T143259Z``.)
         landmarks_enabled: Offer confirmed landmarks of the target's class
             as nodes (the default).
         landmark_prob: The fixed probability such a node is handed to RPT*
@@ -171,6 +212,12 @@ class OpeningSettings:
             168-255: an 87-action loop round the capsule of a staircase to
             peek at the gap at its foot). Checked against the portal points
             as well, as before, and again every action of a peek's walk.
+            Directional since 2026-10-14 (evening): only masked cells and
+            portal points on the exit's UNKNOWN side count
+            (:func:`near_stair_mask` with the heading, :func:`beyond`) --
+            Darden/000034's bathroom door, 1.3-1.5 m beside the flight with
+            its room opening the other way, was struck off the openings for
+            the whole episode by the omnidirectional test.
         vanish_actions: A peek's opening absent from the live inventory for
             this many actions running, while its threshold is still more
             than ``merge_m`` away, was resolved by the camera on the way:
@@ -189,9 +236,13 @@ class OpeningSettings:
     approach_steps: int = 20
     approach_factor: float = 1.6
     look_turns: int = 1
+    step_through: bool = True
+    through_look_turns: int = 2
+    through_steps: int = 8
     visit_steps: int = 30
     service_steps: int = 4
     revalue_actions: int = 6
+    unvalued_prob: float = 0.10
     landmarks_enabled: bool = True
     landmark_prob: float = 0.85
     landmark_standoff_m: float = 1.5
@@ -202,9 +253,12 @@ class OpeningSettings:
     vanish_actions: int = 3
 
     def __post_init__(self):
-        for name in ("enabled", "landmarks_enabled"):
+        for name in ("enabled", "landmarks_enabled", "step_through"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError("openings.%s must be a bool" % name)
+        for name in ("through_look_turns", "through_steps"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError("openings.%s must be a non-negative integer" % name)
         for name in ("gain_full_m2", "stair_exclusion_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
@@ -224,6 +278,8 @@ class OpeningSettings:
                 raise ValueError("%s must be positive and finite" % name)
         if isinstance(self.landmark_prob, bool) or not math.isfinite(self.landmark_prob) or not 0 < self.landmark_prob < 1:
             raise ValueError("landmark_prob must lie in (0, 1)")
+        if isinstance(self.unvalued_prob, bool) or not math.isfinite(self.unvalued_prob) or not 0 <= self.unvalued_prob < 1:
+            raise ValueError("unvalued_prob must lie in [0, 1)")
         if (isinstance(self.landmark_sighting_confidence, bool) or not math.isfinite(self.landmark_sighting_confidence)
                 or not 0 < self.landmark_sighting_confidence <= 1):
             raise ValueError("landmark_sighting_confidence must lie in (0, 1]")
@@ -445,8 +501,25 @@ def opening_value_factor(opening: Opening, settings: OpeningSettings) -> float:
     return float(min(1.0, max(settings.gain_min_factor, float(opening.gain_m2) / settings.gain_full_m2)))
 
 
-def near_stair_mask(policy, world, xy, radius_m: float) -> bool:
-    """Whether a cell the spawn-floor guard has masked (stairs, drops) lies within ``radius_m`` of ``xy``."""
+def beyond(xy, heading: Optional[float], point) -> bool:
+    """Whether ``point`` lies on the unknown side of a frontier at ``xy`` facing ``heading`` (any side when heading is None)."""
+    if heading is None:
+        return True
+    return (float(point[0]) - float(xy[0])) * math.cos(heading) + (float(point[1]) - float(xy[1])) * math.sin(heading) > 0.0
+
+
+def near_stair_mask(policy, world, xy, radius_m: float, heading: Optional[float] = None) -> bool:
+    """Whether a cell the spawn-floor guard has masked (stairs, drops) lies within ``radius_m`` of ``xy`` -- beyond it, when ``heading`` is given.
+
+    The exclusion says "the unknown beyond this frontier is the flight or
+    the level below", so with the frontier's unknown heading known only the
+    masked cells on THAT side count (since 2026-10-14 evening): a doorway
+    beside a staircase whose room opens the other way is a room's door.
+    Darden/000034's bathroom door stands 1.3-1.5 m from the flight, and
+    the omnidirectional test struck both frontiers onto it off the
+    openings for the whole episode. Without a heading every masked cell in
+    the window counts, as before.
+    """
     guard = getattr(policy, "floor_guard", None)
     mask = getattr(guard, "mask", None)
     if mask is None or radius_m <= 0.0:
@@ -454,8 +527,15 @@ def near_stair_mask(policy, world, xy, radius_m: float) -> bool:
     gx, gy = world.world_to_grid(float(xy[0]), float(xy[1]))
     cells = int(math.ceil(radius_m / world.resolution))
     h, w = mask.shape
-    window = mask[max(0, gy - cells):min(h, gy + cells + 1), max(0, gx - cells):min(w, gx + cells + 1)]
-    return bool(window.any())
+    y0, x0 = max(0, gy - cells), max(0, gx - cells)
+    window = mask[y0:min(h, gy + cells + 1), x0:min(w, gx + cells + 1)]
+    if heading is None:
+        return bool(window.any())
+    ys, xs = np.nonzero(window)
+    for cy, cx in zip(ys, xs):
+        if beyond(xy, heading, world.grid_to_world(int(cx + x0), int(cy + y0))):
+            return True
+    return False
 
 
 def unknown_view_for(policy, world):
@@ -484,13 +564,21 @@ def detect_openings(policy, obs, world, settings: OpeningSettings, registry: Ope
         return []
     goals = p.sweep.admissible(obs, world, list(inventory.goals))
     landmarks = list(p.landmarks.confirmed()) if getattr(p, "landmarks", None) is not None else []
-    exits, _ = split_exits(goals, landmarks, world.resolution, p.fallback.settings, type_rule=False)
+    view = unknown_view_for(p, world) if settings.gain_full_m2 > 0.0 else None
+    # A frontier with a room's floor right behind it is nobody's shadow (``shadow_exemption``, since
+    # 2026-10-14): the strip behind a bed has the wall behind it, and the 2.9 m frontier onto
+    # Collierville/000023's toilet room was dropped as the refrigerator's.
+    exits, _ = split_exits(goals, landmarks, world.resolution, p.fallback.settings, type_rule=False,
+                           exempt=shadow_exemption(view, p.fallback.settings))
     stairs = stair_points(p)
-    exits = [g for g in exits if not any(math.dist(g.xy, point) <= settings.merge_m for point in stairs)
-             and not near_stair_mask(p, world, g.xy, settings.stair_exclusion_m)]
+    # The stairs' test is directional (since 2026-10-14 evening): a frontier beside a flight
+    # whose unknown opens the other way is a room's door, not the flight's foot.
+    headings = {g: unknown_heading(world, g.cell) for g in exits}
+    exits = [g for g in exits
+             if not any(math.dist(g.xy, point) <= settings.merge_m and beyond(g.xy, headings[g], point) for point in stairs)
+             and not near_stair_mask(p, world, g.xy, settings.stair_exclusion_m, heading=headings[g])]
     if not exits:
         return []
-    view = unknown_view_for(p, world) if settings.gain_full_m2 > 0.0 else None
     room_of = goal_rooms(inventory)
     clusters: List[List] = []
     for goal in exits:                                  # utility order: the seed is the best exit of its cluster
@@ -510,7 +598,9 @@ def detect_openings(policy, obs, world, settings: OpeningSettings, registry: Ope
         if size < settings.min_cells or registry.peeked(floor, seed.xy):
             continue
         pid = room_of.get(seed)
-        heading = unknown_heading(world, seed.cell)
+        heading = headings.get(seed)
+        if heading is None:
+            heading = unknown_heading(world, seed.cell)
         if heading is None:
             origin = rooms[pid].centroid if pid in rooms else (obs.pose.x, obs.pose.y)
             heading = math.atan2(seed.xy[1] - origin[1], seed.xy[0] - origin[0])

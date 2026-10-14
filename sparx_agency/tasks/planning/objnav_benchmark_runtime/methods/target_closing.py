@@ -46,6 +46,16 @@ class TargetClosingSettings:
     # until 2026-10-07 only the look-down existed, and a hardcoded LOOK_DOWN drove
     # high targets out of the frame.
     look_down_distance_m: float = 1.30
+    # THE GEOMETRIC PITCH IS QUANTISED WITH HYSTERESIS (since 2026-10-14 evening). ``_pitch``
+    # rounds the elevation it wants to the protocol's tilt step; a target whose depression
+    # from the next step's range lands at half a step -- a 0.39 m toilet seen from 2.2 m by a
+    # camera 0.9 m up is 15.0 degrees down, the step is 30 -- rounds to 0 on one frame and to
+    # 30 on the next as the memory's height flickers by millimetres between frames taken at
+    # different pitches, and the converter serves a pitch change before any move: Darden/
+    # 000034 spent its last nine actions on LOOK_DOWN / LOOK_UP 2.19 m from a locked toilet
+    # and never stepped. The step the camera is AT is kept while the wanted angle lies within
+    # ``(0.5 + pitch_hysteresis)`` steps of it; the change needs that much more.
+    pitch_hysteresis: float = 0.15
     # A target within this height of the camera is level with it: neither LOOK is
     # forced, and the verification frame falls back to whichever view keeps the box
     # inside the frame.
@@ -227,6 +237,37 @@ class TargetClosingSettings:
     stop_centring: bool = True
     stop_confidence: float = 0.50
     weak_stop_max_holds: int = 2
+    # THE STOP OVERSHOOT (since 2026-10-14). The terminal ranges are read short of the truth: the
+    # near edge of a box with floor in it, and a centroid fused from the near surfaces, both stand
+    # nearer than the object's footprint does, and the evaluator measures to the footprint.
+    # Markleeville/000188 (``benchmark_toilet_10episodes_20261014T143259Z``) STOPped on a 0.84 m
+    # near-edge reading 1.27 m from the toilet's footprint -- DTG 0.27, SR 0. (Reading a small
+    # object's range from the fused memory instead was tried the same day and flipped CLOSE and
+    # INSPECT on alternate frames; see ``_fresh_measured``.) So once the STOP is DECIDED, on
+    # whichever evidence, the closing walks on toward the target and STOPs then -- no frame is
+    # consulted, nothing is verified again, the decision stands: ``stop_overshoot_steps`` (one)
+    # MOVE_FORWARD always, then more, up to ``stop_overshoot_max_steps`` in all, while the 3-D
+    # memory still stands farther than ``stop_overshoot_within_m`` from the agent. The memory is
+    # about the footprint's near face (000188: 1.25 m where the footprint's disc began at 1.27),
+    # so a memory inside 0.90 m is a tenth inside the evaluator's radius; the near edge is not
+    # trusted for this -- it is what decided the STOP, and in 000188 it undercut the memory by
+    # 0.41 m where the eight STOPs that succeeded agreed with it within 0.14. Verified in turn
+    # (2026-10-14 evening): two steps always, SR 0.90 but every other STOP 0.01-0.07 SPL dearer
+    # (``…155701Z``); one step always, SR 0.80 with 000188 STOPped 3 cm outside the disc
+    # (``…162832Z``); on those nine deciding frames this rule takes the second step twice.
+    # A step is taken only while the memory would still stand ``stop_overshoot_min_range_m`` or
+    # more beyond the agent after it, and the near edge the deciding frame measured (when it did)
+    # at least the body radius; the agent must face within a quarter turn of the memory (farther
+    # off the converter would turn first, and one over a turn off is not "a step forward"); a
+    # step the converter reports blocked ends the overshoot at once, and
+    # ``stop_overshoot_max_actions`` bounds the whole stage, turns included (the three turns a
+    # quarter-turn error can take, plus the steps). ``stop_overshoot_max_steps`` 0 restores the
+    # STOP on the deciding frame; 1 is one step and never a second.
+    stop_overshoot_steps: int = 1
+    stop_overshoot_max_steps: int = 2
+    stop_overshoot_within_m: float = 0.90
+    stop_overshoot_min_range_m: float = 0.45
+    stop_overshoot_max_actions: int = 5
     # After a release, no new takeover may START on a far candidate for this
     # many actions: six twelve-step verifications from one spot three metres
     # from the couch (Ranchester attempt 4) were the same failure repeated,
@@ -383,11 +424,24 @@ class TargetClosingSettings:
         if (isinstance(self.bbox_pitch_region, bool) or not math.isfinite(self.bbox_pitch_region)
                 or not 0 < self.bbox_pitch_region < 0.5):
             raise ValueError("bbox_pitch_region must lie in (0, 0.5)")
+        if (isinstance(self.pitch_hysteresis, bool) or not math.isfinite(self.pitch_hysteresis)
+                or not 0 <= self.pitch_hysteresis < 0.5):
+            raise ValueError("pitch_hysteresis must lie in [0, 0.5)")
         if (isinstance(self.stop_confidence, bool) or not math.isfinite(self.stop_confidence)
                 or not self.track_confidence <= self.stop_confidence <= 1):
             raise ValueError("stop_confidence must lie in [track_confidence, 1]")
         if type(self.weak_stop_max_holds) is not int or self.weak_stop_max_holds < 0:
             raise ValueError("weak_stop_max_holds must be a non-negative int")
+        if type(self.stop_overshoot_steps) is not int or self.stop_overshoot_steps < 0:
+            raise ValueError("stop_overshoot_steps must be a non-negative int")
+        if type(self.stop_overshoot_max_steps) is not int or self.stop_overshoot_max_steps < self.stop_overshoot_steps:
+            raise ValueError("stop_overshoot_max_steps must be an int of at least stop_overshoot_steps")
+        for key in ("stop_overshoot_within_m", "stop_overshoot_min_range_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError("%s must be positive and finite" % key)
+        if type(self.stop_overshoot_max_actions) is not int or self.stop_overshoot_max_actions < self.stop_overshoot_max_steps:
+            raise ValueError("stop_overshoot_max_actions must be an int of at least stop_overshoot_max_steps")
         if type(self.release_cooldown_actions) is not int or self.release_cooldown_actions < 0:
             raise ValueError("release_cooldown_actions must be a non-negative int")
         if self.terminal_distance_m + self.range_tolerance_m > self.look_down_distance_m:
@@ -541,6 +595,7 @@ class TargetClosing:
         self.dead_band_alignments = 0      # inspection frames read as aligned because a turn back would undo the last turn
         self.through_unknown_routes = 0    # standoff routes planned through unknown cells after the known floor had none
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
+        self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
         self._clear()
 
     def _clear(self):
@@ -592,6 +647,7 @@ class TargetClosing:
         self.inspection_stepped = 0        # steps this inspection took for a fresh range one step beyond the limit
         self.inspection_turn = None        # (step, sign) of the inspection's last centring turn on a fresh box
         self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
+        self.overshoot = None              # the decided STOP's forward steps in progress (``_terminal``), else None
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -831,6 +887,10 @@ class TargetClosing:
         if obs.step == self.processed:
             return
         self.processed = obs.step
+        if self.overshoot is not None:
+            # The STOP is decided: the frames between it and the STOP are not evidence
+            # (``_terminal``). Nothing is associated, released or re-verified on them.
+            return
         p, s = self.policy, self.settings
         if self.active and self.blind():
             # No evidence either way: the consecutive-frame chain is carried across the
@@ -1146,12 +1206,30 @@ class TargetClosing:
                 desired = max(actions.tilt_angle_rad, desired)
             elif elevation > 0:
                 desired = min(-actions.tilt_angle_rad, desired)
-        desired = round(desired / actions.tilt_angle_rad) * actions.tilt_angle_rad
+        desired = self._quantise_pitch(obs, desired)
         if actions.min_pitch_rad is not None:
             desired = max(actions.min_pitch_rad, desired)
         if actions.max_pitch_rad is not None:
             desired = min(actions.max_pitch_rad, desired)
         return float(desired)
+
+    def _quantise_pitch(self, obs, desired):
+        """``desired`` on the protocol's tilt steps -- the step the camera is at while ``desired`` lies within the hysteresis band of it.
+
+        Plain rounding chatters: a wanted angle at half a step rounds up on
+        one frame and down on the next as the memory moves by millimetres,
+        and every change of pitch is an action that is not a step toward
+        the target (Darden/000034, 2026-10-14: nine LOOK_DOWN / LOOK_UP
+        actions 2.19 m from a locked toilet, the wanted angle 15.0 degrees
+        against a 30-degree step). The present step is kept while the wanted
+        angle is within ``(0.5 + pitch_hysteresis)`` steps of it; a change
+        has to be wanted by that much more.
+        """
+        tilt = float(self.policy.episode.action_spec.tilt_angle_rad)
+        current = round(float(obs.pose.camera_pitch) / tilt) * tilt
+        if abs(desired - current) <= (0.5 + self.settings.pitch_hysteresis) * tilt:
+            return current
+        return round(desired / tilt) * tilt
 
     def _servo(self, obs, advance_m=0.0):
         """The image-space servo's verdict on the fresh box, or None when it has no say.
@@ -1466,6 +1544,8 @@ class TargetClosing:
         p, s = self.policy, self.settings
         if self.failure:
             self.fail(self.failure)
+        if self.overshoot is not None:
+            return self._overshoot_step(obs)
         if self.blind():
             return self._blind_frame(obs, world)
         if obs.step - self.started >= s.max_closing_steps:
@@ -1802,24 +1882,21 @@ class TargetClosing:
         # down where the prediction said 30, and twenty actions of LOOK_UP/LOOK_DOWN
         # followed a fresh, centred, in-range sighting before the budget STOPped.
         if fresh and not turning and measured <= limit:
-            self.phase = "STOP"
-            return NavigationCommand.stop_here(info=dict(info, phase="STOP", depth_valid=True,
+            return self._terminal(obs, distance, measured, dict(info, phase="STOP", depth_valid=True,
                                                          reason="fresh terminal target confirmation"))
         if history and fresh and measured <= limit:
             # Tracked and approached over metres: a cropped box whose centre says "turn" is
             # still the object, and the benchmark measures range, not heading.
-            self.phase = "STOP"
             self.history_stops += 1
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", reason="fresh in-range sighting after a %.1f m approach; alignment not required"
                 % self.history.path_m))
         if (history and not fresh and distance <= reach
                 and self.terminal_missing >= s.history_stop_after_missing):
             # The trajectory is complete and the detector has dropped the box for a few
             # frames: the 3-D memory refined over the approach is what we STOP on.
-            self.phase = "STOP"
             self.history_stops += 1
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", standoff_reached=self.path.arrived,
                 reason="approach history: target tracked over %.1f m, the 3-D memory stands %.2f m "
                 "away (sigma %.2f m) and %d frames passed without a fresh box%s"
@@ -1830,8 +1907,7 @@ class TargetClosing:
             # The previous frame met the STOP's own conditions -- fresh, in range, confident -- and the
             # one centring tilt deferred it for a whole box; the detector did not show one. That tilt
             # may cost an action, never the STOP: it is taken on the evidence of the frame before.
-            self.phase = "STOP"
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", depth_valid=True,
                 reason="fresh terminal target confirmation one action ago; the centring tilt lost the box, the "
                        "sighting stands (memory %.2f m away, sigma %.2f m)" % (distance, self.memory.sigma_m)))
@@ -1843,9 +1919,8 @@ class TargetClosing:
             # a few actions ago, the memory inside the terminal range: STOP (since 2026-10-11;
             # before, the Wiconisco toilet was released as "saw nothing in any view" with the
             # agent standing inside the success region).
-            self.phase = "STOP"
             self.blind_cone_stops += 1
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", below_frame_px=round(below, 1),
                 reason="target below the camera's field of view from here (%d px of it would show; no LOOK action): "
                        "seen fresh %d action(s) ago, the 3-D memory stands %.2f m away (sigma %.2f m)"
@@ -1858,12 +1933,11 @@ class TargetClosing:
             if distance <= reach and (exhausted or history):
                 # Not "saw nothing": the approach brought us here, or the surface the target
                 # stands on is still measured at the memory's spot. Complete and STOP.
-                self.phase = "STOP"
                 if history:
                     self.history_stops += 1
                 else:
                     self.support_stops += 1
-                return NavigationCommand.stop_here(info=dict(
+                return self._terminal(obs, distance, measured, dict(
                     info, phase="STOP", standoff_reached=self.path.arrived,
                     reason=("approach history: %.1f m walked to this spot; the 3-D memory stands"
                             % self.history.path_m) if history else
@@ -1882,8 +1956,7 @@ class TargetClosing:
                 blank = False
         if exhausted or blank:
             if s.stop_on_exhausted_inspection and self.inspection_sighting is not None:
-                self.phase = "STOP"
-                return NavigationCommand.stop_here(info=dict(
+                return self._terminal(obs, distance, measured, dict(
                     info, phase="STOP", reason="inspection exhausted; target seen fresh in terminal range at action %d"
                     % self.inspection_sighting))
             if s.release_on_failed_inspection:
@@ -1962,6 +2035,95 @@ class TargetClosing:
                        % fix.region.replace("_", " ")))
         return None
 
+    def _terminal(self, obs, distance, measured, info):
+        """The decided STOP -- taken now, or after the forward steps of ``stop_overshoot_steps``.
+
+        The decision is final here: every STOP of :meth:`_inspect` comes
+        through, and once the overshoot has begun no frame is consulted
+        again (:meth:`observe` and :meth:`plan` short-circuit on it) -- the
+        steps are walked blind toward the 3-D memory, and the STOP follows
+        whatever the detector shows meanwhile. ``stop_overshoot_steps``
+        steps always; more, up to ``stop_overshoot_max_steps``, while the
+        memory still stands beyond ``stop_overshoot_within_m``. See the
+        settings for why.
+
+        Args:
+            obs: The deciding frame.
+            distance: Planar range to the 3-D memory from it, metres.
+            measured: Its fresh near-edge range, or None without a fresh box.
+            info: The STOP's diagnostics, ``reason`` included.
+        """
+        self.phase = "STOP"
+        if self.settings.stop_overshoot_max_steps < 1:
+            return NavigationCommand.stop_here(info=info)
+        self.overshoot = {"info": dict(info), "decided": int(obs.step), "step": -1,
+                          "from_xy": (float(obs.pose.x), float(obs.pose.y)),
+                          "near_m": None if measured is None else float(measured), "memory_m": float(distance),
+                          "steps": 0, "actions": 0, "blocked": False, "ended": None}
+        return self._overshoot_step(obs)
+
+    def _overshoot_step(self, obs):
+        """One action of the overshoot: a forward step toward the memory, or the STOP that ends it."""
+        s, actions, o = self.settings, self.policy.episode.action_spec, self.overshoot
+        if o["step"] != obs.step:
+            o["actions"] += int(o["step"] >= 0)
+            o["step"] = int(obs.step)
+        step_m = actions.forward_step_m
+        here = (float(obs.pose.x), float(obs.pose.y))
+        walked = math.dist(here, o["from_xy"])
+        distance = math.dist(here, self.xyz[:2])
+        near = None if o["near_m"] is None else o["near_m"] - walked
+        bearing = math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
+        error = normalize_angle(bearing - obs.pose.yaw)
+        ended = None
+        if o["blocked"]:
+            ended = "a step was blocked"
+        elif o["steps"] >= s.stop_overshoot_max_steps:
+            ended = "%d step(s) taken" % o["steps"]
+        elif o["steps"] >= s.stop_overshoot_steps and distance <= s.stop_overshoot_within_m:
+            ended = ("%d step(s) taken and the memory stands %.2f m away, within %.2f m"
+                     % (o["steps"], distance, s.stop_overshoot_within_m))
+        elif o["actions"] >= s.stop_overshoot_max_actions:
+            ended = "%d actions spent" % o["actions"]
+        elif distance - step_m < s.stop_overshoot_min_range_m:
+            ended = "the memory would stand %.2f m away after another step" % (distance - step_m)
+        elif near is not None and near - step_m < self.policy.settings.body_radius_m:
+            ended = "the measured near edge would stand %.2f m away after another step" % (near - step_m)
+        elif abs(error) > math.pi / 2:
+            ended = "the memory is %.0f degrees off the heading" % math.degrees(abs(error))
+        stage = {"decided_step": o["decided"], "steps": o["steps"], "actions": o["actions"], "blocked": o["blocked"],
+                 "walked_m": round(walked, 3), "memory_m": round(distance, 3),
+                 "near_m": None if near is None else round(near, 3), "ended": ended}
+        if ended is not None:
+            self.phase = "STOP"
+            o["ended"] = ended
+            return NavigationCommand.stop_here(info=dict(o["info"], phase="STOP", range_m=distance, stop_overshoot=stage))
+        self.phase = "ADVANCE"
+        self.overshoot_commands += 1
+        # Within a turn of the memory the heading that put the object in the frame is the better
+        # aim; farther off the converter turns toward the memory first (turns cost no path).
+        aim = float(obs.pose.yaw) if abs(error) <= actions.turn_angle_rad else bearing
+        reach_m = 2.0 * step_m                   # the converter arrives within a step of a goal: aim past it
+        ahead = (here[0] + reach_m * math.cos(aim), here[1] + reach_m * math.sin(aim))
+        return NavigationCommand.follow(
+            [here, ahead], camera_pitch=None,          # the camera stays where it is (``camera_control`` holds it)
+            info=dict(o["info"], phase=self.phase, target_visible=self.last_seen == obs.step, range_m=distance,
+                      stop_overshoot=stage,
+                      reason="STOP decided at action %d (%s): step %d of at most %d toward the target before it%s"
+                             % (o["decided"], o["info"].get("reason"), o["steps"] + 1, s.stop_overshoot_max_steps,
+                                "" if o["steps"] < s.stop_overshoot_steps else
+                                "; the memory still stands %.2f m away, beyond %.2f m" % (distance, s.stop_overshoot_within_m))))
+
+    def note_action(self, action):
+        """The action the agent took on the closing's command (the policy's ``notify_action``)."""
+        if self.overshoot is not None and getattr(action, "name", action) == "MOVE_FORWARD":
+            self.overshoot["steps"] += 1
+
+    def note_blocked(self):
+        """The converter reports the last MOVE_FORWARD did not move the agent (the policy's ``notify_blocked``)."""
+        if self.overshoot is not None:
+            self.overshoot["blocked"] = True
+
     def _approach_stalled(self, obs):
         """Whether the last ``approach_stall_actions`` CLOSE actions left the agent inside a circle of ``approach_stall_m``."""
         s = self.settings
@@ -1981,7 +2143,13 @@ class TargetClosing:
         nearer -- and, for a box the frame's lower edge cut
         (:meth:`_floor_cut`), the planar range to the 3-D memory when that
         is nearer still: the part in view is then the upper, farther part
-        of the object, and the memory is its centroid.
+        of the object, and the memory is its centroid. (A 2026-10-14
+        experiment read a small object's range from the fused memory
+        instead of its near edge, after Markleeville/000188 STOPped 1.25 m
+        from a toilet on a 0.84 m near edge; it flipped CLOSE and INSPECT
+        on alternate frames -- TURN_LEFT / TURN_RIGHT for 25 actions -- and
+        stopped 3 cm outside the evaluator's disk where it did STOP. The
+        near edge stands.)
         """
         if self.last_seen != obs.step or self.observed_xyz is None:
             return None
@@ -2119,6 +2287,9 @@ class TargetClosing:
                 "backoff_persistence_skips": self.backoff_persistence_skips,
                 "inspection_steps": self.inspection_steps, "dead_band_alignments": self.dead_band_alignments,
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
+                "overshoot_commands": self.overshoot_commands,
+                "stop_overshoot": None if self.overshoot is None else {
+                    key: self.overshoot[key] for key in ("decided", "steps", "actions", "blocked", "ended")},
                 "standoff_arrived": self.path.arrived, "standoff_arrivals": self.path.arrivals,
                 "standoff_dropped": self.path.dropped,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}

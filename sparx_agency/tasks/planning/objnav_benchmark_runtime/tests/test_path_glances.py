@@ -243,7 +243,7 @@ def test_a_target_sighting_aborts_the_glance_and_resumes_the_route_clocks():
     assert scheduler.stats["aborted"] == 1 and policy.route_memory.pauses == [2]
     assert scheduler.events[-1]["event"] == "glance_aborted" and scheduler.events[-1]["reason"] == "target_priority"
     state = scheduler.state()
-    assert state == {"active": None, "planned": None}
+    assert state["active"] is None and state["planned"] is None and "here" in state
     diagnostics = scheduler.diagnostics()
     assert diagnostics["stats"]["started"] == 1 and len(diagnostics["events"]) >= 3
 

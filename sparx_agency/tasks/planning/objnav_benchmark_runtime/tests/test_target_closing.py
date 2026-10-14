@@ -318,13 +318,17 @@ def test_navmesh_round_trip_enu_native_coordinates():
 @pytest.mark.parametrize("kwargs", [{"confirmation_frames": 1}, {"confirmation_frames": True},
                                     {"confidence": float("nan")}, {"confidence": 0}, {"max_verify_steps": 0},
                                     {"border_margin_px": -1}, {"border_margin_px": 2.0},
-                                    {"release_unverified": 1}, {"rejection_radius_m": 0}])
+                                    {"release_unverified": 1}, {"rejection_radius_m": 0},
+                                    {"stop_overshoot_steps": -1}, {"stop_overshoot_steps": 1.0},
+                                    {"stop_overshoot_min_range_m": 0}, {"stop_overshoot_within_m": float("inf")},
+                                    {"stop_overshoot_max_steps": 0}, {"stop_overshoot_max_steps": 2.0},
+                                    {"stop_overshoot_steps": 3, "stop_overshoot_max_steps": 3, "stop_overshoot_max_actions": 2}])
 def test_invalid_closing_settings(kwargs):
     with pytest.raises(ValueError):
         TargetClosingSettings(**kwargs)
 
 
-@pytest.mark.parametrize("box", [(0, 269, 84, 479), (300, 0, 360, 80), (560, 200, 640, 280), (300, 400, 360, 480)])
+@pytest.mark.parametrize("box", [(0, 269, 84, 479), (300, 0, 360, 80), (560, 200, 640, 280), (300, 440, 340, 480)])
 def test_border_clipped_box_does_not_start_takeover(box):
     """The Ranchester sofa: an 84 px sliver on the left/bottom edge of a bed."""
     p, ep = setup_policy()
@@ -452,6 +456,161 @@ def test_an_exhausted_inspection_stops_when_the_target_was_seen_fresh_in_termina
     final = p.plan(replace(near, step=5))
     assert final.stop and p.closing.phase == "STOP"
     assert final.info["reason"].startswith("inspection exhausted") and "action 2" in final.info["reason"]
+
+
+# -- the STOP overshoot (Markleeville/000188, 2026-10-14: STOPped 1.27 m from the footprint on a 0.84 m reading) ----
+def decided_at(monkeypatch, x, depth, steps=2, **closing):
+    """A chair locked two metres ahead; the agent stands at ``x`` seeing it fill the frame at ``depth``.
+
+    Two unconditional overshoot steps unless told otherwise: the mechanism's tests want the second step."""
+    closing.setdefault("stop_overshoot_max_steps", max(steps, TargetClosingSettings().stop_overshoot_max_steps))
+    p, ep, _ = locked_at_two_metres(monkeypatch, stop_overshoot_steps=steps, **closing)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    frame = replace(observation(ep, 2, depth=depth), pose=AgentPose(x, 0, 0, 0))
+    return p, ep, frame
+
+
+def test_a_decided_stop_walks_two_steps_toward_the_target_and_stops_without_consulting_a_frame(monkeypatch):
+    """The Markleeville geometry: the memory 1.25 m ahead, the near edge read at 0.84 m. The STOP is
+    decided on that frame and taken two MOVE_FORWARDs later, whatever the detector shows meanwhile."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84)
+    converter = DiscreteActionConverter(ep.action_spec, p.converter_params)
+    first = p.plan(frame)
+    assert not first.stop and first.waypoints and p.closing.phase == "ADVANCE"
+    assert first.info["stop_overshoot"]["steps"] == 0 and first.info["reason"].startswith(
+        "STOP decided at action 2 (fresh terminal target confirmation): step 1 of at most 2")
+    assert converter.step(frame.pose, first).action == DiscreteAction.MOVE_FORWARD
+    memory = tuple(p.closing.xyz)
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    p.detector.detect = lambda rgb: []                       # the frames after the decision are not evidence
+    second = p.plan(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert not second.stop and second.waypoints and second.info["stop_overshoot"]["steps"] == 1
+    assert converter.step(AgentPose(1.0, 0, 0, 0), second).action == DiscreteAction.MOVE_FORWARD
+    p.notify_action(replace(frame, step=3), DiscreteAction.MOVE_FORWARD)
+    final = p.plan(replace(frame, step=4, pose=AgentPose(1.25, 0, 0, 0)))
+    assert final.stop and p.closing.phase == "STOP" and final.info["reason"] == "fresh terminal target confirmation"
+    assert final.info["stop_overshoot"]["ended"] == "2 step(s) taken" and final.info["stop_overshoot"]["walked_m"] == 0.5
+    assert tuple(p.closing.xyz) == memory and p.closing.releases == 0 and p.closing.last_seen == 2
+    assert p.closing.overshoot_commands == 2 and p.episode_info()["target_closing"]["stop_overshoot"]["steps"] == 2
+
+
+def test_by_default_the_overshoot_is_one_step_and_a_second_only_while_the_memory_stands_beyond_0_9_m(monkeypatch):
+    """Two steps always were verified and judged too dear for the SPL; one always STOPped Markleeville/000188
+    3 cm outside the disc (2026-10-14 evening). One step always, a second while the memory is beyond 0.90 m."""
+    defaults = TargetClosingSettings()
+    assert (defaults.stop_overshoot_steps, defaults.stop_overshoot_max_steps, defaults.stop_overshoot_within_m) == (1, 2, 0.90)
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1)
+    first = p.plan(frame)
+    assert first.waypoints and first.info["reason"].endswith("step 1 of at most 2 toward the target before it")
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    # The memory stands 1.03 m from the deciding spot: a step leaves it at 0.78, inside 0.90 -- no second step.
+    final = p.plan(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert final.stop and final.info["stop_overshoot"]["ended"].startswith("1 step(s) taken and the memory stands 0.7")
+    assert final.info["stop_overshoot"]["ended"].endswith("m away, within 0.90 m")
+    assert final.info["stop_overshoot"]["walked_m"] == 0.25 and p.closing.overshoot_commands == 1
+
+
+def test_the_second_overshoot_step_is_taken_when_the_first_leaves_the_memory_beyond_0_9_m(monkeypatch):
+    """The Markleeville/000188 geometry: the memory 1.25 m ahead on the deciding frame, a 0.84 m near edge.
+    One step leaves the memory at 1.00 m -- the evaluator's radius to the footprint -- so a second is taken."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1)
+    assert p.plan(frame).waypoints
+    closing = p.closing
+    closing.overshoot = None
+    closing.xyz = (2.0, 0.0, closing.xyz[2])                       # the memory 1.25 m ahead of x = 0.75
+    first = closing._terminal(frame, 1.25, 0.84, {"reason": "test"})
+    assert first.waypoints and first.info["stop_overshoot"]["memory_m"] == 1.25
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    second = closing._overshoot_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert second.waypoints and second.info["stop_overshoot"]["steps"] == 1
+    assert second.info["reason"].endswith("step 2 of at most 2 toward the target before it; the memory still stands 1.00 m away, beyond 0.90 m")
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    final = closing._overshoot_step(replace(frame, step=4, pose=AgentPose(1.25, 0, 0, 0)))
+    assert final.stop and final.info["stop_overshoot"]["ended"] == "2 step(s) taken" and final.info["stop_overshoot"]["memory_m"] == 0.75
+
+
+def test_a_single_unconditional_step_never_takes_a_second(monkeypatch):
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1, stop_overshoot_max_steps=1)
+    assert p.plan(frame).waypoints
+    closing = p.closing
+    closing.overshoot = None
+    closing.xyz = (2.0, 0.0, closing.xyz[2])
+    assert closing._terminal(frame, 1.25, 0.84, {"reason": "test"}).waypoints
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    final = closing._overshoot_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert final.stop and final.info["stop_overshoot"]["ended"] == "1 step(s) taken"
+
+
+def test_the_overshoot_ends_at_once_on_a_blocked_step(monkeypatch):
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84)
+    assert p.plan(frame).waypoints
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    p.notify_blocked(replace(frame, step=3))                 # the converter: the step did not move the agent
+    final = p.plan(replace(frame, step=3))
+    assert final.stop and final.info["stop_overshoot"]["ended"] == "a step was blocked"
+    assert final.info["stop_overshoot"]["steps"] == 1 and final.info["stop_overshoot"]["walked_m"] == 0.0
+
+
+def test_the_overshoot_keeps_the_memory_beyond_its_minimum_range(monkeypatch):
+    """From 0.9 m the second step would leave the memory 0.40 m away: one step, then the STOP."""
+    p, ep, frame = decided_at(monkeypatch, x=1.1, depth=0.9)
+    assert p.plan(frame).waypoints
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    final = p.plan(replace(frame, step=3, pose=AgentPose(1.35, 0, 0, 0)))
+    assert final.stop and final.info["stop_overshoot"]["ended"].startswith("the memory would stand 0.4")
+    assert final.info["stop_overshoot"]["steps"] == 1 and final.info["stop_overshoot"]["memory_m"] < 0.7
+
+
+def test_the_overshoot_is_bounded_in_actions_even_without_the_hooks(monkeypatch):
+    """A harness that never reports the actions: the stage still ends by its action bound."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, stop_overshoot_max_actions=3)
+    for step in (2, 3, 4):
+        assert p.plan(replace(frame, step=step)).waypoints
+    final = p.plan(replace(frame, step=5))
+    assert final.stop and final.info["stop_overshoot"]["ended"] == "3 actions spent"
+
+
+def test_the_overshoot_aims_along_the_heading_within_a_turn_and_at_the_memory_beyond_it(monkeypatch):
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84)
+    assert p.plan(frame).waypoints
+    closing, spec = p.closing, ep.action_spec
+    info = {"reason": "test"}
+    closing.overshoot = None
+    within = replace(frame, step=3, pose=AgentPose(0.75, 0, 0, math.radians(20)))
+    command = closing._terminal(within, 1.25, 0.84, info)
+    dx, dy = command.waypoints[1][0] - 0.75, command.waypoints[1][1]
+    assert abs(math.atan2(dy, dx) - math.radians(20)) < 1e-9, "within a turn: the heading that framed the object"
+    closing.overshoot = None
+    beyond = replace(frame, step=4, pose=AgentPose(0.75, 0, 0, math.radians(45)))
+    command = closing._terminal(beyond, 1.25, 0.84, info)
+    dx, dy = command.waypoints[1][0] - 0.75, command.waypoints[1][1]
+    assert abs(math.atan2(dy, dx) - math.atan2(closing.xyz[1], closing.xyz[0] - 0.75)) < 1e-9, "beyond: the memory's bearing"
+    assert DiscreteActionConverter(spec, p.converter_params).step(beyond.pose, command).action == DiscreteAction.TURN_RIGHT
+    closing.overshoot = None
+    away = replace(frame, step=5, pose=AgentPose(0.75, 0, 0, math.pi))
+    command = closing._terminal(away, 1.25, 0.84, info)
+    assert command.stop and command.info["stop_overshoot"]["ended"].startswith("the memory is 17")
+    assert command.info["stop_overshoot"]["ended"].endswith("degrees off the heading")
+
+
+def test_the_overshoot_switched_off_stops_on_the_deciding_frame(monkeypatch):
+    p, ep, near = locked_at_two_metres(monkeypatch, stop_overshoot_steps=0, stop_overshoot_max_steps=0)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    command = p.plan(replace(observation(ep, 2, depth=0.84), pose=AgentPose(0.75, 0, 0, 0)))
+    assert command.stop and "stop_overshoot" not in command.info and p.closing.overshoot is None
+
+
+def test_without_an_unconditional_step_the_overshoot_steps_only_while_the_memory_stands_beyond_0_9_m(monkeypatch):
+    """``stop_overshoot_steps`` 0 with ``max_steps`` 2: a memory inside 0.90 m STOPs on the deciding frame."""
+    p, ep, near = locked_at_two_metres(monkeypatch, stop_overshoot_steps=0, stop_overshoot_max_steps=2)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    command = p.plan(replace(observation(ep, 2, depth=0.7), pose=AgentPose(1.2, 0, 0, 0)))
+    assert command.stop and command.info["stop_overshoot"]["ended"].startswith("0 step(s) taken and the memory stands")
+    assert command.info["stop_overshoot"]["memory_m"] <= 0.90
+    closing = p.closing
+    closing.overshoot = None
+    closing.xyz = (2.45, 0.0, closing.xyz[2])                      # 1.25 m ahead: beyond 0.90, so a step
+    assert closing._terminal(replace(observation(ep, 3), pose=AgentPose(1.2, 0, 0, 0)), 1.25, 0.7, {"reason": "test"}).waypoints
 
 
 def test_an_exhausted_inspection_without_any_in_range_sighting_releases_the_lock_and_remembers_the_spot(monkeypatch):
@@ -1359,6 +1518,39 @@ def test_the_approach_pitch_inside_the_servo_band_is_the_boxs_not_the_memorys(mo
     command = off.plan(replace(observation(ep_off, 2, depth=1.4), pose=AgentPose(0.6, 0, 0, 0)))
     assert off.closing.last_seen == 2 and command.camera_pitch == pytest.approx(tilt)
     assert off.closing.bbox_pitch_corrections == 0 and off.closing.last_fix is None
+
+
+def test_the_geometric_pitch_keeps_the_present_step_when_the_wanted_angle_sits_at_half_a_step(monkeypatch):
+    """Darden/000034 (2026-10-14): a 0.39 m toilet 2.19 m away, the camera 0.9 m up -- 15.0 degrees down wanted
+    against a 30-degree step. Rounding gave 0 on one frame and 30 on the next as the memory's height moved by
+    millimetres, and nine LOOK_DOWN / LOOK_UP actions were spent without a step."""
+    p, original = setup_policy()
+    ep = tilt_episode(p, original)
+    tilt = ep.action_spec.tilt_angle_rad
+    camera_z = ep.camera.height_m                                   # the pose's z is 0 in this fixture
+    ahead = 1.94
+    half = camera_z - ahead * math.tan(0.5 * tilt)                 # the height at which exactly half a step is wanted
+    level = replace(observation(ep, 0), pose=AgentPose(0, 0, 0, 0, camera_pitch=0.0))
+    down = replace(observation(ep, 0), pose=AgentPose(0, 0, 0, 0, camera_pitch=tilt))
+    for dz in (-0.005, 0.0, 0.005):                                # the memory flickers about the boundary
+        p.closing.xyz = (ahead, 0.0, half + dz)
+        assert p.closing._pitch(level, ahead) == pytest.approx(0.0), "level camera: stays level"
+        assert p.closing._pitch(down, ahead) == pytest.approx(tilt), "camera a step down: stays a step down"
+    # A change wanted by more than the band still happens, in either direction.
+    p.closing.xyz = (ahead, 0.0, camera_z - ahead * math.tan(math.radians(40)))      # 40 degrees down wanted
+    assert p.closing._pitch(level, ahead) == pytest.approx(tilt)
+    p.closing.xyz = (ahead, 0.0, camera_z)                                           # level wanted
+    assert p.closing._pitch(down, ahead) == pytest.approx(0.0)
+    # Without the band the old rounding is back, and the half-step case chatters with the frame.
+    p.closing.settings = replace(p.closing.settings, pitch_hysteresis=0.0)
+    p.closing.xyz = (ahead, 0.0, half - 0.005)
+    assert p.closing._pitch(level, ahead) == pytest.approx(tilt)
+    p.closing.xyz = (ahead, 0.0, half + 0.005)
+    assert p.closing._pitch(down, ahead) == pytest.approx(0.0)
+    with pytest.raises(ValueError):
+        replace(p.closing.settings, pitch_hysteresis=0.5)
+
+
 def test_the_servo_predicts_the_step_and_looks_down_before_the_box_leaves_through_the_bottom(monkeypatch):
     """From 1.45 m a low box sits whole at rows 300-440; one 0.25 m step would cut it at the lower edge. The step
     carries LOOK_DOWN -- read off the predicted frame, not the memory."""

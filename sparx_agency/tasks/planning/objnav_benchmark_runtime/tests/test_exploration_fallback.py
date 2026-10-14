@@ -492,3 +492,52 @@ def test_a_commitment_survives_a_glance_in_between_but_not_a_long_absence():
     assert policy.fallback.goal_step == 31 and policy.fallback.stats["goal_switched"] == 0
     with pytest.raises(ValueError):
         FallbackSettings(goal_memory_actions=0)
+
+
+# -- 2026-10-14: what casts a shadow, and what is too much unknown to be one ------------------------------
+def test_a_clock_casts_no_shadow_and_neither_does_a_small_measured_footprint():
+    """Collierville/000023, action 27: a doorway frontier 0.5 m from a confirmed clock vanished as 'the shadow of
+    clock 24'. A wall or surface object hides no floor; nor does a landmark whose measured radius is under
+    ``shadow_min_radius_m``."""
+    from sparx_agency.core.mapping.objects.landmarks import ObjectLandmark
+    from sparx_agency.core.planning.exploration.frontier_ranking import FrontierGoal
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import object_shadow
+    goal = FrontierGoal(xy=(4.0, 3.0), cell=(40, 30), size_cells=10, geodesic_m=3.0, heading_error_rad=0.0, utility=1.0)
+    clock = ObjectLandmark(id=24, class_name="clock", xy=(4.3, 3.2), count=3, votes={"clock": 3}, radius_m=0.6)
+    vase = ObjectLandmark(id=25, class_name="vase", xy=(4.3, 3.2), count=3, votes={"vase": 3}, radius_m=None)
+    small = ObjectLandmark(id=26, class_name="chair", xy=(4.3, 3.2), count=3, votes={"chair": 3}, radius_m=0.15)
+    cabinet = ObjectLandmark(id=27, class_name="cabinet", xy=(4.3, 3.2), count=3, votes={"cabinet": 3}, radius_m=0.6)
+    args = (0.1, 0.30, 0.50, 3.0)
+    assert object_shadow(goal, [clock, vase, small], *args, min_radius_m=0.25) is None
+    assert object_shadow(goal, [cabinet], *args, min_radius_m=0.25) is cabinet, "a cabinet beside a 1 m frontier: its shadow"
+    assert object_shadow(goal, [small], *args, min_radius_m=0.0) is small, "the floor is the knob"
+    with pytest.raises(ValueError):
+        FallbackSettings(shadow_min_radius_m=0.0)
+
+
+def test_a_frontier_with_a_rooms_floor_right_behind_it_is_nobodys_shadow():
+    """Collierville/000023, action 24: the 2.9 m frontier onto the room the toilet stood in, a refrigerator 1 m beside
+    it, dropped as 'the shadow of refrigerator 0' -- and the search re-explored the house for 180 actions. The
+    shadow world with the bed removed from the landmark map and a FRIDGE put beside the doorway: the strip behind
+    the bed stays a shadow of the bed (the wall is right behind it); the doorway, with the next room's floor from
+    the threshold on, is an exit whatever stands beside it."""
+    from sparx_agency.core.mapping.objects.landmarks import ObjectLandmark
+    policy, episode, _, rooms, _ = loop_policy(order=(1, 0))
+    world = shadow_world()
+    no_rooms(policy)
+    fridge = ObjectLandmark(id=1, class_name="refrigerator", xy=(6.3, 3.7), count=5, votes={"refrigerator": 5}, radius_m=0.7)
+    policy.landmarks.confirmed = lambda: [bed_landmark(), fridge]
+    here = (3.0, 3.0)
+    command = policy.loop.plan(obs_at(episode, 0, here), world)
+    assert moving(command) and command.info["fallback_stage"] == "frontier"
+    assert command.waypoints[-1][0] > 5.0, "the doorway beside the fridge is still the exit"
+    whys = [d["why"] for d in policy.fallback.last_demoted]
+    assert whys and all(w.startswith("shadow of bed 0") for w in whys), whys
+    # The exemption off: the doorway is the fridge's shadow and the strip behind the bed wins by distance.
+    policy.fallback.settings = replace(policy.fallback.settings, shadow_exempt_m2=0.0)
+    policy.fallback.goal = None
+    command = policy.loop.plan(obs_at(episode, 1, here), world)
+    assert command.waypoints[-1][0] < 5.0 and any(w.startswith("shadow of refrigerator 1") for w in
+                                                  (d["why"] for d in policy.fallback.last_demoted))
+    with pytest.raises(ValueError):
+        FallbackSettings(shadow_exempt_m2=-1.0)

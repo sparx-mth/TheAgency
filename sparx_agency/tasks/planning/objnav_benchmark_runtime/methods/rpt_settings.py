@@ -60,6 +60,18 @@ class RPTSettings:
             every goal on it is refused -- the ``Z_spawn +/- 0.5 m`` plane.
             Larger than the atlas's ``departure_m`` (0.45): a plateau the
             atlas still calls this floor is this floor.
+        step_down_m: With stair traversal forbidden, an observed surface
+            more than this far BELOW the storey plane is a drop and is
+            written occupied for every plan (``spawn_floor_guard``). 0.30 m,
+            the atlas's floor-match tolerance, as before -- a knob since
+            2026-10-14, and NOT lower: at 0.15 m Corozal/000142 painted
+            3,316 cells of its own storey as drops (the plane is the pose
+            height, and the floor the camera sees lies 0.15-0.30 m under it
+            there; the toilet stands across a one-step sunken area the
+            earlier runs walked into) and the episode was lost from the
+            spawn point. The three-tread flight Darden/000034 walked down
+            (-0.11, -0.18, -0.21 m, the floor -0.45 m seen by five samples)
+            is inside this tolerance and remains the open item.
         segmentation: Whether the TARGET's boxes are segmented (box-prompted
             Segment Anything, ``methods/segmentation.HttpSegmenter``) and
             their depth read on the object's own pixels rather than on the
@@ -107,6 +119,7 @@ class RPTSettings:
     warmup_steps: int = 12
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
+    step_down_m: float = 0.30
     segmentation: bool = False
     target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
     doorway_peek: PeekSettings = field(default_factory=lambda: PeekSettings(enabled=False))
@@ -115,7 +128,7 @@ class RPTSettings:
 
     def __post_init__(self):
         for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m",
-                    "preferred_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m"):
+                    "preferred_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m", "step_down_m"):
             value = getattr(self, key)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)

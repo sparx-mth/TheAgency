@@ -222,7 +222,7 @@ def _supported_centroid(observation, box, transform, row, mask=None):
     return xyz
 
 
-def clipped_box(box, intrinsics, margin_px, min_fraction=0.3, floor_cut_min_fraction=0.15):
+def clipped_box(box, intrinsics, margin_px, min_fraction=0.3, floor_cut_min_fraction=0.15, floor_cut_min_width_fraction=0.08):
     """Whether ``box`` is a SLIVER at an image edge: touching it within ``margin_px`` AND narrow.
 
     The one test behind both target gates -- the takeover's start and the
@@ -245,9 +245,14 @@ def clipped_box(box, intrinsics, margin_px, min_fraction=0.3, floor_cut_min_frac
     toilet at 1.2-1.7 m, never counted two in a row and released the
     candidate twice. A box that touches ONLY the bottom edge, whose top lies
     in the lower half of the frame and which spans at least
-    ``floor_cut_min_fraction`` of the frame in BOTH dimensions (the toilet:
-    113 x 187 px of 640 x 480; a 60 px sliver is still a sliver), is not
-    clipped; a box also touching a side edge, or the top, is judged as before.
+    ``floor_cut_min_fraction`` of the frame's height (the toilet: 187 of
+    480 px; a 60 px sliver is still a sliver) and ``floor_cut_min_width_fraction``
+    of its width, is not clipped; a box also touching a side edge, or the
+    top, is judged as before. **The width bar is low** (8 %, since
+    2026-10-14): a box cut only by the bottom edge stands whole laterally,
+    so its width is the object's -- a toilet's tank at 1.3 m is 65-83 px of
+    640, and the 15 % bar refused four 0.91-0.95 frames of it in
+    Collierville/000023, where the takeover never started.
     """
     m = int(margin_px)
     x1, y1, x2, y2 = box
@@ -261,7 +266,7 @@ def clipped_box(box, intrinsics, margin_px, min_fraction=0.3, floor_cut_min_frac
         return False
     floor_cut = (bottom and not lateral and not top and y1 >= intrinsics.cy
                  and (y2 - y1) >= floor_cut_min_fraction * intrinsics.height
-                 and (x2 - x1) >= floor_cut_min_fraction * intrinsics.width)
+                 and (x2 - x1) >= floor_cut_min_width_fraction * intrinsics.width)
     return not floor_cut
 
 

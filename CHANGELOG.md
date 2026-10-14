@@ -6,6 +6,71 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **The STOP overshoot: decide, then walk the margin** (`objnav_benchmark_runtime/methods/target_closing.py`,
+  `rpt_policy.py`, 2026-10-14 night). Every terminal reading is biased short of the object's footprint -- the near
+  edge of a box with floor in it, a centroid fused from near surfaces -- and the evaluator measures to the
+  footprint: Markleeville/000188 STOPped on a 0.84 m near edge 1.27 m from the toilet (DTG 0.27, SR 0) in the run the
+  user chose, `runs/benchmark_toilet_10episodes_20261014T143259Z` (SR 0.80, SPL 0.366, DTG 0.62 m;
+  Collierville/000036 129 actions, SPL 0.67, with the back-off fix). Once a STOP is decided, on whichever of the
+  seven paths of `_inspect`, `TargetClosing._terminal` walks `ClosingSettings.stop_overshoot_steps` (1) more
+  MOVE_FORWARD toward the 3-D memory -- a second, up to `stop_overshoot_max_steps` (2), only while the memory
+  still stands beyond `stop_overshoot_within_m` (0.90 m) after the first -- and STOPs then: no frame is consulted (`observe` short-circuits), nothing is
+  re-verified; a step is taken only while the memory would still stand `stop_overshoot_min_range_m` (0.45) beyond
+  the agent and the deciding frame's near edge a body radius, the agent faces within a quarter turn of the memory
+  (beyond one turn the converter turns toward it first), a step the converter reports blocked ends the stage
+  (`note_blocked`, from the policy's `notify_blocked`; `note_action` counts the steps) and
+  `stop_overshoot_max_actions` (5) ends it without the hooks. Phase `ADVANCE`; `stop_overshoot` in the command
+  info and the diagnostics; counter `overshoot_commands`. 0 restores the STOP on the deciding frame -- the shared
+  test fixture runs the decision tests so. Three fixes tried in between (`unvalued_prob` 0.05, a fused-memory
+  range for small objects, a fold gate on the unknown behind a doorway; run `…150615Z`, SR 0.56) were reverted --
+  the fused-memory range flipped CLOSE and INSPECT on alternate frames for 25 actions -- and are in `LESSONS.md`.
+  Verification run with two steps, `runs/benchmark_toilet_10episodes_20261014T155701Z`: SR 0.90, SPL 0.450,
+  DTG 0.59 m; every episode retraced `…143259Z` within two actions, Markleeville/000188 went from DTG 0.27 to SPL
+  1.0, seven of nine overshoots took both steps and two stopped after one at the minimum range. Two steps were
+  judged too dear for the SPL (every other STOP 0.01-0.07 lower); one step always (`…162832Z`) gave SR 0.80,
+  SPL 0.357 with 000188 STOPped 3 cm outside the disc. The memory at the deciding frame tells the two apart
+  (0.88-1.19 m in the eight successes, 1.25 m in 000188), hence the conditional second step -- verified in
+  `…170224Z`: SR 0.90, SPL 0.456, DTG 0.59 m, the second step taken on 000188 and Collierville/000023 only.
+- **A door beside the stairs, a camera at half a step, and a bump the rays erased** (`objnav_benchmark_runtime/methods/opening_nodes.py`,
+  `room_search_loop.py`, `target_closing.py`, `observed_map.py`, 2026-10-14 evening). The openings' stair exclusion
+  is directional -- only masked cells and portal points on the frontier's unknown side count (`near_stair_mask(...,
+  heading)`, `beyond`): Darden/000034's bathroom door, 1.3-1.5 m beside the flight, was struck off the openings for a
+  whole episode and the search walked 17 m to an "entered" living room instead. The closing's geometric pitch is
+  quantised with hysteresis (`ClosingSettings.pitch_hysteresis` 0.15, `_quantise_pitch`): a wanted angle at half a
+  tilt step chattered LOOK_DOWN / LOOK_UP with the memory's millimetre flicker and the agent never stepped. A second
+  bump within `ObservedMap.repeat_bump_m` (0.5 m) of an earlier one leaves a sticky, body-wide bar in every export
+  (`_touched`, `sticky_bumps`): the single `l_max` cell decays under the rays that look over a ledge the navmesh
+  refuses, and Corozal/000019 bumped three times at one spot and lost its three nearby nodes to the releases.
+  The back-off's retreat spot must show the target on the observed grid (`BackoffManeuver._sees`, a Bresenham
+  ray stopped short of the target's cells): Collierville/000036 retreated 0.5 m from the goal viewpoint to a spot
+  behind the door jamb, disproved the 0.90 toilet from there and lost 380 actions.
+  Third verification run `runs/benchmark_toilet_10episodes_20261014T132341Z`: SR 0.80, SPL 0.477, DTG 0.88 m.
+- **An exit the oracle has not valued is a node at a prior, not at 0.0** (`objnav_benchmark_runtime/methods/room_search_loop.py`,
+  `opening_nodes.py`, `visualization.py`, 2026-10-14 evening). The oracle's numbers are replaced wholesale at every
+  call and the fold is read against the numbers before it, so an exit folded into its room at the call and unfolded
+  by the reply that dropped the room under `min_prob` came out with no number and read 0.0 -- Corozal/000142 lost
+  the toilet's own doorway (12 m2 unseen, 6 m away) to a 12 m gap at 10 % with no SELECT in the 54 actions left.
+  `RoomSearchLoop._exit_prob` hands such an exit to RPT* at the oracle's last number for it (`_exit_memory`) or at
+  `OpeningSettings.unvalued_prob` (0.10); `prob_source` (`oracle`/`remembered`/`provisional`) in the estimate and
+  the HUD record, event `opening_provisional`, stat `openings_provisional`. The node still buys the next call.
+  Second verification run `runs/benchmark_toilet_10episodes_20261014T124355Z`: SR 0.90, SPL 0.522, DTG 0.30 m.
+- **Five losses of one Collierville recording, and a flight the guard let through** (`objnav_benchmark_runtime/methods/exploration_fallback.py`,
+  `opening_nodes.py`, `room_search_loop.py`, `path_glances.py`, `spawn_floor_guard.py`, `rpt_settings.py`;
+  `core/planning/exploration/view_gain.py`, 2026-10-14 afternoon). The object-shadow rule no longer drops a frontier
+  for a clock or a vase beside it (`SHADOWLESS_CLASSES`, `shadow_min_radius_m` 0.25) nor one with a room's floor
+  right behind it (`shadow_exemption`: `shadow_exempt_m2` 2 within `shadow_exempt_range_m` 1.5, through the walls;
+  `UnknownView.unknown_in_sector(max_range_m=...)`), and `detect_openings` applies the same rule -- Collierville/
+  000023 lost the frontier onto its toilet's room as "the shadow of refrigerator 0" and a doorway as a clock's. A
+  peek the supervisor's 0.6 m room-centre tolerance declared arrived short of its threshold walks the remainder and
+  looks two turns to each side of the way it came through (`OpeningSettings.step_through`, `through_look_turns` 2,
+  `through_steps` 8; `peek_step_through`). A transit whose room is missing from the registry keeps walking for
+  `LoopSettings.room_missing_grace` (3) actions before the room is given up (the watershed flickers). The glance
+  state records the gains at the agent's own position (`glance.here`). The spawn-floor guard's drop threshold is a
+  knob, `RPTSettings.step_down_m`, kept at 0.30 m: 0.15 m masked Corozal/000142's own storey (the plane is the pose
+  height). A floor-cut box is judged by its height, with an 8 % width floor (`clipped_box`): a toilet's tank at 1.3 m
+  is 65-83 px wide and the 15 % bar refused four 0.91-0.95 frames. The floor-support gate puts an object on the
+  storey when ONE terrain sample near it is the storey's floor (`PerceptionCycle._floor_support`): the lowest sample
+  beside a toilet at a stairwell was the stairwell's. LESSONS 2026-10-14 (afternoon) has the traces.
 - **The toilet re-run's nine behaviours, fixed from their traces** (`objnav_benchmark_runtime/methods/target_closing.py`,
   `target_path.py`, `room_search_loop.py`, `exploration_fallback.py`, `opening_nodes.py`, `perception_cycle.py`;
   `core/mapping/topology/search_node_oracle.py`, 2026-10-14). Target closing: a re-sighting of the ACTIVE candidate

@@ -124,6 +124,21 @@ class FallbackSettings:
             if it is no longer than this many halo radii -- a five-metre
             frontier that happens to pass a plant is a wall of unknown, not
             the plant's shadow.
+        shadow_min_radius_m: A landmark whose measured footprint radius is
+            under this casts no shadow (since 2026-10-14): a clock, a vase, a
+            bottle, a cup stand on a wall or a surface and hide no floor.
+            Collierville/000023 lost its doorway `O2` as "the shadow of clock
+            24" 0.5 m from it. Classes in :data:`SHADOWLESS_CLASSES` cast none
+            whatever their radius.
+        shadow_exempt_m2: A frontier with at least this much unknown within
+            ``shadow_exempt_range_m`` of it, in every direction and through
+            the walls' blocking, is no object's shadow whatever stands
+            beside it (:func:`shadow_exemption`, since 2026-10-14): the
+            strip behind a bed has the wall a few cells behind it; a doorway
+            has the room's floor from the threshold on. Collierville/000023
+            lost the 2.9 m frontier onto its toilet's room as "the shadow of
+            refrigerator 0". 0 disables.
+        shadow_exempt_range_m: See ``shadow_exempt_m2``.
         near_blind_m: A frontier nearer than this along the floor is inside
             the camera's blind radius (a level camera 0.88 m up sees the floor
             from about 1.4 m out; 1.2 m leaves a step's worth of margin for
@@ -176,6 +191,9 @@ class FallbackSettings:
     shadow_margin_m: float = 0.30
     shadow_default_radius_m: float = 0.50
     shadow_length_factor: float = 3.0
+    shadow_min_radius_m: float = 0.25
+    shadow_exempt_m2: float = 2.0
+    shadow_exempt_range_m: float = 1.5
     near_blind_m: float = 1.2
     goal_switch_gain: float = 2.0
     goal_match_m: float = 0.6
@@ -189,6 +207,8 @@ class FallbackSettings:
                      "service_backoff_max_actions", "goal_memory_actions"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
+        if isinstance(self.shadow_exempt_m2, bool) or not math.isfinite(self.shadow_exempt_m2) or self.shadow_exempt_m2 < 0:
+            raise ValueError("shadow_exempt_m2 must be finite and non-negative (0 disables)")
         if self.min_gain_m2 is not None and (isinstance(self.min_gain_m2, bool) or not math.isfinite(self.min_gain_m2)
                                              or self.min_gain_m2 < 0):
             raise ValueError("min_gain_m2 must be None (the loop's threshold), 0 (off) or a positive area")
@@ -199,7 +219,7 @@ class FallbackSettings:
         if type(self.exits_first) is not bool:
             raise ValueError("exits_first must be a bool")
         for name in ("shadow_margin_m", "shadow_default_radius_m", "shadow_length_factor", "near_blind_m",
-                     "goal_match_m", "footing_radius_m"):
+                     "goal_match_m", "footing_radius_m", "shadow_min_radius_m", "shadow_exempt_range_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
@@ -210,16 +230,26 @@ class FallbackSettings:
             raise ValueError("goal_switch_gain must be finite and at least 1 (1 = no commitment)")
 
 
-def object_shadow(goal, landmarks, resolution_m, margin_m, default_radius_m, length_factor):
+#: Classes that cast no floor shadow whatever the frontier beside them: on a wall or a surface, not on the floor.
+SHADOWLESS_CLASSES = frozenset({"clock", "vase", "book", "bottle", "cup", "toy", "stuffed animal", "television", "tv"})
+
+
+def object_shadow(goal, landmarks, resolution_m, margin_m, default_radius_m, length_factor, min_radius_m=0.0):
     """The landmark whose shadow the frontier ``goal`` is, or None.
 
     The goal lies within the landmark's footprint radius plus ``margin_m``,
     and the frontier is no longer than ``length_factor`` halo radii -- the
     strip of unknown the camera's ray left behind the object, not an opening
-    the object happens to stand beside.
+    the object happens to stand beside. A landmark of a
+    :data:`SHADOWLESS_CLASSES` class, or with a measured radius under
+    ``min_radius_m``, casts none.
     """
     length_m = float(goal.size_cells) * float(resolution_m)
     for landmark in landmarks:
+        if str(landmark.class_name).lower() in SHADOWLESS_CLASSES:
+            continue
+        if landmark.radius_m is not None and float(landmark.radius_m) < float(min_radius_m):
+            continue
         radius = landmark.radius_m if landmark.radius_m is not None else default_radius_m
         halo = float(radius) + float(margin_m)
         if math.dist(goal.xy, landmark.xy) <= halo and length_m <= length_factor * halo:
@@ -227,14 +257,40 @@ def object_shadow(goal, landmarks, resolution_m, margin_m, default_radius_m, len
     return None
 
 
-def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of=None, type_rule=True):
+def shadow_exemption(view, settings):
+    """``goal -> bool``: whether the unknown RIGHT BEHIND a frontier is too much for an object's shadow.
+
+    The unknown cells within ``shadow_exempt_range_m`` of the goal, in every
+    direction, through the ray caster's blocking (walls, the settled
+    unknown): a shadow strip has the wall a few cells behind it and
+    reaches a fraction of a square metre; a doorway onto a room has the
+    room's floor from the threshold on. ``shadow_exempt_m2`` is the bar;
+    0 disables the exemption (None is returned).
+    """
+    if view is None or settings.shadow_exempt_m2 <= 0.0:
+        return None
+    cells = int(round(float(settings.shadow_exempt_m2) / view.cell_area_m2))
+    reach = float(settings.shadow_exempt_range_m)
+
+    def exempt(goal):
+        return int(view.unknown_in_sector(goal.xy, 0.0, math.pi, max_range_m=reach).sum()) >= cells
+    return exempt
+
+
+def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of=None, type_rule=True, exempt=None):
     """Split ranked frontier goals into exits and demoted frontiers, order kept.
 
     Demoted, with the reason: inside the camera's blind radius
     (``settings.near_blind_m``); credited to a room the loop withheld as
     ``type:`` (when ``type_rule``; ``room_of`` maps a goal to its pid and
     ``excluded`` a pid to the reason); or an object's shadow
-    (:func:`object_shadow`). Returns ``(exits, [(goal, why), ...])``.
+    (:func:`object_shadow`) -- unless ``exempt(goal)`` says too much unknown
+    lies right behind it to be one (:func:`shadow_exemption`, since
+    2026-10-14: a strip behind a bed has the wall behind it; a 2.9 m
+    frontier with a room's floor through it is a room, whatever stands
+    beside it -- Collierville/000023 lost the frontier onto its toilet's
+    room as "the shadow of refrigerator 0").
+    Returns ``(exits, [(goal, why), ...])``.
     """
     excluded = excluded or {}
     room_of = room_of or {}
@@ -248,8 +304,9 @@ def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of
             why = "room %d is %s" % (pid, excluded[pid])
         else:
             landmark = object_shadow(goal, landmarks, resolution_m, settings.shadow_margin_m,
-                                     settings.shadow_default_radius_m, settings.shadow_length_factor)
-            if landmark is not None:
+                                     settings.shadow_default_radius_m, settings.shadow_length_factor,
+                                     min_radius_m=getattr(settings, "shadow_min_radius_m", 0.0))
+            if landmark is not None and not (exempt is not None and exempt(goal)):
                 why = "shadow of %s %d" % (landmark.class_name, landmark.id)
         if why is None:
             exits.append(goal)
@@ -463,7 +520,8 @@ class ExplorationFallback:
         landmarks = list(p.landmarks.confirmed()) if getattr(p, "landmarks", None) is not None else []
         excluded = getattr(getattr(p, "loop", None), "excluded", None) or {}
         exits, demoted = split_exits(goals, landmarks, world.resolution, s, excluded=excluded,
-                                     room_of=goal_rooms(inventory), type_rule=True)
+                                     room_of=goal_rooms(inventory), type_rule=True,
+                                     exempt=self._reveals_a_room(obs, world))
         if obs is not None and exits:
             ranked, slivers = self._by_view_gain(obs, world, exits)
             if ranked is not None:
@@ -488,6 +546,13 @@ class ExplorationFallback:
             self.last_demoted.append({"xy": [round(float(v), 2) for v in goal.xy],
                                       "size_cells": int(goal.size_cells), "why": why})
         return exits, [goal for goal, _ in demoted]
+
+    def _reveals_a_room(self, obs, world):
+        """The shadow exemption: ``goal -> bool`` (:func:`shadow_exemption`), or None without the pose or the ray caster."""
+        loop = getattr(self.policy, "loop", None)
+        if obs is None or loop is None or not hasattr(loop, "_unknown_view"):
+            return None
+        return shadow_exemption(loop._unknown_view(obs, world), self.settings)
 
     def _min_gain_m2(self):
         """The significance threshold in force: the setting, else the loop's ``explore_min_gain_m2``."""

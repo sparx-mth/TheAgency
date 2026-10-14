@@ -284,6 +284,7 @@ class RPTSearchPolicy:
 
     def notify_blocked(self, observation):
         if self.closing.active:
+            self.closing.note_blocked()
             self.mapping.notify_blocked(observation, self.episode.action_spec.forward_step_m)
             self._blocked += 1
             self.route_memory.clear("target_forward_blocked")
@@ -351,6 +352,7 @@ class RPTSearchPolicy:
             raise ValueError("Action ledger regressed")
         self._notified_step = observation.step
         if self.closing.active:
+            self.closing.note_action(action)
             self.telemetry.emitted(observation, action, self.telemetry.phase)
             return
         external = self._action_owner in SUSPENDED_PHASES

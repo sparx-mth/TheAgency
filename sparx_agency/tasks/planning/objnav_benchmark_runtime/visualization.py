@@ -87,6 +87,7 @@ def search_snapshot(policy):
                          "folded": nid in folded, "targeted": nid == targeted, "live": nid in loop._openings,
                          "prob": estimate.get("prob", loop.settings.openings.landmark_prob if landmark
                                               else graph.stair_probs.get(nid)),
+                         "prob_source": estimate.get("prob_source"),
                          "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
                          "distance_m": estimate.get("distance_m"), "centroid": [float(v) for v in o.xy]})
     objects = [{"id": lm.id, "class": lm.class_name, "count": lm.count, "xy": list(lm.xy),

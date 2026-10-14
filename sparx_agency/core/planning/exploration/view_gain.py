@@ -153,7 +153,8 @@ class UnknownView:
     def cell_area_m2(self) -> float:
         return self._resolution * self._resolution
 
-    def unknown_in_sector(self, xy: Tuple[float, float], centre_rad: float, half_angle_rad: float) -> np.ndarray:
+    def unknown_in_sector(self, xy: Tuple[float, float], centre_rad: float, half_angle_rad: float,
+                          max_range_m: Optional[float] = None) -> np.ndarray:
         """The UNKNOWN cells a camera at ``xy`` reaches anywhere in the sector ``centre +- half_angle``.
 
         ``half_angle_rad >= pi`` is the full circle. Returns an ``(H, W)``
@@ -163,6 +164,10 @@ class UnknownView:
             xy: The camera's position, world metres.
             centre_rad: The sector's middle bearing, radians CCW from +x.
             half_angle_rad: Half the sector's angular width.
+            max_range_m: Follow the rays only this far (the cone's range by
+                default): the unknown NEAR a point, for a test of what lies
+                right behind a frontier rather than what a camera there would
+                see across the room.
         """
         seen = np.zeros((self._height, self._width), dtype=bool)
         x, y = float(xy[0]), float(xy[1])
@@ -171,10 +176,15 @@ class UnknownView:
         half = min(math.pi, max(0.0, float(half_angle_rad)))
         if half <= 0.0:
             return seen
+        ranges = self._ranges
+        if max_range_m is not None:
+            ranges = ranges[ranges <= float(max_range_m) + 1e-9]
+            if not len(ranges):
+                return seen
         rays = int(math.ceil(2.0 * half * self._rays_per_rad)) + 1
         bearings = np.linspace(centre_rad - half, centre_rad + half, rays, endpoint=half < math.pi)
-        xs = x + np.outer(np.cos(bearings), self._ranges)
-        ys = y + np.outer(np.sin(bearings), self._ranges)
+        xs = x + np.outer(np.cos(bearings), ranges)
+        ys = y + np.outer(np.sin(bearings), ranges)
         gx = np.floor((xs - self._origin_x) / self._resolution).astype(np.int64)
         gy = np.floor((ys - self._origin_y) / self._resolution).astype(np.int64)
         inside = (gx >= 0) & (gx < self._width) & (gy >= 0) & (gy < self._height)

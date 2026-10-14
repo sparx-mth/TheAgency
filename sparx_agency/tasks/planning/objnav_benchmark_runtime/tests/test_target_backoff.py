@@ -122,6 +122,44 @@ def test_no_clear_space_behind_skips_the_manoeuvre_and_verifies_in_place():
     assert p.episode_info()["target_closing"]["backoff"]["skipped"]
 
 
+def test_a_retreat_spot_the_map_hides_the_target_from_is_not_a_wider_perspective(monkeypatch):
+    """Collierville/000036 (2026-10-14): 0.03 m from the goal viewpoint, the toilet at 0.90 in the frame, the
+    retreat along the trail ended behind the door jamb; nothing seen there, the candidate disproved, 380 actions
+    lost. A spot the observed grid puts a wall between and the target is skipped; with every spot hidden the
+    manoeuvre is skipped and the verification happens where the target is in view."""
+    p, ep = open_floor_policy(monkeypatch)
+    world = p.mapping.update(None)
+    # The agent stands in a doorway at x=0: a wall along x=-0.35 with the door at |y| <= 0.3 -- every retreat
+    # spot behind or beside it (0.6-1.2 m back) sees the target only through the door, which the ring's
+    # straight-back spot does, the others do not.
+    for gy in range(0, 200):
+        gx, _ = world.world_to_grid(-0.35, 0.0)
+        y = world.grid_to_world(gx, gy)[1]
+        if abs(y) > 0.30:
+            world.grid[gy, gx] = world.values.occupied
+    target = (0.8, 0.0, 0.5)
+    manoeuvre = __import__("sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_backoff",
+                           fromlist=["BackoffManeuver"]).BackoffManeuver(p, 3, 20)
+    assert manoeuvre._sees(world, (-0.75, 0.0), target[:2]), "straight back through the door: in view"
+    assert not manoeuvre._sees(world, (-0.75, 0.6), target[:2]), "behind the wall: hidden"
+    assert manoeuvre._sees(world, (0.5, 0.0), target[:2]), "0.3 m from the target: nothing between them to test"
+    # Close the door too, and wall the sides (a short corridor open toward the target): every retreat spot is
+    # free floor, and none sees the target -- the manoeuvre is skipped and the verification stays where the
+    # target is in the frame (the default synthetic frame: the target 0.7 m ahead).
+    gx, _ = world.world_to_grid(-0.35, 0.0)
+    world.grid[:, gx] = world.values.occupied
+    for side in (-0.35, 0.35):
+        _, gy = world.world_to_grid(0.0, side)
+        x0, _ = world.world_to_grid(-0.35, 0.0)
+        x1, _ = world.world_to_grid(0.3, 0.0)
+        world.grid[gy, x0:x1 + 1] = world.values.occupied
+    first = p.plan(observation(ep, 0))
+    closing = p.closing
+    assert closing.active and not first.stop and closing.phase == "VERIFY"
+    assert closing.backoffs == 0 and closing.backoff_skips == 1 and "target in view" in closing.backoff.skipped
+    assert p.plan(observation(ep, 1)).stop and closing.locked, "verified where it stood, as the no-clear-space case is"
+
+
 def test_a_far_candidate_and_a_disabled_setting_make_no_manoeuvre(monkeypatch):
     p, ep = open_floor_policy(monkeypatch)
     p.plan(observation(ep, 0, depth=2.0))

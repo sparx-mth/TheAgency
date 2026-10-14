@@ -14,8 +14,10 @@ already keeps: the trail of poses it stood at on this storey
 the floor guard and the collision-qualified A* planner (``_plan_to``). A
 candidate on the spawn floor's forbidden cells, off the local NavMesh when
 one is bound, in unknown or occupied cells, or without a path from here is
-not clear space. When nothing qualifies the manoeuvre is skipped and recorded
-as such: verification proceeds in place, as before.
+not clear space -- nor is a spot the observed grid puts a wall between and
+the target (``_sees``, since 2026-10-14: a perspective the door jamb hides
+the toilet from is not a wider one). When nothing qualifies the manoeuvre is
+skipped and recorded as such: verification proceeds in place, as before.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from typing import Dict, Optional, Sequence, Tuple
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
 
 #: Bearings tried around "straight away from the target", degrees: behind first, then the sides.
 RETREAT_OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90)
@@ -60,7 +63,7 @@ class BackoffManeuver:
         self.started = int(obs.step)
         goal = self._retreat_goal(obs, world, target_xyz)
         if goal is None:
-            self.skipped = "no navigable clear space behind or beside the agent"
+            self.skipped = "no navigable clear space behind or beside the agent with the target in view"
             self.state = "done"
             self.finished = int(obs.step)
             return False
@@ -138,10 +141,37 @@ class BackoffManeuver:
         for xy, source in candidates:
             if math.dist(xy, target_xy) < range_now + self.min_gain_m:
                 continue                                     # not a wider perspective
+            if not self._sees(world, xy, target_xy):
+                continue                                     # a wider perspective the jamb hides the target from
             spot = self._clear_spot(obs, world, xy)
             if spot is not None:
                 return spot, source
         return None
+
+    def _sees(self, world, xy, target_xy, standoff_m: float = 0.45) -> bool:
+        """Whether the observed grid puts no occupied cell between ``xy`` and the target (short of the target's own cells).
+
+        Since 2026-10-14 (evening). The manoeuvre re-verifies "from a wider
+        perspective", which is only one if the target is in it: Collierville/
+        000036 stood 0.03 m from the goal viewpoint with the toilet at 0.90
+        in the frame, retreated 0.5 m along its trail to a spot the door jamb
+        hid the toilet from, saw nothing there, released the candidate as
+        DISPROVED with a 2x rejection, and never found it again in 380
+        actions. The ray is tested on the known occupancy (unknown passes;
+        only what the map has seen as a wall counts) and stops ``standoff_m``
+        short of the target, which is an occupied cell itself.
+        """
+        dx, dy = target_xy[0] - xy[0], target_xy[1] - xy[1]
+        length = math.hypot(dx, dy)
+        if length <= standoff_m:
+            return True
+        scale = (length - standoff_m) / length
+        end = (xy[0] + dx * scale, xy[1] + dy * scale)
+        x0, y0 = world.world_to_grid(float(xy[0]), float(xy[1]))
+        x1, y1 = world.world_to_grid(float(end[0]), float(end[1]))
+        if not (world.in_bounds(x0, y0) and world.in_bounds(x1, y1)):
+            return False
+        return line_of_sight_clear(world.grid == world.values.occupied, x0, y0, x1, y1)
 
     def _clear_spot(self, obs, world, xy) -> Optional[Tuple[float, float]]:
         """``xy`` snapped to the NavMesh when one is bound, if it is a free, allowed, reachable cell."""
