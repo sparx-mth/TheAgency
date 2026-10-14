@@ -9,7 +9,9 @@ every building, say). Episodes are reported the moment they are scored
 ``benchmark_results.csv`` are rewritten after each one. Stair traversal is
 explicitly forbidden: every job receives a written ``policy_config.json`` with
 ``allow_stair_traversal: false`` and the frozen run configuration is checked to
-say so.
+say so. A job that stops recording actions for ``--stall-minutes`` is killed
+and its scene reported failed, so a simulator that dies with its renderer
+threads alive does not hold the campaign (2026-10-13).
 """
 from __future__ import annotations
 
@@ -132,8 +134,31 @@ def _append_report_row(rows, scene, record):
                  "final_rooms": policy.get("rooms", 0), "label_changes": changes})
 
 
+def job_heartbeat(directory):
+    """When the job last showed life: the newest of its ``live.json`` (rewritten every action) and ``episodes.jsonl``, or None before either exists."""
+    stamps = []
+    for name in ("live.json", "episodes.jsonl"):
+        path = Path(directory) / name
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if stamps else None
+
+
 def run_scene_job(args, scene, directory, policy_config, on_episode):
     """Run one recorded ``gibson.run`` job for ``scene`` and report each episode as it is scored.
+
+    A job that stops showing life is killed: ``--stall-minutes`` (20, longer
+    than the reasoning model's 15-minute call timeout, so one slow oracle
+    answer is never read as a death) without a change to its ``live.json``
+    (rewritten every action) or its ``episodes.jsonl``, while the job neither
+    finishes nor is being started (the first ``--stall-minutes`` after launch
+    are the simulator loading).
+    The Darden job of 2026-10-13 died mid-episode with its renderer threads
+    still alive -- a zombie ``poll()`` never returns for -- and the campaign
+    waited on it for half an hour. The scene is then reported as a failed
+    job (exit -9) with a ``STALLED`` line, and the campaign moves on.
 
     Returns:
         ``(exit code, job wall seconds)``.
@@ -157,6 +182,8 @@ def run_scene_job(args, scene, directory, policy_config, on_episode):
     if getattr(args, "software_render", False):
         command.append("--software-render")
     started = time.monotonic()
+    launched = time.time()
+    stall_s = 60.0 * float(getattr(args, "stall_minutes", 0.0) or 0.0)
     tail = EpisodeTail(directory)
     with (directory / "run.log").open("w") as stream:
         process = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT)
@@ -166,8 +193,23 @@ def run_scene_job(args, scene, directory, policy_config, on_episode):
                 on_episode(record)
             if finished:
                 break
+            if stall_s > 0.0:
+                heartbeat = job_heartbeat(directory)
+                since = time.time() - (launched if heartbeat is None else max(heartbeat, launched))
+                if since > stall_s:
+                    print("STALLED           scene=%s  no action recorded for %.0f s; killing the job" % (scene, since),
+                          flush=True)
+                    process.kill()
+                    try:
+                        process.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    for record in tail.poll():
+                        on_episode(record)
+                    break
             time.sleep(args.poll_s)
-    return process.returncode, time.monotonic() - started
+    code = process.returncode if process.returncode is not None else -9
+    return code, time.monotonic() - started
 
 
 def main(argv=None):
@@ -191,6 +233,10 @@ def main(argv=None):
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.add_argument("--video-fps", type=int, default=6)
     parser.add_argument("--poll-s", type=float, default=5.0, help="How often a running job's episodes.jsonl is read")
+    parser.add_argument("--stall-minutes", type=float, default=20.0,
+                        help="Kill a job whose live.json / episodes.jsonl have not changed for this long and report the "
+                             "scene failed (a job that died with its renderer threads alive never finishes); longer than "
+                             "LLM_REASONING_TIMEOUT_S so a slow oracle call is not a death; 0 disables")
     parser.add_argument("--allow-sim-version-mismatch", action="store_true")
     parser.add_argument("--allow-shared-gpu", action="store_true",
                         help="Forwarded to every scene run; needed when GPU 0 also drives a desktop")
@@ -201,6 +247,8 @@ def main(argv=None):
         parser.error("--episodes-per-scene must be between 1 and 200")
     if len(set(args.scenes)) != len(args.scenes):
         parser.error("--scenes lists a scene twice")
+    if args.stall_minutes < 0:
+        parser.error("--stall-minutes must be zero or positive")
     args.output.mkdir(parents=True, exist_ok=False)
     scenes = list(args.scenes)
     per_scene, total = args.episodes_per_scene, args.episodes_per_scene * len(scenes)

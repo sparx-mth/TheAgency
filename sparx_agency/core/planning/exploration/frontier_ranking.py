@@ -330,7 +330,7 @@ def frontier_goals_by_room(world: OccupancyGrid2D,
 
 
 def rank_by_view_gain(goals: Sequence[FrontierGoal], view, params: Optional[FrontierRankingParams] = None,
-                      min_gain_cells: int = 0) -> List[FrontierGoal]:
+                      min_gain_cells: int = 0, keep_size_cells: int = 0) -> List[FrontierGoal]:
     """Re-score frontier goals by the unknown floor a look-around FROM each one would reveal.
 
     The size of a frontier cluster says how long the boundary is; what a
@@ -352,6 +352,10 @@ def rank_by_view_gain(goals: Sequence[FrontierGoal], view, params: Optional[Fron
         view: The ray caster over the current map.
         params: Tuning; the distance floor and the heading weight are read.
         min_gain_cells: Goals whose gain is below this are dropped.
+        keep_size_cells: A goal whose cluster has at least this many
+            cells is kept whatever its gain -- a gap the body can pass is
+            an exit, a doorway, and leads somewhere however little of it
+            the rays reach from this side. 0 exempts nothing.
 
     Returns:
         The goals with ``utility`` replaced, best first.
@@ -362,7 +366,7 @@ def rank_by_view_gain(goals: Sequence[FrontierGoal], view, params: Optional[Fron
         if not math.isfinite(goal.geodesic_m):
             continue
         revealed = int(view.unknown_in_sector(goal.xy, 0.0, math.pi).sum()) + int(goal.size_cells)
-        if revealed < min_gain_cells:
+        if revealed < min_gain_cells and not (keep_size_cells > 0 and int(goal.size_cells) >= keep_size_cells):
             continue
         facing = 1.0 + params.heading_weight * abs(float(goal.heading_error_rad)) / math.pi
         utility = float(revealed) / ((float(goal.geodesic_m) + params.distance_floor_m) * facing)

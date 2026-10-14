@@ -699,14 +699,24 @@ class GlanceScheduler:
                                 event=event, **fields))
 
     def state(self):
-        """The glance in force (or the one planned) for the HUD and the per-step record."""
+        """The glance in force (or the one planned) for the HUD and the per-step record.
+
+        ``here`` is the last evaluation's candidate at the agent's own
+        position -- the left, right and full gains a look from where it
+        stands would have (since 2026-10-14): what the scheduler weighed
+        against the plan it chose, so a recording can say why no look was
+        taken at a given action rather than guess.
+        """
         plan = self.plan_in_force
+        here = next((c for c in self.candidates if c.index == 0), None) if self.candidates else None
         return {"active": None if self.active is None else {k: v for k, v in self.active.items()
                                                              if k not in ("last_yaw", "start_yaw", "xy_exact")},
                 "planned": None if plan is None else {"kind": plan.kind, "gain_m2": round(plan.gain_m2, 2),
                                                       "actions": plan.actions,
                                                       "xy": [round(v, 2) for v in plan.candidate.xy],
-                                                      "along_m": round(plan.candidate.along_m, 2)}}
+                                                      "along_m": round(plan.candidate.along_m, 2)},
+                "here": None if here is None else {"left_m2": round(here.left_m2, 2), "right_m2": round(here.right_m2, 2),
+                                                   "full_m2": round(here.full_m2, 2), "evaluated_step": self._last_eval_step}}
 
     def diagnostics(self):
         return {"settings": asdict(self.settings), "stats": dict(self.stats), "events": list(self.events),

@@ -409,6 +409,27 @@ def test_the_unknown_at_the_foot_of_a_seen_staircase_is_not_an_opening():
     assert [o for o in openings if o.room_pid == 0], "room A's west gap still is"
 
 
+def test_the_stair_exclusion_counts_only_the_masked_cells_on_the_exits_unknown_side():
+    """Darden/000034 (2026-10-14): the bathroom door 1.3-1.5 m beside the flight, its room opening the other
+    way, was struck off the openings for the whole episode by the omnidirectional test."""
+    from types import SimpleNamespace
+    from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import beyond, near_stair_mask
+    world = OccupancyGrid2D(np.zeros((100, 100), np.int8), OccupancyGrid2DParams(0.1, -5.0, -5.0))
+    mask = np.zeros((100, 100), bool)
+    gx, gy = world.world_to_grid(-0.9, 1.2)                        # the flight: north-west of the door, 1.5 m off
+    mask[gy - 2:gy + 3, gx - 2:gx + 3] = True
+    policy = SimpleNamespace(floor_guard=SimpleNamespace(mask=mask))
+    door, east = (0.0, 0.0), 0.0                                   # the door's unknown opens east
+    assert near_stair_mask(policy, world, door, 1.5), "the omnidirectional test: a masked cell is within 1.5 m"
+    assert not near_stair_mask(policy, world, door, 1.5, heading=east), "... but none of it lies beyond the door"
+    assert near_stair_mask(policy, world, door, 1.5, heading=math.radians(135)), "facing the flight: it is the flight's"
+    assert not beyond(door, east, (-0.9, 1.2)) and beyond(door, math.radians(135), (-0.9, 1.2))
+    assert beyond(door, None, (-0.9, 1.2)), "no heading: any side counts, as before"
+    assert not near_stair_mask(policy, world, door, 0.6, heading=math.radians(135)), "outside the window: not counted"
+    assert not near_stair_mask(SimpleNamespace(floor_guard=None), world, door, 1.5, heading=east)
+
+
 def test_a_new_opening_while_nothing_is_in_force_buys_the_oracle_a_call_at_most_every_revalue_actions():
     """Attempt 8 asked the oracle thirty times in sixty fallback actions, once per door that appeared or
     re-snapped. A new room or staircase is still valued at once."""
@@ -523,9 +544,16 @@ def test_a_confirmed_landmark_of_the_targets_class_is_a_node_at_a_fixed_probabil
     assert node.xy[0] < chair[0], "... on the agent's side (the agent is west, in room A)"
     assert abs(normalize(node.heading - math.atan2(chair[1] - node.xy[1], chair[0] - node.xy[0]))) < 1e-6, "facing the chair"
     assert landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, policy.loop.settings.openings, {lid}) == [], "inspected: not again"
-    policy.closing.rejected.append(((chair[0] + 0.3, chair[1], 0.0), policy.mapping.floor_id, 7, 1.0))
+    # A far verification that failed ("unverified") does not hide the landmark: the map fused it from several
+    # frames, and the peek brings the agent to a close view, which is new evidence (since 2026-10-14).
+    policy.closing.rejected.append(((chair[0] + 0.3, chair[1], 0.0), policy.mapping.floor_id, 7, 1.0, "unverified"))
+    assert len(landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, policy.loop.settings.openings, set())) == 1
+    policy.closing.rejected.clear()
+    # A release that DISPROVED the candidate from close does: the closing looked from near and saw nothing.
+    policy.closing.rejected.append(((chair[0] + 0.3, chair[1], 0.0), policy.mapping.floor_id, 7, 2.0,
+                                    "inspection saw nothing in any view"))
     assert landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, policy.loop.settings.openings, set()) == [], (
-        "the takeover verified a candidate there and released it: not worth another look")
+        "the takeover looked at it from close and saw nothing: not worth another look")
     policy.closing.rejected.clear()
     # In the loop: offered beside the exits at the fixed probability, never shown to the oracle, first in the order.
     policy.supervisor.inner._solver = lambda candidates, instance=None: sorted((c.room_id for c in candidates),
@@ -682,6 +710,14 @@ def test_an_opening_released_blocked_is_retired_rather_than_re_chosen():
     assert policy.loop.stats["peeks_abandoned"] == 1
     assert [e for e in policy.loop.events if e["event"] == "peek_abandoned"][-1]["reason"] == "released blocked"
     assert policy.supervisor.room_id != gap.node_id and gap.node_id not in policy.loop._openings, "not chosen again"
+    # The blocked clock was the released node's (since 2026-10-14): the node chosen in its place starts clean,
+    # and is NOT released blocked on its first action. Darden/000034 (2026-10-14, actions 119-124) released six
+    # nodes in six actions on one wedged walk's clock, four of them openings retired for good.
+    assert policy._blocked_since is None, "a release resets the blocked clock"
+    chosen = policy.supervisor.room_id
+    policy.loop.plan(obs_at(episode, 2, IN_A), world)
+    assert policy.supervisor.room_id == chosen and policy.supervisor.history[-1][:2] == (gap.node_id, BLOCKED)
+    assert policy.supervisor.stats["blocked"] == 1, "one blocked release, not a chain"
 
 
 def test_a_completed_look_covers_the_frontier_it_reveals_through_the_same_door():
@@ -704,3 +740,74 @@ def test_a_completed_look_covers_the_frontier_it_reveals_through_the_same_door()
     assert plain.peeked(0, (5.5, 5.0)) and not plain.peeked(0, (7.5, 5.0))
     assert plain.diagnostics()["peeked"]["0"][0]["heading"] is None
     assert registry.diagnostics()["peeked"]["0"][0]["heading"] == 0.0
+
+
+def test_a_target_landmark_seen_once_at_the_closings_confidence_is_a_node_a_weaker_one_is_not():
+    """Wiconisco/000014 (2026-10-14): the toilet seen once at 0.54 from 3.2 m was fused as a landmark with one
+    observation, which the map does not confirm; no `T` node, and the search went elsewhere for 65 actions. A
+    single sighting at ``landmark_sighting_confidence`` (the closing's 0.50) is a node; a 0.35 glimpse is not."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import LANDMARK, landmark_openings, target_landmarks
+    policy, episode, world, rooms, reasoned = opening_policy(order=(1, 0))
+    chair = (8.5, 1.5)
+    weak = (8.5, 3.5)
+    policy.landmarks.observe("chair", chair, frame_id=0, radius_m=0.3)          # one observation: unconfirmed
+    policy.landmarks.observe("chair", weak, frame_id=0, radius_m=0.3)
+    lid = next(lm.id for lm in policy.landmarks.all_landmarks() if lm.xy == chair)
+    wid = next(lm.id for lm in policy.landmarks.all_landmarks() if lm.xy == weak)
+    assert policy.landmarks.confirmed() == []
+    policy._landmark_best_conf = {lid: 0.54, wid: 0.35}
+    settings = policy.loop.settings.openings
+    assert [lm.id for lm in target_landmarks(policy, settings)] == [lid]
+    cost = policy.navigation_cost(world)
+    nodes = landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, settings, set())
+    assert [n.landmark_id for n in nodes] == [lid] and nodes[0].kind == LANDMARK
+    # Disabled (1.0): confirmed landmarks only, as before.
+    from dataclasses import replace as dc_replace
+    strict = dc_replace(settings, landmark_sighting_confidence=1.0)
+    assert target_landmarks(policy, strict) == []
+    policy.landmarks.observe("chair", chair, frame_id=1, radius_m=0.3)          # the second observation confirms it
+    assert [lm.id for lm in target_landmarks(policy, strict)] == [lid]
+    with pytest.raises(ValueError):
+        dc_replace(settings, landmark_sighting_confidence=0.0)
+
+
+# -- 2026-10-14: the peek steps on to the threshold for a second, wider look ------------------------------------
+def test_a_peek_that_stood_short_of_the_threshold_steps_on_to_it_and_looks_left_and_right():
+    """Collierville/000023, action 60: the supervisor's 0.6 m arrival tolerance -- a room centre's -- declared the
+    walk to the doorway over 0.58 m behind it, and the three-heading look from there saw the room beyond through the
+    wedge the jambs leave. A peek's look is taken from the threshold: the peek walks the remainder first and looks
+    two turns to each side of the way it came through."""
+    policy, episode, world, rooms, reasoned = opening_policy(order=(1, 0))
+    gap = west_gap(openings_of(policy, episode, world))
+    policy.supervisor.inner._solver = lambda candidates, instance=None: [gap.node_id, 1, 0]
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.supervisor.room_id == gap.node_id
+    # The supervisor declares the arrival 0.6 m EAST of the threshold; the agent faces north-west.
+    short = (gap.xy[0] + 0.55, gap.xy[1])
+    command = policy.loop.plan(obs_at(episode, 1, short, 2.0), world)
+    policy.loop.charge()
+    assert policy.supervisor.stats["arrivals"] == 1, "the supervisor's own tolerance: arrived 0.55 m short"
+    assert command.info.get("kind") == "peek" and command.waypoints and command.info.get("through") == 1, "the walk on to the threshold first"
+    assert list(command.waypoints[-1]) == pytest.approx(list(gap.xy), abs=0.3)
+    assert policy.loop.stats["peeks_stepped_through"] == 1 and policy.loop.peek_state()["phase"] == "through"
+    assert [e["event"] for e in policy.loop.events if e["event"] == "peek_step_through"] == ["peek_step_through"]
+    # At the threshold: the wide look, five headings about the way the agent came through (westward).
+    commands, last = peek_through(policy, episode, world, gap.xy, 2, 2.0)
+    looks = [c for c in commands if c.info.get("kind") == "peek" and not c.waypoints]
+    assert looks and all(c.info["of"] == 5 and c.info["through"] == 1 for c in looks), "two turns to each side: five headings"
+    assert policy.loop.stats["peeks_completed"] == 1 and policy.openings.peeked(0, gap.xy)
+    complete = [e for e in policy.loop.events if e["event"] == "peek_complete"][0]
+    assert complete["through"] == 1
+    look = [e for e in policy.loop.events if e["event"] == "peek_look"]
+    assert len(look) == 1 and look[0]["through"] == 1 and look[0]["headings"] == 5 and look[0]["walked_m"] == pytest.approx(0.55, abs=0.05)
+    # Switched off: the look from where the supervisor said the walk ended, as before.
+    strict, episode2, world2, rooms2, _ = opening_policy(order=(1, 0), openings={"step_through": False})
+    gap2 = west_gap(openings_of(strict, episode2, world2))
+    strict.supervisor.inner._solver = lambda candidates, instance=None: [gap2.node_id, 1, 0]
+    strict.loop.plan(obs_at(episode2, 0, IN_A), world2)
+    commands, last = peek_through(strict, episode2, world2, (gap2.xy[0] + 0.55, gap2.xy[1]), 1, 2.0)
+    looks = [c for c in commands if c.info.get("kind") == "peek" and not c.waypoints]
+    assert looks and all(c.info["of"] == 3 for c in looks)
+    assert strict.loop.stats["peeks_completed"] == 1 and strict.loop.stats["peeks_stepped_through"] == 0
+    with pytest.raises(ValueError):
+        OpeningSettings(through_look_turns=-1)

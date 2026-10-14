@@ -115,7 +115,9 @@ ROOM: a region the robot segmented. type= was inferred from the objects seen in 
 of object and may be wrong -- a sink alone reads as a kitchen until a toilet shows). \
 size= floor area. frontier= unexplored openings or boundaries still accessible inside it \
 (0 is NOT proof that nothing is there). status= one of: never_entered (only seen from \
-outside, or not at all); entered (the robot stood in it but never completed a look-around); \
+outside, or not at all); entered (the robot stood in it and its camera has seen most of what \
+is mapped of it, but it never completed a look-around: what is left of it lies behind its \
+frontier= boundaries); \
 scanned(<how>, <ago>) (the robot completed a full look-around in it, or saw most of it from \
 one, <ago> ago -- what was visible then was seen ONCE by a detector that misses objects that \
 are small, far, half-hidden, behind a door or under furniture). searched= time spent inside. \
@@ -167,12 +169,20 @@ STEP 4 the numbers, one per node, independently, integers 0-100:
  - a scanned room of a type the target does not live in: 0-2.
  - a scanned room of the home type with the target not seen: 3-10 early in the budget, \
 15-40 late in it, less if it was scanned moments ago.
- - an entered but unscanned room: judge it by type and size like an unexplored one, a little lower.
+ - an entered but unscanned room: the robot has walked it and seen most of it without seeing \
+the target; value only what its frontier= boundaries still hide -- at most HALF of what an \
+unexplored room of the same type and size would get, and under 10 with frontier=0. One \
+searched= 20s or longer with frontier= 0 or 1 is as good as scanned: 0-5, whatever its type. \
+Never write "known to contain" the target of a room the target was not seen in.
  - a never-entered room of unknown type, or an opening with nothing glimpsed: never below 10 \
 while the home type is missing; by size fit and by what the home lacks once it is found.
  - a never-entered room named as the home type by objects seen through its door, or an \
 opening whose glimpse names the home type: 60 or more.
- - a room of the home type with frontier left, entered or not, target not seen: 30 or more.
+ - a never-entered room of the home type with frontier left, target not seen: 30 or more; the \
+same room entered: 10-20, more only if its frontier leads to a large unseen part of it.
+ - prefer the places the robot has NOT been near: an opening or room away from everything \
+entered and scanned leads to a part of the home not seen at all; a gap at the edge of a \
+scanned room usually shows a strip of it.
  - a hallway or corridor rarely holds the target, but one with frontier LEADS to unseen \
 rooms: value it by what it may lead to.
  - searched long and recently -> low, not zero; searched briefly or long ago -> stays promising.

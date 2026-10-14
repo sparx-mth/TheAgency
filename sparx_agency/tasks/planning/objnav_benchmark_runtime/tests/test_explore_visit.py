@@ -19,10 +19,12 @@ import math
 
 import pytest
 
-from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH, TRANSIT
+from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH, TRANSIT, UNREACHABLE
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, GibsonProtocol
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OpeningSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import EXPLORED, SCAN_POINT_INSIDE
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import openings_of, refresh, west_gap
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
     IN_A, IN_B, cell_in, loop_policy, obs_at, two_room_world)
@@ -88,12 +90,19 @@ def test_the_default_visit_enters_a_room_at_its_most_revealing_frontier_not_its_
     assert policy.loop.estimates[1]["frontier_clusters"] == 2
 
 
-def test_a_room_with_no_frontier_left_is_entered_at_its_vantage_point_to_be_confirmed_on_foot():
+def test_a_room_with_no_frontier_left_is_entered_at_its_doorstep_not_its_vantage_point():
+    """Since 2026-10-14: a room with nothing left to walk to is confirmed from its nearest passable cell -- the
+    doorstep -- not from the middle of the room (the user's rule: no walk to the centre without a reason)."""
     policy, episode, world, rooms, _ = explore_policy(order=(1, 0), room_b_resolved=True)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.supervisor.room_id == 1 and policy.loop.events[-1]["entry"] == "vantage"
+    assert policy.supervisor.room_id == 1 and policy.loop.events[-1]["entry"] == "doorstep"
     cost = policy.navigation_cost(world)
-    assert policy.route_memory.goal == policy.loop._vantage(world, cost, rooms[1])[0]
+    goal = policy.route_memory.goal
+    vantage = policy.loop._vantage(world, cost, rooms[1])[0]
+    assert goal == policy.loop._nearest_entry(obs_at(episode, 0, IN_A), world, cost, rooms[1])
+    assert cell_in(world, rooms[1], goal), "inside room B's mask"
+    assert math.dist(goal, IN_A) < math.dist(vantage, IN_A), "nearer the agent than the vantage point"
+    assert policy.loop.estimates[1]["entry"] == "doorstep" and policy.loop.stats["entry_doorstep"] == 1
 
 
 # -- the visit: frontier after frontier, then the room is explored ---------------------------------------
@@ -203,7 +212,10 @@ def test_an_opening_off_a_room_that_is_a_node_is_folded_into_the_rooms_walk():
     assert {e["room"] for e in policy.loop.events if e["event"] == "opening_folded"} == {0, 1}
     assert policy.reasoned_with[0]["stairs"] == [], "the oracle was shown the rooms, not the gaps"
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import search_snapshot
-    assert search_snapshot(policy)["openings"] == [], "and the HUD shows none"
+    shown = search_snapshot(policy)["openings"]
+    assert {o["id"] for o in shown} == {o.node_id for o in before} and all(o["folded"] for o in shown), (
+        "the HUD shows every live opening, the folded ones flagged -- never hidden (2026-10-13)")
+    assert all(not o["targeted"] and o["live"] for o in shown)
     assert policy.loop.diagnostics()["openings_folded"] == sorted(policy.loop._folded_now)
     # A room the ledger has finished is no node, and its openings are nodes again.
     policy.scans.record(obs_at(episode, 1, IN_A), rooms[0], source="warmup")
@@ -220,6 +232,64 @@ def test_openings_of_a_room_the_oracle_valued_below_the_floor_stay_nodes():
         "sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes", fromlist=["opening_options"]
     ).opening_options(policy, openings_of(policy, episode, world))])
     assert [o.node_id for o in kept] == [gap.node_id], "room B's openings fold into room B; room A's gap stays"
+
+
+def test_an_opening_the_reply_itself_unfolded_is_a_node_at_the_provisional_value_not_zero():
+    """Corozal/000142 (2026-10-14), action 446: the toilet's doorway, folded into its room at the call, unfolded
+    by the reply that dropped the room to 1 %, read 0.0 for the 54 actions left."""
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    gap = west_gap(openings_of(policy, episode, world))
+    for pid in (0, 1):                                     # both rooms cooling: SELECT stays, as in the opening tests
+        policy.supervisor.inner._cooling[pid] = 0.0
+        policy.supervisor.inner._cooling_verdict[pid] = EXHAUSTED
+    inner = policy.graph.reason
+
+    def reason(*args, **kwargs):                           # the model's reply drops room A under the floor
+        inner(*args, **kwargs)
+        policy.graph.probs[0] = 0.0
+
+    policy.graph.reason = reason
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert gap.node_id not in policy.reasoned_with[0]["stairs"], "folded at the call: room A was a node then"
+    assert gap.node_id not in policy.loop._folded_now, "... and unfolded by the reply"
+    assert gap.node_id not in policy.graph.stair_probs, "the model never saw it, so it has no number"
+    estimate = policy.loop.estimates[gap.node_id]
+    assert estimate["prob_source"] == "provisional" and estimate["prob"] == policy.loop.settings.openings.unvalued_prob == 0.10
+    assert estimate["entry"] == "peek", "a node RPT* was handed, not one under the floor"
+    assert estimate["why"] == "not yet shown to the model"
+    assert policy.loop.stats["openings_provisional"] == 1
+    [event] = [e for e in policy.loop.events if e["event"] == "opening_provisional"]
+    assert event["node"] == gap.node_id and event["room"] == 0 and event["prob"] == 0.10
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import search_snapshot
+    [shown] = [o for o in search_snapshot(policy)["openings"] if o["id"] == gap.node_id]
+    assert shown["prob"] == 0.10 and shown["prob_source"] == "provisional" and not shown["folded"]
+    # The node without a number still buys the next call, and the model's number then replaces the prior.
+    policy.graph.reason = inner
+    policy.loop.plan(obs_at(episode, 7, IN_A), world)
+    assert len(policy.reasoned_with) == 2 and gap.node_id in policy.reasoned_with[1]["stairs"]
+    assert policy.loop.estimates[gap.node_id]["prob_source"] == "oracle" and policy.loop.estimates[gap.node_id]["prob"] == 0.3
+    assert policy.loop.stats["openings_provisional"] == 1, "logged once"
+    # ... and is remembered across a later call that does not show it again.
+    policy.graph.stair_probs = {}
+    assert policy.loop._exit_prob(gap.node_id) == (0.3, "remembered")
+
+
+def test_with_unvalued_prob_zero_an_unfolded_opening_reads_zero_as_before():
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), openings=OpeningSettings(unvalued_prob=0.0))
+    gap = west_gap(openings_of(policy, episode, world))
+    inner = policy.graph.reason
+
+    def reason(*args, **kwargs):
+        inner(*args, **kwargs)
+        policy.graph.probs[0] = 0.0
+
+    policy.graph.reason = reason
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop.estimates[gap.node_id]["prob"] == 0.0, "under the supervisor's floor: no node, as before"
+    assert policy.loop.stats["openings_provisional"] == 0 and not any(
+        e["event"] == "opening_provisional" for e in policy.loop.events)
+    with pytest.raises(ValueError):
+        OpeningSettings(unvalued_prob=1.0)
 
 
 def test_the_openings_are_read_every_action_so_a_resolved_one_leaves_the_record_at_once():
@@ -269,3 +339,69 @@ def test_a_rooms_service_time_is_a_peeks_worth_per_frontier_so_a_sliver_is_price
         policy.loop.estimates[1]["distance_m"]) and policy.loop.estimates[1]["distance_m"] > 0, "the leg is backed out of the charge"
     scan_mode = loop_policy(visit="scan")[0]
     assert scan_mode.loop._service_steps_for(1) == scan_mode.loop.settings.service_steps()
+
+
+# -- a refused plan is re-aimed, not a room released -------------------------------------------------------
+def test_a_plan_the_planner_refuses_re_aims_at_the_rooms_next_entry_instead_of_releasing_it_unreachable():
+    """Darden/000034 (``4ae716bacfab``, 2026-10-13): the bathroom was released ``unreachable`` twice on one refused
+    plan each, the second time 2.4 m from it after a 65-action walk; the toilet stood 1.3 m away at the step limit."""
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    obs = obs_at(episode, 0, IN_A)
+    policy.loop.plan(obs, world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
+    committed = tuple(policy.route_memory.goal)
+    navigate = policy._navigate
+
+    def refusing(observation, planning_world, goal, kind, final_yaw=None):
+        if tuple(goal) == committed:
+            policy.route_memory.clear("test refusal")
+            policy._route = policy._goal = None
+            return None
+        return navigate(observation, planning_world, goal, kind, final_yaw)
+
+    policy._navigate = refusing
+    policy.loop.charge()
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1, "the room is kept"
+    assert command.waypoints and command.info["kind"] == "transit/1"
+    assert tuple(policy.route_memory.goal) != committed, "a different entry of the same room"
+    assert policy.loop.stats["route_reaimed"] == 1 and policy.loop.stats["plan_failures"] == 0
+    event = [e for e in policy.loop.events if e["event"] == "route_reaimed"][-1]
+    assert event["room"] == 1 and tuple(event["failed"]) == tuple(round(v, 2) for v in committed)
+    assert policy.loop._entry[0] == tuple(policy.route_memory.goal)
+    # Every entry refused: only then is the room released unreachable.
+    policy._navigate = lambda *args, **kwargs: None
+    policy.loop.charge()
+    policy.loop.plan(obs_at(episode, 2, IN_A), world)
+    assert policy.loop.stats["plan_failures"] >= 1, "the room, then whatever the re-solved order put next"
+    assert [e for e in policy.loop.events if e["event"] == "release"][-1]["verdict"] == "unreachable"
+
+
+# -- 2026-10-14: a room gone from the registry for one action does not end its transit -----------------------
+def test_a_room_missing_from_the_registry_for_an_action_keeps_its_transit_walking():
+    """Collierville/000023, action 170: the watershed re-segmented and room 4 was gone from the registry for exactly
+    one action -- the transit was released ``unreachable`` and the order re-solved without it; the room was back the
+    next action. The committed entry point is still a point on the floor: the walk goes on for ``room_missing_grace``
+    actions, and the room is given up only if it stays missing."""
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
+    goal = policy.route_memory.goal
+    missing = policy.graph.registry.rooms.pop(1)
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1, "one action gone: the walk goes on"
+    assert command.waypoints and policy.route_memory.goal == goal and command.info["kind"] == "transit/1"
+    assert policy.loop.stats["room_missing_held"] == 1
+    assert [e["event"] for e in policy.loop.events if e["event"] == "room_missing_held"] == ["room_missing_held"]
+    policy.graph.registry.rooms[1] = missing                        # back the next action, as in the recording
+    command = policy.loop.plan(obs_at(episode, 2, IN_A), world)
+    assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1" and policy.loop._room_missing == 0
+    # Gone for longer than the grace: unreachable, as before.
+    policy.graph.registry.rooms.pop(1)
+    for step in range(3, 3 + policy.loop.settings.room_missing_grace):
+        policy.loop.plan(obs_at(episode, step, IN_A), world)
+        assert policy.supervisor.room_id == 1
+    policy.loop.plan(obs_at(episode, 3 + policy.loop.settings.room_missing_grace, IN_A), world)
+    assert policy.supervisor.history[-1][:2] == (1, UNREACHABLE)
+    with pytest.raises(ValueError):
+        LoopSettings(room_missing_grace=-1)

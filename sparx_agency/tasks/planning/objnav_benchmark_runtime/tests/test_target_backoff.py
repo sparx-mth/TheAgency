@@ -45,17 +45,18 @@ def box_at(label, u, v, conf=0.9, half=20, width=640, height=480):
                                        min(float(width - 1), u + half), min(float(height - 1), v + half)))
 
 
-def drive(p, ep, target_xyz, label, detections, steps=80, until=None):
+def drive(p, ep, target_xyz, label, detections, steps=80, until=None, start=0):
     """Run the policy through the converter against a fixed world target.
 
     ``detections(step, pose, u, v, depth, visible)`` returns the frame's
     boxes -- or ``(boxes, depth)`` to set the uniform depth image too (the
     frame shows a different surface). Returns ``(actions, poses, phases,
     lock_step)``; the last pose is where STOP was issued, when it was.
+    ``start`` is the first action's step (frames fed before the drive).
     """
     converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
     actions, poses, phases, lock_step = [], [pose], [], None
-    for step in range(steps):
+    for step in range(start, start + steps):
         pixels, depths = project_to_image(np.array([target_xyz]), ep.camera, pose)
         u, v = pixels[0]
         visible = depths[0] > 0 and 22 < u < 618 and 22 < v < 458
@@ -119,6 +120,44 @@ def test_no_clear_space_behind_skips_the_manoeuvre_and_verifies_in_place():
     assert "no navigable clear space" in p.closing.backoff.skipped
     assert p.plan(observation(ep, 1)).stop and p.closing.locked
     assert p.episode_info()["target_closing"]["backoff"]["skipped"]
+
+
+def test_a_retreat_spot_the_map_hides_the_target_from_is_not_a_wider_perspective(monkeypatch):
+    """Collierville/000036 (2026-10-14): 0.03 m from the goal viewpoint, the toilet at 0.90 in the frame, the
+    retreat along the trail ended behind the door jamb; nothing seen there, the candidate disproved, 380 actions
+    lost. A spot the observed grid puts a wall between and the target is skipped; with every spot hidden the
+    manoeuvre is skipped and the verification happens where the target is in view."""
+    p, ep = open_floor_policy(monkeypatch)
+    world = p.mapping.update(None)
+    # The agent stands in a doorway at x=0: a wall along x=-0.35 with the door at |y| <= 0.3 -- every retreat
+    # spot behind or beside it (0.6-1.2 m back) sees the target only through the door, which the ring's
+    # straight-back spot does, the others do not.
+    for gy in range(0, 200):
+        gx, _ = world.world_to_grid(-0.35, 0.0)
+        y = world.grid_to_world(gx, gy)[1]
+        if abs(y) > 0.30:
+            world.grid[gy, gx] = world.values.occupied
+    target = (0.8, 0.0, 0.5)
+    manoeuvre = __import__("sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_backoff",
+                           fromlist=["BackoffManeuver"]).BackoffManeuver(p, 3, 20)
+    assert manoeuvre._sees(world, (-0.75, 0.0), target[:2]), "straight back through the door: in view"
+    assert not manoeuvre._sees(world, (-0.75, 0.6), target[:2]), "behind the wall: hidden"
+    assert manoeuvre._sees(world, (0.5, 0.0), target[:2]), "0.3 m from the target: nothing between them to test"
+    # Close the door too, and wall the sides (a short corridor open toward the target): every retreat spot is
+    # free floor, and none sees the target -- the manoeuvre is skipped and the verification stays where the
+    # target is in the frame (the default synthetic frame: the target 0.7 m ahead).
+    gx, _ = world.world_to_grid(-0.35, 0.0)
+    world.grid[:, gx] = world.values.occupied
+    for side in (-0.35, 0.35):
+        _, gy = world.world_to_grid(0.0, side)
+        x0, _ = world.world_to_grid(-0.35, 0.0)
+        x1, _ = world.world_to_grid(0.3, 0.0)
+        world.grid[gy, x0:x1 + 1] = world.values.occupied
+    first = p.plan(observation(ep, 0))
+    closing = p.closing
+    assert closing.active and not first.stop and closing.phase == "VERIFY"
+    assert closing.backoffs == 0 and closing.backoff_skips == 1 and "target in view" in closing.backoff.skipped
+    assert p.plan(observation(ep, 1)).stop and closing.locked, "verified where it stood, as the no-clear-space case is"
 
 
 def test_a_far_candidate_and_a_disabled_setting_make_no_manoeuvre(monkeypatch):
@@ -289,6 +328,52 @@ def test_a_candidate_not_confirmed_from_the_wider_perspective_is_released_for_go
     assert closing.active and closing.backoff is None and closing.backoff_repeats == 1 and closing.backoffs == 1
 
 
+def test_a_confident_candidate_the_wider_perspective_misses_is_given_back_without_a_rejection(monkeypatch):
+    """Collierville/000036 (2026-10-13): a toilet at 0.93-0.95, 1.5 m inside its doorway, backed off from and never
+    re-seen from the retreat spot (the jamb hides it), was released as disproved with twice the rejection radius and
+    its landmark on the map was never a node again. Read at ``backoff_trust_confidence`` or better, the retreat
+    spot is what failed: the release carries no rejection, and the box re-takes the closing from the sighting spot.
+    (The first frame reads under the trust confidence here, so the manoeuvre is made at all -- see the next test.)"""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    p, ep = open_floor_policy(monkeypatch, label="toilet")
+    target = (0.8, 0.0, 0.5)
+
+    def only_from_close(step, pose, u, v, depth, visible):
+        near = math.dist((pose.x, pose.y), target[:2]) <= 1.0
+        return [box_at("toilet", u, v, conf=0.90 if step == 0 else 0.95, half=60)] if visible and near else []
+    actions, poses, phases, lock_step = drive(p, ep, target, "toilet", only_from_close, steps=60,
+                                              until=lambda policy: not policy.closing.active)
+    closing = p.closing
+    assert lock_step is None and not closing.active and closing.phase == "RELEASED"
+    assert closing.backoffs == 1 and closing.wider_releases == 1 and closing.trusted_releases == 1
+    assert closing.last_release == TargetClosing.TRUSTED_RELEASE
+    assert not closing.rejected, "trusted, not disproved: nothing in the rejection memory"
+    assert not closing.refuses_far_candidate(replace(observation(ep, 100, depth=0.8), pose=AgentPose(0, 0, 0, 0),
+                                                     target_category="toilet"), target[:2])
+    # Back at the sighting spot the box re-takes the closing -- and this object had its one manoeuvre.
+    pose = AgentPose(0.0, 0.0, 0.0, 0.0)
+    pixels, depths = project_to_image(np.array([target]), ep.camera, pose)
+    p.detector.detect = lambda rgb: [box_at("toilet", pixels[0][0], pixels[0][1], conf=0.90, half=60)]
+    p.plan(replace(observation(ep, 100, depth=float(depths[0])), pose=pose, target_category="toilet"))
+    assert closing.active and closing.backoff is None and closing.backoff_repeats == 1 and closing.backoffs == 1
+
+
+def test_a_candidate_first_read_at_the_trust_confidence_is_not_backed_off_from(monkeypatch):
+    """The two Collierville toilet episodes of 2026-10-13 spent 23-25 actions each on the manoeuvre and the
+    verification after it, and one of them lost the toilet behind its jamb. A 0.95 first frame at arm's length is
+    verified where it was seen: no retreat, the lock on the next frame, the STOP a few actions on."""
+    p, ep = open_floor_policy(monkeypatch, label="toilet", tilt=True)
+    target = (0.8, 0.0, 0.5)
+    actions, poses, phases, lock_step = drive(
+        p, ep, target, "toilet", lambda step, pose, u, v, d, visible: [box_at("toilet", u, v, conf=0.95, half=60)] if visible else [])
+    closing = p.closing
+    assert actions[-1] == DiscreteAction.STOP and closing.locked
+    assert closing.backoffs == 0 and closing.backoff is None and closing.backoff_trusted_skips == 1
+    assert "BACK_OFF" not in phases and lock_step is not None and lock_step <= 1
+    assert len(actions) <= 8, "no retreat: the STOP within a handful of actions"
+    assert p.episode_info()["target_closing"]["backoff_trusted_skips"] == 1
+
+
 # -- proactive pitch and the no-step rule (Wiconisco toilet, 2026-10-08) -------------------------------------
 def toilet_frame(ep, pose, target, top_m=0.75, half_width=55):
     """A toilet's box as a detector draws it: from the tank top down to where the base meets the floor."""
@@ -437,3 +522,39 @@ def test_the_second_unverified_release_of_one_anchor_is_not_overridable():
         pass
     assert not p.closing.active, "the third look is not"
     assert p.closing.refuses_far_candidate(observation(ep, step + 2, depth=0.9), p.closing.rejected[-1][0][:2])
+
+
+def test_a_candidate_the_detector_had_been_firing_on_is_not_sudden_and_is_not_backed_off_from(monkeypatch):
+    """Collierville/000023 (2026-10-14): 0.95, 0.79, 0.79, 0.76 on four border-cut frames that could not start the
+    takeover, then the takeover on the fifth at 0.84 -- "sudden" by the range alone -- a 25-action retreat to a spot
+    the jamb hid the toilet from, and a 2 m rejection. A class in the frame on two of the six actions before the
+    takeover is persistent, not sudden: verified where it stands."""
+    p, ep = open_floor_policy(monkeypatch, label="toilet", tilt=True)
+    target = (0.8, 0.0, 0.5)
+    pose = AgentPose(0, 0, 0, 0)
+    pixels, depths = project_to_image(np.array([target]), ep.camera, pose)
+    for step in range(2):
+        # Two frames of the toilet cut by the frame's lower edge: the class is in view, no takeover can start,
+        # and the search owns the action (fed through the perception/closing pair as ``_plan`` does).
+        p.detector.detect = lambda rgb: [box_at("toilet", pixels[0][0], 470, conf=0.85, half=60)]
+        obs = replace(observation(ep, step, depth=float(depths[0])), pose=pose, target_category="toilet")
+        p.perception.observe(obs)
+        p.closing.observe(obs)
+        assert not p.closing.active and p.closing.border_rejections == step + 1
+    actions, poses, phases, lock_step = drive(
+        p, ep, target, "toilet",
+        lambda step, pose, u, v, d, visible: [box_at("toilet", u, v, conf=0.85, half=60)] if visible else [], start=2)
+    closing = p.closing
+    assert actions[-1] == DiscreteAction.STOP and closing.locked
+    assert closing.backoffs == 0 and closing.backoff_persistence_skips == 1 and closing.backoff_trusted_skips == 0
+    assert "BACK_OFF" not in phases
+    assert p.episode_info()["target_closing"]["backoff_persistence_skips"] == 1
+    # Truly sudden -- nothing in the frame before the takeover's own -- and under the trust confidence: the
+    # manoeuvre as before.
+    q, ep2 = open_floor_policy(monkeypatch, label="toilet", tilt=True)
+    actions, poses, phases, lock_step = drive(
+        q, ep2, target, "toilet",
+        lambda step, pose, u, v, d, visible: [box_at("toilet", u, v, conf=0.85, half=60)] if visible else [])
+    assert q.closing.backoffs == 1 and q.closing.backoff_persistence_skips == 0 and "BACK_OFF" in phases
+    with pytest.raises(ValueError):
+        TargetClosingSettings(backoff_persistence_frames=0)

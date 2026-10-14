@@ -257,3 +257,76 @@ def test_a_scene_subset_runs_only_those_scenes_in_the_given_order(tmp_path, monk
     with pytest.raises(SystemExit):
         five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "y"),
                          "--scenes", "Nowhere"])
+
+
+def test_a_job_that_stops_recording_actions_is_killed_and_its_scene_reported_failed(tmp_path, monkeypatch, capsys):
+    """The Darden job of 2026-10-13 died mid-episode with its renderer threads alive: a zombie ``poll()`` never
+    returns for, and the campaign waited on it for half an hour."""
+    import os
+    import time as time_module
+
+    class Zombie:
+        def __init__(self):
+            self.returncode = None
+            self.killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    zombies = []
+
+    def on_benchmark(command):
+        output = Path(command[command.index("--output") + 1])
+        scene = command[command.index("--scene") + 1]
+        if scene == "Collierville":
+            write_scored_episode(output, record(scene, success=True, dtg=0.0))
+            return 0
+        # The job scores one episode, then its live record freezes: both files are older than the stall.
+        write_scored_episode(output, record(scene, success=True, dtg=0.0))
+        (output / "live.json").write_text("{}")
+        stale = time_module.time() - 3600.0
+        for name in ("live.json", "episodes.jsonl"):
+            os.utime(output / name, (stale, stale))
+        zombie = Zombie()
+        zombies.append(zombie)
+        return zombie
+
+    real_popen = five_scene.subprocess.Popen
+
+    def fake_popen(command, *args, **kwargs):
+        if "sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run" not in command:
+            return real_popen(command, *args, **kwargs)
+        result = on_benchmark(command)
+        return result if isinstance(result, Zombie) else FakeProcess(result)
+
+    monkeypatch.setattr(five_scene.subprocess, "Popen", fake_popen)
+    output = tmp_path / "campaign"
+    code = five_scene.main(["--episodes-dir", "/episodes", "--scenes-dir", "/scenes", "--output", str(output),
+                            "--detector-url", "http://127.0.0.1:18095", "--allow-sim-version-mismatch",
+                            "--scenes", "Collierville", "Corozal", "--poll-s", "0", "--stall-minutes", "0.0001"])
+    assert code == 1, "a stalled scene is a failed scene"
+    assert len(zombies) == 1 and zombies[0].killed
+    out = capsys.readouterr().out
+    assert "STALLED           scene=Corozal" in out and "SCENE DONE        scene=Corozal  scored=1/1  exit=-9" in out
+    campaign = json.loads((output / "campaign.json").read_text())
+    assert campaign["completed"] == ["Collierville"] and campaign["failed"] == ["Corozal"]
+    # The job's own scored episode is still in the results.
+    assert "episodes=2/2" in out
+
+
+def test_the_job_heartbeat_reads_the_live_record_and_a_negative_stall_is_refused(tmp_path):
+    directory = tmp_path / "job"
+    directory.mkdir()
+    assert five_scene.job_heartbeat(directory) is None, "nothing written yet: the launch is the reference"
+    (directory / "live.json").write_text("{}")
+    assert five_scene.job_heartbeat(directory) is not None
+    with pytest.raises(SystemExit):
+        five_scene.main(["--episodes-dir", "/e", "--scenes-dir", "/s", "--output", str(tmp_path / "x"),
+                         "--detector-url", "http://127.0.0.1:1", "--stall-minutes", "-1"])

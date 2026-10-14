@@ -221,18 +221,27 @@ def _openings(col, search):
     openings = search.get("openings", ())
     if not openings:
         return
-    col.line("OPENINGS (nodes)  p     off room  glimpsed / target landmark", CYAN, bold=True)
-    for node in openings[:6]:
+    col.line("OPENINGS (live)   p     off room  unseen  glimpsed / target landmark", CYAN, bold=True)
+    shown = sorted(openings, key=lambda n: (not n.get("targeted"), bool(n.get("folded")), -(n.get("prob") or 0.0)))
+    for node in shown[:6]:
         via = node.get("via") or "?"
-        col.line("%-5s %-9s %s  %-9s %s" % (
-            _name(node), (node.get("label") or "gap")[:9], _fmt(node.get("prob")),
+        gain = node.get("gain_m2")
+        mark = ">" if node.get("targeted") else ("~" if node.get("folded") else " ")
+        col.line("%s%-5s %-9s %s  %-9s %-6s %s" % (
+            mark, _name(node), (node.get("label") or "gap")[:9], _fmt(node.get("prob")),
             via.split(" (")[0].replace("room ", "R") if via != "?" else "-",
+            "-" if gain is None or node.get("kind") == "landmark" else "%.1fm2" % gain,
             ("look at the %s" % (node.get("glimpsed") or ["target"])[0]) if node.get("kind") == "landmark"
-            else ", ".join(sorted(set(node.get("glimpsed") or ()))[:4]) or "nothing yet"), _node_color(node, search))
-        if node.get("why"):
+            else ", ".join(sorted(set(node.get("glimpsed") or ()))[:4]) or "nothing yet"),
+            DIM if node.get("folded") and not node.get("targeted") else _node_color(node, search))
+        if node.get("folded") and not node.get("targeted"):
+            col.line("folded into R%s's walk" % node.get("room_pid"), DIM, indent=24)
+        elif node.get("targeted") and not node.get("live"):
+            col.line("target of the peek in force; gone from the live map", DIM, indent=24)
+        elif node.get("why"):
             col.line(node["why"], DIM, indent=24)
-    if len(openings) > 6:
-        col.line("... %d more" % (len(openings) - 6), DIM, indent=8)
+    if len(shown) > 6:
+        col.line("... %d more" % (len(shown) - 6), DIM, indent=8)
     col.gap()
 
 

@@ -155,6 +155,25 @@ def test_transit_gives_up_on_its_own_clock():
     assert out.action.verdict == TRANSIT_TIMEOUT
 
 
+def test_a_pause_does_not_unplan_a_committed_route():
+    """A route planned once and followed is still a route after an inspection turned on the way: the pause
+    moves the deadlines, not the mark a plan is measured against (Darden/000034 action 493, 2026-10-13)."""
+    sup = supervisor(ObjectSearchParams(plan_grace_s=5.0, max_transit_s=100.0), solver=fixed_solver(1))
+    sup.update(TWO_ROOMS, facts(r1=1), HERE, now=0.0, last_plan_s=0.0)
+    planned = sup.update(TWO_ROOMS, facts(r1=1), (0.5, 0.0), now=1.0, last_plan_s=0.5)
+    assert isinstance(planned.action, Hold)
+    sup.pause(10.0)                                   # a ten-turn glance, the committed route untouched
+    out = sup.update(TWO_ROOMS, facts(r1=1), (1.0, 0.0), now=20.0, last_plan_s=0.5)
+    assert isinstance(out.action, Hold) and sup.state == TRANSIT, "still on its way, on the plan it had"
+    assert sup.stats["plan_fails"] == 0
+    # Without any plan since the goal was set, the grace still runs out (excluding the pause).
+    other = supervisor(ObjectSearchParams(plan_grace_s=5.0), solver=fixed_solver(1))
+    other.update(TWO_ROOMS, facts(r1=1), HERE, now=0.0, last_plan_s=None)
+    other.pause(10.0)
+    assert isinstance(other.update(TWO_ROOMS, facts(r1=1), HERE, now=14.0, last_plan_s=None).action, Hold)
+    assert other.update(TWO_ROOMS, facts(r1=1), HERE, now=16.0, last_plan_s=None).action.verdict == UNREACHABLE
+
+
 def test_transit_abandons_a_wedged_follower():
     sup = supervisor(ObjectSearchParams(blocked_abandon_s=5.0),
                      solver=fixed_solver(1))

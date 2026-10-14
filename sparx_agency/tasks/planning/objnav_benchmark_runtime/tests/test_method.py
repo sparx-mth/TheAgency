@@ -60,6 +60,14 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     segmenter = overrides.pop("segmenter", None)          # with segmentation=True: the fake SAM service
     if not discovery:
         overrides.setdefault("doorway_peek", {"enabled": False})
+    closing = overrides.get("target_closing")
+    if closing is None or isinstance(closing, dict):
+        # The STOP overshoot is its own stage after the decision (``TargetClosing._terminal``): the
+        # decision tests read the STOP on the deciding frame, and the overshoot's tests name its knobs.
+        closing = dict(closing or {})
+        if not any(key.startswith("stop_overshoot") for key in closing):
+            closing.update(stop_overshoot_steps=0, stop_overshoot_max_steps=0)
+        overrides["target_closing"] = closing
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
                             camera, BODY_ACTIONS_PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))

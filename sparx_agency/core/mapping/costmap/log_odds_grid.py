@@ -86,6 +86,26 @@ class LogOddsGridCostmap(Costmap):
         self._L[mask] = np.clip(self._L[mask] + self.cfg.l_free, self.cfg.l_min, self.cfg.l_max)
         self._seen[mask] = True
 
+    def mark_occupied(self, points_xy: np.ndarray) -> None:
+        """Set the cells under ``points_xy`` to ``l_max`` at once: evidence stronger than any one hit.
+
+        For what the body learned by touching it -- a forward step the
+        simulator or the airframe refused. A hit from :meth:`update_from_points_xy`
+        adds at most ``l_occ`` (0.85), which cannot lift a cell that free-space
+        rays have driven to ``l_min`` (-4) above the occupied threshold; the
+        planner then keeps routing through the cell the body cannot pass. The
+        cell still decays under later free-space evidence like any other.
+        """
+        points = np.asarray(points_xy, dtype=np.float64).reshape((-1, 2))
+        if points.shape[0] == 0:
+            return
+        gx, gy = self._world_to_grid(points[:, 0], points[:, 1])
+        m = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
+        if not np.any(m):
+            return
+        self._L[gy[m], gx[m]] = self.cfg.l_max
+        self._seen[gy[m], gx[m]] = True
+
     def get_grid(self) -> Tuple[GridSpec, np.ndarray]:
         spec = GridSpec(
             resolution_m=self.cfg.resolution_m,

@@ -17,7 +17,13 @@ Four tests say whether a room is finished, in order:
   sight through observed free space (``seen_from_scan``) -- the small room
   fully visible from the corridor the agent scanned, or the half of a split
   room the scan stood in. Unknown cells block sight, so a region the camera
-  never resolved is never credited;
+  never resolved is never credited -- and, since 2026-10-13, neither is a
+  room with a **live frontier** left when the count is known: the unknown
+  beyond that boundary was never in the scan's view. Corozal/000076
+  (``c7a4c81d4dee``): the warm-up at the spawn point saw half of the known
+  part of a room it never entered, the room was finished with three
+  frontier clusters still open, and the bathroom behind one of them -- the
+  toilet's -- was never offered;
 * it has **no live frontier** -- no accessible unexplored boundary left:
   every edge of it is a wall, an object, a pocket, or unknown looked
   through without a return (:class:`~sightlines.SightLedger`) -- and the
@@ -198,7 +204,12 @@ class RoomScanLedger:
         Args:
             frontier: How many accessible, unresolved frontier clusters the
                 room still has, when known; None skips the ``seen_through``
-                and ``fragment`` tests, which need it to be zero.
+                and ``fragment`` tests, which need it to be zero. A known
+                count above zero also withholds ``seen_from_scan``: a room
+                seen from outside with an unexplored boundary left is not
+                finished (``scan_point_inside`` stands regardless -- the
+                circle was turned inside it, and what is left is an opening
+                or a sliver the openings offer).
             doored: Whether a confirmed door stands on the room, when known;
                 None is read as "no door known".
             step: The current action, when known: remembered the first time
@@ -226,6 +237,10 @@ class RoomScanLedger:
             self._cache[cache_key] = result
         if result is None and frontier is not None and int(frontier) == 0:
             result = self._status_without_frontier(world, pid, room, bool(doored))
+        if result == SEEN_FROM_SCAN and frontier is not None and int(frontier) > 0:
+            # Seen from OUTSIDE, with an unexplored boundary left: the unknown beyond
+            # that boundary was never in the scan's view, and the room is not finished.
+            result = None
         if result is not None:
             self._finished[key] = result
             self._finished_cells[key] = int(room.n_cells)

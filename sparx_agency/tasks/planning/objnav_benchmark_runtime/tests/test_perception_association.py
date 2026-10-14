@@ -145,7 +145,10 @@ def test_a_box_cut_only_by_the_bottom_edge_is_the_floor_cutoff_not_a_sliver():
     assert not clipped_box((252, 320, 470, 479), k, 8), "the toilet at 1.2 m"
     assert clipped_box((0, 304, 69, 480), k, 8), "cut by the LEFT edge too: a lateral sliver"
     assert clipped_box((457, 338, 640, 479), k, 8), "cut by the right edge too"
-    assert clipped_box((300, 400, 360, 480), k, 8), "60 px wide: a sliver whatever edge it touches"
+    assert not clipped_box((300, 400, 360, 480), k, 8), "60 x 80 px at the floor cutoff: a narrow object, whole laterally (a toilet's tank at 1.6 m)"
+    assert not clipped_box((104, 362, 187, 480), k, 8), "Collierville/000023's toilet at 1.3 m: 83 px wide, refused four times before 2026-10-14"
+    assert clipped_box((300, 440, 340, 480), k, 8), "40 x 40 px: a sliver whatever edge it touches"
+    assert clipped_box((300, 400, 340, 480), k, 8), "40 px wide, under the 8 % width floor"
     assert clipped_box((300, 100, 400, 480), k, 8) is False or (400 - 300) < 0.3 * k.width, "tall and wide enough: not narrow"
     assert clipped_box((300, 200, 400, 480), k, 8), "its top is in the upper half: not the floor cutoff"
     assert clipped_box((0, 269, 84, 479), k, 8), "the Ranchester bed sliver, as before"
@@ -163,3 +166,25 @@ def test_the_detection_floor_is_the_takeover_tracking_threshold():
     assert statuses == {"cup": "fused", "bottle": "low_confidence"}
     assert p.landmarks.confirmed() == [], "one weak sighting confirms nothing"
 
+
+
+def test_an_object_whose_lowest_sample_stands_within_sixty_centimetres_of_the_floor_is_on_this_storey():
+    """Collierville/000023 (2026-10-14): a toilet seen from a metre, its base under the frame's lower edge and the
+    floor in front inside the camera's blind zone, sampled its bowl at 0.2-0.45 m as the lowest point near it and
+    was refused as `unsupported_floor_association` on every frame -- never a landmark, never a `T` node. A storey
+    is 2.5 m and more away; within 0.60 m of this storey's floor the object stands on it."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy
+    p, ep = setup_policy()
+    assert p.building is not None, "the floor-support test is the multi-storey guard's"
+    p.mapping._anchor = 0.0
+    terrain = p.building.terrain
+    terrain.samples.clear()
+    res = terrain.resolution
+    for i in range(8):                                        # eight samples of the bowl, 0.3-0.4 m up, within 0.75 m
+        terrain.samples[(int(2.0 / res) + (i % 3), int(0.0 / res) + (i // 3), i)] = (0.30 + 0.0125 * i, 0, True)
+    cycle = p.perception
+    assert cycle._floor_support((2.1, 0.1, 0.45)) is None, "0.30 m above the floor: on this storey"
+    terrain.samples.clear()
+    for i in range(8):
+        terrain.samples[(int(2.0 / res) + (i % 3), int(0.0 / res) + (i // 3), i)] = (0.80 + 0.0125 * i, 0, True)
+    assert cycle._floor_support((2.1, 0.1, 0.95)) == "unsupported_floor_association", "0.80 m up: nothing of this floor under it"

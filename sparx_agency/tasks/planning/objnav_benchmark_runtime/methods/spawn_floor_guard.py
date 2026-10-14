@@ -15,7 +15,12 @@ plans on -- rather than in each frontier, opening, peek and route module:
   obstacle band starts 0.15 m above it, so a drop is otherwise *unknown*,
   and unknown next to free is a frontier: that is how a floor-wide frontier
   walked the Pomaria agent down a flight it had never chosen. Rises beyond
-  the first tread are obstacles already;
+  the first tread are obstacles already. ``drop_m`` is
+  ``RPTSettings.step_down_m`` (0.30 m): the plane is the pose height and
+  the floor the camera sees lies up to 0.3 m under it in some scenes, so a
+  tighter bar masks the storey itself (Corozal/000142, 2026-10-14, 3,316
+  cells); a shallow flight inside the tolerance (Darden/000034's three
+  treads at -0.11, -0.18, -0.21 m) is the open item;
 * a goal is refused when its cell is masked, or when the storey the agent
   stands on is further than ``floor_plane_bound_m`` from the spawn plane
   (``Z_spawn +/- 0.5 m``) -- then nothing on it is a destination;
@@ -72,8 +77,10 @@ class SpawnFloorGuard:
         settings = policy.settings
         self.enabled: bool = not settings.allow_stair_traversal
         self.bound_m: float = settings.floor_plane_bound_m
-        # Below the plane by more than the atlas's same-floor tolerance is another level.
-        self.drop_m: float = settings.multifloor.floor_match_m
+        # Below the plane by more than ``RPTSettings.step_down_m`` (0.30 m, the atlas's same-floor tolerance) is a
+        # drop. Not lower: the plane is the pose height, and the floor the camera sees lies up to 0.3 m under it
+        # in some scenes (Corozal, 2026-10-14: 0.15 m masked the agent's own storey).
+        self.drop_m: float = settings.step_down_m
         self.spawn_z: Optional[float] = None
         self.drops: Dict[int, np.ndarray] = {}
         self.mask: Optional[np.ndarray] = None

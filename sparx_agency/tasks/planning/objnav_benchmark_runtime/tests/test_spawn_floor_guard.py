@@ -345,3 +345,39 @@ def test_the_capsule_keeps_its_preferred_margin_where_nothing_is_in_the_way():
     preferred = policy.settings.body_radius_m + policy.converter_params.goal_tolerance_m + world.resolution
     assert list(policy.floor_guard.stair_margins_m.values()) == [round(math.ceil(preferred / world.resolution) * world.resolution, 2)]
     assert policy.episode_info()["spawn_floor_guard"]["stair_margins_m"] == policy.floor_guard.stair_margins_m
+
+
+def test_the_drop_threshold_is_a_knob_at_the_atlas_tolerance_and_a_flights_floor_is_a_drop_its_treads_are_not():
+    """``RPTSettings.step_down_m`` (0.30 m): a surface this far below the plane is a drop. Not lower -- at 0.15 m
+    Corozal/000142 painted 3,316 cells of its own storey as drops (2026-10-14), the plane being the pose height and
+    the floor the camera sees lying 0.15-0.30 m under it there. A flight's lower floor at -0.45 m is a drop; its
+    shallow treads (-0.11, -0.18, -0.21 m) are not, and remain the open item."""
+    assert RPTSettings().step_down_m == 0.30
+    with pytest.raises(ValueError, match="step_down_m"):
+        RPTSettings(step_down_m=0.0)
+    policy, episode, world, _ = forbidden_stairs()
+    policy.mapping._anchor = 0.0
+    assert policy.floor_guard.drop_m == 0.30
+    k = episode.camera.intrinsics
+    camera_z = episode.camera.height_m
+
+    def frame_of(z_surface, step):
+        depth = np.full((k.height, k.width), 4.0, np.float32)
+        for v in range(k.height):
+            dz = (v - k.cy) / k.fy
+            if dz > 1e-3:
+                depth[v, :] = min(4.0, (camera_z - z_surface) / dz)
+        return replace(observation(episode, step), depth_m=depth, pose=AgentPose(3.0, 3.0, 0.0, 0.0))
+    for z in (-0.11, -0.18, -0.21):
+        policy.floor_guard.observe(frame_of(z, 1), world)
+        assert policy.floor_guard.stats["drop_cells"] == 0, "a tread inside the tolerance is not a drop"
+    confined = policy.floor_guard.observe(frame_of(-0.45, 2), world)
+    drops = policy.floor_guard.drops[policy.mapping.floor_id]
+    assert policy.floor_guard.stats["drop_cells"] > 0 and (confined.grid[drops] == world.values.occupied).all()
+    ys, xs = np.nonzero(drops)
+    assert not policy.floor_guard.goal_allowed(frame_of(-0.45, 3), world, world.grid_to_world(xs[0], ys[0]), "frontier")
+    # A tighter knob masks a floor 0.2 m under the pose plane -- the Corozal storey -- which the default does not.
+    tight, episode2, world2, _ = forbidden_stairs(settings={"step_down_m": 0.15})
+    tight.mapping._anchor = 0.0
+    tight.floor_guard.observe(frame_of(-0.20, 1), world2)
+    assert tight.floor_guard.stats["drop_cells"] > 0, "0.15: the storey's own floor, 0.2 m under the pose, is a drop"

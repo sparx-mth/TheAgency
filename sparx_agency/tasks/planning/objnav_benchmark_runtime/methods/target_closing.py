@@ -46,6 +46,16 @@ class TargetClosingSettings:
     # until 2026-10-07 only the look-down existed, and a hardcoded LOOK_DOWN drove
     # high targets out of the frame.
     look_down_distance_m: float = 1.30
+    # THE GEOMETRIC PITCH IS QUANTISED WITH HYSTERESIS (since 2026-10-14 evening). ``_pitch``
+    # rounds the elevation it wants to the protocol's tilt step; a target whose depression
+    # from the next step's range lands at half a step -- a 0.39 m toilet seen from 2.2 m by a
+    # camera 0.9 m up is 15.0 degrees down, the step is 30 -- rounds to 0 on one frame and to
+    # 30 on the next as the memory's height flickers by millimetres between frames taken at
+    # different pitches, and the converter serves a pitch change before any move: Darden/
+    # 000034 spent its last nine actions on LOOK_DOWN / LOOK_UP 2.19 m from a locked toilet
+    # and never stepped. The step the camera is AT is kept while the wanted angle lies within
+    # ``(0.5 + pitch_hysteresis)`` steps of it; the change needs that much more.
+    pitch_hysteresis: float = 0.15
     # A target within this height of the camera is level with it: neither LOOK is
     # forced, and the verification frame falls back to whichever view keeps the box
     # inside the frame.
@@ -54,8 +64,45 @@ class TargetClosingSettings:
     range_tolerance_m: float = 0.05
     refine_distance_m: float = 0.15
     max_verify_steps: int = 12
+    # THE VERIFICATION WALKS TOWARD WHAT IT CAN SEE BUT CANNOT PLACE (since 2026-10-14). A box
+    # of the target's class on the candidate's bearing WITHOUT a usable depth -- a toilet at
+    # 5 m, beyond what the projection accepts -- is a sighting of the candidate, not its
+    # absence: the consecutive-frame chain is carried across such a frame, the verification
+    # faces the box and steps toward it, and ``max_verify_steps`` does not count the step
+    # (at most ``max_verify_approach_steps`` such steps per candidate). The Markleeville
+    # toilet (/000188, actions 20-31) was in view at 5 m on every other frame and the
+    # verification turned in place at it for its whole budget, twice.
+    max_verify_approach_steps: int = 24
+    # THE SWEEP IS ONE CIRCLE, NOT THE BUDGET (since 2026-10-14). An unlocked candidate that has
+    # dropped out of view is swept for at the bearing and one turn to each side (``_scan``: the
+    # headings 0, +30, 0, -30); the cycle takes four or five actions, and a candidate not in any
+    # of those headings is not brought back by the same headings again -- the box went behind a
+    # jamb when the agent stepped (Wiconisco/000014, actions 231-241: eleven turns in place at a
+    # toilet one step had hidden). After this many consecutive sweep actions without a frame of
+    # the candidate the verification is released as it would be at its budget; the rest of the
+    # budget is the search's. 0 disables the cap (the budget alone ends the sweep).
+    verify_sweep_max_actions: int = 6
     max_reacquire_steps: int = 24
     max_closing_steps: int = 160
+    # THE INSPECTION STEPS WHEN THE RANGE IS A STEP OUT (since 2026-10-14). A fresh box
+    # measured beyond the terminal range by less than one forward step, with the agent
+    # facing within one turn of it, is one MOVE_FORWARD from a STOP; the inspection used
+    # to turn in place at it instead (Wiconisco/000193, actions 476-499: the toilet's near
+    # edge at 1.0505 m against a 1.05 m limit, twenty-four alternating turns at the step
+    # limit). At most ``inspection_max_steps`` such steps per inspection.
+    inspection_max_steps: int = 3
+    # A LOCKED TARGET IS WALKED TO THROUGH THE UNKNOWN BEFORE THE SPOT IS GIVEN UP (since
+    # 2026-10-14). The planner blocks unknown cells, and a level camera 0.88 m up sees the
+    # floor only from about 1.4 m out, so the floor between a corridor and the toilet seen
+    # through a doorway is routinely unknown; the standoff ring then had no path, the lock
+    # was released as boxed in and the spot refused a new takeover (Collierville/000023,
+    # action 375, the toilet at 2.8 m in plain view). When no route to the ring exists on
+    # the known floor, the ring is planned again with unknown cells passable at
+    # ``through_unknown_cost`` times the cost of open floor -- the target was seen along
+    # that line of sight -- and the committed route is re-checked against the map as it
+    # fills in, like any other. ``through_unknown=False`` restores the strict planner alone.
+    through_unknown: bool = True
+    through_unknown_cost: float = 8.0
     # A box at or above this confidence starts a takeover past the rejection memory
     # of UNVERIFIED and map-contradicted releases and the release cooldown (since
     # 2026-10-07): the memory stops the same far flicker from restarting the
@@ -190,6 +237,37 @@ class TargetClosingSettings:
     stop_centring: bool = True
     stop_confidence: float = 0.50
     weak_stop_max_holds: int = 2
+    # THE STOP OVERSHOOT (since 2026-10-14). The terminal ranges are read short of the truth: the
+    # near edge of a box with floor in it, and a centroid fused from the near surfaces, both stand
+    # nearer than the object's footprint does, and the evaluator measures to the footprint.
+    # Markleeville/000188 (``benchmark_toilet_10episodes_20261014T143259Z``) STOPped on a 0.84 m
+    # near-edge reading 1.27 m from the toilet's footprint -- DTG 0.27, SR 0. (Reading a small
+    # object's range from the fused memory instead was tried the same day and flipped CLOSE and
+    # INSPECT on alternate frames; see ``_fresh_measured``.) So once the STOP is DECIDED, on
+    # whichever evidence, the closing walks on toward the target and STOPs then -- no frame is
+    # consulted, nothing is verified again, the decision stands: ``stop_overshoot_steps`` (one)
+    # MOVE_FORWARD always, then more, up to ``stop_overshoot_max_steps`` in all, while the 3-D
+    # memory still stands farther than ``stop_overshoot_within_m`` from the agent. The memory is
+    # about the footprint's near face (000188: 1.25 m where the footprint's disc began at 1.27),
+    # so a memory inside 0.90 m is a tenth inside the evaluator's radius; the near edge is not
+    # trusted for this -- it is what decided the STOP, and in 000188 it undercut the memory by
+    # 0.41 m where the eight STOPs that succeeded agreed with it within 0.14. Verified in turn
+    # (2026-10-14 evening): two steps always, SR 0.90 but every other STOP 0.01-0.07 SPL dearer
+    # (``…155701Z``); one step always, SR 0.80 with 000188 STOPped 3 cm outside the disc
+    # (``…162832Z``); on those nine deciding frames this rule takes the second step twice.
+    # A step is taken only while the memory would still stand ``stop_overshoot_min_range_m`` or
+    # more beyond the agent after it, and the near edge the deciding frame measured (when it did)
+    # at least the body radius; the agent must face within a quarter turn of the memory (farther
+    # off the converter would turn first, and one over a turn off is not "a step forward"); a
+    # step the converter reports blocked ends the overshoot at once, and
+    # ``stop_overshoot_max_actions`` bounds the whole stage, turns included (the three turns a
+    # quarter-turn error can take, plus the steps). ``stop_overshoot_max_steps`` 0 restores the
+    # STOP on the deciding frame; 1 is one step and never a second.
+    stop_overshoot_steps: int = 1
+    stop_overshoot_max_steps: int = 2
+    stop_overshoot_within_m: float = 0.90
+    stop_overshoot_min_range_m: float = 0.45
+    stop_overshoot_max_actions: int = 5
     # After a release, no new takeover may START on a far candidate for this
     # many actions: six twelve-step verifications from one spot three metres
     # from the couch (Ranchester attempt 4) were the same failure repeated,
@@ -277,6 +355,29 @@ class TargetClosingSettings:
     sudden_proximity_m: float = 1.30
     backoff_steps: int = 3
     backoff_max_actions: int = 20
+    # A candidate the wider perspective does not confirm is DISPROVED -- unless the detector
+    # read it at ``backoff_trust_confidence`` or better from where it was first seen. From
+    # the retreat spot a toilet 1.5 m inside its doorway is behind the jamb (Collierville/000036,
+    # 2026-10-13: 0.93-0.95 in two frames, backed off, never re-seen, released as disproved
+    # with a 2x rejection radius, and the toilet landmark on the map 2 m away was never a node
+    # again). Such a candidate is released WITHOUT a rejection: the place the agent stood was
+    # not the place to verify it from, and the next frame of it re-takes it. A weaker box --
+    # the table read as a bed at 0.80-0.90 from 0.9 m (Markleeville 2026-10-08) -- is disproved
+    # as before. A candidate FIRST SEEN at that confidence is not backed off from at all
+    # (since 2026-10-14): the manoeuvre and the verification that follows cost 23-25 actions
+    # in both Collierville toilet episodes of the 2026-10-13 run and lost the target once;
+    # a 0.92 box is the detector's word, and the lock is taken where it was seen.
+    backoff_trust_confidence: float = 0.92
+    # NOR IS A CANDIDATE THE DETECTOR HAD BEEN FIRING ON (since 2026-10-14). "Sudden" means the
+    # agent turned and there it was; a toilet whose box stood in the frame on
+    # ``backoff_persistence_frames`` of the ``backoff_persistence_window`` actions before the
+    # takeover -- clipped by the frame's edge, so no takeover could start on those frames -- is
+    # not sudden, it is persistent, and the manoeuvre that re-verifies it from farther back is
+    # not owed (Collierville/000023, 2026-10-14: 0.95, 0.79, 0.79, 0.76 on four border-cut frames,
+    # the takeover on the fifth at 0.84, a 25-action retreat to a spot the jamb hid it from, and a
+    # 2 m rejection that refused eleven more frames of it at 0.86-0.91).
+    backoff_persistence_frames: int = 2
+    backoff_persistence_window: int = 6
     # SUPPORT-SURFACE RESILIENCE (``support_surface``). At close range a mounted or
     # supported object leaves the frame before its support does (a television on a
     # dresser becomes the dresser). A box of a ``support_surface_classes`` label whose
@@ -323,11 +424,24 @@ class TargetClosingSettings:
         if (isinstance(self.bbox_pitch_region, bool) or not math.isfinite(self.bbox_pitch_region)
                 or not 0 < self.bbox_pitch_region < 0.5):
             raise ValueError("bbox_pitch_region must lie in (0, 0.5)")
+        if (isinstance(self.pitch_hysteresis, bool) or not math.isfinite(self.pitch_hysteresis)
+                or not 0 <= self.pitch_hysteresis < 0.5):
+            raise ValueError("pitch_hysteresis must lie in [0, 0.5)")
         if (isinstance(self.stop_confidence, bool) or not math.isfinite(self.stop_confidence)
                 or not self.track_confidence <= self.stop_confidence <= 1):
             raise ValueError("stop_confidence must lie in [track_confidence, 1]")
         if type(self.weak_stop_max_holds) is not int or self.weak_stop_max_holds < 0:
             raise ValueError("weak_stop_max_holds must be a non-negative int")
+        if type(self.stop_overshoot_steps) is not int or self.stop_overshoot_steps < 0:
+            raise ValueError("stop_overshoot_steps must be a non-negative int")
+        if type(self.stop_overshoot_max_steps) is not int or self.stop_overshoot_max_steps < self.stop_overshoot_steps:
+            raise ValueError("stop_overshoot_max_steps must be an int of at least stop_overshoot_steps")
+        for key in ("stop_overshoot_within_m", "stop_overshoot_min_range_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError("%s must be positive and finite" % key)
+        if type(self.stop_overshoot_max_actions) is not int or self.stop_overshoot_max_actions < self.stop_overshoot_max_steps:
+            raise ValueError("stop_overshoot_max_actions must be an int of at least stop_overshoot_max_steps")
         if type(self.release_cooldown_actions) is not int or self.release_cooldown_actions < 0:
             raise ValueError("release_cooldown_actions must be a non-negative int")
         if self.terminal_distance_m + self.range_tolerance_m > self.look_down_distance_m:
@@ -337,6 +451,9 @@ class TargetClosingSettings:
                 raise ValueError("Invalid target-closing action/frame bound: %s" % key)
         if type(self.border_margin_px) is not int or self.border_margin_px < 0:
             raise ValueError("border_margin_px must be a non-negative int")
+        if (isinstance(self.backoff_trust_confidence, bool) or not math.isfinite(self.backoff_trust_confidence)
+                or not 0 < self.backoff_trust_confidence <= 1):
+            raise ValueError("backoff_trust_confidence must lie in (0, 1]")
         for key in ("release_unverified", "stop_on_exhausted_inspection", "release_on_failed_inspection", "footing_sweep"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
@@ -378,9 +495,18 @@ class TargetClosingSettings:
         for key in ("history_stop_after_missing", "backoff_steps", "backoff_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
-        for key in ("backoff", "support_surface_resilience"):
+        for key in ("backoff", "support_surface_resilience", "through_unknown"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
+        for key in ("max_verify_approach_steps", "inspection_max_steps", "verify_sweep_max_actions"):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 0:
+                raise ValueError("%s must be a non-negative int" % key)
+        for key in ("backoff_persistence_frames", "backoff_persistence_window"):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 1:
+                raise ValueError("%s must be a positive int" % key)
+        if (isinstance(self.through_unknown_cost, bool) or not math.isfinite(self.through_unknown_cost)
+                or self.through_unknown_cost < 1.0):
+            raise ValueError("through_unknown_cost must be finite and at least 1 (the cost of open floor)")
         if (not isinstance(self.support_surface_classes, (tuple, list)) or not self.support_surface_classes
                 or not all(isinstance(name, str) and name.strip() for name in self.support_surface_classes)):
             raise ValueError("support_surface_classes must be a non-empty sequence of labels")
@@ -443,6 +569,7 @@ class TargetClosing:
         self.backoff_repeats = 0           # close candidates on an anchor already backed off from: verified in place
         self.backed_off = []               # (anchor xyz, floor id) per manoeuvre made
         self.wider_releases = 0            # candidates the wider perspective did not confirm
+        self.trusted_releases = 0          # ... of which, read at backoff_trust_confidence or better: released without a rejection
         self.repeat_releases = 0           # second unverified releases of one anchor, escalated to non-overridable
         self.disproved_refusals = 0        # legacy-pursuit landmarks refused on a release that disproved them from close
         self.no_step_holds = 0             # verify steps withheld because the step would push the box out of the frame
@@ -458,6 +585,17 @@ class TargetClosing:
         self.bbox_pitch_corrections = 0    # tilts the image-space servo asked for on the approach and in verification
         self.stop_centring_tilts = 0       # terminal STOPs deferred one tilt so they are taken on a whole box
         self.weak_stop_holds = 0           # terminal frames held because the fresh box was under stop_confidence
+        self.resighting_exemptions = 0     # re-sightings of the active candidate the rejection memory would have dropped
+        self.glimpse_steps = 0             # verification steps toward a box in view without a usable depth
+        self.verify_pauses = 0             # verification actions the clock did not count: steps toward a visible candidate
+        self.backoff_trusted_skips = 0     # manoeuvres skipped because the first frame read at backoff_trust_confidence
+        self.backoff_persistence_skips = 0  # ... or because the class had been in the frame on the actions before
+        self.strong_box_steps = []         # the last actions a box of the class at or above ``confidence`` was in the frame
+        self.inspection_steps = 0          # inspection frames answered with a step: the fresh range a step beyond the limit
+        self.dead_band_alignments = 0      # inspection frames read as aligned because a turn back would undo the last turn
+        self.through_unknown_routes = 0    # standoff routes planned through unknown cells after the known floor had none
+        self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
+        self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
         self._clear()
 
     def _clear(self):
@@ -467,7 +605,9 @@ class TargetClosing:
         self.xyz = self.anchor = self.box = None
         self.label = None
         self.count = 0
+        self.best_conf = 0.0               # the strongest fresh reading of this candidate
         self.started = self.last_seen = self.processed = -1
+        self.last_sighting = -1            # the last action the candidate was in view: measured (``last_seen``) or glimpsed
         self.floor_id = None
         self.failure = None
         self.path = TargetApproachPath(self.policy)
@@ -501,6 +641,13 @@ class TargetClosing:
         self.centring_done = False         # this inspection has spent its one centring tilt
         self.centring_step = -1            # ... and the action it was spent on (the next frame STOPs even without a box)
         self.weak_holds = 0                # consecutive terminal frames held for a box under stop_confidence
+        self.glimpse_box = None            # a box of the target's class in view WITHOUT a usable depth, on the anchor's bearing
+        self.glimpse_step = -1             # ... and the action it was seen on
+        self.verify_paused = 0             # verification actions this candidate's clock did not count (bounded)
+        self.inspection_stepped = 0        # steps this inspection took for a fresh range one step beyond the limit
+        self.inspection_turn = None        # (step, sign) of the inspection's last centring turn on a fresh box
+        self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
+        self.overshoot = None              # the decided STOP's forward steps in progress (``_terminal``), else None
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -510,6 +657,8 @@ class TargetClosing:
     #: A candidate backed off from and never re-seen from the wider perspective: not overridable, and refused
     #: from twice ``boxed_in_radius_m`` of the spot it was released at (the agent must really go elsewhere).
     WIDER_RELEASE = "unverified from a wider perspective"
+    #: A confident candidate the wider perspective did not confirm: the retreat spot is blamed, not the candidate.
+    TRUSTED_RELEASE = "unverified from a wider perspective; trusted, not disproved"
     #: The second ``unverified`` release of the same anchor: the same evidence is not new evidence (Markleeville
     #: 2026-10-08, 35 takeovers of one table in 450 actions, every one past the ``unverified`` memory at 0.80).
     REPEAT_RELEASE = "unverified again"
@@ -548,8 +697,27 @@ class TargetClosing:
         """
         return self._rejected_nearby((float(xy[0]), float(xy[1]), 0.0), floor_id)
 
+    def landmark_refused(self, xy, floor_id):
+        """Whether a confirmed landmark of the target's class at ``xy`` is NOT worth offering as a node.
+
+        Only a release that DISPROVED its candidate from close
+        (``DISPROVED_RELEASES``) refuses the landmark: the closing looked
+        from near and saw nothing. A plain ``unverified`` release -- two
+        consecutive frames not had from far -- does not: the landmark map
+        fused the object from several frames, which is more evidence than
+        a far verification that failed, and the node's peek brings the
+        agent to within ``landmark_standoff_m`` of it, where a close view is
+        new evidence whatever the memory holds (since 2026-10-14; until then
+        every release within range hid the seen toilet from the HUD and
+        the order alike).
+        """
+        floor = self.policy.mapping.floor_id
+        if floor_id != floor:
+            return False
+        return self._disproved_near(xy)
+
     def _candidates(self, obs):
-        """Confident in-frame boxes, and those with a coherent 3-D position.
+        """``(kept, projected, glimpses)``: confident in-frame boxes, those with a coherent 3-D position, and the depthless boxes on the candidate's bearing.
 
         Before a lock the box must also clear the image border and lie away
         from every spot already released as unverified on this floor --
@@ -561,7 +729,11 @@ class TargetClosing:
         While a candidate is active, a box of the target's class down to
         ``track_confidence`` is projected too, and counts if -- and only if
         -- it lands on the candidate's anchor: a re-sighting, not a new
-        object.
+        object -- and the memory, the cooldown and the boxed-in spot, which
+        judge whether a takeover may START, do not drop it (since 2026-10-14).
+        A box of the class WITHOUT a usable depth that lies on the active
+        candidate's bearing is a ``glimpse``: in view, not placeable from
+        here (:meth:`_on_anchor_bearing`).
         """
         p, s = self.policy, self.settings
         k = obs.camera.intrinsics
@@ -571,17 +743,25 @@ class TargetClosing:
                  and d.conf >= threshold
                  and 0 <= d.xyxy[0] < d.xyxy[2] <= k.width
                  and 0 <= d.xyxy[1] < d.xyxy[3] <= k.height]
+        if any(d.conf >= s.confidence for d in boxes) and (not self.strong_box_steps or self.strong_box_steps[-1] != obs.step):
+            self.strong_box_steps.append(int(obs.step))          # clipped or not: the class was in the frame
+            del self.strong_box_steps[:-2 * s.backoff_persistence_window]
         if not self.locked:
             kept = [d for d in boxes if not self._clipped(d.xyxy, k)]
             self.border_rejections += sum(1 for d in boxes if d.conf >= s.confidence) - sum(
                 1 for d in kept if d.conf >= s.confidence)
             boxes = kept
-        projected, kept = [], []
+        projected, kept, glimpses = [], [], []
         for detection in boxes:
             rows = []
             strong = detection.conf >= s.confidence
             values = list(observed_objects(obs, (detection,), threshold, rows, masks=p.perception.masks))
             if not values:
+                # No usable depth. A strong box is kept for the record; one that lies on the active
+                # candidate's bearing is a GLIMPSE of it -- the verification faces and approaches it
+                # (:meth:`_scan`), since the depth that failed from here is had from closer.
+                if tracking and not self.locked and self._on_anchor_bearing(obs, detection.xyxy):
+                    glimpses.append(detection)
                 if strong:
                     kept.append(detection)
                 continue
@@ -593,7 +773,16 @@ class TargetClosing:
             if not strong and not associated:
                 continue                                       # a weak box is only ever a re-sighting
             override = s.override_confidence < 1.0 and detection.conf >= s.override_confidence
-            if not self.locked and range_m > s.rejection_min_range_m:
+            if not self.locked and associated:
+                # A re-sighting of the ACTIVE candidate: the rejection memory, the cooldown and
+                # the boxed-in spot judge whether a takeover may START, not whether the one in
+                # force may count its next frame (since 2026-10-14; Markleeville/000188, actions
+                # 34-45: a takeover begun on a 0.84 override past an "unverified" memory had every
+                # 0.60-0.79 re-sighting of the same toilet dropped by that memory, and the
+                # consecutive count never reached two).
+                if range_m > s.rejection_min_range_m and self._rejected_nearby(xyz, p.mapping.floor_id, override=override):
+                    self.resighting_exemptions += 1
+            elif not self.locked and range_m > s.rejection_min_range_m:
                 cooling = (not self.active and self.released_step is not None
                            and obs.step - self.released_step < s.release_cooldown_actions)
                 if self._rejected_nearby(xyz, p.mapping.floor_id, override=override):
@@ -630,7 +819,7 @@ class TargetClosing:
             if not strong:
                 self.weak_resightings += 1
             projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), doubt, rows[-1]))
-        return kept, projected
+        return kept, projected, glimpses
 
     def _associated(self, obs, xyz, radius):
         """Whether a projected centroid is a re-sighting of the anchor.
@@ -658,6 +847,23 @@ class TargetClosing:
             self.depth_associations += 1
         return inside
 
+    def _on_anchor_bearing(self, obs, box):
+        """Whether ``box`` (a frame's ``xyxy``) lies within one turn of the bearing to the active candidate's anchor.
+
+        The test for a box of the target's class WITHOUT a usable depth
+        projection: it cannot be associated in 3-D, but on the anchor's
+        bearing it is the candidate in view -- a toilet at 5 m, beyond the
+        depth the projection accepts -- and the verification faces and
+        approaches it (:meth:`_scan`, ``glimpse``) rather than sweeping as
+        if nothing were there.
+        """
+        if self.anchor is None or self.policy.mapping.floor_id != self.floor_id:
+            return False
+        turn = self.policy.episode.action_spec.turn_angle_rad
+        bearing = math.atan2(self.anchor[1] - obs.pose.y, self.anchor[0] - obs.pose.x)
+        seen = normalize_angle(obs.pose.yaw + self._bbox_error(obs, box))
+        return abs(normalize_angle(seen - bearing)) <= turn + 1e-6
+
     def _suspect(self, obs, label, xyz):
         """Why the context check doubts a box of ``label`` at ``xyz`` (``target_context.suspect``), or None."""
         p = self.policy
@@ -681,6 +887,10 @@ class TargetClosing:
         if obs.step == self.processed:
             return
         self.processed = obs.step
+        if self.overshoot is not None:
+            # The STOP is decided: the frames between it and the STOP are not evidence
+            # (``_terminal``). Nothing is associated, released or re-verified on them.
+            return
         p, s = self.policy, self.settings
         if self.active and self.blind():
             # No evidence either way: the consecutive-frame chain is carried across the
@@ -690,8 +900,10 @@ class TargetClosing:
             self.blind_frames += 1
             if self.last_seen == obs.step - 1:
                 self.last_seen = obs.step
+            if self.last_sighting == obs.step - 1:
+                self.last_sighting = obs.step
             return
-        boxes, projected = self._candidates(obs)
+        boxes, projected, glimpses = self._candidates(obs)
         # Only a candidate with a coherent 3-D projection starts a takeover: a confident
         # box without depth support has nothing the next frame can be checked against,
         # and the twelve-step verifications it bought (Ranchester attempts 4 and 5:
@@ -714,8 +926,12 @@ class TargetClosing:
         here = (float(obs.pose.x), float(obs.pose.y))
         if projected:
             detection, xyz, near, doubt, row = max(projected, key=lambda item: item[0].conf)
-            self.count = self.count + 1 if obs.step == self.last_seen + 1 else 1
-            self.sightings = (self.sightings if obs.step == self.last_seen + 1 else []) + [here]
+            # Consecutive means no frame WITHOUT the candidate in between: a glimpse -- the box in
+            # view on the anchor's bearing without a usable depth -- carries the chain (``last_sighting``).
+            chained = obs.step == self.last_sighting + 1
+            self.count = self.count + 1 if chained else 1
+            self.sightings = (self.sightings if chained else []) + [here]
+            self.last_sighting = obs.step
             self.observed_xyz, self.observed_near_m = xyz, (None if near is None else float(near))
             heights = row.get("height_range_m")
             self.visible_floor_m = None if not heights else float(heights[0])
@@ -732,7 +948,18 @@ class TargetClosing:
                 self.memory = TargetMemory3D(xyz, range_m, obs.step, s.memory_noise_floor_m, s.memory_noise_per_m)
                 self.history = ApproachHistory(here, range_m, obs.step)
                 if s.backoff and range_m < s.sudden_proximity_m:
-                    if self._backed_off_near(xyz):
+                    before = sum(1 for step in self.strong_box_steps
+                                 if obs.step - s.backoff_persistence_window <= step < obs.step)
+                    if detection.conf >= s.backoff_trust_confidence:
+                        # The detector's word at this level is not re-verified from farther back:
+                        # the retreat cost 23-25 actions per candidate and once hid the toilet
+                        # behind its door jamb (the Collierville episodes of 2026-10-13).
+                        self.backoff_trusted_skips += 1
+                    elif before >= s.backoff_persistence_frames:
+                        # Not sudden: the class had been in the frame on the actions before (border-cut
+                        # boxes that could not start the takeover). Verified where it stands.
+                        self.backoff_persistence_skips += 1
+                    elif self._backed_off_near(xyz):
                         self.backoff_repeats += 1          # one manoeuvre per object: verify this one in place
                     else:
                         self.backoff = BackoffManeuver(p, s.backoff_steps, s.backoff_max_actions)
@@ -754,32 +981,54 @@ class TargetClosing:
                 self.box_drift_rows = None
             self.box, self.label, self.last_seen = detection.xyxy, detection.cls, obs.step
             self.conf = float(detection.conf)
+            self.best_conf = max(self.best_conf, float(detection.conf))
             if doubt is not None and not self.locked:
                 self.suspect = doubt
             if self.backoff is None or not (self.backoff.state == "pending" or self.backoff.active):
                 self.locked |= self._confirmed()
             p._target_xy, p._target_step, p._target_floor_id = self.xyz[:2], obs.step, self.floor_id
         else:
+            glimpsed = False
             if not self.locked:
-                self.count = 0
-                self.sightings = []
+                # A box of the class on the anchor's bearing, without a usable depth: the candidate
+                # is in view and cannot be placed from here. Remembered for the verification's step;
+                # the consecutive chain is carried across the frame, not broken by it.
+                if glimpses:
+                    best = max(glimpses, key=lambda d: d.conf)
+                    self.glimpse_box, self.glimpse_step = best.xyxy, obs.step
+                    glimpsed = True
+                if glimpsed and obs.step == self.last_sighting + 1:
+                    self.last_sighting = obs.step
+                else:
+                    self.count = 0
+                    self.sightings = []
             self._support_resighting(obs)
         if self.history is not None and self.xyz is not None:
             self.history.record(here, math.dist(here, self.xyz[:2]), obs.step)
         if self.backoff is not None and (self.backoff.state == "pending" or self.backoff.active):
             self.started += 1                  # the manoeuvre's actions are not verification actions: the clock waits
+        swept_out = (s.verify_sweep_max_actions > 0 and self.sweep_actions >= s.verify_sweep_max_actions
+                     and self.last_sighting < obs.step)
+        if swept_out:
+            self.sweep_releases += 1
         if (not self.locked and s.release_unverified
-                and obs.step - self.started >= s.max_verify_steps):
+                and (obs.step - self.started >= s.max_verify_steps or swept_out)):
             manoeuvre = self.backoff
             if (manoeuvre is not None and manoeuvre.goal is not None and manoeuvre.finished is not None
                     and self.last_seen < manoeuvre.finished):
                 # Backed off, turned to face it, swept -- and the detector never fired again: the
                 # close-range box the wider perspective does not confirm is disproved, like a
-                # failed inspection, and no confidence overrides that (Markleeville 2026-10-08:
-                # eight manoeuvres on one table read as a bed from 0.9 m, released as "unverified"
-                # and re-taken at 0.80 each time).
+                # failed inspection (Markleeville 2026-10-08: eight manoeuvres on one table read
+                # as a bed from 0.9 m, released as "unverified" and re-taken at 0.80 each time) --
+                # unless it was read at ``backoff_trust_confidence`` or better where it was first
+                # seen: then the retreat spot, not the candidate, is what failed (the toilet
+                # behind its door jamb), and it is given back without a rejection to be re-taken.
                 self.wider_releases += 1
-                self._release(obs, radius_factor=s.failed_inspection_radius_factor, why=self.WIDER_RELEASE)
+                if self.best_conf >= s.backoff_trust_confidence:
+                    self.trusted_releases += 1
+                    self._release(obs, why=self.TRUSTED_RELEASE, remember=False)
+                else:
+                    self._release(obs, radius_factor=s.failed_inspection_radius_factor, why=self.WIDER_RELEASE)
             elif self.anchor is not None and self._released_unverified_near(self.anchor):
                 # The same candidate was already given back as unverified once: a third look from
                 # the same evidence is not owed (the override is for far flickers, not for this).
@@ -957,12 +1206,30 @@ class TargetClosing:
                 desired = max(actions.tilt_angle_rad, desired)
             elif elevation > 0:
                 desired = min(-actions.tilt_angle_rad, desired)
-        desired = round(desired / actions.tilt_angle_rad) * actions.tilt_angle_rad
+        desired = self._quantise_pitch(obs, desired)
         if actions.min_pitch_rad is not None:
             desired = max(actions.min_pitch_rad, desired)
         if actions.max_pitch_rad is not None:
             desired = min(actions.max_pitch_rad, desired)
         return float(desired)
+
+    def _quantise_pitch(self, obs, desired):
+        """``desired`` on the protocol's tilt steps -- the step the camera is at while ``desired`` lies within the hysteresis band of it.
+
+        Plain rounding chatters: a wanted angle at half a step rounds up on
+        one frame and down on the next as the memory moves by millimetres,
+        and every change of pitch is an action that is not a step toward
+        the target (Darden/000034, 2026-10-14: nine LOOK_DOWN / LOOK_UP
+        actions 2.19 m from a locked toilet, the wanted angle 15.0 degrees
+        against a 30-degree step). The present step is kept while the wanted
+        angle is within ``(0.5 + pitch_hysteresis)`` steps of it; a change
+        has to be wanted by that much more.
+        """
+        tilt = float(self.policy.episode.action_spec.tilt_angle_rad)
+        current = round(float(obs.pose.camera_pitch) / tilt) * tilt
+        if abs(desired - current) <= (0.5 + self.settings.pitch_hysteresis) * tilt:
+            return current
+        return round(desired / tilt) * tilt
 
     def _servo(self, obs, advance_m=0.0):
         """The image-space servo's verdict on the fresh box, or None when it has no say.
@@ -1066,6 +1333,8 @@ class TargetClosing:
         bearing = (math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
                    if self.xyz is not None else self.verification_yaw)
         fresh = self.last_seen == obs.step and self.box is not None
+        if fresh or self.glimpse_step == obs.step:
+            self.sweep_actions = 0
         if fresh:
             self.inspection_index = 0
             error = self._bbox_error(obs)
@@ -1112,14 +1381,41 @@ class TargetClosing:
                 if view is not None:
                     return view
             return NavigationCommand.hold(camera_pitch=pitch, final_yaw=normalize_angle(obs.pose.yaw + error), info=info)
+        if not self.locked and self.glimpse_step == obs.step and self.glimpse_box is not None:
+            # In view without a usable depth (a toilet at 5 m, beyond what the projection
+            # accepts): the candidate is placed from closer, not swept for. Face the box, and
+            # once faced step toward it; the clock does not count the step (since 2026-10-14;
+            # Markleeville/000188 turned in place at such a box for two whole verifications).
+            error = self._bbox_error(obs, self.glimpse_box)
+            info = {"kind": "target_closing", "reason": reason, "target_visible": True, "target_measured": False}
+            distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2]) if self.xyz is not None else float("inf")
+            if abs(error) <= offset + 1e-6 and distance > self.settings.terminal_distance_m + actions.forward_step_m:
+                reach = 2.0 * actions.forward_step_m
+                ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
+                self.glimpse_steps += 1
+                self._pause_verify_clock()
+                return NavigationCommand.follow([(obs.pose.x, obs.pose.y), ahead], camera_pitch=pitch,
+                                                info=dict(info, verify_step="towards the glimpsed candidate"))
+            return NavigationCommand.hold(camera_pitch=pitch, final_yaw=normalize_angle(obs.pose.yaw + error),
+                                          info=dict(info, verify_step="face the glimpsed candidate"))
         angles = (0, 1, 0, -1)
         yaw = normalize_angle(bearing + angles[self.inspection_index % 4] * offset)
         if turn_action(normalize_angle(yaw - obs.pose.yaw), offset) is None:
             self.inspection_index += 1
             yaw = normalize_angle(bearing + angles[self.inspection_index % 4] * offset)
+        if not self.locked:
+            self.sweep_actions += 1
         return NavigationCommand.hold(camera_pitch=pitch,
                                       final_yaw=yaw,
-                                      info={"kind": "target_closing", "reason": reason, "target_visible": False})
+                                      info={"kind": "target_closing", "reason": reason, "target_visible": False,
+                                            "sweep_action": self.sweep_actions})
+
+    def _pause_verify_clock(self):
+        """One verification action spent stepping toward a visible candidate: the clock does not count it (bounded)."""
+        if self.verify_paused < self.settings.max_verify_approach_steps:
+            self.verify_paused += 1
+            self.verify_pauses += 1
+            self.started += 1
 
     def _backoff_command(self, obs, world, distance):
         """The backing manoeuvre's action for a candidate seen suddenly at close range, or None.
@@ -1248,6 +1544,8 @@ class TargetClosing:
         p, s = self.policy, self.settings
         if self.failure:
             self.fail(self.failure)
+        if self.overshoot is not None:
+            return self._overshoot_step(obs)
         if self.blind():
             return self._blind_frame(obs, world)
         if obs.step - self.started >= s.max_closing_steps:
@@ -1478,11 +1776,12 @@ class TargetClosing:
             return True
         return turn_action(self._bbox_error(obs), self.policy.episode.action_spec.turn_angle_rad) is None
 
-    def _bbox_error(self, obs):
+    def _bbox_error(self, obs, box=None):
         # Optical x points right whereas positive ENU yaw turns left. At a
         # pitched camera the vertical box coordinate also affects body forward.
         k = obs.camera.intrinsics
-        u, v = (self.box[0] + self.box[2]) / 2, (self.box[1] + self.box[3]) / 2
+        box = self.box if box is None else box
+        u, v = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
         forward = math.cos(obs.pose.camera_pitch) - (v - k.cy) / k.fy * math.sin(obs.pose.camera_pitch)
         error = math.atan2(-(u - k.cx) / k.fx, forward)
         return error
@@ -1516,6 +1815,7 @@ class TargetClosing:
             self.inspection_started, self.inspection_index = obs.step, 0
             self.inspection_sighting = None
             self.centring_done, self.centring_step, self.weak_holds = False, -1, 0
+            self.inspection_stepped, self.inspection_turn = 0, None
         self.phase = "INSPECT"
         pitch = self._pitch(obs, distance)
         bearing = math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
@@ -1528,6 +1828,13 @@ class TargetClosing:
         error = 0.0 if spans_centre else self._bbox_error(obs) if fresh else normalize_angle(bearing - obs.pose.yaw)
         yaw = normalize_angle(obs.pose.yaw + error)
         turning = not spans_centre and turn_action(error, actions.turn_angle_rad) is not None
+        if fresh and turning and self._turn_back_undoes_the_last(obs, error):
+            # The last centring turn carried the box past the centre by less than a turn, and the
+            # turn back would recreate the frame before it: the box is as centred as the turn
+            # quantum allows (since 2026-10-14; Wiconisco/000193 alternated TURN_LEFT/TURN_RIGHT
+            # at a toilet 16-17 degrees either side of the centre for twenty-four actions).
+            self.dead_band_alignments += 1
+            turning, error, yaw = False, 0.0, obs.pose.yaw
         tilting = pitch is not None and pitch_action(obs.pose.camera_pitch, pitch, actions.tilt_angle_rad,
                                                      actions.min_pitch_rad, actions.max_pitch_rad) is not None
         limit = s.terminal_distance_m + s.range_tolerance_m
@@ -1550,6 +1857,20 @@ class TargetClosing:
                 "confidence": self.conf if fresh else None,
                 "bbox_region": None if fix is None else fix.region,
                 "memory_sigma_m": None if self.memory is None else self.memory.sigma_m}
+        if (fresh and measured is not None and limit < measured <= limit + actions.forward_step_m
+                and abs(error) <= actions.turn_angle_rad + 1e-6
+                and self.inspection_stepped < s.inspection_max_steps):
+            # The fresh range is a step beyond the limit and the agent faces the target within a
+            # turn: one MOVE_FORWARD puts the next frame inside the terminal range. Turning in
+            # place here only moved the box from one side of the centre to the other.
+            self.inspection_stepped += 1
+            self.inspection_steps += 1
+            reach_m = 2.0 * actions.forward_step_m
+            ahead = (obs.pose.x + reach_m * math.cos(obs.pose.yaw), obs.pose.y + reach_m * math.sin(obs.pose.yaw))
+            return NavigationCommand.follow([(obs.pose.x, obs.pose.y), ahead],
+                                            camera_pitch=None if pitch is None else float(obs.pose.camera_pitch),
+                                            info=dict(info, inspect_step="one step: the fresh range is %.2f m against a "
+                                                                         "%.2f m limit" % (measured, limit)))
         if fresh and measured <= limit and (not turning or history):
             # The terminal evidence is in this frame. Before the STOP is taken on it: a whole box,
             # then a confident one (since 2026-10-11; both bounded, see ``_before_stop``).
@@ -1561,24 +1882,21 @@ class TargetClosing:
         # down where the prediction said 30, and twenty actions of LOOK_UP/LOOK_DOWN
         # followed a fresh, centred, in-range sighting before the budget STOPped.
         if fresh and not turning and measured <= limit:
-            self.phase = "STOP"
-            return NavigationCommand.stop_here(info=dict(info, phase="STOP", depth_valid=True,
+            return self._terminal(obs, distance, measured, dict(info, phase="STOP", depth_valid=True,
                                                          reason="fresh terminal target confirmation"))
         if history and fresh and measured <= limit:
             # Tracked and approached over metres: a cropped box whose centre says "turn" is
             # still the object, and the benchmark measures range, not heading.
-            self.phase = "STOP"
             self.history_stops += 1
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", reason="fresh in-range sighting after a %.1f m approach; alignment not required"
                 % self.history.path_m))
         if (history and not fresh and distance <= reach
                 and self.terminal_missing >= s.history_stop_after_missing):
             # The trajectory is complete and the detector has dropped the box for a few
             # frames: the 3-D memory refined over the approach is what we STOP on.
-            self.phase = "STOP"
             self.history_stops += 1
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", standoff_reached=self.path.arrived,
                 reason="approach history: target tracked over %.1f m, the 3-D memory stands %.2f m "
                 "away (sigma %.2f m) and %d frames passed without a fresh box%s"
@@ -1589,8 +1907,7 @@ class TargetClosing:
             # The previous frame met the STOP's own conditions -- fresh, in range, confident -- and the
             # one centring tilt deferred it for a whole box; the detector did not show one. That tilt
             # may cost an action, never the STOP: it is taken on the evidence of the frame before.
-            self.phase = "STOP"
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", depth_valid=True,
                 reason="fresh terminal target confirmation one action ago; the centring tilt lost the box, the "
                        "sighting stands (memory %.2f m away, sigma %.2f m)" % (distance, self.memory.sigma_m)))
@@ -1602,9 +1919,8 @@ class TargetClosing:
             # a few actions ago, the memory inside the terminal range: STOP (since 2026-10-11;
             # before, the Wiconisco toilet was released as "saw nothing in any view" with the
             # agent standing inside the success region).
-            self.phase = "STOP"
             self.blind_cone_stops += 1
-            return NavigationCommand.stop_here(info=dict(
+            return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", below_frame_px=round(below, 1),
                 reason="target below the camera's field of view from here (%d px of it would show; no LOOK action): "
                        "seen fresh %d action(s) ago, the 3-D memory stands %.2f m away (sigma %.2f m)"
@@ -1617,12 +1933,11 @@ class TargetClosing:
             if distance <= reach and (exhausted or history):
                 # Not "saw nothing": the approach brought us here, or the surface the target
                 # stands on is still measured at the memory's spot. Complete and STOP.
-                self.phase = "STOP"
                 if history:
                     self.history_stops += 1
                 else:
                     self.support_stops += 1
-                return NavigationCommand.stop_here(info=dict(
+                return self._terminal(obs, distance, measured, dict(
                     info, phase="STOP", standoff_reached=self.path.arrived,
                     reason=("approach history: %.1f m walked to this spot; the 3-D memory stands"
                             % self.history.path_m) if history else
@@ -1641,8 +1956,7 @@ class TargetClosing:
                 blank = False
         if exhausted or blank:
             if s.stop_on_exhausted_inspection and self.inspection_sighting is not None:
-                self.phase = "STOP"
-                return NavigationCommand.stop_here(info=dict(
+                return self._terminal(obs, distance, measured, dict(
                     info, phase="STOP", reason="inspection exhausted; target seen fresh in terminal range at action %d"
                     % self.inspection_sighting))
             if s.release_on_failed_inspection:
@@ -1660,7 +1974,23 @@ class TargetClosing:
             # would LOOK away from a target in view and never turn (LOOK_DOWN/LOOK_UP
             # for the whole budget). Centre it at the pitch it was seen at.
             pitch = None
+            self.inspection_turn = (int(obs.step), 1 if error > 0 else -1)
         return NavigationCommand.hold(camera_pitch=pitch, final_yaw=yaw, info=info)
+
+    def _turn_back_undoes_the_last(self, obs, error):
+        """Whether a centring turn on this fresh box would undo the inspection's turn of the previous action.
+
+        The dead band of :func:`turn_action` is half a turn; a box the
+        detector draws a few degrees differently at two headings can sit
+        just outside it on both sides, so the inspection turns left, then
+        right, then left, for ever. A turn opposite to the last one, one
+        action later, with the error under a whole turn, is that cycle.
+        """
+        last = self.inspection_turn
+        if last is None or last[0] != obs.step - 1:
+            return False
+        sign = 1 if error > 0 else -1
+        return sign == -last[1] and abs(error) < self.policy.episode.action_spec.turn_angle_rad
 
     def _before_stop(self, obs, distance, fix, turning, info):
         """What to do instead of STOPping on this fresh in-range frame -- or None: STOP.
@@ -1705,6 +2035,95 @@ class TargetClosing:
                        % fix.region.replace("_", " ")))
         return None
 
+    def _terminal(self, obs, distance, measured, info):
+        """The decided STOP -- taken now, or after the forward steps of ``stop_overshoot_steps``.
+
+        The decision is final here: every STOP of :meth:`_inspect` comes
+        through, and once the overshoot has begun no frame is consulted
+        again (:meth:`observe` and :meth:`plan` short-circuit on it) -- the
+        steps are walked blind toward the 3-D memory, and the STOP follows
+        whatever the detector shows meanwhile. ``stop_overshoot_steps``
+        steps always; more, up to ``stop_overshoot_max_steps``, while the
+        memory still stands beyond ``stop_overshoot_within_m``. See the
+        settings for why.
+
+        Args:
+            obs: The deciding frame.
+            distance: Planar range to the 3-D memory from it, metres.
+            measured: Its fresh near-edge range, or None without a fresh box.
+            info: The STOP's diagnostics, ``reason`` included.
+        """
+        self.phase = "STOP"
+        if self.settings.stop_overshoot_max_steps < 1:
+            return NavigationCommand.stop_here(info=info)
+        self.overshoot = {"info": dict(info), "decided": int(obs.step), "step": -1,
+                          "from_xy": (float(obs.pose.x), float(obs.pose.y)),
+                          "near_m": None if measured is None else float(measured), "memory_m": float(distance),
+                          "steps": 0, "actions": 0, "blocked": False, "ended": None}
+        return self._overshoot_step(obs)
+
+    def _overshoot_step(self, obs):
+        """One action of the overshoot: a forward step toward the memory, or the STOP that ends it."""
+        s, actions, o = self.settings, self.policy.episode.action_spec, self.overshoot
+        if o["step"] != obs.step:
+            o["actions"] += int(o["step"] >= 0)
+            o["step"] = int(obs.step)
+        step_m = actions.forward_step_m
+        here = (float(obs.pose.x), float(obs.pose.y))
+        walked = math.dist(here, o["from_xy"])
+        distance = math.dist(here, self.xyz[:2])
+        near = None if o["near_m"] is None else o["near_m"] - walked
+        bearing = math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
+        error = normalize_angle(bearing - obs.pose.yaw)
+        ended = None
+        if o["blocked"]:
+            ended = "a step was blocked"
+        elif o["steps"] >= s.stop_overshoot_max_steps:
+            ended = "%d step(s) taken" % o["steps"]
+        elif o["steps"] >= s.stop_overshoot_steps and distance <= s.stop_overshoot_within_m:
+            ended = ("%d step(s) taken and the memory stands %.2f m away, within %.2f m"
+                     % (o["steps"], distance, s.stop_overshoot_within_m))
+        elif o["actions"] >= s.stop_overshoot_max_actions:
+            ended = "%d actions spent" % o["actions"]
+        elif distance - step_m < s.stop_overshoot_min_range_m:
+            ended = "the memory would stand %.2f m away after another step" % (distance - step_m)
+        elif near is not None and near - step_m < self.policy.settings.body_radius_m:
+            ended = "the measured near edge would stand %.2f m away after another step" % (near - step_m)
+        elif abs(error) > math.pi / 2:
+            ended = "the memory is %.0f degrees off the heading" % math.degrees(abs(error))
+        stage = {"decided_step": o["decided"], "steps": o["steps"], "actions": o["actions"], "blocked": o["blocked"],
+                 "walked_m": round(walked, 3), "memory_m": round(distance, 3),
+                 "near_m": None if near is None else round(near, 3), "ended": ended}
+        if ended is not None:
+            self.phase = "STOP"
+            o["ended"] = ended
+            return NavigationCommand.stop_here(info=dict(o["info"], phase="STOP", range_m=distance, stop_overshoot=stage))
+        self.phase = "ADVANCE"
+        self.overshoot_commands += 1
+        # Within a turn of the memory the heading that put the object in the frame is the better
+        # aim; farther off the converter turns toward the memory first (turns cost no path).
+        aim = float(obs.pose.yaw) if abs(error) <= actions.turn_angle_rad else bearing
+        reach_m = 2.0 * step_m                   # the converter arrives within a step of a goal: aim past it
+        ahead = (here[0] + reach_m * math.cos(aim), here[1] + reach_m * math.sin(aim))
+        return NavigationCommand.follow(
+            [here, ahead], camera_pitch=None,          # the camera stays where it is (``camera_control`` holds it)
+            info=dict(o["info"], phase=self.phase, target_visible=self.last_seen == obs.step, range_m=distance,
+                      stop_overshoot=stage,
+                      reason="STOP decided at action %d (%s): step %d of at most %d toward the target before it%s"
+                             % (o["decided"], o["info"].get("reason"), o["steps"] + 1, s.stop_overshoot_max_steps,
+                                "" if o["steps"] < s.stop_overshoot_steps else
+                                "; the memory still stands %.2f m away, beyond %.2f m" % (distance, s.stop_overshoot_within_m))))
+
+    def note_action(self, action):
+        """The action the agent took on the closing's command (the policy's ``notify_action``)."""
+        if self.overshoot is not None and getattr(action, "name", action) == "MOVE_FORWARD":
+            self.overshoot["steps"] += 1
+
+    def note_blocked(self):
+        """The converter reports the last MOVE_FORWARD did not move the agent (the policy's ``notify_blocked``)."""
+        if self.overshoot is not None:
+            self.overshoot["blocked"] = True
+
     def _approach_stalled(self, obs):
         """Whether the last ``approach_stall_actions`` CLOSE actions left the agent inside a circle of ``approach_stall_m``."""
         s = self.settings
@@ -1724,7 +2143,13 @@ class TargetClosing:
         nearer -- and, for a box the frame's lower edge cut
         (:meth:`_floor_cut`), the planar range to the 3-D memory when that
         is nearer still: the part in view is then the upper, farther part
-        of the object, and the memory is its centroid.
+        of the object, and the memory is its centroid. (A 2026-10-14
+        experiment read a small object's range from the fused memory
+        instead of its near edge, after Markleeville/000188 STOPped 1.25 m
+        from a toilet on a 0.84 m near edge; it flipped CLOSE and INSPECT
+        on alternate frames -- TURN_LEFT / TURN_RIGHT for 25 actions -- and
+        stopped 3 cm outside the evaluator's disk where it did STOP. The
+        near edge stands.)
         """
         if self.last_seen != obs.step or self.observed_xyz is None:
             return None
@@ -1841,7 +2266,8 @@ class TargetClosing:
                                                                    qualifies=self._history_qualifies()),
                 "backoff": None if self.backoff is None else self.backoff.diagnostics(),
                 "backoffs": self.backoffs, "backoff_skips": self.backoff_skips, "backoff_repeats": self.backoff_repeats,
-                "wider_releases": self.wider_releases, "repeat_releases": self.repeat_releases,
+                "wider_releases": self.wider_releases, "trusted_releases": self.trusted_releases,
+                "repeat_releases": self.repeat_releases,
                 "disproved_refusals": self.disproved_refusals, "no_step_holds": self.no_step_holds,
                 "support_sightings": self.support_sightings, "support_seen_step": self.support_seen,
                 "support_xyz": self.support_xyz, "support_holds": self.support_holds, "support_stops": self.support_stops,
@@ -1856,6 +2282,14 @@ class TargetClosing:
                 "bbox_pitch_steps": None if self.last_fix is None else self.last_fix.steps,
                 "bbox_pitch_corrections": self.bbox_pitch_corrections, "stop_centring_tilts": self.stop_centring_tilts,
                 "weak_stop_holds": self.weak_stop_holds, "goal_kept": self.path.kept,
+                "resighting_exemptions": self.resighting_exemptions, "glimpse_steps": self.glimpse_steps,
+                "verify_pauses": self.verify_pauses, "backoff_trusted_skips": self.backoff_trusted_skips,
+                "backoff_persistence_skips": self.backoff_persistence_skips,
+                "inspection_steps": self.inspection_steps, "dead_band_alignments": self.dead_band_alignments,
+                "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
+                "overshoot_commands": self.overshoot_commands,
+                "stop_overshoot": None if self.overshoot is None else {
+                    key: self.overshoot[key] for key in ("decided", "steps", "actions", "blocked", "ended")},
                 "standoff_arrived": self.path.arrived, "standoff_arrivals": self.path.arrivals,
                 "standoff_dropped": self.path.dropped,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}

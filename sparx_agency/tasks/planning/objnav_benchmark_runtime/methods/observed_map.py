@@ -19,16 +19,21 @@ class ObservedMap:
     bounds, surveyed heights or configured display-slot count are policy inputs.
     """
 
-    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18, multifloor=None):
+    def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18, multifloor=None,
+                 repeat_bump_m=0.5):
         self.grid = LogOddsGridCostmap(LogOddsGridConfig(size_m=size_m, resolution_m=resolution_m))
         self.stride = stride
         self.body_height_m = body_height_m
         self.body_radius_m = body_radius_m
+        self.repeat_bump_m = float(repeat_bump_m)
         self._anchor = None
         self.floor_revision = 0
         self.atlas = FloorAtlas(multifloor or MultiFloorParams())
         self.floor_id = 0
         self.maps, self.worlds = {0: self.grid}, {}
+        self._bumps = {}          # floor id -> [(x, y) the body touched]
+        self._touched = {}        # floor id -> {(gx, gy)} forced occupied in every export (see notify_blocked)
+        self.sticky_bumps = 0
 
     def update(self, observation, integrate=True, *, arrival_allowed=True):
         pose, camera = observation.pose, observation.camera
@@ -98,6 +103,12 @@ class ObservedMap:
         block = data[max(0, gy - radius):min(data.shape[0], gy + radius + 1),
                      max(0, gx - radius):min(data.shape[1], gx + radius + 1)]
         block[footprint & (block != 100)] = 0
+        touched = self._touched.get(self.floor_id)
+        if touched:
+            # What the body learned by touching it twice outranks every ray: see notify_blocked.
+            for tx, ty in touched:
+                if 0 <= ty < data.shape[0] and 0 <= tx < data.shape[1]:
+                    data[ty, tx] = 100
         data[gy, gx] = 0
         world = OccupancyGrid2D(data, OccupancyGrid2DParams(spec.resolution_m, spec.origin_x, spec.origin_y, "world"),
                                 values=OccupancyValues(free=0, occupied=100, unknown=-1))
@@ -105,10 +116,53 @@ class ObservedMap:
         return world
 
     def notify_blocked(self, observation, forward_step_m):
-        """Record a failed forward step as local evidence, not a GT wall lookup."""
+        """Record a failed forward step as local evidence, not a GT wall lookup.
+
+        The cell a forward step would have put the agent's centre on is set
+        occupied outright (:meth:`LogOddsGridCostmap.mark_occupied`): the body
+        touched what is there. A single hit's increment could not outvote the
+        free-space rays that had cleared the cell, and the planner kept routing
+        through it -- Corozal/000142 (``51eff3fa1637``, 2026-10-13) pushed into
+        the same wall ten actions running before the cell flipped. A cell at
+        ``l_max`` also survives the body-footprint clearing below, which keeps
+        occupied cells.
+
+        **A second bump within ``repeat_bump_m`` of an earlier one leaves a
+        STICKY mark** (since 2026-10-14 evening): the cells of a bar one body
+        wide across the heading at the step's end are forced occupied in every
+        export of this storey's world for the rest of the episode
+        (:attr:`_touched`), whatever the rays say afterwards. The ``l_max``
+        cell still decays under the free-space rays of the next frames -- a
+        ledge the camera looks over, a one-step drop the navmesh refuses, is
+        free floor to every ray -- and the planner was back through the same
+        0.1 m cell, or the one beside it, within a dozen actions: Corozal/
+        000019 (``79d7126045c3``, 2026-10-14) bumped three times at one spot
+        in 25 actions and lost the three nodes it was walking to, one by one,
+        to the releases. The first bump stays a single decaying cell, so one
+        spurious refusal walls nothing off.
+        """
         p = observation.pose
-        ahead = [[p.x + forward_step_m * math.cos(p.yaw), p.y + forward_step_m * math.sin(p.yaw)]]
-        self.grid.update_from_points_xy(np.repeat(ahead, 20, axis=0))
+        ahead = (p.x + forward_step_m * math.cos(p.yaw), p.y + forward_step_m * math.sin(p.yaw))
+        self.grid.mark_occupied(np.asarray([list(ahead)]))
+        bumps = self._bumps.setdefault(self.floor_id, [])
+        repeat = any(math.dist(ahead, earlier) <= self.repeat_bump_m for earlier in bumps)
+        bumps.append(ahead)
+        if not repeat:
+            return
+        grid = self.grid
+        resolution = float(grid.cfg.resolution_m)
+        normal = (-math.sin(p.yaw), math.cos(p.yaw))
+        count = int(math.ceil(2.0 * self.body_radius_m / resolution)) + 1
+        bar = [(ahead[0] + t * normal[0], ahead[1] + t * normal[1])
+               for t in np.linspace(-self.body_radius_m, self.body_radius_m, count)]
+        touched = self._touched.setdefault(self.floor_id, set())
+        for x, y in bar:
+            gx = int(math.floor((x - grid.origin_x) / resolution))
+            gy = int(math.floor((y - grid.origin_y) / resolution))
+            if 0 <= gx < grid.width and 0 <= gy < grid.height:
+                touched.add((gx, gy))
+        self.grid.mark_occupied(np.asarray(bar))
+        self.sticky_bumps += 1
 
     def integrity(self):
         """Observed map identities for recording; no surveyed geometry or levels."""
@@ -120,5 +174,6 @@ class ObservedMap:
                          "origin": [spec.origin_x, spec.origin_y], "resolution_m": spec.resolution_m,
                          "occupancy_sha256": hashlib.sha256(probabilities.tobytes()).hexdigest(),
                          "known_cells": int(np.count_nonzero(world.grid >= 0)) if world is not None else 0,
-                         "occupied_cells": int(np.count_nonzero(world.grid == 100)) if world is not None else 0})
+                         "occupied_cells": int(np.count_nonzero(world.grid == 100)) if world is not None else 0,
+                         "touched_cells": len(self._touched.get(floor_id, ())), "bumps": len(self._bumps.get(floor_id, ()))})
         return rows
