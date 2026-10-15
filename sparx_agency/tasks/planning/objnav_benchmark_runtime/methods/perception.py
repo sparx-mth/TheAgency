@@ -11,6 +11,7 @@ from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth, robust
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import detections_from_json, encode_frame
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.box_occluder import depth_band_m, occluder_in_front
 
 STAIR_LABELS = frozenset(("stairs", "staircase"))
 
@@ -160,12 +161,28 @@ def _supported_centroid(observation, box, transform, row, mask=None):
     the mask's pixels only: the occluder that stands inside the box -- and
     that the box read takes for the near surface of the object -- is not on
     the mask, so neither the centroid nor the near range can land on it.
+
+    **The box read has its own answer to an occluder it can tell from the
+    depth** (since 2026-10-15, ``box_occluder.occluder_in_front``): when a
+    second surface spans the whole box behind a near one that covers less of
+    it and leaves its top band alone -- a seat back's rail at camera height
+    in front of a television -- the near surface's pixels are set aside and
+    the box is read again without them; ``occluder_depth_m`` records the
+    range that was set aside. A near surface that fills the box, reaches its
+    top, or has nothing behind it is the object, as before.
     """
     camera, k = observation.camera, observation.camera.intrinsics
     row["status"] = "insufficient_depth"
     x1, y1, x2, y2 = box
+    excluded = None
     if mask is None:
         depth = robust_bbox_depth(observation.depth_m, box, min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
+        if depth is not None:
+            excluded = occluder_in_front(observation.depth_m, box, depth, camera.min_depth_m, camera.max_depth_m)
+            if excluded is not None:
+                row.update(occluder_depth_m=float(depth), occluder_px=int(excluded.sum()))
+                depth = robust_bbox_depth(np.where(excluded, np.nan, observation.depth_m), box,
+                                          min_depth_m=camera.min_depth_m, max_depth_m=camera.max_depth_m)
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         left, right = int(cx - (x2 - x1) / 4), int(cx + (x2 - x1) / 4)
         top, bottom = int(cy - (y2 - y1) / 4), int(cy + (y2 - y1) / 4)
@@ -188,7 +205,9 @@ def _supported_centroid(observation, box, transform, row, mask=None):
     valid = np.isfinite(patch) & (patch > camera.min_depth_m) & (patch < camera.max_depth_m)
     if selected is not None:
         valid &= selected[top:bottom, left:right]
-    supported = valid & (np.abs(patch - depth) <= max(0.12, depth * 0.06))
+    if excluded is not None:
+        valid &= ~excluded[top:bottom, left:right]
+    supported = valid & (np.abs(patch - depth) <= depth_band_m(depth))
     components, count = ndimage.label(supported)
     if not count:
         return None

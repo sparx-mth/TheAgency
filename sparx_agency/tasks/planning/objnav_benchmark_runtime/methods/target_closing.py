@@ -91,6 +91,18 @@ class TargetClosingSettings:
     # edge at 1.0505 m against a 1.05 m limit, twenty-four alternating turns at the step
     # limit). At most ``inspection_max_steps`` such steps per inspection.
     inspection_max_steps: int = 3
+    # THE CLOSEST REACHABLE APPROACH IS TERMINAL (since 2026-10-15). The standoff ring stands 0.70 m
+    # about the 3-D memory -- a point on the object's NEAR surface -- and a big object has no floor
+    # there: Collierville/000009's 1.5 m television on its cabinet put every ring point inside the
+    # cabinet, against it or behind it, and three correct locks were released from 3 m as "no safe
+    # path from here" with the television in view. ``target_path`` now widens the ring out to the
+    # terminal radius when no standoff point has a route (``widened``), and a goal there is reached
+    # within the arrival tolerance -- up to one forward step outside the terminal range. From such a
+    # standoff the inspection's step rule above closes the gap; when its steps are spent, or a step is
+    # blocked (the cabinet), with the target FRESH in view within one step of the limit, the agent
+    # stands as close as the floor allows and the closing STOPs. The alternative -- "the inspection saw
+    # nothing", a 2 m rejection about a real target -- gives the episode up. False restores the release.
+    closest_approach_stop: bool = True
     # A LOCKED TARGET IS WALKED TO THROUGH THE UNKNOWN BEFORE THE SPOT IS GIVEN UP (since
     # 2026-10-14). The planner blocks unknown cells, and a level camera 0.88 m up sees the
     # floor only from about 1.4 m out, so the floor between a corridor and the toilet seen
@@ -495,7 +507,7 @@ class TargetClosingSettings:
         for key in ("history_stop_after_missing", "backoff_steps", "backoff_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
-        for key in ("backoff", "support_surface_resilience", "through_unknown"):
+        for key in ("backoff", "support_surface_resilience", "through_unknown", "closest_approach_stop"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
         for key in ("max_verify_approach_steps", "inspection_max_steps", "verify_sweep_max_actions"):
@@ -594,6 +606,10 @@ class TargetClosing:
         self.inspection_steps = 0          # inspection frames answered with a step: the fresh range a step beyond the limit
         self.dead_band_alignments = 0      # inspection frames read as aligned because a turn back would undo the last turn
         self.through_unknown_routes = 0    # standoff routes planned through unknown cells after the known floor had none
+        self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
+        self.stale_standoffs_kept = 0      # standoffs a refinement made stale, kept because no ring point had a route
+        self.closest_approach_stops = 0    # STOPs from a widened standoff with the fresh range a step outside the limit
+        self.occluder_reads = 0            # candidate frames whose box was read around a surface standing in front of the target
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
         self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
         self._clear()
@@ -645,6 +661,8 @@ class TargetClosing:
         self.glimpse_step = -1             # ... and the action it was seen on
         self.verify_paused = 0             # verification actions this candidate's clock did not count (bounded)
         self.inspection_stepped = 0        # steps this inspection took for a fresh range one step beyond the limit
+        self.inspection_step_pending = False   # the last command was such a step: the hooks say whether it moved
+        self.inspection_blocked = False    # ... and one of them did not: the floor ends here
         self.inspection_turn = None        # (step, sign) of the inspection's last centring turn on a fresh box
         self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
         self.overshoot = None              # the decided STOP's forward steps in progress (``_terminal``), else None
@@ -818,6 +836,8 @@ class TargetClosing:
                 continue
             if not strong:
                 self.weak_resightings += 1
+            if rows[-1].get("occluder_depth_m") is not None:
+                self.occluder_reads += 1                       # the target's box read around a surface in front of it
             projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), doubt, rows[-1]))
         return kept, projected, glimpses
 
@@ -887,6 +907,7 @@ class TargetClosing:
         if obs.step == self.processed:
             return
         self.processed = obs.step
+        self.inspection_step_pending = False      # ``note_blocked`` for the last step has spoken before this frame
         if self.overshoot is not None:
             # The STOP is decided: the frames between it and the STOP are not evidence
             # (``_terminal``). Nothing is associated, released or re-verified on them.
@@ -1566,9 +1587,18 @@ class TargetClosing:
         if command is not None:
             return command
         measured = self._fresh_measured(obs)
-        out_of_range = measured is not None and measured > s.terminal_distance_m + s.range_tolerance_m
-        if self.inspection_started is not None and out_of_range and (self.inspection_sighting is None
-                                                                      or self._centred(obs)):
+        limit = s.terminal_distance_m + s.range_tolerance_m
+        out_of_range = measured is not None and measured > limit
+
+        def nearly():
+            # An ARRIVED standoff found only beyond the standoff ring (``target_path.widened``: no closer point
+            # had a route) with the fresh range within one forward step of the limit: as close as the planner
+            # gets. The inspection's step rule, then the closest-approach STOP, own it (since 2026-10-15).
+            return (s.closest_approach_stop and self.path.arrived and self.path.widened and measured is not None
+                    and measured <= limit + p.episode.action_spec.forward_step_m)
+
+        if (self.inspection_started is not None and out_of_range and not nearly()
+                and (self.inspection_sighting is None or self._centred(obs))):
             # Seen fresh from here but the measured surface lies beyond the terminal range:
             # the filtered estimate entered the inspection early (an older, nearer reading
             # averaged in), or an earlier borderline reading registered a sighting the
@@ -1585,7 +1615,7 @@ class TargetClosing:
         # evidence wherever the centroid is (since 2026-10-08): the benchmark measures to the
         # object, and a low object without LOOK actions is still in the frame from here where
         # it may not be from the standoff (the Wiconisco toilet at 0.65 m is below the FOV).
-        in_range = measured is not None and measured <= s.terminal_distance_m + s.range_tolerance_m
+        in_range = measured is not None and measured <= limit
         if self.inspection_started is not None or in_range or (distance <= s.terminal_distance_m and not out_of_range):
             return self._inspect_or_release(obs, distance)
         # During transit A* owns heading. A bbox outside the FOV must not replace
@@ -1593,7 +1623,7 @@ class TargetClosing:
         command = self.path.command(self, obs, world)
         if command is None:
             return self._no_path(obs, world, distance)
-        if self.path.arrived and not out_of_range:
+        if self.path.arrived and (not out_of_range or nearly()):
             # The route to the standoff is walked (since 2026-10-11): the executor would report
             # ``arrived`` and the headless agent would spend the idle result on a TURN -- twenty of
             # them at a kept standoff 1.15 m from the memory, inside the success region, until the
@@ -1857,14 +1887,28 @@ class TargetClosing:
                 "confidence": self.conf if fresh else None,
                 "bbox_region": None if fix is None else fix.region,
                 "memory_sigma_m": None if self.memory is None else self.memory.sigma_m}
-        if (fresh and measured is not None and limit < measured <= limit + actions.forward_step_m
-                and abs(error) <= actions.turn_angle_rad + 1e-6
-                and self.inspection_stepped < s.inspection_max_steps):
+        a_step_out = (fresh and measured is not None and limit < measured <= limit + actions.forward_step_m)
+        if (a_step_out and s.closest_approach_stop and self.path.arrived and self.path.widened
+                and (self.inspection_stepped >= s.inspection_max_steps or self.inspection_blocked)):
+            # The standoff was found only beyond the standoff ring -- no closer point had a route -- the
+            # agent has walked it and stepped the inspection's steps, or was blocked stepping, and the
+            # target is fresh in view within one forward step of the terminal range: as close as the floor
+            # allows. STOP here; the release that would follow gives up a target in plain view (since
+            # 2026-10-15; Collierville/000009: a 1.5 m television on its cabinet, the 0.70 m ring inside
+            # the cabinet or against it, three correct locks released as "no safe path" from 3 m).
+            self.closest_approach_stops += 1
+            return self._terminal(obs, distance, measured, dict(
+                info, phase="STOP", depth_valid=True,
+                reason="closest reachable approach: the fresh range %.2f m is within one step of the %.2f m limit, no "
+                       "closer standoff has a route and %s" % (measured, limit, "the last step was blocked"
+                                                                if self.inspection_blocked else "the inspection's steps are spent")))
+        if a_step_out and abs(error) <= actions.turn_angle_rad + 1e-6 and self.inspection_stepped < s.inspection_max_steps:
             # The fresh range is a step beyond the limit and the agent faces the target within a
             # turn: one MOVE_FORWARD puts the next frame inside the terminal range. Turning in
             # place here only moved the box from one side of the centre to the other.
             self.inspection_stepped += 1
             self.inspection_steps += 1
+            self.inspection_step_pending = True
             reach_m = 2.0 * actions.forward_step_m
             ahead = (obs.pose.x + reach_m * math.cos(obs.pose.yaw), obs.pose.y + reach_m * math.sin(obs.pose.yaw))
             return NavigationCommand.follow([(obs.pose.x, obs.pose.y), ahead],
@@ -2116,13 +2160,19 @@ class TargetClosing:
 
     def note_action(self, action):
         """The action the agent took on the closing's command (the policy's ``notify_action``)."""
-        if self.overshoot is not None and getattr(action, "name", action) == "MOVE_FORWARD":
+        forward = getattr(action, "name", action) == "MOVE_FORWARD"
+        if self.overshoot is not None and forward:
             self.overshoot["steps"] += 1
+        if self.inspection_step_pending and not forward:
+            self.inspection_step_pending = False       # the converter turned instead: no step was tried
 
     def note_blocked(self):
         """The converter reports the last MOVE_FORWARD did not move the agent (the policy's ``notify_blocked``)."""
         if self.overshoot is not None:
             self.overshoot["blocked"] = True
+        if self.inspection_step_pending:
+            self.inspection_blocked = True
+            self.inspection_step_pending = False
 
     def _approach_stalled(self, obs):
         """Whether the last ``approach_stall_actions`` CLOSE actions left the agent inside a circle of ``approach_stall_m``."""
@@ -2287,11 +2337,14 @@ class TargetClosing:
                 "backoff_persistence_skips": self.backoff_persistence_skips,
                 "inspection_steps": self.inspection_steps, "dead_band_alignments": self.dead_band_alignments,
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
+                "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
+                "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
+                "occluder_reads": self.occluder_reads,
                 "overshoot_commands": self.overshoot_commands,
                 "stop_overshoot": None if self.overshoot is None else {
                     key: self.overshoot[key] for key in ("decided", "steps", "actions", "blocked", "ended")},
                 "standoff_arrived": self.path.arrived, "standoff_arrivals": self.path.arrivals,
-                "standoff_dropped": self.path.dropped,
+                "standoff_dropped": self.path.dropped, "standoff_widened": self.path.widened,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}
                              for xy, floor, step in self.boxed_in],
                 "rejected": [{"xyz": list(entry[0]), "floor_id": entry[1], "step": entry[2], "radius_m": entry[3],

@@ -47,7 +47,31 @@ class TargetApproachPath:
     ``through_unknown_cost`` times open floor -- and the committed route is
     re-checked against the map as it fills in like any other
     (``through_unknown`` counts them).
+
+    **The ring widens before the spot is given up, and a stale goal is kept
+    over no goal** (since 2026-10-15, Collierville/000009). The standoff
+    ring stands ``goal_tolerance_m`` inside the terminal radius so that
+    arriving within the tolerance lands inside it -- 0.70 m about the 3-D
+    memory. The memory is a point on the object's near surface, and a big
+    object has no floor there: a 1.5 m television on its cabinet put every
+    0.70 m point inside the cabinet, against its front or behind it, in both
+    planners, from 3 m away, three times in one episode; each lock was
+    released as "no safe path from here" with the television in view. When
+    neither planner reaches the standoff ring, wider rings are tried in the
+    front arc out to the terminal radius itself (``widened``): a goal there
+    is reached within the tolerance up to one forward step outside the
+    terminal range, which the inspection's step rule closes. And a goal a
+    refinement carries just past the terminal radius -- 1.01 m against
+    1.00, with a seventeen-waypoint route to it -- is dropped only for a
+    ring point that has a route; when none has, the stale goal is kept
+    while it lies within the terminal radius plus the tolerance
+    (``stale_kept``).
     """
+
+    #: The bearings tried about the memory, from the agent's side round to behind it.
+    OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90, 180)
+    #: The front arc alone for the widened rings: beside and behind a big object is where its floor is not.
+    FRONT_OFFSETS_DEG = (0, 30, -30, 60, -60)
 
     def __init__(self, policy):
         self.policy = policy
@@ -58,13 +82,16 @@ class TargetApproachPath:
         self.arrivals = 0                  # standoffs reached over this lock
         self.dropped = 0                   # arrived standoffs given up for a closer one
         self.through_unknown = 0           # standoffs planned through unknown cells (no route on the known floor)
+        self.widened = False               # the current goal lies beyond the standoff ring: no closer point had a route
+        self.widenings = 0                 # standoffs found on a widened ring over this lock
+        self.stale_kept = 0                # stale goals kept because no ring point had a route
 
     def drop(self):
         """Give up the current standoff so the next :meth:`command` selects one anew, closer to the memory."""
         if self.goal_xyz is not None:
             self.dropped += 1
         self.goal_xyz = self.reference_xyz = None
-        self.arrived = False
+        self.arrived = self.widened = False
         self.policy.route_memory.clear("standoff_dropped")
         self.policy._route = self.policy._goal = None
 
@@ -73,14 +100,16 @@ class TargetApproachPath:
         s = target.settings
         stale = self.goal_xyz is not None and math.dist(self.goal_xyz[:2], target.xyz[:2]) > s.terminal_distance_m
         moved = self.reference_xyz is not None and math.dist(self.reference_xyz[:2], target.xyz[:2]) > s.refine_distance_m
+        previous = None
         if moved or stale:
             self.refinements += 1
             self.reference_xyz = tuple(target.xyz)
             if self.goal_xyz is not None and not stale:
                 self.kept += 1                  # the standoff still ends inside the terminal radius: no re-selection
             else:
+                previous = self.goal_xyz        # a goal carried out of the terminal radius: the ring's fallback
                 self.goal_xyz = None
-                self.arrived = False
+                self.arrived = self.widened = False
                 p.route_memory.clear("target_refined")
                 p._route = p._goal = None
         if self.goal_xyz is not None:
@@ -94,8 +123,9 @@ class TargetApproachPath:
                 self.arrived = reached
                 return command
             self.goal_xyz = None
-            self.arrived = False
-        limit = s.terminal_distance_m - p.converter_params.goal_tolerance_m
+            self.arrived = self.widened = False
+        tolerance = p.converter_params.goal_tolerance_m
+        limit = s.terminal_distance_m - tolerance
         radius = max(p.settings.body_radius_m, limit - world.resolution)
         bearing = math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0])
         planners = [None]
@@ -105,24 +135,54 @@ class TargetApproachPath:
             # under its view unknown for 1.4 m ahead; the committed route is re-checked against
             # the map as it fills in like any other (since 2026-10-14).
             planners.append(p.optimistic_planner)
-        for planner in planners:
-            for offset in (0, 30, -30, 60, -60, 90, -90, 180):
-                angle = bearing + math.radians(offset)
-                goal = (target.xyz[0] + radius * math.cos(angle), target.xyz[1] + radius * math.sin(angle), obs.pose.z)
-                if p.target_projector is not None:
-                    goal = p.target_projector(goal)
-                    if goal is None:
+        # The standoff ring first, with every bearing and both planners; then, when no point of it has a
+        # route, wider rings in the front arc out to the terminal radius (since 2026-10-15): a goal there is
+        # reached within the tolerance up to a forward step outside the terminal range, which the inspection
+        # closes with a step (``TargetClosing._inspect``) and STOPs on when it cannot (``closest_approach``).
+        rings = [(radius, limit, self.OFFSETS_DEG)]
+        widest = s.terminal_distance_m - world.resolution
+        if widest > radius + world.resolution:
+            reach = s.terminal_distance_m + world.resolution
+            rings.append((0.5 * (radius + widest), reach, self.FRONT_OFFSETS_DEG))
+            rings.append((widest, reach, self.FRONT_OFFSETS_DEG))
+        for ring_radius, reach, offsets in rings:
+            for planner in planners:
+                for offset in offsets:
+                    angle = bearing + math.radians(offset)
+                    goal = (target.xyz[0] + ring_radius * math.cos(angle), target.xyz[1] + ring_radius * math.sin(angle), obs.pose.z)
+                    if p.target_projector is not None:
+                        goal = p.target_projector(goal)
+                        if goal is None:
+                            continue
+                    if abs(goal[2] - obs.pose.z) > 0.2 or math.dist(goal[:2], target.xyz[:2]) > reach:
                         continue
-                if abs(goal[2] - obs.pose.z) > 0.2 or math.dist(goal[:2], target.xyz[:2]) > limit:
-                    continue
-                command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
-                if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= limit:
-                    self.goal_xyz, self.reference_xyz = tuple(goal), tuple(target.xyz)
-                    self.arrived = p.route_memory.arrived(obs)      # a ring point the agent already stands on
-                    if self.arrived:
-                        self.arrivals += 1
-                    if planner is not None:
-                        self.through_unknown += 1
-                        target.through_unknown_routes += 1
-                    return command
+                    command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
+                    if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
+                        self._adopt(target, obs, goal, widened=ring_radius > radius, through_unknown=planner is not None)
+                        return command
+        if previous is not None and math.dist(previous[:2], target.xyz[:2]) <= s.terminal_distance_m + tolerance:
+            # No ring point has a route, and the goal the refinement made stale -- by centimetres -- had one:
+            # arriving at it puts the agent within a step of the terminal range, where the inspection reads
+            # the fresh range. Kept over no goal at all (since 2026-10-15; Collierville/000009, action 15).
+            command = p._navigate(obs, world, previous[:2], "target_closing")
+            if command is not None:
+                self.stale_kept += 1
+                target.stale_standoffs_kept += 1
+                self._adopt(target, obs, previous, widened=True, through_unknown=False)
+                return command
         return None
+
+    def _adopt(self, target, obs, goal, widened, through_unknown):
+        """Take ``goal`` as the standoff and record how it was found."""
+        p = self.policy
+        self.goal_xyz, self.reference_xyz = tuple(goal), tuple(target.xyz)
+        self.widened = bool(widened)
+        self.arrived = p.route_memory.arrived(obs)      # a ring point the agent already stands on
+        if self.arrived:
+            self.arrivals += 1
+        if widened:
+            self.widenings += 1
+            target.widened_standoffs += 1
+        if through_unknown:
+            self.through_unknown += 1
+            target.through_unknown_routes += 1

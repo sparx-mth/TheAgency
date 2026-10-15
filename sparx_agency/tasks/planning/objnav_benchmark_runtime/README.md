@@ -205,7 +205,26 @@ and Collierville/000194 traded a reachable goal for a ring with none and release
 real television as "no safe path from here" the moment the along-ray association made
 its memory 0.11 m more accurate. A kept goal that a slow drift carries past the terminal
 radius is re-selected the action it falls out. Small refinements do not move the endpoint
-every frame. Collision, blockage and
+every frame. **The ring widens before the spot is given up, and a stale goal is kept over
+no goal** (since 2026-10-15, `target_path.widened` / `stale_kept`; `widened_standoffs`,
+`stale_standoffs_kept` in the diagnostics): the standoff ring stands `goal_tolerance_m`
+inside the terminal radius -- 0.70 m about the 3-D memory, a point on the object's NEAR
+surface -- and a big object has no floor there. Collierville/000009's 1.5 m television on
+its cabinet put every 0.70 m point inside the cabinet, against its front or behind it, in
+both planners, from 3 m away, three times in one episode, and each correct lock was
+released as "no safe path from here" with the television in view; the same episode also
+dropped a standoff 1.01 m from the refined memory -- with a seventeen-waypoint route to
+it -- as stale, for a ring that had no route at all. Now, when neither planner reaches
+the standoff ring, wider rings are tried in the front arc out to the terminal radius; a
+goal there is reached within the arrival tolerance up to one forward step outside the
+terminal range, which the inspection's step rule closes; and a goal a refinement makes
+stale is dropped only for a ring point that has a route, and kept while it lies within
+the terminal radius plus the tolerance when none has. **From such a standoff the closest
+reachable approach is terminal** (`closest_approach_stop`, `closest_approach_stops`):
+with the target fresh in view within one step of the limit, once the inspection's steps
+are spent or a step is blocked (the cabinet), the agent stands as close as the floor
+allows and STOPs -- the release that followed before gave up a target in plain view.
+Collision, blockage and
 progress validation remain active; persistence is not permission to cross obstacles.
 Remote or other-floor snaps and unreachable paths
 are rejected. The optional simulator callback contains no target annotations,
@@ -267,7 +286,27 @@ turned the agent off the couch twelve times); the terminal range is the
 **near edge** of the freshly measured surface (`range_near_m`, the 10th
 percentile horizontal distance of the supported depth points) or the centroid,
 whichever is nearer -- the benchmark's success radius is measured to the
-object, not to its middle; and when the inspection budget runs out after the
+object, not to its middle. **The box pipeline reads around a surface standing in
+front of the object inside its box** (since 2026-10-15, `methods/box_occluder.py`;
+`occluder_depth_m` / `occluder_px` in the projection rows). The box's range is a low
+percentile of the depth inside the shrunken box -- the near side of the object,
+robust to the background a box overhangs onto -- and a surface IN FRONT of the object
+wins that percentile the moment it covers a third of the box's centre: in
+Collierville/000018 the top rail of a seat back at camera height stood 1.3 m from the
+agent between it and a television 4.1 m away, the television's box held 79 %
+television and 20 % rail, the rail was read as the range, the closing walked to 0.8 m
+of the rail and STOPped 3.3 m from the television -- the same five Collierville tv
+episodes, at the same actions, in two 1,000-episode runs. The test asks the whole box
+four measured things: a second surface stands at least 0.5 m (or 30 % of the near
+range) behind the chosen one; that far surface is one connected surface spanning at
+least 80 % of the box's height AND width (what a detector's box outlines when it
+outlines a flat object -- a couch's backrest, a toilet's tank, a bed's headboard span
+the width and not the height); it covers more of the box than the near surface; and
+the near surface leaves the top quarter of the box to it (a floor-standing chair or
+plant in front of a wall reaches the top of its own box, and the wall is never read as
+the object). When all four hold, the near surface's pixels are set aside and the box is
+read again without them. Depth only, no class; the mask pipeline (`segmentation`)
+answers the same question from the object's own pixels and is untouched. And when the inspection budget runs out after the
 locked target *was* seen fresh within terminal range from this spot, the
 closing **STOPs** (`stop_on_exhausted_inspection`, default true) instead of
 raising. Exhaustion of a **locked** target that was *never* seen from the

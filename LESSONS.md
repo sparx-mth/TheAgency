@@ -11,6 +11,62 @@ Format per entry:
 
 ---
 
+## 2026-10-15 — The television the closing STOPped 3.3 m short of, and the one it released three times from 3 m: a rail inside the box, and a standoff ring inside the cabinet
+
+**Symptom:** The 2026-10-12 full run and its 2026-10-15 re-run failed the same five Collierville tv episodes at the
+same actions (000004/11/14/15/18, wrong STOPs inside 50 actions) and timed out 000009 (500 actions, seven
+takeovers). Recorded and replayed: in 000018 (`runs/gibson_Collierville_tv_20261015T055552Z/recordings/991eeffec5a5`)
+the closing locked a `tv` box at 0.65, "approached" from 1.3 m to 0.8 m and STOPped 3.3 m from the television; in
+000009 (`873d8cf1d32d`) three locks with the 3-D memory 0.02-0.14 m from the real television were released from
+3 m as "no safe path to the target", one more from 0.8 m as "the inspection saw nothing", and a seventh,
+0.75 m from the goal, as `unverified` after six sweep turns.
+
+**Root cause (two, unrelated to detection):**
+
+1. **The range was read off a surface in front of the object, inside its box.** `runs/_analysis/closing_vs_truth.py`
+   placed the memory on the *same bearing* as the real television (+92 vs +90 degrees) but 2.4 m short of it, and
+   `replay_depth_dissection.py` showed why: the lock frame's box held 79 % television at 4.0-4.25 m spanning the whole
+   box and 20 % of a seat back's rail at 1.33 m in its lower middle, continuing under the box; `robust_bbox_depth` is
+   the 30th percentile of the shrunken box, the rail covered 36 % of the centre patch against a 35 % coherence gate,
+   and a 7 cm-tall band at camera height became "the television at 1.3 m". The approach then walked to 0.8 m of the
+   rail. Two smaller `television` boxes on the same frame that did not include the rail measured 4.1 m with support
+   1.00. The mask pipeline (SAM, the B arm never run) was the planned answer; the box pipeline had none.
+2. **The standoff ring stands 0.70 m about the memory, and a 1.5 m television on its cabinet has no floor there.**
+   The memory is a point on the object's near surface; the ring (`goal_tolerance_m` inside the terminal radius) put
+   every point inside the cabinet, against its front or behind it, in both planners, and `_no_path` released the lock
+   after six pathless actions as boxed in -- with the television in view at 0.7-0.9 confidence. The same episode
+   dropped a standoff 1.01 m from the refined memory *that had a seventeen-waypoint route* as stale, for a ring with
+   none (`stale = dist > terminal_distance_m`, 1 cm over).
+
+**Fix:** `methods/box_occluder.py` -- a depth-only occluder test on the whole box (a far surface at least 0.5 m
+behind spanning 80 % of the box's height and width, covering more than the near one, the near one leaving the top
+quarter of the box alone); when it holds, `perception._supported_centroid` sets the near surface's pixels aside and
+reads the box again (`occluder_depth_m` in the row). `target_path.TargetApproachPath` widens the ring in the front
+arc out to the terminal radius when neither planner reaches the standoff ring (`widened`), and keeps a stale goal
+within terminal + tolerance when no ring point has a route (`stale_kept`); `TargetClosing` enters the inspection
+from such a standoff with the fresh range within a step of the limit and STOPs when the inspection's steps are
+spent or blocked (`closest_approach_stop`). Re-run: 000018 SR 1 / SPL 0.81 (occluder set aside on 10 frames,
+lock at the real television), 000009 SR 1 / SPL 1.00 (`widened_standoffs` 1, zero boxed releases).
+
+**Don't:**
+- Don't key the occluder test on "the near surface exits the box through its bottom edge": the floor under any
+  floor-standing object has the same optical depth as the object's base, so a toilet or a chair "exits" too. The
+  discriminators that hold are the far surface spanning *both* dimensions (a backrest, a tank, a headboard span the
+  width only) and the near surface not reaching the box's top quarter (a chair in front of a wall does).
+- Don't read the failure as detector confidence: the rail was read at 0.65 *as the television*, and the correct
+  locks of 000009 were 0.81-0.89. Neither STOP threshold nor track threshold would have changed either outcome.
+- Don't widen the ring before both planners have failed on the standoff ring: the 0.70 m point, when it has floor,
+  is the one that lands the inspection inside the terminal radius without a step.
+- 000014 is a genuine detector false positive (a 0.18 x 0.39 m portrait rectangle 1.5 m high, behind the agent, 6.8 m
+  from the television) and is untouched by any of this.
+- The seventh takeover of 000009 (actions 232-239) is a third pattern, not fixed here: at 1.3 m a 1.5 m television
+  fills the frame, YOLO-World reads it 0.06 centred and 0.31 at the frame's edge, the edge frames are refused as
+  clipped for an *unlocked* candidate, and the sweep releases a target the agent stands 0.75 m from. A re-sighting
+  rule that accepts an edge-clipped box of the class on the anchor's bearing for an active candidate is the likely
+  follow-up.
+
+---
+
 ## 2026-10-14 (afternoon) — Five places one Collierville recording lost its toilet's room: shadows cast by a clock and a refrigerator, a peek taken from 0.6 m behind the jamb, a room gone for one action, and a three-tread flight the guard let through
 
 **Symptom:** The user read `runs/benchmark_toilet_10episodes_20261014T100437Z` (SR 0.80) and listed, in

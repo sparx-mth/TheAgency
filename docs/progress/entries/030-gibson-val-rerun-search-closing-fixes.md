@@ -1,7 +1,9 @@
 # 030 - The full Gibson validation run again, with the search and closing fixes of 2026-10-13/14
 
 **Branch:** `feat/objnav-habitat-gibson-nadav`
-**Status:** in-progress -- the run is going (`runs/gibson_val_20261015T045442Z`), detached, supervised
+**Status:** stopped -- the run (`runs/gibson_val_20261015T045442Z`) was ended by the operator at 43/1000 episodes
+(2026-10-15 05:47Z, exit 130, nothing published) on a suspected tv detection problem; see the notes. To be relaunched
+once the tv closing is fixed.
 **Roadmap item:** ObjectNav -- the published Gibson val benchmark re-run on the code that fixed the toilet
 campaign's search and closing sinks, compared against the 2026-10-12 run
 
@@ -66,6 +68,33 @@ the 101 toilet failures were 500-step timeouts) and the 2026-10-08 baseline (SR 
 ## Notes
 - 2026-10-15: the previous run's `.gibson_val_current` pointer was stale (it still named the 2026-10-08 run); it
   now names this run.
+- 2026-10-15: stopped at 43 episodes. The first 12 Collierville tv episodes went 3/12, with five wrong STOPs inside
+  50 actions (000004, 000011, 000014, 000015, 000018) -- the same five as in the 2026-10-12 run, at the same step
+  counts and distances -- so the failure is deterministic and not worth another 34 hours before it is understood.
+- 2026-10-15: three recorded Collierville tv episodes, `runs/gibson_Collierville_tv_20261015T055552Z`
+  (`run_benchmark.sh --scene Collierville --category tv --record --full-records --episode-ids ...`; H.264 MP4 with the
+  HUD, `steps.jsonl` per action, key frames under `recordings/<key>/key_frames/`). All three reproduced their
+  full-run outcome exactly. What the step records say:
+  - **000018** (`recordings/991eeffec5a5`, wrong STOP at 14 actions, DTG 3.33 m): during the warm-up turn YOLO-World
+    reads a **0.33 x 0.18 m** landscape rectangle 1.0 m away as `tv` 0.65 / `television` 0.44; the takeover verifies
+    it in one step, inspects for four, advances one and STOPs on `tv` 0.63 ("fresh terminal target confirmation").
+    A television-shaped object a third of a metre wide.
+  - **000014** (`recordings/b10e28b0975a`, wrong STOP at 50 actions, DTG 5.88 m): `television` 0.60-0.77 on a
+    **0.18 x 0.39 m portrait** rectangle (aspect 0.45-0.53); approach from 3.6 m to 1.0 m, then the inspection
+    oscillated TURN_LEFT / TURN_RIGHT for 24 actions (box 0.42 / 0.29 on alternate frames -- the dead-band alignment
+    of `211cc011` did not catch it), and `stop_on_exhausted_inspection` STOPped on the 0.42 frame.
+  - **000009** (`recordings/873d8cf1d32d`, 500-step timeout): the opposite -- a tv box in 268 of 500 frames, 106 of
+    them at >= 0.50, peak **0.90**; seven takeovers, every one released: three approached from ~4.5 m and released at
+    ~3 m with "no safe path to the target 3.x m away", one reached 0.8 m and "the inspection from 0.8 m saw nothing".
+    The 2026-10-12 run ended this episode 0.12 m from the goal without a STOP. Consistent with a wall-mounted,
+    elevated television: its anchor lands where the planner has no floor, and from under it the level camera loses it.
+  - Reading, revised with the ground truth (entry 031): two closing problems, neither the detector's confidence.
+    (1) In 000018 the box WAS on the real television (same bearing, 113 px wide at 3.7 m = 1.1 m) and the range was
+    read off a rail at camera height inside the box, 2.4 m in front of it -- a measurement fault, fixed by the box
+    pipeline's occluder test. (2) In 000009 the memory was 0.02-0.14 m from the television and the 0.70 m standoff
+    ring had no floor around a 1.5 m object on its cabinet -- a standoff fault, fixed by the widened ring, the kept
+    stale goal and the closest-approach STOP. Both episodes now succeed (SR 1 / SPL 0.81 and 1.00); 000014 is a
+    genuine detector false positive and is unchanged. Relaunch this run on the code of entry 031.
 
 ## Result
 (when the run ends)

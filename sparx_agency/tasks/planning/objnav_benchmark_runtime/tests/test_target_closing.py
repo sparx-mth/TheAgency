@@ -1855,3 +1855,128 @@ def test_a_fruitless_sweep_cycle_releases_the_verification_before_its_budget():
     assert not q.closing.active and q.closing.sweep_releases == 0
     with pytest.raises(ValueError):
         TargetClosingSettings(verify_sweep_max_actions=-1)
+# ── the standoff of a big object (Collierville/000009, 2026-10-15) ───────────────────────────────────
+def locked_at_three_metres(monkeypatch, **closing):
+    """A chair locked three metres ahead on an empty map; the standoff the lock frames chose is dropped, so the
+    next action selects the ring anew under the test's own projector."""
+    p, ep = setup_policy(target_closing=closing) if closing else setup_policy()
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=3))
+    p.plan(observation(ep, 1, depth=3))
+    assert p.closing.locked and abs(p.closing.xyz[0] - 3.0) < 0.1 and abs(p.closing.xyz[1]) < 0.1
+    p.closing.path.drop()
+    p.closing.path.dropped = 0
+    return p, ep, world
+def test_the_standoff_ring_widens_to_the_terminal_radius_when_no_standoff_point_has_a_route(monkeypatch):
+    """A 1.5 m television on its cabinet: every 0.70 m ring point inside the cabinet, against it or behind it, in
+    both planners, from 3 m away -- three correct locks released as 'no safe path from here' with the television
+    in view. Wider rings in the front arc, out to the terminal radius, find the floor the standoff ring has not."""
+    p, ep, world = locked_at_three_metres(monkeypatch)
+    memory = tuple(p.closing.xyz)
+    refused = []
+    def cabinet(point):                                       # no floor within 0.9 m of the memory
+        if math.dist(point[:2], memory[:2]) < 0.9:
+            refused.append(point)
+            return None
+        return point
+    p.target_projector = cabinet
+    command = p.plan(observation(ep, 2, depth=3))
+    assert command.waypoints and not command.stop and p.closing.phase == "CLOSE" and p.closing.no_path_steps == 0
+    path = p.closing.path
+    assert path.widened and path.widenings == 1 and p.closing.widened_standoffs == 1
+    assert 0.9 <= math.dist(path.goal_xyz[:2], memory[:2]) <= 1.0 + world.resolution
+    assert len(refused) >= 16, "the standoff ring was tried first, at every bearing, with both planners"
+    assert math.dist(command.waypoints[-1], memory[:2]) <= 1.0 + world.resolution
+    assert p.closing.diagnostics()["standoff_widened"] is True and p.closing.diagnostics()["widened_standoffs"] == 1
+    # A standoff ring point with floor is still preferred: the widening is only for when it has none.
+    q, ep, _ = locked_at_three_metres(monkeypatch)
+    q.target_projector = lambda point: point
+    q.plan(observation(ep, 2, depth=3))
+    assert not q.closing.path.widened and q.closing.widened_standoffs == 0
+    assert math.dist(q.closing.path.goal_xyz[:2], q.closing.xyz[:2]) <= 0.75
+def test_a_goal_a_refinement_makes_stale_is_kept_when_no_ring_point_has_a_route(monkeypatch):
+    """Collierville/000009, action 15: the standoff stood 1.01 m from the refined memory with a seventeen-waypoint
+    route to it; it was dropped as stale for a ring that had no route at all, and the lock was released six
+    pathless actions later. Kept over no goal, while it lies within the terminal radius plus the tolerance."""
+    p, ep, _ = locked_at_three_metres(monkeypatch)
+    memory = tuple(p.closing.xyz)
+    path = p.closing.path
+    path.goal_xyz, path.reference_xyz = (memory[0] - 1.01, memory[1], 0.0), memory
+    p.target_projector = lambda point: None                   # no ring point has floor, at any radius
+    command = p.plan(observation(ep, 2, depth=3))
+    assert command.waypoints and p.closing.phase == "CLOSE" and p.closing.no_path_steps == 0
+    assert path.goal_xyz[:2] == pytest.approx((memory[0] - 1.01, memory[1]), abs=0.02) and path.widened
+    assert path.stale_kept == 1 and p.closing.stale_standoffs_kept == 1 and path.refinements == 1
+    assert p.closing.diagnostics()["stale_standoffs_kept"] == 1
+    # Beyond the terminal radius plus the arrival tolerance the stale goal is not kept: no path, as before.
+    path.goal_xyz, path.reference_xyz, path.widened = (memory[0] - 1.3, memory[1], 0.0), memory, False
+    command = p.plan(observation(ep, 3, depth=3))
+    assert p.closing.no_path_steps == 1 and p.closing.phase == "REACQUIRE" and not command.waypoints
+    assert command.info["kind"] == "target_closing" and command.info["target_visible"] is True
+    assert path.goal_xyz is None and path.stale_kept == 1 and not path.widened
+def arrived_widened_standoff(monkeypatch, widened=True, **closing):
+    """The agent at an ARRIVED standoff about 0.95 m from the memory -- found on the widened ring unless told
+    otherwise, no closer ring point with floor -- standing 1.1 m from the chair, which fills the frame fresh,
+    centred, at 1.2 m (a centred box keeps the refinement on the line of sight, so the standoff stays inside the
+    terminal radius and is not made stale by it)."""
+    p, ep, _ = locked_at_three_metres(monkeypatch, **closing)
+    path = p.closing.path
+    path.goal_xyz, path.reference_xyz, path.widened = (2.2, 0.0, 0.0), tuple(p.closing.xyz), widened
+    p.target_projector = lambda point: None
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (124, 25, 516, 404))]
+    return p, ep, replace(observation(ep, 2, depth=1.2), pose=AgentPose(2.05, 0, 0, 0))
+def test_from_a_widened_standoff_the_inspection_steps_and_stops_when_the_step_is_blocked(monkeypatch):
+    """The cabinet: the inspection's step toward a fresh range 1.2 m against a 1.05 m limit does not move the agent.
+    As close as the floor allows, the target fresh in view: STOP, not 'the inspection saw nothing'."""
+    p, ep, frame = arrived_widened_standoff(monkeypatch)
+    command = p.plan(frame)
+    assert p.closing.path.arrived and p.closing.phase == "INSPECT" and p.closing.inspection_resumptions == 0
+    assert not command.stop and command.waypoints and "one step" in command.info["inspect_step"]
+    assert p.closing.inspection_stepped == 1 and p.closing.inspection_step_pending
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    blocked = replace(observation(ep, 3, depth=1.2), pose=frame.pose)
+    p.notify_blocked(blocked)
+    assert p.closing.inspection_blocked and not p.closing.inspection_step_pending
+    command = p.plan(blocked)
+    assert command.stop and p.closing.closest_approach_stops == 1 and p.closing.inspection_releases == 0
+    assert "closest reachable approach" in command.info["reason"] and "blocked" in command.info["reason"]
+    assert command.info["measured_m"] == pytest.approx(1.2, abs=0.05) and command.info["target_visible"] is True
+    assert p.closing.diagnostics()["closest_approach_stops"] == 1 and p.closing.rejected == []
+def test_from_a_widened_standoff_the_inspection_stops_once_its_steps_are_spent(monkeypatch):
+    p, ep, frame = arrived_widened_standoff(monkeypatch)
+    assert not p.plan(frame).stop and p.closing.inspection_stepped == 1
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)                      # the step moved the agent: not blocked
+    p.closing.inspection_stepped = TargetClosingSettings().inspection_max_steps
+    command = p.plan(replace(observation(ep, 3, depth=1.2), pose=frame.pose))
+    assert not p.closing.inspection_blocked
+    assert command.stop and p.closing.closest_approach_stops == 1 and "steps are spent" in command.info["reason"]
+def test_the_closest_approach_stop_needs_a_widened_standoff_and_can_be_switched_off(monkeypatch):
+    """From a standoff on the ring itself a fresh range beyond the limit is what it always was: a reason to step
+    closer, never a STOP; and the switch restores that for a widened standoff too."""
+    p, ep, frame = arrived_widened_standoff(monkeypatch, widened=False)
+    command = p.plan(frame)
+    assert not command.stop and p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED") and p.closing.closest_approach_stops == 0
+    assert p.closing.inspection_started is None, "a standoff on the ring, out of range: no inspection from here"
+    q, ep, frame = arrived_widened_standoff(monkeypatch, closest_approach_stop=False)
+    command = q.plan(frame)
+    assert not command.stop and q.closing.inspection_started is None and q.closing.closest_approach_stops == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(closest_approach_stop=1)
+def test_a_pending_inspection_step_does_not_outlive_its_frame(monkeypatch):
+    """The blocked hook speaks before the next frame; a block reported later belongs to another command."""
+    p, ep, frame = arrived_widened_standoff(monkeypatch)
+    p.plan(frame)
+    assert p.closing.inspection_step_pending
+    p.notify_action(frame, DiscreteAction.TURN_LEFT)                         # the converter turned: no step was tried
+    assert not p.closing.inspection_step_pending
+    again = replace(observation(ep, 3, depth=1.2), pose=frame.pose)
+    p.plan(again)
+    assert p.closing.inspection_step_pending and p.closing.inspection_stepped == 2, "the next frame asks for the step again"
+    p.notify_action(again, DiscreteAction.MOVE_FORWARD)
+    later = replace(observation(ep, 4, depth=1.2), pose=frame.pose)
+    p.closing.observe(later)
+    assert not p.closing.inspection_step_pending
+    p.closing.note_blocked()
+    assert not p.closing.inspection_blocked, "a block after the frame changed is not the inspection step's"

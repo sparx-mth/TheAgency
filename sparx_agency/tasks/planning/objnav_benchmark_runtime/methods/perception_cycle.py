@@ -184,6 +184,8 @@ class PerceptionCycle:
         for label, xyz in observed_objects(obs, self.detections, p.settings.detection_confidence, self.projections,
                                            masks=self.masks):
             row = self.projections[-1]
+            if row.get("occluder_depth_m") is not None:
+                self.counts["occluder_reads"] += 1               # the box read around a surface in front of the object
             if label in DOOR_LABELS or label in STAIR_LABELS:
                 row["status"] = "terrain_or_portal_context"
                 continue
