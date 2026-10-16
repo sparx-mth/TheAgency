@@ -30,6 +30,26 @@ def source_fingerprint(package_root=None):
     return digest.hexdigest()
 
 
+def gpu_plan_record(environ=None):
+    """The GPU placement plan the launcher decided on (``gpu_plan.py``), for the frozen configuration.
+
+    ``OBJNAV_GPU_PLAN_JSON`` names the file the launcher wrote; without it the
+    record says so. A plan is provenance -- which process had the card --
+    never an input to the policy.
+
+    Raises:
+        RuntimeError: The variable names a file that cannot be read or parsed.
+    """
+    import os
+    path = (os.environ if environ is None else environ).get("OBJNAV_GPU_PLAN_JSON", "").strip()
+    if not path:
+        return {"source": "none", "note": "launched without gpu_plan.py; devices as the command line and environment say"}
+    try:
+        return dict(json.loads(Path(path).read_text()), source=path)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("OBJNAV_GPU_PLAN_JSON names an unreadable plan: %s" % exc)
+
+
 def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None):
     """Preserve publisher order; shard, optionally shuffle by seed, then apply an explicit subset limit.
 

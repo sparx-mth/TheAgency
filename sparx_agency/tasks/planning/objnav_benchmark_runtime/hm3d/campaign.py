@@ -29,9 +29,11 @@ from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import (
     read_episode_rows, strict_json, write_atomically)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import (
-    HM3DDataset, published_counts)
+    CATEGORIES, HM3DDataset, published_counts)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
     PROTOCOLS, protocol_for)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.smoke_plan import (
+    cover_plan, describe)
 
 RUN_MODULE = "sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run"
 
@@ -56,20 +58,40 @@ def scene_keys(episodes_dir, protocol):
     return tuple(keys)
 
 
+def smoke_cover(episodes_dir, protocol, scenes=None):
+    """The minimal cover (``smoke_plan.cover_plan``) over the split's published episodes.
+
+    Reads the episode files only -- no mesh is required to plan.
+
+    Returns:
+        ``(plan, account)``: ``{scene: [episode_id]}`` and its JSON-ready description.
+    """
+    dataset = HM3DDataset(episodes_dir, None, protocol, full=False, require_scenes=False)
+    plan = cover_plan(dataset.episodes, CATEGORIES, scenes=scenes)
+    return plan, describe(plan, dataset.episodes, CATEGORIES)
+
+
 def scene_command(scene, output, *, version, episodes_dir, scenes_dir, limit=None,
-                  split="val", extra=()):
-    """The exact child command for one scene. A subset run, and labelled as one."""
+                  split="val", extra=(), episode_ids=None):
+    """The exact child command for one scene. A subset run, and labelled as one.
+
+    ``episode_ids`` names the scene's episodes explicitly (the smoke cover);
+    otherwise the child takes the scene's published episodes in order, the
+    first ``limit`` of them when given.
+    """
     command = [sys.executable, "-m", RUN_MODULE, "--version", version,
                "--split", split, "--episodes-dir", str(episodes_dir),
                "--scenes-dir", str(scenes_dir), "--scenes", scene,
                "--output", str(output)]
+    if episode_ids:
+        command += ["--episode-ids"] + [str(i) for i in episode_ids]
     if limit is not None:
         command += ["--limit", str(limit)]
     return command + list(extra)
 
 
 def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=None,
-                 split="val", extra=(), resume=False, runner=subprocess.run):
+                 split="val", extra=(), resume=False, runner=subprocess.run, smoke=False):
     """Run each scene in its own process and return what each one did.
 
     Args:
@@ -84,14 +106,26 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
         resume: Skip a scene that already holds a finished ``summary.json``,
             and pass ``--resume`` to one that started but did not finish.
         runner: Injected for tests; must behave like ``subprocess.run``.
+        smoke: Run the minimal cover instead -- one explicit published episode
+            per scene, chosen so every goal category appears at least once
+            (``smoke_plan``); the plan is written to ``<root>/smoke_plan.json``.
+            Exclusive with ``limit``.
 
     Returns:
         One record per scene: its command, its exit status and its directory.
     """
+    if smoke and limit is not None:
+        raise ValueError("--smoke chooses one episode per scene itself; it takes no --limit")
     root = Path(root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     protocol = protocol_for(version).with_split(split)
     selected = list(scenes) if scenes else list(scene_keys(episodes_dir, protocol))
+    plan = {}
+    if smoke:
+        plan, account = smoke_cover(episodes_dir, protocol, scenes=selected)
+        write_atomically(root / "smoke_plan.json",
+                         strict_json(dict(account, version=version, split=split),
+                                     "HM3D smoke plan", indent=2))
     results = []
     for scene in selected:
         output = root / scene
@@ -105,14 +139,14 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
             arguments.append("--resume")
         command = scene_command(scene, output, version=version, split=split,
                                 episodes_dir=episodes_dir, scenes_dir=scenes_dir,
-                                limit=limit, extra=arguments)
+                                limit=limit, extra=arguments, episode_ids=plan.get(scene))
         completed = runner(command)
         results.append({"scene": scene, "status": "ran",
                         "returncode": int(getattr(completed, "returncode", 1)),
                         "output": str(output), "command": command})
     write_atomically(root / "campaign.json",
                      strict_json({"version": version, "split": split, "limit": limit,
-                                  "scenes": len(selected), "runs": results},
+                                  "smoke": bool(smoke), "scenes": len(selected), "runs": results},
                                  "HM3D campaign", indent=2))
     return results
 
@@ -198,6 +232,10 @@ def main(argv=None):
     parser.add_argument("--episodes-dir", required=True, type=Path)
     parser.add_argument("--scenes-dir", required=True, type=Path)
     parser.add_argument("--limit", type=int, help="Episodes per scene")
+    parser.add_argument("--smoke", action="store_true",
+                        help="The minimal cover: one explicit published episode per scene, categories "
+                             "balanced so every one appears at least once (smoke_plan.py). A diagnostic "
+                             "subset, labelled as one; exclusive with --limit")
     parser.add_argument("--scenes", nargs="+")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
@@ -210,7 +248,8 @@ def main(argv=None):
         results = run_campaign(args.root, version=args.version, split=args.split,
                                episodes_dir=args.episodes_dir,
                                scenes_dir=args.scenes_dir, limit=args.limit,
-                               scenes=args.scenes, extra=extra, resume=args.resume)
+                               scenes=args.scenes, extra=extra, resume=args.resume,
+                               smoke=args.smoke)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
         if failed:
             print("Scenes that did not exit cleanly: %s" % ", ".join(failed))

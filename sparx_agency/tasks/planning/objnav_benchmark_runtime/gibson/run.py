@@ -15,16 +15,17 @@ import subprocess
 
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES, gibson_label_mapper
-from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import (
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import StopDiagnostic, build_policy  # noqa: F401
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import gpu_plan_record
 
 #: The frozen-config keys a ``--resume`` may be told to accept a change in -- each is provenance (which
 #: source, which device had the card) or a self-check that only refuses an episode, never an input to a
@@ -33,15 +34,6 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import
 #: the report. (2026-10-11: the full val run died at episode 919 on the kinematic self-check; finishing
 #: it under the corrected tolerance meant exactly these two differences, plus the plan a relaunch makes.)
 RESUMABLE_CONFIG_CHANGES = ("kinematics", "source_sha256", "gpu_plan")
-
-
-class StopDiagnostic:
-    """Non-privileged plumbing check, never labelled as the search method."""
-    name = "diagnostic-stop"
-    def reset(self, episode, target):
-        pass
-    def plan(self, observation):
-        return NavigationCommand.stop_here()
 
 
 def parser():
@@ -192,7 +184,7 @@ def _runtime(issues):
 
 
 def _method(args, defaults=None):
-    """The policy and its frozen description.
+    """The policy and its frozen description; see :func:`policy_factory.build_policy`.
 
     Args:
         args: Parsed CLI; ``--policy-config`` JSON overrides every default.
@@ -200,76 +192,12 @@ def _method(args, defaults=None):
             config -- the multi-storey development protocol lifts
             ``allow_stair_traversal``, whose benchmark default is False.
     """
-    if args.agent == "stop":
-        return StopDiagnostic(), {"method": "diagnostic-stop", "publishable": False}
-    from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import VerifiedLLMClient, public_service_url
-    overrides = json.loads(args.policy_config.read_text()) if args.policy_config else {}
-    if not isinstance(overrides, dict):
-        raise ValueError("--policy-config must hold a JSON object")
-    if args.explorer is not None:
-        if overrides.get("local_exploration", args.explorer) != args.explorer:
-            raise ValueError("--explorer disagrees with --policy-config")
-        overrides["local_exploration"] = args.explorer
-    if getattr(args, "segmentation", None):
-        if overrides.get("segmentation", True) is not True:
-            raise ValueError("--segmentation disagrees with --policy-config")
-        overrides["segmentation"] = True
-    settings = RPTSettings(**dict(defaults or {}, **dict(overrides, seed=args.seed)))
-    config = LLMConfig.from_env()
-    config.seed = args.seed
-    client = VerifiedLLMClient(LLMClient(config))
-    detector = HttpDetector(public_service_url(args.detector_url), gibson_label_mapper().vocabulary(),
-                            expected_backend=args.detector_backend,
-                            timeout_s=getattr(args, "detector_timeout_s", 30.0))
-    services = [("LLM", client), ("detector", detector)]
-    segmenter = None
-    if settings.segmentation:
-        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.segmentation import HttpSegmenter
-        if not getattr(args, "segmenter_url", None):
-            raise RuntimeError("segmentation is on (--segmentation / policy config) but no --segmenter-url was given; "
-                               "start segmentation_server.py and name it, or turn the setting off")
-        segmenter = HttpSegmenter(public_service_url(args.segmenter_url), timeout_s=getattr(args, "segmenter_timeout_s", 30.0),
-                                  expected_model=getattr(args, "segmenter_model", None))
-        services.append(("segmenter", segmenter))
-    problems, identities = [], {}
-    for name, service in services:
-        try:
-            identities[name] = service.health()
-        except Exception as exc:
-            problems.append("%s: %s" % (name, exc))
-    if problems:
-        raise RuntimeError("; ".join(problems))
-    policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter)
-    emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
-    if emitted > min(settings.detection_confidence, policy.door_settings.confidence):
-        raise RuntimeError("Detector emission threshold hides door candidates; restart with --conf 0.05")
-    info = policy.configuration()
-    llm = asdict(config)
-    llm.pop("api_key", None)
-    info.update(llm=llm, llm_identity=identities["LLM"], detector=identities["detector"],
-                detector_url=args.detector_url, detector_timeout_s=detector.timeout_s)
-    if segmenter is not None:
-        info.update(segmenter=identities["segmenter"], segmenter_url=args.segmenter_url, segmenter_timeout_s=segmenter.timeout_s)
-    return policy, info
+    return build_policy(args, gibson_label_mapper(), defaults=defaults)
 
 
 def _gpu_plan_record():
-    """The GPU placement plan the launcher decided on (``gpu_plan.py``), for the frozen configuration.
-
-    ``OBJNAV_GPU_PLAN_JSON`` names the file the launcher wrote; without it the
-    record says so. A plan is provenance -- which process had the card --
-    never an input to the policy.
-    """
-    path = os.environ.get("OBJNAV_GPU_PLAN_JSON", "").strip()
-    if not path:
-        return {"source": "none", "note": "launched without gpu_plan.py; devices as the command line and environment say"}
-    try:
-        return dict(json.loads(Path(path).read_text()), source=path)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("OBJNAV_GPU_PLAN_JSON names an unreadable plan: %s" % exc)
+    """The launcher's GPU placement plan, for the frozen configuration (``provenance.gpu_plan_record``)."""
+    return gpu_plan_record()
 
 
 def _gpu_gate(args):

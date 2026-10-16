@@ -89,7 +89,7 @@ class HM3DEnv(ObjNavEnv):
         self._simulator = simulator if simulator is not None else HabitatRGBDSimulator(
             self._camera, self._actions, protocol.agent_radius_m,
             protocol.allow_sliding, gpu_device, height_m=protocol.agent_height_m,
-            navmesh=protocol.navmesh)
+            navmesh=protocol.navmesh, depth_holes=protocol.depth_holes())
         self._distances = {}
         self._episode = None
         self._observation = None
@@ -104,6 +104,17 @@ class HM3DEnv(ObjNavEnv):
         """Every published identity except the explicitly excluded ones."""
         excluded = set(self.excluded_episode_ids)
         return tuple(i for i in self._dataset.episode_ids() if i not in excluded)
+
+    @property
+    def target_projector(self):
+        """Optional local NavMesh geometry service, separate from evaluator data.
+
+        The same seam ``GibsonEnv`` exposes: the target closing snaps its
+        standoff goal onto the navmesh through it. It carries no goal, no
+        distance and no view point -- geometry the agent could read off its
+        own depth, served by the simulator because it already has the mesh.
+        """
+        return getattr(self._simulator, "project_target", None)
 
     def _distance_field(self, episode):
         """The (scene, category) distance, built once per goal set per scene."""
@@ -203,6 +214,7 @@ class HM3DEnv(ObjNavEnv):
         self._row = row
         self._steps, self._stopped = 0, False
         self._path_m = self._protocol.path_length_epsilon_m
+        self._collisions, self._collision_available = 0, True
         self._episode = ObjNavEpisode(
             episode_id, row.scene_key, self._protocol.benchmark, self._protocol.split,
             row.category, self._camera, self._actions, self._protocol.max_steps,
@@ -260,6 +272,11 @@ class HM3DEnv(ObjNavEnv):
         after = self._observation.pose
         self._path_m += math.sqrt((after.x - before.x) ** 2 + (after.y - before.y) ** 2
                                   + (after.z - before.z) ** 2)
+        collision = getattr(self._simulator, "last_collision", None)
+        if collision is None:
+            self._collision_available = False
+        else:
+            self._collisions += int(collision)
         return self._observation
 
     def pose_confirmed_on_navmesh(self):
@@ -283,7 +300,9 @@ class HM3DEnv(ObjNavEnv):
                 "shortest_path_m": self._start_dtg,
                 "success_distance_m": self._protocol.success_distance_m,
                 "published_geodesic_m": self._row.published_geodesic_m,
-                "view_points": self._distance.view_point_count}
+                "view_points": self._distance.view_point_count,
+                "collisions": self._collisions if self._collision_available else None,
+                "depth_holes": dict(getattr(self._simulator, "depth_hole_stats", None) or {})}
 
     def measure(self):
         if not self.episode_over:

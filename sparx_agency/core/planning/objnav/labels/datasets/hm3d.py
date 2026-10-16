@@ -36,9 +36,13 @@ from sparx_agency.core.planning.objnav.types.target import LabelSpec
 #: Dataset ``object_category`` spellings, in dataset category-index order.
 CATEGORIES = ("chair", "bed", "plant", "toilet", "tv_monitor", "sofa")
 
-#: What each category is called when it is put to a language model.
+#: What each category is called when it is put to a language model: the
+#: same words the Gibson table uses (``couch``, ``tv``, ``potted plant``), so
+#: the room LLM and the node oracle are asked the identical question on both
+#: benchmarks and the method's priors (``methods/room_priors.py``, keyed through
+#: the same aliases) resolve the same way.
 QUERIES = {"chair": "chair", "bed": "bed", "plant": "potted plant",
-           "toilet": "toilet", "tv_monitor": "tv", "sofa": "sofa"}
+           "toilet": "toilet", "tv_monitor": "tv", "sofa": "couch"}
 
 #: Detector prompts per category, primary first. Tuples, never sets: the order
 #: reaches the open-vocabulary detector verbatim and must not move between a
@@ -53,13 +57,21 @@ PROMPTS = {
 }
 
 #: Non-goal prompts that give the room classifier and the door finder something
-#: to see. A method choice, not part of the benchmark's vocabulary; the four
-#: door prompts are the ones ``methods/doors.py`` looks for.
+#: to see. A method choice, not part of the benchmark's vocabulary, and
+#: **identical to the Gibson table's** (``datasets/gibson.py``) since 2026-10-14:
+#: the open-vocabulary detector scores every prompt against a crop and lands on
+#: the nearest one it was given, so the prompt set is part of the method -- a
+#: different context list on HM3D would be a different detector. The four door
+#: prompts are the ones ``methods/doors.py`` looks for; ``bathtub`` is a home
+#: object of the toilet (``room_priors.HOME_OBJECTS``); ``toy``, ``rocking
+#: horse`` and ``stuffed animal`` are the distractors that stop a child's
+#: ride-on horse reading as a chair.
 CONTEXT_VOCABULARY = (
-    "dining table", "oven", "sink", "refrigerator", "microwave",
-    "book", "clock", "vase", "cup", "bottle", "laptop",
+    "dining table", "oven", "sink", "refrigerator",
+    "book", "clock", "vase", "cup", "bottle",
     "door", "doorway", "open doorway", "door frame",
-    "cabinet", "desk", "shower", "bathtub", "stairs", "washing machine",
+    "cabinet", "desk", "shower", "bathtub", "stairs", "staircase",
+    "toy", "rocking horse", "stuffed animal",
 )
 
 

@@ -26,6 +26,18 @@ radius to 0.2 m where habitat-lab's ``objectnav_hm3d`` uses 0.1 m. We evaluate
 under the official 0.1 m and re-score the *same* episodes at 0.2 m for a
 like-for-like row under their table; see ``report.py``.
 
+**Revision ``/2`` (2026-10-14)** carries the two sensor/actuation choices the
+Gibson protocol made for the shared method, so that the *same* algorithm runs
+on both benchmarks: the camera pitch the method keeps itself to (level to
+30 degrees up, 60 degrees down -- habitat-sim itself never clamps a LOOK, and
+the bound is a method choice the target closing reads from the action spec)
+and the enclosed depth-hole fill (``depth_hole_*``; see
+``GibsonProtocol`` for the measurement behind it). Neither touches the
+scoring: a LOOK is an action against the same 500-action budget, and the
+depth fill changes what the policy sees, not what the evaluator measures.
+``camera_tilt`` cannot be turned off here -- the HM3D action space *is* the
+six actions -- it exists so the two protocols read alike.
+
 Python 3.8 syntax; no simulator import at module scope.
 """
 from __future__ import annotations
@@ -111,7 +123,10 @@ class HM3DProtocol:
     max_depth_m: float = 5.0
     forward_step_m: float = 0.25
     turn_angle_deg: float = 30.0
+    camera_tilt: bool = True
     tilt_angle_deg: float = 30.0
+    min_pitch_deg: float = -30.0
+    max_pitch_deg: float = 60.0
     success_distance_m: float = 0.1
     distance_to: str = "view_points"
     allow_sliding: bool = False
@@ -121,11 +136,22 @@ class HM3DProtocol:
     path_length_epsilon_m: float = 0.0
     reference_habitat_lab_version: str = "0.2.1"
     reference_habitat_sim_version: str = "0.2.4"
+    # Depth holes, as in ``GibsonProtocol`` (where the rule is documented): a
+    # no-return pixel enclosed by valid depth on at least ``depth_hole_min_rim``
+    # of its rim and no larger than ``depth_hole_max_fraction`` of the frame is
+    # filled from its nearest valid pixels; larger or open voids are dropped as
+    # every baseline drops them. ``depth_hole_fill=False`` is the baselines'
+    # sensor handling.
+    depth_hole_fill: bool = True
+    depth_hole_max_fraction: float = 0.5
+    depth_hole_min_rim: float = 0.5
 
     def __post_init__(self) -> None:
         if self.dataset_version not in SCENE_RELEASES:
             raise ValueError("HM3D dataset version must be one of %r, got %r"
                              % (sorted(SCENE_RELEASES), self.dataset_version))
+        if not self.camera_tilt:
+            raise ValueError("HM3D ObjectNav's action space is the six actions; camera_tilt cannot be off")
         if self.distance_to != "view_points":
             raise ValueError("habitat-lab ObjectNav measures to goal view points")
         if not 0 < self.success_distance_m <= 1.0:
@@ -155,12 +181,23 @@ class HM3DProtocol:
             intrinsics_from_hfov(self.width, self.height, self.hfov_deg),
             self.camera_height_m, self.min_depth_m, self.max_depth_m)
 
+    def depth_holes(self) -> "DepthHoleFill":
+        """The rule the simulator bridge fills no-return pixels by."""
+        from sparx_agency.core.mapping.depth.depth_holes import DepthHoleFill
+        return DepthHoleFill(self.depth_hole_fill, self.depth_hole_max_fraction, self.depth_hole_min_rim)
+
     def actions(self) -> DiscreteActionSpec:
-        """All six challenge actions; Habitat does not clamp the camera pitch."""
+        """All six challenge actions, with the pitch bounds the method keeps itself to.
+
+        Habitat does not clamp the camera pitch; ``min_pitch_deg`` /
+        ``max_pitch_deg`` are what the target closing and the camera control
+        read from the spec, the same bounds as on Gibson.
+        """
         return DiscreteActionSpec(
             forward_step_m=self.forward_step_m,
             turn_angle_deg=self.turn_angle_deg,
             tilt_angle_deg=self.tilt_angle_deg,
+            min_pitch_deg=self.min_pitch_deg, max_pitch_deg=self.max_pitch_deg,
             actions=ALL_ACTIONS)
 
     def kinematics(self) -> KinematicTolerance:
@@ -216,12 +253,12 @@ class HM3DProtocol:
 
 #: HM3D-v1 validation: the 2022 challenge episode dataset on HM3D-Semantics v0.1.
 HM3D_V1 = HM3DProtocol(dataset_version="v1",
-                       protocol_id="hm3d-objectnav-v1-val/1",
+                       protocol_id="hm3d-objectnav-v1-val/2",
                        benchmark="hm3d_v1")
 
 #: HM3D-v2 validation: the v2 episode dataset on HM3D-Semantics v0.2.
 HM3D_V2 = HM3DProtocol(dataset_version="v2",
-                       protocol_id="hm3d-objectnav-v2-val/1",
+                       protocol_id="hm3d-objectnav-v2-val/2",
                        benchmark="hm3d_v2")
 
 #: Selectable by name on the command line.

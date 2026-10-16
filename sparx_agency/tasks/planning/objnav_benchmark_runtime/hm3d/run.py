@@ -20,15 +20,16 @@ import os
 from pathlib import Path
 import subprocess
 
-from sparx_agency.core.planning.objnav.labels.datasets.hm3d import hm3d_label_mapper
-from sparx_agency.core.planning.objnav.types.command import NavigationCommand
-from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
+from sparx_agency.core.planning.objnav.labels.datasets.hm3d import hm3d_label_mapper
+from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import StopDiagnostic, build_policy  # noqa: F401
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
-    episodes_of_category, explicit_episodes, select_episodes, source_fingerprint)
+    episodes_of_category, explicit_episodes, gpu_plan_record, select_episodes)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import CATEGORIES, HM3DDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.env import HM3DEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
@@ -40,29 +41,12 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
 #: navmesh snapping put the two numbers a hair apart.
 GEODESIC_AGREEMENT_FRACTION = 0.99
 
-#: The detector service mode every HM3D entrypoint expects unless told otherwise.
-#: YOLO-World only; ``grounded_vlm`` / ``hybrid`` stay selectable via
-#: ``--detector-backend`` but are not the default.
-DEFAULT_DETECTOR_BACKEND = "yolo_world"
-
 #: Packages the runtime needs, and the distribution each version is read from.
 RUNTIME_PACKAGES = (
     ("numpy", "numpy"), ("scipy", "scipy"), ("skimage", "scikit-image"),
     ("cv2", "opencv-python"), ("networkx", "networkx"), ("requests", "requests"),
     ("quaternion", "numpy-quaternion"), ("habitat_sim", "habitat-sim"),
 )
-
-
-class StopDiagnostic:
-    """Non-privileged plumbing check. Never labelled as the search method."""
-
-    name = "diagnostic-stop"
-
-    def reset(self, episode, target):
-        pass
-
-    def plan(self, observation):
-        return NavigationCommand.stop_here()
 
 
 def parser():
@@ -86,14 +70,9 @@ def parser():
                    help="Local exploration inside a room: the observed-map frontier "
                         "sweep (default) or the planar FALCON adaptation. Must agree "
                         "with local_exploration in --policy-config when both are given")
-    p.add_argument("--detector-url", default="http://127.0.0.1:18092")
-    p.add_argument("--detector-backend", default=DEFAULT_DETECTOR_BACKEND,
-                   help="Detector service mode expected on --detector-url; the run "
-                        "refuses a service reporting a different backend "
-                        "(default: %s)" % DEFAULT_DETECTOR_BACKEND)
-    p.add_argument("--detector-timeout-s", type=float, default=30.0,
-                   help="Bounded HTTP timeout per frame; raise it explicitly for a "
-                        "CPU grounded-VLM detector")
+    # The detector and the (off by default) segmenter: the same switches as gibson.run,
+    # so a campaign forwards one set of perception flags to either benchmark.
+    add_detector_options(p, url_default="http://127.0.0.1:18092")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--gpu-device", type=int, default=0)
     p.add_argument("--limit", type=int)
@@ -136,6 +115,11 @@ def parser():
                    help="Hash only the episode files. Faster preflight, weaker "
                         "provenance: a swapped scene release becomes invisible.")
     p.add_argument("--allow-shared-gpu", action="store_true")
+    p.add_argument("--software-render", action="store_true",
+                   help="Render with Mesa's software EGL device (llvmpipe) instead of a CUDA GPU: habitat gets no "
+                        "GPU device, the GPU gate is skipped, and the frozen configuration records the renderer. "
+                        "The launcher must leave Mesa no hardware device (run_benchmark.sh hides /dev/dri), or "
+                        "device 0 is whatever hardware Mesa finds first")
     return p
 
 
@@ -185,62 +169,23 @@ def _runtime(issues):
 
 
 def _method(args, protocol):
-    """Build the search policy and prove its services are the ones recorded."""
-    if args.agent == "stop":
-        return StopDiagnostic(), {"method": "diagnostic-stop", "publishable": False}
-    from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import (
-        RPTSearchPolicy, RPTSettings)
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import (
-        VerifiedLLMClient, public_service_url)
+    """Build the search policy and prove its services are the ones recorded.
 
-    overrides = json.loads(args.policy_config.read_text()) if args.policy_config else {}
-    if not isinstance(overrides, dict):
-        raise ValueError("--policy-config must hold a JSON object")
-    if args.explorer is not None:
-        if overrides.get("local_exploration", args.explorer) != args.explorer:
-            raise ValueError("--explorer disagrees with --policy-config")
-        overrides["local_exploration"] = args.explorer
-    # Embodiment comes from the benchmark's own agent, never from a default.
+    One builder for every benchmark (``policy_factory.build_policy``). The
+    only defaults this entrypoint sets below ``--policy-config`` are the
+    benchmark's own agent -- body height and radius -- so every method knob
+    (clearance, stop distance, closing, peeks, ...) is ``RPTSettings``'
+    default here exactly as it is on Gibson. Nothing here came from an HM3D
+    validation score.
+    """
     embodiment = {"body_height_m": protocol.agent_height_m,
-                  "body_radius_m": protocol.agent_radius_m,
-                  "preferred_clearance_m": 0.30,
-                  "stop_distance_m": 1.0}
-    settings = RPTSettings(**dict(embodiment, **dict(overrides, seed=args.seed)))
-    config = LLMConfig.from_env()
-    config.seed = args.seed
-    client = VerifiedLLMClient(LLMClient(config))
-    detector = HttpDetector(public_service_url(args.detector_url),
-                            hm3d_label_mapper().vocabulary(),
-                            expected_backend=args.detector_backend,
-                            timeout_s=args.detector_timeout_s)
-    problems, identities = [], {}
-    for name, service in (("LLM", client), ("detector", detector)):
-        try:
-            identities[name] = service.health()
-        except Exception as exc:
-            problems.append("%s: %s" % (name, exc))
-    if problems:
-        raise RuntimeError("; ".join(problems))
-    policy = RPTSearchPolicy(detector, client, settings)
-    emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
-    if emitted > min(settings.detection_confidence, policy.door_settings.confidence):
-        raise RuntimeError("Detector emission threshold hides door candidates; "
-                           "restart the detector with --conf 0.05")
-    info = policy.configuration()
-    llm = asdict(config)
-    llm.pop("api_key", None)
-    info.update(llm=llm, llm_identity=identities["LLM"],
-                detector=identities["detector"], detector_url=args.detector_url,
-                detector_backend=args.detector_backend,
-                detector_timeout_s=detector.timeout_s)
-    return policy, info
+                  "body_radius_m": protocol.agent_radius_m}
+    return build_policy(args, hm3d_label_mapper(), defaults=embodiment)
 
 
 def _gpu_gate(args):
     """Refuse to share the rendering GPU with a resident model by accident."""
-    if args.allow_shared_gpu:
+    if args.allow_shared_gpu or getattr(args, "software_render", False):
         return
     result = subprocess.run(
         ["nvidia-smi", "--id=%d" % args.gpu_device, "--query-gpu=memory.used",
@@ -304,7 +249,10 @@ def prepare(args):
                                   full=not subset, scenes=args.scenes,
                                   episodes_per_scene=args.episodes_per_scene)
             manifest = dataset.manifest(hash_scenes=not args.skip_scene_hashes)
-            env = HM3DEnv(dataset, protocol, args.seed, args.gpu_device)
+            # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
+            # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
+            env = HM3DEnv(dataset, protocol, args.seed,
+                          -1 if args.software_render else args.gpu_device)
             pool = episodes_of_category(env.episode_ids(), dataset.episodes, args.category,
                                         CATEGORIES)
             if args.episode_ids:
@@ -328,16 +276,29 @@ def prepare(args):
             issues.append("Dataset/scorer: %s" % exc)
     try:
         policy, method = _method(args, protocol)
+        if args.agent == "rpt":
+            policy.target_projector = getattr(env, "target_projector", None)
+            method["target_navmesh_projection"] = policy.target_projector is not None
     except Exception as exc:
         issues.append("Method services/configuration: %s" % exc)
+    try:
+        gpu_plan = gpu_plan_record()
+    except RuntimeError as exc:
+        issues.append(str(exc))
+        gpu_plan = None
     config = {
         "protocol": asdict(protocol),
         "protocol_id": protocol.protocol_id,
         "runtime": runtime,
         "reference_habitat_sim_version_match": sim_match,
         "method": method,
+        "publishable": method.get("publishable", True),
         "seed": args.seed,
         "gpu_device": args.gpu_device,
+        "renderer": ("software (Mesa llvmpipe EGL device; --software-render)" if args.software_render
+                     else "cuda gpu %d" % args.gpu_device),
+        "kinematics": asdict(protocol.kinematics()),
+        "gpu_plan": gpu_plan,
         "shards": args.shards,
         "shard_index": args.shard_index,
         "limit": args.limit,
