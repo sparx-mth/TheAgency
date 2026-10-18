@@ -75,6 +75,8 @@ def test_the_nearest_frontier_visit_enters_at_the_nearest_frontier_not_the_middl
                                    labels=policy.graph.labels, label=rooms[1].id + 1)
     assert tuple(policy.route_memory.goal) == tuple(nearest.xy)
     assert policy.loop._entries[1][1] is True and policy.loop._entries[1][0] != policy.loop._vantage(world, cost, rooms[1])[0]
+    assert policy.loop.events[-1]["entry"] == "frontier" and policy.loop.stats["entry_frontier"] == 1
+    assert policy.loop.estimates[1]["entry"] == "frontier"
 
 
 def test_the_nearest_frontier_visit_walks_frontiers_instead_of_turning_and_then_finishes_the_room():

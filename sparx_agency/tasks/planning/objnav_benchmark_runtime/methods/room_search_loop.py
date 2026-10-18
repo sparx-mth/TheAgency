@@ -796,7 +796,9 @@ class RoomSearchLoop:
                     self.stats["openings_chosen"] += 1
                 self.stats["entry_peek"] += 1
             else:
-                if self.settings.scanning:
+                if self.settings.nearest_frontier_scan and state.room_id not in self._revisits:
+                    entry = "frontier" if self._entry[1] else "doorstep"
+                elif self.settings.scanning:
                     entry = "vantage"
                 elif self.settings.exploring:
                     entry = ("frontier" if self._entry[1] else
@@ -1839,7 +1841,7 @@ class RoomSearchLoop:
         info = p.graph.label_info(pid) or {}
         if distance_m is None:
             how = "unreachable"
-        elif self.settings.scanning:
+        elif self.settings.scanning and not (self.settings.nearest_frontier_scan and pid not in self._revisits):
             how = "vantage"
         elif entry is not None and entry[1]:
             how = "frontier"
