@@ -109,10 +109,13 @@ against the full method's `gibson/results/gibson_val_20261016_small_llm/summary.
 
 ## The first fifteen (2026-10-18, laptop, 3 per scene in split order, seed 17)
 
-`runs/benchmark_falcon-yolo_15episodes_20261018T145952Z/` -- the result table is
-in `summary.txt` beside the videos (`<Scene>/recordings/<id>/video.mp4`), and in
-entry 032. The smoke episode before it, Darden/000000 (bed), ran its 500
-actions in 104 s (~4.8 actions/s with YOLO on the GPU): 67 FALCON plans at
-~430 ms, 36 viewpoints observed, 30 rejected (18 swept-motion vetoes), two
-takeovers released `unverified` -- the full method failed the same episode
-(STOP at 2.3 m).
+`runs/benchmark_falcon-yolo_15episodes_20261018T152349Z/` on `03d640ff`: **SR 0.800, SPL 0.433, DTG 0.94 m**,
+153 steps and 31 s an episode (~5 actions/s with YOLO on the GPU), against the
+full method's SR 0.867, SPL 0.641, DTG 0.16 m on the same fifteen
+(`results/gibson_val_20261016_small_llm/episodes.csv`). The table, the per-episode
+rows and the failure anatomy are in progress entry 032; the videos are under
+`<Scene>/recordings/<id>/video.mp4`. Two of the three failures are the shared
+closing STOPping on a YOLO `bed` false positive (one of them the full method
+failed too), the third the explorer's 4 m horizon never bringing the bed into
+frame; the SPL gap is mostly FALCON's greedy local gain criss-crossing a big
+room before the next doorway.
