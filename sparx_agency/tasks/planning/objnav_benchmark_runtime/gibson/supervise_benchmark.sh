@@ -192,7 +192,11 @@ relaunch() {   # the run again, --resume, from the snapshot, behind a wrapper th
   pkill -KILL -f -- "gibson\.run .*--output ${OUT}( |$)" 2>/dev/null || true
   pkill -TERM -f -- "gibson\.monitor ${OUT}( |$)" 2>/dev/null || true
   cp "$REPLAY/gpu_plan.json" "$OUT/gpu_plan.json"            # the plan the frozen configuration recorded
-  ensure_service ollama "$(env_value run LLM_BASE_URL)/api/tags" 180 "$OUT/ollama.log"
+  if [[ "$(argv_value run --agent || true)" == falcon-yolo ]]; then
+    say "no LLM to ensure: the run is the FALCON + YOLO + closing baseline (--agent falcon-yolo)"
+  else
+    ensure_service ollama "$(env_value run LLM_BASE_URL)/api/tags" 180 "$OUT/ollama.log"
+  fi
   ensure_service detector "$(argv_value run --detector-url)/health" 300 "$OUT/detector.log"
   if [[ -n "$(argv_value run --segmenter-url || true)" ]]; then
     ensure_service segmenter "$(argv_value run --segmenter-url)/health" 300 "$OUT/segmenter.log"

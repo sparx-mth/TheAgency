@@ -7,6 +7,10 @@ RPT* room/portal ordering, local exploration and A*/WA* path planning. The ROS
 aerial FALCON controller is unchanged. Neither explorer requires an opening
 panorama.
 
+`--agent falcon-yolo` runs the exploration baseline instead: goal-free planar
+FALCON with the same YOLO perception and the same closing, and no LLM, RPT* or
+rooms ([FALCON_YOLO_BASELINE.md](FALCON_YOLO_BASELINE.md)).
+
 See [runtime architecture](../README.md), [FALCON mapping](BOUNDED_FALCON.md),
 [historical FALCON results](FALCON_RESULTS.md),
 [distinct-building experiments](DISTINCT_BUILDINGS.md),

@@ -17,6 +17,8 @@
 #
 # Everything run_benchmark.sh reads from the environment applies to a new run (LLM_REASONING_MODEL, GPU_PLAN,
 # LLM_VRAM_MIB, OLLAMA_CONTAINER, SEGMENTATION, ...); a resume replays the processes with the environment they had.
+# RUN_ARGS is a command-line fragment appended to run_benchmark.sh for a new run -- RUN_ARGS="--agent falcon-yolo"
+# launches the FALCON + YOLO + closing baseline (no LLM is started, checked or ensured on a resume).
 # The supervisor's knobs (PROGRESS_ENTRY -- required for a new run, so that publishing closes THIS run's entry --
 # MAX_RESUMES, RESUME_ARGS, SUPERVISOR_ARGS such as --dry-run) and the container name are written to <output>/launch.env
 # at the first launch and read back on a resume, so after a reboot the command needs no environment at all.
@@ -30,7 +32,7 @@ SELF="$HERE/$(basename -- "${BASH_SOURCE[0]}")"
 REPO="${OBJNAV_REPO:-$(cd -- "$HERE/../../../../.." && pwd)}"
 HAB_PY="${HAB_PY:-$HOME/miniconda3/envs/habitat/bin/python}"
 MONITOR_MODULE="sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.monitor"
-PERSISTED=(PROGRESS_ENTRY SUPERVISOR_ARGS MAX_RESUMES RESUME_ARGS MONITOR_INTERVAL_S OLLAMA_MODE OLLAMA_CONTAINER)
+PERSISTED=(PROGRESS_ENTRY SUPERVISOR_ARGS MAX_RESUMES RESUME_ARGS RUN_ARGS MONITOR_INTERVAL_S OLLAMA_MODE OLLAMA_CONTAINER)
 # Every variable run_benchmark.sh, gpu_plan.py and the supervisor read from the environment, by name family: what a
 # launch scheduled for the next boot carries over, so that it is the launch that would have been made now.
 RUN_ENV_PATTERN='^(HAB_PY|DETECT_PY|DATA|MODELS|SEED|SEGMENTATION|ALLOW_SHARED_GPU|CLIP_WEIGHTS|SAM_WEIGHTS|RUNS_ROOT|REMOTE|BRANCH|POLL_S|RESUME_DELAY_S|PUSH_RETRIES|PUSH_RETRY_S|(GIBSON|YOLO|DETECTOR|SEGMENTER|OLLAMA|LLM|OMP|HABITAT|MAGNUM|GPU|OBJNAV)_[A-Z0-9_]*)$'
@@ -120,6 +122,7 @@ OLLAMA_MODE="${OLLAMA_MODE:-docker}"; OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-olla
 MONITOR_INTERVAL_S="${MONITOR_INTERVAL_S:-300}"
 export OLLAMA_MODE OLLAMA_CONTAINER MONITOR_INTERVAL_S
 export LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:11434}"
+BASELINE=0; [[ " ${RUN_ARGS:-} " == *" --agent falcon-yolo "* ]] && BASELINE=1     # the baseline needs no LLM
 
 start_supervisor() {
   # shellcheck disable=SC2206   # word-splitting SUPERVISOR_ARGS is the point: it is a command-line fragment
@@ -140,7 +143,7 @@ if [[ -s "$OUT/episodes.jsonl" || -f "$OUT/replay/run.cmdline" ]]; then
   ours "$(launcher_pid)" && die "$RUN_NAME is running (launcher $(launcher_pid)); use run_benchmark.sh --status $OUT"
   ours "$(supervisor_pid)" && die "a supervisor ($(supervisor_pid)) already watches $RUN_NAME; it resumes the run itself"
   [[ -f "$OUT/replay/run.cmdline" ]] || die "no replay snapshot under $OUT/replay: this run cannot be resumed by replay (BENCHMARK.md 2.3 for the by-hand resume)"
-  if ! curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
+  if [[ "$BASELINE" != 1 ]] && ! curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
     case "$OLLAMA_MODE" in
       docker) say "starting the Ollama container $OLLAMA_CONTAINER (a container has no /proc snapshot the supervisor could replay)"
               docker start "$OLLAMA_CONTAINER" > /dev/null || die "docker start $OLLAMA_CONTAINER failed" ;;
@@ -175,9 +178,11 @@ if [[ "$SCHEDULE" == 1 ]]; then
 fi
 [[ "$BOOT" == 1 ]] || persist_env "${PERSISTED[@]}"      # the boot launch keeps the file --after-reboot wrote
 
-say "launching $RUN_NAME detached (log: $OUT/launcher.log)"
-setsid nohup bash -c 'echo $$ > "$1/launcher.pid"; exec "$2" --output "$1"' _ "$OUT" "$HERE/run_benchmark.sh" \
-  > "$OUT/launcher.log" 2>&1 < /dev/null &
+say "launching $RUN_NAME detached (log: $OUT/launcher.log)${RUN_ARGS:+ with $RUN_ARGS}"
+# shellcheck disable=SC2206   # word-splitting RUN_ARGS is the point: it is a command-line fragment
+run_args=(${RUN_ARGS:-})
+setsid nohup bash -c 'echo $$ > "$1/launcher.pid"; out="$1"; run="$2"; shift 2; exec "$run" --output "$out" "$@"' \
+  _ "$OUT" "$HERE/run_benchmark.sh" "${run_args[@]}" > "$OUT/launcher.log" 2>&1 < /dev/null &
 setsid nohup "$HAB_PY" -m "$MONITOR_MODULE" "$OUT" --interval "$MONITOR_INTERVAL_S" > /dev/null 2>&1 < /dev/null &
 
 # The supervisor snapshots the live processes, so it starts once run.json exists (the run is past its preflight and

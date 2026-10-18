@@ -13,6 +13,8 @@
 #                                                           #   random published toilet episodes per scene (15), recorded
 #   SEGMENTATION=1 gibson/run_benchmark.sh --five-scene 1   # + the Segment Anything service: the target's depth is
 #                                                           #   read on the object's own pixels (off by default)
+#   gibson/run_benchmark.sh --agent falcon-yolo --five-scene 3   # the FALCON + YOLO + closing baseline (no LLM): 15
+#                                                           #   recorded episodes; the same flag before a full-split run
 #
 # The GPU is handed out by gibson/gpu_plan.py before the services start -- LLM first, YOLO second,
 # Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services). An operator
@@ -22,7 +24,7 @@
 # see BENCHMARK.md beside this file for the full list and what each one is for.
 set -euo pipefail
 
-usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,10 +73,11 @@ CLIP_WEIGHTS="${CLIP_WEIGHTS:-$MODELS/clip/ViT-B-32.pt}"
 RUNS_ROOT="${RUNS_ROOT:-$REPO/runs}"
 
 # -- the command line -----------------------------------------------------------------------
-OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" FIVE_SCENES=() CATEGORY="" EXTRA=()
+OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" FIVE_SCENES=() CATEGORY="" AGENT="rpt" EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) OUTPUT="$2"; shift 2 ;;
+    --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
     --scene) SCENE="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --five-scene) FIVE_SCENE="$2"; RECORD=1; shift 2 ;;
@@ -106,6 +109,7 @@ die() { say "ERROR: $*" >&2; exit 1; }
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   TAG="${CATEGORY:+${CATEGORY}_}"
+  [[ "$AGENT" != rpt ]] && TAG="${AGENT}_${TAG}"
   if [[ -n "$FIVE_SCENE" ]]; then
     SCENE_COUNT=${#FIVE_SCENES[@]}; [[ $SCENE_COUNT -gt 0 ]] || SCENE_COUNT=5
     OUTPUT="$RUNS_ROOT/benchmark_${TAG}$((FIVE_SCENE * SCENE_COUNT))episodes_${STAMP}"
@@ -125,6 +129,10 @@ git --no-pager rev-parse HEAD > "$SERVICE_DIR/source-commit.txt" 2>/dev/null || 
 git --no-pager diff --no-ext-diff > "$SERVICE_DIR/source-changes.diff" 2>/dev/null || true
 
 # -- the GPU: who gets the card (LLM, then YOLO, then Habitat; the rest on the CPU) -------------------------
+if [[ "$AGENT" == falcon-yolo ]]; then
+  # The baseline runs no LLM: the card goes to YOLO and Habitat, and the plan needs no Ollama manifest.
+  export GPU_PLAN_LLM="${GPU_PLAN_LLM:-cpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
+fi
 if [[ "$GPU_PLAN" == "auto" ]]; then
   export OLLAMA_MODELS_DIR
   PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan \
@@ -196,6 +204,9 @@ wait_for_url() {   # url, seconds, label
 
 ollama_has() { curl -fsS --max-time 10 "$LLM_BASE_URL/api/tags" | "$HAB_PY" -c "import json,sys; sys.exit(0 if '$1' in [m['name'] for m in json.load(sys.stdin)['models']] else 1)"; }
 
+if [[ "$AGENT" == falcon-yolo ]]; then
+  say "LLM: none (--agent falcon-yolo: goal-free FALCON + YOLO + the same closing; Ollama is neither started nor checked)" | tee -a "$LOG"
+else
 say "LLM: $OLLAMA_MODE at $LLM_BASE_URL ($LLM_MODEL for room labels, $LLM_REASONING_MODEL for the node oracle)" | tee -a "$LOG"
 if ! curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
   case "$OLLAMA_MODE" in
@@ -227,6 +238,7 @@ for model in "$LLM_MODEL" "$LLM_REASONING_MODEL"; do
     esac
   fi
 done
+fi
 
 DETECTOR_URL="http://$DETECTOR_HOST:$DETECTOR_PORT"
 if curl -fsS --max-time 5 "$DETECTOR_URL/health" > /dev/null 2>&1; then
@@ -284,15 +296,16 @@ fi
 # -- the five-scene campaign: N recorded episodes per val scene, each a gibson.run job, live dashboard --------
 if [[ -n "$FIVE_SCENE" ]]; then
   FIVE_ARGS=(--episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" --output "$OUTPUT"
-             --episodes-per-scene "$FIVE_SCENE" --explorer frontier --detector-url "$DETECTOR_URL" --detector-backend yolo_world
+             --episodes-per-scene "$FIVE_SCENE" --detector-url "$DETECTOR_URL" --detector-backend yolo_world
              --seed "$SEED" --gpu-device "$GPU_DEVICE" --allow-sim-version-mismatch)
+  [[ "$AGENT" == rpt ]] && FIVE_ARGS+=(--explorer frontier)       # the baseline explores with FALCON only
   [[ "$ALLOW_SHARED_GPU" == 1 ]] && FIVE_ARGS+=(--allow-shared-gpu)
   [[ ${#FIVE_SCENES[@]} -gt 0 ]] && FIVE_ARGS+=(--scenes "${FIVE_SCENES[@]}")
   [[ ${#SEGMENTER_FLAGS[@]} -gt 0 ]] && FIVE_ARGS+=("${SEGMENTER_FLAGS[@]}")
   [[ ${#RENDER_FLAGS[@]} -gt 0 ]] && FIVE_ARGS+=("${RENDER_FLAGS[@]}")
   FIVE_ARGS+=("${EXTRA[@]}")
   date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"
-  say "five-scene campaign: $FIVE_SCENE ${CATEGORY:+$CATEGORY }episode(s) per scene, stairs forbidden; results stream to $OUTPUT/benchmark_results.{json,csv}" | tee -a "$LOG"
+  say "five-scene campaign ($AGENT): $FIVE_SCENE ${CATEGORY:+$CATEGORY }episode(s) per scene, stairs forbidden; results stream to $OUTPUT/benchmark_results.{json,csv}" | tee -a "$LOG"
   set +e
   "${RENDER_WRAP[@]}" "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene "${FIVE_ARGS[@]}" 2>&1 | tee -a "$LOG"
   RUN_CODE=${PIPESTATUS[0]}
@@ -304,8 +317,9 @@ fi
 
 # -- the run ------------------------------------------------------------------------------------
 ARGS=(--episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" --output "$OUTPUT"
-      --explorer frontier --detector-url "$DETECTOR_URL" --detector-backend yolo_world
+      --detector-url "$DETECTOR_URL" --detector-backend yolo_world
       --seed "$SEED" --gpu-device "$GPU_DEVICE" --allow-sim-version-mismatch)
+[[ "$AGENT" == rpt ]] && ARGS+=(--explorer frontier)              # the baseline explores with FALCON only
 [[ -n "$SCENE" ]] && ARGS+=(--scene "$SCENE")
 [[ -n "$LIMIT" ]] && ARGS+=(--limit "$LIMIT")
 [[ "$RECORD" == 1 ]] && ARGS+=(--record)
@@ -324,7 +338,9 @@ import json, sys
 config = json.load(open(sys.argv[1]))["configuration"]
 print("  episodes selected: %d%s" % (len(config["selected_episode_ids"]), "  (FULL published split)" if config["full_split"] else ""))
 print("  method: %s | lean records: %s | publishable: %s" % (config["method"]["method"], config["lean_records"], config["publishable"]))
-print("  llm: %s (labels) + %s (node oracle) at %s" % (config["method"]["llm"]["model"], config["method"]["llm"]["reasoning_model"], config["method"]["llm"]["base_url"]))
+llm = config["method"].get("llm")
+print("  llm: %s" % ("none (the FALCON + YOLO + closing baseline)" if not llm else
+                      "%s (labels) + %s (node oracle) at %s" % (llm["model"], llm["reasoning_model"], llm["base_url"])))
 print("  detector: %s" % config["method"]["detector"]["metadata"].get("backend"))
 print("  renderer: %s" % config.get("renderer", "cuda gpu"))
 segmenter = config["method"].get("segmenter")
