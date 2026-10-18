@@ -226,17 +226,24 @@ class GoalFreeFalcon:
                   "turns": self.exhausted, "turns_before_stop": self.settings.exhausted_turns})
 
     def filter_action(self, obs, action):
-        """Veto a forward step the confined map says is unsafe; a FALCON route is also held to its disc.
+        """Veto a forward step off FALCON's own route that its safety map says is unsafe, held to the disc.
 
-        The disc applies to FALCON's own route only: a relocation or the
-        legacy pursuit walks an A* route that may leave it.
+        FALCON's routes are planned on the swept-motion map this check reads,
+        so a veto there is the converter's 30-degree quantisation clipping a
+        corner, and the viewpoint is rejected. A relocation or the legacy
+        pursuit walks an A* route the planner qualified at the body radius --
+        through the squeeze of a doorway the stricter swept check refuses --
+        and is not re-judged here, as the full method's frontier explorer
+        does not re-judge its A* routes: the simulator's blocked step is the
+        check (Wiconisco/000000, 2026-10-18: 179 vetoes in the doorway of the
+        first room, every relocation retired as ``no_progress``).
         """
-        local = self.current is not None and self.policy.route_memory.kind == "falcon"
-        if self.cost is None or self.motion.permits(obs, action, local=local):
+        if self.current is None or self.policy.route_memory.kind != "falcon" or self.cost is None:
+            return action
+        if self.motion.permits(obs, action, local=True):
             return action
         self.stats["safety_vetoes"] += 1
-        if local:
-            self._retire_current("discrete_swept_motion_unsafe", rejected=True)
+        self._retire_current("discrete_swept_motion_unsafe", rejected=True)
         return DiscreteAction.TURN_LEFT
 
     def suspend(self, reason):

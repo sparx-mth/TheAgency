@@ -301,15 +301,16 @@ def test_the_seen_staircase_is_impassable_on_the_world_falcon_plans_on_and_no_go
     for waypoint in command.waypoints:
         wx, wy = world.world_to_grid(*waypoint)
         assert not mask[wy, wx]
-    # ... a goal on the flight is refused by the guard the full method uses, and a forward step into
-    # the masked flight is vetoed by the swept-motion check that reads the confined map.
-    assert policy.floor_guard.goal_allowed(obs, confined, FLIGHT[1][:2], "falcon") is False
-    assert policy._navigate(obs, confined, FLIGHT[1][:2], "relocate") is None
-    assert policy.floor_guard.stats["goals_refused"] >= 2
+    # ... a FALCON step into the masked flight is vetoed by the swept-motion check that reads the confined
+    # map (the route in force is FALCON's), and a goal on the flight is refused by the guard the full method uses.
     before_the_flight = AgentPose(FLIGHT[0][0], FLIGHT[0][1] + 0.35, 0.0, -math.pi / 2)
     at_the_foot = observation(episode, 1, pose=before_the_flight)
     policy.explorer.prepare(at_the_foot, confined)
+    assert policy.route_memory.kind == "falcon"
     assert policy.filter_action(at_the_foot, DiscreteAction.MOVE_FORWARD) == DiscreteAction.TURN_LEFT
+    assert policy.floor_guard.goal_allowed(obs, confined, FLIGHT[1][:2], "falcon") is False
+    assert policy._navigate(obs, confined, FLIGHT[1][:2], "relocate") is None
+    assert policy.floor_guard.stats["goals_refused"] >= 2
     assert policy.episode_info()["spawn_floor_guard"]["stats"]["stair_cells"] > 0
 
 
@@ -392,3 +393,26 @@ def test_the_legacy_pursuit_drops_the_falcon_viewpoint_without_rejecting_it_and_
     far = observation(episode, 1, pose=AgentPose(4.5, 0.0, 0.0, 0.0))     # on the target route, beyond the disc
     policy.explorer.prepare(far, world)
     assert policy.filter_action(far, DiscreteAction.MOVE_FORWARD) == DiscreteAction.MOVE_FORWARD
+
+
+def test_an_astar_route_is_not_rejudged_by_the_swept_motion_check_but_a_falcon_route_is(monkeypatch):
+    policy, episode = baseline()
+    world = corridor_world()
+    monkeypatch.setitem(policy.mapping.__dict__, "update", lambda *a, **kw: world)
+    obs = observation(episode, 0)
+    assert policy.plan(obs).info["kind"] == "falcon" and policy.route_memory.kind == "falcon"
+    monkeypatch.setattr(policy.explorer.motion, "permits", lambda *a, **kw: False)
+    assert policy.filter_action(obs, DiscreteAction.MOVE_FORWARD) == DiscreteAction.TURN_LEFT
+    assert policy.explorer.current is None and policy.episode_info()["exploration"]["stats"]["safety_vetoes"] == 1
+    # The same refusal under a relocation route (A*, qualified at the body radius): the step stands.
+    monkeypatch.setattr(policy.explorer.explorer, "plan", falcon_says("no_useful_reachable_frontiers"))
+    boundary = np.zeros(world.grid.shape, dtype=bool)
+    gx, gy = world.world_to_grid(7.0, 0.0)
+    boundary[gy - 2:gy + 3, gx] = True
+    monkeypatch.setattr(policy.explorer.explorer, "observe", lambda world_: None)
+    policy.explorer.explorer.frontiers.boundary = boundary
+    later = observation(episode, 1)
+    command = policy.plan(later)
+    assert command.info["kind"] == "relocate" and policy.route_memory.kind == "relocate"
+    assert policy.filter_action(later, DiscreteAction.MOVE_FORWARD) == DiscreteAction.MOVE_FORWARD
+    assert policy.episode_info()["exploration"]["stats"]["safety_vetoes"] == 1
