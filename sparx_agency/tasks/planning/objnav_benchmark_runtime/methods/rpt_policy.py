@@ -43,7 +43,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.spawn_floor_gu
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_peek import DoorwayPeek
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES, discover
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import ROOM_VISIT_LOOP, RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_metrics import ExplorationMetrics
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.camera_control import CameraController, CameraControlSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import PerceptionCycle
@@ -69,7 +69,7 @@ class RPTSearchPolicy:
             detour_factor=s.detour_factor,
             unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
             start_skip_m=0.0, search_margin_m=s.map_size_m)
-        self.loop_settings = LoopSettings()
+        self.loop_settings = LoopSettings(**ROOM_VISIT_LOOP[s.room_visit])
         self.supervisor_params = self.loop_settings.supervisor_params(s.seed)
         self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings()
         self.route_settings, self.target_settings = RouteSettings(), TargetEvidenceSettings()
@@ -187,6 +187,10 @@ class RPTSearchPolicy:
                     "openings off a room that is itself a node are folded into its walk; "
                     % (loop.explore_visit_steps, loop.fragment_max_m2, self._rotation_note())
                     + finishing)
+        if loop.nearest_frontier_scan:
+            return ("entered at the room's nearest frontier, then the nearest frontier until none is left, no walk "
+                    "to the middle (bounded by %d actions); a revisit scans from a new spot instead; "
+                    % loop.explore_visit_steps + finishing)
         return ("vantage point + full rotation (as many turns as the camera's field of view needs to see the circle%s); "
                 "a scanned room (or one a scan saw more than half of) is finished for the first pass, and so is a room "
                 "with no live frontier that the camera looked into or walked through, or that is a doorless fragment "

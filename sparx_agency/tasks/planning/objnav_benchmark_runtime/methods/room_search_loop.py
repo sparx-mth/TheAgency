@@ -373,6 +373,7 @@ class LoopSettings:
     """
 
     visit: str = "explore"
+    scan_local: str = "rotate"
     local_steps: int = 10
     explore_visit_steps: int = 60
     explore_service_steps: int = 12
@@ -408,6 +409,8 @@ class LoopSettings:
     def __post_init__(self):
         if self.visit not in ("explore", "scan", "sweep"):
             raise ValueError("visit must be 'explore', 'scan' or 'sweep'; no silent fallback")
+        if self.scan_local not in ("rotate", "nearest_frontier"):
+            raise ValueError("scan_local must be 'rotate' or 'nearest_frontier'; no silent fallback")
         for name in ("local_steps", "supervisor_rounds", "scan_visit_steps", "scan_approach_steps",
                      "explore_visit_steps", "explore_service_steps", "explore_frontier_steps"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
@@ -461,6 +464,11 @@ class LoopSettings:
         return self.visit == "scan"
 
     @property
+    def nearest_frontier_scan(self):
+        """Whether a scan visit enters at the room's nearest frontier and walks nearest frontiers, no middle, no circle."""
+        return self.scanning and self.scan_local == "nearest_frontier"
+
+    @property
     def exploring(self):
         """Whether a visit is the frontier walk (the room's frontiers by view gain, finished when none is left)."""
         return self.visit == "explore"
@@ -472,13 +480,13 @@ class LoopSettings:
 
     def visit_budget(self):
         """Actions one visit may take before it is released ``budget_spent``."""
-        if self.exploring:
+        if self.exploring or self.nearest_frontier_scan:
             return self.explore_visit_steps
         return self.scan_visit_steps if self.scanning else self.local_steps
 
     def service_steps(self):
         """Actions RPT* charges a room for as service time: the expected visit, not its bound."""
-        if self.exploring:
+        if self.exploring or self.nearest_frontier_scan:
             return self.explore_service_steps
         return (self.scan_approach_steps // 2 + 12) if self.scanning else self.local_steps
 
@@ -1605,6 +1613,8 @@ class RoomSearchLoop:
             room = p.graph.registry.rooms.get(option.room_id)
             if self.settings.exploring and room is not None:
                 xy, from_frontier = self._explore_entry(obs, world, cost, room, revisit=revisit)
+            elif self.settings.nearest_frontier_scan and room is not None and not revisit:
+                xy, from_frontier = self._nearest_frontier_entry(obs, world, cost, room)
             elif self.settings.scanning:
                 found = self._vantage(world, cost, room, revisit=revisit) if room is not None else None
                 if found is not None:
@@ -1722,6 +1732,15 @@ class RoomSearchLoop:
                 return (doorstep, False)
         found = self._vantage(world, cost, room, revisit=revisit)
         return ((found[0] if found is not None else tuple(room.centroid)), False)
+
+    def _nearest_frontier_entry(self, obs, world, cost, room):
+        """``((x, y), from_frontier)``: the room's nearest admissible frontier, else its doorstep, else its centroid."""
+        p = self.policy
+        goal = p.sweep.nearest(obs, world, cost, room.mask, labels=p.graph.labels, label=room.id + 1)
+        if goal is not None:
+            return tuple(float(v) for v in goal.xy), True
+        doorstep = self._nearest_entry(obs, world, cost, room)
+        return (doorstep, False) if doorstep is not None else (tuple(room.centroid), False)
 
     def _nearest_entry(self, obs, world, cost, room):
         """The room's passable cell nearest the agent along the floor, or None: where a room with no frontier left is entered.
@@ -1933,8 +1952,10 @@ class RoomSearchLoop:
                 # The vantage point moved out from under the route (the mask re-segmented):
                 # re-aim at where it is now, once; the centroid is the last resort.
                 found = self._vantage(world, cost, room, revisit=state.room_id in self._revisits)
-                candidates = [c for c in ([found[0]] if found is not None else []) + [tuple(room.centroid)]
-                              if math.dist(c, xy_goal) > world.resolution]
+                aims = [found[0]] if found is not None else []
+                if self.settings.nearest_frontier_scan and state.room_id not in self._revisits:
+                    aims.insert(0, self._nearest_frontier_entry(obs, world, cost, room)[0])
+                candidates = [c for c in aims + [tuple(room.centroid)] if math.dist(c, xy_goal) > world.resolution]
                 self._log(obs, "entry_lost", room=state.room_id, goal=[round(v, 2) for v in xy_goal],
                           reaimed=bool(candidates))
                 if not candidates:
@@ -2537,36 +2558,22 @@ class RoomSearchLoop:
         return True
 
     def _scan_visit(self, obs, world, cost, state, room):
-        """Walk to the room's vantage point, turn a full circle, and finish the room.
+        """Walk to the room's vantage point and turn a full circle, or (``nearest_frontier``) walk its nearest frontiers.
 
-        Two phases. ``approach``: the vantage point is re-read every action
-        (the mask moves as the map grows) and walked to on the room-confined
-        map; within :attr:`LoopSettings.vantage_arrival_m` of it, or when
-        the route has ended, the rotation begins. An approach that runs out
-        of :attr:`LoopSettings.scan_approach_steps`, or that the planner
-        refuses, scans from where the agent stands if that is inside the
-        room (``scans_in_place``) and otherwise releases the room
-        ``unreachable``. ``rotate``: one in-place turn per action until the
-        camera's field of view has covered the circle -- as many turns as
-        that takes (``policy.rotation_turns``, ten at 30 degrees with a
-        79-degree camera; or two past that count -- the converter's
-        hysteresis can swallow a degree); then the scan is recorded in the
-        ledger, the room is finished for the episode, and its turn ends
-        ``exhausted`` -- productive, cooled, not repeatable. A full rotation
-        completed inside the room on the way to its vantage point -- a
-        glance -- finishes it without the walk. Nothing in here walks to a
-        frontier.
+        An approach that overruns ``scan_approach_steps`` or is refused scans in place when inside the room,
+        else releases it ``unreachable``. Either local phase ends by recording the scan and finishing the room.
         """
         p = self.policy
         scan = self._scan
         if scan is None or scan["room"] != state.room_id:
             revisit = state.room_id in self._revisits
-            scan = self._scan = dict(room=state.room_id, phase="approach", approach_actions=0,
-                                     turns=0, swept=0.0, last_yaw=None, vantage=None, started=int(obs.step),
-                                     revisit=revisit)
+            walks_frontiers = self.settings.nearest_frontier_scan and not revisit
+            scan = self._scan = dict(room=state.room_id, phase="frontier" if walks_frontiers else "approach",
+                                     approach_actions=0, turns=0, swept=0.0, last_yaw=None, vantage=None,
+                                     started=int(obs.step), revisit=revisit)
             if revisit:
                 self.stats["revisit_scans"] += 1
-            self._log(obs, "scan_begin", room=state.room_id, revisit=revisit)
+            self._log(obs, "scan_begin", room=state.room_id, revisit=revisit, phase=scan["phase"])
         inside = self._inside(obs, world, room)
         if scan["phase"] == "approach":
             if not scan.get("revisit") and self._finished_by_rotation(obs, world, state.room_id, room, scan["started"]):
@@ -2602,7 +2609,8 @@ class RoomSearchLoop:
             self.stats["scan_unreachable"] += 1
             self._log(obs, "scan_abandoned", room=state.room_id, reason="vantage unreachable from outside the room")
             return None, {"route_failed": True}
-        # -- rotate --
+        if scan["phase"] == "frontier":
+            return self._nearest_frontier_step(obs, world, cost, state, room, scan)
         turn = p.episode.action_spec.turn_angle_rad
         if scan["last_yaw"] is not None:
             scan["swept"] += max(0.0, normalize_angle(obs.pose.yaw - scan["last_yaw"]))
@@ -2623,6 +2631,26 @@ class RoomSearchLoop:
             final_yaw=normalize_angle(obs.pose.yaw + turn),
             info={"kind": "room_scan", "room": state.room_id, "scan_turn": scan["turns"], "scan_budget": full_circle,
                   "swept_degrees": round(math.degrees(scan["swept"]), 1)}), {}
+
+    def _nearest_frontier_step(self, obs, world, cost, state, room, scan):
+        """Drive the room's nearest admissible frontier; with none left the room is scanned and finished."""
+        p = self.policy
+        goal = p.sweep.nearest(obs, world, cost, room.mask, labels=p.graph.labels, label=room.id + 1)
+        if goal is not None:
+            planning_world, planning_cost = self._confined(obs, world, cost, room, state.room_id)
+            command = p.sweep.explore(obs, world, planning_cost, room.mask, planning_world=planning_world, ranked=[goal])
+            if command is None and planning_world is not world:
+                command = p.sweep.explore(obs, world, cost, room.mask, ranked=[goal])
+            if command is not None:
+                return command, {}
+            self.stats["plan_failures"] += 1
+        p.scans.record(obs, room, source="room_frontier_walk")
+        self.stats["scans_completed"] += 1
+        self.stats["exhausted_releases"] += 1
+        self._log(obs, "scan_complete", room=state.room_id, mode="nearest_frontier",
+                  actions=int(obs.step) - scan["started"], approach_actions=scan["approach_actions"])
+        self._scan = None
+        return None, {"frontier_exhausted": True}
 
     def _begin_rotation(self, obs, scan, why):
         """Switch the visit in force to its rotation phase and emit its first turn."""

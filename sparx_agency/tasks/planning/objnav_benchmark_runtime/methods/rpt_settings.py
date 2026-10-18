@@ -10,11 +10,22 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candid
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosingSettings
 
 
+ROOM_VISIT_LOOP = {
+    "explore": dict(visit="explore"),
+    "scan360": dict(visit="scan", scan_local="rotate"),
+    "nearest_frontier": dict(visit="scan", scan_local="nearest_frontier"),
+}
+
+
 @dataclass(frozen=True)
 class RPTSettings:
     """Method configuration.
 
     Attributes:
+        room_visit: What a room visit does once the room is chosen: ``explore``
+            walks its frontiers by view gain, ``scan360`` goes to the room's middle and
+            turns a full circle, ``nearest_frontier`` enters at the nearest frontier and
+            keeps walking the nearest one until none is left (no walk to the middle).
         detour_factor: The planner's "squeeze or detour" rule
             (``WeightedAStarParams.detour_factor``): a route at the preferred
             clearance more than this many times longer than the route the
@@ -116,6 +127,7 @@ class RPTSettings:
     preferred_clearance_m: float = 0.30
     detour_factor: float = 1.5
     local_exploration: str = "frontier"
+    room_visit: str = "explore"
     warmup_steps: int = 12
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
@@ -150,6 +162,8 @@ class RPTSettings:
             raise ValueError("detour_factor must be finite and non-negative (0 disables the squeeze rule)")
         if self.local_exploration not in ("frontier", "falcon"):
             raise ValueError("local_exploration must be frontier or falcon; no silent fallback")
+        if self.room_visit not in ROOM_VISIT_LOOP:
+            raise ValueError("room_visit must be one of %s; no silent fallback" % ", ".join(ROOM_VISIT_LOOP))
         if isinstance(self.target_closing, dict):
             object.__setattr__(self, "target_closing", TargetClosingSettings(**self.target_closing))
         if not isinstance(self.target_closing, TargetClosingSettings):
