@@ -164,3 +164,83 @@ SR/SPL are episode means including failures; DTG here is FMM distance to the 1 m
 - **supplementary_metrics:** ['SoftSPL', 'steps', 'wall_s']
 - **total_wall_s:** 127150.13345551712
 - **notes:** OSG's exact evaluator/episode hashes are not published in the supplied paper. SemExp and current PONI code differ; no direct SOTA win is asserted.
+
+## `gibson_val_20261016_small_llm` -- finished 2026-10-18T13:35:17Z
+
+**Full Gibson validation: 1000 of 1000 published episodes.** Protocol `gibson-semexp-v1.1-val/2`: the published SemExp v1.1 `val` episodes, 500 actions, SR / SPL / DTG as in
+arXiv:2508.04678 Table 2 (DTG = FMM distance to the 1 m success region; SoftSPL supplementary).
+
+| | SR | SPL | DTG (m) | SoftSPL | mean steps | episodes |
+|---|---:|---:|---:|---:|---:|---:|
+| **this run** | **0.792** (95% CI 0.766-0.816) | **0.464** (95% CI 0.441-0.487) | **0.94** | 0.491 | 152 | 1000 |
+
+Terminations: agent_error 1, step_limit 67, stop 932. Agent errors: 1. Episodes with no reachable goal at the end: 0.
+
+### Per scene
+
+| scene | n | SR | SPL | SoftSPL | DTG (m) | steps |
+|---|---:|---:|---:|---:|---:|---:|
+| Collierville | 200 | 0.780 | 0.544 | 0.547 | 0.86 | 101 |
+| Corozal | 200 | 0.800 | 0.479 | 0.508 | 1.26 | 172 |
+| Darden | 200 | 0.815 | 0.416 | 0.434 | 0.72 | 173 |
+| Markleeville | 200 | 0.750 | 0.367 | 0.391 | 1.16 | 189 |
+| Wiconisco | 200 | 0.815 | 0.514 | 0.573 | 0.68 | 128 |
+
+### Per category
+
+| category | n | SR | SPL | SoftSPL | DTG (m) | steps |
+|---|---:|---:|---:|---:|---:|---:|
+| bed | 123 | 0.528 | 0.256 | 0.285 | 2.76 | 243 |
+| chair | 177 | 0.915 | 0.689 | 0.703 | 0.23 | 78 |
+| couch | 229 | 0.786 | 0.579 | 0.649 | 0.73 | 99 |
+| potted plant | 193 | 0.798 | 0.376 | 0.386 | 0.70 | 113 |
+| toilet | 208 | 0.894 | 0.357 | 0.366 | 0.52 | 260 |
+| tv | 70 | 0.643 | 0.445 | 0.453 | 2.07 | 147 |
+
+### Provenance
+
+- Source commit `f628a476ca33` (clean tree); source sha256 `41c708f3acc1db8d...` (every `.py` under `sparx_agency/`).
+- Method `sparx-rpt-llm-host-sweep`: local exploration `frontier`; room labels `qwen2.5:3b-instruct`, node oracle `qwen2.5:3b-instruct`
+  (ollama at `http://127.0.0.1:11434`, seed 17, temperature 0.0); detector `yolo_world`.
+- habitat-sim 0.2.4 (reference 0.1.5; `reference_sim_version_match: false`, acknowledged), numpy 1.26.4,
+  scikit-fmm 2024.5.29; seed 17; lean records true; recording off (no video, no frames).
+- GPU plan llm=gpu, yolo=gpu, habitat=gpu on NVIDIA GeForce RTX 5070 Laptop GPU (LP-Boston-17093). Started 2026-10-16T18:22:00Z, finished 2026-10-18T13:35:17Z; 3 resume(s);
+  episode wall time in total 23h17m (mean 1m24s per episode).
+- Data: `results/gibson_val_20261016_small_llm/summary.json` (every metric with its interval, per scene and per category), `episodes.csv`
+  (the per-episode scalars: id, scene, target, success, SPL, SoftSPL, path length, shortest path, start and final
+  distance to goal, steps, STOP, termination, wall time, agent error) and `run.json` (the frozen configuration, the
+  dataset file hashes and the command line). The run directory was `runs/gibson_val_20261016_small_llm` on LP-Boston-17093 (gitignored).
+
+### Beside the published rows (`comparison.md` of the run)
+
+### Full Gibson validation
+
+SR/SPL are episode means including failures; DTG here is FMM distance to the 1 m success region. SoftSPL is supplementary.
+
+| Method | SR (%) | SPL (%) | SoftSPL (%) | DTG (m) | Source |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SemExp | 65.7 | 33.9 | — | 1.47 | arXiv:2508.04678v1, Table 2, p.12; TF=False; NM=False. Paper-reported, protocol equivalence not established. |
+| PONI | 73.6 | 41.0 | — | 1.25 | arXiv:2508.04678v1, Table 2, p.12; TF=False; NM=False. Paper-reported, protocol equivalence not established. |
+| LGX | 31.0 | 5.2 | — | 4.78 | arXiv:2508.04678v1, Table 2, p.12; TF=True; NM=False. Paper-reported, protocol equivalence not established. |
+| LFG | 64.5 | 40.6 | — | 1.81 | arXiv:2508.04678v1, Table 2, p.12; TF=True; NM=False. Paper-reported, protocol equivalence not established. |
+| FBE | 64.1 | 28.3 | — | 1.78 | arXiv:2508.04678v1, Table 2, p.12; TF=True; NM=False. Paper-reported, protocol equivalence not established. |
+| SemUtil | 69.3 | 40.5 | — | 1.49 | arXiv:2508.04678v1, Table 2, p.12; TF=True; NM=False. Paper-reported, protocol equivalence not established. |
+| OSG-Nav | 73.4 | 38.6 | — | 1.72 | arXiv:2508.04678v1, Table 2, p.12; TF=True; NM=True. Paper-reported, protocol equivalence not established. |
+| sparx-rpt-llm-host-sweep (ours) | 79.2 [76.6, 81.6] | 46.4 [44.1, 48.7] | 49.1 | 0.94 | this run: 1000 episodes, 95% intervals, 1 agent errors counted as failures |
+
+**Comparison caveat:** the published rows are reference values, not paired re-evaluations. ApexNav and SG-Nav do not report Gibson. TF = training-free; NM = non-metric. Our RPT adaptation is TF, not NM. GT pose/depth do not mean GT semantic detections.
+
+#### Audit
+
+- **full_split_completed:** True
+- **episodes:** 1000
+- **selected_episodes:** 1000
+- **agent_errors:** 1
+- **reference_sim_version_match:** False
+- **exact_osg_protocol_reproduction:** False
+- **resumes:** 3
+- **resumes_with_config_changes:** []
+- **primary_metrics:** ['SR', 'SPL', 'DTG (SemExp distance-to-success, m)']
+- **supplementary_metrics:** ['SoftSPL', 'steps', 'wall_s']
+- **total_wall_s:** 83844.42688726992
+- **notes:** OSG's exact evaluator/episode hashes are not published in the supplied paper. SemExp and current PONI code differ; no direct SOTA win is asserted.
