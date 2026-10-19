@@ -164,7 +164,7 @@ four body actions of the SemExp agents plus Habitat's LOOK_UP / LOOK_DOWN pair,
 30° a step with the camera held between 30° up and 60° down -- the action space
 of habitat-lab's ObjectNav task. A LOOK is an action against the same 500-action
 budget and moves nothing, so the scoring is untouched; what it buys is the
-target closing's box-driven pitch (`methods/bbox_pitch.py`): a low toilet or a
+target closing's box-driven pitch (`core/control/camera/box_pitch_servo.py`): a low toilet or a
 high television kept whole in the frame on the way in, which the 15-episode
 toilet campaign of 2026-10-13 showed never happening because the protocol had no
 LOOK to fire. `GibsonProtocol(camera_tilt=False)` is the published four-action
@@ -182,7 +182,7 @@ and the other ZSON benchmarks. The policy therefore runs with
 `RPTSettings.allow_stair_traversal: false` by default: seen staircases and
 observed drops are impassable, no goal leaves the spawn plane
 (`floor_plane_bound_m`, 0.5 m), and no staircase is ever a node, a fallback or
-a climb (`methods/spawn_floor_guard.py`, [../README.md](../README.md)).
+a climb (`core/planning/object_search/multifloor/spawn_floor_guard.py`, [../README.md](../README.md)).
 `gibson.run` keeps that default; pass `--policy-config` with
 `{"allow_stair_traversal": true}` only for an explicitly multi-storey experiment.
 

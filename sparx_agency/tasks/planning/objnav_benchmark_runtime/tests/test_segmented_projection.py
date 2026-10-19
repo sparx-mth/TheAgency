@@ -21,10 +21,10 @@ from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import SEGMENTER
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import observed_objects
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.core.planning.object_search.exploration.exploration_fallback import SEGMENTER
+from sparx_agency.core.planning.object_search.perception.projection import observed_objects
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import FakeDetector, FakeLLM, setup_policy
 
 #: The fixture detector's box (``test_method.FakeDetector``) and the occluder standing in its centre.

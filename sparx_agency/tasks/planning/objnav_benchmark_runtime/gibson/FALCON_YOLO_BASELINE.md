@@ -10,7 +10,7 @@ perception cycle, the `TargetClosing` takeover (verification, standoff, pitch
 servo, inspection, STOP overshoot) with its legacy pursuit, the camera
 controller, and the spawn-floor confinement.
 
-Code: `methods/falcon_yolo_baseline.py` (`FalconYoloBaseline`, `GoalFreeFalcon`,
+Code: `core/planning/object_search/baselines/falcon_yolo.py` (`FalconYoloBaseline`, `GoalFreeFalcon`,
 `BaselineSettings`); tests: `tests/test_falcon_yolo_baseline.py`; entry point:
 `gibson/run.py --agent falcon-yolo`, forwarded by `five_scene.py`,
 `run_benchmark.sh --agent falcon-yolo` and `RUN_ARGS="--agent falcon-yolo"
@@ -26,7 +26,7 @@ whole Gibson storey, with the benchmark's perception and closing behind it.
    lines: `PerceptionCycle.observe` (one YOLO-World frame), `TargetClosing.observe`.
    The moment a confident box of the target's class has a coherent 3-D projection
    the takeover is active and owns the episode until its STOP or its release;
-   the exploration is not consulted while it does (`_plan`, as in `rpt_policy`).
+   the exploration is not consulted while it does (`_plan`, as in `RPTSearchPolicy`).
 2. **The map and the confinement** -- `ObservedMap.update`, then
    `SpawnFloorGuard.observe` writes every SEEN ground-truth staircase
    (`MultiFloorSearch`'s perfect detector and portals, unchanged) and every

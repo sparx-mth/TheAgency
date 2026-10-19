@@ -6,10 +6,10 @@ import pytest
 from sparx_agency.core.planning.exploration.object_search_supervisor import SEARCH, TRANSIT
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_peek import DoorwayPeek
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
+from sparx_agency.core.planning.object_search.exploration.doorway_peek import DoorwayPeek
+from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
+from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import IN_A, loop_policy, obs_at, see
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import search_snapshot

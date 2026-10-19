@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from sparx_agency.core.planning.exploration.floor_atlas import FloorAtlas, ObservedFloor
+from sparx_agency.core.localization.floor_atlas import FloorAtlas, ObservedFloor
 from sparx_agency.core.planning.objnav.action_converter.converter import DiscreteActionConverter
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
@@ -15,9 +15,9 @@ from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.floor_panels import FloorPanels, UNKNOWN_GRAY
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import habitat_pose
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.camera_control import CameraController
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import observed_objects
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_traversal import StairTraversal
+from sparx_agency.core.control.camera.pitch_controller import CameraController
+from sparx_agency.core.planning.object_search.perception.projection import observed_objects
+from sparx_agency.core.planning.object_search.multifloor.stair_traversal import StairTraversal
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import method_snapshot
 
@@ -327,8 +327,8 @@ def test_selected_proposal_refines_geometry_but_measured_edge_does_not():
 
 def test_source_floor_slab_does_not_rise_with_base_and_reblock_treads():
     from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
-    from sparx_agency.core.planning.exploration.floor_atlas import MultiFloorParams
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_terrain import StairTerrain
+    from sparx_agency.core.localization.floor_atlas import MultiFloorParams
+    from sparx_agency.core.planning.object_search.world_model.stair_terrain import StairTerrain
     terrain = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)
     for x in range(-10, 30):
         for y in range(-10, 11):
@@ -391,7 +391,7 @@ def test_distractor_classes_are_in_the_vocabulary_and_never_a_goal_nor_a_home_ob
     """Hanson/000001 (2026-10-05): a child's ride-on horse read as 'chair' at 0.9 and the episode
     stopped on it 11.7 m from the nearest chair. An open-vocabulary detector lands on the nearest
     prompt it was given; a toy prompt gives the wrong match somewhere else to go."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import home_object, signature_type
+    from sparx_agency.core.mapping.topology.room_priors import home_object, signature_type
     mapper = gibson_label_mapper()
     vocabulary = set(mapper.vocabulary())
     assert {"toy", "rocking horse", "stuffed animal", "bathtub"} <= vocabulary

@@ -113,12 +113,12 @@ class HabitatRGBDSimulator:
         """Storeys and stair connectors of the loaded scene's navmesh, ENU.
 
         Ground truth for the building's vertical structure -- never the goal.
-        Computed once per scene; see ``gibson/stair_connectors.py``.
+        Computed once per scene; see ``habitat/stair_connectors.py``.
         """
         if self._sim is None:
             raise EnvContractError("Simulator not reset; no navmesh to read the building from")
         if self._structure is None:
-            from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.stair_connectors import (
+            from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.stair_connectors import (
                 scene_structure_from_pathfinder)
             self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
         return self._structure

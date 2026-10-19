@@ -24,10 +24,10 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import (
     RoomFacts)
 from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import frontier_sweep
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import ROOM_LLM
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_nodes import stair_node_id
+from sparx_agency.core.planning.object_search.exploration import frontier_sweep
+from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ROOM_LLM
+from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
+from sparx_agency.core.planning.object_search.rooms.stair_nodes import stair_node_id
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 
 RES = 0.1

@@ -7,9 +7,9 @@ import pytest
 
 from sparx_agency.core.planning.objnav.action_converter.converter import DiscreteActionConverter
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings, doorway_candidates
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_peek import DoorwayPeek
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_nodes import stair_options
+from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings, doorway_candidates
+from sparx_agency.core.planning.object_search.exploration.doorway_peek import DoorwayPeek
+from sparx_agency.core.planning.object_search.rooms.stair_nodes import stair_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_discovery import peek_rig, refresh
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_doorway_actions import moved
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import IN_A, STAIRS, obs_at, stair_policy

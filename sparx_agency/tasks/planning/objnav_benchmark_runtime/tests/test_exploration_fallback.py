@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import (
+from sparx_agency.core.planning.object_search.exploration.exploration_fallback import (
     DETECTOR, ROOM_LLM, FallbackSettings)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
@@ -501,7 +501,7 @@ def test_a_clock_casts_no_shadow_and_neither_does_a_small_measured_footprint():
     ``shadow_min_radius_m``."""
     from sparx_agency.core.mapping.objects.landmarks import ObjectLandmark
     from sparx_agency.core.planning.exploration.frontier_ranking import FrontierGoal
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_fallback import object_shadow
+    from sparx_agency.core.planning.object_search.exploration.exploration_fallback import object_shadow
     goal = FrontierGoal(xy=(4.0, 3.0), cell=(40, 30), size_cells=10, geodesic_m=3.0, heading_error_rad=0.0, utility=1.0)
     clock = ObjectLandmark(id=24, class_name="clock", xy=(4.3, 3.2), count=3, votes={"clock": 3}, radius_m=0.6)
     vase = ObjectLandmark(id=25, class_name="vase", xy=(4.3, 3.2), count=3, votes={"vase": 3}, radius_m=None)

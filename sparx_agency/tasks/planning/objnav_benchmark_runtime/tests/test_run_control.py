@@ -14,8 +14,8 @@ from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.records import EpisodeRecord
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.report import merge_runs, write_report
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import VerifiedLLMClient, public_service_url
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.llm import VerifiedLLMClient, public_service_url
 
 
 def record(episode_id):

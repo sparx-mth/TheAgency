@@ -3,28 +3,28 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-import hashlib
 import importlib
 import importlib.metadata
 import json
 import os
 from pathlib import Path
 import pickle
-import random
 import subprocess
 
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES, gibson_label_mapper
-from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import AGENT_CHOICES, AGENT_HELP, build_policy
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (  # noqa: F401  (re-exported for the sibling CLIs)
+    explicit_episodes, gpu_plan_record, select_episodes, source_fingerprint)
 
 #: The frozen-config keys a ``--resume`` may be told to accept a change in -- each is provenance (which
 #: source, which device had the card) or a self-check that only refuses an episode, never an input to a
@@ -35,15 +35,6 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import
 RESUMABLE_CONFIG_CHANGES = ("kinematics", "source_sha256", "gpu_plan")
 
 
-class StopDiagnostic:
-    """Non-privileged plumbing check, never labelled as the search method."""
-    name = "diagnostic-stop"
-    def reset(self, episode, target):
-        pass
-    def plan(self, observation):
-        return NavigationCommand.stop_here()
-
-
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--episodes-dir", default=os.environ.get("GIBSON_EPISODES_DIR"))
@@ -51,10 +42,7 @@ def parser():
     p.add_argument("--output", type=Path)
     p.add_argument("--preflight", action="store_true")
     p.add_argument("--print-vocabulary", action="store_true")
-    p.add_argument("--agent", choices=("rpt", "falcon-yolo", "stop"), default="rpt",
-                   help="rpt: the room-search method (LLM + RPT* + frontier/FALCON + closing). falcon-yolo: the "
-                        "exploration baseline -- goal-free planar FALCON, the same YOLO perception and the same "
-                        "closing, no LLM (methods/falcon_yolo_baseline.py). stop: the plumbing diagnostic")
+    p.add_argument("--agent", choices=AGENT_CHOICES, default="rpt", help=AGENT_HELP)
     p.add_argument("--policy-config", type=Path,
                    help="JSON of RPTSettings overrides; with --agent falcon-yolo a nested \"baseline\" object holds "
                         "the BaselineSettings (bootstrap_turns, exhausted_turns, ...)")
@@ -125,59 +113,6 @@ def episodes_of_category(ids, episodes, category):
     return kept
 
 
-def explicit_episodes(ids, pool):
-    """``ids`` as given, each checked against ``pool`` (the scene's and category's published ids).
-
-    Raises:
-        ValueError: On a duplicate, or an id outside the pool.
-    """
-    chosen = tuple(str(episode_id) for episode_id in ids)
-    if len(set(chosen)) != len(chosen):
-        raise ValueError("--episode-ids repeats an episode")
-    missing = [episode_id for episode_id in chosen if episode_id not in set(pool)]
-    if missing:
-        raise ValueError("--episode-ids not in the selected scene/category: %s" % ", ".join(missing))
-    return chosen
-
-
-def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None):
-    """Stable sharding, then an optional seeded shuffle, before the explicit per-shard subset limit.
-
-    Args:
-        shuffle_seed: When given, the shard's ids are shuffled by a generator seeded from this
-            seed *and the ids themselves* (so two scenes with equally large pools draw different
-            positions) before ``limit`` applies: the limit is then a reproducible random sample
-            rather than the first ids in split order. The same seed over the same pool selects
-            the same ids.
-    """
-    if shards < 1 or not 0 <= shard_index < shards:
-        raise ValueError("Need shards >= 1 and 0 <= shard-index < shards")
-    if limit is not None and limit <= 0:
-        raise ValueError("--limit must be positive")
-    selected = tuple(ids)[shard_index::shards]
-    if shuffle_seed is not None:
-        tag = "%d\0%s" % (int(shuffle_seed), "\0".join(selected))
-        shuffled = list(selected)
-        random.Random(int.from_bytes(hashlib.sha256(tag.encode()).digest()[:8], "big")).shuffle(shuffled)
-        selected = tuple(shuffled)
-    if limit is not None:
-        selected = selected[:limit]
-    if not selected:
-        raise ValueError("Selection contains no episodes")
-    return selected
-
-
-def source_fingerprint():
-    """Hash actual Python sources, including dirty/untracked edits."""
-    package = Path(__file__).resolve().parents[4]
-    digest = hashlib.sha256()
-    for path in sorted(package.rglob("*.py")):
-        digest.update(str(path.relative_to(package)).encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
 def _runtime(issues):
     packages = {}
     for module, distribution in (("numpy", "numpy"), ("skfmm", "scikit-fmm"),
@@ -197,7 +132,7 @@ def _runtime(issues):
 
 
 def _method(args, defaults=None):
-    """The policy and its frozen description.
+    """The policy and its frozen description, bound to the Gibson label table (``policy_factory.build_policy``).
 
     Args:
         args: Parsed CLI; ``--policy-config`` JSON overrides every default.
@@ -205,101 +140,7 @@ def _method(args, defaults=None):
             config -- the multi-storey development protocol lifts
             ``allow_stair_traversal``, whose benchmark default is False.
     """
-    if args.agent == "stop":
-        return StopDiagnostic(), {"method": "diagnostic-stop", "publishable": False}
-    baseline = args.agent == "falcon-yolo"
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import public_service_url
-    overrides = json.loads(args.policy_config.read_text()) if args.policy_config else {}
-    if not isinstance(overrides, dict):
-        raise ValueError("--policy-config must hold a JSON object")
-    baseline_overrides = overrides.pop("baseline", None)
-    if baseline_overrides is not None and not baseline:
-        raise ValueError("--policy-config holds a \"baseline\" object, which only --agent falcon-yolo reads")
-    if baseline:
-        # The baseline explores with planar FALCON and nothing else: no --explorer frontier under it.
-        if (args.explorer or "falcon") != "falcon" or overrides.get("local_exploration", "falcon") != "falcon":
-            raise ValueError("--agent falcon-yolo explores with FALCON; --explorer / local_exploration cannot be frontier")
-        overrides["local_exploration"] = "falcon"
-    elif args.explorer is not None:
-        if overrides.get("local_exploration", args.explorer) != args.explorer:
-            raise ValueError("--explorer disagrees with --policy-config")
-        overrides["local_exploration"] = args.explorer
-    if getattr(args, "segmentation", None):
-        if overrides.get("segmentation", True) is not True:
-            raise ValueError("--segmentation disagrees with --policy-config")
-        overrides["segmentation"] = True
-    settings = RPTSettings(**dict(defaults or {}, **dict(overrides, seed=args.seed)))
-    config = client = None
-    services = []
-    if not baseline:
-        from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
-        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import VerifiedLLMClient
-        config = LLMConfig.from_env()
-        config.seed = args.seed
-        client = VerifiedLLMClient(LLMClient(config))
-        services.append(("LLM", client))
-    detector = HttpDetector(public_service_url(args.detector_url), gibson_label_mapper().vocabulary(),
-                            expected_backend=args.detector_backend,
-                            timeout_s=getattr(args, "detector_timeout_s", 30.0))
-    services.append(("detector", detector))
-    segmenter = None
-    if settings.segmentation:
-        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.segmentation import HttpSegmenter
-        if not getattr(args, "segmenter_url", None):
-            raise RuntimeError("segmentation is on (--segmentation / policy config) but no --segmenter-url was given; "
-                               "start segmentation_server.py and name it, or turn the setting off")
-        segmenter = HttpSegmenter(public_service_url(args.segmenter_url), timeout_s=getattr(args, "segmenter_timeout_s", 30.0),
-                                  expected_model=getattr(args, "segmenter_model", None))
-        services.append(("segmenter", segmenter))
-    problems, identities = [], {}
-    for name, service in services:
-        try:
-            identities[name] = service.health()
-        except Exception as exc:
-            problems.append("%s: %s" % (name, exc))
-    if problems:
-        raise RuntimeError("; ".join(problems))
-    if baseline:
-        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_yolo_baseline import BaselineSettings, FalconYoloBaseline
-        if baseline_overrides is not None and not isinstance(baseline_overrides, dict):
-            raise ValueError("--policy-config \"baseline\" must be a JSON object of BaselineSettings fields")
-        policy = FalconYoloBaseline(detector, settings, segmenter=segmenter,
-                                    baseline=BaselineSettings(**(baseline_overrides or {})))
-        floor = settings.detection_confidence
-    else:
-        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
-        policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter)
-        floor = min(settings.detection_confidence, policy.door_settings.confidence)
-    emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
-    if emitted > floor:
-        raise RuntimeError("Detector emission threshold hides door candidates; restart with --conf 0.05")
-    info = policy.configuration()
-    if config is not None:
-        llm = asdict(config)
-        llm.pop("api_key", None)
-        info.update(llm=llm, llm_identity=identities["LLM"])
-    info.update(detector=identities["detector"], detector_url=args.detector_url, detector_timeout_s=detector.timeout_s)
-    if segmenter is not None:
-        info.update(segmenter=identities["segmenter"], segmenter_url=args.segmenter_url, segmenter_timeout_s=segmenter.timeout_s)
-    return policy, info
-
-
-def _gpu_plan_record():
-    """The GPU placement plan the launcher decided on (``gpu_plan.py``), for the frozen configuration.
-
-    ``OBJNAV_GPU_PLAN_JSON`` names the file the launcher wrote; without it the
-    record says so. A plan is provenance -- which process had the card --
-    never an input to the policy.
-    """
-    path = os.environ.get("OBJNAV_GPU_PLAN_JSON", "").strip()
-    if not path:
-        return {"source": "none", "note": "launched without gpu_plan.py; devices as the command line and environment say"}
-    try:
-        return dict(json.loads(Path(path).read_text()), source=path)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("OBJNAV_GPU_PLAN_JSON names an unreadable plan: %s" % exc)
+    return build_policy(args, gibson_label_mapper(), defaults=defaults)
 
 
 def _gpu_gate(args):
@@ -375,7 +216,7 @@ def prepare(args):
               "category": args.category, "shuffle": bool(args.shuffle),
               "episode_ids": list(args.episode_ids) if args.episode_ids else None,
               "kinematics": asdict(PROTOCOL.kinematics()),
-              "gpu_plan": _gpu_plan_record(),
+              "gpu_plan": gpu_plan_record(),
               "full_split": (args.scene is None and args.limit is None and args.shards == 1 and args.category is None
                              and not args.episode_ids),
               "target_override": args.target_override,

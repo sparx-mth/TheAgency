@@ -16,7 +16,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_gibson import LineSimulator
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import method_snapshot, render_dashboard
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
 
 
 def test_selection_is_distinct_deterministic_and_order_independent():

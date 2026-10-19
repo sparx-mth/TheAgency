@@ -10,7 +10,7 @@ import numpy as np
 from sparx_agency.tasks.mapping.scene_graph.viz_canvas import compute_extent, world_to_px
 from sparx_agency.tasks.mapping.scene_graph.viz_render import render_scene
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import render_baseline_panel, render_search_panel
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES
+from sparx_agency.core.planning.object_search.rooms.discovery import SUSPENDED_PHASES
 
 FRAME_SIZE = (1600, 900)
 #: The right-hand side of the frame: floor maps, then the search column.

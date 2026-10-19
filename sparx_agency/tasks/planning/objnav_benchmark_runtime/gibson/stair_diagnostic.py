@@ -18,7 +18,7 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_labe
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL as PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import _gpu_gate, _method, source_fingerprint
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator

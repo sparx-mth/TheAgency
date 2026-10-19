@@ -20,8 +20,8 @@ from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.path_glances import (
+from sparx_agency.core.planning.object_search.rooms.discovery import SUSPENDED_PHASES
+from sparx_agency.core.planning.object_search.exploration.path_glances import (
     FULL, LEFT, RIGHT, GlanceScheduler, GlanceSettings)
 
 RES = 0.1
@@ -169,7 +169,7 @@ def test_a_side_glance_beats_a_full_circle_unless_the_rear_holds_something_too()
 
 
 def test_a_full_glance_turns_all_the_way_round_in_the_richer_direction():
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.path_glances import GlanceCandidate, GlancePlan
+    from sparx_agency.core.planning.object_search.exploration.path_glances import GlanceCandidate, GlancePlan
     route = route_east()
     policy, camera, actions = fake_policy(route)
     scheduler = GlanceScheduler(policy)

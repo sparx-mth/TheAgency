@@ -69,7 +69,7 @@ class Guard(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Guard())
 from sparx_agency.core.planning.planners import WeightedAStarPlanner2D
 from sparx_agency.core.planning.planners.common import split_long_segments_2d, dist3d
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import run
 assert not attempts, attempts
 assert not any(n == "ompl" or n.startswith("ompl.") for n in sys.modules)

@@ -7,9 +7,9 @@ import math
 import numpy as np
 import pytest
 
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.stair_connectors import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.stair_connectors import (
     enu_to_habitat, floor_levels, habitat_to_enu, scene_structure, stair_connectors, triangles)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_ground_truth import GroundTruthStairs
+from sparx_agency.core.planning.object_search.multifloor.stair_ground_truth import GroundTruthStairs
 
 
 def quad(x0, x1, z0, z1, y0, y1=None):

@@ -24,10 +24,10 @@ from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import frontier_sweep
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import SweepSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
+from sparx_agency.core.planning.object_search.exploration import frontier_sweep
+from sparx_agency.core.planning.object_search.exploration.frontier_sweep import SweepSettings
+from sparx_agency.core.planning.object_search.route_memory import CommittedRoute
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import (
     FakeDetector, FakeLLM, observation, setup_policy)
 
@@ -238,7 +238,7 @@ def test_inspection_waits_for_a_pause_names_its_trigger_and_keeps_a_long_cadence
 
 
 def test_camera_settings_refuse_a_periodic_cadence_shorter_than_the_cooldown():
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.camera_control import CameraControlSettings
+    from sparx_agency.core.control.camera.pitch_controller import CameraControlSettings
     with pytest.raises(ValueError):
         CameraControlSettings(inspection_cooldown_actions=24, periodic_inspection_actions=10)
     assert CameraControlSettings().periodic_inspection_actions >= CameraControlSettings().inspection_cooldown_actions

@@ -5,6 +5,35 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed
+- **The object-search method moved out of the benchmark runtime into `core`** (`core/planning/object_search/` new,
+  `tasks/planning/objnav_benchmark_runtime/methods/` gone, 2026-10-19). A structural change only -- every module
+  moved with `git mv`, no algorithm, setting or default changed; a run after this commit differs from one before
+  it in `source_sha256` alone. The method (`policy.py`, `settings.py`) is now one package split by concern --
+  `perception/`, `rooms/`, `world_model/`, `exploration/`, `multifloor/`, `closing/`, `falcon/`, `baselines/`,
+  `route_memory.py` -- and its policy-free pieces went to the subsystem they belong to: `box_extent`, `box_occluder`,
+  `detection_dedup`, `target_evidence`, `support_surface` in `core/mapping/objects`; `target_memory_3d` in
+  `core/mapping/tracking`; `room_priors`, `revisable_room_labels` in `core/mapping/topology`; the camera-tilt
+  controller and the box-driven pitch servo in `core/control/camera` (`pitch_controller`, `box_pitch_servo`: where to
+  look is a control process beside where to move, merged in the `NavigationCommand`); the storey localiser
+  `floor_atlas` in `core/localization` (from `core/planning/exploration`). Five inline ``atan2(sin, cos)`` wraps now
+  call the shared `normalize_angle`; the box aliases use `core.common.math.bbox.BBox`. The seam to the
+  services is `object_search/interfaces.py` (`Detection`, the `Detector` / `Segmenter` / `RoomReasoner` protocols,
+  the two failure families, which the perception cycle now tells apart without importing `requests`); the HTTP
+  clients moved to `objnav_benchmark_runtime/services/` (`http_detector`, `http_segmenter`, `llm`). The runtime
+  shares one method factory across datasets (`policy_factory.build_policy`, as on the HM3D branch), lifts
+  `detector_options.py` and `gpu_plan.py` to its root (Gibson keeps import shims), folds `select_episodes`,
+  `explicit_episodes` and `gpu_plan_record` into `provenance.py` (the duplicate `source_fingerprint` in `gibson/run.py`
+  is gone -- same digest), lifts `gibson/progress.py` to `progress.py` (shim kept), and moves the navmesh storey/stair
+  reader to `habitat/stair_connectors.py`. The method's
+  regression rig stays with the runtime (`tests/`); `core/planning/object_search/tests/` adds the boundary scan (no
+  `tasks`, simulator or transport import anywhere in the method), a service-free smoke run and the failure
+  contract. READMEs: `core/planning/object_search/README.md` (new), the runtime README's "Where the code is" and
+  "Adding a dataset adapter", `core/control` (the camera branch), `core/mapping/{objects,tracking,topology}`,
+  `core/planning/objnav`, `falcon`. Verified structural-only: every moved module is code-identical to its original
+  (imports and docstrings aside) and four deterministic 140-step rollouts with fake services -- frontier and FALCON
+  explorers, with and without a target, and the FALCON+YOLO baseline -- produce byte-identical traces, diagnostics
+  and frozen configurations before and after.
 ### Added
 - **The FALCON + YOLO + closing baseline on the Gibson val split** (`gibson/results/gibson_val_falcon-yolo_20261018T173302Z/`, 2026-10-19): SR 0.665, SPL 0.337, DTG 1.75 m over the same 1,000 episodes as the full method's SR 0.792, SPL 0.464, DTG 0.94 m; per scene and per category in entry 032. `supervise_benchmark.sh` kills a run stalled for `STALL_MINUTES` (a habitat-sim segfault left a zombie it waited on for five hours) and calls an episode deterministic after three deaths.
 - **The FALCON + YOLO + closing exploration baseline** (`objnav_benchmark_runtime/methods/falcon_yolo_baseline.py` new, `gibson/run.py --agent falcon-yolo`, `five_scene.py`, `run_benchmark.sh --agent`, `launch_detached.sh` `RUN_ARGS`, `supervise_benchmark.sh`, `floor_panels.py`, `visualization.py`, `search_panel.py`, `gibson/progress.py`, `gibson/FALCON_YOLO_BASELINE.md`, 2026-10-18): goal-free planar FALCON over the storey (bounded transactions in a 4 m disc about the agent, A* relocation to the nearest frontier when the disc is exhausted, a look-around and a STOP when the storey is) with the full method's YOLO perception cycle, `TargetClosing` takeover and legacy pursuit, camera controller and spawn-floor confinement unchanged, and no LLM, RPT*, scene graph, rooms, doors, openings, peeks or glances. The recorder draws the explorer's column in place of the search panel; lean records keep `exploration`. Twenty-one tests in `tests/test_falcon_yolo_baseline.py`. The swept-motion veto judges FALCON's own routes only (a relocation's or the pursuit's A* route is the planner's, as in the full method's frontier explorer; Wiconisco/000000 had spent 179 vetoes in its first doorway). The first fifteen recorded episodes (`runs/benchmark_falcon-yolo_15episodes_20261018T152349Z`): SR 0.800, SPL 0.433, DTG 0.94 m against the full method's 0.867 / 0.641 / 0.16 m on the same episodes.

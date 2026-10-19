@@ -33,16 +33,16 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from sparx_agency.core.planning.exploration.floor_atlas import FloorAtlas, MultiFloorParams
+from sparx_agency.core.localization.floor_atlas import FloorAtlas, MultiFloorParams
 from sparx_agency.core.planning.objnav.action_converter.converter import DiscreteActionConverter
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.stair_connectors import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.stair_connectors import (
     enu_to_habitat, habitat_to_enu, scene_structure_from_pathfinder)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.ground_truth_traversal import GroundTruthTraversal
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_ground_truth import GroundTruthStairs
+from sparx_agency.core.planning.object_search.multifloor.ground_truth_traversal import GroundTruthTraversal
+from sparx_agency.core.planning.object_search.multifloor.stair_ground_truth import GroundTruthStairs
 
 #: Actions a climb may take before the probe calls it a failure (a flight is ~30 actions).
 BUDGET = 160

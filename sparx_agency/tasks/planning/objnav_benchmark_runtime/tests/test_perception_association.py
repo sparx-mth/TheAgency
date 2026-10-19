@@ -21,9 +21,9 @@ from sparx_agency.core.mapping.objects.landmarks import ObjectLandmarkMap
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import clipped_box
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import contradicted_by_map
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.core.mapping.objects.box_extent import clipped_box
+from sparx_agency.core.planning.object_search.perception.cycle import contradicted_by_map
+from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy
 
 

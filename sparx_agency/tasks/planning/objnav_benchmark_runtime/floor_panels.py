@@ -13,11 +13,11 @@ import math
 import cv2
 import numpy as np
 
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OPENING_NODE_BASE
+from sparx_agency.core.planning.object_search.rooms.opening_nodes import OPENING_NODE_BASE
 
 UNKNOWN_GRAY = 128
 #: Unknown the search has settled -- looked through without a depth return, or an enclosed
-#: pocket (``methods/sightlines.py``): drawn darker than the unknown still worth a step.
+#: pocket (``core/planning/object_search/world_model/sightlines.py``): drawn darker than the unknown still worth a step.
 SETTLED_GRAY = 92
 LABEL_SCALE = 0.38
 #: Colour of a seen staircase's entry marker (BGR).

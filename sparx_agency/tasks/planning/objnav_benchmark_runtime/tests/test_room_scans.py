@@ -20,14 +20,14 @@ from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.core.planning.exploration.object_search_supervisor import RoomFacts
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_priors import (
+from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
+from sparx_agency.core.mapping.topology.room_priors import (
     home_object, implausible_room, ruled_out, target_key)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import (
+from sparx_agency.core.planning.object_search.rooms.room_scans import (
     SCAN_POINT_INSIDE, SEEN_FROM_SCAN, RoomScanLedger, visible_fraction)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_vantage import vantage_point
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import ObservedSceneGraph
+from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
+from sparx_agency.core.planning.object_search.rooms.room_vantage import vantage_point
+from sparx_agency.core.planning.object_search.rooms.scene_graph import ObservedSceneGraph
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import FakeLLM, observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
     FREE, IN_A, IN_B, OCC, RES, UNK, VALUES, NamingLLM, cell_in, loop_policy, obs_at, see, two_room_world)
@@ -390,7 +390,7 @@ def test_a_room_holding_a_home_object_of_the_target_is_not_finished_by_sight_fro
     toilet behind the jamb, and the strong bathroom read 0 for the toilet while twenty openings were
     peeked. A scan the agent STOOD in still finishes it."""
     from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import SEEN_THROUGH
+    from sparx_agency.core.planning.object_search.rooms.room_scans import SEEN_THROUGH
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
     policy.target = gibson_label_mapper().target_labels("toilet")
     see(policy, {1: ["bathtub"]}, step=0)
@@ -622,7 +622,7 @@ def test_the_way_back_is_withheld_while_this_storey_still_has_rooms_to_scan():
 
 
 def test_a_warmup_moved_mid_rotation_starts_its_circle_again():
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import discover
+    from sparx_agency.core.planning.object_search.rooms.discovery import discover
     p, episode = setup_policy("bed", discovery=True)
     world = p.mapping.update(observation(episode, 0, depth=3))
     cost = p.navigation_cost(world)
@@ -756,7 +756,7 @@ def test_an_exhausted_floor_forces_the_second_pass_whatever_the_verdict():
 
 
 def test_the_house_line_is_the_big_picture_in_the_prompts_words():
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.house_context import house_line, scan_words
+    from sparx_agency.core.planning.object_search.rooms.house_context import house_line, scan_words
     policy, episode, world, rooms, _ = scan_policy(order=(1, 0), llm=NamingLLM())
     see(policy, {0: ["bed"], 1: ["toilet", "sink"]}, step=0)
     policy.graph.relabel(0, 0)
@@ -789,7 +789,7 @@ def test_a_second_scan_stands_away_from_the_first():
 
 def test_the_vantage_clearance_on_the_bounding_box_equals_the_full_grid_transform():
     from scipy.ndimage import distance_transform_edt
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_vantage import _clearance
+    from sparx_agency.core.planning.object_search.rooms.room_vantage import _clearance
     rng = np.random.default_rng(3)
     mask = np.zeros((120, 160), bool)
     mask[30:70, 40:110] = True

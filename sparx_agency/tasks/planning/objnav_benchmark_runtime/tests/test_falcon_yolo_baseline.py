@@ -22,12 +22,12 @@ from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.floor_panels import FloorPanels
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import lean_episode_info
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import lean_episode_info
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_yolo_baseline import (
+from sparx_agency.core.planning.object_search.baselines.falcon_yolo import (
     BaselineSettings, FalconYoloBaseline)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
+from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import BODY_ACTIONS_PROTOCOL, FakeDetector
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
     FLIGHT, IN_A, STRUCTURE, two_room_world)

@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import SCENES
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options, detector_flags
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options, detector_flags
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import source_fingerprint
 
 

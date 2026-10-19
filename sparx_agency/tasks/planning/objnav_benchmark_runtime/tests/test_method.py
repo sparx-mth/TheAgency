@@ -13,7 +13,7 @@ from sparx_agency.core.planning.objnav.types.observation import ObjNavObservatio
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
 
 #: The published four-action set. The component fixtures below isolate the room and target
 #: machinery on it; the benchmark protocol itself carries the LOOK pair (``camera_tilt``), and the
@@ -152,7 +152,7 @@ def test_approach_arrival_band_is_inside_stop_radius(monkeypatch):
 
 def test_nearby_frontier_is_retired_not_idled_forever(monkeypatch):
     from types import SimpleNamespace
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import frontier_sweep
+    from sparx_agency.core.planning.object_search.exploration import frontier_sweep
     policy, episode = setup_policy()
     policy._goal = (0.25, 0.0)
     policy.route_memory.kind = "frontier"

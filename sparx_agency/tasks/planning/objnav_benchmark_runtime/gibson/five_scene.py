@@ -29,7 +29,7 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES
 from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows, strict_json, write_atomically
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import STYLE
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options, detector_flags
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options, detector_flags
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene_console import (
     failure_line, recording_video, status_line, summary_table)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene_stream import (

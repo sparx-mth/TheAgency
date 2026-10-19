@@ -12,7 +12,7 @@ bookkeeping are the same under both.
 **Whether they are taken at all is a separate setting:**
 `RPTSettings.allow_stair_traversal`, **false by default** because the
 published single-storey benchmarks are scored on the spawn floor
-(`methods/spawn_floor_guard.py`). The multi-storey entrypoints lift it
+(`core/planning/object_search/multifloor/spawn_floor_guard.py`). The multi-storey entrypoints lift it
 explicitly -- `run_development` for a manifest of this protocol's schema and
 `stair_diagnostic` always set `allow_stair_traversal: true` below the policy
 config, and the frozen `method` block records the value -- so every command in
@@ -20,7 +20,7 @@ this file runs with stairs takeable. A `--policy-config` that sets it false
 wins and turns a multi-storey campaign into a guaranteed spawn-floor search.
 
 **`ground_truth` -- the default.** The evaluator reads the scene's navmesh once
-per scene (`gibson/stair_connectors.py`): the area-supported storey heights
+per scene (`habitat/stair_connectors.py`): the area-supported storey heights
 (the generator's own rule -- 8 m² within ±0.30 m, 1.5 m apart) and, between
 them, every cluster of off-level walkable surface as one **connector** -- its
 bottom and top floor anchors, the storey heights it joins and the polyline
@@ -36,7 +36,7 @@ building coordinator then:
   What the oracle is told before any flight is seen is the building's storey
   count and this storey's rank among them (`stair_nodes.storey_position`),
   which comes from the same metadata and is disclosed under `ground_truth_stairs`;
-- **offers every portal to the room-search loop as a NODE** (`methods/stair_nodes.py`)
+- **offers every portal to the room-search loop as a NODE** (`core/planning/object_search/rooms/stair_nodes.py`)
   once its foot is on the observed passable map and it is not cooling after a
   failed approach. The loop hands the staircase to the node oracle beside the
   rooms -- up or down, whether the other storey was visited and what was found
