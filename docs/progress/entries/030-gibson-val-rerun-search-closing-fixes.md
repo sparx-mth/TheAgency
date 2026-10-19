@@ -1,9 +1,9 @@
 # 030 - The full Gibson validation run again, with the search and closing fixes of 2026-10-13/14
 
 **Branch:** `feat/objnav-habitat-gibson-nadav`
-**Status:** stopped -- the run (`runs/gibson_val_20261015T045442Z`) was ended by the operator at 43/1000 episodes
-(2026-10-15 05:47Z, exit 130, nothing published) on a suspected tv detection problem; see the notes. To be relaunched
-once the tv closing is fixed.
+**Status:** done -- the first run (`runs/gibson_val_20261015T045442Z`) was ended at 43/1000 episodes (2026-10-15, tv
+closing, see the notes); the full run was relaunched on `f628a476` (entry 031's code) as
+`runs/gibson_val_20261016_small_llm` and finished 2026-10-18. Result below.
 **Roadmap item:** ObjectNav -- the published Gibson val benchmark re-run on the code that fixed the toilet
 campaign's search and closing sinks, compared against the 2026-10-12 run
 
@@ -97,5 +97,22 @@ the 101 toilet failures were 500-step timeouts) and the 2026-10-08 baseline (SR 
     genuine detector false positive and is unchanged. Relaunch this run on the code of entry 031.
 
 ## Result
-(when the run ends)
+**SR 0.792 (95 % CI 0.766-0.816), SPL 0.464, DTG 0.94 m** over 1000/1000 published episodes on `f628a476`, protocol
+`gibson-semexp-v1.1-val/2`, both LLM roles `qwen2.5:3b-instruct`, SAM off, lean records, seed 17, laptop RTX 5070 (8 GB);
+against the 2026-10-12 run (3B/14B pair on a 4090, protocol /1): SR 0.713, SPL 0.409, DTG 1.27 m. Per-scene and
+per-category tables: `gibson/BENCHMARK_RESULTS.md`, section `gibson_val_20261016_small_llm`. Weakest categories: bed
+(SR 0.528), tv (0.643).
+
+Provenance, to read before comparing:
+- The YOLO-World detector died silently after episode 530 (Darden/000129); the run kept going on its
+  frontier-only fallback, so episodes 531-573 (43, `detector_failures` > 0 in their rows) were not valid. Before the
+  resume they were moved out of `episodes.jsonl`, `evaluation_diagnostics.jsonl` and `episodes.csv` (originals kept
+  beside the run in `gibson_val_20261016_small_llm.quarantine_detector_down`) and re-run. All 1000 final rows have zero
+  detector failures; one agent error.
+- The run died three times for reasons outside the policy (machine crash 2026-10-17, then a gnome-shell SIGSEGV
+  that ended the desktop session at 00:17Z on 2026-10-18, then a third death on Wiconisco/000072); the supervisor
+  and the operator resumed it. The CPU package sat at 90-100 C under the run; after that it ran under a systemd scope
+  (24 GB RAM, 6 CPU cores, balanced power profile, Ollama on 1.5 cores), RAM peak 64 %, VRAM 64 %.
+- Hardware and model differ from the 2026-10-12 baseline (3B for both roles, laptop GPU, detector on GPU); the
+  difference to it is the fixes plus that change, not the fixes alone.
 
