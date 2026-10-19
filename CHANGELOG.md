@@ -5,7 +5,32 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-10-19, HM3D under the Gibson-validated method)
+- **`feat/objnav-benchmark-infra-nadav` merged into `feat/objnav-habitat-hm3d-nadav`**: the HM3D adapter now runs
+  the method from `core/planning/object_search/` exactly as the Gibson val result did. `core/` differs from the
+  infra branch by the HM3D label table and its registry line only; the HM3D branch's two algorithm-side edits were
+  dropped on purpose (the `goal_changed` watchdog exemption in `route_memory.py`, a behaviour change the Gibson
+  number was not measured with, and the `target_closing_enabled` switch, a no-op knob). A frozen HM3D
+  configuration and a frozen Gibson one differ in the detector's deployment (URL, device, class order) and in
+  nothing of the 548 method keys.
+- `hm3d/run_benchmark.sh`: the one-command HM3D run -- services, a mesh-free preflight, then `hm3d/campaign.py`
+  (one `hm3d.run` process per scene, resumable, aggregated into `campaign_summary.json`) or one `--scene`;
+  `--smoke`, `--record`, `--status`, `--preflight`, `--version v1|v2`, `--agent falcon-yolo` as on Gibson.
+- `objnav_benchmark_runtime/benchmark_services.sh`: the service orchestration both launchers share (GPU plan,
+  Ollama, the YOLO-World detector started with the benchmark's own vocabulary, the segmenter, FFmpeg, teardown),
+  lifted verbatim out of `gibson/run_benchmark.sh`, which now sources it; a detector already up at the port is
+  checked to serve this benchmark's class order before it is reused (HM3D defaults to port 18092, Gibson to 18095).
 ### Changed
+- `habitat/simulator.py` is the HM3D branch's superset (body height separate from the camera mount,
+  `navmesh="published"|"agent"`, `pathfinder`, `navmesh_provenance()`), with the reset-time height
+  reconciliation applied under `navmesh="agent"` only: under `"published"` the start is placed verbatim, as every
+  Gibson run did. `HabitatRGBDSimulator` now requires `height_m=`; `gibson/env.py`, `smooth_replay.py` and
+  `stair_diagnostic.py` pass `GibsonProtocol.agent_height_m` (0.88 m, the camera height -- no change in what runs).
+- `provenance.episodes_of_category(ids, episodes, category, categories)` is the one category filter; Gibson's
+  `run.episodes_of_category` delegates to it.
+- The shared runtime keeps the HM3D branch's benchmark-neutral `dashboard.py` (titles from the summary's
+  benchmark/split, unreachable DTGs omitted from the plot), `recording.py` (optional telemetry hook, encoder log
+  closed on a failed start) and `run_evaluation`'s `progress` / `wrap_env` / `agent_class` seams.
 - **The object-search method moved out of the benchmark runtime into `core`** (`core/planning/object_search/` new,
   `tasks/planning/objnav_benchmark_runtime/methods/` gone, 2026-10-19). A structural change only -- every module
   moved with `git mv`, no algorithm, setting or default changed; a run after this commit differs from one before

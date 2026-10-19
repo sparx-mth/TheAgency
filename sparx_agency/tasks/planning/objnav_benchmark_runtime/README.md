@@ -710,9 +710,13 @@ tasks/planning/objnav_benchmark_runtime/   THIS TREE: the adapters and the opera
     detector_options.py, gpu_plan.py, provenance.py, progress.py   the shared CLI options, GPU placement, run provenance, live progress + lean records
     evaluation.py      the shared run loop the HM3D / MP3D / RoboTHOR adapters call (Gibson's run.py keeps its own, see below)
     services/          the HTTP clients the method is given: detector, segmenter, room LLM
-    habitat/           the habitat-sim RGB-D bridge and the navmesh storey/stair reader (any Habitat dataset)
-    gibson/            the Gibson v1.1 adapter: protocol, dataset, SemExp scorer, ObjNavEnv, run CLI, reports
-    hm3d/, mp3d/       the next Habitat datasets, on their own branches (feat/objnav-habitat-{hm3d,mp3d}-*); same shape as gibson/
+    habitat/           the habitat-sim RGB-D bridge (navmesh="published"|"agent") and the navmesh storey/stair reader (any Habitat dataset)
+    benchmark_services.sh   the services every launcher brings up the same way: GPU plan, Ollama, the detector with the
+                       benchmark's vocabulary, the segmenter, FFmpeg, teardown (sourced by gibson/ and hm3d/ run_benchmark.sh)
+    gibson/            the Gibson v1.1 adapter: protocol, dataset, SemExp scorer, ObjNavEnv, run CLI, launcher, reports
+    hm3d/              the HM3D v1/v2 adapter: protocol, dataset, habitat-lab's view-point metrics, ObjNavEnv, run CLI,
+                       the scene-per-process campaign and its launcher, reports (README there)
+    mp3d/              the next Habitat dataset, on its own branch (feat/objnav-habitat-mp3d-*); same shape as hm3d/
     recording.py, visualization.py, floor_panels.py, search_panel.py, dashboard.py   video, HUD, live page
     tests/             the method's regression rig (fake services, the benchmark camera, synthetic maps) and the adapter tests
 ```
@@ -748,7 +752,12 @@ the label tables, never the method:
    from `policy_factory.build_policy(args, <label mapper>)`, the loop from
    `objnav_benchmark.runner.run_benchmark` with `MetricsLogger`, the episode
    selection and the frozen configuration from `provenance`
-   (`select_episodes`, `source_fingerprint`, `gpu_plan_record`).
+   (`select_episodes`, `episodes_of_category`, `source_fingerprint`, `gpu_plan_record`).
+6. **Launcher.** A `run_benchmark.sh` that sources `benchmark_services.sh` for
+   the services (`objnav_services_defaults` before its command line,
+   `objnav_services_up` after it, with `RUN_MODULE` set to its `run.py`) and
+   owns only what is the dataset's: where its episodes and scenes are, how the
+   split is partitioned into processes, what the output is named.
 
 The method needs no change: it sees a camera, an action spec, RGB-D frames
 and a pose, and answers in world coordinates.

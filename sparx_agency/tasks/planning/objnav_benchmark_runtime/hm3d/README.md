@@ -25,9 +25,40 @@ Three processes cooperate, each in its own environment:
 
 | process | interpreter | device | why separate |
 |---|---|---|---|
-| simulator + policy (`hm3d.run` / `hm3d.campaign`) | conda env `objnav-habitat` (Python 3.9, habitat-sim 0.2.4) | GPU 0 renders | habitat-sim pins its own Python/numpy |
+| simulator + policy (`hm3d.run` / `hm3d.campaign`) | conda env `objnav-habitat` (`habitat` on the laptop; Python 3.9, habitat-sim 0.2.4) | GPU 0 renders | habitat-sim pins its own Python/numpy |
 | detector HTTP service (YOLO-World) | `~/.venvs/objnav-detector` (Python ≥ 3.10, torch) | CPU | torch never goes in the Habitat env |
 | room LLM (Ollama, `qwen2.5:3b-instruct`) | system `ollama` | CPU | keeps the one GPU for the renderer |
+
+## One command (the launcher)
+
+`hm3d/run_benchmark.sh` is the one-click path -- the same shape as `gibson/run_benchmark.sh`, and the same
+service code (`../benchmark_services.sh`: the GPU plan, Ollama, the YOLO-World detector started with the HM3D
+label table's vocabulary, the optional segmenter, FFmpeg, and their teardown), so the method's services are
+provisioned identically on both benchmarks. The split runs as `hm3d/campaign.py`: **one `hm3d.run` process per
+scene**, each a complete, resumable results directory, then one aggregate (`campaign_summary.json`) that says
+whether the published split is complete.
+
+```bash
+L=sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/run_benchmark.sh
+$L --preflight                                  # services + data + frozen configuration, no episode, no mesh
+$L --scene 00877-4ok3usBNeis --limit 3 --record # three recorded episodes of one scene (video + HUD + replayable trace)
+$L --smoke                                      # one published episode per scene, every category at least once
+$L                                              # the full published v2 val split (1,000 episodes / 36 scenes), lean records
+$L --version v1                                 # the v1 val split (2,000 episodes / 20 scenes)
+$L --output runs/hm3d_v2_val_X                  # resume: finished scenes are kept, started ones continue
+$L --status runs/hm3d_v2_val_X                  # live progress per scene, and the aggregate once it exists
+```
+
+It reads `HM3D_EPISODES_DIR` (default `$DATA/objectnav/hm3d/<version>/<split>`) and `HM3D_SCENES_DIR` (default
+`$DATA/scene_datasets`), the services' variables of `benchmark_services.sh` (`HAB_PY`, `DETECT_PY`, `MODELS`,
+`LLM_*`, `GPU_PLAN*`, `DETECTOR_PORT` -- 18092 here, 18095 for Gibson, because a detector is pinned to its class
+order and the two tables order their words differently), and two HM3D knobs: `VALIDATE_STARTS=1` (default)
+measures every start's shortest path before its scene runs and refuses the scene unless 99% of them reproduce the
+publisher's own geodesic within a millimetre -- the navmesh check -- and `EXCLUDE_UNREACHABLE=1` drops (and
+records) an episode with no reachable view point instead of stopping. Anything it does not know is forwarded to
+`hm3d.run` verbatim (`--category toilet`, `--shuffle`, `--episode-ids ...`, `--agent falcon-yolo`).
+
+The sections below are the same run by hand, one process at a time, and the protocol reference.
 
 All commands run **from the repository root**. Set once per shell:
 
@@ -555,6 +586,7 @@ issue.
 | `geodesic.py` | habitat-lab's `DistanceToGoal` to view points, on habitat-sim's pathfinder |
 | `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance |
 | `assets.py` | what is installed, what is missing, and the commands that would fix it |
+| `run_benchmark.sh` | The one-command launcher: services (`../benchmark_services.sh`), preflight, `campaign.py` or a `run.py` scene, the aggregate |
 | `run.py` | preflight and the run, on the shared `run_evaluation` (progress, lean rows and diagnostics via its `wrap_env` / `agent_class` hooks); builds the shared `RPTSearchPolicy` from this protocol's agent |
 | `campaign.py` | one child process per scene, then an aggregate over what finished |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
