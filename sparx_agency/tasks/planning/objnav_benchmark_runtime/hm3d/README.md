@@ -60,6 +60,26 @@ records) an episode with no reachable view point instead of stopping. Anything i
 
 The sections below are the same run by hand, one process at a time, and the protocol reference.
 
+### Without the HM3D scenes: the stand-in fixture
+
+The HM3D meshes are licensed (section 1.2) and not on every machine. To run the adapter's **real path**
+anyway -- habitat-sim's navmesh recompute, the view-point geodesic, habitat-lab's success rule, the recording
+and the report -- `tests/hm3d_stand_in_fixture.py` writes an HM3D-format development split on a Gibson mesh:
+Gibson's published starts, goal objects read off SemExp's evaluator semantic map, view points = the navigable
+points within 1 m of an object's footprint. The split is `dev_gibson`, so every id and result says so; it is
+**not** an HM3D number, nor a Gibson one.
+
+```bash
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.hm3d_stand_in_fixture \
+    --root ~/datasets/objectnav/hm3d_stand_in --scene Darden --categories toilet chair bed
+SPLIT=dev_gibson HM3D_EPISODES_DIR=~/datasets/objectnav/hm3d_stand_in/episodes \
+    HM3D_SCENES_DIR=~/datasets/objectnav/hm3d_stand_in/scenes \
+    $L --scene 00001-Darden --record --episode-ids 00001-Darden/000000 --episodes-per-scene 3
+```
+
+(`--episodes-per-scene` is what every development split must state; see `hm3d.run --help`.)
+
+
 All commands run **from the repository root**. Set once per shell:
 
 ```bash
@@ -587,6 +607,7 @@ issue.
 | `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance |
 | `assets.py` | what is installed, what is missing, and the commands that would fix it |
 | `run_benchmark.sh` | The one-command launcher: services (`../benchmark_services.sh`), preflight, `campaign.py` or a `run.py` scene, the aggregate |
+| `../tests/hm3d_stand_in_fixture.py` | an HM3D-format `dev_gibson` split on a Gibson mesh, to run this adapter's real path where the HM3D scenes are absent |
 | `run.py` | preflight and the run, on the shared `run_evaluation` (progress, lean rows and diagnostics via its `wrap_env` / `agent_class` hooks); builds the shared `RPTSearchPolicy` from this protocol's agent |
 | `campaign.py` | one child process per scene, then an aggregate over what finished |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |

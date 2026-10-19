@@ -1,8 +1,9 @@
 # 033 - HM3D under the Gibson-validated method
 
 **Branch:** `feat/objnav-habitat-hm3d-nadav` (merge of `feat/objnav-benchmark-infra-nadav` at `b3c2a5b3`)
-**Status:** the merge, the launcher and every mesh-free check are done; the three recorded HM3D runs and the
-launcher's first real scene are blocked on the licensed HM3D scenes, which are not on this laptop (below)
+**Status:** the merge and the launcher are done and verified; three recorded episodes ran through the HM3D
+adapter's real path on a stand-in Gibson mesh (below); the same three on HM3D's own scenes, the smoke cover
+and the v2 val split wait for the licensed HM3D scenes, which are not on this laptop
 **Roadmap item:** the same object-search method on HM3D v1/v2, then MP3D, then AI2-THOR, under each benchmark's
 own published protocol
 
@@ -53,6 +54,25 @@ point under 0.1 m, on the navmesh habitat-sim recomputes at the agent's dimensio
   the start verbatim (gap 0.0000 m); `"agent"` has habitat-sim recompute at 0.18 m / 0.88 m (recorded settings
   confirm it), places the start on that mesh, and four actions later the height has not moved.
 
+## Three recorded runs through the adapter (stand-in mesh)
+With the HM3D meshes absent, `tests/hm3d_stand_in_fixture.py` wrote an HM3D-format `dev_gibson` split on the
+Darden mesh (Gibson's published starts; goals from SemExp's semantic map; view points = navigable points within
+1 m of a footprint; `info.geodesic_distance` measured on the recomputed navmesh), and `hm3d/run_benchmark.sh
+--scene 00001-Darden --record --episode-ids ...` ran one episode per invocation, the full real path: GPU plan,
+an HM3D-vocabulary detector on the CPU, Ollama (`qwen2.5:3b-instruct` in both roles, the quick-check setting),
+habitat-sim with `navmesh="agent"`, the view-point geodesic, habitat-lab's STOP-and-under-0.1-m rule, lean rows,
+the HUD video, `comparison.md` / `audit.json`. Under `runs/hm3d_standin_darden_{toilet,chair,bed}/` (gitignored):
+
+| episode | from Gibson | l | result | steps | wall |
+|---|---|---|---|---|---|
+| toilet | Darden/000004 | 5.54 m | SR 1, SPL 0.864, DTG 0.07 m | 75 | 68 s |
+| chair | Darden/000002 | 1.84 m | SR 1, SPL 0.384, DTG 0.05 m | 79 | 54 s |
+| bed | Darden/000000 | 6.41 m | SR 0, DTG 7.18 m -- a 0.35-confidence "bed" box cut by the frame's bottom edge, locked at step 52 and STOPped on at 99, 0.7 m from where the policy remembered it and 8.9 m from the real bed | 99 | 69 s |
+
+The miss is the method's own decision under its Gibson-validated STOP rules on a detector false positive; the
+geometry agrees end to end (the start in ENU is the published start, the evaluator's DTG is the geodesic to the
+bed's view points). Nothing about the adapter or the fixture is implicated, and nothing in the method was changed.
+
 ## A finding on Gibson, not acted on
 On Darden/000000 the published start is **not on the shipped navmesh** (built at habitat's legacy 0.10 m /
 1.50 m): `snap_point` disagrees with it, and the first forward step under `navmesh="published"` jumps the agent
@@ -87,5 +107,6 @@ $L                                                      # the full published v2 
 - [x] `benchmark_services.sh` out of `gibson/run_benchmark.sh`; `hm3d/run_benchmark.sh` on it.
 - [x] Preflight both launchers against the real services; compare the frozen method blocks.
 - [ ] HM3D scenes on this machine (credentials).
-- [ ] Three recorded HM3D episodes, then `--smoke`, then the v2 val split; v1 after it.
+- [x] Three recorded episodes through the adapter's real path, on the stand-in mesh.
+- [ ] The same three on HM3D's own scenes, then `--smoke`, then the v2 val split; v1 after it.
 - [ ] MP3D, then AI2-THOR/RoboTHOR, the same way: adapter only.
