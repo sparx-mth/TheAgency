@@ -77,15 +77,14 @@ class FloorPanels:
                 np.copyto(slot["settled"], settled)
             else:
                 slot["settled"].fill(False)
-            context = policy.floors.contexts.get(floor_id)
-            if floor_id == policy.floors.active:
-                context = {key: getattr(policy, key) for key in ("landmarks", "graph", "_floor_time")}
+            context = self._floor_context(policy, floor_id)
             if context is not None:
+                landmarks, graph = context.get("landmarks"), context.get("graph")
                 slot["objects"] = [{"id": lm.id, "class": lm.class_name, "xy": list(lm.xy), "count": lm.count}
-                                   for lm in context["landmarks"].all_landmarks()]
-                slot["rooms"] = len(context["graph"].registry.rooms)
-                slot["search_time_s"] = context["_floor_time"]
-                labels = context["graph"].labels
+                                   for lm in landmarks.all_landmarks()] if landmarks is not None else []
+                slot["rooms"] = len(graph.registry.rooms) if graph is not None else 0
+                slot["search_time_s"] = context.get("_floor_time") or 0.0
+                labels = graph.labels if graph is not None else None
                 slot["room_labels"].fill(0)
                 if labels is not None and labels.shape == self.shape:
                     np.copyto(slot["room_labels"], labels)
@@ -126,6 +125,25 @@ class FloorPanels:
         self.center = (self.origin[0] + (x0 + x1) * self.resolution / 2,
                        self.origin[1] + (y0 + y1) * self.resolution / 2)
         self.span_m = max(x1 - x0, y1 - y0) * self.resolution
+
+    @staticmethod
+    def _floor_context(policy, floor_id):
+        """The storey's landmarks, room graph and search time, or None.
+
+        The floor-context bank's saved state for a storey left, the policy's
+        own attributes for the active one; a policy without a bank (the
+        FALCON + YOLO baseline keeps one storey's evidence) has the active
+        storey only, and no room graph.
+        """
+        floors = getattr(policy, "floors", None)
+        if floors is not None:
+            if floor_id == floors.active:
+                return {key: getattr(policy, key) for key in ("landmarks", "graph", "_floor_time")}
+            return floors.contexts.get(floor_id)
+        mapping = getattr(policy, "mapping", None)
+        if mapping is not None and floor_id == mapping.floor_id:
+            return {key: getattr(policy, key, None) for key in ("landmarks", "graph", "_floor_time")}
+        return None
 
     @staticmethod
     def _stairs_on(policy, floor_id):

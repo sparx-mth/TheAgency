@@ -171,6 +171,8 @@ def run_scene_job(args, scene, directory, policy_config, on_episode):
                "--output", str(directory)] + detector_flags(args)
     if args.explorer is not None:
         command += ["--explorer", args.explorer]
+    if getattr(args, "agent", None):
+        command += ["--agent", args.agent]
     if getattr(args, "category", None):
         command += ["--category", args.category]
     if getattr(args, "shuffle", False):
@@ -229,6 +231,9 @@ def main(argv=None):
                         help="Each scene's N episodes are a random sample seeded with --seed, not the first N "
                              "(forwarded to every job)")
     parser.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
+    parser.add_argument("--agent", choices=("rpt", "falcon-yolo"), default=None,
+                        help="Forwarded to every scene run: the room-search method (rpt, the default) or the "
+                             "FALCON + YOLO + closing exploration baseline (falcon-yolo, no LLM)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.add_argument("--video-fps", type=int, default=6)
@@ -259,7 +264,7 @@ def main(argv=None):
     status = {"source_sha256": fingerprint, "episodes_per_scene": per_scene, "episodes_total": total,
               "allow_stair_traversal": False, "split": "val", "scenes": scenes, "seed": args.seed,
               "category": args.category, "shuffle": bool(args.shuffle), "selection": selection,
-              "explorer": args.explorer, "completed": [], "failed": []}
+              "explorer": args.explorer, "agent": args.agent or "rpt", "completed": [], "failed": []}
     write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
     records, rows = [], []
 

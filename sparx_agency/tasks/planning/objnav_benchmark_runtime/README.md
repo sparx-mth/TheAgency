@@ -677,6 +677,7 @@ own frozen configurations; changed code does not relabel their outcomes.
 | Component | Responsibility |
 |---|---|
 | `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
+| `methods/falcon_yolo_baseline.py` | The exploration baseline: goal-free planar FALCON (bounded transactions in a disc about the agent, A* relocation to the nearest frontier, a look-around and a STOP on exhaustion) hosting the shared perception cycle, target closing, camera controller and spawn-floor confinement under the attribute names `rpt_policy` gives them; no LLM |
 | `methods/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
 | `methods/bbox_pitch.py` | The image-space vertical servo: where a box lands after a tilt or a step, and the tilt that keeps it whole and centred (pure functions) |
 | `methods/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |

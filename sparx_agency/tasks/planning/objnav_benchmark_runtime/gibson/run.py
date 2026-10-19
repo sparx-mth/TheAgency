@@ -51,8 +51,13 @@ def parser():
     p.add_argument("--output", type=Path)
     p.add_argument("--preflight", action="store_true")
     p.add_argument("--print-vocabulary", action="store_true")
-    p.add_argument("--agent", choices=("rpt", "stop"), default="rpt")
-    p.add_argument("--policy-config", type=Path)
+    p.add_argument("--agent", choices=("rpt", "falcon-yolo", "stop"), default="rpt",
+                   help="rpt: the room-search method (LLM + RPT* + frontier/FALCON + closing). falcon-yolo: the "
+                        "exploration baseline -- goal-free planar FALCON, the same YOLO perception and the same "
+                        "closing, no LLM (methods/falcon_yolo_baseline.py). stop: the plumbing diagnostic")
+    p.add_argument("--policy-config", type=Path,
+                   help="JSON of RPTSettings overrides; with --agent falcon-yolo a nested \"baseline\" object holds "
+                        "the BaselineSettings (bootstrap_turns, exhausted_turns, ...)")
     p.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
     add_detector_options(p, url_default="http://127.0.0.1:8092")
     p.add_argument("--seed", type=int, default=0)
@@ -202,14 +207,22 @@ def _method(args, defaults=None):
     """
     if args.agent == "stop":
         return StopDiagnostic(), {"method": "diagnostic-stop", "publishable": False}
-    from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
+    baseline = args.agent == "falcon-yolo"
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import VerifiedLLMClient, public_service_url
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import public_service_url
     overrides = json.loads(args.policy_config.read_text()) if args.policy_config else {}
     if not isinstance(overrides, dict):
         raise ValueError("--policy-config must hold a JSON object")
-    if args.explorer is not None:
+    baseline_overrides = overrides.pop("baseline", None)
+    if baseline_overrides is not None and not baseline:
+        raise ValueError("--policy-config holds a \"baseline\" object, which only --agent falcon-yolo reads")
+    if baseline:
+        # The baseline explores with planar FALCON and nothing else: no --explorer frontier under it.
+        if (args.explorer or "falcon") != "falcon" or overrides.get("local_exploration", "falcon") != "falcon":
+            raise ValueError("--agent falcon-yolo explores with FALCON; --explorer / local_exploration cannot be frontier")
+        overrides["local_exploration"] = "falcon"
+    elif args.explorer is not None:
         if overrides.get("local_exploration", args.explorer) != args.explorer:
             raise ValueError("--explorer disagrees with --policy-config")
         overrides["local_exploration"] = args.explorer
@@ -218,13 +231,19 @@ def _method(args, defaults=None):
             raise ValueError("--segmentation disagrees with --policy-config")
         overrides["segmentation"] = True
     settings = RPTSettings(**dict(defaults or {}, **dict(overrides, seed=args.seed)))
-    config = LLMConfig.from_env()
-    config.seed = args.seed
-    client = VerifiedLLMClient(LLMClient(config))
+    config = client = None
+    services = []
+    if not baseline:
+        from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import VerifiedLLMClient
+        config = LLMConfig.from_env()
+        config.seed = args.seed
+        client = VerifiedLLMClient(LLMClient(config))
+        services.append(("LLM", client))
     detector = HttpDetector(public_service_url(args.detector_url), gibson_label_mapper().vocabulary(),
                             expected_backend=args.detector_backend,
                             timeout_s=getattr(args, "detector_timeout_s", 30.0))
-    services = [("LLM", client), ("detector", detector)]
+    services.append(("detector", detector))
     segmenter = None
     if settings.segmentation:
         from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.segmentation import HttpSegmenter
@@ -242,15 +261,26 @@ def _method(args, defaults=None):
             problems.append("%s: %s" % (name, exc))
     if problems:
         raise RuntimeError("; ".join(problems))
-    policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter)
+    if baseline:
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_yolo_baseline import BaselineSettings, FalconYoloBaseline
+        if baseline_overrides is not None and not isinstance(baseline_overrides, dict):
+            raise ValueError("--policy-config \"baseline\" must be a JSON object of BaselineSettings fields")
+        policy = FalconYoloBaseline(detector, settings, segmenter=segmenter,
+                                    baseline=BaselineSettings(**(baseline_overrides or {})))
+        floor = settings.detection_confidence
+    else:
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
+        policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter)
+        floor = min(settings.detection_confidence, policy.door_settings.confidence)
     emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
-    if emitted > min(settings.detection_confidence, policy.door_settings.confidence):
+    if emitted > floor:
         raise RuntimeError("Detector emission threshold hides door candidates; restart with --conf 0.05")
     info = policy.configuration()
-    llm = asdict(config)
-    llm.pop("api_key", None)
-    info.update(llm=llm, llm_identity=identities["LLM"], detector=identities["detector"],
-                detector_url=args.detector_url, detector_timeout_s=detector.timeout_s)
+    if config is not None:
+        llm = asdict(config)
+        llm.pop("api_key", None)
+        info.update(llm=llm, llm_identity=identities["LLM"])
+    info.update(detector=identities["detector"], detector_url=args.detector_url, detector_timeout_s=detector.timeout_s)
     if segmenter is not None:
         info.update(segmenter=identities["segmenter"], segmenter_url=args.segmenter_url, segmenter_timeout_s=segmenter.timeout_s)
     return policy, info
@@ -330,7 +360,7 @@ def prepare(args):
             issues.append("Dataset/scorer: %s" % exc)
     try:
         policy, method = _method(args)
-        if args.agent == "rpt":
+        if args.agent in ("rpt", "falcon-yolo"):
             policy.target_projector = getattr(env, "target_projector", None)
             method["target_navmesh_projection"] = policy.target_projector is not None
     except Exception as exc:
