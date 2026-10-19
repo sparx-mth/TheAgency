@@ -5,7 +5,67 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed
+- **The object-search method moved out of the benchmark runtime into `core`** (`core/planning/object_search/` new,
+  `tasks/planning/objnav_benchmark_runtime/methods/` gone, 2026-10-19). A structural change only -- every module
+  moved with `git mv`, no algorithm, setting or default changed; a run after this commit differs from one before
+  it in `source_sha256` alone. The method (`policy.py`, `settings.py`) is now one package split by concern --
+  `perception/`, `rooms/`, `world_model/`, `exploration/`, `multifloor/`, `closing/`, `falcon/`, `baselines/`,
+  `route_memory.py` -- and its policy-free pieces went to the subsystem they belong to: `box_extent`, `box_occluder`,
+  `detection_dedup`, `target_evidence`, `support_surface` in `core/mapping/objects`; `target_memory_3d` in
+  `core/mapping/tracking`; `room_priors`, `revisable_room_labels` in `core/mapping/topology`; the camera-tilt
+  controller and the box-driven pitch servo in `core/control/camera` (`pitch_controller`, `box_pitch_servo`: where to
+  look is a control process beside where to move, merged in the `NavigationCommand`); the storey localiser
+  `floor_atlas` in `core/localization` (from `core/planning/exploration`). Five inline ``atan2(sin, cos)`` wraps now
+  call the shared `normalize_angle`; the box aliases use `core.common.math.bbox.BBox`. The seam to the
+  services is `object_search/interfaces.py` (`Detection`, the `Detector` / `Segmenter` / `RoomReasoner` protocols,
+  the two failure families, which the perception cycle now tells apart without importing `requests`); the HTTP
+  clients moved to `objnav_benchmark_runtime/services/` (`http_detector`, `http_segmenter`, `llm`). The runtime
+  shares one method factory across datasets (`policy_factory.build_policy`, as on the HM3D branch), lifts
+  `detector_options.py` and `gpu_plan.py` to its root (Gibson keeps import shims), folds `select_episodes`,
+  `explicit_episodes` and `gpu_plan_record` into `provenance.py` (the duplicate `source_fingerprint` in `gibson/run.py`
+  is gone -- same digest), lifts `gibson/progress.py` to `progress.py` (shim kept), and moves the navmesh storey/stair
+  reader to `habitat/stair_connectors.py`. The method's
+  regression rig stays with the runtime (`tests/`); `core/planning/object_search/tests/` adds the boundary scan (no
+  `tasks`, simulator or transport import anywhere in the method), a service-free smoke run and the failure
+  contract. READMEs: `core/planning/object_search/README.md` (new), the runtime README's "Where the code is" and
+  "Adding a dataset adapter", `core/control` (the camera branch), `core/mapping/{objects,tracking,topology}`,
+  `core/planning/objnav`, `falcon`. Verified structural-only: every moved module is code-identical to its original
+  (imports and docstrings aside) and four deterministic 140-step rollouts with fake services -- frontier and FALCON
+  explorers, with and without a target, and the FALCON+YOLO baseline -- produce byte-identical traces, diagnostics
+  and frozen configurations before and after.
 ### Added
+- **The FALCON + YOLO + closing baseline on the Gibson val split** (`gibson/results/gibson_val_falcon-yolo_20261018T173302Z/`, 2026-10-19): SR 0.665, SPL 0.337, DTG 1.75 m over the same 1,000 episodes as the full method's SR 0.792, SPL 0.464, DTG 0.94 m; per scene and per category in entry 032. `supervise_benchmark.sh` kills a run stalled for `STALL_MINUTES` (a habitat-sim segfault left a zombie it waited on for five hours) and calls an episode deterministic after three deaths.
+- **The FALCON + YOLO + closing exploration baseline** (`objnav_benchmark_runtime/methods/falcon_yolo_baseline.py` new, `gibson/run.py --agent falcon-yolo`, `five_scene.py`, `run_benchmark.sh --agent`, `launch_detached.sh` `RUN_ARGS`, `supervise_benchmark.sh`, `floor_panels.py`, `visualization.py`, `search_panel.py`, `gibson/progress.py`, `gibson/FALCON_YOLO_BASELINE.md`, 2026-10-18): goal-free planar FALCON over the storey (bounded transactions in a 4 m disc about the agent, A* relocation to the nearest frontier when the disc is exhausted, a look-around and a STOP when the storey is) with the full method's YOLO perception cycle, `TargetClosing` takeover and legacy pursuit, camera controller and spawn-floor confinement unchanged, and no LLM, RPT*, scene graph, rooms, doors, openings, peeks or glances. The recorder draws the explorer's column in place of the search panel; lean records keep `exploration`. Twenty-one tests in `tests/test_falcon_yolo_baseline.py`. The swept-motion veto judges FALCON's own routes only (a relocation's or the pursuit's A* route is the planner's, as in the full method's frontier explorer; Wiconisco/000000 had spent 179 vetoes in its first doorway). The first fifteen recorded episodes (`runs/benchmark_falcon-yolo_15episodes_20261018T152349Z`): SR 0.800, SPL 0.433, DTG 0.94 m against the full method's 0.867 / 0.641 / 0.16 m on the same episodes.
+- **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261016_small_llm/`, 2026-10-18): SR 0.792, SPL 0.464, DTG 0.94 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
+- **The box read around a surface in front of the object, and a standoff for a big object** (`objnav_benchmark_runtime/methods/box_occluder.py`
+  new, `perception.py`, `target_path.py`, `target_closing.py`, 2026-10-15). Two Collierville tv failures that
+  reproduced at the same actions in two 1,000-episode runs. (1) 000018: the television's box held 79 % television
+  at 4.1 m and 20 % of a seat back's rail at 1.3 m in its lower middle; the 30th-percentile depth read the rail,
+  the ±0.12 m support band kept 36 % of the centre patch against a 35 % gate, and the closing STOPped 3.3 m from the
+  television after "approaching" the rail. `occluder_in_front` asks the whole box four measured things -- a second
+  surface at least 0.5 m behind, spanning 80 % of the box's height AND width, covering more of the box than the
+  near one, the near one leaving the top quarter of the box alone -- and `_supported_centroid` then sets the near
+  pixels aside and reads the box again (`occluder_depth_m`, `occluder_px` in the row). A chair in front of a wall
+  reaches the top of its box; a couch's backrest, a toilet's tank, a bed's headboard span the width only: none
+  fires. The mask pipeline is untouched. (2) 000009: a 1.5 m television on its cabinet put every 0.70 m standoff
+  point inside the cabinet, against it or behind it, in both planners, and three locks with the memory 0.02-0.14 m
+  from the real television were released from 3 m as "no safe path from here"; a standoff 1.01 m from the refined
+  memory with a seventeen-waypoint route was dropped as stale for a ring with none. `TargetApproachPath` widens the
+  ring in the front arc out to the terminal radius when neither planner reaches the standoff ring (`widened`,
+  `widened_standoffs`) and keeps a stale goal within terminal + tolerance when no ring point has a route
+  (`stale_kept`, `stale_standoffs_kept`); `TargetClosing` begins the inspection from such a standoff with the fresh
+  range within a forward step of the limit and STOPs when the inspection's steps are spent or blocked
+  (`closest_approach_stop` on by default, `closest_approach_stops`; `note_blocked` / `note_action` tell the
+  inspection whether its step moved). Re-run of the three recorded episodes
+  (`runs/gibson_Collierville_tv_fix_20261015T064436Z`): 000018 SR 0 -> 1 (SPL 0.81, 45 actions, the occluder set
+  aside on 10 frames, the lock at the real television), 000009 SR 0 -> 1 (SPL 1.00, 32 actions, one widened
+  standoff, no boxed release); 000014, a detector false positive, unchanged. The toilet yardstick
+  (`runs/benchmark_toilet_10episodes_20261015T064732Z`, the seeded ten): SR 0.90, SPL 0.530, DTG 0.23 m against the
+  2026-10-14 reference's 0.90 / 0.456 / 0.59 -- the same nine successes and the same one timeout. Tests: `tests/test_box_occluder.py`
+  (9) and six standoff/closest-approach tests in `tests/test_target_closing.py`; the runtime suite 860 pass. The
+  per-episode ground-truth tools behind the diagnosis are `runs/_analysis/closing_vs_truth.py` and
+  `replay_depth_dissection.py` (gitignored). LESSONS has the entry.
 - **The STOP overshoot: decide, then walk the margin** (`objnav_benchmark_runtime/methods/target_closing.py`,
   `rpt_policy.py`, 2026-10-14 night). Every terminal reading is biased short of the object's footprint -- the near
   edge of a box with floor in it, a centroid fused from near surfaces -- and the evaluator measures to the

@@ -1,4 +1,4 @@
-"""Live progress of a benchmark run (Gibson or HM3D), and the lean per-episode record a 1,000-episode run can afford.
+"""Live progress of a benchmark run, and the lean per-episode record a 1,000-episode run can afford.
 
 Two things a long benchmark needs that the harness does not provide on its own:
 
@@ -40,7 +40,8 @@ UTC = "%Y-%m-%dT%H:%M:%SZ"
 LEAN_POLICY_KEYS = ("method", "rooms", "max_rooms", "landmarks", "warmup", "llm_queries", "oracle_reuses",
                     "room_label_queries", "plan_calls", "duplicates_removed", "blocked", "floor_revisions",
                     "oracle_repair_attempts", "oracle_repair_successes", "target_closing", "spawn_floor_guard",
-                    "target_evidence", "room_scans", "openings", "glances", "sight", "doors", "doorway_peek")
+                    "target_evidence", "room_scans", "openings", "glances", "sight", "doors", "doorway_peek",
+                    "exploration")
 #: Per-action series and event logs a lean record drops, wherever they appear.
 LEAN_DROP_KEYS = frozenset(("coverage_curve", "events", "estimate_events", "estimates", "records", "history",
                             "label_history", "solver_records", "last_reasoning", "failures", "last_demoted",
@@ -405,7 +406,7 @@ def describe_summary(directory: pathlib.Path) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse
-    parser = argparse.ArgumentParser(description="Print the live progress (default) or the finished summary of a run directory.")
+    parser = argparse.ArgumentParser(description="Print the live progress (default) or the finished summary of a benchmark run directory.")
     parser.add_argument("directory", type=pathlib.Path)
     parser.add_argument("--summary", action="store_true", help="the finished summary.json instead of progress.json")
     args = parser.parse_args(argv)

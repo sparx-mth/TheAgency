@@ -84,4 +84,3 @@ whole split, and a multi-day job needs to survive the operator's session ending.
 
 ## Result
 Finished 2026-10-11T08:49:49Z after 1 resume(s): **SR 0.653, SPL 0.366, DTG 1.59 m** over 1000/1000 published episodes (full split: true; agent errors 1). Per-scene and per-category tables, the published-row comparison and the provenance: `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md` (section `gibson_val_20261008T120112Z`); the data under `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/results/gibson_val_20261008T120112Z/`. Published from the detached run by `supervise_benchmark.sh`.
-

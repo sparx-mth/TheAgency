@@ -1,4 +1,4 @@
-"""Shared, model-free perception-service selection for the Gibson and HM3D entrypoints: the detector and the segmenter."""
+"""Shared, model-free perception-service selection for every benchmark entrypoint: the detector and the segmenter."""
 from __future__ import annotations
 
 from sparx_agency.core.mapping.detection.registry import default_detection_registry
@@ -20,7 +20,7 @@ def add_detector_options(parser, *, url_default=None, required=False, backend_de
 
 
 def detector_flags(args):
-    """The perception-service flags a campaign forwards to every ``gibson.run`` or ``hm3d.run`` job: the detector's and the segmenter's."""
+    """The perception-service flags a campaign forwards to every ``gibson.run`` (or another adapter's ``run``) job: the detector's and the segmenter's."""
     flags = ["--detector-url", args.detector_url,
              "--detector-timeout-s", str(getattr(args, "detector_timeout_s", 30.0))]
     backend = getattr(args, "detector_backend", None)

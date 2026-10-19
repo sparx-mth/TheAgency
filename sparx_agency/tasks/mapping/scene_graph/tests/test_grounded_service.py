@@ -11,8 +11,8 @@ from sparx_agency.core.mapping.detection.tests.test_grounded_vlm import IMAGE, b
 from sparx_agency.tasks.mapping.scene_graph.serve.backends import selected_checkpoint_identity
 from sparx_agency.tasks.mapping.scene_graph.serve.detector_args import parse_args
 from sparx_agency.tasks.mapping.scene_graph.serve.detection_server import _make_server, _ServerContext
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import detector_flags
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import detector_flags
 
 
 def config_file(tmp_path, **updates):

@@ -22,9 +22,9 @@ import pytest
 from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH, TRANSIT, UNREACHABLE
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, GibsonProtocol
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OpeningSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import EXPLORED, SCAN_POINT_INSIDE
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
+from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningSettings
+from sparx_agency.core.planning.object_search.rooms.room_scans import EXPLORED, SCAN_POINT_INSIDE
+from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import openings_of, refresh, west_gap
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
     IN_A, IN_B, cell_in, loop_policy, obs_at, two_room_world)
@@ -229,7 +229,7 @@ def test_openings_of_a_room_the_oracle_valued_below_the_floor_stay_nodes():
     gap = west_gap(openings_of(policy, episode, world))
     policy.graph.probs = {0: 0.0, 1: 0.6}                      # room A is not worth a visit; its gap leads on
     kept = policy.loop._fold_openings(obs_at(episode, 0, IN_A), [o for o in __import__(
-        "sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes", fromlist=["opening_options"]
+        "sparx_agency.core.planning.object_search.rooms.opening_nodes", fromlist=["opening_options"]
     ).opening_options(policy, openings_of(policy, episode, world))])
     assert [o.node_id for o in kept] == [gap.node_id], "room B's openings fold into room B; room A's gap stays"
 

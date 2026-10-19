@@ -31,7 +31,7 @@ class GibsonProtocol:
     LOOK is an action against the same 500-action budget and moves nothing),
     and it is what lets the target closing keep a low toilet or a high
     television whole in the frame on the way in -- the box-driven pitch
-    servo of ``methods/bbox_pitch`` never fired in the 15-episode toilet
+    servo of ``core/control/camera/box_pitch_servo`` never fired in the 15-episode toilet
     campaign of 2026-10-13 because the protocol had no LOOK to fire.
     ``camera_tilt=False`` is the published four-action set.
     """

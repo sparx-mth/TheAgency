@@ -17,8 +17,8 @@ import numpy as np
 from sparx_agency.core.common.math.bbox import iou
 from sparx_agency.tasks.common.model_registry.download.verify import sha256_of
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import detections_from_json, detections_to_json
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import deduplicate_detections
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
+from sparx_agency.core.mapping.objects.detection_dedup import deduplicate_detections
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
 
 # Accepted RoboTHOR names, NOT fuzzy substring matches (e.g. cup != mug).
 TARGET_ALIASES = {"tv": "television", "trash can": "garbage can", "potted plant": "house plant",

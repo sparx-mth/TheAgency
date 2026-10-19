@@ -59,7 +59,9 @@ def falcon_only_parser():
 
 def main(argv=None):
     own, rest = falcon_only_parser().parse_known_args(argv)
-    overrides = {"map_resolution_m": own.voxel_m, "target_closing_enabled": False,
+    # No target_closing switch is needed: the fake detector below never reports
+    # a box, so the closing has no evidence to activate on.
+    overrides = {"map_resolution_m": own.voxel_m,
                  "falcon": {"cell_size_m": own.cell_size_m, "scope_radius_m": own.scope_radius_m}}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(overrides, handle)

@@ -10,16 +10,16 @@ import pytest
 
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator, habitat_pose, metric_depth
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import VerifiedLLMClient, public_service_url
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
+from sparx_agency.core.planning.object_search.settings import RPTSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.llm import VerifiedLLMClient, public_service_url
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import camera, actions
 
 
 def test_runtime_has_no_dataset_specific_imports():
     root = Path(__file__).resolve().parents[1]
     shared = list(root.glob("*.py"))
-    shared += list((root / "methods").rglob("*.py")) + list((root / "habitat").rglob("*.py"))
+    shared += list((root / "services").rglob("*.py")) + list((root / "habitat").rglob("*.py"))
     for path in shared:
         for node in ast.walk(ast.parse(path.read_text())):
             names = ([node.module or ""] if isinstance(node, ast.ImportFrom)
@@ -40,7 +40,7 @@ class Guard(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Guard())
 from sparx_agency.core.planning.planners import WeightedAStarPlanner2D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime import evaluation
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat import simulator, smoke
 assert not attempts, attempts
 '''

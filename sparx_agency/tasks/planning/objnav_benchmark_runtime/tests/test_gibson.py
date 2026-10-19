@@ -273,7 +273,7 @@ def test_category_filter_keeps_only_that_goal_in_split_order():
     assert episodes_of_category(ids, episodes, "toilet") == ("S/000000", "S/000003", "S/000006")
     with pytest.raises(ValueError, match="No published bed episode"):
         episodes_of_category(ids, episodes, "bed")
-    with pytest.raises(ValueError, match="Unknown Gibson category"):
+    with pytest.raises(ValueError, match="Unknown category"):
         episodes_of_category(ids, episodes, "sofa")
 
 

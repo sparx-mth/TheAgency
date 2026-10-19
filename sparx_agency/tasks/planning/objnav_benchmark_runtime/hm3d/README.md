@@ -9,9 +9,10 @@ simulator's navmesh (ground truth, declared as such in the run configuration).
 Habitat supplies ground-truth RGB-D and a perfect pose, so what is measured is
 the search logic and nothing else. No navigation-specific training is performed.
 
-The algorithm lives in the [shared core](../README.md) (`methods/`, `habitat/`,
-`evaluation.py`, `recording.py`) and is byte-identical to what
-[GibsonTask](../gibson/README.md) runs. This package only owns what is HM3D:
+The algorithm lives in [`core/planning/object_search/`](../../../../core/planning/object_search/README.md)
+and is byte-identical to what [GibsonTask](../gibson/README.md) runs; the
+[shared runtime](../README.md) (`habitat/`, `services/`, `evaluation.py`,
+`recording.py`) applies it to a benchmark. This package only owns what is HM3D:
 the episodes, the scenes, habitat-lab's view-point metrics, the two versioned
 protocols, and the CLIs below. Goal positions, view points and distance
 telemetry reach the scorer and the recorder only — never the policy.
@@ -294,7 +295,7 @@ and it needs the rendering GPU:
 
 `--explorer frontier` (default) runs the room-search loop with the observed
 frontier sweep; `--explorer falcon` swaps in the bounded planar FALCON
-adaptation. Anything else in `RPTSettings` (`methods/rpt_settings.py`) is
+adaptation. Anything else in `RPTSettings` (`core/planning/object_search/settings.py`) is
 overridden with a JSON file:
 
 ```bash

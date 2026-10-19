@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 
@@ -40,7 +41,6 @@ def gpu_plan_record(environ=None):
     Raises:
         RuntimeError: The variable names a file that cannot be read or parsed.
     """
-    import os
     path = (os.environ if environ is None else environ).get("OBJNAV_GPU_PLAN_JSON", "").strip()
     if not path:
         return {"source": "none", "note": "launched without gpu_plan.py; devices as the command line and environment say"}
@@ -53,8 +53,12 @@ def gpu_plan_record(environ=None):
 def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None):
     """Preserve publisher order; shard, optionally shuffle by seed, then apply an explicit subset limit.
 
-    The shuffle is seeded from ``shuffle_seed`` and the shard's own ids, so equally large pools
-    draw different positions and the same seed over the same pool picks the same ids.
+    Args:
+        shuffle_seed: When given, the shard's ids are shuffled by a generator seeded from this
+            seed *and the ids themselves* (so two scenes with equally large pools draw different
+            positions) before ``limit`` applies: the limit is then a reproducible random sample
+            rather than the first ids in split order. The same seed over the same pool selects
+            the same ids.
     """
     ids = tuple(ids)
     if not ids or any(not isinstance(i, str) or not i.strip() for i in ids) or len(set(ids)) != len(ids):
@@ -77,7 +81,7 @@ def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None)
 
 
 def explicit_episodes(ids, pool):
-    """``ids`` as given, each checked against ``pool``.
+    """``ids`` as given, each checked against ``pool`` (the scene's and category's published ids).
 
     Raises:
         ValueError: On a duplicate, or an id outside the pool.
@@ -87,12 +91,18 @@ def explicit_episodes(ids, pool):
         raise ValueError("--episode-ids repeats an episode")
     missing = [episode_id for episode_id in chosen if episode_id not in set(pool)]
     if missing:
-        raise ValueError("--episode-ids not in the selected scenes/category: %s" % ", ".join(missing))
+        raise ValueError("--episode-ids not in the selected scene/category: %s" % ", ".join(missing))
     return chosen
 
 
 def episodes_of_category(ids, episodes, category, categories):
     """The ids whose published goal is ``category`` in the given order; all of them when None.
+
+    Args:
+        ids: Episode ids, in split order.
+        episodes: ``id -> episode`` (the dataset's mapping; each has a ``category``).
+        category: A category name of the benchmark, or None for no filter.
+        categories: The benchmark's category names, in its canonical order.
 
     Raises:
         ValueError: The category is not in ``categories``, or no selected episode has it.

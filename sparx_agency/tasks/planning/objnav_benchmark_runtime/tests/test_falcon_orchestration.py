@@ -11,8 +11,8 @@ from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNa
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_regions import ObservedRegions
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.falcon.regions import ObservedRegions
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_falcon import open_fixture
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 

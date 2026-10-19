@@ -29,7 +29,7 @@ from sparx_agency.core.planning.objnav.labels.registry import (
     default_label_mapper_registry,
 )
 from sparx_agency.core.planning.objnav.labels.table_mapper import TableLabelMapper
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import (
+from sparx_agency.core.planning.object_search.perception.doors import (
     DOOR_LABELS,
 )
 
@@ -47,7 +47,7 @@ EXPECTED = {
     "plant": ("potted plant", ("potted plant",), {"potted plant"}),
     "toilet": ("toilet", ("toilet",), {"toilet"}),
     "tv_monitor": ("tv", ("tv", "television"), {"tv", "television"}),
-    "sofa": ("sofa", ("couch", "sofa"), {"couch", "sofa"}),
+    "sofa": ("couch", ("couch", "sofa"), {"couch", "sofa"}),
 }
 
 

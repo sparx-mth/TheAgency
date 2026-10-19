@@ -1,8 +1,8 @@
-"""GPU placement for the ObjectNav runtime's three processes: who gets the card, in which order, who falls back to the CPU.
+"""GPU placement for the benchmark runtime's three processes: who gets the card, in which order, who falls back to the CPU.
 
 The runtime is three processes on one workstation -- the room/node LLM
 (Ollama), the YOLO-World detector service and the Habitat renderer inside
-``gibson.run`` or ``hm3d.run`` -- and one GPU. Measured on the CPU, the LLM is the bottleneck
+``gibson.run`` -- and one GPU. Measured on the CPU, the LLM is the bottleneck
 by an order of magnitude (seconds per room-classifier call, minutes per
 node-oracle judgement on a 14B model), the detector next (a 640x480 YOLO-World
 X frame is hundreds of milliseconds on four cores), and the renderer last (a
@@ -32,8 +32,8 @@ it was decided on; the plan goes into the run directory and the frozen run
 configuration, never into the policy's observations.
 
 ```
-python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan            # JSON
-python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan --format env  # shell exports
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan            # JSON
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan --format env  # shell exports
 ```
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 LLM_OVERHEAD_FACTOR = 1.35
 YOLO_WORLD_X_MIB = 2048          # YOLO-World X-v2 + CLIP ViT-B/32 text encoder, 640x480 inference, fp32
 HABITAT_RENDER_MIB = 1536        # habitat-sim 0.2.4 headless, one agent, 640x480 RGB-D (observed 1.3 GB)
-DEFAULT_RESERVE_MIB = 512        # the display / driver headroom the run's GPU gate also keeps
+DEFAULT_RESERVE_MIB = 512        # the display / driver headroom the ``gibson.run`` GPU gate also keeps
 PARTIAL_FRACTION = 0.5           # an LLM whose estimate fits at least this far is offloaded partially, not pushed to the CPU
 
 #: What an operator may pin a component to (``GPU_PLAN_<COMPONENT>``); ``auto`` leaves it to the free VRAM.
@@ -96,7 +96,7 @@ class GpuPlan:
     reserve_mib: int
     free_mib: int
     placements: List[Placement] = field(default_factory=list)
-    shared: bool = False          # more than one of ours on the card: the run needs --allow-shared-gpu
+    shared: bool = False          # more than one of ours on the card: ``gibson.run`` needs --allow-shared-gpu
     warnings: List[str] = field(default_factory=list)
     pins: Dict[str, str] = field(default_factory=dict)   # the operator's word per component, for the record
 

@@ -38,7 +38,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import write_atomically
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     UTC, describe_summary, human_duration)
 
 #: The scalar fields of an ``episodes.jsonl`` row, in CSV column order. Nothing nested.

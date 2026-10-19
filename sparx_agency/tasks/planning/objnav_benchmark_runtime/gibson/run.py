@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-import hashlib
 import importlib
 import importlib.metadata
 import json
 import os
 from pathlib import Path
 import pickle
-import random
 import subprocess
 
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
@@ -18,14 +16,16 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES,
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import StopDiagnostic, build_policy  # noqa: F401
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import gpu_plan_record
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import AGENT_CHOICES, AGENT_HELP, build_policy
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (  # noqa: F401  (re-exported for the sibling CLIs)
+    explicit_episodes, gpu_plan_record, select_episodes, source_fingerprint)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import episodes_of_category as _episodes_of_category
 
 #: The frozen-config keys a ``--resume`` may be told to accept a change in -- each is provenance (which
 #: source, which device had the card) or a self-check that only refuses an episode, never an input to a
@@ -43,8 +43,10 @@ def parser():
     p.add_argument("--output", type=Path)
     p.add_argument("--preflight", action="store_true")
     p.add_argument("--print-vocabulary", action="store_true")
-    p.add_argument("--agent", choices=("rpt", "stop"), default="rpt")
-    p.add_argument("--policy-config", type=Path)
+    p.add_argument("--agent", choices=AGENT_CHOICES, default="rpt", help=AGENT_HELP)
+    p.add_argument("--policy-config", type=Path,
+                   help="JSON of RPTSettings overrides; with --agent falcon-yolo a nested \"baseline\" object holds "
+                        "the BaselineSettings (bootstrap_turns, exhausted_turns, ...)")
     p.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
     add_detector_options(p, url_default="http://127.0.0.1:8092")
     p.add_argument("--seed", type=int, default=0)
@@ -94,6 +96,9 @@ def parser():
 def episodes_of_category(ids, episodes, category):
     """The ids among ``ids`` whose published goal is ``category``, in the given order; all of them when None.
 
+    Gibson's view of the shared :func:`provenance.episodes_of_category`, bound
+    to its own category table.
+
     Args:
         ids: Episode ids, in split order.
         episodes: ``id -> GibsonEpisode`` (the dataset's mapping).
@@ -102,67 +107,7 @@ def episodes_of_category(ids, episodes, category):
     Raises:
         ValueError: The category is unknown, or no selected episode has it.
     """
-    if category is None:
-        return tuple(ids)
-    if category not in CATEGORIES:
-        raise ValueError("Unknown Gibson category %r (one of %s)" % (category, ", ".join(CATEGORIES)))
-    kept = tuple(episode_id for episode_id in ids if episodes[episode_id].category == category)
-    if not kept:
-        raise ValueError("No published %s episode in the selection" % category)
-    return kept
-
-
-def explicit_episodes(ids, pool):
-    """``ids`` as given, each checked against ``pool`` (the scene's and category's published ids).
-
-    Raises:
-        ValueError: On a duplicate, or an id outside the pool.
-    """
-    chosen = tuple(str(episode_id) for episode_id in ids)
-    if len(set(chosen)) != len(chosen):
-        raise ValueError("--episode-ids repeats an episode")
-    missing = [episode_id for episode_id in chosen if episode_id not in set(pool)]
-    if missing:
-        raise ValueError("--episode-ids not in the selected scene/category: %s" % ", ".join(missing))
-    return chosen
-
-
-def select_episodes(ids, limit=None, shards=1, shard_index=0, shuffle_seed=None):
-    """Stable sharding, then an optional seeded shuffle, before the explicit per-shard subset limit.
-
-    Args:
-        shuffle_seed: When given, the shard's ids are shuffled by a generator seeded from this
-            seed *and the ids themselves* (so two scenes with equally large pools draw different
-            positions) before ``limit`` applies: the limit is then a reproducible random sample
-            rather than the first ids in split order. The same seed over the same pool selects
-            the same ids.
-    """
-    if shards < 1 or not 0 <= shard_index < shards:
-        raise ValueError("Need shards >= 1 and 0 <= shard-index < shards")
-    if limit is not None and limit <= 0:
-        raise ValueError("--limit must be positive")
-    selected = tuple(ids)[shard_index::shards]
-    if shuffle_seed is not None:
-        tag = "%d\0%s" % (int(shuffle_seed), "\0".join(selected))
-        shuffled = list(selected)
-        random.Random(int.from_bytes(hashlib.sha256(tag.encode()).digest()[:8], "big")).shuffle(shuffled)
-        selected = tuple(shuffled)
-    if limit is not None:
-        selected = selected[:limit]
-    if not selected:
-        raise ValueError("Selection contains no episodes")
-    return selected
-
-
-def source_fingerprint():
-    """Hash actual Python sources, including dirty/untracked edits."""
-    package = Path(__file__).resolve().parents[4]
-    digest = hashlib.sha256()
-    for path in sorted(package.rglob("*.py")):
-        digest.update(str(path.relative_to(package)).encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    return _episodes_of_category(ids, episodes, category, CATEGORIES)
 
 
 def _runtime(issues):
@@ -184,7 +129,7 @@ def _runtime(issues):
 
 
 def _method(args, defaults=None):
-    """The policy and its frozen description; see :func:`policy_factory.build_policy`.
+    """The policy and its frozen description, bound to the Gibson label table (``policy_factory.build_policy``).
 
     Args:
         args: Parsed CLI; ``--policy-config`` JSON overrides every default.
@@ -193,11 +138,6 @@ def _method(args, defaults=None):
             ``allow_stair_traversal``, whose benchmark default is False.
     """
     return build_policy(args, gibson_label_mapper(), defaults=defaults)
-
-
-def _gpu_plan_record():
-    """The launcher's GPU placement plan, for the frozen configuration (``provenance.gpu_plan_record``)."""
-    return gpu_plan_record()
 
 
 def _gpu_gate(args):
@@ -258,7 +198,7 @@ def prepare(args):
             issues.append("Dataset/scorer: %s" % exc)
     try:
         policy, method = _method(args)
-        if args.agent == "rpt":
+        if args.agent in ("rpt", "falcon-yolo"):
             policy.target_projector = getattr(env, "target_projector", None)
             method["target_navmesh_projection"] = policy.target_projector is not None
     except Exception as exc:
@@ -273,7 +213,7 @@ def prepare(args):
               "category": args.category, "shuffle": bool(args.shuffle),
               "episode_ids": list(args.episode_ids) if args.episode_ids else None,
               "kinematics": asdict(PROTOCOL.kinematics()),
-              "gpu_plan": _gpu_plan_record(),
+              "gpu_plan": gpu_plan_record(),
               "full_split": (args.scene is None and args.limit is None and args.shards == 1 and args.category is None
                              and not args.episode_ids),
               "target_override": args.target_override,

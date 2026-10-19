@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, SearchNode
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingNodeOracle
+from sparx_agency.core.planning.object_search.rooms.oracle_retry import RepairingNodeOracle
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene import report
 

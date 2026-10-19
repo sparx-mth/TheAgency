@@ -71,12 +71,25 @@ PUBLISHED = {
     "reference_habitat_sim_version": "0.2.4",
 }
 
+#: The method's own sensor handling, identical to ``GibsonProtocol``'s so the
+#: same agent runs on both benchmarks: the pitch range the camera control keeps
+#: itself to (habitat-sim clamps nothing), and the depth-hole fill rule. None of
+#: these is a habitat-lab number; all of them are part of the method.
+METHOD_SIDE = {
+    "camera_tilt": True,
+    "min_pitch_deg": -30.0,
+    "max_pitch_deg": 60.0,
+    "depth_hole_fill": True,
+    "depth_hole_max_fraction": 0.5,
+    "depth_hole_min_rim": 0.5,
+}
+
 #: What each version calls itself. These three fields are the only ones the two
 #: published protocols are allowed to disagree about.
 IDENTITIES = {
-    "v1": {"dataset_version": "v1", "protocol_id": "hm3d-objectnav-v1-val/1",
+    "v1": {"dataset_version": "v1", "protocol_id": "hm3d-objectnav-v1-val/2",
            "benchmark": "hm3d_v1"},
-    "v2": {"dataset_version": "v2", "protocol_id": "hm3d-objectnav-v2-val/1",
+    "v2": {"dataset_version": "v2", "protocol_id": "hm3d-objectnav-v2-val/2",
            "benchmark": "hm3d_v2"},
 }
 
@@ -85,8 +98,16 @@ IDENTITIES = {
                          ids=["v1", "v2"])
 def test_published_protocols_carry_habitat_labs_objectnav_hm3d_numbers(protocol):
     """The manifest block is compared whole, so an added or edited field is a new experiment."""
-    expected = dict(PUBLISHED, **IDENTITIES[protocol.dataset_version])
+    expected = dict(PUBLISHED, **METHOD_SIDE, **IDENTITIES[protocol.dataset_version])
     assert asdict(protocol) == expected
+
+
+def test_method_side_fields_equal_gibsons():
+    """The pitch range and the depth-hole rule are the agent's, so they must read the same on both benchmarks."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL as GIBSON
+    gibson = asdict(GIBSON)
+    assert {key: gibson[key] for key in METHOD_SIDE} == METHOD_SIDE
+    assert HM3D_V1.depth_holes() == GIBSON.depth_holes()
 
 
 def test_the_two_dataset_versions_differ_only_in_identity_and_where_their_scenes_live():
@@ -133,15 +154,16 @@ def test_the_camera_reads_the_published_field_of_view_horizontally():
     assert replace(HM3D_V1, camera_height_m=1.2).camera().height_m == 1.2
 
 
-def test_actions_are_all_six_with_a_camera_pitch_habitat_never_clamps():
-    """A clamp invented here would refuse LOOKs habitat-sim executes, and half the tilt range with them."""
+def test_actions_are_all_six_with_the_methods_own_pitch_range():
+    """habitat-sim clamps no pitch; the bounds in the spec are the ones the camera control keeps to, Gibson's."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL as GIBSON
     spec = HM3D_V1.actions()
     assert spec.actions == ALL_ACTIONS and len(spec.actions) == 6
     assert spec.has_camera_tilt
     assert spec.allows(DiscreteAction.LOOK_UP)
     assert spec.allows(DiscreteAction.LOOK_DOWN)
-    assert spec.min_pitch_deg is None and spec.max_pitch_deg is None
-    assert spec.min_pitch_rad is None and spec.max_pitch_rad is None
+    assert (spec.min_pitch_deg, spec.max_pitch_deg) == (-30.0, 60.0)
+    assert (spec.min_pitch_deg, spec.max_pitch_deg) == (GIBSON.actions().min_pitch_deg, GIBSON.actions().max_pitch_deg)
     assert (spec.forward_step_m, spec.turn_angle_deg,
             spec.tilt_angle_deg) == (0.25, 30.0, 30.0)
 
@@ -174,7 +196,7 @@ def test_rescoring_at_another_radius_renames_the_protocol_and_leaves_the_officia
     assert APEXNAV_SUCCESS_DISTANCE_M == 0.2 != HM3D_V1.success_distance_m
     loose = HM3D_V1.with_success_distance(APEXNAV_SUCCESS_DISTANCE_M)
     assert loose.success_distance_m == 0.2
-    assert loose.protocol_id == "hm3d-objectnav-v1-val/1+success0.2m"
+    assert loose.protocol_id == "hm3d-objectnav-v1-val/2+success0.2m"
     # The radius is written without rounding, so no two radii share an id.
     # A fixed two-decimal format rendered 1 mm and 2 mm alike, and as "0.00m" --
     # a radius __post_init__ refuses outright.
@@ -185,7 +207,7 @@ def test_rescoring_at_another_radius_renames_the_protocol_and_leaves_the_officia
     assert {k for k in official if official[k] != rescored[k]} == {
         "success_distance_m", "protocol_id"}
     assert HM3D_V1.success_distance_m == 0.1
-    assert HM3D_V1.protocol_id == "hm3d-objectnav-v1-val/1"
+    assert HM3D_V1.protocol_id == "hm3d-objectnav-v1-val/2"
     with pytest.raises(FrozenInstanceError):
         HM3D_V1.success_distance_m = 0.2
 
@@ -255,4 +277,4 @@ def test_a_split_must_be_named(split):
 def test_a_renamed_split_still_composes_with_a_rescored_radius():
     """Development and re-scoring are independent deviations; both must show."""
     both = HM3D_V2.with_split("train").with_success_distance(0.2)
-    assert both.protocol_id == "hm3d-objectnav-v2-train/1+success0.2m"
+    assert both.protocol_id == "hm3d-objectnav-v2-train/2+success0.2m"

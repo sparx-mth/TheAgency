@@ -34,6 +34,28 @@ Alias normalization and overlap suppression belong before association, at the
 runtime's detector-vocabulary boundary. They must not use fuzzy target matching
 or turn distinct object classes into equivalent navigation goals.
 
+The object-search method's policy-free pieces live here too (they import
+nothing from `core/planning`; the method imports them):
+
+- `detection_dedup.py`: that alias/overlap suppression -- `deduplicate_detections`
+  folds `couch -> sofa`, `tv -> television` and drops a box that overlaps a
+  kept box of the same class by half (any class by 0.9). Works on any record
+  with `cls`, `conf`, `xyxy`.
+- `target_evidence.py`: `TargetEvidence`, multi-view support for one associated
+  landmark -- repeated sightings from separated viewpoints, a bounded
+  verification turn budget, a rejection cooldown. Fallible evidence that may
+  guide an approach, never a STOP by itself.
+- `box_extent.py`: `clipped_box` (a sliver at the frame's edge vs. a big object
+  filling the view vs. the camera's own floor cut) and `footprint_radius_m`
+  (half the box's width at its depth, clamped to indoor furniture).
+- `box_occluder.py`: `occluder_in_front` -- a second surface spanning the whole
+  box behind a nearer one that covers less of it and leaves its top band alone
+  (a seat back in front of a television), found from the depth alone, and the
+  depth band the coherence test shares.
+- `support_surface.py`: whether a box of another class is the surface the
+  target stands on (exact class membership, strict geometry under the
+  target's footprint).
+
 Tests: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest
 sparx_agency/core/mapping/objects/tests -q`.
 

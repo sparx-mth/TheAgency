@@ -274,3 +274,65 @@ def render_search_panel(search, size=(320, 720)):
             break
     return image
 
+
+
+def render_baseline_panel(snapshot, target, size=(320, 720)):
+    """The column for the FALCON + YOLO baseline: no loop, so what the explorer and the closing are doing.
+
+    Reads the same snapshot the step row holds (``exploration``,
+    ``target_closing``, ``stairs_seen``, ``fallback``): the explorer's mode and
+    FALCON's last verdict, the viewpoints observed and rejected, the
+    relocations, the closing's phase, candidate and releases, and the stairs
+    the building has seen on this storey.
+    """
+    image = np.full((size[1], size[0], 3), 24, np.uint8)
+    col = _Column(image)
+    exploration = snapshot.get("exploration") or {}
+    closing = snapshot.get("target_closing") or {}
+    col.line("TARGET: %s" % target, CYAN, bold=True)
+    col.line("method: FALCON + YOLO + closing (no LLM)", GREY)
+    col.gap()
+    col.line("EXPLORATION (goal-free planar FALCON)", CYAN, bold=True)
+    mode = str(exploration.get("mode", "?")).upper()
+    col.line("mode: %s" % mode, AMBER if mode == "RELOCATE" else GREEN if mode == "FALCON" else GREY)
+    col.line("last FALCON verdict: %s" % exploration.get("last_falcon_status", "-"), WHITE)
+    view = exploration.get("viewpoint")
+    if view:
+        col.line("viewpoint: cell %s yaw %.2f (frontier %s)" % (view.get("cell"), float(view.get("yaw_rad", 0.0)),
+                                                                  view.get("frontier")), WHITE, indent=8)
+    relocation = exploration.get("relocation")
+    if relocation:
+        col.line("relocating to %s (%s m, %s cells)" % (relocation.get("goal"), relocation.get("distance_m"),
+                                                         relocation.get("cells")), AMBER, indent=8)
+    exhausted = exploration.get("exhausted_decisions") or 0
+    if exhausted:
+        col.line("exhausted decisions: %d" % exhausted, RED, indent=8)
+    col.gap()
+    col.line("CLOSING (the full method's takeover)", CYAN, bold=True)
+    phase = str(closing.get("phase", "SEARCH"))
+    active = phase not in ("SEARCH", "RELEASED", "FAILED")
+    col.line("phase: %s%s" % (phase, " | LOCKED" if closing.get("locked") else ""), GREEN if active else GREY)
+    if closing.get("label") is not None:
+        xyz, pose = closing.get("xyz"), snapshot.get("pose")
+        rng = (math.hypot(xyz[0] - pose[0], xyz[1] - pose[1]) if xyz and pose else None)
+        col.line("candidate: %s  frames %s  range %s m%s" % (
+            closing.get("label"), closing.get("consecutive_frames"), _fmt(rng),
+            "  visible" if closing.get("visible") else ""), WHITE, indent=8)
+    if closing.get("last_release"):
+        col.line("last release: %s" % str(closing["last_release"])[:44], GREY, indent=8)
+    counters = [("releases", closing.get("releases")), ("inspection", closing.get("inspection_releases")),
+                ("stalled", closing.get("stall_releases")), ("boxed in", closing.get("boxed_releases")),
+                ("backoffs", closing.get("backoffs"))]
+    col.line("  ".join("%s %s" % (name, value) for name, value in counters if value), GREY, indent=8)
+    col.gap()
+    col.line("STAIRS (seen, masked, never taken)", CYAN, bold=True)
+    seen = snapshot.get("stairs_seen") or []
+    col.line("seen on this storey: %d" % len(seen), WHITE if seen else GREY)
+    for item in seen[:4]:
+        col.line(str(item)[:60], GREY, indent=8)
+    col.gap()
+    col.line("DETECTIONS this frame: %d  |  objects on map: %d" % (len(snapshot.get("detections") or ()),
+                                                                     len(snapshot.get("objects") or ())), WHITE)
+    for box in (snapshot.get("detections") or ())[:8]:
+        col.line("%s %.2f" % (box.get("label"), float(box.get("confidence", 0.0))), GREY, indent=8)
+    return image

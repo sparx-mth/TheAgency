@@ -20,7 +20,7 @@ from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosingSettings
+from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_target_closing import freeze_global
 
@@ -138,7 +138,7 @@ def test_a_retreat_spot_the_map_hides_the_target_from_is_not_a_wider_perspective
         if abs(y) > 0.30:
             world.grid[gy, gx] = world.values.occupied
     target = (0.8, 0.0, 0.5)
-    manoeuvre = __import__("sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_backoff",
+    manoeuvre = __import__("sparx_agency.core.planning.object_search.closing.target_backoff",
                            fromlist=["BackoffManeuver"]).BackoffManeuver(p, 3, 20)
     assert manoeuvre._sees(world, (-0.75, 0.0), target[:2]), "straight back through the door: in view"
     assert not manoeuvre._sees(world, (-0.75, 0.6), target[:2]), "behind the wall: hidden"
@@ -293,7 +293,7 @@ def test_the_verification_step_toward_a_close_candidate_tilts_by_its_elevation(m
 def test_a_candidate_not_confirmed_from_the_wider_perspective_is_released_for_good_and_not_re_manoeuvred(monkeypatch):
     """Markleeville 2026-10-08: a table read as a bed from 0.9 m, eight manoeuvres, eight unverified releases, each
     re-taken at 0.80 past the 'unverified' memory. Now: one manoeuvre, a non-overridable release, no repeat."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosing
     p, ep = open_floor_policy(monkeypatch)
     target = (0.8, 0.0, 0.5)
 
@@ -334,7 +334,7 @@ def test_a_confident_candidate_the_wider_perspective_misses_is_given_back_withou
     its landmark on the map was never a node again. Read at ``backoff_trust_confidence`` or better, the retreat
     spot is what failed: the release carries no rejection, and the box re-takes the closing from the sighting spot.
     (The first frame reads under the trust confidence here, so the manoeuvre is made at all -- see the next test.)"""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosing
     p, ep = open_floor_policy(monkeypatch, label="toilet")
     target = (0.8, 0.0, 0.5)
 
@@ -461,7 +461,7 @@ def test_a_fresh_near_edge_inside_the_terminal_radius_stops_before_the_standoff(
 
 # -- what the closing disproved from close binds the legacy pursuit, at any range (Markleeville/000000 re-fly) ----
 def test_a_disproved_release_refuses_the_legacy_pursuit_at_close_range_too(monkeypatch):
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosing
     p, ep = open_floor_policy(monkeypatch)
     target = (0.8, 0.0, 0.5)
 
@@ -482,7 +482,7 @@ def test_a_disproved_release_refuses_the_legacy_pursuit_at_close_range_too(monke
 def test_the_second_unverified_release_of_one_anchor_is_not_overridable():
     """Markleeville/000001 re-fly: 35 takeovers of one surface, each released 'unverified' after twelve actions,
     each restarted by a 0.80 box past that memory. The second release of the same anchor escalates."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosing
+    from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosing
     p, ep = setup_policy(target_closing={"backoff": False})
     box = DetectionWire("chair", .9, (280, 200, 360, 280))
     seen, blank = [box], []

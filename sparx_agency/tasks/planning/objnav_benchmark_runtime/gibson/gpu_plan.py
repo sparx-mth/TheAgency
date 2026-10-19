@@ -1,5 +1,4 @@
-"""Gibson's import path for the shared GPU placement plan (``..gpu_plan``); also its CLI."""
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan import *  # noqa: F401,F403
+"""Gibson's import path for the shared GPU placement plan (``..gpu_plan``); also its CLI (``run_benchmark.sh``)."""
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan import (  # noqa: F401
     COMPONENT_NAMES, DEFAULT_RESERVE_MIB, HABITAT_RENDER_MIB, LLM_OVERHEAD_FACTOR, PARTIAL_FRACTION, PINS,
     YOLO_WORLD_X_MIB, Component, GpuPlan, Placement, components, llm_need_mib, main, nvidia_smi_memory,

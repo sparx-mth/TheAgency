@@ -351,7 +351,8 @@ def test_the_public_episode_carries_no_privileged_metadata(tmp_path):
     assert observation.step == 0 and observation.target_category == "chair"
     assert set(fixture.env.evaluation_diagnostics()) == {
         "distance_to_goal_m", "path_length_m", "shortest_path_m",
-        "success_distance_m", "published_geodesic_m", "view_points"}
+        "success_distance_m", "published_geodesic_m", "view_points",
+        "collisions", "depth_holes"}
 
 
 def test_reset_starts_at_the_published_pose_and_refuses_a_navmesh_that_moves_it(tmp_path):

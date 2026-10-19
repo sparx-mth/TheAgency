@@ -63,7 +63,7 @@ def test_burst_reasoning_classifies_accumulated_evidence_without_reset():
 def test_one_frame_cannot_satisfy_deferred_classification_gate():
     """With a two-update gate, the same step counts once. (The default gate is one update: the
     landmarks are already confirmed across frames before they reach the labels.)"""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RevisableRoomLabels, RoomLabelSettings
+    from sparx_agency.core.mapping.topology.revisable_room_labels import RevisableRoomLabels, RoomLabelSettings
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import FakeLLM
     labels = RevisableRoomLabels(FakeLLM(), RoomLabelSettings(min_evidence_updates=2))
     objects = {1: ["chair", "sofa", "television"]}

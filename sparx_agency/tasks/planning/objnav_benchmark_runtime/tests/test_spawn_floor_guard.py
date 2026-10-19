@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
+from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
     FLIGHT, IN_A, STAIRS, STRUCTURE, loop_policy, obs_at, stair_policy)
@@ -152,11 +152,11 @@ def test_the_policy_plans_on_the_confined_world_and_the_recorder_sees_it():
 
 
 def test_entrypoint_defaults_sit_below_the_policy_config_and_above_the_settings_default(tmp_path, monkeypatch):
-    """``gibson.run._method``: RPTSettings default < entrypoint ``defaults`` < ``--policy-config``."""
+    """``policy_factory.build_policy`` (behind ``gibson.run._method``): RPTSettings default < entrypoint ``defaults`` < ``--policy-config``."""
     import json
     from types import SimpleNamespace
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import run
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import perception, services
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.services import http_detector, llm
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import FakeDetector, FakeLLM
 
     class Verified(FakeLLM):
@@ -174,8 +174,8 @@ def test_entrypoint_defaults_sit_below_the_policy_config_and_above_the_settings_
         def health(self):
             return {"metadata": {"backend": "yolo_world", "detector_config": {"conf_thresh": 0.05}}}
 
-    monkeypatch.setattr(services, "VerifiedLLMClient", Verified)
-    monkeypatch.setattr(perception, "HttpDetector", Detector)
+    monkeypatch.setattr(llm, "VerifiedLLMClient", Verified)
+    monkeypatch.setattr(http_detector, "HttpDetector", Detector)
     config = tmp_path / "policy.json"
     config.write_text(json.dumps({"allow_stair_traversal": False}))
 
@@ -193,7 +193,7 @@ def test_a_settled_half_level_is_adopted_as_part_of_the_spawn_storey_after_thirt
     landing for ever -- no map integrated, every route unplannable, 361 idle turns. After HALF_LEVEL_ACTIONS
     on the settled plateau the guard adopts it: a floor of its own, goals allowed, the storey below not a drop.
     A plateau a storey away (1.5 m or more) is never adopted."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.spawn_floor_guard import HALF_LEVEL_ACTIONS
+    from sparx_agency.core.planning.object_search.multifloor.spawn_floor_guard import HALF_LEVEL_ACTIONS
     policy, episode, world, _ = forbidden_stairs()
     atlas = policy.mapping.atlas
     policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
@@ -246,7 +246,7 @@ RUN_UP_STRUCTURE = dict(STRUCTURE, stair_connectors=[dict(STRUCTURE["stair_conne
 
 def test_the_floor_run_of_a_flight_is_not_masked_while_its_treads_are():
     """The polyline begins on the storey's own floor; within FLOOR_RUN_M of the plane it is floor, not flight."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import FLOOR_RUN_M
+    from sparx_agency.core.planning.object_search.world_model.peek_stairs import FLOOR_RUN_M
     policy, episode, world, _ = forbidden_stairs(metadata=RUN_UP_STRUCTURE)
     mask = stair_peek_mask(policy, world)
     assert mask.any()
@@ -264,7 +264,8 @@ def test_the_floor_run_of_a_flight_is_not_masked_while_its_treads_are():
 def test_an_agent_inside_the_stair_capsule_is_never_on_an_occupied_cell_and_can_plan_out(monkeypatch):
     """Collierville: the agent walked past the foot of a flight 0.6 m from its centreline; the capsule covered
     its cell as a GENUINE obstacle, A* had no start, and the fallback held for the rest of the episode."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import peek_stairs, spawn_floor_guard
+    from sparx_agency.core.planning.object_search.world_model import peek_stairs
+    from sparx_agency.core.planning.object_search.multifloor import spawn_floor_guard
     policy, episode, world, _ = forbidden_stairs()
     beside = (4.6, 1.3)                                              # 0.6 m east of the flight's first treads
     obs = at(episode, 0, *beside)
@@ -317,7 +318,7 @@ def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_t
     wall, 0.55 m wide; the 0.6 m capsule left 0.25 m of it. Here the flight stands 0.7 m from room A's east
     wall with a cabinet run closing its west side, so that corridor is the only way north."""
     from scipy import ndimage
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import _passable
+    from sparx_agency.core.planning.object_search.world_model.peek_stairs import _passable
     policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(4.8))     # 0.7 m from the wall
     world.grid[5:55, 30:46] = world.values.occupied                                 # x 3.0-4.6, y 0.5-5.5: no way round
     obs = obs_at(episode, 0, (5.25, 0.7))                                            # at the corridor's south end

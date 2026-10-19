@@ -1,8 +1,7 @@
-"""Gibson's import path for the shared run progress and lean records (``..progress``); also its CLI."""
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import *  # noqa: F401,F403
+"""Gibson's import path for the shared run progress and lean records (``..progress``); also its CLI (``run_benchmark.sh``)."""
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (  # noqa: F401
-    LEAN_DROP_KEYS, UTC, LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker, describe_progress,
-    describe_summary, human_duration, lean_episode_info, main)
+    LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker, describe_progress, describe_summary, human_duration,
+    lean_episode_info, main)
 
 if __name__ == "__main__":
     raise SystemExit(main())

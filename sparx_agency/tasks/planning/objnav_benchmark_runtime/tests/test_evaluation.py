@@ -24,6 +24,10 @@ class Env(CorridorEnv):
         super().__init__({"one": 1.0, "two": 1.0})
         self.closed = False
 
+    def evaluation_diagnostics(self):
+        """The recorder reads the scorer's diagnostics after every reset and step."""
+        return {}
+
     def close(self):
         self.closed = True
 
@@ -58,15 +62,22 @@ def test_shared_evaluation_records_without_privileged_telemetry_and_resumes(tmp_
                              config={"purpose": "synthetic"}, record=True, writer_factory=Sink)
     assert summary.overall.success_rate == 1.0 and env.closed
     assert len(list(output.glob("recordings/*/trajectory.csv"))) == 2
-    text = (output / "index.html").read_text()
-    assert "corridor / test" in text and "configured evaluator" in text
-    assert "Gibson" not in text and "SemExp" not in text
-    assert 'href="comparison.md"' not in text
+    assert (output / "index.html").is_file()
     env = Env()
     resumed = run_evaluation(env, LinePolicy(), fake_label_mapper(), output=output,
                              config={"purpose": "synthetic"}, resume=True, dashboard=False)
     assert resumed.overall.n_episodes == 2 and env.resets == [] and env.closed
     assert (output / "episodes.jsonl").read_text().count("\n") == 2
+
+
+def test_shared_dashboard_is_benchmark_neutral(tmp_path):
+    env, output = Env(), tmp_path / "run"
+    run_evaluation(env, LinePolicy(), fake_label_mapper(), output=output,
+                   config={"purpose": "synthetic"}, record=True, writer_factory=Sink)
+    text = (output / "index.html").read_text()
+    assert "corridor / test" in text and "configured evaluator" in text
+    assert "Gibson" not in text and "SemExp" not in text
+    assert 'href="comparison.md"' not in text
 
 
 def test_frozen_configuration_is_checked_before_reset_or_output(tmp_path):

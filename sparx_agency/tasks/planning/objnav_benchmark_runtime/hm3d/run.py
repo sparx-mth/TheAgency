@@ -25,7 +25,8 @@ from sparx_agency.core.planning.objnav.labels.datasets.hm3d import hm3d_label_ma
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import StopDiagnostic, build_policy  # noqa: F401
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import (  # noqa: F401  (StopDiagnostic re-exported for the sibling CLIs)
+    AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
@@ -63,7 +64,7 @@ def parser():
     p.add_argument("--output", type=Path)
     p.add_argument("--preflight", action="store_true")
     p.add_argument("--print-vocabulary", action="store_true")
-    p.add_argument("--agent", choices=("rpt", "stop"), default="rpt")
+    p.add_argument("--agent", choices=AGENT_CHOICES, default="rpt", help=AGENT_HELP)
     p.add_argument("--policy-config", type=Path,
                    help="JSON object of RPTSettings overrides")
     p.add_argument("--explorer", choices=("frontier", "falcon"), default=None,
@@ -276,7 +277,7 @@ def prepare(args):
             issues.append("Dataset/scorer: %s" % exc)
     try:
         policy, method = _method(args, protocol)
-        if args.agent == "rpt":
+        if args.agent in ("rpt", "falcon-yolo"):
             policy.target_projector = getattr(env, "target_projector", None)
             method["target_navmesh_projection"] = policy.target_projector is not None
     except Exception as exc:

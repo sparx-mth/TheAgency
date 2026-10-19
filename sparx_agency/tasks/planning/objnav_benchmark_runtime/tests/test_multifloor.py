@@ -7,14 +7,14 @@ import math
 import numpy as np
 import pytest
 
-from sparx_agency.core.planning.exploration.floor_atlas import FloorAtlas, MultiFloorParams
+from sparx_agency.core.localization.floor_atlas import FloorAtlas, MultiFloorParams
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_distance import MultiFloorDistance
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.exploration_metrics import ExplorationMetrics
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.observed_map import ObservedMap
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_terrain import StairTerrain
+from sparx_agency.core.planning.object_search.exploration.exploration_metrics import ExplorationMetrics
+from sparx_agency.core.planning.object_search.world_model.observed_map import ObservedMap
+from sparx_agency.core.planning.object_search.world_model.stair_terrain import StairTerrain
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import EpisodeRecorder
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 
@@ -245,7 +245,7 @@ def test_yolo_only_is_the_default_detector_pipeline_everywhere():
     import json
     from pathlib import Path
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import compare_explorers, distinct_buildings, run, run_development
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import DEFAULT_DETECTOR_BACKEND, detector_flags
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import DEFAULT_DETECTOR_BACKEND, detector_flags
     assert DEFAULT_DETECTOR_BACKEND == "yolo_world"
     development = run_development.parser().parse_args(["--manifest", "e.json", "--scene", "A", "--output", "r",
                                                        "--explorer", "frontier", "--detector-url", "http://localhost:18095"])
