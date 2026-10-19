@@ -257,7 +257,7 @@ export LLM_TIMEOUT_S="${LLM_TIMEOUT_S:-120}"
 VENV_PY="${REPO_ROOT}/.venv/bin/python"
 NAVDP_PY="${HOME}/miniconda3/envs/navdp/bin/python"
 DETECT_PORT="${DETECT_PORT:-8092}"
-DETECT_MODEL="${DETECT_MODEL:-${REPO_ROOT}/yolov8s-worldv2.pt}"
+DETECT_MODEL="${DETECT_MODEL:-${REPO_ROOT}/yolov8x-worldv2.pt}"
 OLLAMA_NAME="ollama-scene-graph"
 
 say "world=${WORLD}  target='${TARGET}'  out=${OUT_DIR}"
@@ -474,7 +474,7 @@ if detect_healthy; then
     say "reusing the healthy detection server on :${DETECT_PORT}"
 else
     [[ -f "${DETECT_MODEL}" ]] || die "YOLO-World checkpoint missing: ${DETECT_MODEL}
-  (gitignored, per-device — download yolov8s-worldv2.pt to the repo root, or
+  (gitignored, per-device — provision yolov8x-worldv2.pt in the repo root, or
   set DETECT_MODEL=/path/to/it)"
     say "starting the detection server on :${DETECT_PORT} (log: ${OUT_DIR}/detection_server.log)..."
     # cd "$HOME", NEVER the repo: ultralytics silently downloads checkpoints

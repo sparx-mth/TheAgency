@@ -57,6 +57,7 @@ def _drive(env: ObjNavEnv, agent: ObjNavAgent, episode: ObjNavEpisode,
     sent = 0
     action = _STOP
     agent_error = None
+    moved = False      # until the first action that displaces the agent (its first translation)
     # checked_reset refused an episode already over. Forced STOP ends it.
     while not env.episode_over:
         action, agent_error = decide(agent, observation, episode.action_spec, mode)
@@ -65,7 +66,9 @@ def _drive(env: ObjNavEnv, agent: ObjNavAgent, episode: ObjNavEpisode,
         sent += 1
         counts[action.name] += 1
         check_step(env, episode, observation, action, sent, before=before,
-                   kinematics=kinematics)
+                   kinematics=kinematics, moved=moved)
+        if observation.pose.position() != before.position():
+            moved = True
         positions.append(observation.pose.position())
     return _Trace(tuple(positions), counts, sent, action, agent_error)
 
@@ -140,10 +143,10 @@ def run_episode(env: ObjNavEnv, agent: ObjNavAgent, episode_id: str, *,
         kinematics: Realised-action tolerance; None disables only motion checks.
         expected: Required (benchmark, split), or None for any identity.
         clock: Seconds for wall_s, read before reset and after the episode.
-        path_length_dimension: '3d' by default; 'planar' only when required by
-            the adapter's declared protocol. Record this in the run config.
-        path_length_epsilon_m: Explicit initial accumulator, 0 by default.
-            Record a protocol-specific override in the run config too.
+        path_length_dimension: '3d' by default; 'planar' for SemExp Gibson's
+            horizontal travel accounting. Record this in the run config.
+        path_length_epsilon_m: Initial accumulator, 0 by default; SemExp uses
+            1e-5 m. Record this in the run config too.
 
     Returns:
         A scored record. Infinite final/native distances are stored as None.

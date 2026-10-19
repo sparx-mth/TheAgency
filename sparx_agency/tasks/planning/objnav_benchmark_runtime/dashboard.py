@@ -16,15 +16,15 @@ STYLE = """body{background:#101722;color:#e4edf7;font:16px system-ui;margin:30px
 a{color:#7acfff}h1,h2{color:#a9dcff}.cards{display:flex;gap:18px;flex-wrap:wrap}.card{padding:18px 28px;background:#1c2b3b;border-radius:12px}.value{font-size:30px}img,video{max-width:100%;border:1px solid #405266;border-radius:8px}pre{white-space:pre-wrap;background:#182432;padding:16px}table{border-collapse:collapse;width:100%}td,th{padding:10px;border-bottom:1px solid #3c4b5c}small{color:#acbccb}.warning{background:#453322;padding:14px;border-left:5px solid #e0a953}button{padding:14px;font-size:17px;cursor:pointer}"""
 
 
-def write_live_page(root, title="ObjectNav evaluation"):
+def write_live_page(root):
     """Browser-visible live view; only local artifacts are fetched."""
     root = Path(root)
-    text = """<!doctype html><meta charset="utf-8"><title>%s</title>
-<style>%s</style><h1>%s</h1>
-<p class="warning">Waiting/running is not a measured result. Published-split coverage is not established by this live view.</p>
+    text = """<!doctype html><meta charset="utf-8"><title>Gibson single-scene demo</title>
+<style>%s</style><h1>Gibson: one-scene algorithm demo</h1>
+<p class="warning">Waiting/running is not a measured result. No aggregate Gibson score is claimed.</p>
 <p><a href="index.html">Final metrics and recordings</a></p><pre id="status">Waiting for first recorded frame…</pre>
 <img id="frame" alt="Live RGB-D, observed map, detections, paths and room reasoning">
-<script>setInterval(async()=>{try{let s=await(await fetch('live.json?t='+Date.now())).json();document.getElementById('status').textContent=JSON.stringify(s,null,2);document.getElementById('frame').src='latest.jpg?t='+Date.now()}catch(e){}},1500)</script>""" % (html.escape(title), STYLE, html.escape(title))
+<script>setInterval(async()=>{try{let s=await(await fetch('live.json?t='+Date.now())).json();document.getElementById('status').textContent=JSON.stringify(s,null,2);document.getElementById('frame').src='latest.jpg?t='+Date.now()}catch(e){}},1500)</script>""" % STYLE
     write_atomically(root / "live.html", text)
 
 
@@ -39,8 +39,8 @@ def _plots(root, records, summary):
     axes[0].bar(labels, values, color=("#58b687", "#558cdf", "#c092df"))
     axes[0].set(ylim=(0, 1.05), ylabel="Fraction", title="Observed episodes, failures included")
     axes[1].bar([str(i + 1) for i in range(len(records))],
-                [r.distance_to_goal_m if r.distance_to_goal_m is not None else float("nan") for r in records], color="#e3a34f")
-    axes[1].set(xlabel="Episode", ylabel="Evaluator distance (m)", title="Final DTG; unreachable values omitted")
+                [r.distance_to_goal_m if r.distance_to_goal_m is not None else 0 for r in records], color="#e3a34f")
+    axes[1].set(xlabel="Episode", ylabel="DTG / distance to success (m)", title="Final reference FMM distance")
     fig.tight_layout()
     fig.savefig(root / "metrics.png", dpi=140)
     plt.close(fig)
@@ -61,7 +61,7 @@ def _plots(root, records, summary):
         axes[0].set_aspect("equal", adjustable="datalim")
         dtg = [float(r["distance_to_goal_m"]) if r["distance_to_goal_m"] else float("nan") for r in rows]
         axes[1].plot(steps, dtg, color="#c38b30", label="Evaluator-only DTG")
-        axes[1].set(xlabel="Executed action index", ylabel="Distance (m)", title="Evaluator-only progress")
+        axes[1].set(xlabel="Executed action index", ylabel="Distance (m)", title="Progress toward success boundary")
         axes[1].legend()
         fig.tight_layout()
         fig.savefig(directory / "trajectory.png", dpi=140)
@@ -85,7 +85,7 @@ def write_dashboard(root):
     without_stop = sum(record.success and not record.stop_called for record in records)
     if without_stop:
         cards += ('<p class="warning"><strong>Protocol success without STOP: %d episode(s).</strong> '
-                  'The configured evaluator permits success without an explicit STOP. '
+                  'SemExp scores the final position inside the success region even at the step limit. '
                   'This does not establish that the algorithm explicitly declared the target found.</p>'
                   % without_stop)
     rows = []
@@ -121,10 +121,8 @@ def write_dashboard(root):
         sections.append('<h2>%s</h2>%s<p><small>Playback is accelerated: one frame per decision, not wall time.</small></p><img src="%s/trajectory.png" alt="Executed path and DTG curve"><p><a href="%s/steps.jsonl">Decisions/detections/reasoning JSONL</a> · <a href="%s/trajectory.csv">Trajectory CSV</a> · <a href="%s/metrics.json">Episode metrics</a></p><details><summary>Recorded room labels and LLM reasons</summary><pre>%s</pre></details>' %
                         (title, video, relative, relative, relative, relative,
                          html.escape("\n\n".join(reasons) or "No room-reasoning query completed in this episode.")))
-    title = html.escape("%s / %s ObjectNav results" % (summary.benchmark, summary.split))
-    comparison = '<a href="comparison.md">Qualified comparison</a>' if (root / "comparison.md").exists() else ""
-    text = '<!doctype html><meta charset="utf-8"><title>%s</title><style>%s</style><h1>%s</h1><p class="warning">%d completed episode(s). Metrics describe only the listed episodes, not automatically a complete published split. One-episode SR is 0 or 1. DTG follows the configured evaluator; SoftSPL is supplementary. Published SOTA equivalence is not established.</p><div class="cards">%s</div><p><a href="metrics.csv">All metrics CSV</a> <a href="run.json">Configuration/provenance</a> %s</p><img src="metrics.png" alt="Metric graphs"><table><tr>%s</tr>%s</table>%s' % (
-        title, STYLE, title, len(records), cards, comparison,
+    text = '<!doctype html><meta charset="utf-8"><title>Gibson demo results</title><style>%s</style><h1>Gibson one-scene demo results</h1><p class="warning">%d completed episode(s). This is a diagnostic subset, NOT a full Gibson benchmark. One-episode SR is 0 or 1. DTG is SemExp distance to the success region; SoftSPL is supplementary. Published SOTA equivalence is not established.</p><div class="cards">%s</div><p><a href="metrics.csv">All metrics CSV</a> · <a href="run.json">Configuration/provenance</a> · <a href="comparison.md">Qualified paper comparison</a></p><img src="metrics.png" alt="Metric graphs"><table><tr>%s</tr>%s</table>%s' % (
+        STYLE, len(records), cards,
         "".join("<th>%s</th>" % h for h in ("Episode", "Scene", "Target", "Success", "SPL", "DTG", "SoftSPL",
                                            "Steps", "Wall s", "STOP", "Termination", "Error")),
         "".join(rows), "".join(sections))

@@ -1,4 +1,4 @@
-"""Scene-graph YOLO-World HTTP service; no ROS, lazy model imports.
+"""Selectable YOLO / grounded detection and BLIP-2 service; lazy model imports.
 
 Threaded requests share one serialized detector. GET /health returns model,
 device, classes, metadata and frames_served. POST /detect accepts JPEG bytes
@@ -7,16 +7,17 @@ with inference. Metadata identifies checkpoint bytes, configuration and
 library versions. POST /set_classes changes the vocabulary explicitly.
 
 Use --device cpu for a CPU detector while Habitat owns the rendering GPU.
+The default is the local yolov8x-worldv2.pt checkpoint in the working directory.
 A missing checkpoint or unavailable requested device fails at startup; there
-is no automatic model download or CPU fallback. --selftest needs no model.
+is no checkpoint substitution or CPU fallback. --selftest needs no model.
 """
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from copy import deepcopy
 import hashlib
-import importlib.metadata
 import json
+import resource
 import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,9 +28,10 @@ import numpy as np
 
 from sparx_agency.core.common.types.perception import Detection2D
 from sparx_agency.core.mapping.interfaces.detection_model import DetectionModel
+from sparx_agency.tasks.mapping.scene_graph.serve.backends import (
+    build_detector, refresh_vocabulary_metadata)
+from sparx_agency.tasks.mapping.scene_graph.serve.detector_args import parse_args
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import (
-    DEFAULT_HOSPITAL_VOCABULARY,
-    DEFAULT_PORT,
     DetectionWire,
     decode_frame,
     detections_to_json,
@@ -120,19 +122,25 @@ class _DetectionHandler(BaseHTTPRequestHandler):
 
     def _handle_detect(self) -> None:
         ctx = self.server.ctx  # type: ignore[attr-defined]
-        bgr = decode_frame(self._read_body())
+        body = self._read_body()
+        bgr = decode_frame(body)
         rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         t0 = time.perf_counter()
         with ctx.lock:
             dets = ctx.detector.detect(rgb)
             classes = list(ctx.classes)
             metadata = dict(ctx.metadata)
+            diagnostics = (deepcopy(ctx.detector.diagnostics())
+                           if hasattr(ctx.detector, "diagnostics") else {})
             ctx.frames_served += 1
         self._send_json({
             "w": int(bgr.shape[1]), "h": int(bgr.shape[0]),
             "ms": float((time.perf_counter() - t0) * 1000.0),
+            "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
             "classes": classes, "metadata": metadata,
             "detections": detections_to_json(_wire_from_core(dets)),
+            "diagnostics": diagnostics,
+            "request_sha256": hashlib.sha256(body).hexdigest(),
         })
 
     def _handle_set_classes(self) -> None:
@@ -150,6 +158,7 @@ class _DetectionHandler(BaseHTTPRequestHandler):
         with ctx.lock:                                 # never mid-detect
             ctx.detector.set_prompts(cleaned)          # re-prompts a loaded model
             ctx.classes = cleaned
+            ctx.metadata = refresh_vocabulary_metadata(ctx.detector, ctx.metadata)
         print("%s vocabulary set to %d classes" % (_TAG, len(cleaned)))
         self._send_json({"ok": True, "classes": cleaned})
 
@@ -163,41 +172,15 @@ def _make_server(ctx: _ServerContext, host: str, port: int) -> ThreadingHTTPServ
 
 
 # ── startup (the torch-touching side; all heavy imports live in here) ────────
-def _build_real_detector(args: argparse.Namespace) -> DetectionModel:
-    """Construct and warm-load the YOLO-World detector; fail LOUDLY on any gap.
-
-    Startup aborts (non-zero exit) when the checkpoint is missing, torch cannot
-    be imported, or a ``cuda:*`` device is requested without CUDA available.
-    The warm-up detect forces the (otherwise lazy) model load so a bad
-    checkpoint dies here, not on the first client frame.
-    """
-    model_path = Path(args.model)
-    if not model_path.is_file():
-        raise SystemExit("%s [fatal] model checkpoint not found: %s"
-                         % (_TAG, model_path))
-    if args.device.startswith("cuda"):
-        try:
-            import torch  # lazy: conda-side only
-        except ImportError as exc:
-            raise SystemExit("%s [fatal] --device %s but torch is not importable "
-                             "(wrong interpreter? use the conda env): %s"
-                             % (_TAG, args.device, exc))
-        if not torch.cuda.is_available():
-            raise SystemExit("%s [fatal] --device %s but CUDA is unavailable; "
-                             "no silent CPU fallback — pass --device cpu "
-                             "explicitly if that is what you want"
-                             % (_TAG, args.device))
-    from sparx_agency.core.mapping.detection.yolo_world import (
-        YoloWorldConfig,
-        YoloWorldDetector,
-    )
-    detector = YoloWorldDetector(YoloWorldConfig(
-        model_path=str(model_path), device=args.device, conf_thresh=args.conf))
-    detector.set_prompts(_parse_classes(args.classes))
-    print("%s warm-loading %s on %s ..." % (_TAG, model_path.name, args.device))
-    detector.detect(np.zeros((64, 64, 3), dtype=np.uint8))  # forces model load
+def _build_real_detector(args: argparse.Namespace):
+    """Fail at startup, rather than serving a substituted or half-loaded model."""
+    print("%s warm-loading %s on %s ..." % (_TAG, args.backend, args.device))
+    try:
+        result = build_detector(args, _parse_classes(args.classes))
+    except Exception as exc:
+        raise SystemExit("%s [fatal] %s: %s" % (_TAG, args.backend, exc)) from exc
     print("%s model ready" % _TAG)
-    return detector
+    return result
 
 
 def _parse_classes(spec: str) -> List[str]:
@@ -208,28 +191,6 @@ def _parse_classes(spec: str) -> List[str]:
     return classes
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", default=None,
-                   help="Path to the YOLO-World .pt checkpoint (REQUIRED "
-                        "unless --selftest)")
-    p.add_argument("--device", default="cuda:0",
-                   help="Torch device (default cuda:0; pass cpu explicitly "
-                        "for a CPU run)")
-    p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT)
-    p.add_argument("--conf", type=float, default=0.25,
-                   help="Confidence threshold (downstream mapper filters again)")
-    p.add_argument("--classes", default=",".join(DEFAULT_HOSPITAL_VOCABULARY),
-                   help="Comma-separated vocabulary (default: the hospital list)")
-    p.add_argument("--selftest", action="store_true",
-                   help="Exercise request routing against a stub detector "
-                        "(no model, no torch) and exit")
-    args = p.parse_args(argv)
-    if not args.selftest and not args.model:
-        p.error("--model is required (unless --selftest)")
-    return args
 
 
 def main() -> None:
@@ -238,15 +199,7 @@ def main() -> None:
         from sparx_agency.tasks.mapping.scene_graph.serve.selftest import run_selftest
         run_selftest()
         return
-    detector = _build_real_detector(args)
-    digest = hashlib.sha256()
-    with Path(args.model).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    metadata = {"checkpoint_sha256": digest.hexdigest(),
-                "detector_config": asdict(detector.cfg),
-                "packages": {name: importlib.metadata.version(name)
-                             for name in ("torch", "ultralytics", "numpy")}}
+    detector, metadata = _build_real_detector(args)
     ctx = _ServerContext(detector, model_name=Path(args.model).name,
                          device=args.device, classes=_parse_classes(args.classes),
                          metadata=metadata)

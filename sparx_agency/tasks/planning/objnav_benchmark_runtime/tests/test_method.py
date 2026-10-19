@@ -1,26 +1,46 @@
 """Headless method regressions; fake services, real geometry and core algorithms."""
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 
 import numpy as np
 import pytest
 
-from sparx_agency.tasks.planning.objnav_benchmark.fake_env.labels import fake_label_mapper
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import camera, actions, settings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
+
+#: The published four-action set. The component fixtures below isolate the room and target
+#: machinery on it; the benchmark protocol itself carries the LOOK pair (``camera_tilt``), and the
+#: tests of the pitch servo ask for a tilt-enabled spec explicitly (``MULTIFLOOR_PROTOCOL``).
+BODY_ACTIONS_PROTOCOL = replace(PROTOCOL, camera_tilt=False)
 
 
 class FakeLLM:
-    def chat_json(self, system, user):
+    """Every model role at once: room classifier and node oracle -- all neutral.
+
+    The node oracle's prompt is answered with an equal share per node and a
+    small ``elsewhere``; ``reasoning=True`` (the runtime's route to the
+    reasoning model) is accepted and recorded.
+    """
+
+    def __init__(self):
+        self.reasoning_calls = 0
+
+    def chat_json(self, system, user, **kwargs):
+        if kwargs.get("reasoning"):
+            self.reasoning_calls += 1
         if "Room observed objects" in user:
             return {"label": "living_room", "confidence": 0.8, "reasoning": "objects"}
-        return {"rooms": [{"id": int(pid), "score": 50, "why": "unknown room"}
-                          for pid in re.findall(r"id=(\d+)", user)]}
+        ids = [int(nid) for nid in re.findall(r"^id=(\d+)", user, re.MULTILINE)]
+        share = max(1, int(round(90 / max(1, len(ids)))))
+        return {"nodes": [{"id": nid, "why": "no opinion", "p": share} for nid in ids],
+                "elsewhere": max(0, 100 - share * len(ids))}
 
 
 class FakeDetector:
@@ -32,12 +52,34 @@ class FakeDetector:
         return [row, row] if self.duplicate else [row]
 
 
-def setup_policy(label="chair", duplicate=False):
-    episode = ObjNavEpisode("synthetic/0", "synthetic", "synthetic", "development", "chair",
-                            camera(), actions(), 500)
-    policy = RPTSearchPolicy(FakeDetector(label, duplicate), FakeLLM(),
-                             settings())
-    policy.reset(episode, fake_label_mapper().target_labels("chair"))
+def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
+    """A policy on a 20 m synthetic map; ``overrides`` are RPTSettings fields
+    (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests).
+    ``llm`` replaces the neutral :class:`FakeLLM` for every model role."""
+    discovery = overrides.pop("discovery", False)
+    segmenter = overrides.pop("segmenter", None)          # with segmentation=True: the fake SAM service
+    if not discovery:
+        overrides.setdefault("doorway_peek", {"enabled": False})
+    closing = overrides.get("target_closing")
+    if closing is None or isinstance(closing, dict):
+        # The STOP overshoot is its own stage after the decision (``TargetClosing._terminal``): the
+        # decision tests read the STOP on the deciding frame, and the overshoot's tests name its knobs.
+        closing = dict(closing or {})
+        if not any(key.startswith("stop_overshoot") for key in closing):
+            closing.update(stop_overshoot_steps=0, stop_overshoot_max_steps=0)
+        overrides["target_closing"] = closing
+    camera = PROTOCOL.camera()
+    episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
+                            camera, BODY_ACTIONS_PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
+    policy = RPTSearchPolicy(FakeDetector(label, duplicate), llm or FakeLLM(),
+                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)), segmenter=segmenter)
+    policy.reset(episode, gibson_label_mapper().target_labels("chair"))
+    if not discovery:
+        policy.warmup_actions = policy.settings.warmup_steps  # this fixture isolates the existing room/target components
+        policy._warmup_pending = False                        # ... and records no warm-up scan for the spawn room
+        # Stair/solver unit fixtures start after mandatory discovery. Tests of
+        # the actual coverage gate use discovery=True or install a fresh peek.
+        policy.peek.floor_ready = lambda: True
     return policy, episode
 
 
@@ -52,14 +94,14 @@ def test_target_confirmation_uses_distinct_frames_and_reset_clears_memory():
     policy, episode = setup_policy(duplicate=True)
     first = policy.plan(observation(episode, 0))
     assert not first.stop
-    assert len(policy.landmarks) == 1
-    assert policy.landmarks.all_landmarks()[0].count == 1
-    assert not policy.plan(observation(episode, 1)).stop
-    from dataclasses import replace
-    distinct_view = replace(observation(episode, 2), pose=AgentPose(0, 0.25, 0, 0))
-    assert policy.plan(distinct_view).stop
+    assert policy.closing.count == 1
+    assert policy.plan(observation(episode, 0)) is first
+    assert policy.closing.count == 1
+    assert policy.plan(observation(episode, 1)).stop
+    assert policy.closing.locked
     policy.reset(episode, policy.target)
     assert len(policy.landmarks) == 0
+    assert not policy.closing.active
     assert not policy.plan(observation(episode, 0)).stop
 
 
@@ -88,7 +130,7 @@ def test_missing_llm_is_not_silently_run_as_uniform():
                                     {"map_size_m": float("nan")}, {"stop_distance_m": 0}])
 def test_invalid_method_settings_refused(kwargs):
     with pytest.raises(ValueError):
-        settings(**kwargs)
+        RPTSettings(**kwargs)
 
 
 def test_approach_arrival_band_is_inside_stop_radius(monkeypatch):
@@ -110,13 +152,14 @@ def test_approach_arrival_band_is_inside_stop_radius(monkeypatch):
 
 def test_nearby_frontier_is_retired_not_idled_forever(monkeypatch):
     from types import SimpleNamespace
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import rpt_policy
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods import frontier_sweep
     policy, episode = setup_policy()
     policy._goal = (0.25, 0.0)
     policy.route_memory.kind = "frontier"
-    monkeypatch.setattr(rpt_policy, "in_room_frontier_goals", lambda *args: [(0.25, 0.0)])
-    goal = policy._frontier(observation(episode, 1), SimpleNamespace(resolution=0.1), None, None)
-    assert goal is None and (0.25, 0.0) in policy._visited_frontiers
+    monkeypatch.setattr(frontier_sweep, "ranked_frontier_goals",
+                        lambda *args, **kwargs: [SimpleNamespace(xy=(0.25, 0.0))])
+    goals = policy.sweep._goals(observation(episode, 1), SimpleNamespace(resolution=0.1), None, None)
+    assert goals == [] and (0.25, 0.0) in policy._visited_frontiers
 
 
 def test_observed_mapping_reaches_llm_rpt_and_astar():

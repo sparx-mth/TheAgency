@@ -1,0 +1,7 @@
+# Optional model-side environment ONLY; never install into the core/test venv.
+# Torch/torchvision are provisioned separately for the actual CPU/CUDA device.
+# Tested with torch 2.11.0+cu128 and torchvision 0.26.0+cu128.
+transformers==5.17.0
+huggingface-hub==1.8.0
+safetensors==0.8.0
+tokenizers==0.23.2

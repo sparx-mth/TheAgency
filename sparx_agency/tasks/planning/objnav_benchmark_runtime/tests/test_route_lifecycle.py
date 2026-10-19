@@ -9,7 +9,7 @@ from sparx_agency.core.planning.objnav.action_converter.converter import Discret
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import actions
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidence
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
@@ -43,7 +43,7 @@ def test_nearby_endpoint_does_not_finish_unwalked_return_leg(monkeypatch):
 
 @pytest.mark.parametrize("endpoint,tolerance", [(0.25, 0.3), (0.12, 0.05), (1.0, 0.3)])
 def test_route_arrival_matches_actual_converter(endpoint, tolerance):
-    spec = actions()
+    spec = PROTOCOL.actions()
     params = replace(ActionConverterParams(), goal_tolerance_m=tolerance)
     route = CommittedRoute(spec, params)
     obs = SimpleNamespace(step=0, pose=AgentPose(0, 0, 0, 0))
@@ -86,7 +86,7 @@ def test_rejected_hypothesis_requires_new_evidence_after_cooldown():
 
 
 def test_obstruction_replans_cannot_reset_stationary_timeout_forever():
-    route = CommittedRoute(actions(), ActionConverterParams())
+    route = CommittedRoute(PROTOCOL.actions(), ActionConverterParams())
     path = SimpleNamespace(points=[Pose2D(0, 0), Pose2D(3, 0)])
     planner = SimpleNamespace(path_collides=lambda *a, **k: True)
     obs = SimpleNamespace(step=0, pose=AgentPose(0, 0, 0, 0))
@@ -101,7 +101,7 @@ def test_obstruction_replans_cannot_reset_stationary_timeout_forever():
 
 
 def test_real_progress_and_new_goal_rearm_the_route_timeout():
-    route = CommittedRoute(actions(), ActionConverterParams())
+    route = CommittedRoute(PROTOCOL.actions(), ActionConverterParams())
     planner = SimpleNamespace(path_collides=lambda *a, **k: False)
     obs = SimpleNamespace(step=0, pose=AgentPose(0, 0, 0, 0))
     route.adopt([Pose2D(0, 0), Pose2D(20, 0)], (20, 0), "frontier", obs)

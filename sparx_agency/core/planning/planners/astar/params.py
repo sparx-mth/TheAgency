@@ -85,6 +85,16 @@ class WeightedAStarParams:
         relax_step_m: Standoff decrement per retry between the preferred radius
             and the floor. Smaller = more attempts, but the surviving route keeps
             more clearance, so prefer a fine step over a coarse one.
+        detour_factor: The "squeeze or detour" rule. A route found at a standoff
+            above the floor is a DETOUR when it is longer than ``detour_factor``
+            times the route the floor standoff allows; the floor route is then
+            returned instead (relaxed, with ``inflate_used_m`` saying so). Safest
+            feasible first is right for an aircraft that can hover; a ground
+            robot that walks 12.7 m round a room because a 0.5 m pinch on the
+            7.5 m way read as 0.25 m short of its preferred 0.30 m standoff
+            (Corozal/000076, 2026-10-13, actions 394-486) is not safer, only
+            late. Costs one extra search at the floor rung when the first rung
+            succeeded. 0 (the default) keeps the first success, as before.
         probe_radius_m: Diagnostic-only standoff, below ``inflate_floor_m``, used
             once when every flyable rung has failed. Its path is never returned
             (it is not flyable); success merely sets
@@ -153,6 +163,7 @@ class WeightedAStarParams:
     inflate_radius_m: float = 0.4
     inflate_floor_m: float = 0.4      # == inflate_radius_m: relaxation off by default
     relax_step_m: float = 0.05
+    detour_factor: float = 0.0        # 0 = the first success wins, whatever its length
     probe_radius_m: float = 0.0       # 0 = no phantom probe
     unknown_blocked: bool = False
     unknown_cost: float = 5.0

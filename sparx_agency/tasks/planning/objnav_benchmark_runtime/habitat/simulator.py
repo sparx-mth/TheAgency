@@ -13,6 +13,7 @@ import numpy as np
 from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
+from sparx_agency.core.mapping.depth.depth_holes import fill_depth_holes
 
 
 def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
@@ -33,14 +34,27 @@ def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
                                 math.hypot(camera_forward[0], camera_forward[2])))
 
 
-def metric_depth(raw, camera, normalized=False):
-    """Decode Lab normalized depth or raw Sim metres; preserve clip semantics."""
+def metric_depth(raw, camera, normalized=False, depth_holes=None, stats=None):
+    """Decode Lab normalized depth or raw Sim metres; preserve clip semantics.
+
+    ``depth_holes`` (a :class:`DepthHoleFill`) fills the enclosed no-return
+    pixels -- raw ``0``, the scan's missing geometry -- from their valid
+    neighbours before the near/far clipping, so a mirror or a black screen
+    projects as the wall around it; the remaining holes are ``NaN``, no
+    reading, as every baseline treats them. ``stats`` (a dict) receives the
+    fill's counts when given.
+    """
     depth = np.asarray(raw, dtype=np.float32)
     if depth.ndim == 3 and depth.shape[2] == 1:
         depth = depth[..., 0]
     depth = depth.copy()
+    holes = depth <= 0 if not normalized else np.zeros(depth.shape, dtype=bool)
     if normalized:
         depth = depth * (camera.max_depth_m - camera.min_depth_m) + camera.min_depth_m
+    if depth_holes is not None and depth_holes.enabled and holes.any():
+        depth, counts = fill_depth_holes(depth, holes, depth_holes)
+        if stats is not None:
+            stats.update(counts)
     near = (depth <= camera.min_depth_m) | (depth <= 0)
     far = depth >= camera.max_depth_m
     depth[near] = np.nan
@@ -57,27 +71,28 @@ class HabitatRGBDSimulator:
         radius_m: Embodiment radius. The published navmesh remains authoritative.
         allow_sliding: Must match the chosen benchmark, not a library default.
         gpu_device: Rendering device index; this class never starts other models.
-        height_m: Physical body height, independent of the camera mounting height.
     """
 
-    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, *, height_m):
-        if any(isinstance(v, bool) or not math.isfinite(v) or v <= 0
-               for v in (radius_m, height_m)):
-            raise ValueError("Explicit positive finite body radius and height are required")
+    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, depth_holes=None):
         self.camera = camera
         self.actions = actions
         self.radius_m = radius_m
-        self.height_m = height_m
         self.allow_sliding = allow_sliding
         self.gpu_device = gpu_device
+        self.depth_holes = depth_holes          # DepthHoleFill or None (every hole dropped, as the baselines do)
+        self.depth_hole_stats = {"frames": 0, "frames_with_holes": 0, "holes": 0, "filled": 0,
+                                 "pixels_filled": 0, "pixels_left": 0}
         self._sim = None
         self._scene = None
+        self._structure = None  # per-scene navmesh storeys and stair connectors
+        self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
         """Load the scene if needed and teleport ONLY to the published start."""
         import habitat_sim
         import quaternion
 
+        self.depth_hole_stats = {key: 0 for key in self.depth_hole_stats}     # per episode
         if self._scene != str(scene_path):
             self.close()
             self._sim = habitat_sim.Simulator(self._configuration(scene_path))
@@ -85,12 +100,28 @@ class HabitatRGBDSimulator:
                 self.close()
                 raise EnvContractError("Unable to load published navmesh: %s" % navmesh_path)
             self._scene = str(scene_path)
+            self._structure = None
         self._sim.seed(seed)
         state = habitat_sim.AgentState()
         state.position = np.asarray(position, dtype=np.float32)
         state.rotation = quaternion.from_float_array(rotation_wxyz)
         self._sim.get_agent(0).set_state(state, reset_sensors=True)
+        self.last_collision = None
         return self._observe()
+
+    def scene_structure(self):
+        """Storeys and stair connectors of the loaded scene's navmesh, ENU.
+
+        Ground truth for the building's vertical structure -- never the goal.
+        Computed once per scene; see ``gibson/stair_connectors.py``.
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; no navmesh to read the building from")
+        if self._structure is None:
+            from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.stair_connectors import (
+                scene_structure_from_pathfinder)
+            self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
+        return self._structure
 
     def _configuration(self, scene_path):
         import habitat_sim
@@ -101,7 +132,7 @@ class HabitatRGBDSimulator:
         config.enable_physics = False
         config.allow_sliding = self.allow_sliding
         agent = habitat_sim.agent.AgentConfiguration()
-        agent.height = self.height_m
+        agent.height = self.camera.height_m
         agent.radius = self.radius_m
         sensors = []
         k = self.camera.intrinsics
@@ -127,13 +158,37 @@ class HabitatRGBDSimulator:
             for a in self.actions.actions if a != DiscreteAction.STOP}
         return habitat_sim.Configuration(config, [agent])
 
+    def project_target(self, point):
+        """Project a requested ENU footpoint onto the local NavMesh.
+
+        This explicitly privileged geometry service reads neither semantic
+        annotations nor evaluator targets. Reject other floors, remote snaps
+        and invalid geometry; observed-map A* decides reachability.
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; cannot project a target approach")
+        point = np.asarray(point, dtype=float)
+        if point.shape != (3,) or not np.isfinite(point).all():
+            raise ValueError("Target approach projection needs a finite ENU xyz point")
+        native = np.array([-point[1], point[2], -point[0]], dtype=np.float32)
+        snapped = np.asarray(self._sim.pathfinder.snap_point(native), dtype=float)
+        if snapped.shape != (3,) or not np.isfinite(snapped).all():
+            return None
+        enu = np.array([-snapped[2], -snapped[0], snapped[1]])
+        if abs(enu[2] - point[2]) > 0.2 or np.linalg.norm(enu[:2] - point[:2]) > 0.5:
+            return None
+        return tuple(float(v) for v in enu)
+
     def step(self, action):
         """STOP preserves the final view; other actions use native collision tests."""
         if self._sim is None or not self.actions.allows(action):
             raise EnvContractError("Simulator not reset, or unsupported action")
         if action != DiscreteAction.STOP:
             raw = self._sim.step(action.name.lower())
+            collided = raw.get("collided", getattr(self._sim, "previous_step_collided", None))
+            self.last_collision = None if collided is None else bool(collided)
             return self._observe(raw)
+        self.last_collision = False
         return self._observe()
 
     def _observe(self, raw=None):
@@ -142,10 +197,30 @@ class HabitatRGBDSimulator:
         if raw is None:
             raw = self._sim.get_sensor_observations()
         state = self._sim.get_agent(0).get_state()
+        rgb_sensor, depth_sensor = state.sensor_states["rgb"], state.sensor_states["depth"]
+        rgb_rotation = quaternion.as_rotation_matrix(rgb_sensor.rotation)
+        depth_rotation = quaternion.as_rotation_matrix(depth_sensor.rotation)
+        expected_position = np.asarray(state.position) + np.array([0.0, self.camera.height_m, 0.0])
+        if (not np.allclose(rgb_sensor.position, depth_sensor.position, atol=1e-5, rtol=0)
+                or not np.allclose(rgb_rotation, depth_rotation, atol=1e-5, rtol=0)
+                or not np.allclose(depth_sensor.position, expected_position, atol=1e-4, rtol=0)):
+            raise EnvContractError("RGB/depth/pose extrinsics are not registered to the declared camera mount")
         pose = habitat_pose(state.position, quaternion.as_rotation_matrix(state.rotation),
-                            quaternion.as_rotation_matrix(state.sensor_states["depth"].rotation))
+                            depth_rotation)
+        rgb_pose = habitat_pose(state.position, quaternion.as_rotation_matrix(state.rotation), rgb_rotation)
+        self.last_sensor_alignment = {"rgb_pitch_rad": rgb_pose.camera_pitch, "depth_pitch_rad": pose.camera_pitch,
+                                      "mount_error_m": float(np.linalg.norm(depth_sensor.position - expected_position)),
+                                      "registered": True}
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
-        return rgb, metric_depth(raw["depth"], self.camera), pose
+        counts = {}
+        depth = metric_depth(raw["depth"], self.camera, depth_holes=self.depth_holes, stats=counts)
+        totals = self.depth_hole_stats
+        totals["frames"] += 1
+        if counts:
+            totals["frames_with_holes"] += 1
+            for key in ("holes", "filled", "pixels_filled", "pixels_left"):
+                totals[key] += int(counts.get(key, 0))
+        return rgb, depth, pose
 
     def close(self):
         """Release rendering memory before another scene/process takes it."""
@@ -153,4 +228,5 @@ class HabitatRGBDSimulator:
             self._sim.close()
         self._sim = None
         self._scene = None
+        self._structure = None
 

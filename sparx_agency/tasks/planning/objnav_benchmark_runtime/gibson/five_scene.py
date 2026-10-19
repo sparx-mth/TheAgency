@@ -1,0 +1,308 @@
+"""Five-scene Gibson campaign: N published val episodes per scene, sequential recordings.
+
+Each scene is one recorded ``gibson.run`` job over ``--episodes-per-scene``
+published episodes of that scene -- the first N in official ``val`` split order,
+or with ``--shuffle`` a seeded random sample of N, and with ``--category`` only
+the episodes whose published goal is that category (the toilet scenario in
+every building, say). Episodes are reported the moment they are scored
+(``EPISODE COMPLETE`` + ``RUNNING MEAN``), and ``benchmark_results.json`` /
+``benchmark_results.csv`` are rewritten after each one. Stair traversal is
+explicitly forbidden: every job receives a written ``policy_config.json`` with
+``allow_stair_traversal: false`` and the frozen run configuration is checked to
+say so. A job that stops recording actions for ``--stall-minutes`` is killed
+and its scene reported failed, so a simulator that dies with its renderer
+threads alive does not hold the campaign (2026-10-13).
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+from dataclasses import asdict
+import html
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES
+from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
+from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows, strict_json, write_atomically
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import STYLE
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options, detector_flags
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene_console import (
+    failure_line, recording_video, status_line, summary_table)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.five_scene_stream import (
+    EpisodeTail, result_row, running_mean_line, write_benchmark_results)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import SCENES
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import source_fingerprint
+
+
+def scene_records(root, scene, expected):
+    """The scored episodes of a scene directory, in finishing order; empty for an attempt that aborted before scoring.
+
+    Raises:
+        ValueError: A row from another scene, or more rows than the job was asked for.
+    """
+    source = Path(root) / scene / "episodes.jsonl"
+    if not source.exists():
+        return []
+    found = [row for _, row in read_episode_rows(source)]
+    if len(found) > expected or any(row.scene_id != scene for row in found):
+        raise ValueError("Expected at most the %d selected %s episodes in %s" % (expected, scene, source))
+    return found
+
+
+def scene_record(root, scene):
+    """The one scored episode of a single-episode scene directory; None when none was scored."""
+    found = scene_records(root, scene, 1)
+    return found[0] if found else None
+
+
+def assert_stairs_forbidden(directory):
+    """Refuse to count a scene job whose frozen configuration allows stair traversal."""
+    run = json.loads((Path(directory) / "run.json").read_text())
+    allowed = run.get("config", {}).get("method", {}).get("allow_stair_traversal")
+    if allowed is not False:
+        raise RuntimeError("%s/run.json records allow_stair_traversal=%r; the campaign requires False"
+                           % (directory, allowed))
+
+
+def selection_text(episodes_per_scene, category=None, shuffle=False, seed=0):
+    """How the N episodes of each scene were chosen, in words, for the report and the summary line.
+
+    Examples: ``the first 3 published episode(s) per scene``;
+    ``3 published toilet episode(s) per scene, a seeded random sample (seed 17)``.
+    """
+    goal = " %s" % category if category else ""
+    if shuffle:
+        return "%d published%s episode(s) per scene, a seeded random sample (seed %d)" % (episodes_per_scene, goal, seed)
+    return "the first %d published%s episode(s) per scene" % (episodes_per_scene, goal)
+
+
+def report(root, episodes_per_scene=1, scenes=SCENES, selection=None):
+    """Summarise actual completed scene rows, with links to every recording.
+
+    Args:
+        selection: The selection in words (``selection_text``); the first N published episodes when None.
+    """
+    root = Path(root)
+    selection = selection or selection_text(episodes_per_scene)
+    records, rows = [], []
+    for scene in scenes:
+        for record in scene_records(root, scene, episodes_per_scene):
+            records.append(record)
+            _append_report_row(rows, scene, record)
+    if not records:
+        return None
+    summary = summarise(records)
+    write_atomically(root / "summary.json", strict_json(asdict(summary), "five-scene summary", indent=2))
+    with (root / "metrics.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    table = "<tr>" + "".join("<th>%s</th>" % html.escape(key) for key in rows[0]) + "<th>Recording/report</th></tr>"
+    for row in rows:
+        table += "<tr>" + "".join("<td>%s</td>" % html.escape("%.4f" % v if isinstance(v, float) else str(v))
+                                    for v in row.values())
+        table += '<td><a href="%s/index.html">Video, map, reasoning and graphs</a></td></tr>' % row["scene"]
+    overall = summary.overall
+    text = ('<!doctype html><meta charset="utf-8"><title>Gibson five-scene campaign</title><style>%s</style>'
+            '<h1>Gibson: door-aware, revisable-room campaign</h1><p class="warning">%d episodes completed; '
+            '%s, NOT the 1,000-episode benchmark. '
+            'SR may be credited at the step limit without STOP. Label changes include resets to unknown '
+            'after room partition changes; they are not a semantic-accuracy score.</p>'
+            '<p>Mean SR %.3f · SPL %.4f · DTG %s m · SoftSPL %.4f</p>'
+            '<p><a href="metrics.csv">All metrics CSV</a> · <a href="summary.json">Summary JSON</a></p>'
+            '<table>%s</table>') % (STYLE, len(records), html.escape(selection), overall.success_rate, overall.spl,
+                                   overall.distance_to_goal_m, overall.soft_spl, table)
+    write_atomically(root / "index.html", text)
+    return rows
+
+
+def _append_report_row(rows, scene, record):
+    policy = record.agent_info.get("policy", {})
+    doors = policy.get("doors", {})
+    changes = sum(event.get("previous") is not None and event["previous"] != event["label"]
+                  for event in policy.get("room_label_history", []))
+    rows.append({"scene": scene, "episode_id": record.episode_id, "target": record.target_category,
+                 "SR": int(record.success), "SPL": record.spl, "DTG_m": record.distance_to_goal_m,
+                 "SoftSPL": record.soft_spl, "runtime_s": record.wall_s, "steps": record.steps,
+                 "STOP": record.stop_called,
+                 "termination": record.termination, "doors_confirmed": doors.get("confirmed", 0),
+                 "door_detections": doors.get("detections", 0), "max_rooms": policy.get("max_rooms", 0),
+                 "final_rooms": policy.get("rooms", 0), "label_changes": changes})
+
+
+def job_heartbeat(directory):
+    """When the job last showed life: the newest of its ``live.json`` (rewritten every action) and ``episodes.jsonl``, or None before either exists."""
+    stamps = []
+    for name in ("live.json", "episodes.jsonl"):
+        path = Path(directory) / name
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if stamps else None
+
+
+def run_scene_job(args, scene, directory, policy_config, on_episode):
+    """Run one recorded ``gibson.run`` job for ``scene`` and report each episode as it is scored.
+
+    A job that stops showing life is killed: ``--stall-minutes`` (20, longer
+    than the reasoning model's 15-minute call timeout, so one slow oracle
+    answer is never read as a death) without a change to its ``live.json``
+    (rewritten every action) or its ``episodes.jsonl``, while the job neither
+    finishes nor is being started (the first ``--stall-minutes`` after launch
+    are the simulator loading).
+    The Darden job of 2026-10-13 died mid-episode with its renderer threads
+    still alive -- a zombie ``poll()`` never returns for -- and the campaign
+    waited on it for half an hour. The scene is then reported as a failed
+    job (exit -9) with a ``STALLED`` line, and the campaign moves on.
+
+    Returns:
+        ``(exit code, job wall seconds)``.
+    """
+    command = [sys.executable, "-u", "-m", "sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run",
+               "--scene", scene, "--limit", str(args.episodes_per_scene), "--record", "--seed", str(args.seed),
+               "--gpu-device", str(args.gpu_device), "--video-fps", str(args.video_fps),
+               "--policy-config", str(policy_config),
+               "--episodes-dir", args.episodes_dir, "--scenes-dir", args.scenes_dir,
+               "--output", str(directory)] + detector_flags(args)
+    if args.explorer is not None:
+        command += ["--explorer", args.explorer]
+    if getattr(args, "category", None):
+        command += ["--category", args.category]
+    if getattr(args, "shuffle", False):
+        command.append("--shuffle")
+    if args.allow_sim_version_mismatch:
+        command.append("--allow-sim-version-mismatch")
+    if args.allow_shared_gpu:
+        command.append("--allow-shared-gpu")
+    if getattr(args, "software_render", False):
+        command.append("--software-render")
+    started = time.monotonic()
+    launched = time.time()
+    stall_s = 60.0 * float(getattr(args, "stall_minutes", 0.0) or 0.0)
+    tail = EpisodeTail(directory)
+    with (directory / "run.log").open("w") as stream:
+        process = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT)
+        while True:
+            finished = process.poll() is not None
+            for record in tail.poll():
+                on_episode(record)
+            if finished:
+                break
+            if stall_s > 0.0:
+                heartbeat = job_heartbeat(directory)
+                since = time.time() - (launched if heartbeat is None else max(heartbeat, launched))
+                if since > stall_s:
+                    print("STALLED           scene=%s  no action recorded for %.0f s; killing the job" % (scene, since),
+                          flush=True)
+                    process.kill()
+                    try:
+                        process.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    for record in tail.poll():
+                        on_episode(record)
+                    break
+            time.sleep(args.poll_s)
+    code = process.returncode if process.returncode is not None else -9
+    return code, time.monotonic() - started
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--episodes-dir", required=True)
+    parser.add_argument("--scenes-dir", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    add_detector_options(parser, url_default="http://127.0.0.1:18092")
+    parser.add_argument("--episodes-per-scene", type=int, default=1,
+                        help="N published val episodes of every scene: the first N in split order, or a seeded "
+                             "random N with --shuffle")
+    parser.add_argument("--scenes", nargs="+", choices=SCENES, default=list(SCENES), metavar="SCENE",
+                        help="A subset of the five val scenes, run in this order (default: all five)")
+    parser.add_argument("--category", choices=CATEGORIES,
+                        help="Only the episodes whose published goal is this category (forwarded to every job)")
+    parser.add_argument("--shuffle", action="store_true",
+                        help="Each scene's N episodes are a random sample seeded with --seed, not the first N "
+                             "(forwarded to every job)")
+    parser.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--gpu-device", type=int, default=0)
+    parser.add_argument("--video-fps", type=int, default=6)
+    parser.add_argument("--poll-s", type=float, default=5.0, help="How often a running job's episodes.jsonl is read")
+    parser.add_argument("--stall-minutes", type=float, default=20.0,
+                        help="Kill a job whose live.json / episodes.jsonl have not changed for this long and report the "
+                             "scene failed (a job that died with its renderer threads alive never finishes); longer than "
+                             "LLM_REASONING_TIMEOUT_S so a slow oracle call is not a death; 0 disables")
+    parser.add_argument("--allow-sim-version-mismatch", action="store_true")
+    parser.add_argument("--allow-shared-gpu", action="store_true",
+                        help="Forwarded to every scene run; needed when GPU 0 also drives a desktop")
+    parser.add_argument("--software-render", action="store_true",
+                        help="Forwarded to every scene run: Mesa llvmpipe instead of a CUDA GPU (see gibson.run)")
+    args = parser.parse_args(argv)
+    if not 1 <= args.episodes_per_scene <= 200:
+        parser.error("--episodes-per-scene must be between 1 and 200")
+    if len(set(args.scenes)) != len(args.scenes):
+        parser.error("--scenes lists a scene twice")
+    if args.stall_minutes < 0:
+        parser.error("--stall-minutes must be zero or positive")
+    args.output.mkdir(parents=True, exist_ok=False)
+    scenes = list(args.scenes)
+    per_scene, total = args.episodes_per_scene, args.episodes_per_scene * len(scenes)
+    selection = selection_text(per_scene, args.category, args.shuffle, args.seed)
+    policy_config = args.output / "policy_config.json"
+    write_atomically(policy_config, strict_json({"allow_stair_traversal": False}, "policy config", indent=2))
+    fingerprint = source_fingerprint()
+    status = {"source_sha256": fingerprint, "episodes_per_scene": per_scene, "episodes_total": total,
+              "allow_stair_traversal": False, "split": "val", "scenes": scenes, "seed": args.seed,
+              "category": args.category, "shuffle": bool(args.shuffle), "selection": selection,
+              "explorer": args.explorer, "completed": [], "failed": []}
+    write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
+    records, rows = [], []
+
+    def on_episode(record, directory):
+        records.append(record)
+        video = recording_video(directory, record)
+        rows.append(result_row(len(records), record, video))
+        write_benchmark_results(args.output, rows, records, total, status)
+        print(status_line(record, video), flush=True)
+        print(running_mean_line(records, total), flush=True)
+
+    for scene in scenes:
+        if source_fingerprint() != fingerprint:
+            raise RuntimeError("Source changed mid-campaign; refusing to mix algorithm versions")
+        directory = args.output / scene
+        directory.mkdir()
+        status["running"] = scene
+        write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
+        print("Starting %s (%d episodes)" % (scene, per_scene), flush=True)
+        before = len(records)
+        code, job_s = run_scene_job(args, scene, directory, policy_config,
+                                    lambda record, directory=directory: on_episode(record, directory))
+        scored = len(records) - before
+        if scored:
+            assert_stairs_forbidden(directory)
+        status["completed" if code == 0 else "failed"].append(scene)
+        status["running"] = None
+        write_atomically(args.output / "campaign.json", strict_json(status, "campaign", indent=2))
+        report(args.output, per_scene, scenes, selection)
+        if not scored:
+            print(failure_line(scene, code, directory / "run.log"), flush=True)
+        else:
+            print("SCENE DONE        scene=%s  scored=%d/%d  exit=%d  job=%.0f s" % (scene, scored, per_scene, code, job_s),
+                  flush=True)
+    if records:
+        table = summary_table(records)
+        write_atomically(args.output / "summary.txt", table)
+        print("\nFIVE-SCENE SUMMARY (%d/%d episodes scored; %s; %s)\n%s"
+              % (len(records), total, selection, ", ".join(scenes), table), flush=True)
+    else:
+        print("\nFIVE-SCENE SUMMARY: no scene produced a scored episode", flush=True)
+    return int(bool(status["failed"]) or len(records) != total)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

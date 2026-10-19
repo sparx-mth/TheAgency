@@ -286,6 +286,39 @@ def cost_matrix(world: OccupancyGrid2D,
     return out
 
 
+def prefer_cost_matrix(world: OccupancyGrid2D,
+                       full: np.ndarray,
+                       preferred_cost: np.ndarray,
+                       cells: Sequence[Tuple[int, int]]) -> np.ndarray:
+    """``full`` with every pair measured at the preferred standoff where that graph connects them.
+
+    Args:
+        world: The grid, for its resolution.
+        full: The all-pairs matrix at the body radius, ``[N, N]`` metres.
+        preferred_cost: The cost array at the preferred standoff.
+        cells: ``(gx, gy)`` per vertex, in ``full``'s order.
+
+    Returns:
+        A copy of ``full`` where ``full[i, j]`` is the preferred-standoff
+        distance for every pair of vertices on the preferred graph with a
+        finite path between them; other entries are unchanged.
+    """
+    if full.shape != (len(cells), len(cells)):
+        raise ValueError("full %r does not match %d cells" % (full.shape, len(cells)))
+    ids, graph = passable_graph(preferred_cost)
+    on = [i for i, (gx, gy) in enumerate(cells) if ids[gy, gx] >= 0]
+    if len(on) < 2:
+        return full
+    sub = cost_matrix(world, graph, ids, [cells[i] for i in on])
+    out = np.array(full, dtype=np.float64, copy=True)
+    index = np.array(on, dtype=np.int64)
+    block = out[np.ix_(index, index)]
+    finite = np.isfinite(sub)
+    block[finite] = sub[finite]
+    out[np.ix_(index, index)] = block
+    return out
+
+
 def build_instance(world: OccupancyGrid2D,
                    cost: np.ndarray,
                    centroids: Mapping[int, Tuple[float, float]],
@@ -296,7 +329,10 @@ def build_instance(world: OccupancyGrid2D,
                    search_time_s: float = 0.0,
                    frontier_weight: float = 0.0,
                    frontier_counts: Optional[Mapping[int, int]] = None,
-                   p_clamp: float = P_CLAMP_DEFAULT
+                   p_clamp: float = P_CLAMP_DEFAULT,
+                   leaves: Optional[Mapping[int, float]] = None,
+                   service_s: Optional[Mapping[int, float]] = None,
+                   preferred_cost: Optional[np.ndarray] = None
                    ) -> Tuple[HppPtInstance, List[int]]:
     """Assemble the complete, finite, metric instance RPT* takes.
 
@@ -304,7 +340,10 @@ def build_instance(world: OccupancyGrid2D,
         world: The BEV grid, wrapped with the BEV's own occupancy values.
         cost: ``WeightedAStarPlanner2D.cost_for(world)[0]`` -- passed in so
             the matrix and the flown transit share one passable set.
-        centroids: ``{pid: (x, y)}`` room centres from the scene graph.
+        centroids: ``{pid: (x, y)}`` room centres from the scene graph --
+            or, for a node that stands for something beyond the map (a
+            staircase), the passable point on THIS map it is reached
+            through.
         probs: ``{pid: probability}`` from the LLM oracle. A pid absent here
             scores 0.0 rather than being dropped -- an unranked room is a
             room worth visiting last, not one that does not exist.
@@ -332,6 +371,31 @@ def build_instance(world: OccupancyGrid2D,
             heuristic divides by ``1 - p(v)``, and a scene graph with one
             room hands a sum-to-1 oracle vector straight to a division by
             zero.
+        leaves: ``{pid: metres}`` -- a node that hangs off its map point by
+            a corridor of this length, walked in AND out. A staircase is the
+            case: its point on this map is the foot of the flight, and the
+            node itself -- the other storey -- lies a flight plus the fixed
+            cost of a storey change beyond it, so every arc into it AND
+            every arc out of it back to this storey's rooms carries that
+            length. Charging it on every incident arc is what makes RPT*
+            see that going upstairs puts every room down here that much
+            further away. A leaf is a graph edge, so the matrix stays
+            metric: ``c'(u,w) = c(u,w) + l_u + l_w <= c(u,v) + l_u + l_v +
+            c(v,w) + l_v + l_w = c'(u,v) + c'(v,w)``.
+        service_s: ``{pid: seconds}`` -- a node whose visit costs a
+            different time than ``search_time_s``: an opening the search
+            only looks into from the threshold is a few actions, not a
+            room's scan. Folded into the node's entering arcs exactly as
+            ``search_time_s`` is, so the same triangle-inequality argument
+            holds. Nodes absent here keep ``search_time_s``.
+        preferred_cost: Optional cost array at the planner's PREFERRED
+            standoff beside ``cost`` at the body radius. A* flies the
+            preferred route wherever one exists and squeezes only when it
+            must, so with this given every arc between two nodes both
+            reachable at the preferred standoff is measured there; the
+            body-radius distance stands only where the preferred graph
+            does not connect them. Reachability (which nodes are kept) is
+            the body radius's, as before.
 
     Returns:
         ``(instance, dropped_pids)``. Dropped covers both rooms with no
@@ -368,6 +432,9 @@ def build_instance(world: OccupancyGrid2D,
     depot = len(all_nodes) - 1 if depot_node is not None else 0
 
     full = cost_matrix(world, graph, ids, [nd.cell for nd in all_nodes])
+    if preferred_cost is not None:
+        full = prefer_cost_matrix(world, full, np.asarray(preferred_cost, dtype=float),
+                                  [nd.cell for nd in all_nodes])
 
     # RPT* needs a complete finite graph. Keep the depot and everything it
     # can reach; withhold the rest and say which.
@@ -390,11 +457,20 @@ def build_instance(world: OccupancyGrid2D,
 
     units = "metres"
     C = np.array(sub, dtype=np.float64, copy=True)
+    if leaves:
+        leaf = np.array([max(0.0, float(leaves.get(nd.pid, 0.0))) if nd.pid >= 0 else 0.0
+                         for nd in kept_nodes], dtype=np.float64)
+        C = C + leaf[:, None] + leaf[None, :]
+        np.fill_diagonal(C, 0.0)
     if cruise_speed_mps and cruise_speed_mps > 0.0:
         C = C / float(cruise_speed_mps)
         units = "seconds"
-        if search_time_s and search_time_s > 0.0:
-            budget = np.full(C.shape[1], float(search_time_s))
+        if (search_time_s and search_time_s > 0.0) or service_s:
+            budget = np.full(C.shape[1], max(0.0, float(search_time_s or 0.0)))
+            if service_s:
+                for i, nd in enumerate(kept_nodes):
+                    if nd.pid >= 0 and nd.pid in service_s:
+                        budget[i] = max(0.0, float(service_s[nd.pid]))
             budget[depot_idx] = 0.0
             C = C + budget[None, :]
             np.fill_diagonal(C, 0.0)
@@ -423,6 +499,126 @@ def build_instance(world: OccupancyGrid2D,
 
 
 # -- in-room sweep goals --------------------------------------------------
+@dataclass(frozen=True)
+class FrontierCluster:
+    """One unscanned boundary, with the cells it is made of.
+
+    Attributes:
+        size: How many frontier cells the cluster holds.
+        cell: ``(gx, gy)`` of the goal that stands for the cluster: its
+            member cell nearest the centroid, snapped onto the passable
+            graph -- the cell a planner will accept as a goal.
+        rows: Row index of every member cell.
+        cols: Column index of every member cell, same order. Kept so a
+            caller can ask which room the cluster lies in by the same
+            majority vote ``room_stats.count_frontier_clusters`` uses,
+            without extracting the frontier a second time.
+    """
+
+    size: int
+    cell: Tuple[int, int]
+    rows: np.ndarray
+    cols: np.ndarray
+
+
+def frontier_clusters(world: OccupancyGrid2D,
+                      room_mask: np.ndarray,
+                      ids: np.ndarray,
+                      min_cluster_cells: int = 4,
+                      snap_radius_cells: int = 8
+                      ) -> List[FrontierCluster]:
+    """Every unscanned boundary inside ``room_mask``, cells and all.
+
+    A frontier cell is a free cell 4-adjacent to an unknown one -- the same
+    definition ``room_stats.count_frontier_clusters`` uses, so the goals built
+    on this and the ``frontier_clusters`` the scene graph reports are the same
+    population. Each cluster is stood for by its MEMBER cell nearest the
+    centroid, snapped onto the passable graph so the planner will accept it;
+    a cluster with no passable cell within ``snap_radius_cells`` is dropped,
+    not proposed.
+
+    The member cell, not the centroid itself: a frontier is usually an arc
+    -- the edge of the depth range, bowed around the robot -- and the
+    centroid of an arc lies inside the space already seen. A goal there has
+    no unknown cell near it on the action it is adopted, so a sweep that
+    keeps a goal only while unknown space remains around it retired every
+    goal at once, and the next arc's centroid landed within the "recently
+    retired" radius of the last one, so the room read exhausted with three
+    clusters showing. On the boundary a goal is informative by construction.
+
+    The one place the frontier is extracted for goal-making:
+    :func:`frontier_cluster_cells` and :func:`in_room_frontier_goals` order
+    these by size,
+    :func:`~sparx_agency.core.planning.exploration.frontier_ranking.ranked_frontier_goals`
+    by utility, and
+    :func:`~sparx_agency.core.planning.exploration.frontier_ranking.frontier_goals_by_room`
+    assigns them to rooms. Two extractions would drift.
+
+    Args:
+        world: The BEV grid.
+        room_mask: ``(H, W)`` bool, True inside the room; all-True for the
+            whole floor.
+        ids: The index image from :func:`passable_graph`.
+        min_cluster_cells: Clusters smaller than this are noise and dropped.
+        snap_radius_cells: How far the goal cell may move to reach the
+            passable graph.
+
+    Returns:
+        One :class:`FrontierCluster` per surviving cluster, in label order.
+    """
+    grid = world.grid
+    free = grid == world.values.free
+    unknown = grid == world.values.unknown
+    adj = np.zeros_like(unknown)
+    adj[:-1, :] |= unknown[1:, :]
+    adj[1:, :] |= unknown[:-1, :]
+    adj[:, :-1] |= unknown[:, 1:]
+    adj[:, 1:] |= unknown[:, :-1]
+    frontier = free & adj & np.asarray(room_mask, dtype=bool)
+    if not frontier.any():
+        return []
+    lbl, n = cc_label(frontier, structure=np.ones((3, 3), dtype=np.uint8))
+    out: List[FrontierCluster] = []
+    for k in range(1, n + 1):
+        ys, xs = np.nonzero(lbl == k)
+        if ys.size < int(min_cluster_cells):
+            continue
+        nearest = int(np.argmin((xs - xs.mean()) ** 2 + (ys - ys.mean()) ** 2))
+        cell = snap_cell(ids, int(xs[nearest]), int(ys[nearest]), int(snap_radius_cells))
+        if cell is None:
+            continue
+        out.append(FrontierCluster(size=int(ys.size),
+                                   cell=(int(cell[0]), int(cell[1])),
+                                   rows=ys, cols=xs))
+    return out
+
+
+def frontier_cluster_cells(world: OccupancyGrid2D,
+                           room_mask: np.ndarray,
+                           ids: np.ndarray,
+                           min_cluster_cells: int = 4,
+                           snap_radius_cells: int = 8
+                           ) -> List[Tuple[int, Tuple[int, int]]]:
+    """Every unscanned boundary inside one room, as ``(size, snapped cell)``.
+
+    A thin view over :func:`frontier_clusters` for callers that only want a
+    goal per cluster; see there for the definition and the snapping rule.
+
+    Args:
+        world: The BEV grid.
+        room_mask: ``(H, W)`` bool, True inside the room.
+        ids: The index image from :func:`passable_graph`.
+        min_cluster_cells: Clusters smaller than this are noise and dropped.
+        snap_radius_cells: How far a cluster centroid may move to reach the
+            passable graph.
+
+    Returns:
+        ``(size_cells, (gx, gy))`` per surviving cluster, in label order.
+    """
+    return [(c.size, c.cell) for c in frontier_clusters(
+        world, room_mask, ids, min_cluster_cells, snap_radius_cells)]
+
+
 def in_room_frontier_goals(world: OccupancyGrid2D,
                            cost: np.ndarray,
                            room_mask: np.ndarray,
@@ -431,11 +627,12 @@ def in_room_frontier_goals(world: OccupancyGrid2D,
                            ) -> List[Tuple[float, float]]:
     """Where to look next INSIDE one room, largest unscanned region first.
 
-    A frontier cell is a free cell 4-adjacent to an unknown one -- the same
-    definition ``room_stats.count_frontier_clusters`` uses, so the goals this
-    returns and the ``frontier_clusters`` the scene graph reports are the
-    same population, and a room whose count reaches zero has genuinely had
-    every goal here consumed.
+    Size alone is the wrong order from a robot's point of view -- it sent the
+    Gibson agent across a swept room to a big cluster behind it -- so the
+    ObjectNav sweep uses
+    :func:`~sparx_agency.core.planning.exploration.frontier_ranking.ranked_frontier_goals`
+    instead. This stays as the pose-free ordering for callers that have no
+    robot to rank from, and as the definition the scene-graph count matches.
 
     Computed with four array shifts rather than
     ``core/planning/exploration/frontier.py``, whose pure-Python double loop
@@ -457,32 +654,7 @@ def in_room_frontier_goals(world: OccupancyGrid2D,
     """
     if ids is None:
         ids, _ = passable_graph(cost)
-    grid = world.grid
-    free = grid == world.values.free
-    unknown = grid == world.values.unknown
-    adj = np.zeros_like(unknown)
-    adj[:-1, :] |= unknown[1:, :]
-    adj[1:, :] |= unknown[:-1, :]
-    adj[:, :-1] |= unknown[:, 1:]
-    adj[:, 1:] |= unknown[:, :-1]
-    frontier = free & adj & np.asarray(room_mask, dtype=bool)
-    if not frontier.any():
-        return []
-
-    lbl, n = cc_label(frontier, structure=np.ones((3, 3), dtype=np.uint8))
-    if n == 0:
-        return []
-    out: List[Tuple[int, Tuple[float, float]]] = []
-    for k in range(1, n + 1):
-        ys, xs = np.nonzero(lbl == k)
-        if ys.size < int(min_cluster_cells):
-            continue
-        gx = int(round(float(xs.mean())))
-        gy = int(round(float(ys.mean())))
-        cell = snap_cell(ids, gx, gy, 8)
-        if cell is None:
-            continue
-        x, y = world.grid_to_world(cell[0], cell[1])
-        out.append((int(ys.size), (float(x), float(y))))
-    out.sort(key=lambda t: -t[0])
-    return [xy for _, xy in out]
+    clusters = frontier_cluster_cells(world, room_mask, ids, min_cluster_cells)
+    clusters.sort(key=lambda t: -t[0])
+    return [tuple(float(v) for v in world.grid_to_world(gx, gy))
+            for _, (gx, gy) in clusters]

@@ -1,0 +1,194 @@
+\documentclass[10pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+
+% --- Keywords and Function Definitions ---
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+\SetKwInOut{State}{State}
+\SetKwComment{Comment}{$\triangleright$\ }{}
+\SetCommentSty{textit}
+\SetFuncSty{textsc}
+\SetKw{KwOr}{or}
+\SetKw{KwAnd}{and}
+\SetKw{KwContinue}{continue}
+\SetKw{Stop}{Stop}
+\SetKw{Found}{Found}
+\SetKw{Fail}{Fail}
+\SetKwFunction{WarmUp}{WarmUp360}
+\SetKwFunction{InitSceneGraph}{InitSceneGraph}
+\SetKwFunction{UpdateSceneGraph}{UpdateSceneGraph}
+\SetKwFunction{ClassifyRooms}{ClassifyRooms}
+\SetKwFunction{CandidateNodes}{CandidateNodes}
+\SetKwFunction{Dijkstra}{Dijkstra}
+\SetKwFunction{LLMProbabilities}{LLMProbabilities}
+\SetKwFunction{LLM}{LLM}
+\SetKwFunction{RPT}{RPT\ensuremath{^*}}
+\SetKwFunction{AStar}{A\ensuremath{^*}}
+\SetKwFunction{Navigate}{Navigate}
+\SetKwFunction{TargetClosing}{TargetClosing}
+\SetKwFunction{ExploreLocal}{ExploreLocal}
+\SetKwFunction{ExploreFrontier}{ExploreFrontier}
+\SetKwFunction{IntegrateDepth}{IntegrateDepth}
+\SetKwFunction{SegmentRooms}{SegmentRooms}
+
+\begin{document}
+
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{LLM-Guided Object Search}
+\label{alg:main}
+\Input{target category $c^{*}$; RGB-D observations $(I_t, D_t)$ and pose $x_t$; step budget $T$}
+\Output{\Stop at the target (\Found), or \Fail when the budget is spent}
+\State{scene graph $\mathcal{G}$; candidate nodes $\mathcal{N}$; distances $d$; probabilities $p$; visit order $\pi$; destination $v$; path $\tau$}
+\BlankLine
+\Comment{Warm-up}
+\WarmUp{} \Comment*[r]{rotate $360^{\circ}$ in place: first view of the surroundings}
+$\mathcal{G} \gets$ \InitSceneGraph{$x_0$} \Comment*[r]{initial map, rooms and objects from the warm-up scan}
+\While{$t < T$}{
+  \Comment{Scene graph}
+  $\mathcal{G} \gets$ \UpdateSceneGraph{$\mathcal{G}, I_t, D_t, x_t$} \Comment*[r]{Alg.~\ref{alg:updatesg}: occupancy map, objects, doorways, rooms}
+  $\mathcal{G} \gets$ \ClassifyRooms{$\mathcal{G}$} \Comment*[r]{Alg.~\ref{alg:classifyrooms}: the LLM types each room from the objects seen in it}
+  $\mathcal{N} \gets$ \CandidateNodes{$\mathcal{G}$} \Comment*[r]{Alg.~\ref{alg:candidatenodes}: unscanned rooms, openings, sighted targets}
+  \lIf(\Comment*[f]{nothing to plan over}){$\mathcal{N} = \varnothing$}{\ExploreFrontier{}; \KwContinue}
+
+  \Comment{Distances}
+  $d \gets$ \Dijkstra{$\mathcal{G}, x_t, \mathcal{N}$} \Comment*[r]{travel cost from $x_t$ to, and between, the nodes}
+
+  \Comment{Probabilities}
+  $p \gets$ \LLMProbabilities{$c^{*}, \mathcal{G}, \mathcal{N}$} \Comment*[r]{Alg.~\ref{alg:llmprobabilities}: $p_i$, probability that the target is found at node $i$}
+
+  \Comment{Visit order}
+  $\pi \gets$ \RPT{$\mathcal{N}, p, d$};\quad $v \gets \pi_1$ \Comment*[r]{order minimising the expected time-to-find}
+
+  \Comment{Navigation, local exploration and verification}
+  \Repeat{$v$ explored \KwOr $c^{*}$ is sighted}{
+    \uIf{not yet arrived at $v$}{
+      $\tau \gets$ \AStar{$x_t, v$} \Comment*[r]{collision-free path to $v$ on the current map}
+      \Navigate{$\tau$} \Comment*[r]{Alg.~\ref{alg:navigate}: one step along $\tau$; perception keeps updating $\mathcal{G}$}
+    }
+    \Else{
+      \ExploreLocal{$v$} \Comment*[r]{Alg.~\ref{alg:explorelocal}: room: vantage point and $360^{\circ}$ scan; opening: peek}
+    }
+  }
+  \uIf{$c^{*}$ is sighted}{
+    \lIf(\Comment*[f]{verify, approach by A$^*$, inspect; else release and re-plan}){\TargetClosing{$c^*$} $=$ \Stop}{\KwRet{\Found}}
+  }
+  \lElse(\Comment*[f]{the node is done; the next iteration re-plans}){mark $v$ explored}
+}
+\KwRet{\Fail}
+\end{algorithm}
+
+% ===========================================================================
+%  Sub-routines of Algorithm 1.  Notation as in the main algorithm; the scene
+%  graph is G = (M, O, D, R): occupancy grid, objects, doorways, rooms.
+% ===========================================================================
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{\textsc{UpdateSceneGraph}$(\mathcal{G}, I_t, D_t, x_t)$}
+\label{alg:updatesg}
+\Input{scene graph $\mathcal{G} = (\mathcal{M}, \mathcal{O}, \mathcal{D}, \mathcal{R})$; RGB image $I_t$; depth image $D_t$; pose $x_t$}
+\Output{updated $\mathcal{G}$: occupancy grid $\mathcal{M}$, objects $\mathcal{O}$, doorways $\mathcal{D}$, rooms $\mathcal{R}$}
+\BlankLine
+$\mathcal{M} \gets$ \IntegrateDepth{$\mathcal{M}, D_t, x_t$} \Comment*[r]{2-D occupancy grid: free, occupied, unknown}
+\ForEach(\Comment*[f]{open-vocabulary detector}){object detected in $I_t$ by \textsc{YOLO-World}}{
+  locate it in 3-D from $D_t$ and $x_t$\;
+  match it to an object of the same class in $\mathcal{O}$, else add it \Comment*[r]{an object counts once seen in several frames}
+}
+$\mathcal{D} \gets$ doorways detected in $I_t$ and confirmed over several frames\;
+$\mathcal{R} \gets$ \SegmentRooms{$\mathcal{M}, \mathcal{D}$} \Comment*[r]{watershed over free space, cut at the doorways; room ids persist}
+\lForEach(\Comment*[f]{also its area and remaining frontier}){room $r \in \mathcal{R}$}{$\mathcal{O}_r \gets$ objects of $\mathcal{O}$ inside $r$}
+\KwRet{$\mathcal{G}$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{\textsc{ClassifyRooms}$(\mathcal{G})$}
+\label{alg:classifyrooms}
+\Input{scene graph $\mathcal{G}$ with rooms $\mathcal{R}$ and the objects $\mathcal{O}_r$ seen in each room}
+\Output{$\mathcal{G}$ with a semantic type $\ell_r$ per room (tentative from one object class, firm from two or more)}
+\BlankLine
+\ForEach(\Comment*[f]{labels are revised as evidence grows}){room $r \in \mathcal{R}$ whose objects $\mathcal{O}_r$ gained a new class}{
+  $\ell_r \gets$ \LLM{$\mathcal{O}_r$} \Comment*[r]{the room type that best explains the objects, e.g.\ \{bed, wardrobe\} $\Rightarrow$ bedroom}
+}
+rooms without objects keep $\ell_r = $ \emph{unknown}\;
+\KwRet{$\mathcal{G}$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{\textsc{CandidateNodes}$(\mathcal{G})$}
+\label{alg:candidatenodes}
+\Input{scene graph $\mathcal{G} = (\mathcal{M}, \mathcal{O}, \mathcal{D}, \mathcal{R})$; target category $c^{*}$ (global)}
+\Output{candidate nodes $\mathcal{N}$, each with an entry point $e_i$ for \textsc{Dijkstra} and \textsc{A}$^*$}
+\BlankLine
+$\mathcal{N}_{\mathrm{room}} \gets \{\, r \in \mathcal{R} : r \text{ not yet scanned} \,\}$ \Comment*[r]{entry: a reachable point inside $r$}
+$\mathcal{N}_{\mathrm{open}} \gets \{\, o : o \text{ an opening of } \mathcal{M} \text{ onto unseen space, not yet peeked} \,\}$ \Comment*[r]{a doorway or gap at the map's edge; entry: its threshold}
+$\mathcal{N}_{\mathrm{target}} \gets \{\, q \in \mathcal{O} : q \text{ is of class } c^{*}, \text{ not yet inspected} \,\}$ \Comment*[r]{entry: a standoff point facing $q$}
+$\mathcal{N} \gets \mathcal{N}_{\mathrm{room}} \cup \mathcal{N}_{\mathrm{open}} \cup \mathcal{N}_{\mathrm{target}}$\;
+\lIf(\Comment*[f]{floor fully mapped: a second pass re-checks the scanned rooms}){$\mathcal{N} = \varnothing$ \KwAnd no frontier is left in $\mathcal{M}$}{$\mathcal{N} \gets \mathcal{R}$}
+\KwRet{$\mathcal{N}$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{\textsc{LLMProbabilities}$(c^{*}, \mathcal{G}, \mathcal{N})$}
+\label{alg:llmprobabilities}
+\Input{target category $c^{*}$; scene graph $\mathcal{G}$; candidate nodes $\mathcal{N}$}
+\Output{probability vector $p = (p_i)_{i \in \mathcal{N}}$}
+\BlankLine
+$H \gets$ summary of the house so far \Comment*[r]{room types found, rooms still unidentified, openings not looked into, budget spent}
+\lForEach(\Comment*[f]{type, size, objects seen, visit status; never distance}){$i \in \mathcal{N}$}{$u_i \gets$ description of node $i$}
+$y \gets$ \LLM{$c^{*}, H, \{u_i\}_{i \in \mathcal{N}}$} \Comment*[r]{where would $c^{*}$ be, given the house? reasoning first, then one score per node}
+\lForEach(\Comment*[f]{independent estimates, not normalised}){$i \in \mathcal{N}$}{$p_i \gets$ score $y_i$ as a probability, clipped to $[0, 1)$}
+\lForEach(\Comment*[f]{the detector's own evidence; no LLM needed}){sighted-target node $i \in \mathcal{N}_{\mathrm{target}}$}{$p_i \gets$ a fixed high value}
+\KwRet{$p$}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{\textsc{Navigate}$(\tau)$}
+\label{alg:navigate}
+\Input{path $\tau$ from the current pose $x_t$ to the goal}
+\Output{one action executed; $\mathcal{G}$, $x_t$ and $t$ updated; ``$c^{*}$ sighted'' flagged if the target comes into view}
+\BlankLine
+$a \gets$ first action along $\tau$ \Comment*[r]{turn toward the next waypoint, otherwise move forward}
+execute $a$ and observe $(I_{t+1}, D_{t+1}, x_{t+1})$\;
+$\mathcal{G} \gets$ \UpdateSceneGraph{$\mathcal{G}, I_{t+1}, D_{t+1}, x_{t+1}$} \Comment*[r]{perception runs on every step}
+\lIf(\Comment*[f]{ends the navigation loop of Algorithm~\ref{alg:main}}){an object of class $c^{*}$ is detected with a 3-D position}{flag ``$c^{*}$ sighted''}
+$t \gets t + 1$\;
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\caption{\textsc{ExploreLocal}$(v)$}
+\label{alg:explorelocal}
+\Input{node $v \in \mathcal{N}$ the agent has arrived at}
+\Output{one action executed (perception as in \textsc{Navigate}); $v$ declared explored when its inspection is complete}
+\BlankLine
+\uIf(\Comment*[f]{room: look around from the middle}){$v$ is a room}{
+  \uIf{not at the vantage point of $v$}{
+    $\tau \gets$ \AStar{$x_t$, vantage point of $v$};\quad \Navigate{$\tau$} \Comment*[r]{the interior point farthest from walls and objects}
+  }
+  \lElseIf(\Comment*[f]{one turn per step}){less than $360^{\circ}$ swept}{turn in place}
+  \lElse(\Comment*[f]{the room is scanned and leaves $\mathcal{N}$}){declare $v$ explored}
+}
+\uElseIf(\Comment*[f]{opening: look through}){$v$ is an opening}{
+  \lIf{ahead, left and right not all looked at}{turn toward the next}
+  \lElse(\Comment*[f]{what was seen is now part of $\mathcal{M}$ and $\mathcal{R}$}){declare $v$ explored}
+}
+\Else(\Comment*[f]{sighted target: take a close look}){
+  turn toward the object from the standoff point \Comment*[r]{a fresh detection hands over to \textsc{TargetClosing}}
+  \lIf{nothing is detected after a few looks}{declare $v$ explored}
+}
+\end{algorithm}
+
+\end{document}

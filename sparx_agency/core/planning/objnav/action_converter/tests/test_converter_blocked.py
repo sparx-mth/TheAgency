@@ -138,19 +138,30 @@ LAST_DECISIONS = {
     ("forward", (0.0, 0.0, 0.0), True),
     ("forward", (0.005, 0.0, 0.0), True),
     ("forward", (0.004, 0.0, 0.003), True),
-    ("forward", (0.0, 0.0, 0.02), False),
+    ("forward", (0.0, 0.0, 0.02), True),
+    ("forward", (0.03, 0.0, 0.0), True),
+    ("forward", (0.01, 0.09, 0.0), True),
+    ("forward", (0.06, 0.04, 0.0), False),
     ("forward", (0.25, 0.0, 0.0), False),
+    ("forward", (0.22, 0.0, 0.12), False),
     ("turn", (0.0, 0.0, 0.0), False),
     ("look", (0.0, 0.0, 0.0), False),
     ("stop", (0.0, 0.0, 0.0), False),
     ("idle", (0.0, 0.0, 0.0), False),
 ], ids=["before-any-action", "forward-did-not-move", "forward-moved-5mm",
-        "forward-moved-5mm-in-3d", "forward-climbed-2cm",
-        "forward-moved-a-step", "after-a-turn", "after-a-look", "after-stop",
-        "after-an-idle-step"])
-def test_forward_blocked_holds_only_after_a_forward_step_that_moved_less_than_epsilon(
+        "forward-moved-5mm-in-3d", "forward-climbed-2cm-without-advancing",
+        "forward-advanced-3cm", "forward-slid-9cm-along-a-wall",
+        "forward-grazed-a-wall-but-advanced-6cm", "forward-moved-a-step",
+        "forward-climbed-a-tread", "after-a-turn", "after-a-look",
+        "after-stop", "after-an-idle-step"])
+def test_forward_blocked_holds_only_after_a_forward_step_that_advanced_less_than_epsilon(
         last, moved, blocked):
-    """The one definition the converter recovers with and the agent notifies with; a move counts in 3-D."""
+    """The one definition the converter recovers with and the agent notifies with.
+
+    Progress is the advance along the heading the step was emitted with (east
+    here): a slide along a wall the agent walked into moves it sideways and is
+    blocked, however far it skidded; a climb counts by its horizontal advance.
+    """
     converter = DiscreteActionConverter(HABITAT)
     pose = ORIGIN
     if last != "nothing":

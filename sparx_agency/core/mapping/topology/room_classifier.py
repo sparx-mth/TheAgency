@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import math
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from sparx_agency.core.mapping.topology.llm_client import LLMClient
 
@@ -96,6 +96,20 @@ class RoomTypeClassifier:
         """Number of distinct successfully classified evidence signatures."""
         return len(self._sig_cache)
 
+    def cached(self, classes: Sequence[str]) -> Optional[RoomLabel]:
+        """The verdict already held for exactly this evidence, or None.
+
+        For a caller that must decide whether asking is worth a call: the
+        room-search loop re-labels a room the moment a new kind of object
+        appears in it, and the scene graph's re-partitions hand it the same
+        evidence again and again -- a verdict the model has given for that
+        evidence is reused rather than bought twice.
+        """
+        norm = [str(c).strip().lower() for c in classes if str(c).strip()]
+        signature = (tuple(sorted(Counter(norm).items())) if self._count_sensitive
+                     else tuple(sorted(set(norm))))
+        return self._sig_cache.get(signature)
+
     def classify(self, classes: Sequence[str], refresh: bool = False) -> RoomLabel:
         """Classify current evidence; refresh bypasses a previous cached answer.
 
@@ -119,7 +133,9 @@ class RoomTypeClassifier:
         system = SYSTEM_PROMPT_TEMPLATE.format(label_set=", ".join(self._label_set))
         user = USER_PROMPT_TEMPLATE.format(obj_list=format_object_list(classes))
         reply = self._client.chat_json(system, user)
-        label = str(reply.get("label", "unknown")).strip().lower()
+        # "living room" / "Living-Room" are the set's ``living_room``: a model
+        # that writes the type in prose must not read as ``unknown``.
+        label = "_".join(str(reply.get("label", "unknown")).strip().lower().replace("-", " ").split())
         if label not in self._label_set:
             label = "unknown"
         try:

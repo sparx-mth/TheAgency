@@ -283,3 +283,64 @@ def test_a_kinematics_option_of_the_wrong_type_is_refused_before_the_episode_sta
     assert env.resets == []
     with pytest.raises(TypeError, match="action must be a DiscreteAction"):
         check_motion(1, START, START, SPEC, TOLERANCE)
+
+
+def test_a_first_action_settle_onto_the_mesh_is_excused_only_when_the_protocol_allows_it():
+    """Gibson val Darden/000000 starts 0.10 m below the navmesh; habitat-sim lifts the agent on the first
+    action. Default tolerance: refused (a turn that moved 0.10 m). With ``settle_m``: the vertical part
+    of the FIRST action is the simulator's; the horizontal bounds still hold, and later actions are not
+    excused at all."""
+    pose = AgentPose(1.0, 2.0, 0.0, math.radians(40.0))
+    lifted = moved(pose, dz=0.10)
+    turned = AgentPose(lifted.x, lifted.y, lifted.z, pose.yaw + SPEC.turn_angle_rad, pose.camera_pitch)
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, turned, SPEC, TOLERANCE, first=True)
+    settling = KinematicTolerance(settle_m=0.30)
+    check_motion(A.TURN_LEFT, pose, turned, SPEC, settling, first=True)
+    check_motion(F, pose, moved(pose, dx=0.25 * math.cos(pose.yaw), dy=0.25 * math.sin(pose.yaw), dz=0.28), SPEC,
+                 settling, first=True)
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, turned, SPEC, settling, first=False), "only the first action"
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, AgentPose(lifted.x, lifted.y, 0.35, turned.yaw), SPEC, settling, first=True)
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, AgentPose(lifted.x + 0.05, lifted.y, lifted.z, turned.yaw), SPEC, settling,
+                     first=True), "the horizontal bound stands"
+    assert KinematicTolerance().settle_m == 0.0, "off by default"
+    with pytest.raises(HarnessError):
+        KinematicTolerance(settle_m=-0.1)
+    with pytest.raises(HarnessError):
+        KinematicTolerance(position_m=0.0), "every other tolerance is still strictly positive"
+
+
+def test_a_first_action_pull_onto_the_mesh_edge_is_excused_only_up_to_settle_xy_m():
+    """Gibson val Wiconisco/000118 starts 0.033 m outside the navmesh; habitat-sim's step filter pulls the
+    agent onto the mesh edge on the first body action -- the warm-up TURN_LEFT -- which the 0.02 m
+    turn-in-place bound refused, ending the 1,000-episode run at episode 919. With ``settle_xy_m`` that
+    much horizontal placement is taken off the FIRST action, along its own direction; a larger pull, a
+    later action, and the vertical part (``settle_m``'s business) are still judged."""
+    pose = AgentPose(1.0, 2.0, 0.0, math.radians(40.0))
+    pulled = moved(pose, dx=0.033 * math.cos(pose.yaw + math.radians(-73.3)), dy=0.033 * math.sin(pose.yaw + math.radians(-73.3)))
+    turned = AgentPose(pulled.x, pulled.y, pulled.z, pose.yaw + SPEC.turn_angle_rad, pose.camera_pitch)
+    with pytest.raises(EnvContractError, match="turn in place"):
+        check_motion(A.TURN_LEFT, pose, turned, SPEC, KinematicTolerance(settle_m=0.30), first=True)
+    gibson = KinematicTolerance(settle_m=0.30, settle_xy_m=0.05)
+    check_motion(A.TURN_LEFT, pose, turned, SPEC, gibson, first=True)
+    # The real episode: pulled 0.033 m sideways AND settled 0.064 m down on the same turn.
+    check_motion(A.TURN_LEFT, pose, AgentPose(pulled.x, pulled.y, -0.064, turned.yaw), SPEC, gibson, first=True)
+    # A first MOVE_FORWARD carrying the pull: the step is judged on what is left after the excuse.
+    step = moved(pose, dx=0.29 * math.cos(pose.yaw), dy=0.29 * math.sin(pose.yaw))
+    check_motion(F, pose, step, SPEC, gibson, first=True)
+    with pytest.raises(EnvContractError):
+        check_motion(F, pose, step, SPEC, KinematicTolerance(settle_m=0.30), first=True), "0.29 m is over the 0.25 + 0.03 reach"
+    with pytest.raises(EnvContractError):
+        check_motion(A.TURN_LEFT, pose, turned, SPEC, gibson, first=False), "only the first action"
+    far = moved(pose, dx=0.08)
+    with pytest.raises(EnvContractError, match="turn in place"):
+        check_motion(A.TURN_LEFT, pose, AgentPose(far.x, far.y, far.z, turned.yaw), SPEC, gibson, first=True), "0.08 - 0.05 > 0.02"
+    assert KinematicTolerance().settle_xy_m == 0.0, "off by default"
+    with pytest.raises(HarnessError):
+        KinematicTolerance(settle_xy_m=-0.1)
+    assert KinematicTolerance(settle_xy_m=0.0).settle_xy_m == 0.0, "zero is allowed, like settle_m"
+
+
