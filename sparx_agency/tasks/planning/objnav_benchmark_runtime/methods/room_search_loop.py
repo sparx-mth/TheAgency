@@ -2635,17 +2635,20 @@ class RoomSearchLoop:
                   "swept_degrees": round(math.degrees(scan["swept"]), 1)}), {}
 
     def _nearest_frontier_step(self, obs, world, cost, state, room, scan):
-        """Drive the room's nearest admissible frontier; with none left the room is scanned and finished."""
+        """Drive the room's nearest frontier the planner accepts; with none left the room is scanned and finished."""
         p = self.policy
-        goal = p.sweep.nearest(obs, world, cost, room.mask, labels=p.graph.labels, label=room.id + 1)
-        if goal is not None:
+        goals = p.sweep.nearest_goals(obs, world, cost, room.mask, labels=p.graph.labels, label=room.id + 1)
+        if goals:
             planning_world, planning_cost = self._confined(obs, world, cost, room, state.room_id)
-            command = p.sweep.explore(obs, world, planning_cost, room.mask, planning_world=planning_world, ranked=[goal])
+            command = p.sweep.explore(obs, world, planning_cost, room.mask, planning_world=planning_world, ranked=goals)
             if command is None and planning_world is not world:
-                command = p.sweep.explore(obs, world, cost, room.mask, ranked=[goal])
+                command = p.sweep.explore(obs, world, cost, room.mask, ranked=goals)
             if command is not None:
                 return command, {}
             self.stats["plan_failures"] += 1
+            self._log(obs, "scan_abandoned", room=state.room_id, reason="no route to any of the nearest frontiers")
+            self._scan = None
+            return None, {"route_failed": True}
         p.scans.record(obs, room, source="room_frontier_walk")
         self.stats["scans_completed"] += 1
         self.stats["exhausted_releases"] += 1

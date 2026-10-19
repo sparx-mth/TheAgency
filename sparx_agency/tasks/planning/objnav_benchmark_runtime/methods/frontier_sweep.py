@@ -128,10 +128,15 @@ class FrontierSweep:
             self.stats["plan_failures"] += 1
         return None
 
+    def nearest_goals(self, obs, world, cost, mask, labels=None, label=None):
+        """The room's admissible frontier goals, nearest along the floor first."""
+        goals = self.admissible(obs, world, self._ranked(obs, world, cost, mask, labels, label))
+        return sorted(goals, key=lambda g: g.geodesic_m)
+
     def nearest(self, obs, world, cost, mask, labels=None, label=None):
         """The admissible frontier goal of the room nearest along the floor, or None."""
-        goals = self.admissible(obs, world, self._ranked(obs, world, cost, mask, labels, label))
-        return min(goals, key=lambda g: g.geodesic_m) if goals else None
+        goals = self.nearest_goals(obs, world, cost, mask, labels, label)
+        return goals[0] if goals else None
 
     def _ranked(self, obs, world, cost, mask, labels=None, label=None):
         """The room's ranked frontier goals, by label vote when labels are given, else by mask."""

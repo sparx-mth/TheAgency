@@ -283,3 +283,36 @@ def test_a_centred_candidate_without_tilt_turns_toward_the_side_that_keeps_the_b
 
 
 
+
+
+# -- a box taller than the frame: no tilt keeps it whole (Darden/000000, actions 22-45) ----------
+def tilt_bed_policy(monkeypatch):
+    p, original = setup_policy(target_closing=IN_PLACE)
+    ep = replace(original, action_spec=MULTIFLOOR_PROTOCOL.actions(), target_category="bed")
+    p.reset(ep, gibson_label_mapper().target_labels("bed"))
+    freeze_global(monkeypatch, p)
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    return p, ep
+
+
+def test_a_bed_taller_than_the_frame_is_not_tilted_up_and_down_for_ever(monkeypatch):
+    """Level, the bed's box is cut by the bottom edge; tilted down, by the top edge: no tilt keeps it whole,
+    and the verification used to answer LOOK_DOWN, LOOK_UP, LOOK_DOWN ... for twenty-four actions."""
+    p, ep = tilt_bed_policy(monkeypatch)
+    converter = DiscreteActionConverter(ep.action_spec)
+    closing, tilt, pitch, looks = p.closing, ep.action_spec.tilt_angle_rad, 0.0, []
+    base = replace(observation(ep, 0, depth=0.5), target_category="bed")
+    closing.xyz = (0.5, 0.0, base.pose.z + ep.camera.height_m - 0.3)
+    for step in range(12):
+        pose = AgentPose(0, 0, 0, 0, camera_pitch=pitch)
+        closing.box = (18, 217, 639, 480) if pitch < tilt / 2 else (19, 0, 640, 433)
+        command = closing._verification_view(replace(base, pose=pose, step=step), 0.5)
+        if command is None:
+            continue
+        action = converter.step(pose, command).action
+        if action in (DiscreteAction.LOOK_UP, DiscreteAction.LOOK_DOWN):
+            looks.append(action)
+            pitch = command.camera_pitch
+    reversals = sum(1 for a, b in zip(looks, looks[1:]) if a != b)
+    assert reversals <= closing.settings.max_tilt_reversals

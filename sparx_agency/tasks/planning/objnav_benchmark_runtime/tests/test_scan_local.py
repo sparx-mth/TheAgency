@@ -99,3 +99,30 @@ def test_a_revisit_under_the_nearest_frontier_visit_still_turns_a_circle():
     vantage = policy.loop._vantage(world, policy.navigation_cost(world), rooms[1], revisit=True)[0]
     command = policy.loop.plan(obs_at(episode, 1, vantage), world)
     assert policy.supervisor.state == SEARCH and command.info["kind"] == "room_scan"
+
+
+def test_a_refused_route_to_the_nearest_frontier_releases_the_room_unfinished(monkeypatch):
+    policy, episode, world, _, _ = scan_policy("nearest_frontier")
+    entry = enter_room_b(policy, episode, world)
+    monkeypatch.setattr(policy.sweep, "explore", lambda *args, **kwargs: None)
+    policy.loop.plan(obs_at(episode, 1, entry), world)
+    assert policy.loop.stats["plan_failures"] >= 1
+    assert policy.loop.stats["scans_completed"] == 0
+    assert not policy.supervisor.history or policy.supervisor.history[-1][:2] != (1, EXHAUSTED)
+    assert policy.scans.records == [] or policy.scans.records[-1]["source"] != "room_frontier_walk"
+
+
+def test_the_nearest_frontier_visit_offers_the_planner_the_frontiers_nearest_first(monkeypatch):
+    policy, episode, world, _, _ = scan_policy("nearest_frontier")
+    entry = enter_room_b(policy, episode, world)
+    offered = []
+    real_explore = policy.sweep.explore
+
+    def spy(*args, **kwargs):
+        offered.append(kwargs.get("ranked"))
+        return real_explore(*args, **kwargs)
+
+    monkeypatch.setattr(policy.sweep, "explore", spy)
+    policy.loop.plan(obs_at(episode, 1, entry), world)
+    ranked = offered[0]
+    assert ranked and [g.geodesic_m for g in ranked] == sorted(g.geodesic_m for g in ranked)

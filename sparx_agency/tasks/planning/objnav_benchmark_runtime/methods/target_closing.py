@@ -91,6 +91,9 @@ class TargetClosingSettings:
     # edge at 1.0505 m against a 1.05 m limit, twenty-four alternating turns at the step
     # limit). At most ``inspection_max_steps`` such steps per inspection.
     inspection_max_steps: int = 3
+    # Tilt reversals a candidate's verification may take: a box taller than the frame is cut
+    # either way (Darden/000000: 24 alternating LOOKs), so past this it stops tilting.
+    max_tilt_reversals: int = 1
     # THE CLOSEST REACHABLE APPROACH IS TERMINAL (since 2026-10-15). The standoff ring stands 0.70 m
     # about the 3-D memory -- a point on the object's NEAR surface -- and a big object has no floor
     # there: Collierville/000009's 1.5 m television on its cabinet put every ring point inside the
@@ -510,6 +513,8 @@ class TargetClosingSettings:
         for key in ("backoff", "support_surface_resilience", "through_unknown", "closest_approach_stop"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
+        if type(self.max_tilt_reversals) is not int or self.max_tilt_reversals < 0:
+            raise ValueError("max_tilt_reversals must be a non-negative int")
         for key in ("max_verify_approach_steps", "inspection_max_steps", "verify_sweep_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 0:
                 raise ValueError("%s must be a non-negative int" % key)
@@ -610,6 +615,7 @@ class TargetClosing:
         self.stale_standoffs_kept = 0      # standoffs a refinement made stale, kept because no ring point had a route
         self.closest_approach_stops = 0    # STOPs from a widened standoff with the fresh range a step outside the limit
         self.occluder_reads = 0            # candidate frames whose box was read around a surface standing in front of the target
+        self.tilt_refusals = 0             # verification LOOKs refused because they would reverse the last one too often
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
         self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
         self._clear()
@@ -661,6 +667,8 @@ class TargetClosing:
         self.glimpse_step = -1             # ... and the action it was seen on
         self.verify_paused = 0             # verification actions this candidate's clock did not count (bounded)
         self.inspection_stepped = 0        # steps this inspection took for a fresh range one step beyond the limit
+        self.tilt_sign = None              # direction of the verification's last LOOK: +1 down, -1 up
+        self.tilt_reversals = 0            # LOOKs of the opposite direction since the candidate was taken
         self.inspection_step_pending = False   # the last command was such a step: the hooks say whether it moved
         self.inspection_blocked = False    # ... and one of them did not: the floor ends here
         self.inspection_turn = None        # (step, sign) of the inspection's last centring turn on a fresh box
@@ -1470,6 +1478,23 @@ class TargetClosing:
         return None
 
     def _verification_view(self, obs, distance):
+        """The verification frame, with the LOOK that would reverse the last one too often refused."""
+        view = self._verification_look(obs, distance)
+        if view is None or view.camera_pitch is None:
+            return view
+        delta = float(view.camera_pitch) - float(obs.pose.camera_pitch)
+        if abs(delta) < 1e-6:
+            return view
+        sign = 1 if delta > 0 else -1
+        reversal = self.tilt_sign is not None and sign != self.tilt_sign
+        if reversal and self.tilt_reversals >= self.settings.max_tilt_reversals:
+            self.tilt_refusals += 1
+            return None
+        self.tilt_reversals += int(reversal)
+        self.tilt_sign = sign
+        return view
+
+    def _verification_look(self, obs, distance):
         """The next frame for a fresh, aligned candidate too close to step toward: one that keeps its box whole.
 
         A satisfied hold is idle, and the headless agent's idle action is a
@@ -2339,7 +2364,7 @@ class TargetClosing:
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
-                "occluder_reads": self.occluder_reads,
+                "occluder_reads": self.occluder_reads, "tilt_refusals": self.tilt_refusals,
                 "overshoot_commands": self.overshoot_commands,
                 "stop_overshoot": None if self.overshoot is None else {
                     key: self.overshoot[key] for key in ("decided", "steps", "actions", "blocked", "ended")},
