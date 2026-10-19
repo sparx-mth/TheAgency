@@ -1,8 +1,7 @@
 # 032 - The FALCON + YOLO + closing exploration baseline
 
 **Branch:** `feat/falcon-yolo-baseline-nadav` (off `feat/objnav-habitat-gibson-nadav` at `59783f62`)
-**Status:** in progress -- code, tests and docs done; the fifteen recorded episodes run and recorded below; the
-1,000-episode run waits for the review of the fifteen
+**Status:** done -- the fifteen recorded episodes and the 1,000-episode Gibson val run, both recorded below
 **Roadmap item:** ObjectNav exploration ablation -- goal-free FALCON + YOLO + the same closing, scored on the
 Gibson val split against the full method
 
@@ -71,11 +70,14 @@ exploration, run on the same episodes with the same seed, measures exactly that.
       relocation as `no_progress` after 31 actions and the next one chose the same doorway. The full method's
       frontier explorer never re-judges its A* routes; now neither does the baseline's relocation or pursuit. The
       episode then succeeds (320 steps, SPL 0.199) where the full method's run did not (500 steps, DTG 0.13 m).
-- [ ] Review the fifteen recordings; adjust what the videos say needs adjusting (candidates: the turn-heavy
-      viewpoint facing, the 4 m disc, bootstrap turns, the exhaustion STOP).
-- [ ] The 1,000-episode run: `PROGRESS_ENTRY=docs/progress/entries/032-falcon-yolo-exploration-baseline.md
-      RUN_ARGS="--agent falcon-yolo" gibson/launch_detached.sh runs/gibson_val_falcon-yolo_<stamp>`; record SR,
-      SPL, DTG overall, per scene and per category here beside entry 030's, and publish `results/<run>/`.
+- [x] The fifteen reviewed; no change before the full run.
+- [x] The 1,000-episode run on `03d640ff`: `PROGRESS_ENTRY=... RUN_ARGS="--agent falcon-yolo" SUPERVISOR_ARGS=--dry-run
+      gibson/launch_detached.sh runs/gibson_val_falcon-yolo_20261018T173302Z`, with a RAM/VRAM guard (stop above 80 %;
+      peaks 56 % RAM, 52 % VRAM). Its frozen configuration matches the reference run's
+      (`results/gibson_val_20261016_small_llm`, `f628a476`) in the 1,000 episode ids and their order, seed 17,
+      protocol, kinematics, dataset, lean records, detector checkpoint and closing settings; no `.py` differs between
+      `f628a476` and this branch's base. Published to `results/gibson_val_falcon-yolo_20261018T173302Z/`.
+- [x] The run's three deaths (below) and the supervisor fix (`9e81d2c6`).
 
 ## The fifteen (`runs/benchmark_falcon-yolo_15episodes_20261018T152349Z`, `03d640ff`, 2026-10-18, laptop)
 
@@ -124,3 +126,40 @@ What the three failures are (every one is the shared perception/closing or the e
   transaction under ~0.8 s; a bigger disc buys longer local plans at the planner's capacity caps.
 - `exhausted_turns` STOPs a storey the explorer calls finished; a boxed-in agent (inflation on a narrow spot) would
   STOP too, and the recording's `exploration.stats` says which it was.
+
+## The 1,000 episodes (`results/gibson_val_falcon-yolo_20261018T173302Z`)
+
+**Baseline SR 0.665 (95 % CI 0.635-0.694), SPL 0.337 (0.315-0.358), DTG 1.75 m**, against the full method's
+**SR 0.792, SPL 0.464, DTG 0.94 m** on the same 1,000 episodes. Terminations: 847 STOP, 149 step limit, 4 agent
+errors (the shared closing's `target floor changed`, scored as failures as the reference's one was).
+
+| group | n | baseline SR | SPL | DTG m | full method SR | SPL | DTG m |
+|---|---|---|---|---|---|---|---|
+| **overall** | 1000 | 0.665 | 0.337 | 1.75 | 0.792 | 0.464 | 0.94 |
+| Collierville | 200 | 0.760 | 0.411 | 0.91 | 0.780 | 0.544 | 0.86 |
+| Corozal | 200 | 0.740 | 0.371 | 1.67 | 0.800 | 0.479 | 1.26 |
+| Darden | 200 | 0.580 | 0.257 | 2.13 | 0.815 | 0.416 | 0.72 |
+| Markleeville | 200 | 0.600 | 0.279 | 2.06 | 0.750 | 0.367 | 1.16 |
+| Wiconisco | 200 | 0.645 | 0.364 | 1.98 | 0.815 | 0.514 | 0.68 |
+| bed | 123 | 0.301 | 0.117 | 4.12 | 0.528 | 0.256 | 2.76 |
+| chair | 177 | 0.893 | 0.554 | 0.34 | 0.915 | 0.689 | 0.23 |
+| couch | 229 | 0.729 | 0.445 | 0.85 | 0.786 | 0.579 | 0.73 |
+| potted plant | 193 | 0.824 | 0.343 | 0.62 | 0.798 | 0.376 | 0.70 |
+| toilet | 208 | 0.500 | 0.154 | 3.41 | 0.894 | 0.357 | 0.52 |
+| tv | 70 | 0.571 | 0.341 | 2.27 | 0.643 | 0.445 | 2.07 |
+
+The exploration policy accounts for 12.7 points of SR and 12.7 of SPL. The gap is largest where search matters:
+toilet (0.500 vs 0.894) and bed (0.301 vs 0.528), the targets in their own rooms; chair, couch and potted plant,
+usually in view from the common rooms, are within a few points (potted plant slightly above).
+
+## The run's three deaths, and the supervisor fix
+Three native segfaults in habitat-sim (0.2.4 under `--allow-sim-version-mismatch`), each at an episode's start:
+Collierville/000114 (attempt 1), Wiconisco/000139 (attempt 2), and Wiconisco/000139 again on the resume (attempt 3).
+The reference run died three times the same way (Darden/000173, Markleeville/000121, Wiconisco/000072). Wiconisco/000139
+alone in a fresh process ran cleanly (SR 1, 228 steps): an intermittent fault of the simulator over a long process,
+not the episode or the policy. The third crash left a zombie whose renderer threads never exited, and the supervisor --
+waiting for the launcher process to end -- waited five hours. `supervise_benchmark.sh` (`9e81d2c6`) now kills a run
+whose progress files have not changed for `STALL_MINUTES` (20) and counts it as a death, and calls an episode
+deterministic after `SAME_EPISODE_DEATHS` (3) deaths on it rather than two in a row. The resume completed the
+remaining 61 episodes, Wiconisco/000139 included. The supervisor's dry-run publish step then failed writing its
+result files (it expects the full method's configuration); the files were published by hand.
