@@ -29,12 +29,16 @@
 # Env: HAB_PY (the Habitat interpreter), REMOTE (origin), BRANCH (the branch checked out when the supervisor
 #      starts), MAX_RESUMES (2), POLL_S (60), RESUME_DELAY_S (120), PUSH_RETRIES (12), PUSH_RETRY_S (300),
 #      MONITOR_INTERVAL_S (300), PROGRESS_ENTRY (docs/progress/entries/026-...md),
+#      STALL_MINUTES (20: a launcher alive whose progress.json, episodes.jsonl and run.log have not changed for
+#      this long is killed with its process group and counted as a death -- a habitat-sim segfault can leave a
+#      zombie whose renderer threads never exit; 0 disables), SAME_EPISODE_DEATHS (3: deaths on one episode
+#      before it is called deterministic and the supervisor gives up),
 #      RESUME_ARGS (extra gibson.run arguments appended to every replayed resume, e.g.
 #      "--resume-accepting-changes kinematics source_sha256" after a self-check fix; see BENCHMARK.md 2.6).
 # Logs: <output>/supervisor.log.
 set -euo pipefail
 
-usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$HERE/$(basename -- "${BASH_SOURCE[0]}")"
@@ -46,6 +50,8 @@ REPORT_MODULE="sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.repor
 REMOTE="${REMOTE:-origin}"
 MAX_RESUMES="${MAX_RESUMES:-2}"
 POLL_S="${POLL_S:-60}"
+STALL_MINUTES="${STALL_MINUTES:-20}"
+SAME_EPISODE_DEATHS="${SAME_EPISODE_DEATHS:-3}"
 RESUME_DELAY_S="${RESUME_DELAY_S:-120}"
 PUSH_RETRIES="${PUSH_RETRIES:-12}"
 PUSH_RETRY_S="${PUSH_RETRY_S:-300}"
@@ -116,6 +122,30 @@ launcher_exit_code() {   # the current attempt's code: exit_code.txt newer than 
   fi
 }
 run_completed() { [[ -s "$OUT/summary.json" ]]; }
+last_activity() {   # epoch seconds of the newest of the run's progress files (0 when none exists)
+  local newest=0 stamp f
+  for f in "$OUT/progress.json" "$OUT/episodes.jsonl" "$OUT/run.log"; do
+    stamp="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+    (( stamp > newest )) && newest="$stamp"
+  done
+  echo "$newest"
+}
+wait_for_launcher() {   # until the launcher exits -- or stops showing life for STALL_MINUTES, then kill its group
+  local pid="$1" started idle
+  started="$(date +%s)"
+  while alive "$pid"; do
+    sleep "$POLL_S"
+    [[ "$STALL_MINUTES" -gt 0 ]] || continue
+    idle=$(( $(date +%s) - $(( $(last_activity) > started ? $(last_activity) : started )) ))
+    if (( idle > STALL_MINUTES * 60 )); then
+      say "STALLED: no progress for $((idle / 60)) min on $(episode_in_progress) (a crashed run left alive, e.g. a zombie with renderer threads); killing launcher $pid and its process group"
+      kill -KILL -- "-$pid" 2>/dev/null || true
+      pkill -KILL -f -- "gibson\.run .*--output ${OUT}( |$)" 2>/dev/null || true
+      sleep 5
+      return 0
+    fi
+  done
+}
 episode_in_progress() {   # what progress.json says was running (the episode a dead run died on)
   "$HAB_PY" - "$OUT/progress.json" <<'PY' 2>/dev/null || true
 import json, sys
@@ -483,7 +513,8 @@ if [[ "$MODE" == publish ]]; then
 fi
 
 printf '%s\n' "$$" > "$OUT/supervisor.pid"
-ATTEMPT=0 LAST_DIED_ON=""
+ATTEMPT=0
+declare -A DEATHS=()
 say "supervising $RUN_NAME (pid $$): resumes <= $MAX_RESUMES, publish to $REMOTE $BRANCH${DRY_RUN:+ (dry run)}, poll ${POLL_S}s"
 if [[ ! -f "$REPLAY/run.cmdline" && "$MAX_RESUMES" -gt 0 ]] && alive "$(launcher_pid)"; then
   ( snapshot ) || say "WARNING: no replay snapshot could be taken; a dead run will not be resumable"
@@ -491,7 +522,7 @@ fi
 while :; do
   pid="$(launcher_pid)"; [[ -n "$pid" ]] || die "no launcher.pid in $OUT (launch as BENCHMARK.md 2.3 describes)"
   say "attempt $((ATTEMPT + 1)): waiting for launcher $pid"
-  while alive "$pid"; do sleep "$POLL_S"; done
+  wait_for_launcher "$pid"
   code="$(launcher_exit_code)"
   say "launcher $pid ended (exit code ${code:-not recorded})"
   if run_completed; then
@@ -503,9 +534,14 @@ while :; do
   [[ "$code" == 130 || "$code" == 143 ]] && stop_reason="exit $code"
   [[ -e "$OUT/STOP" ]] && stop_reason="${stop_reason:+$stop_reason, }STOP file"
   if [[ -n "$stop_reason" ]]; then say "stopped by the operator ($stop_reason); not resuming"; exit 2; fi
-  if [[ -n "$died_on" && "$died_on" == "$LAST_DIED_ON" ]]; then say "died on $died_on twice: deterministic, not resuming -- see $OUT/run.log"; exit 1; fi
+  if [[ -n "$died_on" ]]; then
+    DEATHS[$died_on]=$(( ${DEATHS[$died_on]:-0} + 1 ))
+    if (( DEATHS[$died_on] >= SAME_EPISODE_DEATHS )); then
+      say "died on $died_on ${DEATHS[$died_on]} times: deterministic, not resuming -- see $OUT/run.log"; exit 1
+    fi
+  fi
   if [[ "$ATTEMPT" -ge "$MAX_RESUMES" ]]; then say "no resumes left (MAX_RESUMES=$MAX_RESUMES); giving up -- see $OUT/run.log"; exit 1; fi
-  LAST_DIED_ON="$died_on"; ATTEMPT=$((ATTEMPT + 1))
+  ATTEMPT=$((ATTEMPT + 1))
   say "the run died${died_on:+ on $died_on} without a summary; resuming in ${RESUME_DELAY_S}s (resume $ATTEMPT of $MAX_RESUMES)"
   sleep "$RESUME_DELAY_S"
   relaunch
