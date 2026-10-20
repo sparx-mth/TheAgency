@@ -7,6 +7,7 @@
 #   hm3d/run_benchmark.sh --scene 00877-4ok3usBNeis --limit 3 --record  # three recorded episodes (video + HUD) of one scene
 #   hm3d/run_benchmark.sh --smoke                           # the minimal cover: one published episode per scene, every category at least once
 #   hm3d/run_benchmark.sh --limit 2 --record                # the first two published episodes of every scene, recorded
+#   hm3d/run_benchmark.sh --limit 2 --record --save-frames  # ... plus every dashboard frame as a JPEG still (frames/)
 #   hm3d/run_benchmark.sh --category toilet --limit 3       # the published toilet episodes, three per scene
 #   hm3d/run_benchmark.sh --output runs/hm3d_v2_val_X       # continue an interrupted campaign there (finished scenes are kept)
 #   hm3d/run_benchmark.sh --preflight                       # services + data + configuration check, no episode

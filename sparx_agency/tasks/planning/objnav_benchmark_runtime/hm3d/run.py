@@ -100,6 +100,10 @@ def parser():
     p.add_argument("--shard-index", type=int, default=0)
     p.add_argument("--record", action="store_true")
     p.add_argument("--video-fps", type=int, default=6)
+    p.add_argument("--save-frames", action="store_true",
+                   help="With --record, also keep every dashboard frame as a JPEG still under "
+                        "recordings/<key>/frames/ (one per decision, ~0.3 MB each) so single "
+                        "moments can be inspected without decoding the video")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--validate-starts", action="store_true",
                    help="Load every selected scene and measure l up front. Slow, "
@@ -220,6 +224,8 @@ def prepare(args):
         issues.append("--shuffle is a seeded random sample and needs --limit N")
     if not 1 <= args.video_fps <= 60:
         issues.append("--video-fps must be between 1 and 60")
+    if args.save_frames and not args.record:
+        issues.append("--save-frames keeps the recorder's frames and so needs --record")
     if args.exclude_unreachable and not args.validate_starts:
         issues.append("--exclude-unreachable needs --validate-starts to find them")
     if args.record:
@@ -310,7 +316,7 @@ def prepare(args):
         "episode_ids": list(args.episode_ids) if args.episode_ids else None,
         "lean_records": bool(args.lean),
         "allow_shared_gpu": args.allow_shared_gpu,
-        "recording": {"enabled": args.record, "fps": args.video_fps},
+        "recording": {"enabled": args.record, "fps": args.video_fps, "frames": bool(args.save_frames)},
         "split": protocol.split,
         "published_split": not development,
         "starts_validated": bool(args.validate_starts),
@@ -410,7 +416,7 @@ def main(argv=None, *, frozen_lock=None, expected_episode_ids=None):
             settings=protocol.evaluation_settings(), episode_ids=selected,
             resume=args.resume, frozen_lock=frozen_lock,
             expected_episode_ids=expected_episode_ids, record=args.record,
-            video_fps=args.video_fps, progress=progress, wrap_env=wrap_env,
+            video_fps=args.video_fps, save_frames=args.save_frames, progress=progress, wrap_env=wrap_env,
             agent_class=LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent)
         live["tracker"].finish()
         closed = True  # run_evaluation closes the environment itself

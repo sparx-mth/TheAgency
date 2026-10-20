@@ -21,6 +21,10 @@ from sparx_agency.tasks.planning.objnav_benchmark.results_io import strict_json,
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import FRAME_SIZE, method_snapshot, render_dashboard
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.floor_panels import FloorPanels
 
+#: JPEG quality of the optional per-frame stills: high enough to keep the dashboard's small text legible,
+#: which the streamed H.264 (CRF default, "veryfast") does not guarantee.
+STILL_JPEG_QUALITY = 92
+
 
 def ffmpeg_executable():
 	"""Use installed FFmpeg or imageio's bundled executable, with no download."""
@@ -108,12 +112,22 @@ class PolicyProbe:
 
 
 class EpisodeRecorder:
-	"""Observed policy state and separate display-only configuration/telemetry."""
-	def __init__(self, root, policy, fps=6, writer_factory=VideoSink, selected_episode_ids=None, display_floor_counts=None):
+	"""Observed policy state and separate display-only configuration/telemetry.
+
+	``save_frames`` additionally keeps every frame the video receives as a JPEG still under
+	``recordings/<key>/frames/<ordinal>_step<step>.jpg`` -- one per decision, plus the terminal
+	frame -- so a single moment can be inspected without decoding the video. The FINAL banner
+	frame is ``final.jpg``, as before.
+	"""
+	def __init__(self, root, policy, fps=6, writer_factory=VideoSink, selected_episode_ids=None, display_floor_counts=None,
+	             save_frames=False):
 		self.root, self.policy = Path(root), policy
 		self.fps, self.writer_factory = fps, writer_factory
 		self.selected_episode_ids = None if selected_episode_ids is None else set(selected_episode_ids)
 		self.display_floor_counts = dict(display_floor_counts or {})
+		self.save_frames = bool(save_frames)
+		self.frames_dir = None
+		self.frame_count = 0
 		self.panels = None
 		self.enabled = True
 		self.video = self.trace = self.csv_file = None
@@ -123,6 +137,8 @@ class EpisodeRecorder:
 	def begin(self, episode, observation, telemetry):
 		self.close()
 		self.episode_dir = None
+		self.frames_dir = None
+		self.frame_count = 0
 		self.last_frame = None
 		self.enabled = self.selected_episode_ids is None or episode.episode_id in self.selected_episode_ids
 		if not self.enabled:
@@ -137,6 +153,9 @@ class EpisodeRecorder:
 		key = hashlib.sha256(episode.episode_id.encode()).hexdigest()[:12]
 		self.episode_dir = self.root / "recordings" / key
 		self.episode_dir.mkdir(parents=True, exist_ok=True)
+		if self.save_frames:
+			self.frames_dir = self.episode_dir / "frames"
+			self.frames_dir.mkdir(exist_ok=True)
 		self.trace = (self.episode_dir / "steps.jsonl").open("w", encoding="utf-8")
 		self.csv_file = (self.episode_dir / "trajectory.csv").open("w", newline="", encoding="utf-8")
 		self.csv = csv.DictWriter(self.csv_file, fieldnames=(
@@ -146,7 +165,9 @@ class EpisodeRecorder:
 		write_atomically(self.episode_dir / "episode.json", strict_json({
 			"episode_id": episode.episode_id, "scene": episode.scene_id, "target": episode.target_category, "video_fps": self.fps,
 			"display_floor_count": len(self.panels.slots) if self.panels else None,
-			"video_timebase": "one frame per decision; accelerated, not real time"}, "recording", indent=2))
+			"video_timebase": "one frame per decision; accelerated, not real time",
+			"frames": ("frames/<ordinal>_step<step>.jpg: every video frame as a still; the FINAL banner is final.jpg"
+			           if self.save_frames else None)}, "recording", indent=2))
 		self._position(observation, telemetry)
 
 	def _position(self, observation, telemetry):
@@ -231,6 +252,11 @@ class EpisodeRecorder:
 		if self.video is None:
 			self.video = self.writer_factory(self.episode_dir / "video.mp4", self.fps)
 		self.video.write(frame)
+		if self.frames_dir is not None:
+			still = self.frames_dir / ("%05d_step%05d.jpg" % (self.frame_count, int(observation.step)))
+			if not cv2.imwrite(str(still), frame, [cv2.IMWRITE_JPEG_QUALITY, STILL_JPEG_QUALITY]):
+				raise HarnessError("Cannot write frame still %s" % still)
+		self.frame_count += 1
 		self.last_frame = frame
 		temporary = self.root / "latest.tmp.jpg"
 		if not cv2.imwrite(str(temporary), frame):

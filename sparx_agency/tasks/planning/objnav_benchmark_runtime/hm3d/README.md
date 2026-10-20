@@ -306,6 +306,7 @@ What the run leaves behind:
 | `<output>/episodes.jsonl` | one row per episode incl. `agent_info` (`room_search_loop` events, `exploration_fallback.failures`, `building` transitions, route stats) |
 | `<output>/run.json` | the frozen configuration: protocol, method settings, detector/LLM identities, dataset manifest, navmesh provenance |
 | `<output>/recordings/<key>/video.mp4` | the dashboard video, one frame per decision (accelerated, not wall time) |
+| `<output>/recordings/<key>/frames/<n>_step<s>.jpg` | with `--save-frames`: every video frame as a JPEG still, numbered by decision ordinal and step (`steps.jsonl` row *n* is the decision shown in still *n*; the last still is the terminal frame, the FINAL banner is `final.jpg`) |
 | `<output>/recordings/<key>/steps.jsonl` | every command, action, pose, detection and policy snapshot |
 | `<output>/recordings/<key>/trajectory.csv` | pose, camera pitch, traversal state and evaluator-only DTG per action |
 | `<output>/recordings/<key>/floor_maps.npz`, `floor_panels.json` | the persistent per-storey occupancy panels |
@@ -322,7 +323,9 @@ Development flags, all subset runs (scoring is unchanged, the goal is always the
 `--episode-ids <id>…` re-runs exactly those episodes (same start and goal) after a change;
 `--shuffle --limit N` takes a seeded random sample instead of the first N in split order;
 `--category toilet` keeps one goal category; `--lean` keeps ~a few KB per episode row instead of ~100 KB
-(no per-action series); `--progress-file` moves the live `progress.json`, otherwise `<output>/progress.json`.
+(no per-action series); `--save-frames` (with `--record`) also writes every dashboard frame as a JPEG still
+(~0.3 MB each, a few hundred per episode) for frame-by-frame review without decoding the video;
+`--progress-file` moves the live `progress.json`, otherwise `<output>/progress.json`.
 `<output>/evaluation_diagnostics.jsonl` holds the evaluator-only distance and path values per episode and is
 never shown to the policy.
 
@@ -493,6 +496,8 @@ way. Tune there; touch `val` only under a lock.
 | `Only N of M checked starts reproduce the publisher's own geodesic` | wrong navmesh in force; check `HM3DProtocol.navmesh` (`agent` is the reference) — `--allow-geodesic-mismatch` only records a deliberate deviation |
 | `N selected episodes have no reachable goal view point` | `--exclude-unreachable` with `--validate-starts`; the dropped ids are recorded in the manifest |
 | `Requested LLM model … is not provisioned` | `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`; check `LLM_BASE_URL` |
+| `No Ollama manifest for … under $MODELS/ollama` (the GPU planner) | the planner sizes the LLM from Ollama's manifest files; with Ollama in Docker they live in the container's volume — `docker cp <container>:/root/.ollama/models/manifests "$MODELS/ollama/manifests"` (24 KB, no weights), or set `LLM_VRAM_MIB` |
+| the room LLM answers but every oracle call takes minutes | check the serving container's CPU quota (`docker inspect … --format '{{.HostConfig.NanoCpus}}'`): a container created for GPU serving may be capped at 1–2 CPUs, and the planner keeps the 14B oracle on the CPU — serve from the unlimited CPU container instead |
 | `Detector emission threshold hides door candidates` | restart the service with `--conf 0.05` |
 | vocabulary / backend mismatch on `/health` | restart the service with `--classes "$VOCAB"` from `hm3d.run --print-vocabulary` and `--backend yolo_world` |
 | `Room oracle failed` in an episode | raise `LLM_TIMEOUT_S`; the run keeps exploring through it (see `exploration_fallback` in the record) |

@@ -53,7 +53,7 @@ def evaluation_configuration(config, episode_ids, settings=None, *, policy):
 def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                    episode_ids=None, resume=False, frozen_lock=None,
                    expected_episode_ids=None, record=False, video_fps=6,
-                   writer_factory=None, dashboard=True, progress=None,
+                   writer_factory=None, save_frames=False, dashboard=True, progress=None,
                    wrap_env=None, agent_class=HeadlessObjNavAgent):
     """Run the exact prepared policy, optionally locked/recorded, and close the env.
 
@@ -70,6 +70,8 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
     Extra evaluator telemetry is recorder-only and optional. The policy sees
     only ObjNavObservation. Recording preserves the converter settings used by
     route commitment; wrappers do not silently construct a different controller.
+    ``save_frames`` (with ``record``) also keeps every dashboard frame as a JPEG
+    still beside the video; see :class:`EpisodeRecorder`.
     """
     options = settings or EvaluationSettings()
     recorder = None
@@ -96,7 +98,8 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                 )
                 write_live_page(output)
                 recorder = EpisodeRecorder(output, policy, fps=video_fps,
-                                           writer_factory=writer_factory or VideoSink)
+                                           writer_factory=writer_factory or VideoSink,
+                                           save_frames=save_frames)
                 probe = PolicyProbe(policy)
                 agent = RecordingAgent(agent_class(probe, label_mapper, params, name=policy.name),
                                        probe, recorder)

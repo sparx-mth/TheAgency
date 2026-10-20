@@ -87,7 +87,7 @@ def main(argv=None):
     summary = run_evaluation(
         env, policy, label_mapper, output=args.output, config=config,
         settings=protocol.evaluation_settings(), episode_ids=selected,
-        record=args.record, video_fps=args.video_fps, progress=progress)
+        record=args.record, video_fps=args.video_fps, save_frames=args.save_frames, progress=progress)
     print("DONE", summary.overall.n_episodes, "episode(s) ->", args.output)
     return 0
 
