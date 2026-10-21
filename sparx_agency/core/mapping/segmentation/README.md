@@ -53,7 +53,7 @@ detector's boxes are the prompt here).
 The HTTP service `tasks/mapping/scene_graph/serve/segmentation_server.py`
 (torch venv) serves it beside the detector service; the ObjectNav runtime's
 `HttpSegmenter` client and the `segmentation` setting of
-`tasks/planning/objnav_benchmark_runtime/methods/rpt_settings.py` turn the
+`core/planning/object_search/settings.py` turn the
 masked depth read on for the target's boxes (off by default).
 
 Tests: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest

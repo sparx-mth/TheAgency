@@ -16,7 +16,7 @@ import numpy as np
 from sparx_agency.core.mapping.costmap.log_odds_grid import LogOddsGridConfig, LogOddsGridCostmap
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.observed_map import ObservedMap
+from sparx_agency.core.planning.object_search.world_model.observed_map import ObservedMap
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 
 

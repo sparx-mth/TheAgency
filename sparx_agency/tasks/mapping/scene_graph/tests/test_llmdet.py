@@ -17,7 +17,7 @@ from sparx_agency.core.mapping.detection.registry import default_detection_regis
 from sparx_agency.tasks.mapping.scene_graph.serve import backends
 from sparx_agency.tasks.mapping.scene_graph.serve.detection_server import (
     _make_server, _ServerContext, parse_args)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
 
 
 @pytest.mark.parametrize("kwargs", [{"conf_thresh": float("nan")}, {"max_det": 0},

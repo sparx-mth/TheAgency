@@ -24,8 +24,8 @@ from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_from_camera
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import FRAGMENT, SEEN_THROUGH
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import (
+from sparx_agency.core.planning.object_search.rooms.room_scans import FRAGMENT, SEEN_THROUGH
+from sparx_agency.core.planning.object_search.world_model.sightlines import (
     SightLedger, SightSettings, cone_seen, enclosed_pockets, floor_band)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import openings_of, refresh

@@ -24,6 +24,10 @@ discrete actions; this package is the translation between them.
 
 Scoring, logging and the run loop live in the harness,
 [`tasks/planning/objnav_benchmark`](../../../tasks/planning/objnav_benchmark/).
+The method that plugs into this seam -- the scene graph, the room LLM, RPT\*,
+the target closing -- is [`core/planning/object_search`](../object_search/README.md);
+the simulator and dataset adapters that drive it are
+[`tasks/planning/objnav_benchmark_runtime`](../../../tasks/planning/objnav_benchmark_runtime/README.md).
 
 Python 3.8 syntax, numpy only, no ROS — enforced by `tests/test_python38_contract.py`
 (which also scans every repo module the package pulls in) and
@@ -238,8 +242,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest sparx_agency/core/pl
 ## Not in here, on purpose
 
 - **No simulator.** Habitat and AI2-THOR adapters live on their own branches.
-- **No method.** The scene graph, the LLM oracle and RPT\* plug in later as a
-  `SearchPolicy`; this layer only defines the seam.
+- **No method.** The scene graph, the LLM oracle and RPT\* plug in as a
+  `SearchPolicy` from `core/planning/object_search`; this layer only defines
+  the seam, and its numpy-only, Python-3.8 contract does not bind the method.
 - **No scoring.** SPL, SoftSPL and the statistics are in the harness, so that
   every benchmark is scored by one piece of code.
 - **No mapping from depth.** `camera_geometry` defines the frames; building an

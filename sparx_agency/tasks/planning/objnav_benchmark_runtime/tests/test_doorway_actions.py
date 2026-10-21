@@ -151,9 +151,9 @@ def test_llm_failure_after_peek_uses_bounded_backoff_without_repeating_the_scan(
 def test_peek_evidence_flows_through_classifier_oracle_and_real_rpt_star():
     from types import MethodType
     from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RevisableRoomLabels
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.oracle_retry import RepairingNodeOracle
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import ObservedSceneGraph
+    from sparx_agency.core.mapping.topology.revisable_room_labels import RevisableRoomLabels
+    from sparx_agency.core.planning.object_search.rooms.oracle_retry import RepairingNodeOracle
+    from sparx_agency.core.planning.object_search.rooms.scene_graph import ObservedSceneGraph
 
     class BathroomLLM:
         def __init__(self):
@@ -199,7 +199,7 @@ def test_falcon_external_actions_keep_global_ledger_but_not_local_budget():
 
 def test_falcon_active_room_is_not_removed_by_its_own_cooldown():
     from sparx_agency.core.planning.exploration.falcon.params import FalconParams
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.falcon_regions import ObservedRegions
+    from sparx_agency.core.planning.object_search.falcon.regions import ObservedRegions
     p, ep, world, rooms, _ = peek_rig()
     regions = ObservedRegions(FalconParams())
     obs = obs_at(ep, 1, IN_A)

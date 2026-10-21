@@ -1,4 +1,11 @@
-# ObjectNav runtime and Gibson adapter
+# ObjectNav benchmark runtime: the adapters, the services, the operator tooling
+
+**The method itself lives in `core/planning/object_search/`** (its README is
+the architecture reference for the algorithm); this tree is what applies it
+to a benchmark -- the Habitat bridge, the Gibson and HM3D dataset/protocol/scorer
+adapters, the HTTP service clients, the recording and the dashboards -- and the
+regression rig that exercises the method on the benchmark's camera. See "Where
+the code is" below for the map and the recipe for a new dataset.
 
 Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order →
 local exploration and A*/WA* paths → existing discrete actions. Both explorers
@@ -14,10 +21,24 @@ camera sees lies up to 0.3 m under it in some scenes, so 0.15 m masked
 Corozal/000142's own storey; the three-tread flight Darden/000034 walked
 down, inside the tolerance, is the open item), no goal off
 the spawn plane is accepted, and no staircase is a node, a fallback or a
-climb (`methods/spawn_floor_guard.py`; the multi-storey development
+climb (`core/planning/object_search/multifloor/spawn_floor_guard.py`; the multi-storey development
 entrypoints lift the flag explicitly). Habitat target closing additionally uses
 declared local NavMesh projection (`target_navmesh_projection` in run configuration).
 This is an experimental multi-story algorithm, **not a claim of solved navigation**.
+## Layout: one navigation core, one task per dataset
+| Layer | Where | Owns |
+|---|---|---|
+| **Shared navigation core** | `methods/` (RPT*, room-search loop, frontier sweep, exploration fallback, perception with YOLO-World default), `habitat/` (RGB-D bridge, navmesh stair connectors), `evaluation.py`, `provenance.py`, `recording.py`, `visualization.py`, `dashboard.py`, `replay.py` | The algorithm, its settings, and the dataset-neutral execution/recording path. **No dataset loader, episode list, category table, scoring rule or benchmark profile lives here**, and `tests/test_runtime_boundaries.py` fails if a core module imports `gibson/`, `hm3d/` or a label table. |
+| **GibsonTask** | [`gibson/`](gibson/README.md) | SemExp v1.1 episodes, FMM scoring maps, planar path accounting, sliding, success without STOP, its CLI and campaigns. |
+| **HM3DTask** | [`hm3d/`](hm3d/README.md) | HM3D ObjectNav v1/v2 episodes and scenes, habitat-lab's view-point geodesic metrics, STOP-required success, published-geodesic agreement preflight, its CLI and campaign runner. |
+Both tasks construct the same `RPTSearchPolicy` from the same `RPTSettings`,
+feed it the same `HabitatRGBDSimulator`, and hand it to the same
+`run_evaluation`/`run_benchmark`; what differs is only the `ObjNavEnv` adapter,
+the label mapper and the `EvaluationSettings` each protocol declares. Fix the
+algorithm once, in `methods/`, and both benchmarks pick it up.
+**To set up and run Gibson end to end, start with [QUICKSTART.md](QUICKSTART.md)**;
+for HM3D, with [hm3d/README.md](hm3d/README.md). This file is the architecture
+reference for the shared core.
 
 **To run the published Gibson val benchmark end to end, start with
 [gibson/BENCHMARK.md](gibson/BENCHMARK.md)** (one script: services, preflight, the 1,000
@@ -126,7 +147,7 @@ rejection around the toilet followed. Three rules of `TargetClosing` answer it:
   is off whenever the action spec has the tilt pair -- there the dynamic pitch
   controller (below) is its counterpart (`blind_cone_stops`).
 
-**The context check** (`methods/target_context.py`, `context_check`, since
+**The context check** (`core/planning/object_search/perception/target_context.py`, `context_check`, since
 2026-10-07). A detector's confidence is a score over the crop; it knows nothing
 about the room the crop was taken in or how high the surface it fired on is.
 Allensville/2 and Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter
@@ -172,7 +193,7 @@ without the lock, `release_unverified` (default **true**) hands control back to
 exploration in phase `RELEASED`, records the anchor in the rejection memory and
 clears the legacy target hint; the room/stair search resumes where it was
 interrupted. **What the takeover refuses, the legacy pursuit does not walk
-after** (`TargetClosing.refuses_far_candidate`, read by `perception_cycle.fuse`):
+after** (`TargetClosing.refuses_far_candidate`, read by `PerceptionCycle.fuse`):
 a far landmark within the rejection memory, one seen during the release
 cooldown, or one seen from a spot given up for want of a path, sets no legacy
 target hint (`refused_by_takeover` on the projection row) -- the second Hanson
@@ -287,7 +308,7 @@ turned the agent off the couch twelve times); the terminal range is the
 percentile horizontal distance of the supported depth points) or the centroid,
 whichever is nearer -- the benchmark's success radius is measured to the
 object, not to its middle. **The box pipeline reads around a surface standing in
-front of the object inside its box** (since 2026-10-15, `methods/box_occluder.py`;
+front of the object inside its box** (since 2026-10-15, `core/mapping/objects/box_occluder.py`;
 `occluder_depth_m` / `occluder_px` in the projection rows). The box's range is a low
 percentile of the depth inside the shrunken box -- the near side of the object,
 robust to the background a box overhangs onto -- and a surface IN FRONT of the object
@@ -492,7 +513,7 @@ of the budget is the search's (which now has the `T` node to walk to).
 
 #### Close range: the 3-D memory, the approach history and the sudden-proximity manoeuvre (since 2026-10-08)
 
-**The 3-D memory** (`methods/target_memory.py`). The target's XYZ centroid is saved the
+**The 3-D memory** (`core/mapping/tracking/target_memory_3d.py`). The target's XYZ centroid is saved the
 moment a takeover starts and fused, precision-weighted, with every frame that projects
 onto it: a frame from `r` metres enters with sigma `0.03 + 0.03 r` (depth noise and the
 visible-part shift of a big object both grow with range), so the near frames of the
@@ -503,7 +524,7 @@ pitch follows, the range the approach and the terminal test measure, the spot a 
 surface must sit at -- which replaced the former 50/50 update.
 
 **Two close-range situations look alike to the detector and are opposites to the
-closing** (`methods/approach_history.py`, the ledger of the planar path walked since the
+closing** (`core/planning/object_search/closing/approach_history.py`, the ledger of the planar path walked since the
 takeover began and the range it closed):
 
 - *Extended approach history* -- at least `approach_history_m` (3 m) walked and
@@ -519,7 +540,7 @@ takeover began and the range it closed):
 - *Sudden close proximity* -- a candidate first seen inside `sudden_proximity_m`
   (1.3 m) with no history: the agent turned and there it was, a single viewpoint, and a
   single viewpoint at 0.7 m is exactly where a counter front read as a bed. Before the
-  lock the **backing manoeuvre** (`methods/target_backoff.py`, phase `BACK_OFF`) takes
+  lock the **backing manoeuvre** (`core/planning/object_search/closing/target_backoff.py`, phase `BACK_OFF`) takes
   the agent `backoff_steps` (3) forward steps back into space it knows to be clear --
   its own trail on this storey, the observed grid, the floor guard, collision-qualified
   A*, the NavMesh when bound -- **and that the observed grid shows the target from**
@@ -575,7 +596,7 @@ the inspection starts, and STOPs, from there, where a low object is still in the
 a fresh *centred* reading beyond the limit resumes the approach rather than spinning
 through the budget.
 
-**Support-surface resilience** (`methods/support_surface.py`). At close range a mounted
+**Support-surface resilience** (`core/mapping/objects/support_surface.py`). At close range a mounted
 or supported object leaves the frame before its support does -- the television on a
 dresser becomes the dresser. A box of a `support_surface_classes` label (cabinet, desk,
 dining table, shelf, ...) whose coherent centroid lies under the memory's footprint and
@@ -606,16 +627,16 @@ against the camera's -- and the memory is biased exactly when the pitch matters 
 frame cut by the lower edge lands its depth patch on the upper part of the object (the
 toilets of the 1,000-episode run). Every terminal STOP of the nine inspection recordings
 fired on a box cut by the lower edge: at a metre, a level camera 0.88 m up cuts any
-floor-standing object. `methods/bbox_pitch.py` is the **image-space servo** that reads
+floor-standing object. `core/control/camera/box_pitch_servo.py` is the **image-space servo** that reads
 the box itself, with no class, no height and no memory involved (`TargetClosing._servo`,
 `bbox_pitch`, `bbox_pitch_distance_m` 1.50 m, `bbox_pitch_region` 0.25):
 
 - **Which frame.** On the approach the verdict is read on the frame the next step will
-  produce (`bbox_pitch.box_after_advance`: every edge row is a ray at a depression below
+  produce (`box_pitch_servo.box_after_advance`: every edge row is a ray at a depression below
   the horizon, met at the fresh surface's near-edge range, and re-projected from one step
   closer), so a box about to leave through the bottom is looked down at *before* the step;
   in verification and inspection it is read on the frame as it is.
-- **The verdict** (`bbox_pitch.vertical_fix`). Cut by BOTH the top and the bottom margins:
+- **The verdict** (`box_pitch_servo.vertical_fix`). Cut by BOTH the top and the bottom margins:
   the object fills the frame, nothing helps. Cut by the bottom margin alone: LOOK_DOWN by
   the rounded steps (one at least) provided the top edge stays inside afterwards -- a bottom
   cut traded for a top cut is no gain; symmetrically LOOK_UP for a top cut. Whole, with its
@@ -658,7 +679,7 @@ the box itself, with no class, no height and no memory involved (`TargetClosing.
 
 Verified end to end through the real converter (`tests/test_target_closing.py`: the
 approach, the verification frame, the centring tilt and its safety net, the confidence
-hold, the Gibson path unchanged) and on the pure maths (`tests/test_bbox_pitch.py`).
+hold, the Gibson path unchanged) and on the pure maths (`core/control/camera/tests/test_box_pitch_servo.py`).
 
 - `--explorer frontier`: the existing observed-frontier baseline (default).
 - `--explorer falcon`: bounded FALCON 2D/2.5D adaptation, not the unchanged ROS
@@ -672,52 +693,154 @@ See [FALCON component mapping](gibson/BOUNDED_FALCON.md),
 [multi-story protocol](gibson/MULTISTORY.md). Earlier campaigns retain their
 own frozen configurations; changed code does not relabel their outcomes.
 
-## Reusable pieces
+## Where the code is
+
+The method and the benchmark are two trees, and the line between them is the
+line between an algorithm and its application:
+
+```text
+core/planning/objnav/            the ObjectNav CONTRACT: types, ObjNavEnv / SearchPolicy / LabelMapper, the action converter
+core/planning/object_search/     the METHOD: a SearchPolicy -- mapping, rooms, LLM, RPT*, exploration, closing (README there)
+core/mapping/{objects,tracking,topology}/   the method's policy-free pieces, shared with the scene-graph runtime
+core/control/camera/             the camera-tilt controller and the box-driven pitch servo (where to LOOK, beside where to move)
+core/localization/floor_atlas.py the storey localiser the per-storey maps are keyed by
+tasks/planning/objnav_benchmark/           the HARNESS: run loop, scoring, records, statistics (every benchmark, one scorer)
+tasks/planning/objnav_benchmark_runtime/   THIS TREE: the adapters and the operator tooling
+    policy_factory.py  build the agent under test from the method options -- the same for every dataset
+    detector_options.py, gpu_plan.py, provenance.py, progress.py   the shared CLI options, GPU placement, run provenance, live progress + lean records
+    evaluation.py      the shared run loop the HM3D / MP3D / RoboTHOR adapters call (Gibson's run.py keeps its own, see below)
+    services/          the HTTP clients the method is given: detector, segmenter, room LLM
+    habitat/           the habitat-sim RGB-D bridge (navmesh="published"|"agent") and the navmesh storey/stair reader (any Habitat dataset)
+    benchmark_services.sh   the services every launcher brings up the same way: GPU plan, Ollama, the detector with the
+                       benchmark's vocabulary, the segmenter, FFmpeg, teardown (sourced by gibson/ and hm3d/ run_benchmark.sh)
+    gibson/            the Gibson v1.1 adapter: protocol, dataset, SemExp scorer, ObjNavEnv, run CLI, launcher, reports
+    hm3d/              the HM3D v1/v2 adapter: protocol, dataset, habitat-lab's view-point metrics, ObjNavEnv, run CLI,
+                       the scene-per-process campaign and its launcher, reports (README there)
+    mp3d/              the next Habitat dataset, on its own branch (feat/objnav-habitat-mp3d-*); same shape as hm3d/
+    recording.py, visualization.py, floor_panels.py, search_panel.py, dashboard.py   video, HUD, live page
+    tests/             the method's regression rig (fake services, the benchmark camera, synthetic maps) and the adapter tests
+```
+
+The method imports nothing from this tree (enforced by
+`core/planning/object_search/tests/test_package_boundaries.py`); this tree
+imports the method by module path and hands it services behind the protocols
+of `core/planning/object_search/interfaces.py`.
+
+### Adding a dataset adapter
+
+A new dataset -- HM3D, MP3D, another simulator -- touches only this tree and
+the label tables, never the method:
+
+1. **Protocol.** A frozen dataclass like `gibson/protocol.py`: camera
+   (`intrinsics_from_hfov`), action set, step budget, success radius, sliding,
+   path-length convention, kinematic tolerances. Changing a field is a
+   different experiment; the frozen configuration records it.
+2. **Dataset.** A validated local reader like `gibson/dataset.py`: published
+   episode rows (scene-qualified ids, start pose, goal category) and whatever
+   privileged maps the scorer needs. Nothing from it reaches the policy.
+3. **Scorer and `ObjNavEnv`.** The benchmark's own distance-to-goal and
+   success (`gibson/distance.py`) behind the shared environment contract
+   (`gibson/env.py`): `reset` returns the episode and its first observation,
+   `step` the next, `measure` the privileged `EpisodeMeasurement`. A Habitat
+   dataset reuses `habitat/simulator.py` as is -- frames, pose, depth clips,
+   collisions and `scene_structure()` are already in the public frame.
+4. **Label table.** `core/planning/objnav/labels/datasets/<dataset>.py`, a
+   `TableLabelMapper` registered in `labels/registry.py`: the dataset's goal
+   names, the detector prompts in a fixed order, and the labels that count.
+5. **CLI.** A `run.py` like Gibson's: `--agent` from `policy_factory.AGENT_CHOICES`,
+   the detector options of `detector_options.add_detector_options`, the policy
+   from `policy_factory.build_policy(args, <label mapper>)`, the loop from
+   `objnav_benchmark.runner.run_benchmark` with `MetricsLogger`, the episode
+   selection and the frozen configuration from `provenance`
+   (`select_episodes`, `episodes_of_category`, `source_fingerprint`, `gpu_plan_record`).
+6. **Launcher.** A `run_benchmark.sh` that sources `benchmark_services.sh` for
+   the services (`objnav_services_defaults` before its command line,
+   `objnav_services_up` after it, with `RUN_MODULE` set to its `run.py`) and
+   owns only what is the dataset's: where its episodes and scenes are, how the
+   split is partitioned into processes, what the output is named.
+
+The method needs no change: it sees a camera, an action spec, RGB-D frames
+and a pose, and answers in world coordinates.
+
+### The pieces
+
+**The method** (`core/planning/object_search/`; its README is the authority):
 
 | Component | Responsibility |
 |---|---|
-| `methods/rpt_policy.py`, `rpt_settings.py` | Detector/mapper composition, RPT* and baseline selection |
-| `methods/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
-| `methods/bbox_pitch.py` | The image-space vertical servo: where a box lands after a tilt or a step, and the tilt that keeps it whole and centred (pure functions) |
-| `methods/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |
-| `methods/target_path.py` | Persistent NavMesh standoff goal, meaningful target refinement and continuous collision-qualified A* execution through occlusion |
-| `methods/target_memory.py` | The closing's 3-D memory: the fused, precision-weighted XYZ centroid (near frames dominate), its standard error and spread, the fixed association anchor |
-| `methods/approach_history.py` | The path walked and the range closed since the takeover began: what separates an extended approach (complete and STOP) from a sudden close sighting (back off and re-verify) |
-| `methods/target_backoff.py` | The backing manoeuvre for a target seen suddenly at arm's length: a verified clear spot two or three steps back (trail, grid, floor guard, A*, NavMesh) that the observed grid shows the target from (`_sees`), the turn back, the hand-off to re-verification |
-| `methods/support_surface.py` | Whether a box of another class is the surface the target stands on: exact class membership and strict geometry under the memory's footprint |
+| `policy.py`, `settings.py` | `RPTSearchPolicy`: detector/mapper composition, RPT* and baseline selection; `RPTSettings` |
+| `interfaces.py` | `Detection`, the `Detector` / `Segmenter` / `RoomReasoner` protocols and the service failure contract |
+| `baselines/falcon_yolo.py` | The exploration baseline: goal-free planar FALCON (bounded transactions in a disc about the agent, A* relocation to the nearest frontier, a look-around and a STOP on exhaustion) hosting the shared perception cycle, target closing, camera controller and spawn-floor confinement under the attribute names the policy gives them; no LLM |
+| `closing/target_closing.py` | Episode-local target takeover, consecutive-frame verification, bbox/depth servo, standoff A* and explicit STOP |
+| `closing/target_path.py` | Persistent NavMesh standoff goal, meaningful target refinement and continuous collision-qualified A* execution through occlusion |
+| `closing/approach_history.py` | The path walked and the range closed since the takeover began: what separates an extended approach (complete and STOP) from a sudden close sighting (back off and re-verify) |
+| `closing/target_backoff.py` | The backing manoeuvre for a target seen suddenly at arm's length: a verified clear spot two or three steps back (trail, grid, floor guard, A*, NavMesh) that the observed grid shows the target from (`_sees`), the turn back, the hand-off to re-verification |
+| `perception/cycle.py`, `perception/projection.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association within a class with a height check |
+| `perception/doors.py` | Confirmed doorway landmarks from the detector's door boxes |
+| `perception/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |
+| `rooms/room_search_loop.py` | The seven-step room-search loop: one scan visit per room (vantage point, full rotation, finished for the episode) or the bounded room-confined sweep; re-classify → re-estimate → re-order at each loop point over the rooms that are still nodes; transit to the chosen room's vantage point / nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
+| `rooms/scene_graph.py` | Observed rooms and doors, the room label image, the nodes handed to the oracle |
+| `rooms/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
+| `rooms/room_vantage.py` | Where to stand in a room to see it: the reachable interior cell of greatest clearance (distance transform of the room mask) |
+| `rooms/stair_nodes.py` | Staircases as nodes of the loop's RPT* instance: ids above every room pid, the facts the oracle values them by, the climb as a leaf charged on every arc |
+| `rooms/opening_nodes.py` | Doorways and gaps at the edge of the mapped floor as nodes beside the rooms, and the peek that visits them |
+| `rooms/house_context.py`, `rooms/oracle_retry.py` | The HOUSE line of the oracle's prompt; one bounded schema repair around its scoring |
+| `rooms/floor_context.py`, `rooms/discovery.py` | Per-storey policy state with shared ledgers; episode start, semantic interrupts and the resumption of a local task |
+| `world_model/observed_map.py` | Independent per-storey occupancy from RGB-D on the core log-odds integrator; a blocked forward step marks the cell ahead occupied outright (`LogOddsGridCostmap.mark_occupied`), and a second bump within `repeat_bump_m` (0.5 m) of an earlier one leaves a sticky bar one body wide across the heading, forced occupied in every export for the rest of the episode (`_touched`) |
+| `world_model/sightlines.py` | The sight ledger: unknown looked through without a depth return (within 2.5 m, from two poses) and enclosed unknown pockets under 3 m2 are settled -- written occupied for the frontier logic alone -- and every camera pose per storey |
+| `world_model/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run and off the agent's own trail, its capsule margin bounded per flight so it never splits a body-passable corridor (`adaptive_capsule`); excluded from the room partition, from peek viewpoints and from a peek-only A* copy |
+| `world_model/stair_terrain.py`, `world_model/stair_grid.py` | RGB-D support surfaces for the observed stair source |
+| `exploration/exploration_fallback.py` | Where every failed plan, model or decision lands: the best floor-wide exit (object shadows and frontiers of rooms the target cannot be in wait behind it), the stairs by the explicit fallback rule, the demoted frontiers, a retired frontier, a relocation, a footing sweep, an escape probe -- a move, never an idle spin; failure records and service back-off |
+| `exploration/escape_probe.py` | The fallback's rung before its idle turn: boxed in on the inflated map, the grid read without inflation along every turn heading, one turn or one forward step toward the thinnest occupied band with the most floor beyond it; the simulator decides, a blocked heading is remembered per cell |
+| `exploration/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
+| `exploration/path_glances.py`, `exploration/doorway_peek.py`, `exploration/doorway_candidates.py` | Informative glances along a route; the one-shot doorway inspection and its candidates |
+| `exploration/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
+| `multifloor/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied, and `_navigate` refusing a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`); inert when traversal is allowed |
+| `multifloor/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
+| `multifloor/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
+| `multifloor/stair_ground_truth.py`, `multifloor/floor_decision.py`, `multifloor/ground_truth_traversal.py`, `multifloor/stair_sightings.py` | Ground-truth stairs (default): the navmesh connectors as the policy reads them, the fallback rule's up/down choice, the committed polyline traversal, the perfect stair detector |
+| `multifloor/stair_traversal.py` | Observed stairs (`stair_source: "observed"`): step-connected paths, native-heading safety checks and the committed transition lifecycle |
+| `falcon/policy.py`, `falcon/regions.py` | Bounded hierarchy and persistent local region history |
+| `falcon/motion.py`, `falcon/routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
+
+**The camera's control process** (`core/control/camera/`; the method asks it for the pitch, the
+action converter serialises the LOOK before the body action):
+
+| Component | Responsibility |
+|---|---|
+| `pitch_controller.py` | Sole pitch owner; bounded stair inspection, the footing sweep (a circle at 30 degrees down that maps the blind radius, for a pathless lock or a boxed-in fallback), long unprompted cadence and safe restoration |
+| `box_pitch_servo.py` | The image-space vertical servo: where a box lands after a tilt or a step, and the tilt that keeps it whole and centred (pure functions) |
+
+**Policy-free pieces in `core/mapping/`** (shared with the scene-graph runtime):
+
+| Component | Responsibility |
+|---|---|
+| `objects/box_extent.py`, `objects/box_occluder.py` | A box cut by the frame's edge (sliver vs. floor cut) and its footprint radius; a surface standing in front of the object inside its box |
+| `objects/detection_dedup.py`, `objects/target_evidence.py` | Alias/frame deduplication; separated-view target evidence and bounded rejection |
+| `objects/support_surface.py` | Whether a box of another class is the surface the target stands on: exact class membership and strict geometry under the memory's footprint |
+| `objects/landmarks.py` | The landmark map: per-class association (a tight dedupe radius or footprint-disc IoU; classes never merge), confirmation by observation count; the class vote of 2026-10-04 kept behind `class_votes=True` |
+| `tracking/target_memory_3d.py` | The closing's 3-D memory: the fused, precision-weighted XYZ centroid (near frames dominate), its standard error and spread, the fixed association anchor |
+| `topology/room_priors.py`, `topology/revisable_room_labels.py` | Where a target cannot be (exclusions, not permissions; `unknown` never excluded); one-object (weak) and two-class (strong) room labels revised the action a new kind of object lands |
+| `topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room still a node and every staircase -- P(going there next finds the target) per node plus "elsewhere" |
+
+**The adapters and the operator tooling** (this tree):
+
+| Component | Responsibility |
+|---|---|
+| `policy_factory.py` | `build_policy`: the method and its frozen description from the CLI's method options, for every dataset adapter; the `stop` plumbing diagnostic |
+| `detector_options.py`, `gpu_plan.py`, `provenance.py`, `progress.py` | The perception-service CLI options, the GPU placement plan, the run provenance (source hash, episode selection, GPU plan record) and the live progress / lean records every adapter shares; `gibson/detector_options.py`, `gibson/gpu_plan.py` and `gibson/progress.py` are Gibson's import paths (and CLIs) for them |
+| `evaluation.py` | `run_evaluation`: the shared prepared-environment run loop (frozen-lock check, optional recording, the harness runner) the sibling adapters call. Gibson's `run.py` drives the harness runner itself because it carries the operator features of the 1,000-episode campaign -- resume with accepted config changes, the progress tracker, lean records, the evaluator sidecar, the report; folding those into `run_evaluation` is the one harness unification still open, to be done when the adapter branches merge |
+| `services/http_detector.py`, `services/http_segmenter.py`, `services/llm.py` | The detector and segmenter clients (pinned identity, one POST per frame, the contract's two failure families) and the verified LLM client |
+| `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose; any Habitat dataset |
+| `habitat/stair_connectors.py` | Storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
+| `gibson/protocol.py`, `gibson/dataset.py`, `gibson/distance.py`, `gibson/env.py` | The SemExp v1.1 protocol, the published episodes and evaluator maps, the FMM scorer, the `ObjNavEnv` |
+| `gibson/run.py`, `gibson/frozen_eval.py`, `gibson/run_development.py` | Protocol execution and frozen source/model/data checks |
 | `gibson/gpu_plan.py` | Who gets the one GPU -- LLM, then YOLO-World, then Habitat -- from the free VRAM and explicit footprints; the rest on the CPU; the plan recorded in every run |
-| `methods/room_search_loop.py` | The seven-step room-search loop: one scan visit per room (vantage point, full rotation, finished for the episode) or the bounded room-confined sweep; re-classify → re-estimate → re-order at each loop point over the rooms that are still nodes; transit to the chosen room's vantage point / nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
-| `methods/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
-| `methods/sightlines.py` | The sight ledger: unknown looked through without a depth return (within 2.5 m, from two poses) and enclosed unknown pockets under 3 m2 are settled -- written occupied for the frontier logic alone -- and every camera pose per storey |
-| `methods/room_vantage.py` | Where to stand in a room to see it: the reachable interior cell of greatest clearance (distance transform of the room mask) |
-| `methods/room_priors.py` | Where a target cannot be: the room types a search need not enter for it (exclusions, not permissions; `unknown` never excluded) |
-| `core/mapping/topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room still a node and every staircase -- P(going there next finds the target) per node plus "elsewhere" |
-| `methods/stair_nodes.py` | Staircases as nodes of the loop's RPT* instance: ids above every room pid, the facts the oracle values them by, the climb as a leaf charged on every arc |
-| `methods/exploration_fallback.py` | Where every failed plan, model or decision lands: the best floor-wide exit (object shadows and frontiers of rooms the target cannot be in wait behind it), the stairs by the explicit fallback rule, the demoted frontiers, a retired frontier, a relocation, a footing sweep, an escape probe -- a move, never an idle spin; failure records and service back-off |
-| `methods/escape_probe.py` | The fallback's rung before its idle turn: boxed in on the inflated map, the grid read without inflation along every turn heading, one turn or one forward step toward the thinnest occupied band with the most floor beyond it; the simulator decides, a blocked heading is remembered per cell |
-| `methods/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
-| `methods/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: the world every decision plans on has every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied (so no frontier, opening, peek or route reaches a flight), and `_navigate` refuses a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`), so the mask cannot leave A* without a start; inert when traversal is allowed |
-| `methods/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run (`FLOOR_RUN_M`, the floor in front of the stairs is not the stairs) and off the agent's own trail, its capsule margin bounded per flight so it never splits or erases a body-passable corridor (`adaptive_capsule`: preferred 0.65 m down to the body radius, judged as the planner judges passability; Markleeville's stair-head corridor needed 0.3 m); excluded from the room partition (stairs are never a room), from peek viewpoints and from a peek-only A* copy; ordinary stair navigation is unchanged |
-| `methods/camera_control.py` | Sole pitch owner; bounded stair inspection, the footing sweep (a circle at 30 degrees down that maps the blind radius, for a pathless lock or a boxed-in fallback), long unprompted cadence and safe restoration |
-| `methods/perception.py`, `perception_cycle.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association within a class with a height check |
-| `core/mapping/objects/landmarks.py` | The landmark map: per-class association (a tight dedupe radius or footprint-disc IoU; classes never merge), confirmation by observation count; the class vote of 2026-10-04 kept behind `class_votes=True` |
-| `methods/observed_map.py`, `floor_context.py` | Independent occupancy, rooms, objects, association anchors and paused floor clocks; a blocked forward step marks the cell ahead occupied outright (`LogOddsGridCostmap.mark_occupied`), evidence the body gathered and stronger than one depth hit -- and a second bump within `repeat_bump_m` (0.5 m) of an earlier one leaves a sticky bar one body wide across the heading, forced occupied in every export for the rest of the episode (`_touched`; the rays that look over a ledge the navmesh refuses would otherwise clear the mark within a dozen actions -- Corozal/000019, 2026-10-14) |
-| `methods/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
-| `methods/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
-| `methods/stair_ground_truth.py`, `floor_decision.py`, `ground_truth_traversal.py` | Ground-truth stairs (default): the navmesh connectors as the policy reads them, the fallback rule's up/down choice (worth per metre of approach, flight and fixed change cost), and the committed polyline traversal |
-| `methods/stair_traversal.py`, `stair_terrain.py` | Observed stairs (`stair_source: "observed"`): RGB-D support surfaces, step-connected paths, native-heading safety checks and the committed transition lifecycle |
-| `gibson/stair_connectors.py` | Evaluator side: storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
-| `methods/falcon_policy.py`, `falcon_regions.py` | Bounded hierarchy and persistent local region history |
-| `methods/falcon_motion.py`, `falcon_routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
-| `methods/object_evidence.py` | Alias/frame deduplication, separated-view target evidence and bounded rejection |
-| `methods/scene_graph.py`, `room_labels.py`, `doors.py` | Observed rooms/doors, the room label image, one-object (weak) and two-class (strong) room labels revised the action a new kind of object lands, the nodes handed to the oracle |
-| `methods/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
-| `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose |
 | `recording.py`, `floor_panels.py`, `search_panel.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels with the rooms and visit order drawn on the active floor, the search column, grids and video |
-| `gibson/run.py`, `frozen_eval.py`, `run_development.py` | Protocol execution and frozen source/model/data checks |
+| `gibson/run.py`, `hm3d/run.py`, their `frozen_eval.py`, `run_development.py` | Per-task protocol execution and frozen source/model/data checks |
 | `tests/trace_room_search_loop.py` | Development probe: the loop on the production map size with fake services and the real action converter on a point agent; not a test |
 
-The floor tracker remains ROS-free in `core/planning/exploration/floor_atlas.py`.
+The storey localiser (`core/localization/floor_atlas.py`) is ROS-free and standard-library only.
 Host-side numpy/scipy terrain processing does not enter the Noetic exploration
 facade. No robot's flight controller is changed.
 
@@ -732,7 +855,7 @@ the length). RGB-D, YOLO, object
 confirmation and scene-graph geometry remain synchronous on every frame, so the
 rotation gives the map its first rooms and the detector its first objects; when
 it ends the agent's position is recorded in the **scan ledger**
-(`methods/room_scans.py`), which finishes the spawn room before the first room
+(`core/planning/object_search/rooms/room_scans.py`), which finishes the spawn room before the first room
 is ever chosen. Target pursuit and committed stair safety take priority; a
 warm-up interrupted by one and resumed more than 0.5 m away starts its circle
 again, so the ledger's record lands where the whole circle was turned. The
@@ -891,7 +1014,7 @@ refresh.
    room since the visit began -- a glance taken on the way -- finishes it
    at once** (`finished_by_rotation`): no circle is turned twice.
 
-   Finishing is the **scan ledger's** verdict (`methods/room_scans.py`): it
+   Finishing is the **scan ledger's** verdict (`core/planning/object_search/rooms/room_scans.py`): it
    remembers *where* every rotation was completed, not which room id it was
    credited to -- the watershed renumbers, splits and merges rooms on every
    update, and the Ranchester recordings re-entered the same room under a
@@ -936,7 +1059,7 @@ refresh.
 
    `visit="scan"` is the former default, kept as a mode: walk to the room's
    **vantage point** -- the interior cell of greatest clearance the observed
-   map can reach (`methods/room_vantage.py`: the Euclidean distance transform
+   map can reach (`core/planning/object_search/rooms/room_vantage.py`: the Euclidean distance transform
    of the room mask, so the middle of the open floor, not the doorway and not
    the far frontier) -- turn a **full circle**, and leave; the room is then
    finished whatever frontier its mask still shows, because the camera's ray
@@ -958,7 +1081,7 @@ refresh.
    is shown **every room of the storey** -- finished and type-excluded ones
    included, each with a `status=` of `never_entered`, `entered` or
    `scanned(<how>, <ago>)` -- together with a **HOUSE line**
-   (`methods/house_context.py`): every room type found so far with its
+   (`core/planning/object_search/rooms/house_context.py`): every room type found so far with its
    status, the rooms still unidentified, the openings not yet looked into,
    whether unexplored frontier is still reachable, and the budget
    (`actions used about 150 of 500`, in 25-action steps so an unchanged map
@@ -1049,7 +1172,7 @@ refresh.
    storey is covered, and records why (`excluded` in the events,
    estimates and HUD); with `LoopSettings.type_prior` switched on it also
    withholds a room whose identified type **cannot hold the target**
-   (`methods/room_priors.py`: a sofa is not
+   (`core/mapping/topology/room_priors.py`: a sofa is not
    searched for in a bedroom, a bathroom or a kitchen; a toilet not in a
    bedroom; the table is exclusions, not permissions, so a hallway stays
    searchable and `unknown` is never excluded). Since 2026-10-05 the type
@@ -1105,7 +1228,7 @@ refresh.
    fallback carries the search. `LoopSettings.min_prob` (0.05) keeps the
    oracle's "1" for a bedroom in a search for a couch out of the order.
 
-   **Two more ways a room is finished** (`methods/room_scans.py`, since
+   **Two more ways a room is finished** (`core/planning/object_search/rooms/room_scans.py`, since
    2026-10-05), both for a room with **no live frontier** -- no accessible
    unexplored boundary the sight ledger has not settled (below): it is
    `seen_through` when the camera **looked into it** (one recorded pose,
@@ -1244,7 +1367,7 @@ refresh.
    (`oracle_reuses`). The per-node record in `room_search_loop.estimates`
    carries the probability, the model's reason and the distance charged.
 4. **Visit order** -- RPT* over the surviving nodes, rooms and staircases
-   together (`methods/stair_nodes.py`). A room enters the instance at its
+   together (`core/planning/object_search/rooms/stair_nodes.py`). A room enters the instance at its
    entry point; a staircase at the foot of the flight on this floor's map,
    with a **leaf** as long as the flight plus `MultiFloorParams
    .floor_change_cost_m` (8 m, about thirty actions) charged on every arc
@@ -1278,7 +1401,7 @@ refresh.
    `arrived_by`. The order and its head are kept on the loop (`order`,
    `order_index`, `next_room`) for the recording and the dashboard.
 
-   **Openings are nodes too** (`methods/opening_nodes.py`,
+   **Openings are nodes too** (`core/planning/object_search/rooms/opening_nodes.py`,
    `LoopSettings.openings`, since 2026-10-04). The room partition is a
    watershed over *observed* free space, so a room the agent has only
    glimpsed through its door is not a room yet: its few seen cells hang off
@@ -1579,7 +1702,7 @@ from 22 classifier calls in 60 actions to 5 with identical decisions).
 ## The exploration fallback: a failure is a move, not a spin
 
 Every way the decision pipeline can fail lands in one place,
-`methods/exploration_fallback.py`, and comes out as a command that moves:
+`core/planning/object_search/exploration/exploration_fallback.py`, and comes out as a command that moves:
 
 1. the **highest-utility reachable EXIT anywhere on the floor** -- not confined to
    the room in force, so a room whose routes all fail is left rather than
@@ -1657,7 +1780,7 @@ Every way the decision pipeline can fail lands in one place,
    radius, and unknown is impassable; one LOOK_DOWN, a circle and a LOOK_UP
    map it (`CameraController.begin_inspection(reason="footing")`, once per
    spot; a protocol without LOOK actions skips it);
-7. an **escape probe** (since 2026-10-13, `methods/escape_probe.py`) when the
+7. an **escape probe** (since 2026-10-13, `core/planning/object_search/exploration/escape_probe.py`) when the
    inflated map has no way out of the pocket the agent stands in -- the strip
    behind a sofa, the ring a counter's top draws round the agent -- while the
    body may well have one. The grid is read **without inflation** along every
@@ -1687,7 +1810,7 @@ loop records it, arms a doubling back-off (25 → 50 → 100 → 200 actions,
 `FallbackSettings`) during which no model is asked, and the fallback carries
 every action until the model answers again, at which point the loop resumes
 its steps. A **detector** failure is handled the same way in
-`perception_cycle.py`: the frame carries no detections, is counted as
+`perception/cycle.py`: the frame carries no detections, is counted as
 skipped, and the service is left alone for the back-off. Every failure is
 counted, kept with its type, message and origin under
 `exploration_fallback.failures` in the episode record, and logged once per
@@ -1697,7 +1820,7 @@ recordings -- and a model failure was an agent error.
 
 ## Glances: where along a route a look to the side pays
 
-`methods/path_glances.py` (`GlanceSettings` on the policy, since 2026-10-05).
+`core/planning/object_search/exploration/path_glances.py` (`GlanceSettings` on the policy, since 2026-10-05).
 The camera's cone is narrow and the map is what it saw: an agent walking a
 corridor sees the corridor, and a door a step to the side passes through
 the edge of the frame or not at all (Hanson, action 35). Turning in place
@@ -1807,7 +1930,7 @@ no longer worth a look for the garden behind it.
 
 ## The sight ledger: unknown that is not worth a step
 
-`methods/sightlines.py` (`SightSettings` on the policy, `sight` in the
+`core/planning/object_search/world_model/sightlines.py` (`SightSettings` on the policy, `sight` in the
 configuration and the episode record, since 2026-10-05). The frontier --
 free beside unknown -- is where exploration goes, and two kinds of unknown
 are not worth a step:
@@ -1915,9 +2038,9 @@ rejection reasons recorded. No bed/sofa proximity blacklist is used.
 
 **Object identity is per class, and same-class instances are told apart by
 size** (since 2026-10-07; `core/mapping/objects/landmarks.py` with
-`class_votes=False`, wired in `methods/floor_context.py` from
+`class_votes=False`, wired in `core/planning/object_search/rooms/floor_context.py` from
 `RPTSettings.landmark_dedupe_radius_m` / `landmark_footprint_iou`, and
-`methods/perception_cycle.py`). Every projected detection carries a
+`core/planning/object_search/perception/cycle.py`). Every projected detection carries a
 **footprint**: a disc around its world centroid, half the box's width at its
 depth (`perception.footprint_radius_m`, clamped to 0.15-1.5 m). **Classes
 never merge**: a detection associates only with a landmark of its own class,
@@ -1981,7 +2104,7 @@ kind STOPped wrong in the Gibson recordings.
 `run_benchmark.sh`) adds one step: every frame's **target-class boxes** at or
 above `detection_confidence` go, in one call, to the box-prompted Segment
 Anything service (`tasks/mapping/scene_graph/serve/segmentation_server.py`,
-MobileSAM by default, `methods/segmentation.HttpSegmenter` the client,
+MobileSAM by default, `tasks/planning/objnav_benchmark_runtime/services/http_segmenter.HttpSegmenter` the client,
 `--segmenter-url`), and `perception.observed_objects` reads each of them on
 the returned mask: the depth is `robust_mask_depth` over the mask within the
 box, the near-surface component is sought over the whole box on the mask's
@@ -2028,7 +2151,7 @@ service started before this change must be restarted** with the new
 `--print-vocabulary` output; the health check pins the class list.
 
 Restart a dedicated detector with the exact `gibson.run --print-vocabulary`
-output. A former 24-prompt service is intentionally rejected. HTTP checks pin
+(or `hm3d.run --print-vocabulary`) output. A former 24-prompt service is intentionally rejected. HTTP checks pin
 classes, checkpoint, configuration, runtime and prompt-feature provenance on
 health and inference responses. See the [CPU detector runbook](../../mapping/scene_graph/serve/README.md).
 Do not reconfigure another mission's service or place inference on Habitat's GPU.
@@ -2075,3 +2198,139 @@ Coverage is ever-observed occupancy area, not true coverage; it excludes initial
 gain and transient terrain, and deduplicates revisits by stable floor ID.
 Recordings and interpolated replays never feed evaluator data back to decisions.
 Passing tests, encoded videos and completed episodes are not navigation success.
+
+## Adapter boundary — keep benchmark rules out of shared code
+
+Each simulator branch supplies:
+
+1. An `ObjNavEnv` implementation: published episode loading, reset/step, episode
+   termination and evaluator-only measurements. `measure()` is not called early.
+2. Exact scene/split identities and a `TableLabelMapper` with that dataset's
+   category spellings, detector prompts and accepted aliases. The infrastructure
+   registry does not claim any dataset is implemented.
+3. Explicit camera intrinsics, registered metric depth, body dimensions, action
+   lengths/angles, sliding policy, step budget and protocol/version metadata.
+4. Its published success/STOP/distance/path-accounting rules. Shared defaults
+   remain **STOP required, 3D observed path length, zero initial accumulator**.
+   Override `EvaluationSettings` only when the adapter's protocol requires it.
+5. Data/model provisioning and checks, including GPU ownership. No weights,
+   licensed scenes, containers or remote services are downloaded/launched by the
+   shared evaluation entrypoint.
+6. A manifest identifying the actual dataset/assets, model checkpoint/revision,
+   package versions, seed and protocol. Keep credentials out of this metadata;
+   the shared service URL validator rejects embedded credentials/query strings.
+
+Gibson and both HM3D versions reuse the Habitat bridge. The HM3D versions
+share one adapter -- [`hm3d/`](hm3d/README.md) -- with two versioned protocol
+objects, because only their episodes and scene release differ. RoboTHOR needs an AI2-THOR environment bridge but reuses
+the policy, action conversion, provenance and recording; neither it nor MP3D is
+implemented here.
+
+The Habitat bridge takes an explicit `navmesh` policy, because which navmesh an
+episode runs on decides what is reachable and therefore sets `l` and every SPL.
+`"published"` uses the shipped mesh verbatim; `"agent"` is habitat-sim's own
+load-then-recompute-at-the-agent's-dimensions behaviour, which is what
+habitat-lab's ObjectNav actually runs. Whichever an adapter picks,
+`navmesh_provenance()` records what was in force.
+
+### Explicit embodiment and method settings
+
+`RPTSettings` (`core/planning/object_search/settings.py`) carries `body_height_m`,
+`body_radius_m`, `preferred_clearance_m` and `stop_distance_m`; each task's
+`run.py` sets them from its protocol's agent, never from a benchmark name. Physical
+inflation is never relaxed below the supplied body radius. The stop distance
+is a method choice, not an override of the evaluator's success definition.
+
+`RPTSearchPolicy` records its planner, loop, fallback, sweep, door, room-label
+and route settings in `configuration()`. `run_evaluation`
+uses the same converter settings in the actual headless agent, so route
+arrival/progress checks agree with the executor.
+
+`HabitatRGBDSimulator` separately requires body height and radius; camera mount
+height is not body height. Under `navmesh="published"` it loads the supplied
+navmesh verbatim and never recomputes it; under `navmesh="agent"` it uses
+habitat-sim's own recomputation and refuses a navmesh path that is not the
+scene's sibling. It never moves a published start's (x, z); under `"agent"` it
+fixes the start height once, from the recomputed mesh, so the first forward step
+does not carry a height jump into the episode. Only the explicitly synthetic
+renderer smoke constructs its own fixture navmesh.
+
+## Shared execution and locks
+
+Construct the environment, policy, label mapper and adapter metadata, then call
+`run_evaluation` with an explicit output directory. It uses the existing
+`run_benchmark`/`MetricsLogger`, not a second scoring loop, and closes the
+environment even on recording failures. Extra `evaluation_diagnostics()` is an
+optional recorder-only hook; environments without it remain recordable.
+
+`progress=` takes a `(index, total, record)` callback, so an adapter's CLI can
+report each finished episode — a thousand-episode run that prints nothing until
+it ends is unusable. It runs *after* the recorder's own hook, which is what
+finishes writing an episode's artifacts, so a caller can never displace it.
+
+For frozen evaluation:
+
+1. Use `evaluation_configuration(config, episode_ids, settings, policy=policy)`
+   to capture actual Python sources, the policy, converter, selected episode
+   order and execution settings alongside adapter metadata.
+2. Call `freeze_configuration` with a new lock path and an explicit
+   `development_note` describing prior tuning/exposure. Existing locks are not
+   overwritten.
+3. Pass that lock to `run_evaluation(frozen_lock=...)`. It checks the actual
+   execution configuration before output creation or reset, not merely an
+   earlier preflight. To claim a complete published split, also supply the
+   publisher's exact ordered `expected_episode_ids`.
+
+There is no hardcoded scene count or episode count. A lock is a reproducibility
+commitment, **not proof that validation was unseen**. It never creates a
+held-out or SOTA claim. Full benchmark equivalence, tuning disclosure and
+reference-version caveats remain the adapter's responsibility. Dashboards only
+summarize recorded rows and do not label arbitrary subsets as complete splits.
+
+## Recording and visual-only replay
+
+Recording is optional and loads plotting/video dependencies only when requested.
+It keeps images/maps out of per-step JSON; the JSON records compact observed
+state, actions, predictions, paths and reasoning. Model service metadata pins
+checkpoint bytes and vocabulary atomically with inference. Missing or changed
+services raise rather than silently changing the evaluated method.
+
+`render_replay(recording_dir, render_pose, ...)` takes a callback receiving an
+`AgentPose` and returning uint8 RGB. The adapter owns scene loading, GPU safety
+and camera-pitch handling. Replay interpolates translation/pitch and the shortest
+yaw arc, includes the final pose, preserves aspect ratio, and writes only a
+separate `smooth_rgb.mp4`. It does not alter original scores or observations.
+
+## Dependencies and validation
+
+`requirements.txt` lists the shared CPU/scientific extras. Core contracts and the
+lightweight harness remain free of simulator/model imports. Install simulator
+bindings in their dedicated environments; do not install torch into the
+lightweight test environment. Recording requires a working FFmpeg/libx264;
+`IMAGEIO_FFMPEG_EXE` may select an already installed executable.
+
+From the checkout root with the test interpreter selected:
+
+```bash
+PYTHONPATH="$PWD" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
+  sparx_agency/tasks/planning/objnav_benchmark_runtime/tests \
+  sparx_agency/core/mapping/objects/tests sparx_agency/core/mapping/topology/tests \
+  sparx_agency/core/planning/objnav sparx_agency/tasks/planning/objnav_benchmark \
+  sparx_agency/core/planning/planners/common/tests \
+  sparx_agency/core/planning/planners/astar/tests -q
+```
+
+Tests use explicit synthetic geometry and the existing fake/corridor fixtures,
+not a real dataset's constants. They cover route lifecycle, physical clearance,
+object/room evidence, optional imports, explicit protocol accounting, locks,
+resumption, metadata drift, recording without GT telemetry and replay integrity.
+
+For a provisioned Habitat environment and an idle rendering GPU:
+
+```bash
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.smoke
+```
+
+This creates a temporary license-free room and checks real RGB-D, ENU frame
+conversion, left/right turns, forward movement and STOP. Its result is explicitly
+synthetic, not a published benchmark score.

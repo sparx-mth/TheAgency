@@ -19,7 +19,7 @@ from sparx_agency.tasks.planning.objnav_benchmark.aggregate import paired_compar
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.compare_explorers import summarize
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.development_dataset import SCHEMA, SPLIT
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options, detector_flags
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options, detector_flags
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_SCHEMA
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import source_fingerprint
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import run_development

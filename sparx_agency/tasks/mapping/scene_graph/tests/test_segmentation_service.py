@@ -20,7 +20,7 @@ from sparx_agency.tasks.mapping.scene_graph.serve.segmentation_contract import (
     SEGMENTATION_BACKEND, decode_mask, encode_mask, masks_from_json, masks_to_json, parse_segment_request,
     segment_request)
 from sparx_agency.tasks.mapping.scene_graph.serve.segmentation_server import _make_server, _SegmentationContext
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.segmentation import HttpSegmenter
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_segmenter import HttpSegmenter
 
 
 def frame(h=48, w=64):

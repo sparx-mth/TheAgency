@@ -1,8 +1,25 @@
 """Optional reusable habitat-sim RGB-D bridge. No task goals or metric access.
 
-Uses existing navmeshes, never recomputes them or snaps episode starts. Import
-is GPU-free; a rendering context is created only by reset(). The same bridge
-can serve Gibson, HM3D and MP3D behind their separate dataset evaluators.
+Never snaps a published episode start. Import is GPU-free; a rendering context
+is created only by reset(). The same bridge can serve Gibson, HM3D and MP3D
+behind their separate dataset evaluators.
+
+**Which navmesh an episode runs on is an explicit adapter choice**, because it
+is not a detail: the navmesh decides what is reachable, so it sets the geodesic
+``l`` and therefore every SPL. ``navmesh="published"`` loads the file the
+publisher shipped and uses exactly that. ``navmesh="agent"`` is habitat-sim's
+own behaviour, and the one habitat-lab's ObjectNav actually runs:
+``Simulator._config_pathfinder`` loads the sibling ``<scene>.navmesh`` and then
+recomputes it whenever the mesh's recorded settings differ from the agent's
+radius and height -- which they do for HM3D, whose meshes are built at the
+library defaults (0.10 m / 1.50 m) while ObjectNav's agent is 0.18 m / 0.88 m.
+Neither is guessed from a benchmark name, and whichever is chosen,
+``navmesh_provenance()`` records what was actually in force.
+
+Beyond RGB-D and pose the bridge exposes two evaluator/policy-side readings of
+the loaded navmesh: :meth:`scene_structure` (storeys and stair connectors, the
+one declared ground-truth input of the multi-floor search) and
+:attr:`last_collision` (recorder-only). Neither is part of an observation.
 """
 from __future__ import annotations
 
@@ -14,6 +31,12 @@ from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.core.mapping.depth.depth_holes import fill_depth_holes
+
+# Measured reconciliations were 0.021-0.050 m; past this it's a mismatched
+# navmesh, not a reconciliation -- refuse it instead of fixing it quietly.
+_MAX_RESET_SETTLE_M = 0.5
+#: A landing point this close to the navmesh's own answer is confirmed real.
+_NAVMESH_CONFIRM_M = 0.05
 
 
 def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
@@ -71,12 +94,25 @@ class HabitatRGBDSimulator:
         radius_m: Embodiment radius. The published navmesh remains authoritative.
         allow_sliding: Must match the chosen benchmark, not a library default.
         gpu_device: Rendering device index; this class never starts other models.
+        height_m: Physical body height, independent of the camera mounting height.
+        navmesh: ``"published"`` to navigate the shipped navmesh verbatim, or
+            ``"agent"`` for habitat-sim's own load-then-recompute-at-the-agent's
+            -dimensions behaviour, which is what habitat-lab's ObjectNav does.
+            See the module docstring; this is a protocol decision.
     """
 
-    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, depth_holes=None):
+    def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, *,
+                 height_m, navmesh="published", depth_holes=None):
+        if any(isinstance(v, bool) or not math.isfinite(v) or v <= 0
+               for v in (radius_m, height_m)):
+            raise ValueError("Explicit positive finite body radius and height are required")
+        if navmesh not in ("published", "agent"):
+            raise ValueError("navmesh must be 'published' or 'agent', got %r" % (navmesh,))
+        self.navmesh = navmesh
         self.camera = camera
         self.actions = actions
         self.radius_m = radius_m
+        self.height_m = height_m
         self.allow_sliding = allow_sliding
         self.gpu_device = gpu_device
         self.depth_holes = depth_holes          # DepthHoleFill or None (every hole dropped, as the baselines do)
@@ -86,9 +122,25 @@ class HabitatRGBDSimulator:
         self._scene = None
         self._structure = None  # per-scene navmesh storeys and stair connectors
         self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
+        self.last_sensor_alignment = None
+        # Diagnostic only, never read by the policy: the navmesh-corrected
+        # height's gap from the raw published one, set fresh each reset().
+        self.last_reset_settle_gap_m = 0.0
+        #: Checker-only, refreshed every _observe(): is the current pose
+        #: within _NAVMESH_CONFIRM_M of the navmesh's own answer there.
+        self.last_pose_on_navmesh = False
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
-        """Load the scene if needed and teleport ONLY to the published start."""
+        """Load the scene if needed and place the agent at the published start.
+
+        Under ``navmesh="published"`` the start is used verbatim, as the
+        publisher wrote it. Under ``navmesh="agent"`` the recomputed mesh's
+        floor sits a few centimetres from the published one, so the height is
+        fixed once here from this run's own navmesh -- the episode's one
+        working height under its 2.5-D contract -- instead of jumping on the
+        first forward step, which habitat-sim would otherwise snap. The (x, z)
+        start is never moved in either mode.
+        """
         import habitat_sim
         import quaternion
 
@@ -96,14 +148,47 @@ class HabitatRGBDSimulator:
         if self._scene != str(scene_path):
             self.close()
             self._sim = habitat_sim.Simulator(self._configuration(scene_path))
-            if not self._sim.pathfinder.load_nav_mesh(str(navmesh_path)):
-                self.close()
-                raise EnvContractError("Unable to load published navmesh: %s" % navmesh_path)
+            if self.navmesh == "published":
+                if not self._sim.pathfinder.load_nav_mesh(str(navmesh_path)):
+                    self.close()
+                    raise EnvContractError("Unable to load published navmesh: %s"
+                                           % navmesh_path)
+            else:
+                sibling = str(scene_path)
+                sibling = sibling[:sibling.rfind(".")] + ".navmesh"
+                if str(navmesh_path) != sibling:
+                    self.close()
+                    raise EnvContractError(
+                        "navmesh='agent' uses the navmesh habitat-sim finds beside "
+                        "the scene (%s), not %s" % (sibling, navmesh_path))
+                if not self._sim.pathfinder.is_loaded:
+                    self.close()
+                    raise EnvContractError(
+                        "habitat-sim loaded no navmesh for %s; nothing can be "
+                        "measured on it" % scene_path)
             self._scene = str(scene_path)
             self._structure = None
         self._sim.seed(seed)
+        raw_position = np.asarray(position, dtype=np.float32)
+        self.last_reset_settle_gap_m = 0.0
+        if self.navmesh == "agent":
+            snapped = np.asarray(self._sim.pathfinder.snap_point(raw_position), dtype=np.float32)
+            if snapped.shape != (3,) or not np.isfinite(snapped).all():
+                raise EnvContractError(
+                    "Published start %s is not near this run's navmesh at all; "
+                    "the recomputed mesh does not match the episodes" % (raw_position.tolist(),))
+            self.last_reset_settle_gap_m = float(snapped[1] - raw_position[1])
+            if abs(self.last_reset_settle_gap_m) > _MAX_RESET_SETTLE_M:
+                raise EnvContractError(
+                    "Published start height is %.3f m from this navmesh's own height "
+                    "at (x, z); too far to be the usual agent-radius navmesh-recompute "
+                    "reconciliation (checked against %.2f m) -- the navmesh likely "
+                    "doesn't match this episode at all" % (self.last_reset_settle_gap_m,
+                                                            _MAX_RESET_SETTLE_M))
+            raw_position = np.array(
+                [raw_position[0], snapped[1], raw_position[2]], dtype=np.float32)
         state = habitat_sim.AgentState()
-        state.position = np.asarray(position, dtype=np.float32)
+        state.position = raw_position
         state.rotation = quaternion.from_float_array(rotation_wxyz)
         self._sim.get_agent(0).set_state(state, reset_sensors=True)
         self.last_collision = None
@@ -113,12 +198,13 @@ class HabitatRGBDSimulator:
         """Storeys and stair connectors of the loaded scene's navmesh, ENU.
 
         Ground truth for the building's vertical structure -- never the goal.
-        Computed once per scene; see ``gibson/stair_connectors.py``.
+        Computed once per scene from whichever navmesh is in force (see
+        ``habitat/stair_connectors.py``).
         """
         if self._sim is None:
             raise EnvContractError("Simulator not reset; no navmesh to read the building from")
         if self._structure is None:
-            from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.stair_connectors import (
+            from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.stair_connectors import (
                 scene_structure_from_pathfinder)
             self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
         return self._structure
@@ -132,7 +218,7 @@ class HabitatRGBDSimulator:
         config.enable_physics = False
         config.allow_sliding = self.allow_sliding
         agent = habitat_sim.agent.AgentConfiguration()
-        agent.height = self.camera.height_m
+        agent.height = self.height_m
         agent.radius = self.radius_m
         sensors = []
         k = self.camera.intrinsics
@@ -157,6 +243,39 @@ class HabitatRGBDSimulator:
                 a.name.lower(), habitat_sim.agent.ActuationSpec(amount=amounts[a.name.lower()]))
             for a in self.actions.actions if a != DiscreteAction.STOP}
         return habitat_sim.Configuration(config, [agent])
+
+    @property
+    def pathfinder(self):
+        """The loaded navmesh, for an adapter's own privileged measurements.
+
+        Geodesic distances belong to the evaluator, never to the policy: this
+        is the same navmesh the episode is executed on, so a distance measured
+        through it is the one the benchmark means. It is available only between
+        reset() and close(), because a navmesh is a property of a loaded scene.
+        """
+        if self._sim is None:
+            raise EnvContractError("Simulator not reset; there is no navmesh yet")
+        return self._sim.pathfinder
+
+    def navmesh_provenance(self):
+        """What navmesh is actually in force, as recorded run metadata.
+
+        Returns:
+            The requested mode, the pathfinder's own settings, its navigable
+            area and island count -- enough to tell afterwards which mesh a
+            number was measured on.
+        """
+        pathfinder = self.pathfinder
+        settings = {}
+        recorded = getattr(pathfinder, "nav_mesh_settings", None)
+        for name in ("agent_radius", "agent_height", "agent_max_climb",
+                     "agent_max_slope", "cell_size", "cell_height"):
+            value = getattr(recorded, name, None)
+            if value is not None:
+                settings[name] = float(value)
+        return {"mode": self.navmesh, "settings": settings,
+                "navigable_area_m2": float(pathfinder.navigable_area),
+                "islands": int(pathfinder.num_islands)}
 
     def project_target(self, point):
         """Project a requested ENU footpoint onto the local NavMesh.
@@ -205,12 +324,14 @@ class HabitatRGBDSimulator:
                 or not np.allclose(rgb_rotation, depth_rotation, atol=1e-5, rtol=0)
                 or not np.allclose(depth_sensor.position, expected_position, atol=1e-4, rtol=0)):
             raise EnvContractError("RGB/depth/pose extrinsics are not registered to the declared camera mount")
-        pose = habitat_pose(state.position, quaternion.as_rotation_matrix(state.rotation),
-                            depth_rotation)
-        rgb_pose = habitat_pose(state.position, quaternion.as_rotation_matrix(state.rotation), rgb_rotation)
+        body_rotation = quaternion.as_rotation_matrix(state.rotation)
+        pose = habitat_pose(state.position, body_rotation, depth_rotation)
+        rgb_pose = habitat_pose(state.position, body_rotation, rgb_rotation)
         self.last_sensor_alignment = {"rgb_pitch_rad": rgb_pose.camera_pitch, "depth_pitch_rad": pose.camera_pitch,
                                       "mount_error_m": float(np.linalg.norm(depth_sensor.position - expected_position)),
                                       "registered": True}
+        snapped = self._sim.pathfinder.snap_point(state.position)
+        self.last_pose_on_navmesh = bool(abs(float(snapped[1]) - float(state.position[1])) <= _NAVMESH_CONFIRM_M)
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
         counts = {}
         depth = metric_depth(raw["depth"], self.camera, depth_holes=self.depth_holes, stats=counts)

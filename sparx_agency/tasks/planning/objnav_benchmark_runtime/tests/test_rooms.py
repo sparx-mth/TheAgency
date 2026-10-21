@@ -15,9 +15,9 @@ from sparx_agency.core.planning.objnav.types.observation import ObjNavObservatio
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doors import DoorSettings, ObservedDoors, doorway_position
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_labels import RevisableRoomLabels, RoomLabelSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.scene_graph import ObservedSceneGraph
+from sparx_agency.core.planning.object_search.perception.doors import DoorSettings, ObservedDoors, doorway_position
+from sparx_agency.core.mapping.topology.revisable_room_labels import RevisableRoomLabels, RoomLabelSettings
+from sparx_agency.core.planning.object_search.rooms.scene_graph import ObservedSceneGraph
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import FakeLLM
 
 

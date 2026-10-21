@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import gpu_plan
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime import gpu_plan
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan import (
     Component, components, llm_need_mib, nvidia_smi_memory, ollama_model_mib, plan, plan_from_environment,
     render_env)
 

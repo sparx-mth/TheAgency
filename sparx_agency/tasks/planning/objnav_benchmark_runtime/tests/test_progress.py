@@ -12,7 +12,7 @@ from sparx_agency.tasks.planning.objnav_benchmark.records import ACTION_NAMES, T
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     LEAN_DROP_KEYS, LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker, human_duration, lean_episode_info)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_gibson import (

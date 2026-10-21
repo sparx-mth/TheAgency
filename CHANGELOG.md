@@ -5,9 +5,65 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-10-19, HM3D under the Gibson-validated method)
+- **`feat/objnav-benchmark-infra-nadav` merged into `feat/objnav-habitat-hm3d-nadav`**: the HM3D adapter now runs
+  the method from `core/planning/object_search/` exactly as the Gibson val result did. `core/` differs from the
+  infra branch by the HM3D label table and its registry line only; the HM3D branch's two algorithm-side edits were
+  dropped on purpose (the `goal_changed` watchdog exemption in `route_memory.py`, a behaviour change the Gibson
+  number was not measured with, and the `target_closing_enabled` switch, a no-op knob). A frozen HM3D
+  configuration and a frozen Gibson one differ in the detector's deployment (URL, device, class order) and in
+  nothing of the 548 method keys.
+- `hm3d/run_benchmark.sh`: the one-command HM3D run -- services, a mesh-free preflight, then `hm3d/campaign.py`
+  (one `hm3d.run` process per scene, resumable, aggregated into `campaign_summary.json`) or one `--scene`;
+  `--smoke`, `--record`, `--status`, `--preflight`, `--version v1|v2`, `--agent falcon-yolo` as on Gibson.
+- `objnav_benchmark_runtime/benchmark_services.sh`: the service orchestration both launchers share (GPU plan,
+  Ollama, the YOLO-World detector started with the benchmark's own vocabulary, the segmenter, FFmpeg, teardown),
+  lifted verbatim out of `gibson/run_benchmark.sh`, which now sources it; a detector already up at the port is
+  checked to serve this benchmark's class order before it is reused (HM3D defaults to port 18092, Gibson to 18095).
+### Changed
+- `habitat/simulator.py` is the HM3D branch's superset (body height separate from the camera mount,
+  `navmesh="published"|"agent"`, `pathfinder`, `navmesh_provenance()`), with the reset-time height
+  reconciliation applied under `navmesh="agent"` only: under `"published"` the start is placed verbatim, as every
+  Gibson run did. `HabitatRGBDSimulator` now requires `height_m=`; `gibson/env.py`, `smooth_replay.py` and
+  `stair_diagnostic.py` pass `GibsonProtocol.agent_height_m` (0.88 m, the camera height -- no change in what runs).
+- `provenance.episodes_of_category(ids, episodes, category, categories)` is the one category filter; Gibson's
+  `run.episodes_of_category` delegates to it.
+- The shared runtime keeps the HM3D branch's benchmark-neutral `dashboard.py` (titles from the summary's
+  benchmark/split, unreachable DTGs omitted from the plot), `recording.py` (optional telemetry hook, encoder log
+  closed on a failed start) and `run_evaluation`'s `progress` / `wrap_env` / `agent_class` seams.
+- **The object-search method moved out of the benchmark runtime into `core`** (`core/planning/object_search/` new,
+  `tasks/planning/objnav_benchmark_runtime/methods/` gone, 2026-10-19). A structural change only -- every module
+  moved with `git mv`, no algorithm, setting or default changed; a run after this commit differs from one before
+  it in `source_sha256` alone. The method (`policy.py`, `settings.py`) is now one package split by concern --
+  `perception/`, `rooms/`, `world_model/`, `exploration/`, `multifloor/`, `closing/`, `falcon/`, `baselines/`,
+  `route_memory.py` -- and its policy-free pieces went to the subsystem they belong to: `box_extent`, `box_occluder`,
+  `detection_dedup`, `target_evidence`, `support_surface` in `core/mapping/objects`; `target_memory_3d` in
+  `core/mapping/tracking`; `room_priors`, `revisable_room_labels` in `core/mapping/topology`; the camera-tilt
+  controller and the box-driven pitch servo in `core/control/camera` (`pitch_controller`, `box_pitch_servo`: where to
+  look is a control process beside where to move, merged in the `NavigationCommand`); the storey localiser
+  `floor_atlas` in `core/localization` (from `core/planning/exploration`). Five inline ``atan2(sin, cos)`` wraps now
+  call the shared `normalize_angle`; the box aliases use `core.common.math.bbox.BBox`. The seam to the
+  services is `object_search/interfaces.py` (`Detection`, the `Detector` / `Segmenter` / `RoomReasoner` protocols,
+  the two failure families, which the perception cycle now tells apart without importing `requests`); the HTTP
+  clients moved to `objnav_benchmark_runtime/services/` (`http_detector`, `http_segmenter`, `llm`). The runtime
+  shares one method factory across datasets (`policy_factory.build_policy`, as on the HM3D branch), lifts
+  `detector_options.py` and `gpu_plan.py` to its root (Gibson keeps import shims), folds `select_episodes`,
+  `explicit_episodes` and `gpu_plan_record` into `provenance.py` (the duplicate `source_fingerprint` in `gibson/run.py`
+  is gone -- same digest), lifts `gibson/progress.py` to `progress.py` (shim kept), and moves the navmesh storey/stair
+  reader to `habitat/stair_connectors.py`. The method's
+  regression rig stays with the runtime (`tests/`); `core/planning/object_search/tests/` adds the boundary scan (no
+  `tasks`, simulator or transport import anywhere in the method), a service-free smoke run and the failure
+  contract. READMEs: `core/planning/object_search/README.md` (new), the runtime README's "Where the code is" and
+  "Adding a dataset adapter", `core/control` (the camera branch), `core/mapping/{objects,tracking,topology}`,
+  `core/planning/objnav`, `falcon`. Verified structural-only: every moved module is code-identical to its original
+  (imports and docstrings aside) and four deterministic 140-step rollouts with fake services -- frontier and FALCON
+  explorers, with and without a target, and the FALCON+YOLO baseline -- produce byte-identical traces, diagnostics
+  and frozen configurations before and after.
 ### Added
 - **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261018T105339Z/`, 2026-10-19): SR 0.788, SPL 0.465, DTG 0.96 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261018_14b_sam/`, 2026-10-19): SR 0.784, SPL 0.480, DTG 1.00 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
+- **The FALCON + YOLO + closing baseline on the Gibson val split** (`gibson/results/gibson_val_falcon-yolo_20261018T173302Z/`, 2026-10-19): SR 0.665, SPL 0.337, DTG 1.75 m over the same 1,000 episodes as the full method's SR 0.792, SPL 0.464, DTG 0.94 m; per scene and per category in entry 032. `supervise_benchmark.sh` kills a run stalled for `STALL_MINUTES` (a habitat-sim segfault left a zombie it waited on for five hours) and calls an episode deterministic after three deaths.
+- **The FALCON + YOLO + closing exploration baseline** (`objnav_benchmark_runtime/methods/falcon_yolo_baseline.py` new, `gibson/run.py --agent falcon-yolo`, `five_scene.py`, `run_benchmark.sh --agent`, `launch_detached.sh` `RUN_ARGS`, `supervise_benchmark.sh`, `floor_panels.py`, `visualization.py`, `search_panel.py`, `gibson/progress.py`, `gibson/FALCON_YOLO_BASELINE.md`, 2026-10-18): goal-free planar FALCON over the storey (bounded transactions in a 4 m disc about the agent, A* relocation to the nearest frontier when the disc is exhausted, a look-around and a STOP when the storey is) with the full method's YOLO perception cycle, `TargetClosing` takeover and legacy pursuit, camera controller and spawn-floor confinement unchanged, and no LLM, RPT*, scene graph, rooms, doors, openings, peeks or glances. The recorder draws the explorer's column in place of the search panel; lean records keep `exploration`. Twenty-one tests in `tests/test_falcon_yolo_baseline.py`. The swept-motion veto judges FALCON's own routes only (a relocation's or the pursuit's A* route is the planner's, as in the full method's frontier explorer; Wiconisco/000000 had spent 179 vetoes in its first doorway). The first fifteen recorded episodes (`runs/benchmark_falcon-yolo_15episodes_20261018T152349Z`): SR 0.800, SPL 0.433, DTG 0.94 m against the full method's 0.867 / 0.641 / 0.16 m on the same episodes.
 - **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261016_small_llm/`, 2026-10-18): SR 0.792, SPL 0.464, DTG 0.94 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **The box read around a surface in front of the object, and a standoff for a big object** (`objnav_benchmark_runtime/methods/box_occluder.py`
   new, `perception.py`, `target_path.py`, `target_closing.py`, 2026-10-15). Two Collierville tv failures that
@@ -619,6 +675,27 @@ future-you, not for a commit log.
   now succeeds in **150 actions (SR 1, SPL 0.71)** where the 2026-10-04 morning runs failed at 28 and
   500; the seven attempts of the day (185 / 215 / 167 / 150 actions on the successful ones) are kept
   under `attempt-*` with the diff each ran.
+### Added (2026-10-01, HM3D: shared navigation core)
+- HM3D ObjectNav now runs the same navigation core as Gibson. `feat/objnav-habitat-gibson-nadav`
+  is merged into `feat/objnav-habitat-hm3d-nadav`: `objnav_benchmark_runtime/methods/` (RPT*,
+  room-search loop, frontier sweep, exploration fallback, multi-floor coordinator with
+  ground-truth stairs, YOLO-World default detector), `habitat/` and the shared
+  evaluation/recording path are one core; `gibson/` and `hm3d/` are the two task modules
+  that own their environments, loaders and protocols. The core imports neither task
+  (`tests/test_runtime_boundaries.py`). `hm3d.run` gains `--explorer frontier|falcon`,
+  `--detector-backend` and `--detector-timeout-s`; `HM3DEnv` attaches the navmesh storeys
+  and stair connectors to the episode like `GibsonEnv` does. See
+  `docs/progress/entries/013-*.md`.
+- `hm3d/README.md` rewritten as the HM3D execution guide: environments, dataset and weight
+  downloads, one recorded episode with the live dashboard, and the scene-per-process
+  campaign, sharding and freeze-then-evaluate workflow for the full published split.
+### Changed (2026-10-01, HM3D merge)
+- `habitat/simulator.py` is the union of both branches: explicit `height_m` and the
+  `navmesh="published"|"agent"` protocol choice with `navmesh_provenance()` (HM3D), plus
+  `scene_structure()`, `last_collision` and RGB/depth extrinsic checks (Gibson). Gibson's
+  protocol now states `agent_height_m = 0.88` explicitly instead of reusing the camera height.
+- `gibson/stair_connectors.py` moved to `habitat/stair_connectors.py` (it reads any habitat-sim
+  navmesh); the old path re-exports it.
 - Target-closing recording HUD shows active/confirmed lock, phase, observed target range,
   elapsed time and FPS; per-frame LLM/classifier/RPT/A* counters permit freeze verification,
   and normally completed videos end with SR/SPL/DTG/runtime metrics.

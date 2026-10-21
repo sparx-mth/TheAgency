@@ -27,7 +27,7 @@ from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import FakeDetector, FakeLLM, observation
 
 

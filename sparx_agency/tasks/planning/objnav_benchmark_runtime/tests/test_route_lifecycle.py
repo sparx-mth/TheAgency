@@ -10,8 +10,8 @@ from sparx_agency.core.planning.objnav.action_converter.params import ActionConv
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.object_evidence import TargetEvidence
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.route_memory import CommittedRoute
+from sparx_agency.core.mapping.objects.target_evidence import TargetEvidence
+from sparx_agency.core.planning.object_search.route_memory import CommittedRoute
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 
 

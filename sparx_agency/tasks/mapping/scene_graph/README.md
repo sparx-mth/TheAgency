@@ -365,8 +365,10 @@ The service supports explicit `--backend yolo_world` (X-v2 by default) and
 `/detect` includes the vocabulary and this
 metadata captured under the same lock as inference, so a client can reject
 a model or vocabulary change mid-run. Existing response fields are unchanged.
-The [Gibson headless runtime](../../planning/objnav_benchmark_runtime/gibson/README.md)
-uses this service on a dedicated CPU/remote endpoint while Habitat owns the
+The [shared ObjectNav runtime](../../planning/objnav_benchmark_runtime/README.md)
+and its [Gibson](../../planning/objnav_benchmark_runtime/gibson/README.md) and
+[HM3D](../../planning/objnav_benchmark_runtime/hm3d/README.md) adapters use this
+service on a dedicated CPU/remote endpoint while Habitat owns the
 rendering GPU; it never changes another mission's vocabulary automatically.
 
 **Room tints are a two-part contract.** `OccupancyGrid` data is `int8` and room
