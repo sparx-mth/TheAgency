@@ -6,6 +6,7 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261018_14b_sam/`, 2026-10-19): SR 0.784, SPL 0.480, DTG 1.00 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261016_small_llm/`, 2026-10-18): SR 0.792, SPL 0.464, DTG 0.94 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **The box read around a surface in front of the object, and a standoff for a big object** (`objnav_benchmark_runtime/methods/box_occluder.py`
   new, `perception.py`, `target_path.py`, `target_closing.py`, 2026-10-15). Two Collierville tv failures that

@@ -14,6 +14,7 @@ entry under `entries/` when work actually starts on it.
 - [ ] The published Gibson val benchmark on the 8 GB laptop: `qwen2.5:3b-instruct` in both LLM roles, box depth (SAM off), lean records, resumable across a reboot, with the per-episode data a failure analysis needs → `entries/029-gibson-val-3b-laptop-run.md`
 - [ ] The published Gibson val benchmark re-run on the search and closing fixes of 2026-10-13/14 (frontier exploration, the LOOK pair, the STOP overshoot), compared per scene and per category against the 2026-10-12 run → `entries/030-gibson-val-rerun-search-closing-fixes.md`
 - [x] ObjectNav target closing for a television: the box's range read around a surface standing in front of the object, and a standoff ring that widens to reach a big object instead of releasing a correct lock → `entries/031-tv-closing-occluder-range-and-widened-standoff.md`
+- [x] The published Gibson val benchmark with Segment Anything on (the B arm) and the 3B/14B LLM pair, compared against the SAM-off runs → `entries/032-gibson-val-14b-sam-on.md`
 - [ ] FALCON BEV click-to-fly for Rooster/Sphera, end-to-end and reliable → `entries/001-falcon-rooster-clickfly.md`
 - [ ] Move every Rooster node still running on the bare host into `robotican_dev`/`theagency:robotican` → `entries/002-rooster-full-containerize.md`
 - [ ] Incoming updated FALCON/planning drop from the user — integrate and re-verify → `entries/003-falcon-planning-update.md`
