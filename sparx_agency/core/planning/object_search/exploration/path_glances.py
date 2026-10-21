@@ -24,10 +24,17 @@ This module schedules at most one such **glance** on the route in force:
    gain clears ``min_gain_m2`` and the rate ``min_gain_per_action_m2``; a
    side glance costs the turns out and back, a circle as many turns as the
    camera's field of view needs to see the whole of it (ten at 30 degrees
-   with a 79-degree camera -- not twelve). A candidate far along the route
+   with a 79-degree camera -- not twelve), and a circle must pay for its
+   extra turns with its rear sector alone and is never taken inside a room
+   the search has finished or that has no frontier left (since
+   2026-10-21). A candidate far along the route
    is discounted (``lookahead_discount``): a glance the agent can take now
    is worth more than one of the same rate planned six metres on, which
-   the route's changes as often re-plan away as take.
+   the route's changes as often re-plan away as take. The plan chosen is
+   **committed** (since 2026-10-21): re-scored as the map grows, kept while
+   its gain clears the floors, and replaced only by a candidate at or
+   nearer than its point -- not by a farther one, which the re-scoring
+   used to prefer every two actions until no look was ever taken.
 4. **The look** begins when the agent reaches the chosen point: one in-place
    turn per action, toward the side (and back, which the route follower
    does by itself when the glance ends) or all the way round, read off the
@@ -100,6 +107,18 @@ class GlanceSettings:
             (the Hanson routes of 2026-10-04 replayed on their final maps:
             14.8 m2 at action 33, 7.6 m2 at 164).
         side_rad: How far a side glance turns (a right angle).
+        wide_rad: How far a WIDE side glance turns (since 2026-10-21): 120
+            degrees, four turns out and four back at the benchmark's 30. A
+            right angle with the camera's 79-degree field shows the floor
+            up to about 130 degrees off the route; a pocket of unknown
+            beside and a little behind the agent -- the alcove just passed,
+            the room whose door opens back toward it -- lies in the 130-160
+            band only the wide look reaches. Scored beside the right-angle
+            look from every candidate point and chosen only when the extra
+            band alone pays for the extra turns at
+            ``min_gain_per_action_m2``, so the look stays a right angle
+            wherever the far band is empty. At most ``pi``; a value at or
+            under ``side_rad`` disables the wide look.
         cooldown_actions: After a glance, no new one for this many actions.
             Four (eight until 2026-10-13): the Darden recording
             ``ec8d17aeaaaa`` took a two-turn cue glance at action 51 and the
@@ -168,6 +187,7 @@ class GlanceSettings:
     min_gain_m2: float = 3.0
     min_gain_per_action_m2: float = 0.5
     side_rad: float = math.pi / 2
+    wide_rad: float = 2.0 * math.pi / 3.0
     cooldown_actions: int = 4
     revalue_actions: int = 2
     lookahead_discount: float = 0.5
@@ -186,8 +206,8 @@ class GlanceSettings:
     def __post_init__(self):
         if type(self.enabled) is not bool or type(self.cue_enabled) is not bool:
             raise ValueError("glances.enabled and glances.cue_enabled must be bools")
-        for name in ("horizon_m", "stride_m", "arrival_m", "min_gain_m2", "min_gain_per_action_m2", "side_rad", "blind_m",
-                     "scanned_m", "repeat_m", "cue_min_gain_m2", "cue_repeat_m"):
+        for name in ("horizon_m", "stride_m", "arrival_m", "min_gain_m2", "min_gain_per_action_m2", "side_rad", "wide_rad",
+                     "blind_m", "scanned_m", "repeat_m", "cue_min_gain_m2", "cue_repeat_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("glances.%s must be positive and finite" % name)
@@ -207,6 +227,13 @@ class GlanceSettings:
             raise ValueError("glances.max_range_m must exceed blind_m")
         if self.side_rad > math.pi:
             raise ValueError("glances.side_rad must be at most pi")
+        if self.wide_rad > math.pi:
+            raise ValueError("glances.wide_rad must be at most pi")
+
+    @property
+    def wide_enabled(self) -> bool:
+        """Whether a wide look is scored at all: ``wide_rad`` beyond ``side_rad``."""
+        return self.wide_rad > self.side_rad + 1e-9
 
 
 @dataclass(frozen=True)
@@ -228,20 +255,32 @@ class GlanceCandidate:
     left_m2: float
     right_m2: float
     full_m2: float
+    wide_left_m2: float = 0.0
+    wide_right_m2: float = 0.0
 
 
 @dataclass(frozen=True)
 class GlancePlan:
-    """The glance chosen on the route in force."""
+    """The glance chosen on the route in force.
+
+    Attributes:
+        turn_rad: How far a side glance turns -- ``side_rad``, or ``wide_rad``
+            for a wide look (since 2026-10-21); unused by a full glance.
+    """
 
     candidate: GlanceCandidate
     kind: str
     gain_m2: float
     actions: int
+    turn_rad: float = math.pi / 2
 
     @property
     def rate(self) -> float:
         return self.gain_m2 / max(1, self.actions)
+
+    @property
+    def wide(self) -> bool:
+        return self.kind != FULL and self.turn_rad > math.pi / 2 + 1e-9
 
 
 class GlanceScheduler:
@@ -264,7 +303,7 @@ class GlanceScheduler:
         self.events: List[Dict] = []
         self.stats = {"evaluations": 0, "scheduled": 0, "started": 0, "completed": 0, "aborted": 0,
                       "turns": 0, "gain_m2": 0.0, "cues": 0, "cues_repeated": 0, "cues_without_gain": 0,
-                      "cues_placed_elsewhere": 0, "rotations_recorded": 0}
+                      "cues_placed_elsewhere": 0, "rotations_recorded": 0, "wide_scheduled": 0, "wide_started": 0}
         self._last_eval_step = -10 ** 9
         self._last_glance_step = -10 ** 9
         self._route_key = None
@@ -386,7 +425,22 @@ class GlanceScheduler:
         return out
 
     def _evaluate(self, obs, world, route):
-        """Score every candidate and keep the best glance, or none."""
+        """Score every candidate and keep the best glance, or none -- holding a committed one against farther ones.
+
+        A plan in force is **committed** (since 2026-10-21): re-scored on
+        the fresh map, it is kept while its gain still clears the floors,
+        and only a candidate at or nearer than its point may replace it.
+        The re-scoring every ``revalue_actions`` used to move the plan ahead
+        of the agent as the map grew under the walk -- a farther doorway
+        out-rated the one abreast, then the next one that -- and the looks
+        were planned and never taken (Collierville/000000 of 2026-10-21: 27
+        scheduled, 4 geometric glances taken; Markleeville/000000: 27 and
+        none). A full circle must also pay for its extra turns with the
+        rear sector alone (:meth:`_full_worth_it`) and is never taken in a
+        room the search has finished or that has no frontier left
+        (:meth:`_full_allowed_at`): a circle inside a mapped room is a spin
+        for nothing under the action budget.
+        """
         s = self.settings
         self.stats["evaluations"] += 1
         self._last_eval_step = int(obs.step)
@@ -398,40 +452,115 @@ class GlanceScheduler:
         scanned = self._scanned_points()
         turn = float(self.policy.episode.action_spec.turn_angle_rad)
         side_actions = 2 * int(math.ceil(s.side_rad / turn - 1e-9))
+        wide_actions = 2 * int(math.ceil(s.wide_rad / turn - 1e-9)) if s.wide_enabled else side_actions
         full_actions = self._full_turns()
         half_fov = view.cone.half_fov_rad
         candidates, best, best_score = [], None, None
+        previous = self.plan_in_force
+        committed = None
         for index, xy, heading, along in points:
             if any(math.dist(xy, point) <= s.scanned_m for point in scanned):
                 continue                                           # a full rotation stood here: nothing more to see
             gain = glance_gains(view, xy, heading, s.side_rad, already=walk)
+            wide = glance_gains(view, xy, heading, s.wide_rad, already=walk) if s.wide_enabled else None
             candidate = GlanceCandidate(index, (float(xy[0]), float(xy[1])), float(heading), float(along),
-                                        gain.left_m2, gain.right_m2, gain.full_m2)
+                                        gain.left_m2, gain.right_m2, gain.full_m2,
+                                        0.0 if wide is None else wide.left_m2, 0.0 if wide is None else wide.right_m2)
             candidates.append(candidate)
+            full_ok = None                                         # judged once per candidate, only when needed
             # A bird in the hand: the rate of a glance planned far along the route is
             # discounted, because the route and the map change before the agent gets there.
             discount = 1.0 - s.lookahead_discount * min(1.0, float(along) / s.horizon_m)
-            for kind, value, actions in ((LEFT, gain.left_m2, side_actions), (RIGHT, gain.right_m2, side_actions),
-                                         (FULL, gain.full_m2, full_actions)):
+            looks = [(LEFT, gain.left_m2, side_actions, s.side_rad), (RIGHT, gain.right_m2, side_actions, s.side_rad),
+                     (FULL, gain.full_m2, full_actions, s.side_rad)]
+            if wide is not None:
+                # The wide look is the right-angle look plus the 130-160 degree band; the band alone
+                # must pay for the extra turns, or the right angle is the better buy.
+                for kind, narrow, value in ((LEFT, gain.left_m2, wide.left_m2), (RIGHT, gain.right_m2, wide.right_m2)):
+                    if (value - narrow) / max(1, wide_actions - side_actions) >= s.min_gain_per_action_m2:
+                        looks.append((kind, value, wide_actions, s.wide_rad))
+            for kind, value, actions, turn_rad in looks:
                 if value < s.min_gain_m2 or value / actions < s.min_gain_per_action_m2:
                     continue
-                if kind != FULL and self._already_looked(xy, heading + (0.5 if kind == LEFT else -0.5) * s.side_rad,
-                                                         0.5 * s.side_rad + half_fov):
+                if kind != FULL and self._already_looked(xy, heading + (0.5 if kind == LEFT else -0.5) * turn_rad,
+                                                         0.5 * turn_rad + half_fov):
                     continue                                       # a look from beside here swept that sector already
-                plan = GlancePlan(candidate, kind, float(value), int(actions))
+                if kind == FULL:
+                    if full_ok is None:
+                        full_ok = (self._full_worth_it(gain, side_actions, full_actions)
+                                   and self._full_allowed_at(obs, world, xy))
+                    if not full_ok:
+                        continue
+                plan = GlancePlan(candidate, kind, float(value), int(actions), float(turn_rad))
+                if (previous is not None and kind == previous.kind and plan.wide == previous.wide
+                        and math.dist(xy, previous.candidate.xy) <= s.stride_m / 2):
+                    committed = plan                               # the plan in force, re-scored on this map
                 score = plan.rate * discount
                 if best is None or score > best_score + 1e-9 or (abs(score - best_score) <= 1e-9
                                                                 and plan.candidate.along_m < best.candidate.along_m):
                     best, best_score = plan, score
         self.candidates = tuple(candidates)
-        previous = self.plan_in_force
+        if previous is not None and committed is None and not any(
+                math.dist(c.xy, previous.candidate.xy) <= s.stride_m / 2 for c in candidates):
+            here = (float(obs.pose.x), float(obs.pose.y))
+            on_route = min(math.dist(point, previous.candidate.xy) for point in route) <= s.stride_m
+            if on_route and self._passed(route, here, previous):
+                committed = previous                               # just walked past its point: taken from here
+        if committed is not None and (best is None or best.candidate.along_m > committed.candidate.along_m + 1e-9):
+            best = committed                                       # a farther candidate never pre-empts the one in force
         self.plan_in_force = best
-        if best is not None and (previous is None or previous.kind != best.kind
+        if best is not None and (previous is None or previous.kind != best.kind or previous.wide != best.wide
                                  or math.dist(previous.candidate.xy, best.candidate.xy) > s.stride_m / 2):
             self.stats["scheduled"] += 1
+            if best.wide:
+                self.stats["wide_scheduled"] += 1
             self._log(obs, "glance_scheduled", kind=best.kind, gain_m2=round(best.gain_m2, 2), actions=best.actions,
                       along_m=round(best.candidate.along_m, 2), xy=[round(v, 2) for v in best.candidate.xy],
-                      candidates=len(candidates))
+                      candidates=len(candidates), turn_deg=round(math.degrees(best.turn_rad), 1))
+
+    def _full_worth_it(self, gain, side_actions, full_actions):
+        """Whether the rear sector alone pays for a circle's turns beyond a side glance's.
+
+        A circle sweeps what the better side glance would and the rest; its
+        extra ``full_actions - side_actions`` turns are worth taking only
+        when that rest clears ``min_gain_per_action_m2`` per turn. The
+        recordings of 2026-10-21 promised 5.5 and 18.5 m2 for circles that
+        revealed 0.8 and 1.9: the unknown they counted lay on the sides, and
+        a side glance would have had it for six actions.
+        """
+        extra_actions = max(1, int(full_actions) - int(side_actions))
+        rear = float(gain.full_m2) - max(float(gain.left_m2), float(gain.right_m2))
+        return rear >= self.settings.min_gain_per_action_m2 * extra_actions
+
+    def _full_allowed_at(self, obs, world, xy):
+        """Whether a full circle at ``xy`` may be taken: not inside a room the search has finished, that has no frontier left, or whose frontier walk is in force.
+
+        Read off the room-search loop when the policy has one (the scan
+        ledger's finished rooms, the room's live frontier count, the explore
+        visit in force); a stand-in policy without a loop or a room graph
+        allows it. A side glance is still allowed there: it looks OUT of
+        the room, through its door. The room being walked is excluded
+        because its visit walks every frontier the circle would sweep
+        (Darden/000001 of 2026-10-21, action 60: a circle mid-walk promised
+        5.5 m2 and revealed 0.8).
+        """
+        p = self.policy
+        loop, graph = getattr(p, "loop", None), getattr(p, "graph", None)
+        if loop is None or graph is None or not callable(getattr(graph, "room_at", None)):
+            return True
+        pid = graph.room_at(world, (float(xy[0]), float(xy[1])))
+        if pid is None:
+            return True
+        if pid in (getattr(loop, "_finished", None) or {}):
+            return False
+        visit = getattr(loop, "_explore", None)
+        if isinstance(visit, dict) and visit.get("room") == pid:
+            return False
+        live = getattr(loop, "_live_frontier", None)
+        if not callable(live):
+            return True
+        frontier = live(pid, obs, world)
+        return frontier is None or int(frontier) > 0
 
     def _scanned_points(self):
         """Where completed rotations stood on this storey (the scan ledger), as ``(x, y)`` pairs."""
@@ -597,20 +726,26 @@ class GlanceScheduler:
         p = self.policy
         yaw = float(obs.pose.yaw)
         heading = plan.candidate.heading
+        turn = float(p.episode.action_spec.turn_angle_rad)
         if plan.kind == FULL:
             direction = 1.0 if plan.candidate.left_m2 >= plan.candidate.right_m2 else -1.0
             target = None
+            side_turns = None
         else:
             direction = 1.0 if plan.kind == LEFT else -1.0
-            target = float(normalize_angle(heading + direction * self.settings.side_rad))
+            target = float(normalize_angle(heading + direction * plan.turn_rad))
+            side_turns = int(math.ceil(plan.turn_rad / turn - 1e-9))
         self.active = dict(kind=plan.kind, direction=direction, target=target, started=int(obs.step),
                            turns=0, swept=0.0, last_yaw=yaw, start_yaw=yaw, gain_m2=plan.gain_m2,
                            xy=[round(v, 2) for v in plan.candidate.xy],
-                           xy_exact=(float(obs.pose.x), float(obs.pose.y)))
+                           xy_exact=(float(obs.pose.x), float(obs.pose.y)), side_turns=side_turns, wide=plan.wide)
         self.stats["started"] += 1
+        if plan.wide:
+            self.stats["wide_started"] += 1
         self.plan_in_force = None
         self._log(obs, "glance_started", kind=plan.kind, gain_m2=round(plan.gain_m2, 2), actions=plan.actions,
-                  xy=self.active["xy"], heading_deg=round(math.degrees(heading), 1))
+                  xy=self.active["xy"], heading_deg=round(math.degrees(heading), 1),
+                  turn_deg=round(math.degrees(plan.turn_rad), 1))
         return self._turn(obs)
 
     def _continue(self, obs, world=None):
@@ -626,7 +761,8 @@ class GlanceScheduler:
             full_circle = self._full_turns()
             done = active["swept"] >= (full_circle - 0.5) * turn - 1e-9 or active["turns"] >= full_circle + 2
         else:
-            side_turns = int(active.get("cue_turns") or math.ceil(self.settings.side_rad / turn - 1e-9))
+            side_turns = int(active.get("cue_turns") or active.get("side_turns")
+                             or math.ceil(self.settings.side_rad / turn - 1e-9))
             done = (abs(normalize_angle(active["target"] - yaw)) <= 0.5 * turn + 1e-6
                     or active["turns"] >= side_turns + 2)
         if not done:
@@ -686,6 +822,8 @@ class GlanceScheduler:
                 "gain_m2": round(float(active["gain_m2"]), 2), "xy": list(active["xy"])}
         if active.get("cue"):
             info["cue"] = active["cue"]
+        if active.get("wide"):
+            info["wide"] = True
         return NavigationCommand.hold(final_yaw=float(normalize_angle(yaw + step)), info=info)
 
     def _finish_pause(self, turns):
@@ -712,11 +850,13 @@ class GlanceScheduler:
         return {"active": None if self.active is None else {k: v for k, v in self.active.items()
                                                              if k not in ("last_yaw", "start_yaw", "xy_exact")},
                 "planned": None if plan is None else {"kind": plan.kind, "gain_m2": round(plan.gain_m2, 2),
-                                                      "actions": plan.actions,
+                                                      "actions": plan.actions, "wide": plan.wide,
                                                       "xy": [round(v, 2) for v in plan.candidate.xy],
                                                       "along_m": round(plan.candidate.along_m, 2)},
                 "here": None if here is None else {"left_m2": round(here.left_m2, 2), "right_m2": round(here.right_m2, 2),
-                                                   "full_m2": round(here.full_m2, 2), "evaluated_step": self._last_eval_step}}
+                                                   "full_m2": round(here.full_m2, 2), "wide_left_m2": round(here.wide_left_m2, 2),
+                                                   "wide_right_m2": round(here.wide_right_m2, 2),
+                                                   "evaluated_step": self._last_eval_step}}
 
     def diagnostics(self):
         return {"settings": asdict(self.settings), "stats": dict(self.stats), "events": list(self.events),

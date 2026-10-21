@@ -106,6 +106,63 @@ def test_a_left_glance_is_scheduled_abreast_of_the_doorway_not_where_the_agent_s
     assert scheduler.stats["evaluations"] == 2, "re-scored every revalue_actions"
 
 
+def pocket_behind_world():
+    """The corridor with a doorway at x 4.6-5.4 onto an unknown pocket; the route starts at x = 6, east of it."""
+    world = corridor_world(door=False)
+    g = world.grid.copy()
+    g[30, 46:54] = FREE
+    g[31:60, 40:60] = UNK
+    return OccupancyGrid2D(g, world.params, values=world.values)
+
+
+def test_a_wide_look_reaches_a_pocket_behind_the_shoulder_that_a_right_angle_misses():
+    """A doorway 0.6-1.4 m behind the agent's shoulder lies in the 130-160 degree band: the right-angle look's
+    frames end at about 130 degrees and show none of it, the 120-degree look turns to it. Four turns out and four
+    back, paid for by that band alone; with the wide look disabled nothing is scheduled (2026-10-21)."""
+    world = pocket_behind_world()
+    route = route_east(x0=6.0, x1=12.0)
+    policy, camera, actions = fake_policy(route)
+    scheduler = GlanceScheduler(policy)
+    command = follow(route)
+    first = scheduler.apply(obs_at(camera, 0, (6.0, 2.5)), world, command)
+    assert first is not command and first.info["kind"] == "glance" and first.info.get("wide") is True
+    here = next(c for c in scheduler.candidates if c.index == 0)
+    assert here.left_m2 == 0.0 and here.wide_left_m2 >= GlanceSettings().min_gain_m2, "only the wide band sees the pocket"
+    started = [e for e in scheduler.events if e["event"] == "glance_started"]
+    assert len(started) == 1 and started[0]["kind"] == LEFT and started[0]["turn_deg"] == 120.0 and started[0]["actions"] == 8
+    assert scheduler.active["side_turns"] == 4 and scheduler.stats["wide_started"] == 1 == scheduler.stats["wide_scheduled"]
+    # Four turns to face 120 degrees left, then the search resumes.
+    turn = actions.turn_angle_rad
+    yaw = float(first.final_yaw)
+    for n in (2, 3, 4):
+        out = scheduler.continue_look(obs_at(camera, n, (6.0, 2.5), yaw=yaw))
+        assert out is not None and out.final_yaw == pytest.approx(n * turn, abs=1e-6)
+        yaw = float(out.final_yaw)
+    assert yaw == pytest.approx(2 * math.pi / 3, abs=1e-6)
+    assert scheduler.continue_look(obs_at(camera, 5, (6.0, 2.5), yaw=yaw)) is None
+    assert scheduler.stats["completed"] == 1 and scheduler.stats["turns"] == 4
+    assert scheduler._looked[-1][2] == pytest.approx(math.pi / 3 + math.atan(0.5 * camera.intrinsics.width / camera.intrinsics.fx), abs=0.02)
+    # Disabled (wide_rad at the right angle): nothing is worth a look from here.
+    off = GlanceScheduler(fake_policy(route)[0], GlanceSettings(wide_rad=math.pi / 2))
+    assert off.apply(obs_at(camera, 0, (6.0, 2.5)), world, command) is command and off.plan_in_force is None
+    assert not GlanceSettings(wide_rad=math.pi / 2).wide_enabled and GlanceSettings().wide_enabled
+    with pytest.raises(ValueError):
+        GlanceSettings(wide_rad=4.0)
+
+
+def test_the_wide_look_is_not_taken_where_the_right_angle_sees_everything():
+    """Abreast of the doorway the right-angle look shows the room in full; the wide look adds nothing in the far
+    band and costs two turns more, so the plain look is scheduled, as before."""
+    route = route_east()
+    policy, camera, actions = fake_policy(route)
+    scheduler = GlanceScheduler(policy)
+    world = corridor_world()
+    scheduler.apply(obs_at(camera, 0, (1.0, 2.5)), world, follow(route))
+    plan = scheduler.plan_in_force
+    assert plan is not None and plan.kind == LEFT and not plan.wide and plan.actions == 6
+    assert scheduler.stats["wide_scheduled"] == 0
+
+
 def test_no_glance_where_there_is_nothing_to_see():
     route = route_east()
     policy, camera, actions = fake_policy(route)
@@ -467,3 +524,109 @@ def test_a_cue_of_an_ordinary_class_must_clear_the_geometric_rate_floor_and_is_n
     scheduler._looked.append(((5.4, 2.5), 0.5 * turns * turn, 0.5 * turns * turn + math.radians(39.5), 5))
     assert scheduler._cue(obs_at(camera, 6, (5.6, 2.5), yaw=0.0), world) is None
     assert scheduler.stats["cues_repeated"] >= 1
+
+
+# -- the plan is committed; a circle pays for its rear; no circle in a finished room (2026-10-21) --------------
+def test_a_scheduled_glance_is_kept_against_a_farther_richer_one_until_it_is_taken_or_worthless():
+    """Collierville/000000 of 2026-10-21: 27 glances scheduled, 4 taken -- the re-scoring every two actions moved
+    the plan to the next doorway before the agent reached the one abreast. A farther candidate never pre-empts
+    the plan in force; the plan goes only when its own gain is gone."""
+    g = corridor_world().grid.copy()
+    g[31:100, :] = OCC                                      # nothing north of the corridor but ...
+    g[31:56, 44:64] = UNK                                   # ... a small unknown room (2 x 2.5 m) behind the near door
+    world = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    route = route_east(x0=3.0, x1=10.0)
+    policy, camera, actions = fake_policy(route)
+    scheduler = GlanceScheduler(policy)
+    command = follow(route)
+    scheduler.apply(obs_at(camera, 0, (3.0, 2.5)), world, command)
+    plan = scheduler.plan_in_force
+    assert plan is not None and plan.kind == LEFT and 4.3 <= plan.candidate.xy[0] <= 5.6, "the near doorway first"
+    near = plan.candidate.xy
+    # The map grows as the agent walks: a far, wider doorway onto a big room appears at x 8.0-9.0. From here its
+    # gain out-rates the near look even discounted -- and the plan stays where it was.
+    g[30, 80:90] = FREE
+    g[31:100, 72:120] = UNK
+    scheduler.apply(obs_at(camera, 2, (3.5, 2.5)), world, command)
+    assert scheduler.stats["evaluations"] == 2
+    assert scheduler.plan_in_force is not None and math.dist(scheduler.plan_in_force.candidate.xy, near) <= 0.25, (
+        "committed: the look abreast of the near door is taken before any farther one")
+    far_rates = [c for c in scheduler.candidates if c.xy[0] > 7.5]
+    assert far_rates and max(c.left_m2 for c in far_rates) > plan.gain_m2, "the far doorway promised more"
+    assert scheduler.stats["scheduled"] == 1, "no re-scheduling churn"
+    # The near room gets mapped as the agent walks: the committed plan's gain is gone, and the far one takes over.
+    g[31:56, 44:64] = FREE
+    scheduler.apply(obs_at(camera, 4, (4.0, 2.5)), world, command)
+    moved = scheduler.plan_in_force
+    assert moved is not None and moved.candidate.xy[0] > 7.0 and scheduler.stats["scheduled"] == 2
+    # A nearer candidate may still replace the plan in force when it scores better -- it is taken first anyway --
+    # but the plan never moves FARTHER than where it stands.
+    g[30, 60:66] = FREE                                     # a doorway at x 6.0-6.6 ...
+    g[31:100, 56:72] = UNK                                  # ... onto a fresh, long unknown room nearer than the far one
+    scheduler.apply(obs_at(camera, 6, (4.5, 2.5)), world, command)
+    settings = scheduler.settings
+    def score(c):
+        return c.left_m2 / 6 * (1 - settings.lookahead_discount * min(1.0, c.along_m / settings.horizon_m))
+    nearer_candidates = [c for c in scheduler.candidates if 5.8 <= c.xy[0] <= 6.8 and c.left_m2 >= settings.min_gain_m2]
+    far_candidates = [c for c in scheduler.candidates if math.dist(c.xy, moved.candidate.xy) <= 0.25]
+    assert nearer_candidates and far_candidates
+    plan = scheduler.plan_in_force
+    assert plan is not None and plan.candidate.xy[0] <= moved.candidate.xy[0] + 1e-9, "never farther"
+    if max(score(c) for c in nearer_candidates) > score(far_candidates[0]) + 1e-9:
+        assert plan.candidate.xy[0] < moved.candidate.xy[0], "the nearer, better one replaces the plan in force"
+    else:
+        assert math.dist(plan.candidate.xy, moved.candidate.xy) <= 0.25, "the plan in force stands"
+
+
+def test_a_full_circle_must_pay_for_its_extra_turns_with_the_rear_sector_alone():
+    policy, camera, actions = fake_policy(route_east())
+    scheduler = GlanceScheduler(policy)
+    turn = actions.turn_angle_rad
+    side, full = 2 * int(math.ceil(scheduler.settings.side_rad / turn - 1e-9)), scheduler._full_turns()
+    assert (side, full) == (6, 10)
+    # The circle's extra over the better side glance -- the other side and the rear together -- must clear the
+    # rate floor over its four extra turns (2 m2): a left look already swept from beside here leaves the circle
+    # as the only way to look left again, and 1 m2 behind is not worth ten turns for it.
+    assert not scheduler._full_worth_it(SimpleNamespace(left_m2=4.0, right_m2=0.0, full_m2=5.0), side, full)
+    assert scheduler._full_worth_it(SimpleNamespace(left_m2=4.0, right_m2=0.0, full_m2=6.0), side, full)
+    assert scheduler._full_worth_it(SimpleNamespace(left_m2=5.0, right_m2=5.0, full_m2=10.5), side, full), (
+        "both sides and a little behind: the circle buys the second side cheaper than a second glance would")
+    # Through the scorer: the circle that promised 5.5 m2 in Darden/000001 and revealed 0.8 is no plan.
+    route = route_east()
+    g = corridor_world().grid.copy()
+    g[19, 50:58] = FREE                                     # the opposite doorway, so the circle sees both rooms
+    g[0:19, 30:80] = UNK
+    world = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    scheduler.apply(obs_at(camera, 0, (1.0, 2.5)), world, follow(route))
+    assert scheduler.plan_in_force is not None and scheduler.plan_in_force.kind in (LEFT, RIGHT)
+    assert all(c.full_m2 - max(c.left_m2, c.right_m2) < scheduler.settings.min_gain_per_action_m2 * (full - side)
+               or c.full_m2 / full <= scheduler.plan_in_force.rate for c in scheduler.candidates)
+
+
+def test_no_full_circle_inside_a_room_the_search_has_finished_or_that_has_no_frontier_left():
+    policy, camera, actions = fake_policy(route_east())
+    scheduler = GlanceScheduler(policy)
+    world = corridor_world()
+    obs = obs_at(camera, 0, (5.4, 2.5))
+    assert scheduler._full_allowed_at(obs, world, (5.4, 2.5)), "a stand-in policy without a room graph allows it"
+    frontier = {3: 2}
+    policy.graph = SimpleNamespace(room_at=lambda world_, xy: 3)
+    policy.loop = SimpleNamespace(_finished={}, _live_frontier=lambda pid, obs_, world_: frontier.get(pid))
+    assert scheduler._full_allowed_at(obs, world, (5.4, 2.5)), "an unfinished room with frontier left"
+    frontier[3] = 0
+    assert not scheduler._full_allowed_at(obs, world, (5.4, 2.5)), "no frontier left: a circle reveals nothing"
+    frontier[3] = 2
+    policy.loop._finished = {3: ("scan_point_inside", 4)}
+    assert not scheduler._full_allowed_at(obs, world, (5.4, 2.5)), "finished: the look it got is the look it gets"
+    policy.graph = SimpleNamespace(room_at=lambda world_, xy: None)
+    assert scheduler._full_allowed_at(obs, world, (5.4, 2.5)), "no room under the point: no room to have finished"
+    # Through the scorer: a circle that would otherwise be scheduled is not, inside a finished room.
+    g = corridor_world().grid.copy()
+    g[19, 40:70] = FREE
+    g[0:19, 20:100] = UNK                                   # a huge unknown south and the room north: a circle's worth
+    g[30, 40:70] = FREE
+    big = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    policy.graph = SimpleNamespace(room_at=lambda world_, xy: 3)
+    policy.loop = SimpleNamespace(_finished={3: ("explored", 1)}, _live_frontier=lambda pid, o, w: 5)
+    scheduler.apply(obs_at(camera, 0, (1.0, 2.5)), big, follow(route_east()))
+    assert scheduler.plan_in_force is None or scheduler.plan_in_force.kind != FULL

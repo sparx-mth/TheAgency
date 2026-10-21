@@ -47,16 +47,24 @@ happens so a recording can be read against this docstring:
 * **3. Probability per NODE** -- the same call, to
   :class:`~sparx_agency.core.mapping.topology.search_node_oracle.SearchNodeOracle`:
   for every room on the floor -- its type or ``unknown``, size, frontier
-  left, time searched and how long ago, objects seen -- for every
+  left, its **exits** (the doorways and gaps at its edge to space not seen
+  yet, how many stand at a seen door frame, the objects glimpsed through
+  them: :func:`~opening_nodes.room_exits`, the room's attributes since
+  2026-10-21), time searched and how long ago, objects seen -- and for every
   STAIRCASE off the floor -- up or down, whether the other storey was
-  visited and what was found there -- and for every OPENING of the floor
-  (:mod:`opening_nodes`, since 2026-10-04) -- a doorway or gap at the edge
-  of the mapped floor leading to space not seen yet, named by the room it
-  opens from and the objects glimpsed through it -- the probability that
-  going there NEXT finds the target, plus the mass in none of them. The
+  visited and what was found there -- the probability that going there NEXT
+  finds the target, plus the mass in none of them. An exit is NOT a node
+  and gets no number of its own: the model raises a room for its exits
+  only where the room's type fits the target's home (a bathroom's unlooked
+  door for a toilet; never a living room's gaps), and a hallway's or an
+  unidentified room's by what the home still lacks behind them. (Under the
+  deprecated ``openings.exits_as_nodes`` every OPENING of the floor not
+  folded into an offered room is a node beside the rooms, valued by the
+  room it opens from and the objects glimpsed through it, as the
+  2026-10-04 design had it.) The
   model is given the HOUSE line (:mod:`house_context`): every room type
-  found so far with its status, the rooms still unidentified, the openings
-  not looked into, and the action budget spent -- and asked to reason as a
+  found so far with its status, the rooms still unidentified, the exits of
+  the storey not looked into, and the action budget spent -- and asked to reason as a
   person who knows homes does: where the target lives (an en-suite toilet
   is reached through a bedroom), what the rooms found say about the rest (a
   living room found makes a sofa unlikely in the unidentified rooms), and
@@ -83,17 +91,24 @@ happens so a recording can be read against this docstring:
   frontier; a room with none keeps its centroid); to the foot of the
   chosen stairs, where the building coordinator takes over and climbs; the
   node's turn ends there (``traversed``) and the floor's search resumes
-  clean when the aircraft comes back down; or to the threshold of the
-  chosen opening, where the visit is a **peek** (:meth:`_peek_visit`): face
-  the unknown, one look to each side, and the opening is retired for the
-  storey -- what the peek saw is floor in the partition now, and the room
-  behind is a node of its own, named by its objects, or ruled out by them.
-  Openings are read off the live map every action and, under ``explore``,
-  an opening off a room that is itself a node is folded into that room's
-  walk (:meth:`_fold_openings`). An exit the oracle has not valued -- one
-  the reply itself unfolded, by dropping its room -- is handed to RPT* at
-  the oracle's last number for it or the unseen doorway's prior
-  (:meth:`_exit_prob`, :attr:`OpeningSettings.unvalued_prob`), never 0.0.
+  clean when the aircraft comes back down. **The room's exits are its
+  visit's** (room-level GAPs, since 2026-10-21): under ``explore`` every
+  exit read off the live map is folded into the room it opens from
+  (:meth:`_fold_openings`) and the room's frontier walk looks through it;
+  a room the ledger has finished but with GAPs still left to walk is a node
+  again for what lies behind them (:attr:`_reopened`, :meth:`_exclusions`),
+  entered at its best frontier and walked like any other -- not a
+  second-pass revisit. The local phase ends when the room's GAPs are
+  exhausted or :attr:`LoopSettings.explore_visit_steps` runs out, and the
+  release is the loop point that re-selects globally. Only a target
+  landmark is still a node of its own, visited by a **peek**
+  (:meth:`_peek_visit`): walk to the standoff, face it, one look to each
+  side. Under the deprecated ``openings.exits_as_nodes`` an exit whose
+  room is not an offered node is a node at its threshold, peeked -- face
+  the unknown, one look to each side -- and retired for the storey; an exit
+  the oracle has not valued is handed to RPT* at the oracle's last number
+  for it or the unseen doorway's prior (:meth:`_exit_prob`,
+  :attr:`OpeningSettings.unvalued_prob`), never 0.0.
 * **7. Reset** -- arrival is the aircraft's own cell inside the room's mask
   (the supervisor only sees a point); it resets the local counter and the
   loop returns to step 1.
@@ -140,7 +155,7 @@ from sparx_agency.core.mapping.topology.room_priors import home_object, implausi
 from sparx_agency.core.planning.object_search.rooms.room_scans import SCAN_POINT_INSIDE
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import (
     LANDMARK, OpeningSettings, detect_openings, is_opening_node, landmark_openings, near_stair_mask,
-    opening_options, opening_value_factor)
+    opening_options, opening_value_factor, room_exits)
 from sparx_agency.core.planning.object_search.rooms.room_vantage import vantage_point
 from sparx_agency.core.planning.object_search.rooms.stair_nodes import (
     is_stair_node, portal_id_of, search_context, stair_node_id, stair_options)
@@ -240,6 +255,30 @@ class LoopSettings:
             as good as scanned, whatever the model writes). Applied in
             place of ``entered_discount``, never on top of it; 1 disables.
         lingered_steps: See ``lingered_discount``.
+        dwell_half_life_steps: The time-in-room decay (since 2026-10-21): a
+            room the agent has stood in and left loses half of its number
+            for every this many actions spent inside it, on top of
+            ``entered_discount`` -- ``factor = entered_discount * 0.5 **
+            (steps_inside / half_life)``, so a room walked through in five
+            actions keeps most of the entered factor and one searched for
+            forty keeps a quarter of it. Continuous where the lingered rule
+            is a step: the longer the robot has already looked, the less a
+            return is worth, whatever the model writes. ``lingered_discount``
+            still caps the factor when its rule holds. 0 disables.
+        dwell_floor: The least factor an entered room keeps under the decay:
+            searched long is low, never dead -- the detector misses things,
+            and the second pass is the model's to call.
+        unvisited_boost: The factor a room the agent has NEVER stood in gets
+            on the oracle's number (capped at 1.0), since 2026-10-21: the
+            unmapped is where discovery is -- one frontier cleared opens a
+            region, a room never entered has its whole floor to show -- and
+            the models under-value a never-entered room with ``frontier=0``
+            or ``1`` as if a count of visible boundaries measured what it
+            hides. 1 disables.
+        unvisited_floor: The least number a never-entered room is read at
+            after the boost, 0-1: a node, not a 2 % afterthought, while it
+            has never been stood in. Rooms the type prior rules out are not
+            nodes at all and are not floored. 0 disables.
         scan_visit_steps: ``scan`` -- the hard bound on one visit: the walk
             to the vantage point plus the rotation. A visit that overruns it
             is released ``budget_spent``. Also the bound of a second-pass
@@ -352,9 +391,16 @@ class LoopSettings:
             searched alone and the stairs are only ever the exploration
             fallback's last resort -- the ablation, not a mode to fly.
         openings: The floor's openings -- doorways and gaps to space not
-            yet seen -- as nodes beside the rooms and the stairs, visited by
-            a peek (:mod:`opening_nodes`). ``openings.enabled`` is the
-            switch.
+            yet seen (:mod:`opening_nodes`). ``openings.enabled`` is the
+            switch. Since 2026-10-21 an exit is an ATTRIBUTE of the room it
+            opens from under ``explore`` -- shown on the room's node line
+            (``exits=2 (1 doorway)``, the objects glimpsed through them),
+            valued by the model only where the room's type fits the
+            target, and walked by the room's own visit
+            (:attr:`room_level_gaps`); ``openings.exits_as_nodes`` is the
+            deprecated 2026-10-04 design in which every exit not folded
+            into an offered room is a node of its own, valued by the oracle
+            and visited by a peek. Target landmarks are nodes either way.
         weak_type_max_openings: Retained for configuration compatibility
             and the record. Until 2026-10-05 a weak label ruled a room out
             unless the room had more than this many openings (Ranchester
@@ -383,6 +429,10 @@ class LoopSettings:
     entered_discount: float = 0.5
     lingered_discount: float = 0.2
     lingered_steps: int = 20
+    dwell_half_life_steps: int = 20
+    dwell_floor: float = 0.05
+    unvisited_boost: float = 1.5
+    unvisited_floor: float = 0.15
     scan_visit_steps: int = 36
     scan_approach_steps: int = 20
     vantage_arrival_m: float = 0.6
@@ -454,6 +504,16 @@ class LoopSettings:
             raise ValueError("lingered_discount must lie in (0, 1]")
         if type(self.lingered_steps) is not int or self.lingered_steps < 1:
             raise ValueError("lingered_steps must be a positive integer")
+        if type(self.dwell_half_life_steps) is not int or self.dwell_half_life_steps < 0:
+            raise ValueError("dwell_half_life_steps must be a non-negative integer (0 disables)")
+        if (isinstance(self.dwell_floor, bool) or not math.isfinite(self.dwell_floor)
+                or not 0.0 < self.dwell_floor <= 1.0):
+            raise ValueError("dwell_floor must lie in (0, 1]")
+        if isinstance(self.unvisited_boost, bool) or not math.isfinite(self.unvisited_boost) or self.unvisited_boost < 1.0:
+            raise ValueError("unvisited_boost must be at least 1")
+        if (isinstance(self.unvisited_floor, bool) or not math.isfinite(self.unvisited_floor)
+                or not 0.0 <= self.unvisited_floor <= 1.0):
+            raise ValueError("unvisited_floor must lie in [0, 1]")
 
     @property
     def scanning(self):
@@ -469,6 +529,16 @@ class LoopSettings:
     def finishing(self):
         """Whether rooms are FINISHED by the scan ledger -- under ``scan`` and ``explore``; ``sweep`` never finishes one."""
         return self.visit in ("scan", "explore")
+
+    @property
+    def room_level_gaps(self):
+        """Whether exits are room attributes walked by the room's visit, never nodes (``explore`` without ``openings.exits_as_nodes``).
+
+        The global decision is then over rooms (and stairs) alone; the look
+        through a doorway is a step of the chosen room's local exploration,
+        and a finished room with GAPs left to walk is re-offered for them.
+        """
+        return self.exploring and self.openings.enabled and not self.openings.exits_as_nodes
 
     def visit_budget(self):
         """Actions one visit may take before it is released ``budget_spent``."""
@@ -552,6 +622,7 @@ class RoomSearchLoop:
         self._last_reason_step = -10 ** 9   # the action of the last oracle call, for the openings' revalue throttle
         self._excluded = {}           # pid -> why the room was not offered at the last SELECT
         self._finished = {}           # pid -> (how, step) for every room the scan ledger has finished, offered or not
+        self._reopened = set()        # finished rooms offered again for the GAPs left to walk in them (room-level GAPs)
         self._revisits = set()        # finished rooms offered as second-pass nodes at the last SELECT
         self._second_pass_logged = False   # the second_pass event is logged once per stretch of the verdict
         self._exhausted = False       # the floor has no unfinished room, no exit and no reachable frontier left
@@ -567,6 +638,7 @@ class RoomSearchLoop:
         self._openings_unfolded = []  # every exit and landmark read at the last SELECT, before the fold
         self._service_last = {}       # node id -> seconds the last RPT* instance charged it as service
         self._exit_memory = {}        # exit node id -> the oracle's last number for it, across calls (see _exit_prob)
+        self._exits_at_call = {}      # pid -> exits on the room's line at the last oracle call (room-level GAPs)
         self._provisional = set()     # exit node ids read at ``openings.unvalued_prob`` (logged once each)
         self._way_back_held_logged = None    # (rooms left, openings left) the last way_back_held event was logged for
         self._room_missing, self._room_missing_pid = 0, None   # actions the room in transit has been gone from the registry
@@ -590,7 +662,7 @@ class RoomSearchLoop:
                       "scans_completed": 0, "scans_in_place": 0, "scan_approach_actions": 0,
                       "scan_unreachable": 0, "excluded_scanned": 0, "excluded_type": 0, "finished_in_transit": 0,
                       "finished_by_rotation": 0, "explore_goals": 0, "explore_visits": 0, "explore_exhausted": 0,
-                      "openings_folded": 0, "openings_provisional": 0,
+                      "openings_folded": 0, "openings_provisional": 0, "rooms_reopened": 0,
                       "second_pass_rounds": 0, "second_pass_forced": 0, "revisits_offered": 0, "revisits_chosen": 0,
                       "revisit_scans": 0, "oracle_calls_skipped": 0,
                       "reconsiders_deferred": 0,
@@ -823,14 +895,19 @@ class RoomSearchLoop:
             # the estimate has never seen appears while nothing is in force --
             # a node without a probability can never be chosen, and no release
             # is coming to give it one. Finished and ruled-out rooms are not
-            # nodes: they are neither valued nor missed. The openings of the
-            # floor and its staircases are nodes beside the rooms; a NEW
-            # opening buys a call at most every ``revalue_actions`` (they
-            # appear and re-snap with every step the fallback takes).
+            # nodes: they are neither valued nor missed. The staircases are
+            # nodes beside the rooms; a NEW opening -- a node of its own under
+            # ``exits_as_nodes``, a new exit on an offered room's line under the
+            # room-level design -- buys a call at most every ``revalue_actions``
+            # (they appear and re-snap with every step the fallback takes).
             stairs, openings = self._collect_nodes(obs, world, cost)
             unvalued = (any(pid not in p.graph.probs for pid in rooms if pid not in self._excluded)
                         or any(o.node_id not in p.graph.stair_probs for o in stairs))
             new_openings = any(o.node_id not in p.graph.stair_probs for o in openings if o.opening.kind != LANDMARK)
+            if self.settings.room_level_gaps:
+                exits_now = self._exits_by_room(self._openings_unfolded)
+                new_openings = any(exits_now.get(pid, 0) > self._exits_at_call.get(pid, 0)
+                                   for pid in rooms if pid not in self._excluded)
             if new_openings and obs.step - self._last_reason_step >= self.settings.openings.revalue_actions:
                 unvalued = True
             if (self.second_pass() and self._revisits
@@ -880,10 +957,12 @@ class RoomSearchLoop:
 
         The openings are read first because the exclusions need them: a
         weak type label rules a room out only if the room has few openings,
-        and the floor is exhausted only when no exit is left. Under
-        ``explore`` an opening off a room that is itself a node is then
-        FOLDED into that room (:meth:`_fold_openings`): the room's visit
-        walks its frontiers, the opening among them.
+        the floor is exhausted only when no exit is left, and a finished
+        room is re-offered for the GAPs left in it. Under ``explore`` the
+        exits are then FOLDED into their rooms (:meth:`_fold_openings`):
+        every one under the room-level design, those of an offered node
+        under ``exits_as_nodes``; the room's visit walks its frontiers, the
+        exits among them.
         """
         openings = self._opening_options(obs, world, cost)
         self._exclusions(obs, world, openings)
@@ -893,21 +972,27 @@ class RoomSearchLoop:
         return stairs, openings
 
     def _fold_openings(self, obs, openings, log=True):
-        """Under ``explore``, drop the openings whose room is an offered node; its frontier walk covers them.
+        """Under ``explore``, drop the exits that are a room's own: every one (room-level GAPs), or -- under ``exits_as_nodes`` -- those whose room is an offered node.
 
         An opening is a frontier at the edge of the mapped floor, credited
         to the room it opens from; the explore visit of that room walks
         exactly those frontiers. Offered beside the room it is the same
         place twice -- the Darden recording's RPT* order read ``R3 -> O3``,
         a room and the gap at its far end -- and a peek of it is a visit
-        the room's own visit makes anyway. Openings off FINISHED rooms (and
-        rooms withheld for any reason) stay nodes: they are how the next
-        room is found. Target landmarks are never folded. (A 2026-10-14
-        experiment kept openings with a room's worth of unknown behind them
-        unfolded too, after Corozal/000019 folded the toilet's door into a
-        never-entered living room; it was reverted with the rest of that
-        round -- the run the user chose, ``…143259Z``, folds as described
-        here.) The folded ids
+        the room's own visit makes anyway. Since 2026-10-21 (room-level
+        GAPs) EVERY exit is folded: an exit is the attribute of its room
+        (``exits=`` on the room's node line), never a node with a number
+        of its own, and an exit off a finished room is what re-offers the
+        room for the GAPs left in it (:meth:`_exclusions`); an exit off no
+        room is the exploration fallback's. Under the deprecated
+        ``openings.exits_as_nodes`` openings off FINISHED rooms (and rooms
+        withheld for any reason, or valued under the solver's floor) stay
+        nodes: they were how the next room was found. Target landmarks are
+        never folded. (A 2026-10-14 experiment kept openings with a room's
+        worth of unknown behind them unfolded too, after Corozal/000019
+        folded the toilet's door into a never-entered living room; it was
+        reverted with the rest of that round -- the run the user chose,
+        ``…143259Z``, folds as described here.) The folded ids
         are kept in :attr:`_folded_now` for the HUD; :attr:`_openings`
         keeps every opening read this action, folded or not, because the
         transit and the retirement look the chosen node up there.
@@ -918,6 +1003,7 @@ class RoomSearchLoop:
         p = self.policy
         rooms = p.graph.registry.rooms
         probs = getattr(p.graph, "probs", {}) or {}
+        every_exit = self.settings.room_level_gaps
         kept = []
         for option in openings:
             pid = option.opening.room_pid
@@ -925,7 +1011,7 @@ class RoomSearchLoop:
             # openings must stay nodes of their own (the kitchen at 0.0 whose doorways led on).
             offered = (pid is not None and pid in rooms and pid not in self._excluded
                        and (pid not in probs or float(probs[pid]) >= self.settings.min_prob))
-            if option.opening.kind != LANDMARK and offered:
+            if option.opening.kind != LANDMARK and (every_exit or offered):
                 self._folded_now.add(option.node_id)
                 if log and option.node_id not in self._folded:
                     self._folded.add(option.node_id)
@@ -1026,6 +1112,16 @@ class RoomSearchLoop:
         RPT* is handed it, so a node scaled under ``min_prob`` is no node,
         as the model's own low number would make it. ``here`` is the pid of
         the room the agent stands in, which is not discounted.
+
+        Two more rules since 2026-10-21, the user's recalibration for the
+        unvisited: a room the agent has NEVER stood in is raised by
+        :attr:`LoopSettings.unvisited_boost` and read at no less than
+        :attr:`LoopSettings.unvisited_floor` -- the unmapped is where the
+        discovery is, and ``frontier=0`` on a room never entered measures
+        the map, not the room; and the entered factor decays with the time
+        spent inside (:attr:`LoopSettings.dwell_half_life_steps`), so a
+        room searched for forty actions is worth a quarter of one walked
+        through, bounded below by :attr:`LoopSettings.dwell_floor`.
         """
         p = self.policy
         settings = self.settings
@@ -1035,21 +1131,45 @@ class RoomSearchLoop:
         for option in options:
             nid = option.room_id
             factor = 1.0
+            prob = float(option.prob)
             if nid in by_node:
                 factor = opening_value_factor(by_node[nid].opening, settings.openings)
-            elif (settings.entered_discount < 1.0 and nid in p.graph.registry.rooms and nid not in self._finished
+            elif (nid in p.graph.registry.rooms and p.graph.last_inside.get(nid) is None and nid != here
+                  and (nid not in self._finished or nid in self._reopened)):
+                # Never stood in and not finished from outside: the whole room is still to be seen,
+                # whatever its frontier count reads.
+                if settings.unvisited_boost > 1.0 and prob > 0.0:
+                    factor = settings.unvisited_boost
+                if settings.unvisited_floor > 0.0 and prob > 0.0 and prob * factor < settings.unvisited_floor:
+                    factor = settings.unvisited_floor / prob
+            elif (settings.entered_discount < 1.0 and nid in p.graph.registry.rooms
+                  and (nid not in self._finished or nid in self._reopened)
                   and p.graph.last_inside.get(nid) is not None and nid != here):
                 # Entered and LEFT. The room the agent stands in keeps its number: finishing it
                 # from here is the cheap move, and leaving it with frontier is what the rule is against.
-                factor = settings.entered_discount
+                # A finished room re-offered for its GAPs was stood in too, and is discounted the same.
+                factor = max(settings.dwell_floor, settings.entered_discount * self._dwell_decay(nid))
                 if settings.lingered_discount < factor and self._lingered(nid, obs, world):
                     factor = settings.lingered_discount
-            if factor < 1.0:
+            if factor != 1.0:
                 factors[nid] = round(factor, 3)
-                option = replace(option, prob=float(option.prob) * factor)
+                option = replace(option, prob=min(1.0, prob * factor))
             out.append(option)
         self._value_factors = factors
         return out
+
+    def _dwell_decay(self, pid):
+        """``0.5 ** (steps inside / half-life)`` for room ``pid``; 1 with the decay off or no record of it."""
+        settings = self.settings
+        if settings.dwell_half_life_steps <= 0:
+            return 1.0
+        p = self.policy
+        fact = p.graph.facts.get(pid) if getattr(p.graph, "facts", None) else None
+        if fact is None:
+            return 1.0
+        action = max(float(p.settings.action_time_s), 1e-9)
+        steps = max(0.0, float(fact.time_in_room_s) / action)
+        return 0.5 ** (steps / float(settings.dwell_half_life_steps))
 
     def _lingered(self, pid, obs=None, world=None):
         """Whether room ``pid`` was searched for ``lingered_steps`` or more with at most one significant frontier left."""
@@ -1072,7 +1192,7 @@ class RoomSearchLoop:
         settings = self.settings
         if not settings.exploring:
             return settings.service_steps()
-        if pid in self._finished:
+        if pid in self._finished and pid not in self._reopened:
             return settings.scan_approach_steps // 2 + self.policy.rotation_turns()
         frontier = self._live_frontier(pid, obs, world)
         if frontier is None:
@@ -1094,6 +1214,10 @@ class RoomSearchLoop:
         if self._opening_cache is not None and self._opening_cache[0] == int(obs.step):
             return list(self._opening_cache[1])
         openings = detect_openings(p, obs, world, self.settings.openings, registry)
+        if openings and callable(getattr(p.graph, "note_openings", None)):
+            # The doorway each opening is seen through, from this viewing pose, becomes a sticky threshold of
+            # the floor: the partition keeps the room beyond the door apart from this one (room-level GAPs).
+            p.graph.note_openings(world, openings, (obs.pose.x, obs.pose.y), int(obs.step))
         landmarks = landmark_openings(p, obs, world, cost, self.settings.openings, self._inspected)
         options = opening_options(p, openings + landmarks)
         offered = {o.node_id: o for o in options}
@@ -1125,7 +1249,8 @@ class RoomSearchLoop:
                 or building.ground_truth is None or building.committed):
             self._stairs = {}
             return []
-        rooms_left = self.settings.finishing and (any(pid not in self._excluded and pid not in self._finished
+        rooms_left = self.settings.finishing and (any(pid not in self._excluded
+                                                      and (pid not in self._finished or pid in self._reopened)
                                                       for pid in p.graph.registry.rooms)
                                                   or bool(self._openings))
         options = stair_options(building, obs, world, cost, p.floors.save(), p.settings.action_time_s,
@@ -1180,7 +1305,8 @@ class RoomSearchLoop:
         # The labels are read from the evidence BEFORE the nodes are chosen, so a
         # room that became a strong bedroom on this action is excluded on this
         # action, not shown to the oracle and kept in the order for one more
-        # loop point (Hanson 2026-10-05, action 150).
+        # loop point (Hanson 2026-10-05, action 150). The exclusions read every
+        # exit of the storey, folded or not: a room's GAPs are counted on the room.
         if self.settings.type_prior and callable(getattr(p.graph, "refresh_labels", None)):
             try:
                 p.graph.refresh_labels(obs.step)
@@ -1189,15 +1315,21 @@ class RoomSearchLoop:
                 self._log(obs, "llm_failure", error="%s: %s" % (type(exc).__name__, exc), retry_step=retry,
                           where="refresh_labels")
                 raise RoomReasoningUnavailable(str(exc)) from exc
-            self._exclusions(obs, world, openings)
+            self._exclusions(obs, world, self._openings_unfolded)
         started = time.monotonic()
         shown = [o for o in openings if o.opening.kind != LANDMARK]        # a target landmark's probability is fixed
+        # Every exit that is not a node of its own is its room's attribute: all of them under the
+        # room-level design, the folded ones under ``exits_as_nodes`` (the unfolded are shown as nodes).
+        shown_ids = {o.node_id for o in shown}
+        attributed = [o for o in self._openings_unfolded if o.opening.kind != LANDMARK and o.node_id not in shown_ids]
+        exits = room_exits(attributed)
         scanned = self._scanned_for_prompt(obs)
-        house = house_line(p.graph, scanned, len(shown), int(obs.step), int(p.episode.max_steps),
+        house = house_line(p.graph, scanned, len(shown) + len(attributed), int(obs.step), int(p.episode.max_steps),
                            frontier_left=self._frontier_left())
         # The finished rooms are not nodes (``scanned_to_oracle`` off): they are left off the
         # model's list and read at 0.0 downstream; the HOUSE line still names their types. The
-        # room in force and a room the second pass has re-offered are shown either way.
+        # room in force, a room re-offered for the GAPs left in it and a room the second pass has
+        # re-offered are shown either way.
         hidden = () if self.settings.scanned_to_oracle else tuple(
             pid for pid, why in self._excluded.items() if str(why).startswith("scanned") and pid != self.room_id)
         try:
@@ -1207,7 +1339,7 @@ class RoomSearchLoop:
                            extra_nodes=[o.node for o in stairs] + [o.node for o in shown],
                            context=search_context(getattr(p, "building", None), p, p.floors.save(), house=house),
                            here_xy=(obs.pose.x, obs.pose.y), action_time_s=p.settings.action_time_s,
-                           exclude=hidden, scanned=scanned)
+                           exclude=hidden, scanned=scanned, exits=exits)
         except Exception as exc:  # the room LLM: timeout, bad JSON, refused uniform prior
             retry = p.fallback.note_service_failure(obs, ROOM_LLM, exc)
             self._log(obs, "llm_failure", error="%s: %s" % (type(exc).__name__, exc), retry_step=retry)
@@ -1217,17 +1349,21 @@ class RoomSearchLoop:
         p.fallback.note_service_success(ROOM_LLM)
         self._needs_reason = False
         self._last_reason_step = int(obs.step)
+        self._exits_at_call = {pid: gaps.count for pid, gaps in exits.items()}
         self.stats["llm_reasonings"] += 1
         oracle = p.graph.last_reasoning.get("oracle", {})
         # The fresh verdict decides whether the finished rooms are offered on THIS
         # action (the exclusions above were read under the previous one).
-        self._exclusions(obs, world, openings, after_reasoning=True)
+        self._exclusions(obs, world, self._openings_unfolded, after_reasoning=True)
         # Kept apart from ``events``, which is the record of step transitions;
         # one entry per reasoning round, with what the oracle was shown and said.
         self.estimate_events.append(dict(
             step=int(obs.step), floor_id=p.mapping.floor_id, nodes=len(oracle.get("probs", {})),
             stairs=[o.node_id for o in stairs], openings=[o.node_id for o in shown],
             landmarks=[o.node_id for o in openings if o.opening.kind == LANDMARK],
+            exits={str(pid): {"count": gaps.count, "doorways": gaps.doorways, "glimpsed": list(gaps.glimpsed)}
+                   for pid, gaps in sorted(exits.items())},
+            reopened=sorted(int(pid) for pid in self._reopened),
             p_present=round(float(oracle.get("p_present", 0.0)), 3),
             elsewhere=round(float(oracle.get("elsewhere", 0.0)), 3), reused=bool(oracle.get("reused")),
             omitted=list(oracle.get("omitted", ())), reading=dict(oracle.get("reading", {})),
@@ -1308,11 +1444,29 @@ class RoomSearchLoop:
           is the partition's merge showing (``home_object_kept``). Off by
           default: the oracle sees the type and values the room.
 
+        **Reopened for its GAPs** (room-level GAPs, since 2026-10-21): a
+        finished room with GAPs still left to walk (:meth:`_gaps_left`:
+        significant live frontier, and an exit -- a doorway or gap to space
+        not seen yet -- credited to it) is NOT withheld. The warm-up spun a
+        circle in the spawn room whose two doorways were never looked
+        through; a room finished long ago whose edge the map has since
+        opened. Its exits are its own attributes now, not nodes that could
+        carry the search on for it, so the room itself is offered again for
+        what lies behind them: shown to the oracle as ``status=scanned(...)``
+        with its ``exits=``, entered at its best frontier, priced by its
+        frontiers and walked like any other room (:attr:`_reopened`; never
+        a second-pass revisit, which is a scan). Only ``scan_point_inside``
+        can finish a room with frontier left (the other verdicts need
+        none), so this reopens the rooms a rotation finished before their
+        GAPs were walked, and a room the exploration has exhausted stays
+        finished. A newly reopened room buys the oracle a call when it was
+        hidden at the last one (it reads 0.0 from it).
+
         The room in force is never excluded mid-visit: its turn ends by the
         visit's own rule, and the exclusion takes effect at the loop point.
         """
         p = self.policy
-        excluded, finished, verdicts = {}, {}, {}
+        excluded, finished, verdicts, reopened = {}, {}, {}, set()
         ledger = getattr(p, "scans", None)
         exits = self._exits_by_room(openings)
         doored = set()
@@ -1326,8 +1480,8 @@ class RoomSearchLoop:
                 continue
             if not self.settings.finishing or ledger is None:
                 continue
-            how = ledger.status(world, pid, room, frontier=self._live_frontier(pid, obs, world), doored=pid in doored,
-                                step=int(obs.step))
+            frontier = self._live_frontier(pid, obs, world)
+            how = ledger.status(world, pid, room, frontier=frontier, doored=pid in doored, step=int(obs.step))
             if how is not None and how != SCAN_POINT_INSIDE and self._home_objects(pid):
                 # Finished by sight from OUTSIDE -- half its floor seen from the
                 # door -- with a home object of the target standing in it: the
@@ -1341,6 +1495,8 @@ class RoomSearchLoop:
             if how is not None:
                 verdicts[pid] = how
                 finished[pid] = (how, ledger.finished_step(pid))
+                if self._gaps_left(pid, obs, world, frontier=frontier, exits=exits):
+                    reopened.add(pid)
         # The second pass: the storey covered -- no unfinished room, no exit to look
         # into -- in which case re-checking the scanned rooms is the move there is
         # (exhausted: no reachable frontier anywhere either, the forced form).
@@ -1357,7 +1513,7 @@ class RoomSearchLoop:
             if pid == in_force:
                 continue
             how = verdicts.get(pid)
-            if how is not None and not revisiting:
+            if how is not None and not revisiting and pid not in reopened:
                 excluded[pid] = "scanned:%s" % how
                 continue
             if self.settings.type_prior:
@@ -1365,6 +1521,13 @@ class RoomSearchLoop:
                 if why is not None:
                     excluded[pid] = why
         self._exhausted, self._covered = exhausted, covered
+        for pid in sorted(reopened - self._reopened):
+            self.stats["rooms_reopened"] += 1
+            self._log(obs, "room_reopened", room=pid, how=verdicts[pid],
+                      frontier=self._live_frontier(pid, obs, world), exits=exits.get(pid, 0))
+            if not after_reasoning and pid in self._excluded:
+                self._needs_reason = True       # hidden at the last call, so it reads 0.0: value it afresh
+        self._reopened = reopened
         if revisiting and not self._second_pass_logged:
             self._second_pass_logged = True
             self.stats["second_pass_rounds"] += 1
@@ -1433,13 +1596,32 @@ class RoomSearchLoop:
 
     @staticmethod
     def _exits_by_room(openings):
-        """``{pid: n}`` -- how many exits (not landmarks) the offered openings put on each room."""
-        exits = {}
-        for option in openings:
-            pid = option.opening.room_pid
-            if pid is not None and option.opening.kind != LANDMARK:
-                exits[pid] = exits.get(pid, 0) + 1
-        return exits
+        """``{pid: n}`` -- how many exits (not landmarks) the openings read this action put on each room (:func:`~opening_nodes.room_exits`)."""
+        return {pid: gaps.count for pid, gaps in room_exits(openings).items()}
+
+    def _gaps_left(self, pid, obs, world, frontier=None, exits=None):
+        """Whether room ``pid`` still has GAPs its own visit would walk (room-level GAPs), else False.
+
+        A GAP is a frontier the explore visit walks to -- significant live
+        frontier (:meth:`_live_frontier`) -- on a room that has an exit, a
+        doorway or gap to space not seen yet, credited to it
+        (:func:`~opening_nodes.room_exits` over the openings read this
+        action, or ``exits`` when the caller has them). The population the
+        old opening nodes covered, read on the room: a scanned room whose
+        only frontier is the shadow behind its sofa has none left (the
+        rotation was the look it gets), a scanned room with an unlooked
+        doorway has. False outside the room-level design, so the callers'
+        older rules stand unchanged there.
+        """
+        if not self.settings.room_level_gaps:
+            return False
+        if frontier is None:
+            frontier = self._live_frontier(pid, obs, world)
+        if frontier is None or int(frontier) <= 0:
+            return False
+        if exits is None:
+            exits = self._exits_by_room(self._openings.values())
+        return int(exits.get(pid, 0)) > 0
 
     def _live_frontier(self, pid, obs=None, world=None):
         """Accessible, unresolved frontier clusters the scene graph credits to room ``pid``, or None when unknown.
@@ -1601,7 +1783,8 @@ class RoomSearchLoop:
             if option.room_id in self._excluded:
                 continue
             xy, from_frontier = option.xy, False
-            revisit = option.room_id in self._finished
+            # A finished room re-offered for the GAPs left in it is walked, not re-scanned.
+            revisit = option.room_id in self._finished and option.room_id not in self._reopened
             room = p.graph.registry.rooms.get(option.room_id)
             if self.settings.exploring and room is not None:
                 xy, from_frontier = self._explore_entry(obs, world, cost, room, revisit=revisit)
@@ -2026,6 +2209,10 @@ class RoomSearchLoop:
         if not self.settings.finishing or ledger is None or pid in self._revisits:
             return False       # a second-pass revisit is finished already: that is the point of going
         frontier = self._live_frontier(pid, obs, world)
+        if self._gaps_left(pid, obs, world, frontier=frontier):
+            # GAPs left to walk: the walk is the point of going (room-level GAPs). A glance on the
+            # way may have finished the room in the ledger; what lies behind its exits it did not see.
+            return False
         doored = any(int(pid) in (door.get("rooms") or ()) for door in getattr(p.graph, "doors", ()) or ())
         how = ledger.status(world, pid, room, frontier=frontier, doored=doored, step=int(obs.step))
         if how is None:
@@ -2484,7 +2671,13 @@ class RoomSearchLoop:
         and nothing unknown borders it (:class:`~room_scans.RoomScanLedger`).
         A full rotation completed inside the room since the visit began --
         a glance taken on the way -- finishes it at once
-        (``finished_by_rotation``): no circle is turned twice. The whole
+        (``finished_by_rotation``): no circle is turned twice. Under
+        room-level GAPs (since 2026-10-21) not while GAPs are left to walk
+        (:meth:`_gaps_left`): the rotation finishes the room in the ledger
+        -- it saw the room's floor -- but what lies behind the room's exits
+        it did not see, and the visit walks on to them; it ends when they
+        are exhausted or the bound runs out, which is the loop point that
+        re-selects globally. The whole
         visit is bounded by :attr:`LoopSettings.explore_visit_steps`.
         """
         p = self.policy
@@ -2495,10 +2688,14 @@ class RoomSearchLoop:
             self.stats["explore_visits"] += 1
             self._log(obs, "explore_begin", room=state.room_id,
                       frontier=self._live_frontier(state.room_id, obs, world))
-        if self._finished_by_rotation(obs, world, state.room_id, room, visit["started"]):
-            return None, {"frontier_exhausted": True}
         goals = self._explore_goals(obs, world, cost, room)
         visit["frontier_left"] = len(goals)
+        # A rotation completed inside the room since the visit began finishes it -- unless, under
+        # room-level GAPs, GAPs are left to walk: the rotation saw the room, not what lies behind
+        # its exits, and the visit goes on to them (its exits: every GAP walked, or the bound).
+        if (not (goals and self._gaps_left(state.room_id, obs, world, frontier=len(goals)))
+                and self._finished_by_rotation(obs, world, state.room_id, room, visit["started"])):
+            return None, {"frontier_exhausted": True}
         if goals:
             planning_world, planning_cost = self._confined(obs, world, cost, room, state.room_id)
             command = p.sweep.explore(obs, world, planning_cost, room.mask, planning_world=planning_world,
@@ -2722,6 +2919,8 @@ class RoomSearchLoop:
                 "second_pass": self.second_pass(), "covered": self._covered, "exhausted": self._exhausted,
                 "oracle_pass": self.oracle_pass(), "value_factors": {str(k): v for k, v in sorted(self._value_factors.items())},
                 "revisits_offered_now": sorted(int(pid) for pid in self._revisits),
+                "reopened_for_gaps": sorted(int(pid) for pid in self._reopened),
+                "room_level_gaps": self.settings.room_level_gaps,
                 "scan": None if self._scan is None else dict(self._scan),
                 "explore": None if self._explore is None else dict(self._explore),
                 "peek": self.peek_state(),

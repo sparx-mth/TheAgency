@@ -58,6 +58,10 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     ``llm`` replaces the neutral :class:`FakeLLM` for every model role."""
     discovery = overrides.pop("discovery", False)
     segmenter = overrides.pop("segmenter", None)          # with segmentation=True: the fake SAM service
+    if "stair_connectors" in (overrides.get("metadata") or {}) and "multifloor" not in overrides:
+        # A fixture handing the episode a scene structure is a test of the ground-truth stair machinery,
+        # the ablation: the method's default is the observed source (2026-10-21), which reads no metadata.
+        overrides["multifloor"] = {"stair_source": "ground_truth"}
     if not discovery:
         overrides.setdefault("doorway_peek", {"enabled": False})
     closing = overrides.get("target_closing")

@@ -1,9 +1,13 @@
 """Observed-only ObjectNav with persistent floors and frontier or planar FALCON.
 
-Stairs are a declared exception to "observed-only": with
-``RPTSettings.multifloor.stair_source == "ground_truth"`` (the default) the
-building coordinator takes the simulator's navmesh connectors from the
-episode metadata, and ``configuration()["ground_truth_stairs"]`` says so.
+Stairs included, since 2026-10-21: ``RPTSettings.multifloor.stair_source``
+is ``"observed"`` by default -- a staircase is a measured support surface
+rising within reach of the robot's own RGB-D (``world_model/stair_terrain.py``),
+masked on the planning grid from that measurement, and no simulator geometry
+is consulted (ApexNav, SG-Nav and OSG-Nav have no staircase oracle either).
+``"ground_truth"`` is the declared ablation: the building coordinator takes
+the simulator's navmesh connectors from the episode metadata, and
+``configuration()["ground_truth_stairs"]`` says so.
 An optional local NavMesh target-standoff projector is declared separately by
 ``configuration()["target_navmesh_projection"]``; evaluator goals remain private.
 """
@@ -111,16 +115,26 @@ class RPTSearchPolicy:
                                   "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
                                   "the nearest room floor; room numbers are unique across the building"
                                   % DEFAULT_SEGMENTATION.door_snap_reach_m,
-                "openings": ("doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs, "
-                             "visited by a peek (threshold, face the unknown, one look to each side) priced at %d actions; "
-                             "valued by the oracle (uncertainty floor %s, elsewhere value %s, home floor %s)"
-                             % (self.loop_settings.openings.service_steps,
-                                "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor,
-                                "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere,
-                                "off" if not self.loop_settings.home_floor else "p=%.2f" % self.loop_settings.home_floor)
+                "openings": (("every exit of the storey (a doorway or gap at the edge of the mapped floor) is an attribute "
+                              "of the room it opens from -- exits=N (k doorways) and the objects glimpsed through them on "
+                              "the room's node line -- never a node with a number of its own; the model raises a room for "
+                              "its exits only where the room's type fits the target, the room's own frontier walk looks "
+                              "through them, and a finished room with GAPs left to walk is offered again for them "
+                              "(room-level GAPs, 2026-10-21)"
+                              if self.loop_settings.room_level_gaps else
+                              "doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs "
+                              "(DEPRECATED exits_as_nodes%s), visited by a peek (threshold, face the unknown, one look to each "
+                              "side) priced at %d actions; valued by the oracle (uncertainty floor %s, elsewhere value %s, "
+                              "home floor %s)"
+                              % ("" if self.loop_settings.exploring else ", the %s visit's only way into an exit"
+                                 % self.loop_settings.visit,
+                                 self.loop_settings.openings.service_steps,
+                                 "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor,
+                                 "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere,
+                                 "off" if not self.loop_settings.home_floor else "p=%.2f" % self.loop_settings.home_floor))
                              + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
-                                "visited by the same peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
-                                                                            self.loop_settings.openings.landmark_standoff_m)
+                                "visited by a peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
+                                                                    self.loop_settings.openings.landmark_standoff_m)
                                 if self.loop_settings.openings.landmarks_enabled else "")
                              if self.loop_settings.openings.enabled else "none: openings are the exploration fallback's alone"),
                 "floor_exit_gate": ("unknown non-stair rooms get at most one peek attempt per episode before a floor change; "
@@ -129,7 +143,9 @@ class RPTSearchPolicy:
                                     "none: a floor change is the RPT* order's or the fallback rule's to take at any time"),
                 "node_oracle": {"nodes": "every room of the floor in force (finished and type-excluded ones shown with "
                                          "their status) + its staircases" + (
-                                    " + its openings" if self.loop_settings.openings.enabled else ""),
+                                    "" if not self.loop_settings.openings.enabled else
+                                    "; each room's exits are attributes on its line, not nodes"
+                                    if self.loop_settings.room_level_gaps else " + its openings"),
                                 "asks": "independent P(searching there finds target), without a fixed action horizon; "
                                         "the model is briefed with the HOUSE line (room types found, rooms unidentified, "
                                         "openings unlooked, actions used of the budget) and writes home/house/stage and a "
@@ -184,8 +200,11 @@ class RPTSearchPolicy:
                     "is finished (explored), and so is a room a full rotation stood in or saw more than half of, one "
                     "with no live frontier the camera looked into or walked through, or a doorless fragment under "
                     "%.1f m2; every rotation is as many turns as the camera's field of view needs to see the circle%s; "
-                    "openings off a room that is itself a node are folded into its walk; "
                     % (loop.explore_visit_steps, loop.fragment_max_m2, self._rotation_note())
+                    + ("every exit of the storey is an attribute of the room it opens from and is walked by that "
+                       "room's visit, and a finished room with GAPs left to walk is offered again for them "
+                       "(room-level GAPs); " if loop.room_level_gaps else
+                       "openings off a room that is itself a node are folded into its walk; ")
                     + finishing)
         return ("vantage point + full rotation (as many turns as the camera's field of view needs to see the circle%s); "
                 "a scanned room (or one a scan saw more than half of) is finished for the first pass, and so is a room "

@@ -574,7 +574,7 @@ def test_the_policy_excludes_seen_stair_footprints_from_the_partition(monkeypatc
     policy, episode, world, rooms, _ = stair_policy(order=(STAIRS, 1, 0))
     exclusion = policy.room_exclusion(world)
     assert exclusion is not None and exclusion.any(), "the seen flight's foot is on this floor"
-    gx, gy = world.world_to_grid(4.0, 1.0)
+    gx, gy = world.world_to_grid(4.0, 1.3)                       # the first treads; (4.0, 1.0) is the floor before them
     assert exclusion[gy, gx]
     seen = {}
     monkeypatch.setattr(policy.graph, "update", lambda *a, **k: seen.update(k))

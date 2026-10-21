@@ -9,6 +9,7 @@ import numpy as np
 
 from sparx_agency.core.mapping.objects.box_extent import clipped_box
 from sparx_agency.core.mapping.objects.detection_dedup import deduplicate_detections
+from sparx_agency.core.planning.objnav.camera_geometry import project_to_image
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import DETECTOR, SEGMENTER
 from sparx_agency.core.planning.object_search.interfaces import (
     RECOVERABLE_DETECTOR_CAUSES, RECOVERABLE_SEGMENTER_CAUSES)
@@ -20,6 +21,8 @@ from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 #: Two observations more than this apart in height are different objects
 #: stacked in plan view (a television on a cabinet), never one vote.
 HEIGHT_TOLERANCE_M = 0.35
+#: Retraction events kept for the record; the counters are complete.
+MAX_RETRACTION_EVENTS = 50
 
 
 def associate_landmark(policy, xyz, radius_m=None, exclude=(), class_name=None):
@@ -77,6 +80,10 @@ class PerceptionCycle:
         # two pipelines. A box mapped to None was due a mask the service did not deliver.
         self.masks = None
         self.segmenter_evidence = {}
+        #: Landmarks retracted on clear views without their class (``_count_misses``), for the record.
+        self.retractions = []
+        #: landmark id -> the pose ``(x, y, yaw)`` of its last counted miss: the next must be a distinct viewpoint.
+        self._miss_poses = {}
 
     def observe(self, obs):
         """Exactly one synchronous prediction for this RGB/depth/pose tuple.
@@ -208,6 +215,7 @@ class PerceptionCycle:
             before = landmark.class_name if landmark is not None else None
             landmark = p.landmarks.observe(label, tuple(float(v) for v in xyz[:2]), frame_id=obs.step,
                                            radius_m=radius, landmark=landmark)
+            self._miss_poses.pop(landmark.id, None)              # seen: the miss ledger starts afresh
             p._object_geometry.setdefault(landmark.id, tuple(float(v) for v in xyz))
             # The best confidence the landmark was ever observed at: a single sighting at the
             # closing's threshold makes a target landmark a node (``opening_nodes.target_landmarks``).
@@ -251,7 +259,76 @@ class PerceptionCycle:
                     p._target_floor_id = p.mapping.floor_id
                     confirmed |= supported
         self.counts.update(row["status"] for row in self.projections)
+        if allowed:
+            self._count_misses(obs, used)
         return bool(confirmed and allowed and p._target_floor_id == p.mapping.floor_id)
+
+    def _count_misses(self, obs, used):
+        """Tell the map which confirmed landmarks stood in a clear view this frame and got no detection.
+
+        The negative evidence the one-way confirmation lacked (2026-10-21):
+        a landmark is in a clear view when its anchor projects inside the
+        frame by ``landmark_miss_margin_px``, between the miss range bounds,
+        and the depth at its pixel reaches at least as far as the landmark
+        -- nothing measured in front of it. A depth reading short of it is
+        an occluder; an invalid reading (beyond the sensor's range, a hole
+        in the mesh) is no view at all. Only in a normal, uncommitted view:
+        a frame the detections themselves are not fused from counts for
+        nothing against them either. ``used`` holds the landmarks this
+        frame's detections fed. A miss counts only from a viewpoint
+        distinct from the last counted one -- ``landmark_miss_viewpoint_m``
+        of travel or 30 degrees of turn -- so a bad angle held for four
+        frames is one miss, not four. The map retracts after ``max_misses``
+        or the landmark's own observation count, whichever is more.
+        """
+        p = self.policy
+        landmarks = p.landmarks
+        if landmarks.max_misses <= 0:
+            return
+        s = p.settings
+        candidates = [lm for lm in landmarks.confirmed() if lm.id not in used and lm.id in p._object_geometry]
+        if not candidates:
+            return
+        anchors = np.asarray([p._object_geometry[lm.id] for lm in candidates], dtype=float)
+        if anchors.ndim != 2 or anchors.shape[1] != 3 or not np.isfinite(anchors).all():
+            return
+        pixels, depths = project_to_image(anchors, obs.camera, obs.pose)
+        k = obs.camera.intrinsics
+        margin = int(s.landmark_miss_margin_px)
+        depth_image = obs.depth_m
+        here = (float(obs.pose.x), float(obs.pose.y), float(obs.pose.yaw))
+        for lm, (u, v), z in zip(candidates, pixels, depths):
+            last = self._miss_poses.get(lm.id)
+            if last is not None and (math.hypot(here[0] - last[0], here[1] - last[1]) < s.landmark_miss_viewpoint_m
+                                     and abs(math.remainder(here[2] - last[2], 2 * math.pi)) < math.radians(30.0)):
+                continue                          # the same viewpoint as the last counted miss
+            if not (np.isfinite(z) and s.landmark_miss_min_range_m <= z <= s.landmark_miss_max_range_m):
+                continue
+            if not (np.isfinite(u) and np.isfinite(v)):
+                continue
+            col, row = int(round(u)), int(round(v))
+            if not (margin <= col < k.width - margin and margin <= row < k.height - margin):
+                continue
+            # The sensor's word on the line of sight: the median reading around the pixel.
+            patch = depth_image[max(0, row - 2):row + 3, max(0, col - 2):col + 3]
+            readings = patch[np.isfinite(patch) & (patch > float(obs.camera.min_depth_m))
+                             & (patch < float(obs.camera.max_depth_m))]
+            if len(readings) < 3:
+                continue                          # no measurement there: not a view of the spot
+            if float(np.median(readings)) < float(z) - 0.5:
+                self.counts["landmark_views_occluded"] += 1
+                continue                          # something stands between the camera and the landmark
+            before = lm.misses
+            retracted = landmarks.note_missed(lm.id, frame_id=obs.step)
+            if lm.misses > before:
+                self.counts["landmark_misses"] += 1
+                self._miss_poses[lm.id] = here
+            if retracted:
+                self.counts["landmark_retractions"] += 1
+                if len(self.retractions) < MAX_RETRACTION_EVENTS:
+                    self.retractions.append({"step": int(obs.step), "landmark_id": int(lm.id), "class": lm.class_name,
+                                             "count": int(lm.count), "misses": int(lm.misses), "range_m": round(float(z), 2),
+                                             "xy": [round(float(c), 2) for c in lm.xy]})
 
     def _floor_support(self, xyz):
         p = self.policy
@@ -292,5 +369,5 @@ class PerceptionCycle:
     def diagnostics(self):
         return {"observation_step": self.step, "counts": dict(self.counts),
                 "projections": list(self.projections), "detector_evidence": self.detector_evidence,
-                "segmenter_evidence": self.segmenter_evidence}
+                "segmenter_evidence": self.segmenter_evidence, "retractions": list(self.retractions)}
 

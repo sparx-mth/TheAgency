@@ -235,7 +235,8 @@ def _openings(col, search):
             else ", ".join(sorted(set(node.get("glimpsed") or ()))[:4]) or "nothing yet"),
             DIM if node.get("folded") and not node.get("targeted") else _node_color(node, search))
         if node.get("folded") and not node.get("targeted"):
-            col.line("folded into R%s's walk" % node.get("room_pid"), DIM, indent=24)
+            col.line("folded into R%s's walk" % node.get("room_pid") if node.get("room_pid") is not None
+                     else "off no room: the exploration fallback's", DIM, indent=24)
         elif node.get("targeted") and not node.get("live"):
             col.line("target of the peek in force; gone from the live map", DIM, indent=24)
         elif node.get("why"):

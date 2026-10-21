@@ -14,6 +14,8 @@ instance only within 0.35 m or at a footprint-disc IoU of 0.25.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -27,12 +29,16 @@ from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy
 
 
-def frame(episode, step, boxes, depth=1.0):
+def frame(episode, step, boxes, depth=1.0, pose=None):
     """An observation whose detector returns ``boxes`` over a flat depth of ``depth`` metres."""
     k = episode.camera.intrinsics
     return ObjNavObservation(np.zeros((k.height, k.width, 3), np.uint8),
                              np.full((k.height, k.width), depth, np.float32),
-                             AgentPose(0, 0, 0, 0), episode.camera, "chair", step)
+                             pose or AgentPose(0, 0, 0, 0), episode.camera, "chair", step)
+
+
+#: Four viewpoints a 2 m landmark at (2, 0) stays in frame from, each a distinct viewpoint for the miss ledger.
+VIEWPOINTS = (AgentPose(0, 0, 0, 0), AgentPose(0, 0.6, 0, 0), AgentPose(0, -0.6, 0, 0), AgentPose(0.6, 0, 0, 0))
 
 
 def fused(policy):
@@ -188,3 +194,129 @@ def test_an_object_whose_lowest_sample_stands_within_sixty_centimetres_of_the_fl
     for i in range(8):
         terrain.samples[(int(2.0 / res) + (i % 3), int(0.0 / res) + (i // 3), i)] = (0.80 + 0.0125 * i, 0, True)
     assert cycle._floor_support((2.1, 0.1, 0.95)) == "unsupported_floor_association", "0.80 m up: nothing of this floor under it"
+
+
+# -- 2026-10-21: a confirmed landmark the detector stops seeing from clear views is retracted ----------------
+def test_a_landmark_missed_from_clear_views_is_retracted_and_a_new_detection_reinstates_it():
+    """Darden/000000: YOLO called a dining table ``bed`` at 0.52 twice; the landmark was confirmed and no later
+    frame could unmake it. Now a confirmed landmark inside the frame, within range, with the depth reaching it,
+    that no detection of its class lands on, is missed; after ``landmark_max_misses`` it leaves the confirmed set
+    (the room's evidence), and the next detection that folds into it clears the misses."""
+    p, ep = setup_policy()
+    bed = DetectionWire("bed", .6, (240, 180, 400, 300))                 # centred, 2 m away
+    p.detector.detect = lambda rgb: [bed]
+    p.perception.fuse(frame(ep, 0, None, depth=2.0))
+    p.perception.fuse(frame(ep, 1, None, depth=2.0))
+    landmark, = p.landmarks.confirmed()
+    assert landmark.class_name == "bed" and landmark.count == 2 and landmark.misses == 0
+    assert p.settings.landmark_max_misses == 4 and p.landmarks.max_misses == 4
+    # A view with something in front of it counts for nothing.
+    p.detector.detect = lambda rgb: []
+    p.perception.fuse(frame(ep, 2, None, depth=0.9))                     # a surface 0.9 m away: the bed is behind it
+    assert p.perception.counts["landmark_views_occluded"] == 1 and landmark.misses == 0
+    # Clear views without a bed from four DISTINCT viewpoints: a miss each; the fourth retracts.
+    for n, pose in enumerate(VIEWPOINTS[:3]):
+        p.perception.fuse(frame(ep, 3 + n, None, depth=2.0, pose=pose))
+        assert landmark.misses == n + 1 and p.landmarks.confirmed() == [landmark], n
+    p.perception.fuse(frame(ep, 5, None, depth=2.0, pose=VIEWPOINTS[2]))
+    assert landmark.misses == 3, "the same frame is not counted twice"
+    p.perception.fuse(frame(ep, 6, None, depth=2.0, pose=VIEWPOINTS[2]))
+    assert landmark.misses == 3, "... nor the same viewpoint again"
+    p.perception.fuse(frame(ep, 7, None, depth=2.0, pose=VIEWPOINTS[3]))
+    assert landmark.misses == 4 and p.landmarks.confirmed() == [] and p.landmarks.retracted() == [landmark]
+    assert p.perception.counts["landmark_retractions"] == 1 and p.perception.counts["landmark_misses"] == 4
+    assert p.perception.retractions[0]["class"] == "bed" and p.perception.retractions[0]["step"] == 7
+    assert len(p.landmarks) == 1, "retracted, not deleted: its history stands"
+    p.perception.fuse(frame(ep, 8, None, depth=2.0))
+    assert landmark.misses == 4 and p.perception.counts["landmark_misses"] == 4, "nothing more is counted against a retracted landmark"
+    # Seen again: reinstated, the misses cleared.
+    p.detector.detect = lambda rgb: [bed]
+    p.perception.fuse(frame(ep, 9, None, depth=2.0))
+    assert landmark.misses == 0 and landmark.count == 3 and p.landmarks.confirmed() == [landmark]
+    assert landmark.retractions == 1
+    # The negative evidence must outweigh the positive: a landmark seen six times needs six clear misses.
+    for step in range(10, 13):
+        p.perception.fuse(frame(ep, step, None, depth=2.0))
+    assert landmark.count == 6 and p.landmarks.misses_to_retract(landmark) == 6
+    p.detector.detect = lambda rgb: []
+    poses = VIEWPOINTS + (AgentPose(0.6, 0.6, 0, 0), AgentPose(0.6, -0.6, 0, 0), AgentPose(-0.3, 0, 0, 0))
+    for n, pose in enumerate(poses[:5]):
+        p.perception.fuse(frame(ep, 13 + n, None, depth=2.0, pose=pose))
+    assert landmark.misses == 5 and p.landmarks.confirmed() == [landmark], "five of six: still confirmed"
+    p.perception.fuse(frame(ep, 18, None, depth=2.0, pose=poses[5]))
+    assert landmark.misses == 6 and p.landmarks.confirmed() == [] and landmark.retractions == 2
+
+
+def test_no_miss_is_counted_from_a_view_that_does_not_show_the_landmark():
+    """Out of range, at the frame's edge, behind the camera or without a depth reading: not a clear view."""
+    p, ep = setup_policy()
+    bed = DetectionWire("bed", .6, (240, 180, 400, 300))
+    p.detector.detect = lambda rgb: [bed]
+    p.perception.fuse(frame(ep, 0, None, depth=2.0))
+    p.perception.fuse(frame(ep, 1, None, depth=2.0))
+    landmark, = p.landmarks.confirmed()
+    p.detector.detect = lambda rgb: []
+    k = ep.camera.intrinsics
+    def view(step, pose, depth=2.0, invalid=False):
+        d = np.full((k.height, k.width), np.nan if invalid else depth, np.float32)
+        return ObjNavObservation(np.zeros((k.height, k.width, 3), np.uint8), d, pose, ep.camera, "chair", step)
+    p.perception.fuse(view(2, AgentPose(0, 0, 0, math.pi)))              # facing away: behind the camera
+    p.perception.fuse(view(3, AgentPose(-3.0, 0, 0, 0)))                 # 5 m off: beyond the miss range
+    p.perception.fuse(view(4, AgentPose(1.6, 0, 0, 0)))                  # 0.4 m: inside the blind band
+    p.perception.fuse(view(5, AgentPose(0, 0, 0, 0.66)))                 # 38 degrees off: at the frame's edge
+    p.perception.fuse(view(6, AgentPose(0, 0, 0, 0), invalid=True))      # no depth reading there
+    assert landmark.misses == 0 and p.perception.counts.get("landmark_misses", 0) == 0
+    p.perception.fuse(view(7, AgentPose(0, 0, 0, 0)))                    # the clear view
+    assert landmark.misses == 1
+    p.perception.fuse(view(8, AgentPose(0.2, 0.1, 0, 0.1)))              # a step and a nudge: the same viewpoint
+    assert landmark.misses == 1 and p.perception.counts["landmark_misses"] == 1
+    p.perception.fuse(view(9, AgentPose(0, 0, 0, -0.6)))                 # turned 34 degrees: a distinct viewpoint
+    assert landmark.misses == 2
+    # Off by setting: the one-way confirmation of before.
+    q, eq = setup_policy(landmark_max_misses=0)
+    assert q.landmarks.max_misses == 0
+    q.detector.detect = lambda rgb: [bed]
+    q.perception.fuse(frame(eq, 0, None, depth=2.0)); q.perception.fuse(frame(eq, 1, None, depth=2.0))
+    q.detector.detect = lambda rgb: []
+    for step, pose in enumerate(VIEWPOINTS * 3, start=2):
+        q.perception.fuse(frame(eq, step, None, depth=2.0, pose=pose))
+    assert len(q.landmarks.confirmed()) == 1 and q.landmarks.confirmed()[0].misses == 0
+    with pytest.raises(ValueError):
+        RPTSettings(landmark_max_misses=-1)
+    with pytest.raises(ValueError):
+        RPTSettings(landmark_miss_max_range_m=0.5)
+
+
+def test_a_retracted_landmark_leaves_the_rooms_evidence_and_the_label_built_on_it_goes():
+    """The lock the user described: one noisy ``bed`` named a room for good. Retracted, it leaves the room's object
+    list at the next scene-graph update, the evidence gate takes the label back to ``unknown`` at once, and the
+    change is in the label history; a detection that reinstates the bed brings the evidence back."""
+    from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+    p, ep = setup_policy()
+    data = np.full((100, 100), -1, np.int8)
+    data[20:80, 20:80] = 0
+    world = OccupancyGrid2D(data, OccupancyGrid2DParams(0.1, -5, -5),
+                            values=OccupancyValues(free=0, occupied=100, unknown=-1))
+    bed = DetectionWire("bed", .6, (240, 180, 400, 300))
+    p.detector.detect = lambda rgb: [bed]
+    p.perception.fuse(frame(ep, 0, None, depth=2.0))
+    p.perception.fuse(frame(ep, 1, None, depth=2.0))
+    p.graph.update(world, p.landmarks.confirmed(), p.target, step=1, reason=False)
+    pid = p.graph.room_at(world, (2.0, 0.0))
+    assert pid is not None and p.graph.objects_in(pid) == ["bed"]
+    p.graph.refresh_labels(1)
+    before = p.graph.label_tracker.labels[pid]
+    assert before.label != "unknown", "the FakeLLM names every room with an object"
+    p.detector.detect = lambda rgb: []
+    for step, pose in enumerate(VIEWPOINTS, start=2):
+        p.perception.fuse(frame(ep, step, None, depth=2.0, pose=pose))
+    assert p.landmarks.confirmed() == []
+    p.graph.update(world, p.landmarks.confirmed(), p.target, step=6, reason=False)
+    assert p.graph.objects_in(pid) == []
+    after = p.graph.label_tracker.labels[pid]
+    assert after.label == "unknown" and p.graph.label_tracker.history[-1]["previous"] == before.label
+    assert p.graph.label_tracker.history[-1]["label"] == "unknown"
+    p.detector.detect = lambda rgb: [bed]
+    p.perception.fuse(frame(ep, 7, None, depth=2.0))
+    p.graph.update(world, p.landmarks.confirmed(), p.target, step=7, reason=False)
+    assert p.graph.objects_in(pid) == ["bed"]

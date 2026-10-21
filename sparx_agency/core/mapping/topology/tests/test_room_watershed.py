@@ -646,3 +646,107 @@ def test_a_walked_through_threshold_is_carved_like_a_snapped_door_and_only_at_a_
                                               threshold_cells=[doorway])
     assert not carve.any()
 
+
+
+# -- the floor beyond an open doorway is a room of its own (2026-10-21) --------------------------------------
+def glimpsed_hall(depth_rows=4):
+    """``room_doorway_hall`` with only ``depth_rows`` of the hall seen through the doorway; returns ``(free, unknown)``."""
+    free, doorway, _, _ = room_doorway_hall()
+    seen = free.copy()
+    seen[43:70, :] = False
+    seen[43:43 + depth_rows, 29:41] = True
+    unknown = np.zeros_like(free)
+    unknown[43:70, 10:60] = True
+    unknown[43:43 + depth_rows, 29:41] = False
+    return seen, unknown
+
+
+def test_the_sliver_seen_through_a_doorway_is_a_stub_room_beyond_the_threshold_not_part_of_the_room():
+    """Before: the sliver had no clearance peak, so no label, and the reclaim handed it to the nearest seeded
+    room ACROSS the cut -- the toilet seen through the door named the hallway a bathroom. With
+    ``stub_min_cells`` the sliver is a room of its own, exempt from ``min_room_cells``."""
+    seen, unknown = glimpsed_hall()
+    _, doorway, misplaced, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    for cuts in (dict(door_cells=[], threshold_cells=[doorway]), dict(door_cells=[misplaced])):
+        room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, params, unknown_mask=unknown, **cuts)
+        room, sliver = int(room_lbl[20, 15]), int(room_lbl[44, 35])
+        assert room > 0 and sliver > 0 and room != sliver and len(stats) == 2, cuts
+        assert all(int(room_lbl[y, x]) == sliver for y in range(43, 47) for x in range(30, 40)), "one stub, whole"
+    # A thinner sliver -- two rows of floor beyond the door -- is under ``min_room_cells`` and kept all the same.
+    thin, thin_unknown = glimpsed_hall(depth_rows=2)
+    room_lbl, _, stats = segment_rooms_watershed(thin, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=thin_unknown)
+    assert len(stats) == 2 and int(room_lbl[43, 35]) != int(room_lbl[20, 15])
+    assert params.stub_min_cells <= min(s.n_cells for s in stats) < params.min_room_cells, "under the floor and kept"
+    # Legacy: with the knob off the sliver is the room's, as before.
+    legacy = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5)
+    room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, legacy, [], threshold_cells=[doorway])
+    assert len(stats) == 1 and int(room_lbl[44, 35]) == int(room_lbl[20, 15])
+    # Nothing seen beyond the door: nothing to instantiate; the whole hall seen: two rooms as ever.
+    none, _, _, _ = room_doorway_hall()
+    none[43:70, :] = False
+    assert len(segment_rooms_watershed(none, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=unknown)[2]) == 1
+    free, _, _, _ = room_doorway_hall()
+    _, _, stats = segment_rooms_watershed(free, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=np.zeros_like(free))
+    assert len(stats) == 2 and min(s.n_cells for s in stats) > params.min_room_cells
+    # As the hall is seen deeper the room beyond the door grows and stays one room apart from the first.
+    deeper, _, _, _ = room_doorway_hall()
+    deeper[53:70, :] = False
+    unk = np.zeros_like(deeper)
+    unk[53:70, 10:60] = True
+    room_lbl, _, stats = segment_rooms_watershed(deeper, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=unk)
+    assert len(stats) == 2 and int(room_lbl[50, 35]) != int(room_lbl[20, 15]) and int(room_lbl[50, 35]) == int(room_lbl[44, 35])
+
+
+def test_a_notch_a_cut_parts_off_is_no_stub_and_neither_is_an_open_rooms_frontier():
+    seen, unknown = glimpsed_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, params, [], threshold_cells=[(28, 11)], unknown_mask=unknown)
+    assert int(room_lbl[5, 28]) == int(room_lbl[20, 15]) > 0, "the dead-end notch borders no unknown: the room's"
+    room = np.zeros((60, 60), dtype=bool)
+    room[5:30, 5:55] = True                                   # an open room, its north half unseen
+    unk = np.zeros_like(room)
+    unk[30:58, 5:55] = True
+    assert len(segment_rooms_watershed(room, HOME_RES, params, [], threshold_cells=[(30, 27)], unknown_mask=unk)[2]) == 1, (
+        "a threshold at a frontier in open floor severs nothing and partitions nothing")
+
+
+def test_the_cut_at_a_doorway_is_a_line_across_the_passage_and_the_disk_only_where_the_line_does_not_seal():
+    """The disk sized to the passage swallowed a thin sliver whole (no far side left) or left two crescents of
+    it (two stubs). The line -- two cells thick, from the choke toward its jamb and the opposite way -- is the
+    fence the flood needs and keeps the sliver in one piece."""
+    seen, unknown = glimpsed_hall()
+    _, doorway, _, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    healed, clearance, _ = clearance_and_skeleton(seen)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [], params, HOME_RES, threshold_cells=[doorway],
+                                                    unknown_mask=unknown)
+    ys, xs = np.nonzero(carve)
+    assert carve.any() and not barrier.any()
+    assert ys.max() - ys.min() <= 2 and xs.min() <= 31 and xs.max() >= 38, "a band across the 0.8 m doorway, wall to wall"
+    assert 40 <= ys.min() and ys.max() <= 43, "at the doorway, not in the sliver"
+    # The full hall seen: the line still seals the doorway and parts room from hall.
+    free, _, _, _ = room_doorway_hall()
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=np.zeros_like(free))
+    assert len(stats) == 2 and int(room_lbl[20, 15]) != int(room_lbl[60, 35])
+
+
+def test_a_sightline_to_an_opening_names_the_doorway_it_passes_and_an_open_rooms_frontier_names_nothing():
+    from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenham
+    seen, unknown = glimpsed_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    line = list(bresenham(35, 20, 35, 45))                     # from the room, through the doorway, to the sliver's frontier
+    dips = room_watershed.sightline_thresholds(seen, HOME_RES, line, params, unknown_mask=unknown)
+    assert len(dips) == 1 and dips[0][0] == 35 and 39 <= dips[0][1] <= 43, dips
+    room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, params, [], threshold_cells=dips, unknown_mask=unknown)
+    assert len(stats) == 2 and int(room_lbl[44, 35]) != int(room_lbl[20, 15])
+    # An open room's frontier names no doorway, read against the observed obstacles or against every non-free cell.
+    room = np.zeros((60, 60), dtype=bool)
+    room[5:30, 5:55] = True
+    unk = np.zeros_like(room)
+    unk[30:58, 5:55] = True
+    assert room_watershed.sightline_thresholds(room, HOME_RES, list(bresenham(30, 8, 30, 29)), params, unknown_mask=unk) == []
+    assert room_watershed.sightline_thresholds(room, HOME_RES, list(bresenham(30, 8, 30, 29)), params) == []
+    assert room_watershed.sightline_thresholds(seen, HOME_RES, line[:2], params, unknown_mask=unknown) == []
+    with pytest.raises(ValueError):
+        room_watershed.sightline_thresholds(seen, 0.0, line, params)

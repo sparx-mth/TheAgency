@@ -156,8 +156,11 @@ def test_the_explored_verdict_needs_the_agent_inside_the_room_not_on_its_thresho
 
 def test_a_full_rotation_turned_on_the_way_finishes_the_room_and_ends_the_visit_at_once():
     """Darden ``ec8d17aeaaaa``, actions 61-106: a full glance inside R3 on the way to its vantage point, then
-    the walk on and the same circle again. A rotation the ledger records inside the room in force ends it."""
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    the walk on and the same circle again. A rotation the ledger records inside the room in force ends it --
+    under the deprecated exits-as-nodes mode, where the room's openings carry the search on as nodes of their
+    own. Under room-level GAPs (the default) the rotation finishes the room in the ledger but the visit walks
+    on to the GAPs left in it: see ``test_room_level_gaps``."""
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), openings=OpeningSettings(exits_as_nodes=True))
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     entry = policy.route_memory.goal
     inside = (entry[0] - 0.3, entry[1]) if cell_in(world, rooms[1], (entry[0] - 0.3, entry[1])) else entry
@@ -200,9 +203,15 @@ def test_a_visit_that_overruns_its_bound_is_released_budget_spent_and_not_finish
 
 
 # -- openings: live every action, folded into the room whose walk covers them ---------------------------
+# Under room-level GAPs (the default since 2026-10-21) EVERY exit is folded; the tests of the selective fold
+# -- an exit off a room that is no node staying a node of its own -- run the deprecated ``exits_as_nodes``
+# mode they describe. ``test_room_level_gaps`` covers the default.
+LEGACY = dict(openings=OpeningSettings(exits_as_nodes=True))
+
+
 def test_an_opening_off_a_room_that_is_a_node_is_folded_into_the_rooms_walk():
     """Darden ``ec8d17aeaaaa``, action 27: the order read R3 -> O3, a room and the gap at its own far end."""
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), **LEGACY)
     before = openings_of(policy, episode, world)
     assert len(before) == 3, "room A's west end; room B's patch by the door and its east end"
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
@@ -225,7 +234,7 @@ def test_an_opening_off_a_room_that_is_a_node_is_folded_into_the_rooms_walk():
 
 
 def test_openings_of_a_room_the_oracle_valued_below_the_floor_stay_nodes():
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), **LEGACY)
     gap = west_gap(openings_of(policy, episode, world))
     policy.graph.probs = {0: 0.0, 1: 0.6}                      # room A is not worth a visit; its gap leads on
     kept = policy.loop._fold_openings(obs_at(episode, 0, IN_A), [o for o in __import__(
@@ -237,7 +246,7 @@ def test_openings_of_a_room_the_oracle_valued_below_the_floor_stay_nodes():
 def test_an_opening_the_reply_itself_unfolded_is_a_node_at_the_provisional_value_not_zero():
     """Corozal/000142 (2026-10-14), action 446: the toilet's doorway, folded into its room at the call, unfolded
     by the reply that dropped the room to 1 %, read 0.0 for the 54 actions left."""
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), **LEGACY)
     gap = west_gap(openings_of(policy, episode, world))
     for pid in (0, 1):                                     # both rooms cooling: SELECT stays, as in the opening tests
         policy.supervisor.inner._cooling[pid] = 0.0
@@ -275,7 +284,8 @@ def test_an_opening_the_reply_itself_unfolded_is_a_node_at_the_provisional_value
 
 
 def test_with_unvalued_prob_zero_an_unfolded_opening_reads_zero_as_before():
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), openings=OpeningSettings(unvalued_prob=0.0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0),
+                                                      openings=OpeningSettings(unvalued_prob=0.0, exits_as_nodes=True))
     gap = west_gap(openings_of(policy, episode, world))
     inner = policy.graph.reason
 

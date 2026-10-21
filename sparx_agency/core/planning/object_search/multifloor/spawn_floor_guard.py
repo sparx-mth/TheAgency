@@ -48,10 +48,14 @@ carved out of the combined mask -- the agent was physically there, and
 nothing written for planning may outvote that (``walked_exempt_cells``).
 
 All of this is a constraint on what the agent may choose, not knowledge
-about the target: the only privileged input is the stair geometry the
-perfect detector already hands the coordinator once a staircase is in frame.
-With ``allow_stair_traversal`` true the guard is inert and returns the world
-untouched.
+about the target. Under the default ``stair_source == "observed"`` (since
+2026-10-21) nothing here is privileged at all: the flights masked are the
+ones the robot's own depth measured rising (``stair_terrain`` candidates,
+placed as portals by the coordinator), the drops are its own depth reads.
+Under the ``ground_truth`` ablation the one privileged input is the stair
+geometry the perfect detector hands the coordinator once a staircase is in
+frame. With ``allow_stair_traversal`` true the guard is inert and returns
+the world untouched.
 """
 from __future__ import annotations
 

@@ -18,6 +18,7 @@ entry under `entries/` when work actually starts on it.
 - [x] ObjectNav exploration ablation (SR 0.665 / SPL 0.337 / DTG 1.75 m vs 0.792 / 0.464 / 0.94 m): goal-free planar FALCON + the same YOLO perception + the same closing, no LLM/RPT*/rooms, fifteen recorded episodes for review and then the 1,000-episode Gibson val split beside the full method's SR/SPL/DTG → `entries/032-falcon-yolo-exploration-baseline.md`
 - [x] ObjectNav target closing for a television: the box's range read around a surface standing in front of the object, and a standoff ring that widens to reach a big object instead of releasing a correct lock → `entries/031-tv-closing-occluder-range-and-widened-standoff.md`
 - [x] The published Gibson val benchmark with Segment Anything on (the B arm) and the 3B/14B LLM pair, compared against the SAM-off runs → `entries/034-gibson-val-14b-sam-on.md`
+- [ ] ObjectNav decision hierarchy: exits (GAPs) are a room's attributes to the oracle and the room's own visit walks them -- no standalone gap nodes or probabilities in RPT*; a finished room with GAPs left is reopened for them; to be flown on a toilet episode → `entries/035-objnav-room-level-gaps.md`
 - [ ] FALCON BEV click-to-fly for Rooster/Sphera, end-to-end and reliable → `entries/001-falcon-rooster-clickfly.md`
 - [ ] Move every Rooster node still running on the bare host into `robotican_dev`/`theagency:robotican` → `entries/002-rooster-full-containerize.md`
 - [ ] Incoming updated FALCON/planning drop from the user — integrate and re-verify → `entries/003-falcon-planning-update.md`

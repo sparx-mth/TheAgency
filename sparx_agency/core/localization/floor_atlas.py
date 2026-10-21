@@ -27,12 +27,21 @@ class MultiFloorParams:
     """Floor hysteresis for the atlas plus the building coordinator's knobs.
 
     Attributes:
-        stair_source: ``ground_truth`` -- stair connectors and floor levels
-            come from the simulator's navmesh through the episode metadata,
-            and a floor transition is started only at one of them;
-            ``observed`` -- the former RGB-D support-surface discovery, which
-            mistook a raised bathroom floor for a staircase. The atlas itself
-            reads poses only in either mode; this is the coordinator's choice.
+        stair_source: ``observed`` (the default since 2026-10-21) -- stairs
+            are what the robot's own RGB-D sees: measured support surfaces
+            rising ``stair_min_rise_m`` or more within reach
+            (``world_model/stair_terrain.py``), masked on the planning grid
+            like any other seen flight, with no simulator geometry consulted
+            -- the footing of ApexNav, SG-Nav and OSG-Nav, which have no
+            staircase oracle. ``ground_truth`` -- the ablation: stair
+            connectors and floor levels come from the simulator's navmesh
+            through the episode metadata, a perfect detector sights them,
+            and a floor transition is started only at one of them. Its
+            footprint is the navmesh centreline, which in Darden begins
+            0.45 m before the first riser, on a sloped threshold: drawn on
+            the grid it closed the junction below the flight. The atlas
+            itself reads poses only in either mode; this is the
+            coordinator's choice.
         near_connector_m: How close (XY, metres) to a ground-truth connector's
             polyline an unplanned height departure must be to count as being
             on those stairs rather than on a step or a threshold.
@@ -79,7 +88,7 @@ class MultiFloorParams:
     """
 
     enabled: bool = True
-    stair_source: str = STAIR_SOURCE_GROUND_TRUTH
+    stair_source: str = STAIR_SOURCE_OBSERVED
     near_connector_m: float = 0.75
     departure_m: float = 0.45
     floor_match_m: float = 0.30

@@ -1,4 +1,4 @@
-"""Openings as search nodes: a doorway or gap at the edge of the mapped floor, and the quick look into it.
+"""Openings: a doorway or gap at the edge of the mapped floor -- a room's exit -- and the quick look into it.
 
 The room partition is a watershed over OBSERVED free space, so a room the
 agent has only glimpsed through its door is not a room yet: its few seen
@@ -14,39 +14,51 @@ storey it would have been fatal.
 An **opening** is the search's name for such a place: a genuine exit of the
 mapped floor -- a frontier that is not an object's shadow, not the floor
 under the agent's feet, wide enough to pass -- taken together with its
-neighbours within :attr:`OpeningSettings.merge_m`. It is offered to the
-oracle and to RPT* as a node beside the rooms and the stairs (ids from
-:data:`OPENING_NODE_BASE`), described by the room it opens from, whether a
-door frame was seen there, and the objects glimpsed through it. Its visit is
-a **peek**: walk to the threshold, look in -- straight, one turn left, one
-turn right -- and move on; a peek is priced to RPT* at a few actions, not a
-room's scan. What the peek sees becomes floor in the partition: the room
-behind separates, is named by its objects, and is excluded by type or
-scanned like any other. A peeked opening is retired for the storey
-(:class:`OpeningRegistry`), as is one the planner cannot reach.
+neighbours within :attr:`OpeningSettings.merge_m`, described by the room it
+opens from, whether a door frame was seen there, and the objects glimpsed
+through it.
+
+**Room-level since 2026-10-21.** An exit is an ATTRIBUTE of the room it
+opens from, not a node: the room's line to the oracle carries its exits
+(:func:`room_exits` -> ``SearchNode.exits`` / ``doorways`` / ``glimpsed``,
+rendered ``exits=2 (1 doorway)  glimpsed through its exits: toilet``), the
+model values the room by its type AND what its exits may lead to (a
+bathroom's unlooked door raises it for a toilet; a living room's gaps do
+not), and the room's visit -- the explore visit's frontier walk -- walks the
+exits itself. The global decision is over rooms; the look through a doorway
+is a step of the room's local exploration. Standalone opening NODES --
+valued by the oracle beside the rooms, offered to RPT* at the threshold and
+visited by a **peek** (walk to the threshold, look in -- straight, one turn
+left, one turn right -- and move on, priced at a few actions) -- are the
+2026-10-04 design, kept as the deprecated ``exits_as_nodes`` mode: a
+standalone number per gap let the order chase open passes for their own
+sake (every gap of a living room, in a search for a toilet) instead of the
+room-level prior. The ``scan`` and ``sweep`` visits have no local walk to
+fold an exit into and keep the exits as peek nodes whatever the knob. A
+peeked opening is retired for the storey (:class:`OpeningRegistry`), as is
+one the planner cannot reach.
 
 A **target landmark** is the second kind of opening (``kind="landmark"``,
-since attempt 9 of 2026-10-04): a confirmed landmark whose class the target
-accepts, not yet looked at from close and not in the takeover's rejection
-memory. The downstairs warm-up of that attempt saw the couch three times at
-0.41-0.45 -- under the takeover's 0.50, the far frames without depth -- put
-a ``sofa`` landmark on the map 3.8 m away, and the search then walked west
-for forty actions chasing frontiers while the one object it was looking for
-stood confirmed on its own map. Such a landmark is offered to RPT* at a
-fixed probability (``landmark_prob``; the detector's word is the evidence,
-no oracle call), at a standoff point ``landmark_standoff_m`` from it on the
-agent's side, and its visit is the same peek: walk there, face it, one look
-to each side -- a few close frames for the detector, and the takeover does
-the rest or the landmark is marked inspected for the storey.
+since attempt 9 of 2026-10-04), and stays a node in every mode: a confirmed
+landmark whose class the target accepts, not yet looked at from close and
+not in the takeover's rejection memory. The downstairs warm-up of that
+attempt saw the couch three times at 0.41-0.45 -- under the takeover's 0.50,
+the far frames without depth -- put a ``sofa`` landmark on the map 3.8 m
+away, and the search then walked west for forty actions chasing frontiers
+while the one object it was looking for stood confirmed on its own map. Such
+a landmark is offered to RPT* at a fixed probability (``landmark_prob``; the
+detector's word is the evidence, no oracle call), at a standoff point
+``landmark_standoff_m`` from it on the agent's side, and its visit is the
+same peek: walk there, face it, one look to each side -- a few close frames
+for the detector, and the takeover does the rest or the landmark is marked
+inspected for the storey.
 
-An exit is **valued by what is behind it** (since 2026-10-13): the oracle
-says how likely the room behind an opening holds the target; the rays say
-how much unseen floor the look from the threshold would show
-(``Opening.gain_m2``), and :func:`opening_value_factor` scales the model's
-number down for a gap onto a strip -- never for a ``doorway``, a room's
-door whatever the rays count. A room already walked leaves gaps along its
-edges that the model values like the doorway onto an unseen wing; the
-factor is what tells them apart.
+Under ``exits_as_nodes`` an exit node is **valued by what is behind it**
+(since 2026-10-13): the oracle says how likely the room behind an opening
+holds the target; the rays say how much unseen floor the look from the
+threshold would show (``Opening.gain_m2``), and :func:`opening_value_factor`
+scales the model's number down for a gap onto a strip -- never for a
+``doorway``, a room's door whatever the rays count.
 """
 from __future__ import annotations
 
@@ -91,8 +103,27 @@ class OpeningSettings:
     """What counts as an opening, and what a peek is. Distances in metres, counts in actions or cells.
 
     Attributes:
-        enabled: Offer the floor's openings as nodes (the default). Off, the
-            openings are the exploration fallback's business alone.
+        enabled: Read the floor's openings at all (the default). Off, the
+            openings are the exploration fallback's business alone: no
+            room carries an ``exits=`` count and no exit is a node.
+        exits_as_nodes: **Deprecated (2026-10-21).** Offer the floor's
+            exits to the oracle and to RPT* as nodes of their own beside
+            the rooms, visited by a peek -- the 2026-10-04 design. A
+            standalone probability per gap let the order chase open passes
+            for their own sake: every gap of a living room, in a search for
+            a toilet, while the room-level prior said bathroom. Off (the
+            default): under the ``explore`` visit every exit is folded into
+            the room it opens from (:meth:`RoomSearchLoop._fold_openings`),
+            the room's node line carries its exits as attributes
+            (``exits=2 (1 doorway)``, the objects glimpsed through them),
+            the model raises a room for its exits only where its type fits
+            the target, and the room's own visit walks the exits; a room
+            the ledger has finished but with GAPs still left to walk is
+            offered again for what lies behind them
+            (:attr:`RoomSearchLoop._reopened`). The ``scan`` and ``sweep``
+            visits have no local walk to fold an exit into and keep the
+            exits as peek nodes whatever this says. Target landmarks are
+            nodes in every mode (``landmarks_enabled``).
         min_cells: Fewest frontier cells an opening must hold -- a gap the
             body cannot pass is not a way anywhere. 5 cells (0.5 m at the
             map's resolution, since 2026-10-13): the body is 0.36 m across
@@ -225,6 +256,7 @@ class OpeningSettings:
     """
 
     enabled: bool = True
+    exits_as_nodes: bool = False
     min_cells: int = 5
     merge_m: float = 1.5
     match_m: float = 1.0
@@ -253,7 +285,7 @@ class OpeningSettings:
     vanish_actions: int = 3
 
     def __post_init__(self):
-        for name in ("enabled", "landmarks_enabled", "step_through"):
+        for name in ("enabled", "exits_as_nodes", "landmarks_enabled", "step_through"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError("openings.%s must be a bool" % name)
         for name in ("through_look_turns", "through_steps"):
@@ -353,6 +385,41 @@ class OpeningOption:
 
     def option(self, prob: float) -> RoomOption:
         return RoomOption(room_id=self.node_id, prob=float(prob), xy=self.opening.xy, label=self.node.label)
+
+
+@dataclass(frozen=True)
+class RoomExits:
+    """One room's open exits, as its node line shows them to the oracle (room-level GAPs, since 2026-10-21).
+
+    Attributes:
+        count: Exits (doorways and gaps to space not seen yet) credited to the room.
+        doorways: How many of them stand at a confirmed door frame.
+        glimpsed: Object classes seen through them, beyond their thresholds, sorted.
+    """
+
+    count: int = 0
+    doorways: int = 0
+    glimpsed: Tuple[str, ...] = ()
+
+
+def room_exits(openings: Sequence) -> Dict[int, RoomExits]:
+    """``{pid: RoomExits}`` over the EXITS among ``openings`` (:class:`Opening` or :class:`OpeningOption`), by the room each opens from.
+
+    Target landmarks are not exits and an exit off no room (``room_pid``
+    None) is nobody's attribute: both are left out.
+    """
+    counts: Dict[int, List] = {}
+    for item in openings:
+        opening = getattr(item, "opening", item)
+        pid = opening.room_pid
+        if opening.kind == LANDMARK or pid is None:
+            continue
+        entry = counts.setdefault(int(pid), [0, 0, set()])
+        entry[0] += 1
+        entry[1] += 1 if opening.door_id is not None else 0
+        entry[2].update(str(c) for c in opening.glimpsed if str(c).strip())
+    return {pid: RoomExits(count=n, doorways=doors, glimpsed=tuple(sorted(seen)))
+            for pid, (n, doors, seen) in counts.items()}
 
 
 class OpeningRegistry:

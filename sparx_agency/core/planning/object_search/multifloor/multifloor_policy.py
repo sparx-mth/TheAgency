@@ -2,7 +2,18 @@
 
 Two sources of stairs, chosen by ``MultiFloorParams.stair_source``:
 
-* ``ground_truth`` (default) -- the connectors the evaluator read from the
+* ``observed`` (the default since 2026-10-21) -- the RGB-D support-surface
+  discovery (:mod:`stair_terrain`): a reachable run of measured treads
+  rising ``stair_min_rise_m`` or more within 5 m is a portal of the storey,
+  placed from the measurement, and its path is what the planning grid masks
+  (:mod:`world_model.peek_stairs`, the spawn-floor guard). No simulator
+  geometry is read -- the footing of the published baselines. With stair
+  traversal forbidden (the benchmark default) that mask, the observed drops
+  and the observed map's own obstacle band are the whole of the stair
+  handling; with it allowed the mode still decides floor changes by the
+  ``floor_search_actions`` allowance and look-down inspections, and once
+  started a "traversal" on a 13 cm raised bathroom floor.
+* ``ground_truth`` (the ablation) -- the connectors the evaluator read from the
   simulator's navmesh and attached to the episode metadata, **known to the
   policy only once seen**: a perfect detector (:mod:`stair_sightings`) hands
   the coordinator a bounding box for a staircase when, and only when, its
@@ -12,11 +23,10 @@ Two sources of stairs, chosen by ``MultiFloorParams.stair_source``:
   placed on the map from that sighting, becomes a portal of the storey it
   touches, and is climbed by :mod:`ground_truth_traversal` along the
   connector's centreline. No look-down inspections, no depth stair
-  candidates, no terrain veto on the committed route.
-* ``observed`` -- the former RGB-D support-surface discovery
-  (:mod:`stair_terrain`, :mod:`stair_traversal`), kept for comparison. It
-  started a "stair traversal" on a 13 cm raised bathroom floor, and it still
-  decides floor changes by the ``floor_search_actions`` allowance.
+  candidates, no terrain veto on the committed route. Its footprint is the
+  navmesh centreline, which in Darden begins 0.45 m before the first riser
+  on a sloped threshold, so the drawn flight stood lower on the grid than
+  the stairs do -- the reason the observed source is the default.
 
 The floor atlas, the per-floor contexts and the portal bookkeeping are the
 same in both modes.

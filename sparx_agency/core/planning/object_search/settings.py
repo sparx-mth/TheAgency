@@ -72,6 +72,20 @@ class RPTSettings:
             spawn point. The three-tread flight Darden/000034 walked down
             (-0.11, -0.18, -0.21 m, the floor -0.45 m seen by five samples)
             is inside this tolerance and remains the open item.
+        stair_margin_m: The preferred half-width of the capsule written
+            impassable around a SEEN staircase's centreline
+            (``world_model/peek_stairs.stair_peek_mask``): a flight's
+            half-width plus room for the body, which the planner's own
+            body-radius inflation then surrounds like any wall. Stairs
+            only -- walls, furniture and observed drops are inflated as
+            before. 0.45 m (five cells drawn) since 2026-10-21, down from
+            the implicit ``body_radius + goal_tolerance + cell`` (0.53 m,
+            six cells drawn): with the planner's 0.18 m on top the old
+            capsule kept the body 0.78 m from a flight's centreline and,
+            in Markleeville, narrowed the passages beside its stairwell on
+            the 2D grid; the adaptive capsule still narrows it further,
+            down to the body radius, wherever a corridor would close.
+            Never below ``body_radius_m``.
         segmentation: Whether the TARGET's boxes are segmented (box-prompted
             Segment Anything, ``tasks/planning/objnav_benchmark_runtime/services/http_segmenter.HttpSegmenter``) and
             their depth read on the object's own pixels rather than on the
@@ -107,6 +121,20 @@ class RPTSettings:
     # two chairs 0.3 m apart are two (since 2026-10-07).
     landmark_dedupe_radius_m: float = 0.35
     landmark_footprint_iou: float = 0.25
+    # Retraction (since 2026-10-21, ``landmarks.py`` ``max_misses``): a confirmed landmark that
+    # stood in ``landmark_max_misses`` CLEAR views -- inside the frame by ``landmark_miss_margin_px``,
+    # between ``landmark_miss_min_range_m`` and ``landmark_miss_max_range_m`` away, the depth at its
+    # pixel showing nothing in front of it -- without a detection of its class leaves the confirmed
+    # set, and the room it stood in is re-classified without it; the next detection reinstates it.
+    # Four, or as many as the landmark's observations if more (``landmarks.py``: the negative evidence
+    # must outweigh the positive), each from a DISTINCT viewpoint -- the camera moved
+    # ``landmark_miss_viewpoint_m`` or turned 30 degrees since the last counted miss -- so four frames
+    # from one bad angle are one miss. 0 disables (the one-way confirmation of before).
+    landmark_max_misses: int = 4
+    landmark_miss_margin_px: int = 40
+    landmark_miss_min_range_m: float = 0.8
+    landmark_miss_max_range_m: float = 3.5
+    landmark_miss_viewpoint_m: float = 0.5
     stop_distance_m: float = 0.75
     target_memory_steps: int = 30
     seed: int = 0
@@ -120,6 +148,7 @@ class RPTSettings:
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
     step_down_m: float = 0.30
+    stair_margin_m: float = 0.45
     segmentation: bool = False
     target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
     doorway_peek: PeekSettings = field(default_factory=lambda: PeekSettings(enabled=False))
@@ -128,10 +157,13 @@ class RPTSettings:
 
     def __post_init__(self):
         for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m",
-                    "preferred_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m", "step_down_m"):
+                    "preferred_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m", "step_down_m",
+                    "stair_margin_m"):
             value = getattr(self, key)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)
+        if self.stair_margin_m < self.body_radius_m:
+            raise ValueError("stair_margin_m cannot be smaller than the robot radius")
         if type(self.allow_stair_traversal) is not bool:
             raise ValueError("allow_stair_traversal must be boolean; no silent fallback")
         if type(self.segmentation) is not bool:
@@ -139,6 +171,15 @@ class RPTSettings:
         if (isinstance(self.landmark_footprint_iou, bool) or not math.isfinite(self.landmark_footprint_iou)
                 or not 0 < self.landmark_footprint_iou <= 1):
             raise ValueError("landmark_footprint_iou must lie in (0, 1]")
+        for name in ("landmark_max_misses", "landmark_miss_margin_px"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError("%s must be a non-negative integer" % name)
+        for name in ("landmark_miss_min_range_m", "landmark_miss_max_range_m", "landmark_miss_viewpoint_m"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError("%s must be positive and finite" % name)
+        if self.landmark_miss_max_range_m <= self.landmark_miss_min_range_m:
+            raise ValueError("landmark_miss_max_range_m must exceed landmark_miss_min_range_m")
         for key in ("depth_stride", "graph_period_steps", "replan_steps", "target_memory_steps", "max_rooms", "warmup_steps"):
             if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
                 raise ValueError("%s must be a positive integer" % key)

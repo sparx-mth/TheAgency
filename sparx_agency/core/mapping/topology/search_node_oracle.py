@@ -11,12 +11,21 @@ the WHOLE question at once, over every node the search could go to next:
 * a **room** the map has segmented on the storey the robot stands on --
   identified by type from the objects seen in it, or still ``unknown`` --
   with its size, the frontier (unexplored boundary) left inside it, its
-  **status** (never entered; entered but not looked around; scanned, and how
-  long ago), how long it was searched and the objects confirmed in it;
-* an **opening** -- a doorway or gap at the edge of the mapped floor leading
-  to space not seen yet, valued by the room likely behind it;
+  **exits** (the doorways and gaps at its edge leading to space not seen
+  yet, how many stand at a seen door frame, and what was glimpsed through
+  them -- since 2026-10-21 the room's attributes, not nodes of their own),
+  its **status** (never entered; entered but not looked around; scanned, and
+  how long ago), how long it was searched and the objects confirmed in it;
 * a **staircase** to another storey, when the search is allowed to change
-  storeys (the standard single-storey benchmarks never offer one).
+  storeys (the standard single-storey benchmarks never offer one);
+* an **opening** -- a doorway or gap at the edge of the mapped floor leading
+  to space not seen yet, valued by the room likely behind it -- only under
+  the deprecated exits-as-nodes mode (``OpeningSettings.exits_as_nodes``),
+  which brings :data:`OPENINGS_SUPPLEMENT` into the system prompt. The
+  room-level design values a room by its type AND its exits: a high exit
+  count raises a room only where its type fits the target's home (a
+  bathroom's unlooked door for a toilet, never a living room's gaps), and
+  the room's visit walks its exits itself.
 
 **LLM-first (since 2026-10-07).** The model is given the big picture and
 asked to apply the knowledge a person has of homes: where the target
@@ -113,26 +122,38 @@ NODE LINES.
 ROOM: a region the robot segmented. type= was inferred from the objects seen in it \
 (unknown = NOT IDENTIFIED YET, never "empty"; a type ending in "?" rests on a single kind \
 of object and may be wrong -- a sink alone reads as a kitchen until a toilet shows). \
-size= floor area. frontier= unexplored openings or boundaries still accessible inside it \
-(0 is NOT proof that nothing is there). status= one of: never_entered (only seen from \
+size= floor area. frontier= unexplored boundaries still accessible inside it (0 is NOT \
+proof that nothing is there). exits= the doorways and gaps at its edge that lead to space \
+NOT seen yet -- rooms the robot has not entered. They are NOT nodes of their own: going to \
+the room means walking its exits and looking through each; in brackets, how many stand at a \
+seen door frame (exits=2 (1 doorway)). glimpsed through its exits: objects seen beyond \
+those thresholds -- they name the rooms BEHIND the exits (a toilet -> a bathroom; a bed -> a \
+bedroom), not this room. status= one of: never_entered (only seen from \
 outside, or not at all); entered (the robot stood in it and its camera has seen most of what \
 is mapped of it, but it never completed a look-around: what is left of it lies behind its \
-frontier= boundaries); \
+frontier= boundaries and its exits=); \
 scanned(<how>, <ago>) (the robot completed a full look-around in it, or saw most of it from \
 one, <ago> ago -- what was visible then was seen ONCE by a detector that misses objects that \
-are small, far, half-hidden, behind a door or under furniture). searched= time spent inside. \
-seen= objects confirmed in it. here=yes: the robot stands in it now.
-OPENING: a doorway or gap at the edge of the mapped floor leading to space NOT seen yet -- a \
-room the robot has not entered. Going there is a quick look from the threshold, cheaper than a \
-room visit. Value it by the room likely BEHIND it: glimpsed objects name that room (a toilet \
--> a bathroom; a bed -> a bedroom); nothing glimpsed -> an unidentified room, judged by what \
-the home still lacks. An opening whose glimpsed objects name the home type of the target \
-(a sink or a shower for a toilet; a sofa or a television for a couch) is the home room seen \
-from its door: the best node there is, 60 or more.
+are small, far, half-hidden, behind a door or under furniture; a scanned room with exits= \
+left is offered again for what lies BEHIND them, not for itself). searched= time spent \
+inside. seen= objects confirmed in it. here=yes: the robot stands in it now.
 The HOUSE line is the big picture: every room type found so far (scanned ones included), how \
-many rooms are still unidentified, how many openings are not yet looked into, whether any \
-unexplored frontier is still reachable, and the budget -- actions used of the total. Use ALL \
-of it.
+many rooms are still unidentified, how many exits (openings) of the whole home are not yet \
+looked into, whether any unexplored frontier is still reachable, and the budget -- actions \
+used of the total. Use ALL of it.
+
+EXITS. What lies behind a room's exits is decided by the HOME, never by the count alone: an \
+exit leads to a room of this home, and the rooms the home still lacks say which. Exits RAISE \
+a room ONLY when its type fits the target -- a bathroom with an unlooked door (a second \
+bathroom or an en-suite beyond it) when the target is a toilet; a bedroom whose exit may be \
+an en-suite's; a kitchen's exits for a refrigerator -- or when a glimpse through one of them \
+names the home type (a toilet glimpsed through an exit of the hallway: that room is the \
+bathroom seen from its door, 60 or more). Exits of a hallway, a corridor or an unidentified \
+room are valued by what the home still lacks behind them: while the bathroom is missing, \
+they are where it must be. Exits of a room whose type does NOT fit the target do NOT raise \
+it, however many: three gaps off a living room, for a toilet, lead to strips of the living \
+room or to rooms already found, and the living room stays low. A room with many exits and no \
+fit is no more promising than one with none.
 
 HOW TO JUDGE. Work in this order and write steps 1-3 into the reply before any number.
 STEP 1 "home": the room types where this object normally lives, most likely first, and \
@@ -148,15 +169,16 @@ living room, ONE dining area, one to four bedrooms, one to three bathrooms (one 
 en-suite off the main bedroom), a hallway, perhaps an office, a laundry or a garage. If a \
 type that occurs once has been FOUND, an unidentified room is unlikely to be another of it, \
 and the odds of the target's home being among the unidentified rooms drop. If the home type \
-is still MISSING, the unidentified rooms and the openings are where it must be: value them \
-in proportion to how well their size fits the home type (bathrooms ARE small, 3-8 m2; \
+is still MISSING, the unidentified rooms and the unlooked exits are where it must be: value \
+them in proportion to how well their size fits the home type (bathrooms ARE small, 3-8 m2; \
 bedrooms 9-20 m2; living rooms 15 m2 and up) and to what else the home still lacks -- \
 never write a room off for its size. A home-type object seen in a room of ANOTHER type (a \
 sink in a "living room", a bed in a "kitchen") means the map merged two rooms: value that \
 room as the home type.
 STEP 3 "stage": weigh the budget. EARLY -- much budget left and unexplored places remain: \
-the target is most likely somewhere not yet looked at; unexplored rooms and openings first, \
-scanned rooms low. LATE -- most of the home seen, few or no unexplored places or frontier \
+the target is most likely somewhere not yet looked at; unexplored rooms and the rooms whose \
+exits lead to them first, scanned rooms low. LATE -- most of the home seen, few or no \
+unexplored places or frontier \
 left, the home type found but the target not seen: the detector may have MISSED the target in a \
 scanned room of a fitting type (a toilet behind a half-open door, a television on a wall \
 the scan grazed, a chair under a table), and the chance that an unseen room holds it \
@@ -174,24 +196,30 @@ the target; value only what its frontier= boundaries still hide -- at most HALF 
 unexplored room of the same type and size would get, and under 10 with frontier=0. One \
 searched= 20s or longer with frontier= 0 or 1 is as good as scanned: 0-5, whatever its type. \
 Never write "known to contain" the target of a room the target was not seen in.
- - a never-entered room of unknown type, or an opening with nothing glimpsed: never below 10 \
-while the home type is missing; by size fit and by what the home lacks once it is found.
- - a never-entered room named as the home type by objects seen through its door, or an \
-opening whose glimpse names the home type: 60 or more.
+ - a never-entered room of unknown type: never below 15 while the home type is missing; by \
+size fit and by what the home lacks once it is found. Its frontier= count measures the MAP, \
+not the room: a never-entered room with frontier=0 or 1 is as unexplored as one with five -- \
+clearing one boundary of an unentered room opens the whole of it and what lies beyond. \
+Never lower a never-entered room for a low frontier count.
+ - a never-entered room named as the home type by objects seen through its door, or a room \
+whose exits' glimpse names the home type behind them: 60 or more.
  - a never-entered room of the home type with frontier left, target not seen: 30 or more; the \
 same room entered: 10-20, more only if its frontier leads to a large unseen part of it.
- - prefer the places the robot has NOT been near: an opening or room away from everything \
-entered and scanned leads to a part of the home not seen at all; a gap at the edge of a \
-scanned room usually shows a strip of it.
- - a hallway or corridor rarely holds the target, but one with frontier LEADS to unseen \
-rooms: value it by what it may lead to.
- - searched long and recently -> low, not zero; searched briefly or long ago -> stays promising.
- - SPREAD, do not copy: the unexplored places compete for the same missing rooms. A missing \
-bathroom is ONE room, so five unlooked doorways share its chance -- about 10-15 each, the \
-best-fitting one more, never 35 on every one of them; with many openings and one or two \
-missing home-type rooms, most openings get under 15. Several openings often lead to the same \
-hallway. The sum over the unexplored places should be about the chance that the target is \
-somewhere not yet looked at, not more.
+ - prefer the places the robot has NOT been near: a room away from everything entered and \
+scanned, or one whose exits lead away from it all, leads to a part of the home not seen at \
+all; a gap at the edge of a scanned room usually shows a strip of it.
+ - a hallway or corridor rarely holds the target, but one with exits LEADS to unseen rooms: \
+value it by what the home still lacks behind them.
+ - searched long and recently -> low, not zero; searched briefly or long ago -> stays promising. \
+The longer searched= reads on an entered room, the lower its number: time already spent inside \
+is evidence the target is not there.
+ - SPREAD, do not copy: the unexplored rooms and the exits of the rooms found compete for the \
+same missing rooms. A missing bathroom is ONE room, so five unlooked exits spread over three \
+rooms share its chance -- the room whose type and exits fit it best gets most, the others \
+about 10-15, never 35 on every room with an exit; with many exits and one or two missing \
+home-type rooms, most such rooms get under 15. Several exits often lead to the same hallway. \
+The sum over the unexplored places should be about the chance that the target is somewhere \
+not yet looked at, not more.
 ALWAYS: NEVER use distance, travel time or here=yes as a reason -- the planner charges travel, \
 and the room the robot stands in is judged exactly like the others. Several rooms may each \
 hold an instance: the numbers are independent search-success probabilities, NOT shares of \
@@ -203,28 +231,43 @@ Reply with ONLY this JSON, keys in this order:
  "pass":"first|second","nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
 EXAMPLE of the FORMAT and the style of reasoning -- a different home every time, so never \
 copy its numbers or its words. TARGET toilet; HOUSE: rooms found: kitchen (scanned), \
-living_room (scanned), bedroom (never entered), hallway (entered); 1 room unidentified; 1 \
-opening not yet looked into; actions used about 150 of 500:
-id=2  ROOM  type=kitchen  size=12m2  frontier=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
-id=3  ROOM  type=living_room  size=24m2  frontier=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
-id=5  ROOM  type=bedroom  size=14m2  frontier=1  status=never_entered  searched=0s  seen: bed
-id=6  ROOM  type=unknown  size=5m2  frontier=1  status=never_entered  searched=0s  seen: nothing yet
-id=7  ROOM  type=hallway  size=6m2  frontier=1  status=entered  searched=10s  here=yes  seen: nothing yet
-id=200001  OPENING  doorway off room 7 (type=hallway)  to space NOT seen yet  glimpsed through it: nothing yet
+living_room (scanned), bedroom (never entered), hallway (entered); 1 room unidentified; 3 \
+openings not yet looked into; actions used about 150 of 500:
+id=2  ROOM  type=kitchen  size=12m2  frontier=0  exits=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
+id=3  ROOM  type=living_room  size=24m2  frontier=1  exits=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
+id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)  status=never_entered  searched=0s  seen: bed
+id=6  ROOM  type=unknown  size=5m2  frontier=1  exits=0  status=never_entered  searched=0s  seen: nothing yet
+id=7  ROOM  type=hallway  size=6m2  frontier=1  exits=1 (1 doorway)  status=entered  searched=10s  here=yes  seen: nothing yet
 {"home":"bathroom; often an en-suite off a bedroom",
- "house":"kitchen and living room found and scanned; no bathroom yet; two unidentified rooms, one bathroom-sized; one unlooked doorway",
+ "house":"kitchen and living room found and scanned; no bathroom yet; one unidentified room, bathroom-sized; unlooked doorways off the bedroom and the hallway",
  "stage":"early, 150 of 500 used, unexplored places remain: first pass",
  "pass":"first",
  "nodes":[{"id":2,"why":"kitchen, scanned, toilets are not in kitchens","p":1},
-{"id":3,"why":"living room, scanned, no toilet there","p":1},
-{"id":5,"why":"bedroom never entered, an en-suite may open off it","p":25},
-{"id":6,"why":"small unidentified room, bathroom sized, bathroom missing","p":55},
-{"id":7,"why":"hallway, leads to the unlooked doorway","p":5},
-{"id":200001,"why":"unseen room off the hallway, bathroom still missing","p":35}]}
+{"id":3,"why":"living room, scanned; its gap is no bathroom door","p":2},
+{"id":5,"why":"bedroom never entered, its doorway may be an en-suite's","p":35},
+{"id":6,"why":"small unidentified room, bathroom sized, bathroom missing","p":50},
+{"id":7,"why":"hallway; its unlooked doorway leads to the missing bathroom","p":25}]}
 Had the HOUSE line read "every known room identified; 0 openings not yet looked into; no \
 unexplored frontier left; actions used about 420 of 500" with a bathroom found and scanned 4 \
 minutes ago, the pass would be "second": the scanned bathroom 35, the scanned bedroom 8 (an \
 en-suite door the scan may have missed), and the scanned kitchen and living room 1 each."""
+
+#: Appended to :data:`SYSTEM_PROMPT` when an OPENING node is offered -- the deprecated
+#: exits-as-nodes mode (``OpeningSettings.exits_as_nodes``, the 2026-10-04 design): an exit
+#: shown as a node of its own is valued by the room likely behind it and visited by a peek.
+OPENINGS_SUPPLEMENT = """
+OPENING NODES ARE ON OFFER. OPENING: a doorway or gap at the edge of the mapped floor leading \
+to space NOT seen yet -- a room the robot has not entered -- offered as a node of its own \
+(it is then not counted among its room's exits=). Going there is a quick look from the \
+threshold, cheaper than a room visit. Value it by the room likely BEHIND it: glimpsed objects \
+name that room (a toilet -> a bathroom; a bed -> a bedroom); nothing glimpsed -> an \
+unidentified room, judged by what the home still lacks. An opening whose glimpsed objects \
+name the home type of the target (a sink or a shower for a toilet; a sofa or a television for \
+a couch) is the home room seen from its door: the best node there is, 60 or more. Openings \
+compete with the unexplored rooms for the same missing rooms (SPREAD applies to them too). \
+Line format: id=200001  OPENING  doorway off room 7 (type=hallway)  to space NOT seen yet  \
+glimpsed through it: nothing yet -- in the example above, with the hallway's doorway offered \
+so, the opening would take the hallway's 25 and the hallway itself 5."""
 
 #: Appended to :data:`SYSTEM_PROMPT` when a STAIRS node is offered: the multi-storey rules.
 STAIRS_SUPPLEMENT = """
@@ -299,6 +342,16 @@ class SearchNode:
             ``looked into, no frontier left``, ``fragment``), or None while
             it is not finished. Rendered as ``status=scanned(<how>, <ago>)``.
         scanned_ago_s: Seconds since that verdict, when known.
+        exits: Room: the doorways and gaps at its edge leading to space not
+            seen yet -- its open GAPs, read off the live map by
+            ``opening_nodes.detect_openings`` and credited to the room they
+            open from (since 2026-10-21 the room's attribute, not nodes of
+            their own: the room's visit walks them). 0 for the other kinds.
+        doorways: Room: how many of those exits stand at a confirmed door
+            frame. Rendered as ``exits=2 (1 doorway)``.
+        glimpsed: Room: object classes seen THROUGH its exits, beyond their
+            thresholds -- they name the rooms behind the exits, not this
+            one. Rendered as ``glimpsed through its exits: ...``.
     """
 
     id: int
@@ -320,6 +373,9 @@ class SearchNode:
     home: bool = False
     scanned: Optional[str] = None
     scanned_ago_s: Optional[float] = None
+    exits: int = 0
+    doorways: int = 0
+    glimpsed: Tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -482,12 +538,25 @@ def format_node(node: SearchNode) -> str:
     label = node.label + ("?" if node.tentative and node.label != "unknown" else "")
     parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % size,
              "frontier=%d" % max(0, int(node.frontier_clusters)),
+             "exits=%s" % format_exits(node.exits, node.doorways),
              "status=%s" % node.status,
              "searched=%s" % coarse_seconds(node.searched_s)]
     if node.here:
         parts.append("here=yes")
     parts.append("seen: %s" % seen)
+    glimpsed = sorted({str(c).strip().lower() for c in node.glimpsed if str(c).strip()})
+    if glimpsed:
+        parts.append("glimpsed through its exits: %s" % ", ".join(glimpsed[:MAX_CLASSES_IN_PROMPT]))
     return "  ".join(parts)
+
+
+def format_exits(exits: int, doorways: int = 0) -> str:
+    """The ``exits=`` value of a room line: the count, and in brackets how many stand at a seen door frame."""
+    count = max(0, int(exits))
+    doors = max(0, min(count, int(doorways)))
+    if doors <= 0:
+        return "%d" % count
+    return "%d (%d doorway%s)" % (count, doors, "" if doors == 1 else "s")
 
 
 def format_prompt(target: str, nodes: Sequence[SearchNode], context: Optional[SearchContext] = None) -> str:
@@ -504,10 +573,13 @@ def format_prompt(target: str, nodes: Sequence[SearchNode], context: Optional[Se
 
 
 def system_prompt(nodes: Sequence[SearchNode], context: Optional[SearchContext] = None) -> str:
-    """The system prompt for this query: the single-storey rules, plus the stairs supplement when a storey change is on offer."""
+    """The system prompt for this query: the single-storey rules, plus the stairs supplement when a storey change is on offer, plus the openings supplement when an exit is offered as a node of its own (deprecated)."""
+    text = SYSTEM_PROMPT
     if any(n.kind == STAIRS for n in nodes) or (context is not None and context.multi_storey):
-        return SYSTEM_PROMPT + STAIRS_SUPPLEMENT
-    return SYSTEM_PROMPT
+        text += STAIRS_SUPPLEMENT
+    if any(n.kind == OPENING for n in nodes):
+        text += OPENINGS_SUPPLEMENT
+    return text
 
 
 # -- the parse --------------------------------------------------------------
