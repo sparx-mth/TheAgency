@@ -99,14 +99,19 @@ one run and why every reported row carries a `notes` field.
 
 ## Our own exposure must be disclosed
 
-The only HM3D validation episode run so far is `00877-4ok3usBNeis/000000` (2026-10-14, and again on 2026-10-20 after
-the scene install, with `--record --save-frames`), a one-episode plumbing smoke test of the merged pipeline (success both times,
-170 and 192 actions); nothing was tuned on it. Beyond that there is
-**no HM3D development contamination to disclose**. That is a fact with a shelf life: the moment a
+**HM3D-v1 validation is no longer untouched.** On 2026-10-20 the first published episode of every one of
+the 20 v1 validation scenes was run and recorded for review, by the operator's decision, in
+`runs/hm3d_v1_val_1per-scene_oracle3b_20261020T165941Z` (`--limit 1 --record --save-frames --full-records`,
+`qwen2.5:3b-instruct` as both the room labeller and the node oracle, `GPU_PLAN_LLM=cpu`). Those 20 episodes
+(`<scene>/000000` for each scene; `00878-XB4GS9ShBRE/000000` re-run alone after the kinematics-contract fix
+recorded in `LESSONS.md`) are development exposure from now on: anything tuned after reading them must be
+disclosed with any v1 number, and a held-out claim on v1 val is no longer available. Before that, the only
+validation episode run was `00877-4ok3usBNeis/000000` (2026-10-14 and 2026-10-20, plumbing smoke tests,
+nothing tuned). The other 1,980 v1 episodes and all of v2 val remain unrun. Exposure cannot be undone: the moment a
 validation episode is inspected while tuning, it stops being untouched, and no
 later flag or rename undoes it.
 
-Keep it that way deliberately:
+Keep the rest that way deliberately:
 
 - Develop and tune on the **train split**, which is installed
   (`~/datasets/objectnav/hm3d/<version>/train`, 80 scenes for v1 and 145 for

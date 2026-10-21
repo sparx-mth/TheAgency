@@ -201,13 +201,22 @@ class HM3DProtocol:
             actions=ALL_ACTIONS)
 
     def kinematics(self) -> KinematicTolerance:
-        """The shared default, which is already sized for Habitat.
+        """The shared default, with the climb bound HM3D's stairs need.
 
         Sliding is off here, so a blocked MOVE_FORWARD moves nothing at all and
-        a partial step up a stair is what the default tolerance allows. Nothing
-        is relaxed for HM3D.
+        the horizontal bounds stand unchanged. ``climb_m`` (since 2026-10-20) is
+        0.60 m, as Gibson's: the default 0.20 m is one stair riser, but the
+        navmesh habitat-sim recomputes here (``agent_max_climb`` 0.20 m,
+        ``agent_max_slope`` 45 degrees) lets one 0.25 m stride cross a riser
+        AND run along a sloped tread, and the two add. The first v1 sweep lost
+        ``00878-XB4GS9ShBRE/000000`` to it: action 170 moved 0.204 m across a
+        tread and 0.210 m down, which the contract refused as "a pose left in
+        the Y-up frame" and, through the runner, ended the scene (LESSONS.md,
+        2026-10-20). The trade is the same as Gibson accepted: a step that
+        reads entirely as height is no longer refused by this bound alone,
+        and the independent path-length and heading checks remain.
         """
-        return KinematicTolerance()
+        return KinematicTolerance(climb_m=0.60)
 
     def evaluation_settings(self) -> EvaluationSettings:
         """The harness options this protocol requires, stated explicitly."""

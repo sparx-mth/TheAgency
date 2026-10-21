@@ -174,9 +174,23 @@ def test_evaluation_settings_demand_stop_and_exact_three_dimensional_path_accoun
     assert settings.require_stop_for_success is True
     assert settings.path_length_dimension == "3d"
     assert settings.path_length_epsilon_m == 0.0
-    assert settings.kinematics == KinematicTolerance()
+    assert settings.kinematics == KinematicTolerance(climb_m=0.60)
     assert replace(HM3D_V1, path_length_epsilon_m=0.01
                    ).evaluation_settings().path_length_epsilon_m == 0.01
+
+
+def test_the_climb_bound_admits_a_stair_tread_and_still_refuses_a_jump():
+    """00878-XB4GS9ShBRE/000000 action 170 (0.204 m across, 0.210 m down one tread) killed the first v1 sweep under the 0.20 m default."""
+    from sparx_agency.core.planning.objnav.errors import EnvContractError
+    from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+    from sparx_agency.core.planning.objnav.types.pose import AgentPose
+    from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
+    before = AgentPose(0.0, 0.0, 0.0, 0.0)
+    check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.204, 0.0, -0.210, 0.0),
+                 HM3D_V1.actions(), HM3D_V1.kinematics())
+    with pytest.raises(EnvContractError, match="height by at most 0.600 m"):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0.0, 0.61, 0.0),
+                     HM3D_V1.actions(), HM3D_V1.kinematics())
 
 
 def test_the_navmesh_is_the_agents_own_and_no_unmeasured_third_option_is_accepted():

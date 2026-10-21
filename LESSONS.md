@@ -11,6 +11,39 @@ Format per entry:
 
 ---
 
+## 2026-10-20 — The first HM3D sweep lost a scene to the harness, not the method: one step down a stair tread was "a pose left in the Y-up frame"
+
+**Symptom:** In the first 20-scene HM3D-v1 campaign (one published episode per scene, 3B oracle),
+`00878-XB4GS9ShBRE/000000` died at action 170 with `EnvContractError: MOVE_FORWARD should change its
+height by at most 0.204 m, but the agent moved 0.292 m (0.204 m across the floor ... -0.210 m up) ...
+likely a pose left in the simulator's Y-up frame`. The campaign moved on, the scene ended "without rows",
+and the launcher exited 1. The pose was fine: the agent had walked down one stair tread.
+
+**Root cause:** `objnav_benchmark/kinematics.py::_check_forward` bounded a step's height change by
+`max(climb_m, advanced_m)` — a 0.2 m riser OR a 45-degree slope over the advance — but Habitat's navmesh
+(`agent_max_climb` 0.2 m, `agent_max_slope` 45 degrees) lets one 0.25 m step cross a riser AND run along a
+sloped tread, and the two add. HM3D's stairs produce exactly that; Gibson's 1,000 episodes never did, so the
+bound looked right for a week. The refusal message's confident diagnosis ("Y-up frame") pointed at the wrong
+culprit.
+
+**Fix / workaround:** The bound is set where Gibson's already was, in the protocol that knows its data:
+`HM3DProtocol.kinematics()` returns `KinematicTolerance(climb_m=0.60)` (Gibson's `gibson/protocol.py` did the
+same on 2026-10-07 for the same reason -- shipped navmeshes step up to 0.50 m on one stride), and
+`test_hm3d_protocol.py` pins the 00878 step (passes) and a 0.61 m jump (refused). The shared rule keeps its
+riser-OR-slope `max` semantics, which `test_multifloor.py` encodes. The scene was re-run alone into the same
+campaign root (`--output <root> --scenes 00878-XB4GS9ShBRE`) after moving its dead directory out of the root
+-- a scene directory without rows is what the aggregate counts as a failed scene, so it must not stay there.
+That re-run executed under a transient riser-PLUS-slope edit of the shared rule (`climb_m + advanced_m`),
+reverted the same evening in favour of the protocol bound; for that episode the two admit the same motions,
+and the launcher's `source-changes.diff` at the root captured the transient state.
+
+**Don't:** Don't read a contract refusal's "likely ..." clause as the diagnosis; it names the failure the check
+was written for, not the one that fired. Don't change the shared rule's semantics when a protocol-level
+tolerance is the established answer -- Gibson's docstring already held the measurement. And don't leave
+a dead scene directory in a campaign root while re-running: the aggregate reads it as a scene without rows.
+
+---
+
 ## 2026-10-15 — The television the closing STOPped 3.3 m short of, and the one it released three times from 3 m: a rail inside the box, and a standoff ring inside the cabinet
 
 **Symptom:** The 2026-10-12 full run and its 2026-10-15 re-run failed the same five Collierville tv episodes at the
