@@ -54,7 +54,7 @@ the 101 toilet failures were 500-step timeouts) and the 2026-10-08 baseline (SR 
 - [ ] While it runs: no edit to any `.py` under `sparx_agency/` on this checkout (the source hash is frozen into the
       run; a resume after an edit needs `RESUME_ARGS="--resume-accepting-changes source_sha256"`), and this entry
       committed and pushed before the run ends so the supervisor's worktree can close it.
-- [ ] When the run ends: read `FINAL_SUMMARY.txt` / `summary.json` / `comparison.md`; record SR, SPL, DTG here beside
+- [x] When the run ends: read `FINAL_SUMMARY.txt` / `summary.json` / `comparison.md`; record SR, SPL, DTG here beside
       the 2026-10-12 run per category (toilet, bed, tv first) and per scene (Wiconisco couch 0.500 and Corozal bed
       0.343 were the weakest cells), run the same analysis as the step above for the scene x category delta, and a
       LESSONS entry if anything other than the policy's quality explains a number.
@@ -116,3 +116,5 @@ Provenance, to read before comparing:
 - Hardware and model differ from the 2026-10-12 baseline (3B for both roles, laptop GPU, detector on GPU); the
   difference to it is the fixes plus that change, not the fixes alone.
 
+## Result (2026-10-19)
+Finished 2026-10-19T12:40:17Z after 0 resume(s): **SR 0.788, SPL 0.465, DTG 0.96 m** over 1000/1000 published episodes (full split: true; agent errors 0). Per-scene and per-category tables, the published-row comparison and the provenance: `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md` (section `gibson_val_20261018T105339Z`); the data under `sparx_agency/tasks/planning/objnav_benchmark_runtime/gibson/results/gibson_val_20261018T105339Z/`. Published from the detached run by `supervise_benchmark.sh`.
