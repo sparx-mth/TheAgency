@@ -137,7 +137,7 @@ def test_ollama_manifest_sizes_and_the_llm_estimate(tmp_path):
     assert ollama_model_mib(tmp_path, "qwen2.5:7b-instruct") is None
     need, note = llm_need_mib(["qwen2.5:3b-instruct", "qwen2.5:14b-instruct"], tmp_path)
     assert need == round((ollama_model_mib(tmp_path, "qwen2.5:3b-instruct") + ollama_model_mib(tmp_path, "qwen2.5:14b-instruct"))
-                         * gpu_plan.LLM_OVERHEAD_FACTOR) and "x 1.35" in note
+                         * gpu_plan.LLM_OVERHEAD_FACTOR) and "x %.2f" % gpu_plan.LLM_OVERHEAD_FACTOR in note
     assert llm_need_mib(["any"], tmp_path, override=4321) == (4321, "LLM_VRAM_MIB override")
     with pytest.raises(RuntimeError, match="LLM_VRAM_MIB"):
         llm_need_mib(["qwen2.5:7b-instruct"], tmp_path)
@@ -160,3 +160,54 @@ def test_plan_from_environment_reads_models_dir_overrides_and_reserve(tmp_path):
 def test_component_validation_is_explicit():
     with pytest.raises(TypeError):
         Component("x", 1)   # need_mib and cpu_capable are required
+
+
+def test_each_ollama_request_slot_beyond_the_first_adds_its_own_kv_cache_to_the_llm_estimate(tmp_path):
+    base = tmp_path / "manifests" / "registry.ollama.ai" / "library" / "m"
+    base.mkdir(parents=True)
+    (base / "big").write_text(json.dumps({"layers": [{"size": 8572 * 2 ** 20}]}))
+    one, note_one = llm_need_mib(["m:big"], tmp_path)
+    two, note_two = llm_need_mib(["m:big"], tmp_path, parallel=2)
+    assert one == round(8572 * gpu_plan.LLM_OVERHEAD_FACTOR) and "slots" not in note_one
+    assert two == round(8572 * (gpu_plan.LLM_OVERHEAD_FACTOR + gpu_plan.LLM_SLOT_FACTOR)) and "2 request slots" in note_two
+    assert llm_need_mib(["m:big"], tmp_path, override=100, parallel=4) == (100, "LLM_VRAM_MIB override")
+    with pytest.raises(ValueError, match="OLLAMA_NUM_PARALLEL"):
+        llm_need_mib(["m:big"], tmp_path, parallel=0)
+
+
+def test_parallel_shards_take_one_renderer_each_off_the_budget():
+    three = components(14000, "test", habitat_count=3)
+    habitat = [part for part in three if part.name == "habitat"][0]
+    assert habitat.need_mib == 3 * gpu_plan.HABITAT_RENDER_MIB and "3 renderers" in habitat.note
+    # 20 GB free: the LLM and YOLO fit beside three renderers but not beside six.
+    assert devices(plan(three, 0, "card", 24000, 1000))["yolo"] == "gpu"
+    six = components(14000, "test", habitat_count=6)
+    assert devices(plan(six, 0, "card", 24000, 1000))["yolo"] == "cpu"
+    with pytest.raises(ValueError, match="HABITAT_RENDERERS"):
+        components(14000, "test", habitat_count=0)
+
+
+def test_plan_from_environment_scales_by_slots_and_renderers(tmp_path):
+    base = tmp_path / "manifests" / "registry.ollama.ai" / "library" / "m"
+    base.mkdir(parents=True)
+    (base / "small").write_text(json.dumps({"layers": [{"size": 1000 * 2 ** 20}]}))
+    env = {"LLM_MODEL": "m:small", "LLM_REASONING_MODEL": "m:small", "OLLAMA_MODELS_DIR": str(tmp_path),
+           "OLLAMA_NUM_PARALLEL": "3", "HABITAT_RENDERERS": "4", "HABITAT_VRAM_MIB": "500"}
+    result = plan_from_environment(0, run=lambda cmd: "card, 24000, 100\n", env=env)
+    assert result.placement("llm").need_mib == round(1000 * (gpu_plan.LLM_OVERHEAD_FACTOR + 2 * gpu_plan.LLM_SLOT_FACTOR))
+    assert result.placement("habitat").need_mib == 2000
+
+
+def test_a_recorded_plan_is_replayed_as_the_environment_it_emitted(tmp_path):
+    result = plan(parts(), 0, "card", 24000, 1000)
+    record = tmp_path / "gpu_plan.json"
+    record.write_text(json.dumps(dict(result.__dict__, environment=result.environment()), default=lambda o: o.__dict__))
+    assert gpu_plan.replay_environment(record) == result.environment()
+    copy = tmp_path / "elsewhere" / "gpu_plan.json"
+    assert gpu_plan.main(["--replay", str(record), "--format", "env", "--write", str(copy)]) == 0
+    assert copy.read_text() == record.read_text()
+    (tmp_path / "bare.json").write_text(json.dumps({"placements": []}))
+    with pytest.raises(RuntimeError, match="environment"):
+        gpu_plan.replay_environment(tmp_path / "bare.json")
+    with pytest.raises(RuntimeError):
+        gpu_plan.replay_environment(tmp_path / "missing.json")

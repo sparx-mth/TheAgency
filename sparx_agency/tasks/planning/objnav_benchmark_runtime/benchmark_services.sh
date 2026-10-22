@@ -19,6 +19,13 @@
 # The launcher provides: HAB_PY DETECT_PY RUN_MODULE SERVICE_DIR LOG AGENT RECORD, and say()/die().
 # RUN_MODULE is the benchmark's run CLI (its --print-vocabulary names the detector's classes, in the order
 # the policy's label table pins).
+#
+# A launcher that runs several benchmark processes against these services (gibson/run_benchmark.sh --parallel N)
+# sets HABITAT_RENDERERS=N before objnav_services_up so the GPU plan budgets one renderer per process, and may
+# define objnav_launcher_cleanup(): the EXIT trap calls it before the services go down, so the processes are
+# stopped first and never run against a dead detector (every such episode would be recorded as an agent error).
+# GPU_PLAN_REPLAY=<gpu_plan.json> starts the services from a recorded plan instead of planning again: the plan
+# is part of the frozen run configuration, and a resume that re-planned would be refused for its changed MiB.
 
 objnav_services_defaults() {
   HAB_PY="${HAB_PY:-$HOME/miniconda3/envs/habitat/bin/python}"
@@ -40,6 +47,18 @@ objnav_services_defaults() {
   OLLAMA_MODE="${OLLAMA_MODE:-docker}"
   OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-ollama-scene-graph}"
   OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$MODELS/ollama}"
+  # Request slots of the native server: one serialises every LLM call; a parallel run (--parallel N) raises it so the
+  # shards' node-oracle calls are batched on the card instead of queued. Each slot beyond the first costs its own KV
+  # cache (gpu_plan.py LLM_SLOT_FACTOR), so the plan reads it too.
+  OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
+  # The context the native server loads a model with when a request names none. The node oracle asks for its own
+  # (LLM_REASONING_NUM_CTX); the room-label calls do not, and without this they load qwen2.5:3b-instruct at the
+  # model's 32k -- 2.3 GB of KV cache per slot for prompts of a few hundred tokens (measured 2026-10-22).
+  OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
+  # Habitat renderers on the card at once: one per benchmark process (--parallel N sets it; the GPU plan reads it).
+  HABITAT_RENDERERS="${HABITAT_RENDERERS:-1}"
+  # A recorded gpu_plan.json to start the services from instead of planning again (a resume; see the header).
+  GPU_PLAN_REPLAY="${GPU_PLAN_REPLAY:-}"
   export LLM_BACKEND="${LLM_BACKEND:-ollama}"
   export LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:11434}"
   export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b-instruct}"
@@ -73,10 +92,18 @@ objnav_services_up() {
     export GPU_PLAN_LLM="${GPU_PLAN_LLM:-cpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
   fi
   if [[ "$GPU_PLAN" == "auto" ]]; then
-    export OLLAMA_MODELS_DIR
-    PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
-                 --gpu-device "$GPU_DEVICE" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
-      || die "gpu_plan.py could not place the processes (nvidia-smi? Ollama manifests under $OLLAMA_MODELS_DIR? set LLM_VRAM_MIB)"
+    export OLLAMA_MODELS_DIR OLLAMA_NUM_PARALLEL HABITAT_RENDERERS
+    if [[ -n "$GPU_PLAN_REPLAY" ]]; then
+      [[ -f "$GPU_PLAN_REPLAY" ]] || die "GPU_PLAN_REPLAY names no recorded plan at $GPU_PLAN_REPLAY"
+      PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
+                   --replay "$GPU_PLAN_REPLAY" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
+        || die "gpu_plan.py could not replay $GPU_PLAN_REPLAY"
+      say "GPU plan replayed from $GPU_PLAN_REPLAY (a resume keeps the devices the run was frozen with)" | tee -a "$LOG"
+    else
+      PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
+                   --gpu-device "$GPU_DEVICE" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
+        || die "gpu_plan.py could not place the processes (nvidia-smi? Ollama manifests under $OLLAMA_MODELS_DIR? set LLM_VRAM_MIB)"
+    fi
     OPERATOR_SHARED_GPU="$ALLOW_SHARED_GPU"
     eval "$PLAN_ENV"                      # sets ALLOW_SHARED_GPU=1 when more than one process (or a desktop) holds the card
     [[ "$OPERATOR_SHARED_GPU" == 1 ]] && ALLOW_SHARED_GPU=1
@@ -126,10 +153,11 @@ PY
       docker) docker start "$OLLAMA_CONTAINER" > /dev/null || die "docker start $OLLAMA_CONTAINER failed"; STARTED_OLLAMA=1 ;;
       native) command -v ollama > /dev/null || die "ollama not on PATH (OLLAMA_MODE=native)"
               mkdir -p "$OLLAMA_MODELS_DIR"
-              if [[ "$OLLAMA_CUDA_VISIBLE_DEVICES" == -1 ]]; then say "starting ollama on the CPU" | tee -a "$LOG"
-              else say "starting ollama on GPU $OLLAMA_CUDA_VISIBLE_DEVICES" | tee -a "$LOG"; fi
+              if [[ "$OLLAMA_CUDA_VISIBLE_DEVICES" == -1 ]]; then say "starting ollama on the CPU ($OLLAMA_NUM_PARALLEL request slot(s), default context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"
+              else say "starting ollama on GPU $OLLAMA_CUDA_VISIBLE_DEVICES ($OLLAMA_NUM_PARALLEL request slot(s), default context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"; fi
               CUDA_VISIBLE_DEVICES="$OLLAMA_CUDA_VISIBLE_DEVICES" OLLAMA_HOST="${LLM_BASE_URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" \
-                OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
+                OLLAMA_NUM_PARALLEL="$OLLAMA_NUM_PARALLEL" OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" \
+                OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
               OLLAMA_PID=$!; STARTED_OLLAMA=1 ;;
       external) die "no LLM service answers at $LLM_BASE_URL (OLLAMA_MODE=external: start it yourself)" ;;
       *) die "OLLAMA_MODE must be docker, native or external" ;;
@@ -215,6 +243,8 @@ PY
 objnav_services_cleanup() {
   code=$?
   trap - EXIT
+  # The launcher's own processes first (a parallel run's shards): they must not outlive the detector they call.
+  if declare -F objnav_launcher_cleanup > /dev/null; then objnav_launcher_cleanup || true; fi
   if [[ -n "$DETECTOR_PID" ]]; then kill -TERM "$DETECTOR_PID" 2>/dev/null || true; wait "$DETECTOR_PID" 2>/dev/null || true; fi
   if [[ -n "$SEGMENTER_PID" ]]; then kill -TERM "$SEGMENTER_PID" 2>/dev/null || true; wait "$SEGMENTER_PID" 2>/dev/null || true; fi
   if [[ "$STARTED_OLLAMA" == 1 ]]; then

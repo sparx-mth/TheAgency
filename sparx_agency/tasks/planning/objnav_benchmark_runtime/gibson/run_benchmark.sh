@@ -15,35 +15,45 @@
 #                                                           #   read on the object's own pixels (off by default)
 #   gibson/run_benchmark.sh --agent falcon-yolo --five-scene 3   # the FALCON + YOLO + closing baseline (no LLM): 15
 #                                                           #   recorded episodes; the same flag before a full-split run
+#   gibson/run_benchmark.sh --parallel 3                    # the full split as 3 interleaved shards at once on this
+#                                                           #   machine, one renderer each, sharing the services; the
+#                                                           #   shards go to <output>/shard_<k>/ and are merged into
+#                                                           #   <output>/ at the end (one summary, one comparison.md)
+#   gibson/run_benchmark.sh --parallel 3 --output runs/gibson_val_X   # resume that parallel run: each shard resumes
+#                                                           #   its own rows, the GPU plan is the one the run recorded
 #
 # The GPU is handed out by gibson/gpu_plan.py before the services start -- LLM first, YOLO second,
 # Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services). An operator
 # pin overrides the budget per process: GPU_PLAN_LLM / GPU_PLAN_YOLO / GPU_PLAN_HABITAT = auto | gpu | cpu
 # (GPU_PLAN_LLM=gpu GPU_PLAN_HABITAT=cpu: the LLM on the card, software rendering, YOLO where the VRAM allows).
+# --parallel N budgets N renderers and gives the native Ollama ceil(N/2) request slots (OLLAMA_NUM_PARALLEL
+# overrides), since the node oracle is about a third of a shard's wall time and the slots batch on the card.
 # Everything else is read from the environment, with defaults for the development laptop;
 # see BENCHMARK.md beside this file for the full list and what each one is for.
 set -euo pipefail
 
-usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${OBJNAV_REPO:-$(cd -- "$HERE/../../../../.." && pwd)}"
 # The services, their ports, the models, the LLM and the GPU plan are the shared launcher library's defaults;
 # only what is Gibson -- its episodes and scenes -- is set here (after DATA, which the library defines).
+OPERATOR_OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-}"      # the operator's word, before the library's default of 1
 source "$HERE/../benchmark_services.sh"
 objnav_services_defaults
 GIBSON_EPISODES_DIR="${GIBSON_EPISODES_DIR:-$DATA/objectnav/gibson/objectnav/gibson/v1.1/val}"
 GIBSON_SCENES_DIR="${GIBSON_SCENES_DIR:-$DATA/gibson/scenes}"
 
 # -- the command line -----------------------------------------------------------------------
-OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" FIVE_SCENES=() CATEGORY="" AGENT="rpt" EXTRA=()
+OUTPUT="" SCENE="" LIMIT="" RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 FIVE_SCENE="" FIVE_SCENES=() CATEGORY="" AGENT="rpt" PARALLEL="" EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) OUTPUT="$2"; shift 2 ;;
     --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
     --scene) SCENE="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
+    --parallel) PARALLEL="$2"; shift 2 ;;   # the full split as N concurrent shards on this machine, merged at the end
     --five-scene) FIVE_SCENE="$2"; RECORD=1; shift 2 ;;
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do FIVE_SCENES+=("$1"); shift; done ;;   # a subset, five-scene mode
     --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
@@ -70,6 +80,13 @@ die() { say "ERROR: $*" >&2; exit 1; }
 [[ -d "$GIBSON_SCENES_DIR" ]] || die "no scene directory at $GIBSON_SCENES_DIR (set GIBSON_SCENES_DIR)"
 [[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
 [[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS; mobile_sam.pt or sam2.1_t.pt from the ultralytics assets release)"
+if [[ -n "$PARALLEL" ]]; then
+  # The shards are merged by report.merge_runs, which accepts only complete, unlimited shards of the full split.
+  [[ "$PARALLEL" =~ ^[0-9]+$ && "$PARALLEL" -ge 2 ]] || die "--parallel needs an integer of at least 2, got '$PARALLEL'"
+  [[ -z "$FIVE_SCENE$SCENE$LIMIT$CATEGORY" ]] || die "--parallel runs the full published split only (no --five-scene, --scene, --limit or --category)"
+  HABITAT_RENDERERS="$PARALLEL"
+  [[ -n "$OPERATOR_OLLAMA_NUM_PARALLEL" ]] || OLLAMA_NUM_PARALLEL=$(( (PARALLEL + 1) / 2 ))
+fi
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   TAG="${CATEGORY:+${CATEGORY}_}"
@@ -91,6 +108,11 @@ say "repo $REPO" | tee -a "$LOG"
 say "output $OUTPUT" | tee -a "$LOG"
 git --no-pager rev-parse HEAD > "$SERVICE_DIR/source-commit.txt" 2>/dev/null || true
 git --no-pager diff --no-ext-diff > "$SERVICE_DIR/source-changes.diff" 2>/dev/null || true
+# A parallel run that already holds shard rows is a resume: the services start from the plan the run was frozen
+# with, or every shard would refuse its --resume for a plan whose free MiB are not what they were.
+if [[ -n "$PARALLEL" && -f "$OUTPUT/gpu_plan.json" ]] && compgen -G "$OUTPUT/shard_*/episodes.jsonl" > /dev/null; then
+  GPU_PLAN_REPLAY="$OUTPUT/gpu_plan.json"
+fi
 
 # -- the services: GPU plan, renderer, Ollama, the detector with the Gibson vocabulary, segmenter, FFmpeg ----------
 # (benchmark_services.sh: the same code hm3d/run_benchmark.sh runs; the detector takes its classes from the run
@@ -121,7 +143,7 @@ if [[ -n "$FIVE_SCENE" ]]; then
 fi
 
 # -- the run ------------------------------------------------------------------------------------
-ARGS=(--episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" --output "$OUTPUT"
+ARGS=(--episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR"
       --detector-url "$DETECTOR_URL" --detector-backend yolo_world
       --seed "$SEED" --gpu-device "$GPU_DEVICE" --allow-sim-version-mismatch)
 [[ "$AGENT" == rpt ]] && ARGS+=(--explorer frontier)              # the baseline explores with FALCON only
@@ -130,18 +152,34 @@ ARGS=(--episodes-dir "$GIBSON_EPISODES_DIR" --scenes-dir "$GIBSON_SCENES_DIR" --
 [[ "$RECORD" == 1 ]] && ARGS+=(--record)
 [[ "$LEAN" == 1 ]] && ARGS+=(--lean)
 [[ "$ALLOW_SHARED_GPU" == 1 ]] && ARGS+=(--allow-shared-gpu)
-[[ -s "$OUTPUT/episodes.jsonl" ]] && { say "resuming: $OUTPUT already holds episodes" | tee -a "$LOG"; ARGS+=(--resume); }
 [[ ${#SEGMENTER_FLAGS[@]} -gt 0 ]] && ARGS+=("${SEGMENTER_FLAGS[@]}")
 [[ ${#RENDER_FLAGS[@]} -gt 0 ]] && ARGS+=("${RENDER_FLAGS[@]}")
 ARGS+=("${EXTRA[@]}")
+# The selection and the directory: one process takes the whole split into $OUTPUT; a parallel run gives shard k
+# every PARALLEL-th published episode (gibson.run --shards) into $OUTPUT/shard_k, and the shards are merged below.
+shard_args() {   # k -> the arguments that make shard k of a parallel run (its own rows resumed when it holds any)
+  local dir="$OUTPUT/shard_$1"
+  printf '%s\n' --shards "$PARALLEL" --shard-index "$1" --output "$dir"
+  [[ -s "$dir/episodes.jsonl" ]] && printf '%s\n' --resume
+  return 0
+}
+if [[ -n "$PARALLEL" ]]; then
+  mapfile -t PREFLIGHT_ARGS < <(shard_args 0)
+else
+  PREFLIGHT_ARGS=(--output "$OUTPUT")
+  [[ -s "$OUTPUT/episodes.jsonl" ]] && { say "resuming: $OUTPUT already holds episodes" | tee -a "$LOG"; PREFLIGHT_ARGS+=(--resume); }
+fi
 
-say "preflight" | tee -a "$LOG"
-"${RENDER_WRAP[@]}" "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run "${ARGS[@]}" --preflight > "$OUTPUT/preflight.json" \
+say "preflight${PARALLEL:+ (shard 0 of $PARALLEL)}" | tee -a "$LOG"
+"${RENDER_WRAP[@]}" "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run "${ARGS[@]}" "${PREFLIGHT_ARGS[@]}" --preflight > "$OUTPUT/preflight.json" \
   || { cat "$OUTPUT/preflight.json"; die "preflight refused the run (see $OUTPUT/preflight.json)"; }
-"$HAB_PY" - "$OUTPUT/preflight.json" <<'PY'
+"$HAB_PY" - "$OUTPUT/preflight.json" "${PARALLEL:-1}" <<'PY'
 import json, sys
 config = json.load(open(sys.argv[1]))["configuration"]
-print("  episodes selected: %d%s" % (len(config["selected_episode_ids"]), "  (FULL published split)" if config["full_split"] else ""))
+shards = int(sys.argv[2])
+print("  episodes selected: %d%s" % (len(config["selected_episode_ids"]),
+      "  (FULL published split)" if config["full_split"] else
+      "  per shard, %d shards of the FULL published split run at once" % shards if shards > 1 else ""))
 print("  method: %s | lean records: %s | publishable: %s" % (config["method"]["method"], config["lean_records"], config["publishable"]))
 llm = config["method"].get("llm")
 print("  llm: %s" % ("none (the FALCON + YOLO + closing baseline)" if not llm else
@@ -154,6 +192,45 @@ print("  segmentation: %s" % ("ON -- %s on %s at %s" % (segmenter["model"], segm
 PY
 if [[ "$PREFLIGHT" == 1 ]]; then say "preflight only: done"; exit 0; fi
 
+# -- the parallel run: PARALLEL shards of gibson.run at once, then one merged result ----------------------------
+if [[ -n "$PARALLEL" ]]; then
+  SHARD_PIDS=()
+  objnav_launcher_cleanup() {   # the EXIT trap (benchmark_services.sh) calls this before the services go down
+    local pid
+    for pid in "${SHARD_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+    for pid in "${SHARD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+  }
+  date -u +%FT%TZ > "$OUTPUT/started_utc.txt"
+  say "running $PARALLEL shards; LLM slots $OLLAMA_NUM_PARALLEL; progress: $OUTPUT/shard_<k>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
+  SHARD_DIRS=()
+  for ((k = 0; k < PARALLEL; k++)); do
+    mapfile -t SHARD_ARGS < <(shard_args "$k")
+    SHARD_DIRS+=("$OUTPUT/shard_$k")
+    mkdir -p "$OUTPUT/shard_$k"
+    [[ " ${SHARD_ARGS[*]} " == *" --resume "* ]] && say "shard $k resumes its rows" | tee -a "$LOG"
+    "${RENDER_WRAP[@]}" "$HAB_PY" -u -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run "${ARGS[@]}" "${SHARD_ARGS[@]}" \
+      >> "$OUTPUT/shard_$k/run.log" 2>&1 &
+    SHARD_PIDS+=($!)
+    say "shard $k: pid $! -> $OUTPUT/shard_$k/run.log" | tee -a "$LOG"
+  done
+  FAILED=()
+  for ((k = 0; k < PARALLEL; k++)); do
+    set +e; wait "${SHARD_PIDS[$k]}"; code=$?; set -e
+    say "shard $k exited with $code" | tee -a "$LOG"
+    [[ "$code" == 0 ]] || FAILED+=("$k")
+    "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress "$OUTPUT/shard_$k" --summary 2>&1 | sed 's/^/  /' | tee -a "$LOG" || true
+  done
+  SHARD_PIDS=()
+  [[ ${#FAILED[@]} -eq 0 ]] || die "shard(s) ${FAILED[*]} failed (see $OUTPUT/shard_<k>/run.log); rerun the same command with --output $OUTPUT to resume them"
+  say "merging ${#SHARD_DIRS[@]} shards into $OUTPUT" | tee -a "$LOG"
+  "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.report "${SHARD_DIRS[@]}" --merge-output "$OUTPUT" > "$OUTPUT/merge.json" \
+    || die "the merge refused the shards (see $OUTPUT/merge.json and report.merge_runs)"
+  "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.progress "$OUTPUT" --summary | tee -a "$LOG"
+  say "results: $OUTPUT/summary.json (metrics), comparison.md (vs published), episodes.jsonl (one row per episode); the shards' own records under $OUTPUT/shard_<k>/"
+  exit 0
+fi
+
+ARGS+=("${PREFLIGHT_ARGS[@]}")
 date -u +%FT%TZ > "$OUTPUT/started_utc.txt"
 say "running; progress: $OUTPUT/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
 set +e

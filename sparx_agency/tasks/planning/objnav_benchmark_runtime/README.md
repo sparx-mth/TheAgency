@@ -785,7 +785,12 @@ the label tables, never the method:
    the services (`objnav_services_defaults` before its command line,
    `objnav_services_up` after it, with `RUN_MODULE` set to its `run.py`) and
    owns only what is the dataset's: where its episodes and scenes are, how the
-   split is partitioned into processes, what the output is named.
+   split is partitioned into processes, what the output is named. A launcher
+   that runs several processes against the one set of services (Gibson's
+   `--parallel N`) tells the library so before `objnav_services_up` --
+   `HABITAT_RENDERERS=N` for the GPU plan -- and defines
+   `objnav_launcher_cleanup` so the teardown stops its processes before the
+   detector they call.
 
 The method needs no change: it sees a camera, an action spec, RGB-D frames
 and a pose, and answers in world coordinates.

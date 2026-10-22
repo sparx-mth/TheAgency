@@ -13,7 +13,8 @@ from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
-    LEAN_DROP_KEYS, LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker, human_duration, lean_episode_info)
+    LEAN_DROP_KEYS, LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker, describe_progress, human_duration,
+    lean_episode_info, shard_progress_files)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_gibson import (
     LinePolicy, LineSimulator, semantic, write_dataset)  # noqa: F401  (the fixture)
@@ -137,3 +138,31 @@ def test_the_real_runner_writes_progress_and_lean_rows(tmp_path, semantic):
     assert row["agent_info"]["lean"] is True and "policy" in row["agent_info"]
     assert env.evaluation_diagnostics()["distance_to_goal_m"] == 0.0, "the scorer's diagnostics pass through the wrapper"
     env.close()
+
+
+def test_a_parallel_run_is_described_from_its_shards_until_the_merge_writes_one_progress_file(tmp_path):
+    assert shard_progress_files(tmp_path) == [] and "no progress.json" in describe_progress(tmp_path)
+    first = ProgressTracker(tmp_path / "shard_0" / "progress.json", total=2, label="gibson val")
+    second = ProgressTracker(tmp_path / "shard_1" / "progress.json", total=2, label="gibson val")
+    (tmp_path / "shard_x").mkdir()
+    (tmp_path / "shard_x" / "progress.json").write_text("{}")        # not a shard: ignored
+    first.update(1, 2, record("Collierville/000000", "Collierville", "toilet", True, 0.8, 0.0, steps=100, wall_s=40.0))
+    second.update(1, 2, record("Collierville/000001", "Collierville", "chair", False, 0.0, 3.0, steps=200, wall_s=80.0,
+                               termination=TERMINATION_STEP_LIMIT))
+    second.begin("Corozal/000003")
+    assert [path.parent.name for path in shard_progress_files(tmp_path)] == ["shard_0", "shard_1"]
+    text = describe_progress(tmp_path)
+    assert text.startswith("gibson val: 2/4 episodes (50.0%) in 2 shards")
+    assert "ETA (slowest shard) 1m20s" in text, "the run ends when its slowest shard does"
+    overall = [line for line in text.splitlines() if line.strip().startswith("overall")][0]
+    assert "n=   2  SR 0.500  SPL 0.400" in overall and "DTG  1.50" in overall and "steps 150" in overall
+    assert "Collierville   n=   2" in text and "terminations: step_limit=1, stop=1" in text
+    assert "shard_0    1/  2  SR 1.000  SPL 0.800" in text and "shard_1    1/  2  SR 0.000" in text
+    assert "running Corozal/000003" in text
+    first.update(2, 2, record("Corozal/000002", "Corozal", "bed", True, 1.0, 0.0))
+    first.finish()
+    text = describe_progress(tmp_path)
+    assert "shard_0    2/  2" in text and "FINISHED" in text and "ALL SHARDS FINISHED" not in text
+    # the merged run writes the root progress file (or summary): the single-run view takes over
+    (tmp_path / "progress.json").write_text((tmp_path / "shard_0" / "progress.json").read_text())
+    assert describe_progress(tmp_path).startswith("gibson val: 2/2 episodes")
