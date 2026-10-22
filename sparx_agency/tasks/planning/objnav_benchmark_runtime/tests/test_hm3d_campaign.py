@@ -207,3 +207,78 @@ def test_a_few_starts_may_sit_exactly_on_a_view_point():
               "max_abs_m": 4e-3}
     assert run.geodesic_agreement_issue(nearly) is None
     assert run.GEODESIC_AGREEMENT_FRACTION < 1.0
+
+
+# -- scenes at once (--jobs) -------------------------------------------------
+
+def test_concurrent_scenes_overlap_and_log_beside_not_inside_the_scene_directories(tmp_path):
+    """Three scenes with two jobs must have two children alive at once, and each
+    child's console must land in a file at the root: a subdirectory there would
+    be read by the aggregate as a scene without rows."""
+    import threading
+    import time
+
+    scenes = ("00800-TEEsavR23oF", "00802-wcojb4TFT35", "00803-k1cupFYWXJ6")
+    live, peak, guard = [0], [0], threading.Lock()
+
+    def runner(command, stdout=None, stderr=None):
+        assert stdout is not None, "a concurrent child must not write to the shared console"
+        scene = command[command.index("--scenes") + 1]
+        stdout.write("child %s\n" % scene)
+        with guard:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.2)
+        write_scene(tmp_path, scene, 1)
+        with guard:
+            live[0] -= 1
+        return types.SimpleNamespace(returncode=0 if scene != scenes[1] else 3)
+
+    results = campaign.run_campaign(tmp_path, version="v2", episodes_dir="E",
+                                    scenes_dir="S", limit=1, scenes=list(scenes),
+                                    runner=runner, jobs=2)
+    assert peak[0] == 2
+    assert [r["scene"] for r in results] == list(scenes)
+    assert [r["returncode"] for r in results] == [0, 3, 0]
+    for scene in scenes:
+        log = tmp_path / ("%s.console.log" % scene)
+        assert log.read_text() == "child %s\n" % scene
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_dir()) == sorted(scenes)
+    assert json.loads((tmp_path / "campaign.json").read_text())["jobs"] == 2
+
+
+def test_concurrent_resume_skips_finished_scenes_and_resumes_started_ones(tmp_path):
+    """--resume means the same thing whether scenes run one at a time or not."""
+    write_scene(tmp_path, SCENES[0], 1)
+    write_scene(tmp_path, SCENES[1], 1, finish=False)
+    seen = []
+
+    def runner(command, stdout=None, stderr=None):
+        seen.append(command)
+        return types.SimpleNamespace(returncode=0)
+
+    results = campaign.run_campaign(tmp_path, version="v2", episodes_dir="E",
+                                    scenes_dir="S", scenes=list(SCENES),
+                                    runner=runner, resume=True, jobs=4)
+    assert results[0]["status"] == "already finished"
+    assert len(seen) == 1 and "--resume" in seen[0]
+    assert seen[0][seen[0].index("--scenes") + 1] == SCENES[1]
+
+
+def test_jobs_below_one_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        campaign.run_campaign(tmp_path, version="v2", episodes_dir="E", scenes_dir="S",
+                              scenes=list(SCENES), runner=fake_runner([0, 0]), jobs=0)
+
+
+def test_jobs_reaches_the_campaign_from_its_command_line(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_campaign(*args, **kwargs):
+        seen.update(kwargs)
+        return []
+    monkeypatch.setattr(campaign, "run_campaign", fake_run_campaign)
+    write_scene(tmp_path, SCENES[0], 1)
+    campaign.main([str(tmp_path), "--version", "v2", "--episodes-dir", EPISODES,
+                   "--scenes-dir", "S", "--jobs", "5"])
+    assert seen["jobs"] == 5

@@ -32,6 +32,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import (
     CATEGORIES, HM3DDataset, published_counts)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
     PROTOCOLS, protocol_for)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool import (
+    run_concurrently)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.smoke_plan import (
     cover_plan, describe)
 
@@ -91,7 +93,8 @@ def scene_command(scene, output, *, version, episodes_dir, scenes_dir, limit=Non
 
 
 def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=None,
-                 split="val", extra=(), resume=False, runner=subprocess.run, smoke=False):
+                 split="val", extra=(), resume=False, runner=subprocess.run, smoke=False,
+                 jobs=1):
     """Run each scene in its own process and return what each one did.
 
     Args:
@@ -110,6 +113,10 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
             per scene, chosen so every goal category appears at least once
             (``smoke_plan``); the plan is written to ``<root>/smoke_plan.json``.
             Exclusive with ``limit``.
+        jobs: Scenes run at once. 1 runs them in order with the child's output
+            on this console; more runs them through ``scene_pool``, each
+            child's output in ``<root>/<scene>.console.log``. Children never
+            share a scene, so the rows are the same either way.
 
     Returns:
         One record per scene: its command, its exit status and its directory.
@@ -126,7 +133,9 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
         write_atomically(root / "smoke_plan.json",
                          strict_json(dict(account, version=version, split=split),
                                      "HM3D smoke plan", indent=2))
-    results = []
+    if int(jobs) < 1:
+        raise ValueError("jobs must be at least 1, got %r" % (jobs,))
+    results, pending = [], []
     for scene in selected:
         output = root / scene
         finished = (output / "summary.json").is_file()
@@ -140,13 +149,24 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
         command = scene_command(scene, output, version=version, split=split,
                                 episodes_dir=episodes_dir, scenes_dir=scenes_dir,
                                 limit=limit, extra=arguments, episode_ids=plan.get(scene))
-        completed = runner(command)
-        results.append({"scene": scene, "status": "ran",
-                        "returncode": int(getattr(completed, "returncode", 1)),
-                        "output": str(output), "command": command})
+        if int(jobs) == 1:
+            completed = runner(command)
+            results.append({"scene": scene, "status": "ran",
+                            "returncode": int(getattr(completed, "returncode", 1)),
+                            "output": str(output), "command": command})
+        else:
+            pending.append((scene, command))
+    if pending:
+        returncodes = run_concurrently(pending, root, int(jobs), runner=runner)
+        results.extend({"scene": scene, "status": "ran", "returncode": returncodes[scene],
+                        "output": str(root / scene), "command": command}
+                       for scene, command in pending)
+        order = {scene: index for index, scene in enumerate(selected)}
+        results.sort(key=lambda entry: order[entry["scene"]])
     write_atomically(root / "campaign.json",
                      strict_json({"version": version, "split": split, "limit": limit,
-                                  "smoke": bool(smoke), "scenes": len(selected), "runs": results},
+                                  "smoke": bool(smoke), "scenes": len(selected), "jobs": int(jobs),
+                                  "runs": results},
                                  "HM3D campaign", indent=2))
     return results
 
@@ -239,6 +259,8 @@ def main(argv=None):
     parser.add_argument("--scenes", nargs="+")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
+    parser.add_argument("--jobs", type=int, default=1,
+                        help="Scenes run at once; above 1 each child logs to <root>/<scene>.console.log")
     # Anything after a bare "--" is passed through to every child run.py.
     args, extra = parser.parse_known_args(argv)
     if extra[:1] == ["--"]:
@@ -249,7 +271,7 @@ def main(argv=None):
                                episodes_dir=args.episodes_dir,
                                scenes_dir=args.scenes_dir, limit=args.limit,
                                scenes=args.scenes, extra=extra, resume=args.resume,
-                               smoke=args.smoke)
+                               smoke=args.smoke, jobs=args.jobs)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
         if failed:
             print("Scenes that did not exit cleanly: %s" % ", ".join(failed))

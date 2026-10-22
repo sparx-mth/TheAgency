@@ -40,6 +40,9 @@ objnav_services_defaults() {
   OLLAMA_MODE="${OLLAMA_MODE:-docker}"
   OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-ollama-scene-graph}"
   OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$MODELS/ollama}"
+  # Requests one native Ollama serves at once. 1 for a single run; a campaign with --jobs N needs more, or its
+  # children queue on the LLM. Each slot holds its own KV cache (~1.5 GiB for the 14B at 8192 tokens).
+  OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
   export LLM_BACKEND="${LLM_BACKEND:-ollama}"
   export LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:11434}"
   export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b-instruct}"
@@ -127,9 +130,9 @@ PY
       native) command -v ollama > /dev/null || die "ollama not on PATH (OLLAMA_MODE=native)"
               mkdir -p "$OLLAMA_MODELS_DIR"
               if [[ "$OLLAMA_CUDA_VISIBLE_DEVICES" == -1 ]]; then say "starting ollama on the CPU" | tee -a "$LOG"
-              else say "starting ollama on GPU $OLLAMA_CUDA_VISIBLE_DEVICES" | tee -a "$LOG"; fi
+              else say "starting ollama on GPU $OLLAMA_CUDA_VISIBLE_DEVICES (OLLAMA_NUM_PARALLEL=$OLLAMA_NUM_PARALLEL)" | tee -a "$LOG"; fi
               CUDA_VISIBLE_DEVICES="$OLLAMA_CUDA_VISIBLE_DEVICES" OLLAMA_HOST="${LLM_BASE_URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" \
-                OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
+                OLLAMA_NUM_PARALLEL="$OLLAMA_NUM_PARALLEL" OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
               OLLAMA_PID=$!; STARTED_OLLAMA=1 ;;
       external) die "no LLM service answers at $LLM_BASE_URL (OLLAMA_MODE=external: start it yourself)" ;;
       *) die "OLLAMA_MODE must be docker, native or external" ;;

@@ -411,9 +411,28 @@ is labelled as such.
 - Run v1 the same way with `--version v1` and `HM3D_EPISODES_DIR=.../hm3d/v1/val`.
 - The campaign exits non-zero when any scene crashed or produced no rows, so it
   can gate a scripted sweep.
+- `--jobs N` runs N scenes at once (each child's console goes to
+  `<root>/<scene>.console.log`; `run_benchmark.sh --jobs N` forwards it). A child
+  spends roughly half its time waiting on the 14B oracle, so give a native Ollama
+  more slots with `OLLAMA_NUM_PARALLEL` -- but every slot is its own KV cache
+  (~1.5 GiB for the 14B at 8192 tokens), and when the two models no longer fit
+  beside the renderers Ollama evicts one, requests time out at `LLM_TIMEOUT_S`,
+  and the policy falls back to the nearest frontier: the run continues with a
+  *different method*. Measured on the RTX 4090 (2026-10-22): `OLLAMA_NUM_PARALLEL=4`
+  with 8 jobs evicted and timed out; `OLLAMA_NUM_PARALLEL=2` with 6 jobs held
+  both models (19.4 GB) with no LLM failure; `OLLAMA_NUM_PARALLEL=3` with 8 jobs
+  held them too (21.6 GB) at 1.32× that throughput. Slots above 1 are **not
+  bit-reproducible**: batching concurrent requests changes the numerics, so even
+  at temperature 0 the oracle can answer differently -- 4 of 12 episodes shared
+  by those two pilots took different paths. Only `OLLAMA_NUM_PARALLEL=1`
+  reproduces a serial run step for step. After any parallel run, check
+  `grep -c "room_llm failure\|timed out" <root>/*.console.log` is zero and
+  `grep -c evicting <root>/ollama.log` is zero.
 
-Budget: 1000 episodes × ~8–10 min ≈ 6–7 days on one GPU with CPU services; v1's
-2000 episodes double it. Split across machines with `hm3d.run`'s
+Budget: with GPU services on the RTX 4090 an HM3D-v1 episode takes ~70 s serially
+(2000 episodes ≈ 40 h); `--jobs 8` with `OLLAMA_NUM_PARALLEL=3` runs ~4.4× that
+throughput. On the laptop with CPU services an episode is ~8–10 min. Or split
+across machines with `hm3d.run`'s
 `--shards N --shard-index I` (deterministic, stable selection) and merge with
 `report.py --merge-output`, which refuses shards that disagree on data, protocol,
 method or runtime, or that do not cover every episode exactly once:
@@ -615,6 +634,7 @@ issue.
 | `../tests/hm3d_stand_in_fixture.py` | an HM3D-format `dev_gibson` split on a Gibson mesh, to run this adapter's real path where the HM3D scenes are absent |
 | `run.py` | preflight and the run, on the shared `run_evaluation` (progress, lean rows and diagnostics via its `wrap_env` / `agent_class` hooks); builds the shared `RPTSearchPolicy` from this protocol's agent |
 | `campaign.py` | one child process per scene, then an aggregate over what finished |
+| `scene_pool.py` | `--jobs N`: N scene children at once, each logging to `<root>/<scene>.console.log` |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
 | `sota.py` | the published numbers, with the table each came from |
 | `frozen_eval.py` | freeze an exact configuration, then run the full split under it |

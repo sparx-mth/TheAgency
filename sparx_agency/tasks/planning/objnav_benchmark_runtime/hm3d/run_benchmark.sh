@@ -3,6 +3,7 @@
 #
 #   hm3d/run_benchmark.sh                                   # the full published v2 val split (1,000 episodes / 36 scenes), lean records
 #   hm3d/run_benchmark.sh --version v1                      # the v1 val split (2,000 episodes / 20 scenes)
+#   hm3d/run_benchmark.sh --version v1 --jobs 6             # ... six scenes at once (give Ollama OLLAMA_NUM_PARALLEL slots)
 #   hm3d/run_benchmark.sh --scene 00877-4ok3usBNeis --limit 1           # one episode of one scene
 #   hm3d/run_benchmark.sh --scene 00877-4ok3usBNeis --limit 3 --record  # three recorded episodes (video + HUD) of one scene
 #   hm3d/run_benchmark.sh --smoke                           # the minimal cover: one published episode per scene, every category at least once
@@ -30,9 +31,11 @@
 #                        geodesic (99% within 1 mm, or the scene refuses to run: that is the navmesh check)   default 1
 #   EXCLUDE_UNREACHABLE  1: drop, and record, an episode whose goal view points are unreachable instead of stopping   default 0
 #   SPLIT                val (the benchmark); train / val_mini are development splits and are labelled subsets   default val
+#   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; with --jobs N, about N/2 keeps the children from
+#                        queueing on the LLM (each slot is its own KV cache)                                    default 1
 set -euo pipefail
 
-usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +52,7 @@ CAMPAIGN_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.campai
 PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
 
 # -- the command line -----------------------------------------------------------------------
-VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" SCENES=() EXTRA=()
+VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -58,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --scene) SCENE="$2"; shift 2 ;;                            # one scene, run directly by hm3d.run
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do SCENES+=("$1"); shift; done ;;   # a subset of the campaign's scenes
     --limit) LIMIT="$2"; shift 2 ;;                            # episodes (per scene, in the campaign)
+    --jobs) JOBS="$2"; shift 2 ;;                              # scenes at once (campaign only)
     --smoke) SMOKE=1; shift ;;
     --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
     --record) RECORD=1; shift ;;
@@ -96,6 +100,8 @@ HM3D_EPISODES_DIR="${HM3D_EPISODES_DIR:-$DATA/objectnav/hm3d/$VERSION/$SPLIT}"
 [[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS)"
 [[ "$SMOKE" == 0 || -z "$LIMIT" ]] || die "--smoke chooses one episode per scene itself; it takes no --limit"
 [[ "$SMOKE" == 0 || -z "$SCENE" ]] || die "--smoke is a campaign over scenes; use --scene X --limit 1 for one scene"
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer"
+[[ "$JOBS" == 1 || -z "$SCENE" ]] || die "--jobs runs scenes of a campaign at once; a --scene run is one process"
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   TAG="${CATEGORY:+${CATEGORY}_}"
@@ -188,6 +194,7 @@ fi
 # -- the campaign: every scene of the split (or --scenes), one process each, then the aggregate ---------------------
 CAMPAIGN_ARGS=("$OUTPUT" --version "$VERSION" --split "$SPLIT" --episodes-dir "$HM3D_EPISODES_DIR" --scenes-dir "$HM3D_SCENES_DIR")
 [[ -n "$LIMIT" ]] && CAMPAIGN_ARGS+=(--limit "$LIMIT")
+CAMPAIGN_ARGS+=(--jobs "$JOBS")
 [[ "$SMOKE" == 1 ]] && CAMPAIGN_ARGS+=(--smoke)
 [[ ${#SCENES[@]} -gt 0 ]] && CAMPAIGN_ARGS+=(--scenes "${SCENES[@]}")
 if [[ -f "$OUTPUT/campaign.json" ]] || ls -d "$OUTPUT"/*/ > /dev/null 2>&1; then
@@ -195,7 +202,7 @@ if [[ -f "$OUTPUT/campaign.json" ]] || ls -d "$OUTPUT"/*/ > /dev/null 2>&1; then
   CAMPAIGN_ARGS+=(--resume)
 fi
 # hm3d.run's --version/--split/--episodes-dir/--scenes-dir come from the campaign itself; the rest is passed through after "--".
-say "campaign ($AGENT): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; else echo "every ${CATEGORY:+$CATEGORY }episode of the split"; fi), one process per scene; per-scene progress under $OUTPUT/<scene>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
+say "campaign ($AGENT): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; else echo "every ${CATEGORY:+$CATEGORY }episode of the split"; fi), one process per scene, $JOBS at once; per-scene progress under $OUTPUT/<scene>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
 set +e
 "${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$CAMPAIGN_MODULE" "${CAMPAIGN_ARGS[@]}" -- "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" 2>&1 | tee -a "$LOG"
 RUN_CODE=${PIPESTATUS[0]}
