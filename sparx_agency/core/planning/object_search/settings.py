@@ -30,6 +30,16 @@ class RPTSettings:
             and a ten-action-old mask confines routes to a room that has
             since moved. This is not the LLM cadence; the room LLM runs at
             the loop's own points (see ``room_search_loop.LoopSettings``).
+        transit_graph_period_steps: The cadence instead while the loop walks
+            a COMMITTED transit route under its commitment rule
+            (``LoopSettings.transit_commitment``): the follower needs the map
+            and its route, not a fresh partition, and the full rebuild --
+            watershed, registry, frontier inventory, per-room facts -- was
+            1.4 s of a 1.7 s median decision on Corozal/000003
+            (``c1af8954a378``, 2026-10-22). 5 by default; the loop forces a
+            rebuild on the action a transit ends, and a loop point always
+            reasons over geometry refreshed on its own action. A value at or
+            under ``graph_period_steps`` disables the throttle.
         warmup_steps: Upper bound on the warm-up rotation taken in place
             where the agent stands before any room is chosen (and again on
             every storey first entered). The rotation itself is as long as
@@ -104,6 +114,7 @@ class RPTSettings:
     map_resolution_m: float = 0.1
     depth_stride: int = 8
     graph_period_steps: int = 1
+    transit_graph_period_steps: int = 5
     replan_steps: int = 5  # accepted for old configs; not a path replacement timer
     action_time_s: float = 1.0
     # The floor under which a box is not projected at all. 0.30 since 2026-10-07,
@@ -180,7 +191,8 @@ class RPTSettings:
                 raise ValueError("%s must be positive and finite" % name)
         if self.landmark_miss_max_range_m <= self.landmark_miss_min_range_m:
             raise ValueError("landmark_miss_max_range_m must exceed landmark_miss_min_range_m")
-        for key in ("depth_stride", "graph_period_steps", "replan_steps", "target_memory_steps", "max_rooms", "warmup_steps"):
+        for key in ("depth_stride", "graph_period_steps", "transit_graph_period_steps", "replan_steps",
+                    "target_memory_steps", "max_rooms", "warmup_steps"):
             if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
                 raise ValueError("%s must be a positive integer" % key)
         if not 0 <= self.detection_confidence <= 1 or type(self.seed) is not int:

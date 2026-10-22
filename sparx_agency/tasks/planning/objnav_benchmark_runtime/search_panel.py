@@ -105,7 +105,7 @@ def _header(col, search):
         planned = glance["planned"]
         col.line("glance %s planned %.1f m ahead: %.1f m2 for %d actions" % (
             planned.get("kind", "?"), planned.get("along_m", 0.0), planned.get("gain_m2", 0.0), planned.get("actions", 0)), GREY)
-    col.line("Accessible frontiers: %d (blue diamonds)" % len(search.get("accessible_frontiers", ())), GREY)
+    col.line("Accessible frontiers: %d (blue diamonds on the map, one per cluster)" % len(search.get("accessible_frontiers", ())), GREY)
     floor = search.get("floor") or {}
     if floor:
         col.line("building: %s | arrived by stairs %s | active portal %s (%s)" % (

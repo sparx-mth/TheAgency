@@ -777,20 +777,37 @@ def _parts_skeleton(skeleton: np.ndarray, cell: Tuple[int, int],
     to leave any skeleton outside the disk counts as that far side when
     the disk itself reaches the unknown's band over floor (``healed``).
     """
-    shape = skeleton.shape
-    disk = door_disk_mask(shape, [cell], radius)
-    outside = skeleton & ~disk
-    ring = door_disk_mask(shape, [cell], radius + 2) & outside
+    # Judged on the skeleton's own bounding box -- the known area -- rather than the whole grid (since
+    # 2026-10-22: the 800x800 grid was labelled twice per candidate, a hundred times per scene-graph update,
+    # 0.4 s of the update's 0.7). Exact: nothing of the skeleton lies outside the box, and the pieces'
+    # connectivity, sizes and contact with the unknown are global properties the box contains whole.
+    rows = np.flatnonzero(skeleton.any(axis=1))
+    cols = np.flatnonzero(skeleton.any(axis=0))
+    if not len(rows):
+        return False
+    H, W = skeleton.shape
+    y0, y1 = max(0, int(rows[0]) - 1), min(H, int(rows[-1]) + 2)
+    x0, x1 = max(0, int(cols[0]) - 1), min(W, int(cols[-1]) + 2)
+    cx, cy = int(cell[0]), int(cell[1])
+    if not (y0 <= cy < y1 and x0 <= cx < x1):
+        return False
+    window = (slice(y0, y1), slice(x0, x1))
+    shape = (y1 - y0, x1 - x0)
+    local_cell = (cx - x0, cy - y0)
+    skeleton_w = skeleton[window]
+    disk = door_disk_mask(shape, [local_cell], radius)
+    outside = skeleton_w & ~disk
+    ring = door_disk_mask(shape, [local_cell], radius + 2) & outside
     ring_groups, n_groups = cc_label(ring, structure=_EIGHT)
-    disk_leads_on = bool(leads_on is not None and healed is not None
-                         and (disk & healed & np.asarray(leads_on, bool)).any())
+    leads_w = None if leads_on is None else np.asarray(leads_on, bool)[window]
+    disk_leads_on = bool(leads_w is not None and healed is not None and (disk & healed[window] & leads_w).any())
     if n_groups < 2 and not (n_groups == 1 and disk_leads_on):
         return False
     components, _ = cc_label(outside, structure=_EIGHT)
     sizes = np.bincount(components.ravel())
     reaching = None
-    if leads_on is not None:
-        reaching = set(np.unique(components[np.asarray(leads_on, bool) & outside]).tolist()) - {0}
+    if leads_w is not None:
+        reaching = set(np.unique(components[leads_w & outside]).tolist()) - {0}
     substantial, short_leading = set(), set()
     for group in range(1, n_groups + 1):
         member = components[ring_groups == group]

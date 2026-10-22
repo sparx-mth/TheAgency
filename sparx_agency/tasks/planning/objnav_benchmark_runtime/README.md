@@ -11,8 +11,11 @@ Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order
 local exploration and A*/WA* paths → existing discrete actions. Both explorers
 retain persistent floor contexts; stairs are what the robot's own RGB-D
 measures by default (`RPTSettings.multifloor.stair_source: "observed"` since
-2026-10-21 -- a reachable run of treads rising 0.40 m within 5 m,
-`world_model/stair_terrain.py`; no simulator geometry is read. The navmesh
+2026-10-21 -- a reachable run of treads rising 0.40 m within 5 m in a
+flight's profile: three or more risers of 0.10-0.24 m with no level between
+them walked for more than 0.55 m, `world_model/stair_terrain.py`
+`stair_profile` since 2026-10-22, when a coffee table and a sofa had passed
+for one; no simulator geometry is read. The navmesh
 connectors are the `"ground_truth"` ablation, see
 [MULTISTORY.md](gibson/MULTISTORY.md): their centreline begins 0.45 m before
 Darden's first riser, on a sloped threshold, and drawn on the grid it closed
@@ -741,7 +744,8 @@ tasks/planning/objnav_benchmark_runtime/   THIS TREE: the adapters and the opera
     hm3d/              the HM3D v1/v2 adapter: protocol, dataset, habitat-lab's view-point metrics, ObjNavEnv, run CLI,
                        the scene-per-process campaign and its launcher, reports (README there)
     mp3d/              the next Habitat dataset, on its own branch (feat/objnav-habitat-mp3d-*); same shape as hm3d/
-    recording.py, visualization.py, floor_panels.py, search_panel.py, dashboard.py   video, HUD, live page
+    recording.py, visualization.py, floor_panels.py, search_panel.py, dashboard.py   the step log, the map journal, video, HUD, live page
+    review_recording.py   read a recording by step from the log (summary, timeline, step N, map N, events)
     tests/             the method's regression rig (fake services, the benchmark camera, synthetic maps) and the adapter tests
 ```
 
@@ -823,7 +827,7 @@ and a pose, and answers in world coordinates.
 | `multifloor/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
 | `multifloor/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
 | `multifloor/stair_ground_truth.py`, `multifloor/floor_decision.py`, `multifloor/ground_truth_traversal.py`, `multifloor/stair_sightings.py` | Ground-truth stairs (the `stair_source: "ground_truth"` ablation): the navmesh connectors as the policy reads them, the fallback rule's up/down choice, the committed polyline traversal, the perfect stair detector |
-| `world_model/stair_terrain.py`, `world_model/stair_grid.py`, `multifloor/stair_traversal.py` | Observed stairs (the default since 2026-10-21): measured support surfaces, step-connected candidate paths rising `stair_min_rise_m` -- the portals the capsule masks under the benchmark's confinement -- and, with traversal allowed, native-heading safety checks and the committed transition lifecycle |
+| `world_model/stair_terrain.py`, `world_model/stair_grid.py`, `multifloor/stair_traversal.py` | Observed stairs (the default since 2026-10-21): measured support surfaces, step-connected candidate paths rising `stair_min_rise_m` in a flight's profile (`stair_profile`: `stair_min_risers` risers of `stair_riser_min_m`-`max_step_m`, treads at most `stair_max_tread_m`) -- the portals the capsule masks under the benchmark's confinement -- and, with traversal allowed, native-heading safety checks and the committed transition lifecycle |
 | `falcon/policy.py`, `falcon/regions.py` | Bounded hierarchy and persistent local region history |
 | `falcon/motion.py`, `falcon/routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
 
@@ -860,7 +864,8 @@ action converter serialises the LOOK before the body action):
 | `gibson/protocol.py`, `gibson/dataset.py`, `gibson/distance.py`, `gibson/env.py` | The SemExp v1.1 protocol, the published episodes and evaluator maps, the FMM scorer, the `ObjNavEnv` |
 | `gibson/run.py`, `gibson/frozen_eval.py`, `gibson/run_development.py` | Protocol execution and frozen source/model/data checks |
 | `gibson/gpu_plan.py` | Who gets the one GPU -- LLM, then YOLO-World, then Habitat -- from the free VRAM and explicit footprints; the rest on the CPU; the plan recorded in every run |
-| `recording.py`, `floor_panels.py`, `search_panel.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels with the rooms and visit order drawn on the active floor, the search column, grids and video |
+| `recording.py`, `floor_panels.py`, `search_panel.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels with the rooms and visit order drawn on the active floor, the search column, grids and video; `floor_panels.py` also keeps the per-action **map journal** (`map_journal.npz`) |
+| `review_recording.py` | The log-side review of a recording: `summary`, `timeline`, `step N` (everything the log holds about one action, and the map of that action by sector round the agent), `map N` (the map of that action as text), `events`. A review pointed at a step reads this, never a video frame |
 | `gibson/run.py`, `hm3d/run.py`, their `frozen_eval.py`, `run_development.py` | Per-task protocol execution and frozen source/model/data checks |
 | `tests/trace_room_search_loop.py` | Development probe: the loop on the production map size with fake services and the real action converter on a point agent; not a test |
 
@@ -2463,6 +2468,39 @@ It keeps images/maps out of per-step JSON; the JSON records compact observed
 state, actions, predictions, paths and reasoning. Model service metadata pins
 checkpoint bytes and vocabulary atomically with inference. Missing or changed
 services raise rather than silently changing the evaluated method.
+
+**The log is the record; the video is for a person watching.** A recording
+directory holds, per episode:
+
+| file | holds |
+|---|---|
+| `steps.jsonl` | one row per decision: pose, action and the follower's status, the command (route reason, kind, waypoints), the method's snapshot -- state, the search column (rooms with probability / type / frontier / entry / distance, the RPT* order, the node in force and the next, the transit's committed room and entry point, the openings, the **frontier inventory in full** -- size, walk, facing, utility, room -- the explore visit's ranked goals, the loop's events, the oracle's reading, the exclusions, the places failed), detections, target closing, the control counters (A\*, classifier, room LLM, RPT\* calls so far) |
+| `map_journal.npz` | the cells of the occupancy grid, the settled-unknown mask and the room partition that changed on every action, as deltas (since 2026-10-22): the map of ANY action is replayed from it |
+| `floor_maps.npz`, `room_partitions.npz`, `floor_panels.json` | the final maps and the display panels' metadata |
+| `metrics.json` | the outcome and the policy's diagnostics, including the latency ledger (where the wall time went) |
+| `trajectory.csv`, `episode.json` | the poses per action; the episode's identity and the review command |
+| `video.mp4`, `final.jpg`, `frames/` | the dashboard, for watching |
+
+A review that is pointed at an action reads the log through
+`review_recording.py`, never a frame:
+
+```bash
+R=runs/<campaign>/<scene>/recordings/<key>
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording $R summary         # outcome, latency ledger, release verdicts
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording $R timeline --start 120 --end 140
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording $R step 261         # the action, and its map by sector round the agent
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording $R map 261 --radius 6 --cell 0.2
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording $R events --name release
+```
+
+`step N` ends with the map of that action summarised in the agent's frame --
+ahead / left / behind / right, within the radius: free, occupied, unknown and
+settled area, raw frontier cells, and the frontier goals and openings that
+fall in each sector -- so "there is unknown to the robot's left and no
+frontier there" is a line of numbers with its reason beside it (settled by
+the sight ledger; behind occupied cells; under the significance floor), not
+an impression from a picture. Recordings made before the journal existed
+fall back to the final map and say so.
 
 `render_replay(recording_dir, render_pose, ...)` takes a callback receiving an
 `AgentPose` and returning uint8 RGB. The adapter owns scene loading, GPU safety

@@ -11,6 +11,37 @@ Format per entry:
 
 ---
 
+## 2026-10-22 — Reviewing Corozal/000003 from video frames when the step log should have answered: the recording did not keep the map of each action
+
+**Symptom:** Asked why, at action 261 of the toilet episode `c1af8954a378`, the agent never looked at the
+unknown on its left and why no frontier was shown there, and why at 291 it walked back through the open room
+it had crossed five times, the review decoded two frames of `video.mp4` and read the dashboard off the
+pixels. The timeline, the latency ledger and the release verdicts had all come out of `steps.jsonl` in
+minutes; the two questions about the MAP at a step did not, because `steps.jsonl` carried the frontier goals
+as bare coordinates and the only saved map was the final one (`floor_maps.npz`).
+
+**Root cause:** The recording was built for a person watching and for aggregate review, not for standing at
+one action: the per-step row had no map, no settled-unknown mask, no partition, and no account of each
+frontier goal (size, walk, facing, utility, room), so "what lay to the left and why was it not a goal" was
+only in the frame. Reading frames is slow, lossy and unverifiable -- a review that is pointed at a step and
+answers from a picture cannot say whether the unknown it saw was settled by the sight ledger, lay behind
+occupied cells or fell under the significance floor.
+
+**Fix / workaround:** The recording now keeps a **map journal** (`floor_panels.py`, `map_journal.npz`): the
+cells of the occupancy grid, the settled mask and the room partition that changed on every action, as sparse
+deltas, so the map of any action is replayed from the log; the step row carries the frontier inventory in
+full, the transit's committed room and entry, the explore visit's ranked goals and the failed places; and
+`review_recording.py` reads a recording by step -- `summary`, `timeline`, `step N` (with the map of that
+action summarised by sector round the agent: free / occupied / unknown / settled area, raw frontier cells,
+the goals and openings in each sector), `map N` as text, `events`. The rule for every review from here:
+pointed at a step, read `step N` and `map N`; open a frame only to check what the log already says.
+
+**Don't:** Don't answer a question about one action from a video frame or a still, and don't accept a
+recording whose per-step log cannot reproduce what the dashboard drew: whatever a frame shows that
+`steps.jsonl` plus the journal do not is a gap in the recording to be closed, not a reason to look at pixels.
+
+---
+
 ## 2026-10-20 — The first HM3D sweep lost a scene to the harness, not the method: one step down a stair tread was "a pose left in the Y-up frame"
 
 **Symptom:** In the first 20-scene HM3D-v1 campaign (one published episode per scene, 3B oracle),

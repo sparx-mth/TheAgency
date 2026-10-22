@@ -6,6 +6,7 @@ import math
 import numpy as np
 
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenham
+from sparx_agency.core.mapping.topology.frontier_split import side_min_cells, side_window_cells
 from sparx_agency.core.mapping.topology.room_adjacency import room_adjacency
 from sparx_agency.core.mapping.topology.room_registry import RoomRegistry
 from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters, link_doors, door_room_pairs
@@ -375,7 +376,9 @@ class ObservedSceneGraph:
         self.labels = pid_labels
         self._door_links(world, pid_labels, doors, cells)
         frontier_world = self.frontier_world(world)
-        counts = count_frontier_clusters(frontier_world.grid, pid_labels, min_cluster_cells=4)
+        counts = count_frontier_clusters(frontier_world.grid, pid_labels, min_cluster_cells=4,
+                                         side_window_cells=side_window_cells(world.resolution),
+                                         side_min_cells=side_min_cells(world.resolution, 4))
         self.facts = {pid: RoomFacts(pid, counts.get(pid + 1, 0), self.searched.get(pid, 0.0), room.n_cells)
                       for pid, room in rooms.items()}
         self.frontier_inventory = None
@@ -584,7 +587,8 @@ class ObservedSceneGraph:
                 scanned_ago_s=None if finished is None or finished[1] is None else max(0.0, float(finished[1])),
                 exits=0 if gaps is None else int(gaps.count),
                 doorways=0 if gaps is None else int(gaps.doorways),
-                glimpsed=() if gaps is None else tuple(gaps.glimpsed)))
+                glimpsed=() if gaps is None else tuple(gaps.glimpsed),
+                unseen_m2=0.0 if gaps is None else float(getattr(gaps, "unseen_m2", 0.0))))
         return out
 
     def _reason(self, world, objects, target, step, changed, extra_nodes=(), context=None, here_xy=None,

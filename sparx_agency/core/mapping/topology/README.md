@@ -47,6 +47,12 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   (`door_room_pairs`), frontier cluster counting
   (`count_frontier_clusters`), room-at-cell majority-vote lookup
   (`room_at_cell`), and the golden-ratio room color (`room_color`).
+- `frontier_split.py` — the cut shared by `count_frontier_clusters` and
+  the planning side's goal maker (`core/planning/exploration/room_costs.py`
+  `frontier_clusters`): a frontier component that wraps round a block of
+  unknown is one cluster per side of the block (`frontier_sides`,
+  `split_by_side`), so an unmapped room seen along three sides has a way
+  in from each; an arc bulging into the open unknown stays whole.
 
 **Graph-based (MORE, untested in flight).** The Werby et al. (2025)
 implementation operating on a Voronoi navigation graph:

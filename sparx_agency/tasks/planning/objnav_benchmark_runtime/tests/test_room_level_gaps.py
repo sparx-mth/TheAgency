@@ -65,7 +65,9 @@ def test_the_oracle_is_shown_rooms_only_each_with_its_exits_and_no_exit_gets_a_n
     policy.graph.probs = {0: 0.0, 1: 0.6}
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert reasoned == [0] and policy.reasoned_with[0]["stairs"] == [], "the oracle saw the rooms, not the gaps"
-    assert policy.reasoned_with[0]["exits"] == {0: RoomExits(count=1), 1: RoomExits(count=2)}
+    exits = policy.reasoned_with[0]["exits"]
+    assert {pid: (e.count, e.doorways, e.glimpsed) for pid, e in exits.items()} == {0: (1, 0, ()), 1: (2, 0, ())}
+    assert all(e.unseen_m2 > 0.0 for e in exits.values()), "and the unseen floor behind them rides along (2026-10-22)"
     assert policy.loop._folded_now == {o.node_id for o in before} and policy.loop.stats["openings_folded"] == 3
     assert set(policy.loop._openings) == {o.node_id for o in before}, "still on record for the HUD and the landmark lookups"
     assert not any(k >= 200_000 for k in policy.loop.estimates), "no opening in the estimate: nothing RPT* was handed"
@@ -79,7 +81,7 @@ def test_the_oracle_is_shown_rooms_only_each_with_its_exits_and_no_exit_gets_a_n
     # The real scene graph renders the attributes on the room's line, as the prompt describes them.
     nodes = {n.id: n for n in policy.graph.nodes(world, 0, exits=policy.reasoned_with[0]["exits"])}
     assert nodes[1].kind == ROOM and nodes[1].exits == 2 and nodes[1].doorways == 0 and nodes[1].glimpsed == ()
-    assert "  exits=2  " in format_node(nodes[1]) and "  exits=1  " in format_node(nodes[0])
+    assert "  exits=2 (~1m2 unseen behind them)  " in format_node(nodes[1]) and "  exits=1 (~1m2" in format_node(nodes[0])
     assert OPENING not in {n.kind for n in nodes.values()} and "OPENING" not in system_prompt(list(nodes.values()))
     # The frozen configuration says so.
     configuration = policy.configuration()
@@ -152,7 +154,8 @@ def test_a_room_a_rotation_finished_with_gaps_left_is_reopened_for_them_entered_
     gap = west_gap(openings_of(legacy, episode_l, world_l))
     legacy.loop.plan(obs_at(episode_l, 0, IN_A), world_l)
     assert legacy.loop._excluded == {0: "scanned:" + SCAN_POINT_INSIDE} and legacy.loop._reopened == set()
-    assert gap.node_id in legacy.reasoned_with[0]["stairs"] and legacy.reasoned_with[0]["exits"] == {1: RoomExits(count=2)}
+    assert gap.node_id in legacy.reasoned_with[0]["stairs"]
+    assert {pid: e.count for pid, e in legacy.reasoned_with[0]["exits"].items()} == {1: 2}
 
 
 def test_a_glance_mid_visit_finishes_the_room_in_the_ledger_but_the_visit_walks_its_gaps_to_the_end():
@@ -208,7 +211,9 @@ def test_the_local_phase_ends_on_its_bound_and_control_returns_to_the_global_loo
 
 
 def test_a_finished_room_with_gaps_left_is_released_in_transit_only_once_the_way_there_showed_the_last_of_them():
-    policy, episode, world, rooms, _ = explore_policy(order=(0, 1))
+    """The release on the way is the historical rule, behind ``transit_commitment=False`` since 2026-10-22: under
+    the committed-target rule the walk is finished and the room's verdict is read at arrival."""
+    policy, episode, world, rooms, _ = explore_policy(order=(0, 1), transit_commitment=False)
     policy.scans.record(obs_at(episode, 0, IN_A), rooms[0], source="warmup")
     policy.loop.plan(obs_at(episode, 0, IN_B), world)
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 0 and policy.loop._reopened == {0}

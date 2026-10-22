@@ -5,7 +5,10 @@ happens so a recording can be read against this docstring:
 
 * **Background, every action** -- ``RPTSearchPolicy._search`` refreshes the scene
   graph without an LLM call: room geometry, object->room association, doors,
-  cumulative search time and remaining frontier clusters per room. A committed
+  cumulative search time and remaining frontier clusters per room -- every
+  ``RPTSettings.transit_graph_period_steps`` actions instead while a committed
+  transit route is walked (:attr:`LoopSettings.transit_commitment`, since
+  2026-10-22), and on the action the transit ends. A committed
   stair climb belongs to the multi-floor policy, which this loop yields to
   before it does anything of its own.
 * **1. One visit, bounded to the room in force** (:meth:`_local`). Under
@@ -91,7 +94,12 @@ happens so a recording can be read against this docstring:
   frontier; a room with none keeps its centroid); to the foot of the
   chosen stairs, where the building coordinator takes over and climbs; the
   node's turn ends there (``traversed``) and the floor's search resumes
-  clean when the aircraft comes back down. **The room's exits are its
+  clean when the aircraft comes back down. **The transit is committed**
+  (:attr:`LoopSettings.transit_commitment`, since 2026-10-22): the room
+  renumbered on the way keeps its turn under the new number
+  (:meth:`_rebind_room`), a new name or a finishing verdict waits for the
+  arrival, and only arrival, a refused or stalled route, the follower's
+  wedge, the clocks or the target takeover end it. **The room's exits are its
   visit's** (room-level GAPs, since 2026-10-21): under ``explore`` every
   exit read off the live map is folded into the room it opens from
   (:meth:`_fold_openings`) and the room's frontier walk looks through it;
@@ -141,7 +149,7 @@ from sparx_agency.core.mapping.topology.search_node_oracle import (
     BUDGET_STEP, HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR)
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import (
-    accessible_frontiers, frontier_goals_by_room, rank_by_view_gain)
+    accessible_frontiers, frontier_goals_by_room, rank_by_view_gain, trail_visits)
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
     ALL_VERDICTS, BLOCKED, BUDGET_SPENT, EXHAUSTED, MAPPED, NEUTRAL, SEARCH, SELECT, TRANSIT, TRANSIT_TIMEOUT,
     TRAVERSED, UNREACHABLE, ObjectSearchParams)
@@ -226,11 +234,56 @@ class LoopSettings:
             is the price). 0 restores every admissible frontier.
         room_missing_grace: Actions a transit keeps walking to its committed
             entry point while the room it was chosen for is missing from the
-            registry (since 2026-10-14): the watershed re-segments every
-            action and a room can be gone for one of them and back the next
-            (Collierville/000023, action 170: room 4 missing for one action,
-            the transit released ``unreachable``, the order re-solved without
-            it). A room missing for longer is given up as before.
+            registry AND no live room holds the place (since 2026-10-14; the
+            re-binding below is tried first since 2026-10-22): the watershed
+            re-segments every action and a room can be gone for one of them
+            and back the next (Collierville/000023, action 170: room 4
+            missing for one action, the transit released ``unreachable``,
+            the order re-solved without it). A room missing for longer, with
+            nobody's floor under its entry point, is given up as before.
+        transit_commitment: The committed-target rule (since 2026-10-22,
+            the user's: "once a target is set, the agent should be allowed
+            to reach it"). On, a transit ends ONLY by arrival, a route the
+            planner refuses or the follower makes no progress on, the
+            follower's wedge, the supervisor's clocks, or the target
+            takeover at the policy level. The room in force survives the
+            partition renaming it -- the loop re-binds the turn to the live
+            room that holds the committed entry point, or the old room's
+            centre, within :attr:`rebind_reach_m` (``room_rebound`` events;
+            :meth:`~sparx_agency.core.planning.exploration.object_search_supervisor.ObjectSearchSupervisor.rebind`)
+            -- and neither a re-identification of the room on the way
+            (``_reclassify``: no classifier call is spent in transit; the
+            arrival asks) nor the ledger finishing it from outside
+            (``finished_in_transit``) ends the walk: both are judged at
+            arrival, where the visit's own rules apply. Corozal/000003
+            (``c1af8954a378``, 2026-10-22): eleven of eighteen selections
+            were ``unreachable`` releases of a room that had merely been
+            renumbered, each buying a room-LLM call (10 s) and an RPT*
+            solve, and the agent re-planned to the toilet's room at action
+            137 while committed to its neighbour. The policy also throttles
+            the scene-graph rebuild while the committed route is walked
+            (``RPTSettings.transit_graph_period_steps``). Off restores the
+            2026-10-21 behaviour: every one of those ends the turn.
+        rebind_reach_m: How far from the committed entry point (or the lost
+            room's centre) a live room's floor may lie for the turn to be
+            re-bound to that room: the watershed erodes its masks by the
+            minimum clearance, so a frontier entry at a room's edge
+            routinely reads as just outside it.
+        entry_failure_limit: Failed attempts at one PLACE -- a transit
+            released ``unreachable``, ``blocked`` or ``transit_timeout``
+            with its entry point within :attr:`entry_failure_radius_m` of
+            an earlier failure's -- after which rooms entered there are
+            withheld from the nodes (``unreachable:<n>`` exclusions) for
+            ``failure_cooldown_steps * entry_failure_backoff ** (n -
+            limit)`` actions (since 2026-10-22, the user's rule: a place the
+            agent keeps failing to reach likely has no viable route the way
+            it is being attempted; stop choosing it). The supervisor's own
+            ``max_attempts`` is keyed by room id, which the partition
+            renumbers; this memory is by position and survives it. 0
+            disables.
+        entry_failure_radius_m: See :attr:`entry_failure_limit`.
+        entry_failure_backoff: See :attr:`entry_failure_limit`; 1 keeps the
+            cooldown flat.
         failure_cooldown_steps: Actions a room is withheld after a turn the
             planner or the follower failed (``unreachable``, ``blocked``,
             ``transit_timeout``), instead of the supervisor's 120-action
@@ -425,7 +478,12 @@ class LoopSettings:
     explore_frontier_steps: int = 4
     explore_min_gain_m2: float = 1.0
     failure_cooldown_steps: int = 30
-    room_missing_grace: int = 3
+    room_missing_grace: int = 10
+    transit_commitment: bool = True
+    rebind_reach_m: float = 0.6
+    entry_failure_limit: int = 2
+    entry_failure_radius_m: float = 0.75
+    entry_failure_backoff: float = 2.0
     entered_discount: float = 0.5
     lingered_discount: float = 0.2
     lingered_steps: int = 20
@@ -466,6 +524,18 @@ class LoopSettings:
             raise ValueError("failure_cooldown_steps must be a non-negative integer")
         if type(self.room_missing_grace) is not int or self.room_missing_grace < 0:
             raise ValueError("room_missing_grace must be a non-negative integer")
+        if type(self.transit_commitment) is not bool:
+            raise ValueError("transit_commitment must be a bool")
+        if isinstance(self.rebind_reach_m, bool) or not math.isfinite(self.rebind_reach_m) or self.rebind_reach_m < 0:
+            raise ValueError("rebind_reach_m must be finite and non-negative")
+        if type(self.entry_failure_limit) is not int or self.entry_failure_limit < 0:
+            raise ValueError("entry_failure_limit must be a non-negative integer (0 disables)")
+        if (isinstance(self.entry_failure_radius_m, bool) or not math.isfinite(self.entry_failure_radius_m)
+                or self.entry_failure_radius_m <= 0):
+            raise ValueError("entry_failure_radius_m must be positive and finite")
+        if (isinstance(self.entry_failure_backoff, bool) or not math.isfinite(self.entry_failure_backoff)
+                or self.entry_failure_backoff < 1.0):
+            raise ValueError("entry_failure_backoff must be finite and at least 1")
         if self.scan_approach_steps >= self.scan_visit_steps:
             raise ValueError("scan_approach_steps must leave room for the rotation inside scan_visit_steps")
         for name in ("confine_routes", "entry_frontier", "stairs_as_nodes", "type_prior", "second_pass",
@@ -628,6 +698,7 @@ class RoomSearchLoop:
         self._exhausted = False       # the floor has no unfinished room, no exit and no reachable frontier left
         self._covered = False         # ... no unfinished room and no exit (the second pass's gate; frontier may remain)
         self._view_cache = None       # (step, UnknownView) -- the openings' and the explore goals' ray caster this action
+        self._visits_cache = None     # (step, visits) -- the trail's visitation count for the goal ranking this action
         self._value_factors = {}      # node id -> the factor the oracle's probability was scaled by at the last SELECT
         self._peek_missing = 0        # consecutive actions the peek in force's opening was absent from the inventory
         self._scan = None             # the visit in force under ``scan``: phase, room, approach actions, swept yaw
@@ -642,6 +713,9 @@ class RoomSearchLoop:
         self._provisional = set()     # exit node ids read at ``openings.unvalued_prob`` (logged once each)
         self._way_back_held_logged = None    # (rooms left, openings left) the last way_back_held event was logged for
         self._room_missing, self._room_missing_pid = 0, None   # actions the room in transit has been gone from the registry
+        self._committed_room = None   # (pid, TrackedRoom) -- the room in force as the registry last showed it
+        self._entry_failures = []     # [(xy, count, step)] -- places a transit failed to reach, for the exclusions
+        self._withheld_logged = {}    # pid -> the ``unreachable:<n>`` reason logged for it at the last SELECT
         self.estimates = {}
         self.events = []
         self.estimate_events = []
@@ -659,6 +733,8 @@ class RoomSearchLoop:
                       "arrivals": 0, "entry_frontier": 0, "entry_centroid": 0, "entry_vantage": 0, "entry_doorstep": 0,
                       "entry_peek": 0,
                       "entry_reaimed": 0, "entry_lost": 0, "route_reaimed": 0, "room_missing_held": 0,
+                      "rooms_rebound": 0, "relabels_deferred": 0,
+                      "entry_failures": 0, "excluded_unreachable": 0,
                       "scans_completed": 0, "scans_in_place": 0, "scan_approach_actions": 0,
                       "scan_unreachable": 0, "excluded_scanned": 0, "excluded_type": 0, "finished_in_transit": 0,
                       "finished_by_rotation": 0, "explore_goals": 0, "explore_visits": 0, "explore_exhausted": 0,
@@ -716,7 +792,7 @@ class RoomSearchLoop:
             self.stats["reconsiders_deferred"] += 1
             self._log(obs, "reconsider_deferred", room=p.supervisor.room_id, state=p.supervisor.state)
             return
-        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+        cost = p.navigation_cost(world)
         stairs, openings = self._collect_nodes(obs, world, cost)
         if not self._worth_asking(stairs, openings):
             # Nothing the answer could send the search to (the spawn room finished, no
@@ -752,7 +828,7 @@ class RoomSearchLoop:
     def plan(self, obs, world):
         """The command for this action: in-room exploration, transit, or the exploration fallback."""
         p = self.policy
-        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+        cost = p.navigation_cost(world)
         # The openings are read off the live map every action -- for the HUD, and so that an
         # opening the camera has just resolved is gone the action it is resolved, not at the
         # next loop point (Darden 2026-10-13: O3 stood on the HUD for fifty actions after the
@@ -816,6 +892,8 @@ class RoomSearchLoop:
                 opening = opening or (option.opening if option is not None else None)
                 if opening is not None and not self._retired(opening):     # the transit may have retired it already
                     self._retire_peek(obs, opening, "released %s" % verdict)
+            elif verdict in (BLOCKED, UNREACHABLE, TRANSIT_TIMEOUT) and not is_stair_node(room_id):
+                self._note_entry_failure(obs, room_id, verdict)
             p._route = p._goal = None
             p.route_memory.clear("room_completed")
             # The blocked clock was the released node's: it started when the follower pushed into
@@ -825,6 +903,8 @@ class RoomSearchLoop:
             # openings retired for good); ``notify_blocked`` starts it again if the new route sticks.
             p._blocked_since = None
             self._entry = None
+            self._committed_room = None
+            self._room_missing, self._room_missing_pid = 0, None
             self._scan = None
             self._explore = None
             self._peek = None
@@ -833,6 +913,9 @@ class RoomSearchLoop:
             self._log(obs, "release", room=room_id, verdict=verdict, local_steps=self.local_steps)
             self.room_id = None
             self._needs_reason = True                       # step 7 -> steps 2-4 on this action
+            # The re-selection reads room masks, frontier counts and exits: over geometry rebuilt on THIS
+            # action, whatever cadence the released transit was walked on.
+            self._fresh_geometry(obs, world)
             state = self._update(obs, world, cost)
         if state.changed and state.state == TRANSIT:
             self._entry = self._entries.get(state.room_id, (state.goal_xy, False))
@@ -873,6 +956,16 @@ class RoomSearchLoop:
             self._log(obs, "transit", room=state.room_id, goal=list(state.goal_xy), entry=entry, order=list(state.order),
                       revisit=state.room_id in self._revisits)
         if state.changed and state.state == SEARCH:
+            # Arrival: the visit reads room masks and frontier counts every action, so its first decision
+            # is over geometry rebuilt on THIS action -- the committed transit walked on a throttled cadence
+            # (``RPTSettings.transit_graph_period_steps``). The rebuild may renumber the room the agent now
+            # stands in; the turn follows it.
+            self._fresh_geometry(obs, world)
+            if (not is_opening_node(state.room_id) and not is_stair_node(state.room_id)
+                    and p.graph.registry.rooms.get(state.room_id) is None):
+                rebound = self._rebind_room(obs, world, state, places=[(float(obs.pose.x), float(obs.pose.y))])
+                if rebound is not None:
+                    state = rebound
             self.local_steps = 0                            # step 7
             self.room_id = state.room_id
             self._scan = None
@@ -1779,6 +1872,7 @@ class RoomSearchLoop:
                                               obs.pose.yaw, p.sweep.settings.ranking))
         self._entries, options = {}, []
         revisits = set()
+        withheld = {}
         for option in p.graph.options:
             if option.room_id in self._excluded:
                 continue
@@ -1797,12 +1891,27 @@ class RoomSearchLoop:
                 if goals:
                     nearest = min(goals, key=lambda g: g.geodesic_m)
                     xy, from_frontier = nearest.xy, True
+            # A place the agent has repeatedly failed to reach is not entered again while it cools: the
+            # room whose every way in lies there is withheld this SELECT (``unreachable:<n>``).
+            why = None
+            if option.room_id != self.room_id:
+                why = self._room_unreachable(world, option.room_id, obs.step) or self._entry_failed(xy, obs.step)
+            if why is not None:
+                withheld[option.room_id] = why
+                continue
             self._entries[option.room_id] = (xy, from_frontier)
             if revisit:
                 revisits.add(option.room_id)
             # The probability the supervisor filters on is the oracle's latest, whatever
             # the option carried: the two are one number, read from one place.
             options.append(replace(option, xy=xy, prob=p.graph.probs.get(option.room_id, option.prob)))
+        if withheld:
+            self._excluded.update(withheld)
+            newly = sorted(pid for pid in withheld if self._withheld_logged.get(pid) != withheld[pid])
+            if newly:
+                self.stats["excluded_unreachable"] += len(newly)
+                self._log(obs, "excluded", rooms={str(pid): withheld[pid] for pid in newly})
+        self._withheld_logged = dict(withheld)
         self.stats["revisits_offered"] += len(revisits - self._revisits)
         self._revisits = revisits
         for stair in stairs:
@@ -1870,7 +1979,28 @@ class RoomSearchLoop:
         # Significant frontiers only: at least ``explore_min_gain_m2`` of unknown a look from the
         # goal would reveal. A long boundary onto a strip is not significant; a short gap onto a room is.
         min_gain = int(round(self.settings.explore_min_gain_m2 / view.cell_area_m2))
-        return rank_by_view_gain(goals, view, p.sweep.settings.ranking, min_gain_cells=min_gain)
+        return rank_by_view_gain(goals, view, p.sweep.settings.ranking, min_gain_cells=min_gain,
+                                 visits=self._visits(obs))
+
+    def _visits(self, obs):
+        """``xy -> actions spent nearby`` over the storey's trail (:func:`~frontier_ranking.trail_visits`), built once per action.
+
+        The ranking's visitation discount (``FrontierRankingParams.visit_weight``):
+        a frontier beside ground the agent has crossed many times ranks under
+        one in ground it has barely been near. None when the sight ledger is
+        not there or the weight is off.
+        """
+        p = self.policy
+        ranking = p.sweep.settings.ranking
+        sight = getattr(p, "sight", None)
+        if sight is None or getattr(ranking, "visit_weight", 0.0) <= 0.0:
+            return None
+        cached = self._visits_cache
+        if cached is not None and cached[0] == int(obs.step):
+            return cached[1]
+        visits = trail_visits([(x, y) for _, x, y, _, _ in sight.poses()], ranking.visit_radius_m)
+        self._visits_cache = (int(obs.step), visits)
+        return visits
 
     def _unknown_view(self, obs, world):
         """The ray caster over this action's map, built once per action for every goal and opening read on it."""
@@ -1894,14 +2024,19 @@ class RoomSearchLoop:
         its DOORSTEP -- its passable cell nearest the agent along the floor
         (:meth:`_nearest_entry`), since 2026-10-14 -- else its vantage
         point, else its centroid. A second-pass revisit, whose visit is a
-        scan from a new spot, is entered at its vantage point.
+        scan from a new spot, is entered at its vantage point. A frontier
+        or doorstep at a place the agent has repeatedly failed to reach
+        (:meth:`_entry_failed`) is passed over for the next; the last
+        resort is offered regardless and :meth:`_options` withholds the
+        room when that too lies there.
         """
+        step = int(obs.step)
         if not revisit:
-            goals = self._explore_goals(obs, world, cost, room)
+            goals = [g for g in self._explore_goals(obs, world, cost, room) if self._entry_failed(g.xy, step) is None]
             if goals:
                 return (tuple(float(v) for v in goals[0].xy), True)
             doorstep = self._nearest_entry(obs, world, cost, room)
-            if doorstep is not None:
+            if doorstep is not None and self._entry_failed(doorstep, step) is None:
                 return (doorstep, False)
         found = self._vantage(world, cost, room, revisit=revisit)
         return ((found[0] if found is not None else tuple(room.centroid)), False)
@@ -2042,7 +2177,11 @@ class RoomSearchLoop:
 
         A room re-identified on the way in -- a toilet seen through the
         doorway of what a sink had made a kitchen -- ends its turn before it
-        is entered, so the order is re-solved over the new fact.
+        is entered, so the order is re-solved over the new fact: under
+        ``transit_commitment=False`` only. Under the committed rule (the
+        default since 2026-10-22) the clue waits for the arrival, the room
+        renumbered on the way keeps its turn (:meth:`_rebind_room`), and
+        the ledger's finishing verdict does not end the walk either.
 
         A STAIRCASE is handed to the building coordinator, which approaches
         the foot of the flight and climbs; see :meth:`_transit_stairs`. An
@@ -2055,26 +2194,46 @@ class RoomSearchLoop:
             return self._transit_opening(obs, world, state)
         room = p.graph.registry.rooms.get(state.room_id)
         if room is None:
-            # The watershed re-segments every action and a room can be gone for one of them and
-            # back the next (Collierville/000023, 2026-10-14, action 170: room 4 missing for one
-            # action, the transit released ``unreachable`` and the order re-solved without it).
-            # The committed entry point is still a point on the floor: the walk goes on for
+            # The watershed re-segments every action: the room can be gone for one of them and back the
+            # next (Collierville/000023, 2026-10-14, action 170), or come back under another number --
+            # merged into its neighbour, split, renumbered -- while the place and the entry point
+            # committed to stand where they were (Corozal/000003, 2026-10-22: eleven ``unreachable``
+            # releases of renumbered rooms in one episode). The turn follows the place: it is re-bound
+            # to the live room that holds the entry point, or the lost room's centre; failing that, the
+            # committed entry point is still a point on the floor and the walk goes on for
             # ``room_missing_grace`` actions before the room is given up.
-            self._room_missing = self._room_missing + 1 if self._room_missing_pid == state.room_id else 1
-            self._room_missing_pid = state.room_id
-            entry = self._entry if self._entry is not None else (state.goal_xy, False)
-            if self._room_missing <= self.settings.room_missing_grace and entry[0] is not None:
-                command = p._navigate(obs, world, tuple(entry[0]), "transit/%s" % state.room_id)
-                if command is not None:
-                    if self._room_missing == 1:
-                        self.stats["room_missing_held"] += 1
-                        self._log(obs, "room_missing_held", room=state.room_id, grace=self.settings.room_missing_grace)
-                    return command, {}
-            return None, {"route_failed": True}
+            rebound = self._rebind_room(obs, world, state)
+            if rebound is not None:
+                state = rebound
+                room = p.graph.registry.rooms[state.room_id]
+            else:
+                self._room_missing = self._room_missing + 1 if self._room_missing_pid == state.room_id else 1
+                self._room_missing_pid = state.room_id
+                entry = self._entry if self._entry is not None else (state.goal_xy, False)
+                arrival = p.converter_params.goal_tolerance_m + world.resolution
+                if entry[0] is not None and (p.route_memory.arrived(obs)
+                                             or math.dist((obs.pose.x, obs.pose.y), entry[0]) <= arrival):
+                    # The place was reached and nobody's floor is under it: nothing is there to visit.
+                    return None, {"frontier_exhausted": True}
+                if self._room_missing <= self.settings.room_missing_grace and entry[0] is not None:
+                    command = p._navigate(obs, world, tuple(entry[0]), "transit/%s" % state.room_id)
+                    if command is not None:
+                        if self._room_missing == 1:
+                            self.stats["room_missing_held"] += 1
+                            self._log(obs, "room_missing_held", room=state.room_id, grace=self.settings.room_missing_grace)
+                        return command, {}
+                return None, {"route_failed": True}
         self._room_missing, self._room_missing_pid = 0, None
-        if self._reclassify(obs, state.room_id, "transit") and self._relabel_ends_turn(obs, state.room_id):
+        self._committed_room = (state.room_id, room)
+        committed = self.settings.transit_commitment
+        if committed:
+            # The committed-target rule: a new name for the room, or the ledger finishing it from
+            # outside, is judged at arrival -- no classifier call and no release on the way.
+            if p.graph.label_tracker.pending(state.room_id):
+                self.stats["relabels_deferred"] += 1
+        elif self._reclassify(obs, state.room_id, "transit") and self._relabel_ends_turn(obs, state.room_id):
             return None, {"room_reclassified": True}
-        if self._finished_on_the_way(obs, world, state.room_id, room):
+        if not committed and self._finished_on_the_way(obs, world, state.room_id, room):
             return None, {"frontier_exhausted": True}
         entry = self._entry if self._entry is not None else (state.goal_xy, False)
         xy_goal, from_frontier = entry
@@ -2083,7 +2242,7 @@ class RoomSearchLoop:
                    or math.dist((obs.pose.x, obs.pose.y), xy_goal) <= arrival)
         inside = self._inside(obs, world, room)
         if inside and (not from_frontier or at_goal or not self._informative(world, xy_goal)):
-            return None, {"arrived": True}          # step 7
+            return None, {"arrived": True}          # step 7 (``_tick`` rebuilds the geometry on this action)
         if at_goal and not inside:
             if self._near_room(obs, world, room):
                 return None, {"arrived": True}      # step 7, on the boundary the mask stops short of
@@ -2148,6 +2307,145 @@ class RoomSearchLoop:
         self.stats["plan_failures"] += 1
         return None, {"route_failed": True}
 
+    def _rebind_room(self, obs, world, state, places=None):
+        """The turn's state re-bound to the live room that holds the committed place, or None.
+
+        The place is the committed entry point (``self._entry``, else the
+        supervisor's goal), then the centre of the room as the registry
+        last showed it (:attr:`_committed_room`) -- or the caller's own
+        ``places`` first (the agent's position, for a visit in force); the
+        live room whose floor lies within :attr:`LoopSettings.rebind_reach_m`
+        of one of them -- the watershed erodes its masks by the minimum
+        clearance, so an entry frontier at a room's edge reads as just
+        outside it -- takes the turn over under its own id
+        (``room_rebound``), its entry, estimate and probability carried
+        along so the HUD and the next loop point read one room. Never when
+        :attr:`LoopSettings.transit_commitment` is off: there the historical
+        release stands.
+        """
+        p = self.policy
+        if not self.settings.transit_commitment:
+            return None
+        old = state.room_id
+        places = [tuple(float(v) for v in xy) for xy in (places or ())]
+        entry = self._entry if self._entry is not None else (state.goal_xy, False)
+        if entry[0] is not None:
+            places.append(tuple(float(v) for v in entry[0]))
+        if self._committed_room is not None and self._committed_room[0] == old:
+            places.append(tuple(float(v) for v in self._committed_room[1].centroid))
+        rooms = p.graph.registry.rooms
+        new = None
+        for xy in places:
+            pid = p.graph.room_near(world, xy, self.settings.rebind_reach_m)
+            if pid is not None and pid in rooms and pid != old:
+                new = pid
+                break
+        if new is None:
+            return None
+        label = (p.graph.label_info(new) or {}).get("label")
+        if not p.supervisor.rebind(new, label=label):
+            return None
+        if old in self._entries and new not in self._entries:
+            self._entries[new] = self._entries[old]
+        if old in self.estimates and new not in self.estimates:
+            self.estimates[new] = dict(self.estimates[old], room=new)
+        if old in p.graph.probs and new not in p.graph.probs:
+            p.graph.probs[new] = p.graph.probs[old]
+        for members in (self._revisits, self._reopened):
+            if old in members:
+                members.add(new)
+        if self._explore is not None and self._explore.get("room") == old:
+            self._explore["room"] = new
+        if self.room_id == old:
+            self.room_id = new
+        self.order = tuple(new if pid == old else pid for pid in self.order)
+        self.next_room = new
+        self._committed_room = (new, rooms[new])
+        self._room_missing, self._room_missing_pid = 0, None
+        self.stats["rooms_rebound"] += 1
+        self._log(obs, "room_rebound", room=old, to=new, state=state.state,
+                  place=[round(v, 2) for v in places[0]] if places else None)
+        return replace(state, room_id=new, label=label if label is not None else state.label)
+
+    def _fresh_geometry(self, obs, world):
+        """Rebuild the scene graph's geometry now if the policy's cadence left it older than this action."""
+        p = self.policy
+        refresh = getattr(p, "refresh_graph", None)
+        if callable(refresh) and getattr(p, "_last_graph_step", obs.step) != obs.step:
+            refresh(obs, world, force=True)
+
+    def _note_entry_failure(self, obs, room_id, verdict):
+        """Remember where a transit failed (``unreachable``, ``blocked``, ``transit_timeout``), by place not by room id.
+
+        The place is the entry in force when the turn ended -- the point
+        the planner refused or the follower could not reach -- binned by
+        :attr:`LoopSettings.entry_failure_radius_m`. The record outlives
+        the room's number: a room the partition renames tomorrow is the
+        same place today.
+        """
+        if self.settings.entry_failure_limit <= 0:
+            return
+        entry = self._entry if self._entry is not None else self._entries.get(room_id)
+        if entry is None or entry[0] is None:
+            return
+        xy = tuple(float(v) for v in entry[0])
+        radius = self.settings.entry_failure_radius_m
+        for i, (place, count, _) in enumerate(self._entry_failures):
+            if math.dist(place, xy) <= radius:
+                self._entry_failures[i] = (place, count + 1, int(obs.step))
+                count += 1
+                break
+        else:
+            self._entry_failures.append((xy, 1, int(obs.step)))
+            count = 1
+        self.stats["entry_failures"] += 1
+        self._log(obs, "entry_failure", room=room_id, verdict=verdict, place=[round(v, 2) for v in xy], failures=count,
+                  withheld=count >= self.settings.entry_failure_limit)
+
+    def _failure_cooling(self, count, last, step):
+        """Whether a place (or room) failed ``count`` times, last at action ``last``, is still withheld at ``step``."""
+        settings = self.settings
+        if count < settings.entry_failure_limit:
+            return False
+        cooling = settings.failure_cooldown_steps * settings.entry_failure_backoff ** (count - settings.entry_failure_limit)
+        return int(step) - int(last) < cooling
+
+    def _entry_failed(self, xy, step):
+        """``"unreachable:<n>"`` when ``xy`` lies at a place failed ``entry_failure_limit`` times or more and still cooling, else None."""
+        settings = self.settings
+        if settings.entry_failure_limit <= 0 or xy is None or not self._entry_failures:
+            return None
+        xy = tuple(float(v) for v in xy)
+        for place, count, last in self._entry_failures:
+            if math.dist(place, xy) <= settings.entry_failure_radius_m and self._failure_cooling(count, last, step):
+                return "unreachable:%d" % count
+        return None
+
+    def _room_unreachable(self, world, pid, step):
+        """``"unreachable:<n>"`` when the failed places room ``pid`` owns add up to the limit and the latest still cools, else None.
+
+        A place is the room's when its floor lies within
+        :attr:`LoopSettings.entry_failure_radius_m` of it
+        (:meth:`~scene_graph.ObservedSceneGraph.room_near`). One
+        ``unreachable`` turn already means every entry of the room -- its
+        next frontiers, its doorstep, its vantage point, its centroid --
+        was refused on the map as it stood (:meth:`_reaim_after_refusal`);
+        a second, at whichever of them, is a room the map cannot route
+        to the way it is being tried, and it is withheld with the same
+        back-off as a place.
+        """
+        settings = self.settings
+        if settings.entry_failure_limit <= 0 or not self._entry_failures:
+            return None
+        total, last = 0, None
+        for place, count, when in self._entry_failures:
+            if self.policy.graph.room_near(world, place, settings.entry_failure_radius_m) == pid:
+                total += int(count)
+                last = int(when) if last is None else max(last, int(when))
+        if last is not None and self._failure_cooling(total, last, step):
+            return "unreachable:%d" % total
+        return None
+
     def _reaim_after_refusal(self, obs, world, cost, state, room, failed):
         """The transit command to the room's next entry after the planner refused ``failed``, or None when every entry is refused.
 
@@ -2179,7 +2477,7 @@ class RoomSearchLoop:
         tried = set()
         for xy, from_frontier in candidates:
             key = world.world_to_grid(*xy)
-            if key in tried or math.dist(xy, failed) <= world.resolution:
+            if key in tried or math.dist(xy, failed) <= world.resolution or self._entry_failed(xy, obs.step) is not None:
                 continue
             tried.add(key)
             command = p._navigate(obs, world, xy, "transit/%s" % state.room_id)
@@ -2635,8 +2933,15 @@ class RoomSearchLoop:
         if is_opening_node(state.room_id):
             return self._peek_visit(obs, world, state)
         room = p.graph.registry.rooms.get(state.room_id)
+        if room is None and self.settings.transit_commitment:
+            # The room the agent stands in was renumbered under its feet: the visit goes on under the new id.
+            rebound = self._rebind_room(obs, world, state, places=[(float(obs.pose.x), float(obs.pose.y))])
+            if rebound is not None:
+                state = rebound
+                room = p.graph.registry.rooms.get(state.room_id)
         if room is None:
             return None, {"frontier_exhausted": True}
+        self._committed_room = (state.room_id, room)
         if self._reclassify(obs, state.room_id, "search") and self._relabel_ends_turn(obs, state.room_id):
             return None, {"room_reclassified": True}
         if self.settings.exploring and state.room_id not in self._revisits:
@@ -2690,6 +2995,10 @@ class RoomSearchLoop:
                       frontier=self._live_frontier(state.room_id, obs, world))
         goals = self._explore_goals(obs, world, cost, room)
         visit["frontier_left"] = len(goals)
+        # The ranking as the visit read it this action, for the recording: which boundary and why.
+        visit["ranked"] = [{"xy": [round(float(v), 2) for v in g.xy], "utility": round(float(g.utility), 3),
+                            "size_cells": int(g.size_cells), "geodesic_m": round(float(g.geodesic_m), 2)}
+                           for g in goals[:8]]
         # A rotation completed inside the room since the visit began finishes it -- unless, under
         # room-level GAPs, GAPs are left to walk: the rotation saw the room, not what lies behind
         # its exits, and the visit goes on to them (its exits: every GAP walked, or the bound).
@@ -2924,6 +3233,9 @@ class RoomSearchLoop:
                 "scan": None if self._scan is None else dict(self._scan),
                 "explore": None if self._explore is None else dict(self._explore),
                 "peek": self.peek_state(),
+                "committed_room": None if self._committed_room is None else int(self._committed_room[0]),
+                "entry_failures": [{"place": [round(v, 2) for v in place], "failures": count, "step": step}
+                                   for place, count, step in self._entry_failures],
                 "stairs_offered": sorted(self._stairs), "openings_offered": sorted(self._openings),
                 "openings_folded": sorted(self._folded_now),
                 "events": list(self.events), "estimate_events": list(self.estimate_events)}

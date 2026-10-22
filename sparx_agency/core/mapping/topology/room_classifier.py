@@ -167,13 +167,23 @@ class RoomTypeClassifier:
         return len(self._sig_cache)
 
     def _signature(self, norm: List[str], facts: Optional[Dict[str, object]] = None) -> Tuple:
+        """The cache key: the objects -- and, for a room with none, the geometry bucket.
+
+        A room with objects is keyed by them alone: its geometry is shown to
+        the model but does not buy a second verdict when the room grows
+        from small to medium or gains a doorway (the first run with the
+        bucket in every key asked the model 80-100 times per long episode,
+        2026-10-22). An empty room has nothing else to be keyed by.
+        """
         objects = (tuple(sorted(Counter(norm).items())) if self._count_sensitive
                    else tuple(sorted(set(norm))))
+        if objects:
+            return objects
         bucket = facts_bucket(facts)
         return objects if not bucket else objects + (bucket,)
 
     def cached(self, classes: Sequence[str], facts: Optional[Dict[str, object]] = None) -> Optional[RoomLabel]:
-        """The verdict already held for exactly this evidence (and geometry bucket), or None.
+        """The verdict already held for exactly this evidence (the geometry bucket for an empty room), or None.
 
         For a caller that must decide whether asking is worth a call: the
         room-search loop re-labels a room the moment a new kind of object
@@ -189,8 +199,9 @@ class RoomTypeClassifier:
         """Classify current evidence; refresh bypasses a previous cached answer.
 
         ``facts`` is the room's geometry (``area_m2``, ``elongation``,
-        ``doors``), shown to the model and bucketed coarsely into the cache
-        key (:func:`facts_bucket`). ``shape_only`` asks about a room with
+        ``doors``), shown to the model and -- for a room without objects --
+        bucketed coarsely into the cache key (:func:`facts_bucket`).
+        ``shape_only`` asks about a room with
         fewer objects than the evidence thresholds on its geometry alone --
         a hallway has no furniture to name it (since 2026-10-21); the caller
         bounds those calls. Failure leaves an existing cache entry untouched.

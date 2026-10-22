@@ -162,10 +162,14 @@ class RPTSearchPolicy:
                                           % self.settings.multifloor.floor_change_cost_m)
                 if self.loop_settings.stairs_as_nodes and self.settings.multifloor.stair_source == "ground_truth"
                 else "exploration fallback only",
-                "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s); "
-                                     "synchronous frame processing, one full rotation (warm-up scan) before room selection "
-                                     "on every storey first entered"
-                                     % self.settings.graph_period_steps,
+                "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s)"
+                                     "%s; synchronous frame processing, one full rotation (warm-up scan) before room "
+                                     "selection on every storey first entered"
+                                     % (self.settings.graph_period_steps,
+                                        (", every %d while a committed transit route is walked (rebuilt on the action "
+                                         "the transit ends)" % self.settings.transit_graph_period_steps)
+                                        if (self.settings.transit_graph_period_steps > self.settings.graph_period_steps
+                                            and self.loop_settings.transit_commitment) else ""),
                 "camera_control": asdict(CameraControlSettings()),
                 "perception_fusion": "coherent-depth/floor-qualified-v1" + ("/target-masked" if self.settings.segmentation else ""),
                 "segmentation": ({"enabled": True, "scope": "target boxes at or above detection_confidence",
@@ -537,11 +541,26 @@ class RPTSearchPolicy:
             return command
         return self.glances.apply(observation, world, self.loop.plan(observation, world))
 
-    def _refresh_graph(self, observation, world):
-        """Refresh geometry even on a stair approach, so new rooms revoke departure."""
+    def _refresh_graph(self, observation, world, force=False):
+        """Refresh geometry even on a stair approach, so new rooms revoke departure.
+
+        The watershed, the registry, the frontier inventory and every
+        per-room fact are rebuilt every ``graph_period_steps`` actions --
+        every action by default -- EXCEPT while a committed transit route is
+        being walked, where they are rebuilt every
+        ``transit_graph_period_steps`` (:meth:`graph_period`): the follower
+        needs the map, not the partition, and the full rebuild was the
+        largest share of every decision's wall time (Corozal/000003,
+        ``c1af8954a378``, 2026-10-22: 1.4 s of a 1.7 s median decision,
+        500 times). The room-search loop forces a rebuild on the action a
+        transit ends (:meth:`~rooms.room_search_loop.RoomSearchLoop._fresh_geometry`),
+        and a loop point reasons over geometry refreshed on its own action
+        regardless. Between rebuilds the frontier inventory is not refreshed
+        either; the committed route does not read it.
+        """
         pose = observation.pose
         cost = self.navigation_cost(world)
-        if (observation.step - self._last_graph_step >= self.settings.graph_period_steps
+        if (force or observation.step - self._last_graph_step >= self.graph_period()
                 or self.doors.revision != self._last_door_revision):
             started = time.monotonic()
             self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(),
@@ -550,10 +569,32 @@ class RPTSearchPolicy:
                               preferred_cost=self.preferred_cost(world))
             self.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
             self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
-        else:
+        elif self.graph_period() == self.settings.graph_period_steps:
             self.graph.refresh_accessibility(world, cost, (pose.x, pose.y), pose.yaw, self.sweep.settings.ranking,
                                              preferred_cost=self.preferred_cost(world))
         return cost
+
+    def refresh_graph(self, observation, world, force=False):
+        """The scene graph's geometry for this action (:meth:`_refresh_graph`); ``force`` rebuilds it whatever the cadence."""
+        return self._refresh_graph(observation, world, force=force)
+
+    def graph_period(self):
+        """Actions between two rebuilds of the scene graph's geometry, as things stand this action.
+
+        ``transit_graph_period_steps`` while the room-search loop walks a
+        committed transit route under its commitment rule (the supervisor in
+        TRANSIT, the route memory holding a ``transit/`` route), else
+        ``graph_period_steps``.
+        """
+        s = self.settings
+        if s.transit_graph_period_steps <= s.graph_period_steps:
+            return s.graph_period_steps
+        supervisor, loop, route = getattr(self, "supervisor", None), getattr(self, "loop", None), self.route_memory
+        if (supervisor is not None and supervisor.state == "transit" and loop is not None
+                and getattr(loop.settings, "transit_commitment", False)
+                and route.path is not None and str(route.kind or "").startswith("transit/")):
+            return s.transit_graph_period_steps
+        return s.graph_period_steps
 
     def room_exclusion(self, world):
         """Cells that are never room floor: the footprint of every seen staircase near this storey's level.
@@ -569,8 +610,20 @@ class RPTSearchPolicy:
         return mask if mask.any() else None
 
     def navigation_cost(self, world):
-        """The common clearance-qualified map used by counts, entries and routes (passable at the body radius)."""
-        return assemble_cost_grid(self.planner.fields_for(world), self.planner_params, self.settings.body_radius_m)[0]
+        """The common clearance-qualified map used by counts, entries and routes (passable at the body radius).
+
+        Cached on the planner's distance fields for the map in force: the
+        policy, the loop and the fallback all ask for it on one action, the
+        map is rebuilt once per action, and ``planner.invalidate_cache()``
+        drops this with the fields.
+        """
+        cached = getattr(self, "_navigation_cost_cache", None)
+        fields = self.planner.fields_for(world)
+        if cached is not None and cached[0] is fields:
+            return cached[1]
+        cost = assemble_cost_grid(fields, self.planner_params, self.settings.body_radius_m)[0]
+        self._navigation_cost_cache = (fields, cost)
+        return cost
 
     def preferred_cost(self, world):
         """The cost map at the planner's PREFERRED standoff -- what A* flies wherever it can.

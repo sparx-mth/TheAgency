@@ -80,6 +80,13 @@ def test_a_rooms_exits_are_attributes_on_its_line_and_the_rule_ties_them_to_the_
                                     "searched=0s  seen: nothing yet  glimpsed through its exits: sink, toilet")
     assert format_exits(0) == "0" and format_exits(3) == "3" and format_exits(3, 2) == "3 (2 doorways)"
     assert format_exits(1, 5) == "1 (1 doorway)", "no more doorways than exits"
+    # Since 2026-10-22 the unseen floor behind the exits rides in the brackets: where the unexplored space is.
+    assert format_exits(2, 1, 30.4) == "2 (1 doorway, ~30m2 unseen behind them)"
+    assert format_exits(2, 0, 7.6) == "2 (~8m2 unseen behind them)" and format_exits(0, 0, 12.0) == "0"
+    assert format_exits(2, 0, 0.2) == "2", "under half a square metre is nothing to say"
+    wing = SearchNode(8, ROOM, "hallway", exits=2, unseen_m2=30.0)
+    assert "exits=2 (~30m2 unseen behind them)" in format_node(wing)
+    assert "unexplored floor the camera could reach beyond them" in SYSTEM_PROMPT
     assert "glimpsed through its exits" not in format_node(SearchNode(7, ROOM, "hallway", exits=1)), "nothing glimpsed: unsaid"
     for rule in ("exits= the doorways and gaps at its edge", "NOT nodes of their own", "glimpsed through its exits",
                  "Exits RAISE a room ONLY when its type fits the target", "three gaps off a living room",

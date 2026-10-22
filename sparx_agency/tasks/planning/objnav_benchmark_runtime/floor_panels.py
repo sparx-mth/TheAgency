@@ -5,6 +5,14 @@ and committed route only. Objects, probabilities and visit order belong in
 the unchanged search column. Every storey shares an observed-footprint
 viewport and metric scale, fitted to the available panel without clipping
 large houses or shrinking small ones into a fixed 32-metre square.
+
+Since 2026-10-22 the panels also keep the **map journal**: the cells of
+the occupancy grid, the settled-unknown mask and the room partition that
+changed on every action, as sparse deltas, saved beside the final maps as
+``map_journal.npz`` (:func:`journal_to_arrays`, :func:`replay_journal`).
+The final map alone could not say what the policy saw at action 261; a
+review that is pointed at a step must read the log, not a video frame, and
+``review_recording.py`` rebuilds the map of any step from this.
 """
 from __future__ import annotations
 
@@ -26,6 +34,48 @@ STAIRS_COLOR = (60, 140, 255)
 OPENING_COLOR = (200, 90, 200)
 #: Colour of a target landmark offered as a node: the standoff point and the way the landmark lies (BGR).
 LANDMARK_COLOR = (0, 200, 220)
+#: The map layers the recording journals per step: the occupancy, the settled unknown, the room partition.
+JOURNAL_LAYERS = ("grid", "settled", "room_labels")
+JOURNAL_DTYPES = {"grid": np.int8, "settled": np.uint8, "room_labels": np.int32}
+
+
+def journal_to_arrays(prefix, deltas, dtype):
+    """``{prefix_steps, prefix_offsets, prefix_index, prefix_values}`` from ``[(step, index, values), ...]``.
+
+    ``offsets`` has one more entry than ``steps``: delta ``k`` is
+    ``index[offsets[k]:offsets[k + 1]]`` and the matching ``values``.
+    """
+    steps = np.asarray([d[0] for d in deltas], dtype=np.int32)
+    offsets = np.zeros(len(deltas) + 1, dtype=np.int64)
+    if deltas:
+        offsets[1:] = np.cumsum([len(d[1]) for d in deltas])
+    index = np.concatenate([d[1] for d in deltas]) if deltas else np.zeros(0, dtype=np.int32)
+    values = np.concatenate([d[2] for d in deltas]) if deltas else np.zeros(0, dtype=dtype)
+    return {prefix + "_steps": steps, prefix + "_offsets": offsets, prefix + "_index": index.astype(np.int32),
+            prefix + "_values": values.astype(dtype)}
+
+
+def replay_journal(arrays, slot, layer, step, shape, initial):
+    """The ``layer`` of ``slot`` as it stood after ``step``: ``initial`` with every delta up to ``step`` applied.
+
+    ``arrays`` is the loaded ``map_journal.npz``; ``initial`` the layer's
+    value before the first delta (unknown for the grid, False for the
+    settled mask, 0 for the room labels).
+    """
+    prefix = "slot_%d_%s" % (int(slot), layer)
+    out = np.full(int(np.prod(shape)), initial, dtype=JOURNAL_DTYPES[layer])
+    steps = np.asarray(arrays[prefix + "_steps"])
+    if len(steps):
+        offsets, index, values = (np.asarray(arrays[prefix + k]) for k in ("_offsets", "_index", "_values"))
+        for k in np.nonzero(steps <= int(step))[0]:
+            out[index[offsets[k]:offsets[k + 1]]] = values[offsets[k]:offsets[k + 1]]
+    return out.reshape(tuple(int(v) for v in shape))
+
+
+#: Colour of an accessible frontier goal -- one per cluster of the inventory (BGR): the "blue diamonds" the
+#: search column counts. Drawn since 2026-10-22; before, the floor panel showed the openings alone and the
+#: count on the column named markers that were not there.
+FRONTIER_COLOR = (235, 150, 40)
 
 
 class FloorPanels:
@@ -53,12 +103,31 @@ class FloorPanels:
     def _unknown(self):
         return {"floor_id": None, "grid": np.full(self.shape, -1, np.int8), "objects": [], "trail": [],
                 "room_labels": np.zeros(self.shape, np.int32), "settled": np.zeros(self.shape, bool),
-                "stairs": [], "rooms": 0, "search_time_s": 0.0, "pose": None}
+                "stairs": [], "rooms": 0, "search_time_s": 0.0, "pose": None,
+                "journal": {layer: [] for layer in JOURNAL_LAYERS}}
+
+    @staticmethod
+    def _journal(slot, layer, step, before, after):
+        """Append the cells of ``layer`` that differ between ``before`` and ``after`` -- the step's map delta -- and copy ``after`` in.
+
+        The journal is what lets a review stand at ANY step of the recording
+        with the map as the policy saw it then (:mod:`review_recording`), not
+        the final map alone: the occupancy, the settled unknown and the room
+        partition of every action, as sparse deltas (``int32`` flat cell
+        indices and the new values), written by :meth:`save` as
+        ``map_journal.npz``.
+        """
+        changed = np.flatnonzero(before.ravel() != after.ravel())
+        if len(changed):
+            values = after.ravel()[changed]
+            slot["journal"][layer].append((int(step), changed.astype(np.int32), values.astype(JOURNAL_DTYPES[layer])))
+        np.copyto(before, after)
 
     def capture(self, policy, observation):
         mapping = getattr(policy, "mapping", None)
         if mapping is None:
             return
+        step = int(getattr(observation, "step", 0))
         for floor_id, world in sorted(mapping.worlds.items()):
             if floor_id not in self.bindings:
                 free = next((i for i, s in enumerate(self.slots) if s["floor_id"] is None), None)
@@ -70,13 +139,12 @@ class FloorPanels:
             slot = self.slots[self.bindings[floor_id]]
             if world.grid.shape != self.shape or not np.allclose((world.origin_x, world.origin_y), self.origin):
                 raise ValueError("Floor map identity/scale changed inside an episode")
-            np.copyto(slot["grid"], world.grid)
+            self._journal(slot, "grid", step, slot["grid"], np.asarray(world.grid, dtype=np.int8))
             sight = getattr(policy, "sight", None)
             settled = sight.resolved(world, floor_id) if sight is not None else None
-            if settled is not None and settled.shape == self.shape:
-                np.copyto(slot["settled"], settled)
-            else:
-                slot["settled"].fill(False)
+            if settled is None or settled.shape != self.shape:
+                settled = np.zeros(self.shape, bool)
+            self._journal(slot, "settled", step, slot["settled"], np.asarray(settled, dtype=bool))
             context = self._floor_context(policy, floor_id)
             if context is not None:
                 landmarks, graph = context.get("landmarks"), context.get("graph")
@@ -85,9 +153,9 @@ class FloorPanels:
                 slot["rooms"] = len(graph.registry.rooms) if graph is not None else 0
                 slot["search_time_s"] = context.get("_floor_time") or 0.0
                 labels = graph.labels if graph is not None else None
-                slot["room_labels"].fill(0)
-                if labels is not None and labels.shape == self.shape:
-                    np.copyto(slot["room_labels"], labels)
+                if labels is None or labels.shape != self.shape:
+                    labels = np.zeros(self.shape, np.int32)
+                self._journal(slot, "room_labels", step, slot["room_labels"], np.asarray(labels, dtype=np.int32))
             slot["stairs"] = self._stairs_on(policy, floor_id)
         if mapping.floor_id in self.bindings and not (getattr(policy, "building", None) and policy.building.traversing):
             slot = self.slots[self.bindings[mapping.floor_id]]
@@ -181,6 +249,18 @@ class FloorPanels:
         np.savez_compressed(directory / "floor_maps.npz", **{"slot_%d" % i: s["grid"] for i, s in enumerate(self.slots)})
         np.savez_compressed(directory / "room_partitions.npz",
                             **{"slot_%d" % i: s["room_labels"] for i, s in enumerate(self.slots)})
+        np.savez_compressed(directory / "map_journal.npz", **self.journal_arrays())
+
+    def journal_arrays(self):
+        """The per-step map deltas of every slot as flat arrays for ``map_journal.npz`` (:func:`journal_to_arrays`)."""
+        out = {"origin": np.asarray(self.origin, dtype=np.float64), "resolution_m": np.asarray(self.resolution),
+               "shape": np.asarray(self.shape, dtype=np.int64),
+               "floor_ids": np.asarray([-1 if s["floor_id"] is None else int(s["floor_id"]) for s in self.slots],
+                                       dtype=np.int64)}
+        for i, slot in enumerate(self.slots):
+            for layer in JOURNAL_LAYERS:
+                out.update(journal_to_arrays("slot_%d_%s" % (i, layer), slot["journal"][layer], JOURNAL_DTYPES[layer]))
+        return out
 
     def render(self, active_id, planned_path=(), size=(960, 720), search=None):
         """Fit persistent floor plans into ``size=(w, h)`` at one shared scale."""
@@ -289,8 +369,10 @@ class FloorPanels:
 
     @classmethod
     def _draw_search(cls, canvas, pixel, search):
-        """Current/next-node emphasis and the openings offered as nodes; verbose search facts stay off the map."""
+        """Every accessible frontier goal, the openings offered as nodes and the current/next-node emphasis; verbose search facts stay off the map."""
         placed = []
+        for goal in search.get("accessible_frontiers", ()):
+            cv2.drawMarker(canvas, pixel(goal), FRONTIER_COLOR, cv2.MARKER_DIAMOND, 7, 1, cv2.LINE_AA)
         for opening in search.get("openings", ()):
             if not opening.get("centroid"):
                 continue

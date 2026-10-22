@@ -21,7 +21,10 @@ wins and turns a multi-storey campaign into a guaranteed spawn-floor search.
 
 **`observed` -- the default since 2026-10-21.** The method's stairs are what its
 own RGB-D measures (`world_model/stair_terrain.py`: a reachable run of support
-surfaces rising `stair_min_rise_m`, 0.40 m, within 5 m is a portal of the
+surfaces rising `stair_min_rise_m`, 0.40 m, within 5 m in a flight's
+profile -- `stair_min_risers` (3) risers of `stair_riser_min_m` (0.10) to
+`max_step_m` with no tread between them deeper than `stair_max_tread_m`
+(0.55), `stair_profile`, since 2026-10-22 -- is a portal of the
 storey, placed from the measurement and masked on the planning grid by the
 same capsule as any seen flight); no simulator geometry is read, which is the
 footing of ApexNav, SG-Nav and OSG-Nav. The navmesh connectors below are the

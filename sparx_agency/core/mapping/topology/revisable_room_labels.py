@@ -253,8 +253,9 @@ class RevisableRoomLabels:
         facts = self._facts.get(pid)
         shape_only = self._shape_only(pid, classes)
         ready = self._objects_ready(pid, classes) or shape_only
-        # The geometry bucket is part of the evidence: a room whose shape or doorways changed is re-asked.
-        keyed = signature + ((facts_bucket(facts),) if facts else ())
+        # For a room with no objects the geometry bucket IS the evidence: one whose shape or doorways changed
+        # is re-asked (a cached verdict per bucket). A room with objects is keyed by them alone.
+        keyed = signature + ((facts_bucket(facts),) if facts and not classes else ())
         previous = self.labels.get(pid)
         elapsed = step - self._last_query.get(pid, -s.refresh_steps)
         changed = self._signatures.get(pid) != keyed

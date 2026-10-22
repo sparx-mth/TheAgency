@@ -130,7 +130,22 @@ loop's state machine.
   hallway x2, living room, bathroom, bedroom -- the taxonomy in use). SPL is low on the long routes; one episode
   each is too few to separate the four changes from the LLM's draw.
 
+- 2026-10-22, the 25-episode campaign (`runs/benchmark_25episodes_20261022T044344Z`, five recorded episodes per
+  scene, stopped by the user at 19 of 25 with Wiconisco not reached): **SR 0.895, SPL 0.631, DTG 0.76 m over the
+  nineteen** -- Collierville 4/5 (tv: a STOP on a small kitchen screen at 0.34, under `stop_confidence`, accepted
+  after the two extra frames the rule allows; DTG 5.9 m), Corozal 4/5 (toilet: the 500-step limit, 1168 s, DTG
+  8.5 m), Darden 5/5 (both beds and the toilet at SPL 0.90, the episodes that failed in every earlier campaign),
+  Markleeville 4/4 (000001 bed, the old wrong STOP, now SR 1 / SPL 0.51). Measured on the failures: the observed
+  stair detector placed a "staircase" on Corozal's coffee table and sofa (and Darden's bed the day before), the
+  classifier was asked 82-100 times per long episode because the geometry bucket keyed its cache, and the scene-graph
+  update cost 1.4 s median on a 500-step map -- `_parts_skeleton` labelling the full 800x800 grid a hundred times per
+  update. All three fixed the same morning (CHANGELOG "Fixed (2026-10-22)"); the stair profile, the objects-only key
+  and the bounding-box crop (proved exact on 9,600 verdicts over three recorded maps).
+
 ## Open questions
+- A low-confidence terminal box (`television 0.34` on a kitchen's wall screen, Collierville/000004) is accepted after
+  two extra frames; whether a box under `stop_confidence` should also need the landmark's confirmation or a closer
+  look is for the user to decide.
 - A `bed` box on a dining table confirmed by the closing in a room whose evidence is ovens and cabinets
   (Markleeville 000000 and 000001): the room-type prior reaches the global loop and now the label's strength, but
   not the terminal confirmation. Whether a low-confidence terminal box contradicting a kitchen should need a

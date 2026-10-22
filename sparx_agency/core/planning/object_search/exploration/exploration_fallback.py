@@ -567,8 +567,10 @@ class ExplorationFallback:
         The loop's own ray caster (``RoomSearchLoop._unknown_view``, cached
         per action) scores each goal as :func:`rank_by_view_gain` does for
         the explore visit -- the unknown within the camera's range from the
-        goal's cell over the walk to it, not the length of the boundary --
-        and a goal under the threshold is a sliver, returned apart.
+        goal's cell over the walk to it, not the length of the boundary,
+        discounted by the actions already spent near it (the loop's trail
+        visits, since 2026-10-22) -- and a goal under the threshold is a
+        sliver, returned apart.
         ``(None, [])`` when the threshold is off or the loop has no caster:
         the inventory's order stands.
         """
@@ -578,7 +580,9 @@ class ExplorationFallback:
             return None, []
         view = loop._unknown_view(obs, world)
         cells = int(round(min_gain / view.cell_area_m2))
-        ranked = rank_by_view_gain(list(goals), view, self.policy.sweep.settings.ranking, min_gain_cells=cells)
+        visits = loop._visits(obs) if hasattr(loop, "_visits") else None
+        ranked = rank_by_view_gain(list(goals), view, self.policy.sweep.settings.ranking, min_gain_cells=cells,
+                                   visits=visits)
         kept = {tuple(g.cell) for g in ranked}
         return ranked, [g for g in goals if tuple(g.cell) not in kept]
 

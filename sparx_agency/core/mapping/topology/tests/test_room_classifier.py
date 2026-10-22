@@ -216,8 +216,11 @@ def test_room_geometry_is_shown_to_the_model_and_buckets_the_cache_and_a_shape_o
     assert clf.classify([], facts=facts, shape_only=True) is verdict, "the bucket is cached: no second call"
     client.replies.append({"label": "dining_room", "confidence": 0.8, "reasoning": "table and chairs"})
     square = clf.classify(["chair", "dining table"], facts={"area_m2": 12.0, "elongation": 1.1, "doors": 1})
-    assert square.label == "dining_room" and len(client.calls) == 2
-    assert clf.cached(["chair", "dining table"]) is None, "with geometry the key carries the bucket"
+    assert square.label == "dining_room" and len(client.calls) == 2 and "about 12 m2" in client.calls[-1]["user"]
+    # A room with objects is keyed by them alone: growing from medium to large buys no second verdict.
+    assert clf.cached(["chair", "dining table"]) is square
+    assert clf.classify(["chair", "dining table"], facts={"area_m2": 25.0, "elongation": 1.0, "doors": 3}) is square
+    assert len(client.calls) == 2
 
 
 def test_a_label_written_in_prose_is_read_as_the_sets_label():

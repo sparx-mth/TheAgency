@@ -126,7 +126,10 @@ size= floor area. frontier= unexplored boundaries still accessible inside it (0 
 proof that nothing is there). exits= the doorways and gaps at its edge that lead to space \
 NOT seen yet -- rooms the robot has not entered. They are NOT nodes of their own: going to \
 the room means walking its exits and looking through each; in brackets, how many stand at a \
-seen door frame (exits=2 (1 doorway)). glimpsed through its exits: objects seen beyond \
+seen door frame and about how much unexplored floor the camera could reach beyond them \
+(exits=2 (1 doorway, ~30m2 unseen behind them)): a room whose exits open onto a large unseen \
+area is where rooms not found yet must be, one whose exits open onto a few m2 leads nowhere \
+new. glimpsed through its exits: objects seen beyond \
 those thresholds -- they name the rooms BEHIND the exits (a toilet -> a bathroom; a bed -> a \
 bedroom), not this room. status= one of: never_entered (only seen from \
 outside, or not at all); entered (the robot stood in it and its camera has seen most of what \
@@ -352,6 +355,10 @@ class SearchNode:
         glimpsed: Room: object classes seen THROUGH its exits, beyond their
             thresholds -- they name the rooms behind the exits, not this
             one. Rendered as ``glimpsed through its exits: ...``.
+        unseen_m2: Room: unknown floor the rays from its exits' thresholds
+            reach, summed (since 2026-10-22) -- how much unexplored space
+            the exits open onto. Rendered inside the ``exits=`` brackets as
+            ``~30m2 unseen behind them``; 0 adds nothing.
     """
 
     id: int
@@ -376,6 +383,7 @@ class SearchNode:
     exits: int = 0
     doorways: int = 0
     glimpsed: Tuple[str, ...] = field(default_factory=tuple)
+    unseen_m2: float = 0.0
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -538,7 +546,7 @@ def format_node(node: SearchNode) -> str:
     label = node.label + ("?" if node.tentative and node.label != "unknown" else "")
     parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % size,
              "frontier=%d" % max(0, int(node.frontier_clusters)),
-             "exits=%s" % format_exits(node.exits, node.doorways),
+             "exits=%s" % format_exits(node.exits, node.doorways, node.unseen_m2),
              "status=%s" % node.status,
              "searched=%s" % coarse_seconds(node.searched_s)]
     if node.here:
@@ -550,13 +558,22 @@ def format_node(node: SearchNode) -> str:
     return "  ".join(parts)
 
 
-def format_exits(exits: int, doorways: int = 0) -> str:
-    """The ``exits=`` value of a room line: the count, and in brackets how many stand at a seen door frame."""
+def format_exits(exits: int, doorways: int = 0, unseen_m2: float = 0.0) -> str:
+    """The ``exits=`` value of a room line: the count, and in brackets how many stand at a seen door frame and how much unseen floor lies behind them.
+
+    ``exits=2 (1 doorway, ~30m2 unseen behind them)``; a count alone when
+    neither detail is known.
+    """
     count = max(0, int(exits))
     doors = max(0, min(count, int(doorways)))
-    if doors <= 0:
+    details = []
+    if doors > 0:
+        details.append("%d doorway%s" % (doors, "" if doors == 1 else "s"))
+    if count > 0 and float(unseen_m2) >= 0.5:
+        details.append("~%dm2 unseen behind them" % int(round(float(unseen_m2))))
+    if not details:
         return "%d" % count
-    return "%d (%d doorway%s)" % (count, doors, "" if doors == 1 else "s")
+    return "%d (%s)" % (count, ", ".join(details))
 
 
 def format_prompt(target: str, nodes: Sequence[SearchNode], context: Optional[SearchContext] = None) -> str:

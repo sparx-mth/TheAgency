@@ -402,3 +402,112 @@ def test_view_gain_ranks_a_doorway_onto_a_room_above_a_longer_strip_along_a_wall
                                heading_error_rad=0.0, utility=0.0)
     assert rank_by_view_gain([unreachable], view) == [], "no path, no goal"
     assert rank_by_view_gain(goals, view, min_gain_cells=10 ** 6) == [], "a floor on the gain drops every goal"
+
+
+# -- 2026-10-22: a frontier wrapping a block of unknown is one cluster per side -----------------------------
+def test_a_frontier_round_three_sides_of_an_unknown_block_is_three_clusters_one_per_side():
+    """Corozal/000003, action 291: known floor along the west, south and east of an unmapped square; one
+    component, one goal, on whichever side its centroid fell nearest -- and nothing on the side the agent
+    could reach. Every side is a way in and gets a goal and a marker of its own."""
+    hall = world_from([
+        "###################",
+        "#.....???????.....#",
+        "#.....???????.....#",
+        "#.....???????.....#",
+        "#.....???????.....#",
+        "#.....???????.....#",
+        "#.....???????.....#",
+        "#.................#",
+        "#.................#",
+        "#.................#",
+        "###################",
+    ])
+    from sparx_agency.core.planning.exploration.room_costs import frontier_clusters
+    ids, _ = passable_graph(flat_cost(hall))
+    whole = frontier_clusters(hall, hall.grid != OCC, ids, min_cluster_cells=1, split_sides=False)
+    assert len(whole) == 1, "one 8-connected component wraps the block"
+    clusters = frontier_clusters(hall, hall.grid != OCC, ids, min_cluster_cells=1)
+    assert len(clusters) == 3, "west, south and east sides"
+    sides = sorted((int(np.median(c.cols)), int(np.median(c.rows))) for c in clusters)
+    assert sides[0][0] == 5 and sides[2][0] == 13, "a cluster down each flank ..."
+    assert sides[1][1] == 7, "... and one along the south edge"
+    assert sum(c.size for c in clusters) == whole[0].size, "no cell lost, none counted twice"
+    for cluster in clusters:
+        assert hall.grid[cluster.cell[1], cluster.cell[0]] == FREE
+        assert any(abs(cluster.cell[0] - c) + abs(cluster.cell[1] - r) == 0 for c, r in zip(cluster.cols, cluster.rows))
+    goals = ranked_frontier_goals(hall, flat_cost(hall), hall.grid != OCC, at(3, 8), 0.0, min_cluster_cells=1)
+    assert len(goals) == 3 and {g.cell[0] for g in goals} >= {5, 13}, "a goal on each flank, ranked with the rest"
+    from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters
+    labels = np.where(hall.grid == FREE, 1, 0).astype(np.int32)
+    assert count_frontier_clusters(hall.grid.astype(np.int8), labels, 1, side_window_cells=1, side_min_cells=2) == {1: 3}
+    assert count_frontier_clusters(hall.grid.astype(np.int8), labels, 1, split_sides=False) == {1: 1}
+
+
+def test_a_ring_round_an_island_of_unknown_is_four_clusters_and_an_arc_into_the_unknown_stays_one():
+    from sparx_agency.core.planning.exploration.room_costs import frontier_clusters
+    island = world_from([
+        "###############",
+        "#.............#",
+        "#.............#",
+        "#....?????....#",
+        "#....?????....#",
+        "#....?????....#",
+        "#....?????....#",
+        "#....?????....#",
+        "#.............#",
+        "#.............#",
+        "###############",
+    ])
+    ids, _ = passable_graph(flat_cost(island))
+    assert len(frontier_clusters(island, island.grid != OCC, ids, min_cluster_cells=1)) == 4
+    arc = world_from([
+        "#############",
+        "#.....??????#",
+        "#.......????#",
+        "#.........??#",
+        "#..........?#",
+        "#..........?#",
+        "#..........?#",
+        "#..........?#",
+        "#..........?#",
+        "#..........?#",
+        "#..........?#",
+        "#..........?#",
+        "#############",
+    ])
+    ids, _ = passable_graph(flat_cost(arc))
+    [one] = frontier_clusters(arc, arc.grid != OCC, ids, min_cluster_cells=1)
+    assert one.size >= 12, "the bulge into the unknown bends away from the robot: its centre is behind it, so it is one gap"
+
+
+# -- 2026-10-22: ground the robot has trodden many times ranks under ground it has barely been near ----------
+def test_the_visitation_discount_prefers_the_frontier_the_robot_has_barely_been_near():
+    from sparx_agency.core.planning.exploration.frontier_ranking import rank_by_view_gain, trail_visits
+    from sparx_agency.core.planning.exploration.view_gain import UnknownView, ViewCone
+    hall = world_from([
+        "###########",
+        "#?.......?#",
+        "#?.......?#",
+        "#?.......?#",
+        "###########",
+    ])
+    mask = hall.grid != OCC
+    goals = ranked_frontier_goals(hall, flat_cost(hall), mask, at(5, 2), 0.0, min_cluster_cells=1)
+    assert len(goals) == 2
+    view = UnknownView(hall, ViewCone(half_fov_rad=math.radians(40), max_range_m=3.0))
+    symmetric = FrontierRankingParams(heading_weight=0.0, visit_weight=0.05)
+    west, east = sorted(rank_by_view_gain(goals, view, symmetric), key=lambda g: g.xy[0])
+    assert west.utility == pytest.approx(east.utility), "the same gain at the same distance, facing ignored"
+    # Twenty actions spent beside the west boundary: the east one, never approached, comes first.
+    visits = trail_visits([at(2, 2)] * 20, radius_m=1.5)
+    assert visits(west.xy) == 20 and visits(east.xy) == 0
+    ranked = rank_by_view_gain(goals, view, symmetric, visits=visits)
+    assert ranked[0].xy == east.xy and ranked[0].utility == pytest.approx(east.utility), "the untrodden side first, undiscounted"
+    assert ranked[1].utility == pytest.approx(west.utility / (1.0 + 0.05 * 20)), "the trodden side at half its number"
+    flat = rank_by_view_gain(goals, view, FrontierRankingParams(heading_weight=0.0, visit_weight=0.0), visits=visits)
+    assert flat[0].utility == pytest.approx(flat[1].utility), "0 disables the discount"
+    with pytest.raises(ValueError):
+        FrontierRankingParams(visit_weight=-1.0)
+    with pytest.raises(ValueError):
+        FrontierRankingParams(visit_radius_m=0.0)
+    assert trail_visits([], 1.0)((0.0, 0.0)) == 0.0

@@ -395,11 +395,18 @@ class RoomExits:
         count: Exits (doorways and gaps to space not seen yet) credited to the room.
         doorways: How many of them stand at a confirmed door frame.
         glimpsed: Object classes seen through them, beyond their thresholds, sorted.
+        unseen_m2: Unknown floor the camera's rays from the exits' thresholds
+            reach, summed (``Opening.gain_m2``; since 2026-10-22): how much
+            unexplored space the room's exits open onto, so the model can
+            tell a room whose gaps lead to a wing of the home not seen yet
+            from one whose gaps lead to a cupboard's worth. Rendered on the
+            room's line as ``~30m2 unseen behind them``.
     """
 
     count: int = 0
     doorways: int = 0
     glimpsed: Tuple[str, ...] = ()
+    unseen_m2: float = 0.0
 
 
 def room_exits(openings: Sequence) -> Dict[int, RoomExits]:
@@ -414,12 +421,13 @@ def room_exits(openings: Sequence) -> Dict[int, RoomExits]:
         pid = opening.room_pid
         if opening.kind == LANDMARK or pid is None:
             continue
-        entry = counts.setdefault(int(pid), [0, 0, set()])
+        entry = counts.setdefault(int(pid), [0, 0, set(), 0.0])
         entry[0] += 1
         entry[1] += 1 if opening.door_id is not None else 0
         entry[2].update(str(c) for c in opening.glimpsed if str(c).strip())
-    return {pid: RoomExits(count=n, doorways=doors, glimpsed=tuple(sorted(seen)))
-            for pid, (n, doors, seen) in counts.items()}
+        entry[3] += max(0.0, float(getattr(opening, "gain_m2", 0.0) or 0.0))
+    return {pid: RoomExits(count=n, doorways=doors, glimpsed=tuple(sorted(seen)), unseen_m2=round(unseen, 1))
+            for pid, (n, doors, seen, unseen) in counts.items()}
 
 
 class OpeningRegistry:
