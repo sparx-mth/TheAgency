@@ -8,11 +8,15 @@ import pytest
 
 from sparx_agency.core.mapping.topology.room_classifier import (
     DEFAULT_LABEL_SET,
+    HOME_LABEL_SET,
+    LABEL_ALIASES,
     RoomLabel,
     RoomTypeClassifier,
     SYSTEM_PROMPT_TEMPLATE,
     USER_PROMPT_TEMPLATE,
+    facts_bucket,
     format_object_list,
+    format_room_facts,
 )
 
 
@@ -67,7 +71,7 @@ def test_prompts_carry_label_set_and_object_counts():
     assert call["system"] == SYSTEM_PROMPT_TEMPLATE.format(
         label_set=", ".join(DEFAULT_LABEL_SET))
     assert call["user"] == USER_PROMPT_TEMPLATE.format(
-        obj_list="- oven x1\n- sink x2")
+        obj_list="- oven x1\n- sink x2", facts="")
 
 
 def test_min_objects_gate_skips_llm():
@@ -176,9 +180,47 @@ def test_llm_failure_propagates_and_is_not_cached():
 # ---------------------------------------------------------------------
 #  Label set contract
 # ---------------------------------------------------------------------
-def test_default_label_set_has_15_labels_incl_unknown():
-    assert len(DEFAULT_LABEL_SET) == 15
-    assert "unknown" in DEFAULT_LABEL_SET
+def test_default_label_set_is_the_home_taxonomy_first_then_the_clinical_labels_and_unknown():
+    """The residential taxonomy of 2026-10-21: hallway, foyer, dining room, office, laundry, balcony, closet,
+    garage beside the four coarse types; the clinical labels the classifier's other users keep follow."""
+    assert "unknown" in DEFAULT_LABEL_SET and DEFAULT_LABEL_SET[:len(HOME_LABEL_SET)] == HOME_LABEL_SET
+    for label in ("hallway", "foyer", "dining_room", "office", "laundry_room", "balcony", "storage_closet", "garage"):
+        assert label in HOME_LABEL_SET
+    assert len(DEFAULT_LABEL_SET) == len(set(DEFAULT_LABEL_SET)) == 18
+    assert all(LABEL_ALIASES[alias] in DEFAULT_LABEL_SET for alias in LABEL_ALIASES)
+
+
+def test_a_synonym_or_a_slashed_label_is_read_as_the_sets_label():
+    """'corridor' is the hallway, 'Study' the office, 'patio' the balcony, 'entryway' the foyer, 'Office/Study' the office."""
+    for spelled, expected in (("corridor", "hallway"), ("Study", "office"), ("patio", "balcony"), ("Entryway", "foyer"),
+                              ("utility room", "laundry_room"), ("pantry", "storage_closet"), ("Office/Study", "unknown"),
+                              ("family room", "living_room"), ("WC", "bathroom"), ("Dining", "dining_room")):
+        client = FakeClient([{"label": spelled, "confidence": 0.8, "reasoning": "x"}])
+        assert RoomTypeClassifier(client).classify(["chair", "desk"]).label == expected, spelled
+
+
+def test_room_geometry_is_shown_to_the_model_and_buckets_the_cache_and_a_shape_only_room_can_be_asked():
+    """A long narrow space with three doorways and nothing in it is asked about on its shape alone, once per
+    geometry bucket; the same objects in a differently shaped room are a different question."""
+    assert format_room_facts(None) == "" and facts_bucket({}) == ()
+    facts = {"area_m2": 5.6, "elongation": 4.2, "doors": 3}
+    text = format_room_facts(facts)
+    assert "about 6 m2" in text and "long and narrow, 4:1" in text and "doorways opening off it: 3" in text
+    assert facts_bucket(facts) == ("S", True, 2) and facts_bucket({"area_m2": 20.0, "elongation": 1.2, "doors": 1}) == ("L", False, 1)
+    client = FakeClient([{"label": "Corridor", "confidence": 0.7, "reasoning": "long, three doors, empty"}])
+    clf = RoomTypeClassifier(client)
+    assert clf.classify([], facts=facts).label == "unknown", "no objects: not asked unless shape_only"
+    verdict = clf.classify([], facts=facts, shape_only=True)
+    assert verdict.label == "hallway" and len(client.calls) == 1 and "Room geometry:" in client.calls[0]["user"]
+    assert clf.cached([], facts=facts) is verdict and clf.cached([], facts={"area_m2": 30.0, "elongation": 1.0, "doors": 0}) is None
+    assert clf.classify([], facts=facts, shape_only=True) is verdict, "the bucket is cached: no second call"
+    client.replies.append({"label": "dining_room", "confidence": 0.8, "reasoning": "table and chairs"})
+    square = clf.classify(["chair", "dining table"], facts={"area_m2": 12.0, "elongation": 1.1, "doors": 1})
+    assert square.label == "dining_room" and len(client.calls) == 2 and "about 12 m2" in client.calls[-1]["user"]
+    # A room with objects is keyed by them alone: growing from medium to large buys no second verdict.
+    assert clf.cached(["chair", "dining table"]) is square
+    assert clf.classify(["chair", "dining table"], facts={"area_m2": 25.0, "elongation": 1.0, "doors": 3}) is square
+    assert len(client.calls) == 2
 
 
 def test_a_label_written_in_prose_is_read_as_the_sets_label():

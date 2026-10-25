@@ -19,7 +19,21 @@ config, and the frozen `method` block records the value -- so every command in
 this file runs with stairs takeable. A `--policy-config` that sets it false
 wins and turns a multi-storey campaign into a guaranteed spawn-floor search.
 
-**`ground_truth` -- the default.** The evaluator reads the scene's navmesh once
+**`observed` -- the default since 2026-10-21.** The method's stairs are what its
+own RGB-D measures (`world_model/stair_terrain.py`: a reachable run of support
+surfaces rising `stair_min_rise_m`, 0.40 m, within 5 m in a flight's
+profile -- `stair_min_risers` (3) risers of `stair_riser_min_m` (0.10) to
+`max_step_m` with no tread between them deeper than `stair_max_tread_m`
+(0.55), `stair_profile`, since 2026-10-22 -- is a portal of the
+storey, placed from the measurement and masked on the planning grid by the
+same capsule as any seen flight); no simulator geometry is read, which is the
+footing of ApexNav, SG-Nav and OSG-Nav. The navmesh connectors below are the
+ablation: their centreline begins 0.45 m before Darden's first riser, on a
+sloped threshold, and drawn on the grid it closed the junction below the
+flight. Everything in the "Architecture" section describes the observed mode.
+
+**`ground_truth` -- the ablation** (`{"multifloor": {"stair_source": "ground_truth"}}`;
+the fixtures that hand an episode a scene structure ask for it). The evaluator reads the scene's navmesh once
 per scene (`habitat/stair_connectors.py`): the area-supported storey heights
 (the generator's own rule -- 8 m² within ±0.30 m, 1.5 m apart) and, between
 them, every cluster of off-level walkable surface as one **connector** -- its
@@ -122,9 +136,8 @@ building coordinator then:
 observed-only run, and its results must say so. RGB stair detections (YOLO
 `stairs`/`staircase`) are context labels only, as before.
 
-**`observed`** -- the former RGB-D discovery, kept for comparison
-(`{"multifloor": {"stair_source": "observed"}}`). Everything in the next
-section describes it.
+**`observed`** -- the default (above). Everything in the next section
+describes it.
 
 ## Architecture
 
@@ -167,7 +180,7 @@ in ground-truth mode it receives the storey heights and stair connectors and
 nothing else.
 
 Configuration is under `RPTSettings.multifloor` (`enabled: true`,
-`stair_source: "ground_truth"` by default).
+`stair_source: "observed"` by default since 2026-10-21; `"ground_truth"` is the ablation).
 `{"multifloor": {"enabled": false}}` explicitly selects the historical destructive
 floor-reset ablation. Both `--explorer frontier` and `--explorer falcon` support
 the building coordinator. The frontier mode remains the default; enabling

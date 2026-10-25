@@ -27,12 +27,25 @@ class MultiFloorParams:
     """Floor hysteresis for the atlas plus the building coordinator's knobs.
 
     Attributes:
-        stair_source: ``ground_truth`` -- stair connectors and floor levels
-            come from the simulator's navmesh through the episode metadata,
-            and a floor transition is started only at one of them;
-            ``observed`` -- the former RGB-D support-surface discovery, which
-            mistook a raised bathroom floor for a staircase. The atlas itself
-            reads poses only in either mode; this is the coordinator's choice.
+        stair_source: ``observed`` (the default since 2026-10-21) -- stairs
+            are what the robot's own RGB-D sees: measured support surfaces
+            rising ``stair_min_rise_m`` or more within reach in a flight's
+            profile -- ``stair_min_risers`` risers of ``stair_riser_min_m``
+            to ``max_step_m`` with treads of ``stair_min_tread_m`` to
+            ``stair_max_tread_m`` between them (``world_model/stair_terrain.py``
+            ``stair_profile``, since 2026-10-22: a coffee table and a sofa,
+            or a bed, are no flight) -- masked on the planning grid
+            like any other seen flight, with no simulator geometry consulted
+            -- the footing of ApexNav, SG-Nav and OSG-Nav, which have no
+            staircase oracle. ``ground_truth`` -- the ablation: stair
+            connectors and floor levels come from the simulator's navmesh
+            through the episode metadata, a perfect detector sights them,
+            and a floor transition is started only at one of them. Its
+            footprint is the navmesh centreline, which in Darden begins
+            0.45 m before the first riser, on a sloped threshold: drawn on
+            the grid it closed the junction below the flight. The atlas
+            itself reads poses only in either mode; this is the
+            coordinator's choice.
         near_connector_m: How close (XY, metres) to a ground-truth connector's
             polyline an unplanned height departure must be to count as being
             on those stairs rather than on a step or a threshold.
@@ -79,7 +92,7 @@ class MultiFloorParams:
     """
 
     enabled: bool = True
-    stair_source: str = STAIR_SOURCE_GROUND_TRUTH
+    stair_source: str = STAIR_SOURCE_OBSERVED
     near_connector_m: float = 0.75
     departure_m: float = 0.45
     floor_match_m: float = 0.30
@@ -96,6 +109,10 @@ class MultiFloorParams:
     max_step_m: float = 0.24
     terrain_radius_m: float = 6.0
     stair_min_rise_m: float = 0.40
+    stair_min_risers: int = 3
+    stair_riser_min_m: float = 0.10
+    stair_min_tread_m: float = 0.20
+    stair_max_tread_m: float = 0.55
     max_failures: int = 4
     floor_change_cost_m: float = 8.0
     commit_failures: int = 12
@@ -111,7 +128,8 @@ class MultiFloorParams:
             raise ValueError("multifloor.stair_source must be one of %s; no silent fallback" % (STAIR_SOURCES,))
         for name in ("departure_m", "floor_match_m", "min_floor_separation_m",
                      "min_floor_area_m2", "stable_height_m", "stable_distance_m", "max_step_m",
-                     "terrain_radius_m", "stair_min_rise_m", "exit_distance_m", "near_connector_m"):
+                     "terrain_radius_m", "stair_min_rise_m", "exit_distance_m", "near_connector_m",
+                     "stair_riser_min_m", "stair_min_tread_m", "stair_max_tread_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
@@ -121,9 +139,13 @@ class MultiFloorParams:
         for name in ("stable_samples", "floor_search_actions", "transition_actions",
                      "retreat_actions", "portal_cooldown_actions", "max_failures",
                      "commit_failures", "commit_stall_actions", "confirm_actions", "approach_failures",
-                     "arrival_grace_actions"):
+                     "arrival_grace_actions", "stair_min_risers"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
+        if not self.stair_riser_min_m < self.max_step_m:
+            raise ValueError("stair_riser_min_m must be below max_step_m")
+        if not self.stair_min_tread_m < self.stair_max_tread_m:
+            raise ValueError("stair_min_tread_m must be below stair_max_tread_m")
         if not self.stable_height_m < self.floor_match_m < self.departure_m < self.min_floor_separation_m:
             raise ValueError("Floor hysteresis thresholds must be strictly ordered")
         if self.stable_samples < 3:

@@ -131,6 +131,52 @@ def test_measured_treads_are_connected_but_a_cliff_is_not():
     assert not cliff.permits(AgentPose(0, 0, 0, 0), 0.25)
 
 
+def test_a_candidate_flight_needs_a_flights_profile_not_any_climbable_chain():
+    """Corozal/000003 (2026-10-22): a coffee table's shelf and top and the sofa behind it climbed 0.68 m in
+    climbable steps and were placed as a staircase, masking the room's floor; Darden/000000 placed one on a bed.
+    Three tread-sized risers with treads under 0.55 m between them, climbing one way, is a flight; a level
+    walked longer than a tread -- a table top, a seat, a mattress, a landing -- ends the stretch."""
+    from sparx_agency.core.planning.object_search.world_model.stair_terrain import stair_profile
+    params = MultiFloorParams()
+    def path_from(levels):
+        points, x = [], 0.0
+        for z, run in levels:
+            for _ in range(max(1, int(round(run / 0.1)))):
+                points.append((x, 0.0, z)); x += 0.1
+        return points
+    flight = [(0.0, 1.0)] + [(0.17 * k, 0.3) for k in range(1, 7)]
+    assert stair_profile(path_from(flight), 1, params) == (6, pytest.approx(1.02))
+    assert stair_profile(path_from(flight), -1, params) is None, "it climbs; it is no descent"
+    assert stair_profile(path_from([(0.0, 1.0)] + [(-0.17 * k, 0.3) for k in range(1, 5)]), -1, params) == (4, pytest.approx(0.68))
+    coffee_table_and_sofa = [(0.0, 1.5), (0.2, 0.2), (0.45, 0.5), (0.45, 0.6), (0.68, 0.3)]
+    assert stair_profile(path_from(coffee_table_and_sofa), 1, params) is None
+    bed = [(0.0, 2.0), (0.22, 0.15), (0.45, 1.5)]
+    assert stair_profile(path_from(bed), 1, params) is None
+    # The apron of a table seen obliquely: a ramp of single cells, risers of a tread's size with no tread between
+    # them (the Corozal portal survived the first profile this way); a flight of two-cell treads is still a flight.
+    table_edge = [(0.0, 1.0)] + [(0.12 * k, 0.1) for k in range(1, 6)]
+    assert stair_profile(path_from(table_edge), 1, params) is None
+    assert stair_profile(path_from([(0.0, 1.0), (0.12, 0.1), (0.24, 0.1), (0.36, 0.1), (0.45, 0.6), (0.68, 0.3)]), 1, params) is None
+    assert stair_profile(path_from([(0.0, 1.0)] + [(0.17 * k, 0.2) for k in range(1, 6)]), 1, params) == (3, pytest.approx(0.51))
+    assert stair_profile(path_from([(0.0, 1.0), (0.2, 0.3), (0.4, 0.3)]), 1, params) is None, "two risers: a step, not a flight"
+    assert stair_profile(path_from([(0.0, 1.0), (0.16, 0.3), (0.32, 0.3), (0.48, 0.3)]), 1, params) == (3, pytest.approx(0.48))
+    with_landing = [(0.0, 1.0)] + [(0.17 * k, 0.3) for k in range(1, 4)] + [(0.51, 1.2)] + [(0.51 + 0.17 * k, 0.3) for k in range(1, 5)]
+    assert stair_profile(path_from(with_landing), 1, params) is not None, "a landing between two flights is still stairs"
+    # The terrain's own candidates: a staircase of 0.4 m treads is one, the same chain as furniture is not.
+    stairs = terrain_with_surface(lambda x: max(0, x // 4) * 0.18 - 0.05)
+    candidate = next(c for c in stairs.candidates if c["direction"] == 1)
+    assert candidate["risers"] >= 3 and candidate["profile_rise_m"] >= params.stair_min_rise_m
+    def furniture(x):                      # floor, a 0.2 m shelf for 0.2 m, a 0.45 m top for 0.9 m, a 0.68 m back
+        if x < 4: return -0.05
+        if x < 6: return 0.2
+        if x < 15: return 0.45
+        return 0.68
+    assert not terrain_with_surface(furniture).candidates
+    for bad in ({"stair_min_risers": 0}, {"stair_riser_min_m": 0.3}, {"stair_max_tread_m": 0.0}, {"stair_min_tread_m": 0.6}):
+        with pytest.raises(ValueError):
+            MultiFloorParams(**bad)
+
+
 def test_depth_wall_is_not_mistaken_for_stairs():
     _, episode = setup_policy()
     terrain = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)

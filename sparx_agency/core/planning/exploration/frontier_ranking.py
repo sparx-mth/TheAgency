@@ -76,6 +76,19 @@ class FrontierRankingParams:
         snap_radius_m: How far the robot's own cell may be moved onto the
             passable graph -- the robot routinely reads as standing inside an
             inflation skirt.
+        visit_weight: How much a goal in well-trodden ground is discounted
+            (:func:`rank_by_view_gain`, since 2026-10-22): the utility is
+            divided by ``1 + visit_weight * visits``, where ``visits`` is
+            the number of actions the robot has spent within
+            ``visit_radius_m`` of the goal (the caller's ``visits``
+            callable, built from the trail). 0.05 halves a goal the robot
+            stood beside for twenty actions and leaves one it never came
+            near untouched: the user's rule -- explore where the robot has
+            barely been, not where it has been many times (Corozal/000003,
+            ``c1af8954a378``, action 291: a route back through the open
+            room crossed five times while O30, O16 and O29 stood unwalked).
+            0 disables.
+        visit_radius_m: See ``visit_weight``.
 
     Raises:
         ValueError: On a non-finite or out-of-range value.
@@ -86,13 +99,15 @@ class FrontierRankingParams:
     heading_weight: float = 1.0
     max_geodesic_m: float = 30.0
     snap_radius_m: float = 1.0
+    visit_weight: float = 0.05
+    visit_radius_m: float = 1.5
 
     def __post_init__(self):
-        for name in ("gain_exponent", "heading_weight"):
+        for name in ("gain_exponent", "heading_weight", "visit_weight"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0.0:
                 raise ValueError("%s must be finite and non-negative" % name)
-        for name in ("distance_floor_m", "max_geodesic_m", "snap_radius_m"):
+        for name in ("distance_floor_m", "max_geodesic_m", "snap_radius_m", "visit_radius_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0.0:
                 raise ValueError("%s must be positive and finite" % name)
@@ -329,8 +344,28 @@ def frontier_goals_by_room(world: OccupancyGrid2D,
     return out
 
 
+def trail_visits(points: Sequence[Tuple[float, float]], radius_m: float):
+    """``xy -> visits``: how many of ``points`` -- the robot's recorded positions, one per action -- lie within ``radius_m`` of ``xy``.
+
+    The ``visits`` callable :func:`rank_by_view_gain` discounts by: actions
+    spent near a place, turns in place included (time spent looking around
+    there is time spent there). Brute force over a few hundred points per
+    goal; the trail of a 500-action episode is small.
+    """
+    trail = np.asarray([(float(x), float(y)) for x, y in points], dtype=float).reshape(-1, 2)
+    r2 = float(radius_m) ** 2
+
+    def visits(xy):
+        if not len(trail):
+            return 0.0
+        dx = trail[:, 0] - float(xy[0])
+        dy = trail[:, 1] - float(xy[1])
+        return float(np.count_nonzero(dx * dx + dy * dy <= r2))
+    return visits
+
+
 def rank_by_view_gain(goals: Sequence[FrontierGoal], view, params: Optional[FrontierRankingParams] = None,
-                      min_gain_cells: int = 0, keep_size_cells: int = 0) -> List[FrontierGoal]:
+                      min_gain_cells: int = 0, keep_size_cells: int = 0, visits=None) -> List[FrontierGoal]:
     """Re-score frontier goals by the unknown floor a look-around FROM each one would reveal.
 
     The size of a frontier cluster says how long the boundary is; what a
@@ -356,6 +391,12 @@ def rank_by_view_gain(goals: Sequence[FrontierGoal], view, params: Optional[Fron
             cells is kept whatever its gain -- a gap the body can pass is
             an exit, a doorway, and leads somewhere however little of it
             the rays reach from this side. 0 exempts nothing.
+        visits: Optional ``xy -> visits`` (:func:`trail_visits`): the
+            actions the robot has spent near a goal, which discounts it by
+            ``1 + params.visit_weight * visits`` -- ground the robot has
+            trodden many times is worth less than ground it has barely
+            been near, whatever the rays say. None, or a zero weight,
+            ranks on gain and cost alone.
 
     Returns:
         The goals with ``utility`` replaced, best first.
@@ -369,7 +410,10 @@ def rank_by_view_gain(goals: Sequence[FrontierGoal], view, params: Optional[Fron
         if revealed < min_gain_cells and not (keep_size_cells > 0 and int(goal.size_cells) >= keep_size_cells):
             continue
         facing = 1.0 + params.heading_weight * abs(float(goal.heading_error_rad)) / math.pi
-        utility = float(revealed) / ((float(goal.geodesic_m) + params.distance_floor_m) * facing)
+        trodden = 1.0
+        if visits is not None and params.visit_weight > 0.0:
+            trodden = 1.0 + params.visit_weight * max(0.0, float(visits(goal.xy)))
+        utility = float(revealed) / ((float(goal.geodesic_m) + params.distance_floor_m) * facing * trodden)
         out.append(replace(goal, utility=float(utility)))
     out.sort(key=lambda g: (-g.utility, g.geodesic_m))
     return out

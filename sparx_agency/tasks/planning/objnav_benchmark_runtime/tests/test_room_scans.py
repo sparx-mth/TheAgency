@@ -496,7 +496,9 @@ def test_a_relabel_mid_scan_keeps_the_visit_unless_the_new_type_rules_the_room_o
 
 
 def test_a_relabel_in_transit_under_scan_keeps_the_transit_unless_ruled_out():
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+    """The historical rule, behind ``transit_commitment=False`` since 2026-10-22: under the committed-target
+    rule no classifier call is spent in transit at all (``test_explore_visit``)."""
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), transit_commitment=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
     see(policy, {1: ["bed"]}, step=1)                                # a bedroom may hold a chair
@@ -574,7 +576,7 @@ def test_the_policy_excludes_seen_stair_footprints_from_the_partition(monkeypatc
     policy, episode, world, rooms, _ = stair_policy(order=(STAIRS, 1, 0))
     exclusion = policy.room_exclusion(world)
     assert exclusion is not None and exclusion.any(), "the seen flight's foot is on this floor"
-    gx, gy = world.world_to_grid(4.0, 1.0)
+    gx, gy = world.world_to_grid(4.0, 1.3)                       # the first treads; (4.0, 1.0) is the floor before them
     assert exclusion[gy, gx]
     seen = {}
     monkeypatch.setattr(policy.graph, "update", lambda *a, **k: seen.update(k))

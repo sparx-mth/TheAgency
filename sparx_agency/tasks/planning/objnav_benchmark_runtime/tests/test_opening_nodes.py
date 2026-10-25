@@ -516,7 +516,10 @@ def test_a_home_object_of_the_target_keeps_a_strongly_labelled_room_a_node():
     policy.target = gibson_label_mapper().target_labels("toilet")
     see(policy, {1: ["sofa", "bed", "shower"]}, step=0)             # still a bedroom to the classifier
     policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["label"] == "bedroom" and policy.graph.label_info(1)["strength"] == "strong"
+    info = policy.graph.label_info(1)
+    # A bed and a shower in one region are signature objects of two types: the merge showing, so the label is
+    # WEAK since 2026-10-21 (``conflicting_signatures``) -- and the home object keeps the room a node either way.
+    assert info["label"] == "bedroom" and info["strength"] == "weak" and info["conflicting_signatures"]
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert 1 not in policy.loop._excluded and policy.loop.stats["home_object_kept"] == 1
     kept = [e for e in policy.loop.events if e["event"] == "home_object_kept"][0]

@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import asdict, dataclass
 
-from sparx_agency.core.mapping.topology.room_classifier import RoomLabel, RoomTypeClassifier
+from sparx_agency.core.mapping.topology.room_classifier import RoomLabel, RoomTypeClassifier, facts_bucket
 from sparx_agency.core.mapping.topology.room_priors import generic_object, signature_type
 
 WEAK = "weak"
@@ -59,6 +59,19 @@ class RoomLabelSettings:
             0.9 on an upper storey, which the storey summary then showed the
             node oracle as a kitchen found). The objects are still shown to
             the oracle on the room's line. ``False`` asks the model.
+        shape_only_rooms: Ask about a room that has NO classifiable objects
+            on its geometry alone when it reads as a passage (since
+            2026-10-21): long and narrow (``corridor_elongation`` or more)
+            or with ``corridor_doors`` or more doorways off it, and at least
+            ``shape_min_area_m2`` of floor. A hallway, a foyer, a landing
+            have no furniture to name them, and ``unknown`` left the oracle
+            to value every corridor as a possible bedroom. One call per
+            geometry bucket (:func:`room_classifier.facts_bucket`); the
+            label is WEAK and never rules a room out. ``False`` keeps the
+            object gate alone.
+        corridor_elongation: See ``shape_only_rooms``.
+        corridor_doors: See ``shape_only_rooms``.
+        shape_min_area_m2: See ``shape_only_rooms``.
     """
 
     min_objects: int = 1
@@ -70,16 +83,37 @@ class RoomLabelSettings:
     signature_objects: bool = True
     distinctive_required: bool = True
     generic_evidence_gate: bool = True
+    shape_only_rooms: bool = True
+    corridor_elongation: float = 2.5
+    corridor_doors: int = 2
+    shape_min_area_m2: float = 2.0
 
     def __post_init__(self):
-        for name in ("min_objects", "min_classes", "min_evidence_updates", "refresh_steps", "strong_classes"):
+        for name in ("min_objects", "min_classes", "min_evidence_updates", "refresh_steps", "strong_classes",
+                     "corridor_doors"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
         if not 0.0 <= float(self.strong_confidence) <= 1.0:
             raise ValueError("strong_confidence must lie in [0, 1]")
-        for name in ("signature_objects", "distinctive_required", "generic_evidence_gate"):
+        for name in ("signature_objects", "distinctive_required", "generic_evidence_gate", "shape_only_rooms"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError("%s must be a bool" % name)
+        for name in ("corridor_elongation", "shape_min_area_m2"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError("%s must be positive" % name)
+
+    def shape_candidate(self, facts):
+        """Whether a room with no classifiable objects is asked about on this geometry."""
+        if not self.shape_only_rooms or not facts:
+            return False
+        area = facts.get("area_m2")
+        if area is None or float(area) < self.shape_min_area_m2:
+            return False
+        elongation = facts.get("elongation")
+        doors = facts.get("doors")
+        return ((elongation is not None and float(elongation) >= self.corridor_elongation)
+                or (doors is not None and int(doors) >= self.corridor_doors))
 
 
 class RevisableRoomLabels:
@@ -113,8 +147,16 @@ class RevisableRoomLabels:
         self.queries = 0
         self._evidence_steps = {}
         self._objects = {}
+        self._facts = {}
 
-    def update(self, objects, step, partition_changed=False, allow_query=True):
+    def update(self, objects, step, partition_changed=False, allow_query=True, facts=None):
+        """Record every room's evidence and, when allowed, (re-)classify the ones whose evidence changed.
+
+        ``facts`` is ``{pid: {"area_m2", "elongation", "doors"}}``, the
+        room's geometry: shown to the model beside the objects, part of the
+        cache key, and -- for a room with nothing in it -- the one reason it
+        may be asked about at all (``RoomLabelSettings.shape_only_rooms``).
+        """
         if partition_changed:
             # Pids survive one side of a split: retaining their old cached
             # label would attach the whole-room verdict to a different region.
@@ -126,6 +168,7 @@ class RevisableRoomLabels:
             self._evidence_steps.clear()
         live = set(objects)
         self._objects = {pid: list(classes) for pid, classes in objects.items()}
+        self._facts = {pid: dict(item) for pid, item in (facts or {}).items() if pid in live}
         self.labels = {pid: label for pid, label in self.labels.items() if pid in live}
         self.metadata = {pid: item for pid, item in self.metadata.items() if pid in live}
         for pid, classes in objects.items():
@@ -178,12 +221,26 @@ class RevisableRoomLabels:
         aliases = {"couch": "sofa", "tv": "television"}
         return tuple(sorted(Counter(aliases.get(name, name) for name in classes).items()))
 
-    def _ready(self, pid, classes):
+    def _objects_ready(self, pid, classes):
         s = self.settings
         if s.generic_evidence_gate and classes and all(generic_object(name) for name in classes):
             return False
         return (len(classes) >= s.min_objects and len(set(classes)) >= s.min_classes
                 and self._evidence_updates.get(pid, 0) >= s.min_evidence_updates)
+
+    def _ready(self, pid, classes):
+        """Whether the room may be classified: on its objects, or -- with none that count -- on its shape."""
+        return self._objects_ready(pid, classes) or self._shape_only(pid, classes)
+
+    def _shape_only(self, pid, classes):
+        """A room with no classifiable objects whose geometry reads as a passage (``shape_only_rooms``)."""
+        if self._objects_ready(pid, classes):
+            return False
+        s = self.settings
+        if classes and not (s.generic_evidence_gate and all(generic_object(name) for name in classes)):
+            return False                                   # objects below the thresholds: wait for them
+        return (self._evidence_updates.get(pid, 0) >= s.min_evidence_updates
+                and s.shape_candidate(self._facts.get(pid)))
 
     def _update_room(self, pid, classes, step, allow_query=True, clue=False):
         signature = self._signature(classes)
@@ -193,10 +250,15 @@ class RevisableRoomLabels:
             self._evidence_updates[pid] = self._evidence_updates.get(pid, 0) + 1
             self._evidence_steps[pid] = step
         s = self.settings
-        ready = self._ready(pid, classes)
+        facts = self._facts.get(pid)
+        shape_only = self._shape_only(pid, classes)
+        ready = self._objects_ready(pid, classes) or shape_only
+        # For a room with no objects the geometry bucket IS the evidence: one whose shape or doorways changed
+        # is re-asked (a cached verdict per bucket). A room with objects is keyed by them alone.
+        keyed = signature + ((facts_bucket(facts),) if facts and not classes else ())
         previous = self.labels.get(pid)
         elapsed = step - self._last_query.get(pid, -s.refresh_steps)
-        changed = self._signatures.get(pid) != signature
+        changed = self._signatures.get(pid) != keyed
         if not ready:
             result = RoomLabel("unknown", 0.0, "insufficient stable confirmed-object evidence")
             reason = "evidence_gate"
@@ -211,19 +273,20 @@ class RevisableRoomLabels:
             # for evidence the model has seen, once per ``refresh_steps``.
             result = None
             if changed:
-                result = self.classifier.cached(classes)
-                if result is None and clue:
+                result = self.classifier.cached(classes, facts)
+                if result is None and clue and not shape_only:
                     result = self._kind_cache.get(kinds)
             if result is None:
-                result = self.classifier.classify(classes, refresh=True)
+                result = self.classifier.classify(classes, refresh=True, facts=facts, shape_only=shape_only)
                 self.queries += 1
                 self._last_query[pid] = step
-                self._kind_cache[kinds] = result
-            self._signatures[pid] = signature
+                if not shape_only:
+                    self._kind_cache[kinds] = result
+            self._signatures[pid] = keyed
             self._query_kinds[pid] = kinds
             self._agreement[pid] = (self._agreement.get(pid, 0) + 1
                                     if previous and previous.label == result.label else 1)
-            reason = "evidence_changed" if changed else "periodic_refresh"
+            reason = "shape" if shape_only else "evidence_changed" if changed else "periodic_refresh"
         else:
             return
         self.labels[pid] = result
@@ -235,13 +298,18 @@ class RevisableRoomLabels:
         kinds = set(classes)
         confident = result.confidence >= s.strong_confidence and result.label != "unknown"
         signed = s.signature_objects and any(signature_type(name) == result.label for name in kinds)
+        # Signature objects of two room types in one region (a bed beside an oven and a refrigerator,
+        # Darden/000000 of 2026-10-21): the map merged two rooms or the detector erred, and whichever type the
+        # model picked is a guess -- WEAK, so the type prior never rules the region out on it.
+        conflicting = len({signature_type(name) for name in kinds if signature_type(name)}) > 1
         distinctive = not s.distinctive_required or any(not generic_object(name) for name in kinds)
         agreeing = len(kinds) >= s.strong_classes and distinctive
-        strength = STRONG if confident and (agreeing or signed) else WEAK
-        self.metadata[pid] = dict(asdict(result), strength=strength, signature=bool(confident and signed),
+        strength = STRONG if confident and (agreeing or signed) and not shape_only and not conflicting else WEAK
+        self.metadata[pid] = dict(asdict(result), strength=strength, signature=bool(confident and signed and not conflicting),
                                   provisional=(result.label == "unknown" or result.confidence < s.strong_confidence
-                                               or self._agreement.get(pid, 0) < 2),
+                                               or self._agreement.get(pid, 0) < 2 or shape_only or conflicting),
+                                  conflicting_signatures=bool(conflicting),
                                   evidence_objects=len(classes), evidence_classes=len(set(classes)),
-                                  updated_step=int(step), trigger=reason)
+                                  shape_only=bool(shape_only), updated_step=int(step), trigger=reason)
 
 

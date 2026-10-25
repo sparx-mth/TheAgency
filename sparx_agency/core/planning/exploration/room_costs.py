@@ -45,10 +45,13 @@ from dataclasses import dataclass
 from typing import (Any, Dict, List, Mapping, Optional, Sequence, Tuple)
 
 import numpy as np
+from scipy.ndimage import find_objects
 from scipy.ndimage import label as cc_label
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 
+from sparx_agency.core.mapping.topology.frontier_split import (
+    frontier_sides, side_min_cells, side_window_cells, split_by_side)
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 
 SQRT2 = float(np.sqrt(2.0))
@@ -525,9 +528,10 @@ def frontier_clusters(world: OccupancyGrid2D,
                       room_mask: np.ndarray,
                       ids: np.ndarray,
                       min_cluster_cells: int = 4,
-                      snap_radius_cells: int = 8
+                      snap_radius_cells: int = 8,
+                      split_sides: bool = True
                       ) -> List[FrontierCluster]:
-    """Every unscanned boundary inside ``room_mask``, cells and all.
+    """Every unscanned boundary inside ``room_mask``, cells and all -- one per SIDE of a block of unknown.
 
     A frontier cell is a free cell 4-adjacent to an unknown one -- the same
     definition ``room_stats.count_frontier_clusters`` uses, so the goals built
@@ -546,6 +550,14 @@ def frontier_clusters(world: OccupancyGrid2D,
     retired" radius of the last one, so the room read exhausted with three
     clusters showing. On the boundary a goal is informative by construction.
 
+    **Split by side (since 2026-10-22).** A component that wraps round a
+    block of unknown -- the floor seen along two or three sides of an
+    unmapped room -- is cut at the block's corners into one cluster per
+    side (:mod:`~sparx_agency.core.mapping.topology.frontier_split`), so
+    every way in has a goal and a marker; an arc bulging into the unknown
+    stays one cluster. ``split_sides=False`` is the historical
+    one-component-one-goal.
+
     The one place the frontier is extracted for goal-making:
     :func:`frontier_cluster_cells` and :func:`in_room_frontier_goals` order
     these by size,
@@ -562,9 +574,12 @@ def frontier_clusters(world: OccupancyGrid2D,
         min_cluster_cells: Clusters smaller than this are noise and dropped.
         snap_radius_cells: How far the goal cell may move to reach the
             passable graph.
+        split_sides: Cut a component at the corners of the unknown it wraps
+            (the default).
 
     Returns:
-        One :class:`FrontierCluster` per surviving cluster, in label order.
+        One :class:`FrontierCluster` per surviving cluster, in label order
+        (a split component's parts follow each other).
     """
     grid = world.grid
     free = grid == world.values.free
@@ -578,18 +593,27 @@ def frontier_clusters(world: OccupancyGrid2D,
     if not frontier.any():
         return []
     lbl, n = cc_label(frontier, structure=np.ones((3, 3), dtype=np.uint8))
+    sides = frontier_sides(unknown, side_window_cells(world.resolution)) if split_sides else None
     out: List[FrontierCluster] = []
-    for k in range(1, n + 1):
-        ys, xs = np.nonzero(lbl == k)
-        if ys.size < int(min_cluster_cells):
+    for k, window in enumerate(find_objects(lbl), start=1):
+        if window is None:
             continue
-        nearest = int(np.argmin((xs - xs.mean()) ** 2 + (ys - ys.mean()) ** 2))
-        cell = snap_cell(ids, int(xs[nearest]), int(ys[nearest]), int(snap_radius_cells))
-        if cell is None:
+        local_ys, local_xs = np.nonzero(lbl[window] == k)
+        if local_ys.size < int(min_cluster_cells):
             continue
-        out.append(FrontierCluster(size=int(ys.size),
-                                   cell=(int(cell[0]), int(cell[1])),
-                                   rows=ys, cols=xs))
+        ys = local_ys + window[0].start
+        xs = local_xs + window[1].start
+        parts = [(ys, xs)]
+        if sides is not None:
+            parts = split_by_side(ys, xs, sides[ys, xs], side_min_cells(world.resolution, int(min_cluster_cells)))
+        for ys, xs in parts:
+            nearest = int(np.argmin((xs - xs.mean()) ** 2 + (ys - ys.mean()) ** 2))
+            cell = snap_cell(ids, int(xs[nearest]), int(ys[nearest]), int(snap_radius_cells))
+            if cell is None:
+                continue
+            out.append(FrontierCluster(size=int(ys.size),
+                                       cell=(int(cell[0]), int(cell[1])),
+                                       rows=ys, cols=xs))
     return out
 
 

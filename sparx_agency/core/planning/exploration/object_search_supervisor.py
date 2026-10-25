@@ -628,6 +628,43 @@ class ObjectSearchSupervisor:
         self._order_rooms = tuple(sorted(c.room_id for c in candidates))
         return self._snapshot(state.action, now, completed=state.completed)
 
+    def rebind(self, room_id, label=None, goal_xy=None):
+        # type: (int, Optional[str], Optional[Tuple[float, float]]) -> bool
+        """Rename the room in force: the same place under a new id, the turn untouched.
+
+        The segmentation that produces the ids re-draws them as the map
+        grows, and the room the aircraft is walking to can come back under
+        another number -- merged into its neighbour, split, or re-numbered
+        -- while the place itself, and the entry point committed to, stand
+        where they were. A rename is not a verdict: nothing is cooled,
+        charged or released, the clocks run on, and the order index does
+        not move. Per-room memory keyed by the old id (attempts) follows the
+        room to its new id.
+
+        Args:
+            room_id: The id the room in force now goes by.
+            label: Its name under that id, or None to keep the old one.
+            goal_xy: A new entry point, or None to keep the one in force.
+
+        Returns:
+            True when a room was in force (TRANSIT or SEARCH) and renamed;
+            False when nothing was in force, in which case nothing changes.
+        """
+        if self._room_id is None or self._state not in (TRANSIT, SEARCH):
+            return False
+        old = int(self._room_id)
+        new = int(room_id)
+        if new != old:
+            attempts = self._attempts.pop(old, None)
+            if attempts is not None:
+                self._attempts[new] = max(attempts, self._attempts.get(new, 0))
+            self._room_id = new
+        if label is not None:
+            self._label = str(label)
+        if goal_xy is not None:
+            self._goal_xy = (float(goal_xy[0]), float(goal_xy[1]))
+        return True
+
     def finish(self, verdict, note, now):
         # type: (str, str, float) -> ObjectSearchState
         """End the turn of the room in force with ``verdict``, outside a tick.

@@ -568,7 +568,8 @@ class FalconYoloBaseline:
         s = self.settings
         self.doors = ObservedDoors(self.door_settings)
         self.landmarks = ObjectLandmarkMap(dedupe_radius_m=s.landmark_dedupe_radius_m, nearest_match=True,
-                                           class_votes=False, footprint_iou=s.landmark_footprint_iou)
+                                           class_votes=False, footprint_iou=s.landmark_footprint_iou,
+                                           max_misses=s.landmark_max_misses)
         self.target_evidence = TargetEvidence(self.target_settings)
         self._target_xy = self._target_id = self._target_floor_id = None
         self._object_geometry = {}

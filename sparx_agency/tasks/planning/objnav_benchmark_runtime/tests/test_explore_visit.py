@@ -17,9 +17,12 @@ from __future__ import annotations
 from dataclasses import replace
 import math
 
+import numpy as np
 import pytest
 
-from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH, TRANSIT, UNREACHABLE
+from sparx_agency.core.mapping.topology.room_registry import TrackedRoom
+from sparx_agency.core.planning.exploration.object_search_supervisor import (
+    EXHAUSTED, SEARCH, TRANSIT, UNREACHABLE, RoomFacts)
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, GibsonProtocol
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningSettings
@@ -27,7 +30,7 @@ from sparx_agency.core.planning.object_search.rooms.room_scans import EXPLORED, 
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import openings_of, refresh, west_gap
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
-    IN_A, IN_B, cell_in, loop_policy, obs_at, two_room_world)
+    IN_A, IN_B, NamingLLM, cell_in, loop_policy, obs_at, see, two_room_world)
 
 
 def explore_policy(order=(1, 0), room_b_resolved=False, **overrides):
@@ -156,8 +159,11 @@ def test_the_explored_verdict_needs_the_agent_inside_the_room_not_on_its_thresho
 
 def test_a_full_rotation_turned_on_the_way_finishes_the_room_and_ends_the_visit_at_once():
     """Darden ``ec8d17aeaaaa``, actions 61-106: a full glance inside R3 on the way to its vantage point, then
-    the walk on and the same circle again. A rotation the ledger records inside the room in force ends it."""
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    the walk on and the same circle again. A rotation the ledger records inside the room in force ends it --
+    under the deprecated exits-as-nodes mode, where the room's openings carry the search on as nodes of their
+    own. Under room-level GAPs (the default) the rotation finishes the room in the ledger but the visit walks
+    on to the GAPs left in it: see ``test_room_level_gaps``."""
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), openings=OpeningSettings(exits_as_nodes=True))
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     entry = policy.route_memory.goal
     inside = (entry[0] - 0.3, entry[1]) if cell_in(world, rooms[1], (entry[0] - 0.3, entry[1])) else entry
@@ -200,9 +206,15 @@ def test_a_visit_that_overruns_its_bound_is_released_budget_spent_and_not_finish
 
 
 # -- openings: live every action, folded into the room whose walk covers them ---------------------------
+# Under room-level GAPs (the default since 2026-10-21) EVERY exit is folded; the tests of the selective fold
+# -- an exit off a room that is no node staying a node of its own -- run the deprecated ``exits_as_nodes``
+# mode they describe. ``test_room_level_gaps`` covers the default.
+LEGACY = dict(openings=OpeningSettings(exits_as_nodes=True))
+
+
 def test_an_opening_off_a_room_that_is_a_node_is_folded_into_the_rooms_walk():
     """Darden ``ec8d17aeaaaa``, action 27: the order read R3 -> O3, a room and the gap at its own far end."""
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), **LEGACY)
     before = openings_of(policy, episode, world)
     assert len(before) == 3, "room A's west end; room B's patch by the door and its east end"
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
@@ -225,7 +237,7 @@ def test_an_opening_off_a_room_that_is_a_node_is_folded_into_the_rooms_walk():
 
 
 def test_openings_of_a_room_the_oracle_valued_below_the_floor_stay_nodes():
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), **LEGACY)
     gap = west_gap(openings_of(policy, episode, world))
     policy.graph.probs = {0: 0.0, 1: 0.6}                      # room A is not worth a visit; its gap leads on
     kept = policy.loop._fold_openings(obs_at(episode, 0, IN_A), [o for o in __import__(
@@ -237,7 +249,7 @@ def test_openings_of_a_room_the_oracle_valued_below_the_floor_stay_nodes():
 def test_an_opening_the_reply_itself_unfolded_is_a_node_at_the_provisional_value_not_zero():
     """Corozal/000142 (2026-10-14), action 446: the toilet's doorway, folded into its room at the call, unfolded
     by the reply that dropped the room to 1 %, read 0.0 for the 54 actions left."""
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), **LEGACY)
     gap = west_gap(openings_of(policy, episode, world))
     for pid in (0, 1):                                     # both rooms cooling: SELECT stays, as in the opening tests
         policy.supervisor.inner._cooling[pid] = 0.0
@@ -275,7 +287,8 @@ def test_an_opening_the_reply_itself_unfolded_is_a_node_at_the_provisional_value
 
 
 def test_with_unvalued_prob_zero_an_unfolded_opening_reads_zero_as_before():
-    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), openings=OpeningSettings(unvalued_prob=0.0))
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0),
+                                                      openings=OpeningSettings(unvalued_prob=0.0, exits_as_nodes=True))
     gap = west_gap(openings_of(policy, episode, world))
     inner = policy.graph.reason
 
@@ -405,3 +418,204 @@ def test_a_room_missing_from_the_registry_for_an_action_keeps_its_transit_walkin
     assert policy.supervisor.history[-1][:2] == (1, UNREACHABLE)
     with pytest.raises(ValueError):
         LoopSettings(room_missing_grace=-1)
+
+
+# -- 2026-10-22: the committed-target rule -- a target set is a target reached -------------------------------
+def renumber(policy, world, old, new):
+    """The watershed hands a room a new number: same floor, same mask, a fresh pid; the label image and the
+    per-room facts follow, as the scene graph's background refresh would make them."""
+    room = policy.graph.registry.rooms.pop(old)
+    policy.graph.registry.rooms[new] = TrackedRoom(id=new, mask=room.mask, n_cells=room.n_cells, centroid=room.centroid)
+    policy.graph.labels = np.where(policy.graph.labels == old + 1, new + 1, policy.graph.labels).astype(np.int32)
+    fact = policy.graph.facts.pop(old)
+    policy.graph.facts[new] = RoomFacts(new, fact.frontier_clusters, fact.time_in_room_s, fact.cells)
+    policy.graph.options = [replace(o, room_id=new) if o.room_id == old else o for o in policy.graph.options]
+    return policy.graph.registry.rooms[new]
+
+
+def arrive(policy, episode, world, rooms, pid, step):
+    """Stand the agent inside room ``pid`` at the committed entry (the frame there resolves it) and tick the loop."""
+    entry = policy.route_memory.goal
+    inside = (entry[0] - 0.3, entry[1]) if cell_in(world, rooms[pid], (entry[0] - 0.3, entry[1])) else entry
+    resolve_around(world, inside, 1.2)
+    refresh(policy, world, inside)
+    policy.sight.observe(obs_at(episode, step, inside), world)
+    return policy.loop.plan(obs_at(episode, step, inside), world), inside
+
+
+def test_a_room_renumbered_in_transit_keeps_its_turn_under_the_new_number_without_a_loop_point():
+    """Corozal/000003 (``c1af8954a378``, 2026-10-22): eleven of eighteen selections were ``unreachable`` releases of
+    a room the watershed had merely renumbered on the way to it, each buying a room-LLM call (10 s) and an RPT*
+    solve, and at action 137 the agent re-planned to another room while committed. The turn follows the place."""
+    policy, episode, world, rooms, reasoned = explore_policy(order=(1, 0))
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
+    goal = policy.route_memory.goal
+    prob = policy.graph.probs[1]
+    renumber(policy, world, 1, 7)
+    refresh(policy, world, IN_A)
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 7, "the same turn, under the new number"
+    assert command.info["kind"] == "transit/7" and policy.route_memory.goal == goal, "the same walk to the same place"
+    assert reasoned == [0] and policy.supervisor.history == [], "no release, no loop point, no LLM call"
+    assert policy.loop.stats["rooms_rebound"] == 1 and policy.loop.stats["room_missing_held"] == 0
+    [event] = [e for e in policy.loop.events if e["event"] == "room_rebound"]
+    assert event["room"] == 1 and event["to"] == 7 and event["state"] == TRANSIT
+    assert policy.loop.next_room == 7 and policy.loop.order == (7, 0) and policy.loop.estimates[7]["room"] == 7
+    assert policy.graph.probs[7] == prob and policy.loop._entries[7] == (goal, True)
+    # Arrival is arrival at room 7; the visit begins there with the counter reset.
+    arrive(policy, episode, world, rooms | {7: policy.graph.registry.rooms[7]}, 7, 2)
+    assert policy.supervisor.state == SEARCH and policy.loop.room_id == 7 and policy.loop.local_steps == 0
+    assert policy.supervisor.stats["arrivals"] == 1 and policy.supervisor.history == []
+
+
+def test_a_room_renumbered_under_the_agents_feet_keeps_the_visit_running():
+    policy, episode, world, rooms, reasoned = explore_policy(order=(1, 0))
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    _, inside = arrive(policy, episode, world, rooms, 1, 1)
+    assert policy.supervisor.state == SEARCH and policy.loop.room_id == 1
+    policy.loop.charge()
+    renumber(policy, world, 1, 9)
+    refresh(policy, world, inside)
+    policy.loop.plan(obs_at(episode, 2, inside), world)
+    assert policy.supervisor.state == SEARCH and policy.supervisor.room_id == 9 and policy.loop.room_id == 9
+    assert policy.loop.local_steps == 1 and policy.loop._explore["room"] == 9, "the visit and its counter go on"
+    assert policy.supervisor.history == [] and reasoned == [0]
+
+
+def test_the_rebinding_is_the_committed_rule_and_off_with_it():
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), transit_commitment=False)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    renumber(policy, world, 1, 7)
+    refresh(policy, world, IN_A)
+    for step in range(1, 2 + policy.loop.settings.room_missing_grace):
+        policy.loop.plan(obs_at(episode, step, IN_A), world)
+    assert policy.supervisor.history[-1][:2] == (1, UNREACHABLE), "the historical release"
+    assert policy.loop.stats["rooms_rebound"] == 0
+    for kwargs in ({"transit_commitment": 1}, {"rebind_reach_m": -1.0}, {"entry_failure_limit": -1},
+                   {"entry_failure_radius_m": 0.0}, {"entry_failure_backoff": 0.5}):
+        with pytest.raises(ValueError):
+            LoopSettings(**kwargs)
+
+
+def test_a_new_kind_of_object_in_the_room_in_transit_is_asked_about_at_arrival_not_on_the_way():
+    """The user's rule of 2026-10-22: a new name for the target room on the way is not a reason to re-plan, nor
+    to spend a classifier call; the arrival asks, and the loop point after the visit values the answer."""
+    llm = NamingLLM()
+    policy, episode, world, rooms, reasoned = explore_policy(order=(1, 0), llm=llm)
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    see(policy, {1: ["sink"]}, step=1)
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
+    assert llm.calls == 0 and policy.loop.stats["relabels_deferred"] == 1 and policy.loop.stats["relabels"] == 0
+    assert policy.supervisor.state == TRANSIT and command.info["kind"] == "transit/1" and reasoned == [0]
+    assert policy.supervisor.history == [], "no reclassified release on the way"
+    arrive(policy, episode, world, rooms, 1, 2)
+    assert policy.supervisor.state == SEARCH and llm.calls == 1, "the arrival asks"
+    assert policy.graph.label_info(1)["label"] == "bathroom"
+    assert [e for e in policy.loop.events if e["event"] == "relabel"][-1]["where"] == "search"
+
+
+def test_a_room_finished_from_outside_on_the_way_is_still_walked_to_under_the_committed_rule():
+    """The mirror of ``test_room_level_gaps``' release in transit: with the rule on, the walk is completed and the
+    room's verdict is read at arrival by the visit's own rules."""
+    policy, episode, world, rooms, _ = explore_policy(order=(0, 1))
+    policy.scans.record(obs_at(episode, 0, IN_A), rooms[0], source="warmup")
+    policy.loop.plan(obs_at(episode, 0, IN_B), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 0 and policy.loop._reopened == {0}
+    gap = west_gap(openings_of(policy, episode, world))
+    resolve_around(world, gap.xy, 3.0)
+    refresh(policy, world, IN_B)
+    policy.loop.plan(obs_at(episode, 1, IN_B), world)
+    assert policy.loop.stats["finished_in_transit"] == 0
+    assert not any(e["event"] == "finished_in_transit" for e in policy.loop.events)
+    # What DOES end this walk is the committed frontier itself resolving: the look through the door mapped the
+    # west end, the room has no significant frontier left to re-aim at, and there is nothing left to walk to.
+    assert policy.loop.stats["skipped_in_transit"] == 1 and policy.supervisor.history[-1][:2] == (0, EXHAUSTED)
+
+
+# -- 2026-10-22: a place the agent keeps failing to reach is given up ----------------------------------------
+def test_an_unreachable_release_is_remembered_by_place_and_a_repeat_withholds_the_room(monkeypatch):
+    """A planner that refuses every route: room B is released ``unreachable`` at its frontier, then at its doorstep
+    -- two failed turns at places of one room withhold the room (``unreachable:2``) and the order goes to room A.
+    The memory is by position, not by room id, so the partition renumbering the room does not reset it."""
+    policy, episode, world, rooms, reasoned = explore_policy(order=(1, 0))
+    monkeypatch.setattr(policy.planner, "plan", lambda request, world_: type("R", (), {"ok": False, "path": None})())
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.supervisor.history[0][:2] == (1, UNREACHABLE), "every way into room B refused: released"
+    failures = [e for e in policy.loop.events if e["event"] == "entry_failure" and e["room"] == 1]
+    assert [f["failures"] for f in failures] == [1, 1] and not any(f["withheld"] for f in failures)
+    assert failures[0]["place"] != failures[1]["place"], "the frontier, then the doorstep: two places of one room"
+    assert all(f["verdict"] == UNREACHABLE for f in failures)
+    assert policy.loop._excluded.get(1) == "unreachable:2" and policy.loop.stats["excluded_unreachable"] == 1
+    assert policy.supervisor.room_id == 0 or policy.supervisor.history[-1][0] == 0, "the order went elsewhere"
+    assert policy.loop.estimates[1]["entry"] == "excluded" and policy.loop.estimates[1]["excluded"] == "unreachable:2"
+    [event] = [e for e in policy.loop.events if e["event"] == "excluded" and "1" in e["rooms"]]
+    assert event["rooms"]["1"] == "unreachable:2"
+    assert policy.loop._room_unreachable(world, 1, 0) == "unreachable:2" and policy.loop._room_unreachable(world, 0, 0) is None
+    # The back-off: ``failure_cooldown_steps * backoff ** (n - limit)`` actions after the last failure the room is open again.
+    cooldown = policy.loop.settings.failure_cooldown_steps
+    assert policy.loop._room_unreachable(world, 1, cooldown - 1) == "unreachable:2"
+    assert policy.loop._room_unreachable(world, 1, cooldown) is None
+    # The same by place: a spot failed twice is passed over for the room's next entry, and withheld when it is the last.
+    place = tuple(failures[1]["place"])
+    policy.loop._entry_failures = [(place, 2, 0)]
+    assert policy.loop._entry_failed(place, cooldown - 1) == "unreachable:2" and policy.loop._entry_failed(place, cooldown) is None
+    policy.loop._entry_failures = [(place, 3, 0)]
+    assert policy.loop._entry_failed(place, 2 * cooldown - 1) == "unreachable:3", "a third failure doubles the wait"
+    assert policy.loop._entry_failed(place, 2 * cooldown) is None
+    assert policy.loop._entry_failed((place[0] + 5.0, place[1]), 1) is None, "another place is another place"
+    assert policy.loop.diagnostics()["entry_failures"][0]["failures"] == 3
+    # Off: nothing is remembered.
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0), entry_failure_limit=0)
+    monkeypatch.setattr(policy.planner, "plan", lambda request, world_: type("R", (), {"ok": False, "path": None})())
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._entry_failures == [] and not any(e["event"] == "entry_failure" for e in policy.loop.events)
+
+
+# -- 2026-10-22: the scene graph is not rebuilt on every action of a committed transit ----------------------
+def test_the_geometry_is_rebuilt_every_transit_period_while_a_committed_route_is_walked_and_at_arrival():
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    assert policy.settings.transit_graph_period_steps == 5 and policy.graph_period() == 1, "idle: every action"
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.refreshed == [0], "the loop point rebuilt it on its own action"
+    assert policy.supervisor.state == TRANSIT and policy.route_memory.kind == "transit/1"
+    assert policy.graph_period() == 5, "a committed transit route is being walked"
+    accessibility = []
+    policy.graph.refresh_accessibility = lambda *a, **k: accessibility.append(a[2])
+    for step in range(1, 5):
+        policy._refresh_graph(obs_at(episode, step, IN_A), world)
+    assert policy.refreshed == [0] and accessibility == [], "four actions: neither the partition nor the inventory"
+    policy._refresh_graph(obs_at(episode, 5, IN_A), world)
+    assert policy.refreshed == [0, 5], "the fifth rebuilds"
+    policy._refresh_graph(obs_at(episode, 6, IN_A), world, force=True)
+    assert policy.refreshed == [0, 5, 6], "force rebuilds whatever the cadence"
+    # Arrival forces the rebuild on its own action, before the visit's first decision.
+    del policy.graph.refresh_accessibility
+    arrive(policy, episode, world, rooms, 1, 7)
+    assert policy.supervisor.state == SEARCH and policy.refreshed[-1] == 7
+    assert policy.graph_period() == 1, "a visit reads the partition every action"
+    configuration = policy.configuration()
+    assert "every 5 while a committed transit route is walked" in configuration["reasoning_cadence"]
+    assert configuration["adaptation"]["transit_graph_period_steps"] == 5
+
+
+# -- 2026-10-22: the explore visit ranks a room's frontiers by where the agent has barely been ----------------
+def test_the_explore_goals_discount_a_frontier_the_agent_has_spent_many_actions_beside():
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    obs = obs_at(episode, 0, IN_A)
+    cost = policy.navigation_cost(world)
+    goals = policy.loop._explore_goals(obs, world, cost, rooms[1])
+    assert len(goals) == 2, "room B: the patch by the door and the east end"
+    first = goals[0]
+    # Thirty actions spent standing beside the best frontier (a long look-around there): the other comes first now.
+    for step in range(1, 31):
+        policy.sight.observe(obs_at(episode, step, first.xy, yaw=step * 0.2), world)
+    policy.loop._visits_cache = None
+    visits = policy.loop._visits(obs_at(episode, 31, IN_A))
+    assert visits is not None and visits(first.xy) == 30
+    ranked = policy.loop._explore_goals(obs_at(episode, 31, IN_A), world, cost, rooms[1])
+    assert ranked[0].xy != first.xy and ranked[-1].xy == first.xy, "the trodden frontier drops behind the untrodden one"
+    assert policy.sweep.settings.ranking.visit_weight == 0.05 and policy.sweep.settings.ranking.visit_radius_m == 1.5
+    policy.sweep.settings = replace(policy.sweep.settings, ranking=replace(policy.sweep.settings.ranking, visit_weight=0.0))
+    policy.loop._visits_cache = None
+    assert policy.loop._visits(obs_at(episode, 31, IN_A)) is None, "0 disables"

@@ -99,10 +99,35 @@ def search_snapshot(policy):
         floor = {"phase": building.phase, "spent": int(round(now / max(1e-6, policy.settings.action_time_s))),
                  "arrived_by": building.arrived_by, "active_portal": building.active["id"] if building.active else None,
                  "selected_by": building.active.get("selected_by") if building.active else None}
+    inventory = graph.frontier_inventory
+    room_of = {}
+    if inventory is not None:
+        for label, goals in inventory.by_room.items():
+            for goal in goals:
+                room_of[id(goal)] = int(label) - 1
+    frontier_goals = [{"xy": [round(float(v), 3) for v in goal.xy], "cell": [int(v) for v in goal.cell],
+                       "size_cells": int(goal.size_cells), "geodesic_m": round(float(goal.geodesic_m), 2),
+                       "heading_error_deg": round(math.degrees(float(goal.heading_error_rad)), 1),
+                       "utility": round(float(goal.utility), 4), "room": room_of.get(id(goal))}
+                      for goal in (inventory.goals if inventory is not None else ())]
+    committed = getattr(loop, "_committed_room", None)
+    entry = getattr(loop, "_entry", None)
+    transit = None
+    if supervisor is not None and supervisor.state == "transit" and supervisor.room_id is not None:
+        transit = {"room": supervisor.room_id, "committed_room": None if committed is None else int(committed[0]),
+                   "entry": None if entry is None or entry[0] is None else [round(float(v), 3) for v in entry[0]],
+                   "from_frontier": None if entry is None else bool(entry[1]),
+                   "room_missing_actions": int(getattr(loop, "_room_missing", 0) or 0)}
     return {"target": policy.target.query, "p_present": graph.p_present, "elsewhere": max(0.0, 1.0 - graph.p_present),
             "probability_model": "independent_search_success",
-            "accessible_frontiers": [list(goal.xy) for goal in graph.frontier_inventory.goals]
-            if graph.frontier_inventory is not None else [],
+            "accessible_frontiers": [list(goal.xy) for goal in inventory.goals] if inventory is not None else [],
+            # The inventory in full (since 2026-10-22): a review pointed at a step reads WHY a boundary was or
+            # was not a goal from here -- size, walk, facing, utility, the room credited -- not from a frame.
+            "frontier_goals": frontier_goals,
+            "frontier_inventory_step": getattr(policy, "_last_graph_step", None),
+            "transit": transit,
+            "entry_failures": [{"place": [round(float(v), 2) for v in place], "failures": int(count), "step": int(step)}
+                               for place, count, step in getattr(loop, "_entry_failures", ())],
             "warmup": {"actions": getattr(policy, "warmup_actions", 0),
                        "budget": getattr(policy, "warmup_turns", policy.settings.warmup_steps)},
             "doorway_peek": policy.peek.diagnostics() if hasattr(policy, "peek") else {},

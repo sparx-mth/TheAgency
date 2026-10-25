@@ -47,6 +47,8 @@ def baseline(detector=None, label="chair", metadata=None, actions=None, baseline
     overrides["target_closing"] = closing
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", label, PROTOCOL.camera(),
                             actions or BODY_ACTIONS_PROTOCOL.actions(), 500, metadata=metadata or {})
+    if "stair_connectors" in (metadata or {}) and "multifloor" not in overrides:
+        overrides["multifloor"] = {"stair_source": "ground_truth"}      # a scene structure handed in is the GT ablation
     policy = FalconYoloBaseline(detector or NoDetector(), RPTSettings(**dict({"map_size_m": 20.0}, **overrides)),
                                 baseline=baseline_settings)
     policy.reset(episode, gibson_label_mapper().target_labels(label))
@@ -70,7 +72,9 @@ def test_the_baseline_has_no_llm_and_declares_the_full_methods_closing_and_confi
     assert configuration["method"] == "sparx-falcon-yolo-baseline"
     assert configuration["llm"] is None and configuration["room_llm"] == configuration["rpt_star"] == "none"
     assert configuration["local_exploration"] == "falcon" and configuration["falcon_running"]
-    assert configuration["allow_stair_traversal"] is False and configuration["ground_truth_stairs"] is True
+    assert configuration["allow_stair_traversal"] is False and configuration["ground_truth_stairs"] is False
+    assert configuration["stair_source"] == "observed", "the baseline reads no navmesh stairs either (2026-10-21)"
+    assert baseline(multifloor={"stair_source": "ground_truth"})[0].configuration()["ground_truth_stairs"] is True
     assert configuration["target_closing"] == configuration["adaptation"]["target_closing"]
     assert policy.llm_client is None and not hasattr(policy, "graph") and not hasattr(policy, "loop")
     assert policy.settings.local_exploration == "falcon", "a frontier setting is overridden: the baseline is FALCON"

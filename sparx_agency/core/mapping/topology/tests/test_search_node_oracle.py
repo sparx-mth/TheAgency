@@ -4,10 +4,10 @@ from __future__ import annotations
 import pytest
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    HOME_FLOOR, OMITTED_PERCENT, OPENING, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, STAIRS, STAIRS_SUPPLEMENT,
-    SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, SearchContext, SearchNode, SearchNodeOracle, budget_line,
-    coarse_seconds, floor_unexplored, format_node, format_prompt, normalise, parse_home_here, parse_pass, parse_reply,
-    system_prompt)
+    HOME_FLOOR, OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, STAIRS,
+    STAIRS_SUPPLEMENT, SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, SearchContext, SearchNode, SearchNodeOracle,
+    budget_line, coarse_seconds, floor_unexplored, format_exits, format_node, format_prompt, normalise, parse_home_here,
+    parse_pass, parse_reply, system_prompt)
 
 
 class Scripted:
@@ -53,11 +53,11 @@ def test_the_prompt_lists_every_node_in_the_format_the_system_prompt_explains():
     assert "TARGET: bed" in text and "NODES (5)" in text
     assert "HOUSE: " + HOUSE in text
     assert "THIS STOREY: a storey with a kitchen and a living room" in text and "OTHER STOREYS: storey F0: ..." in text
-    assert format_node(KITCHEN) == ("id=0  ROOM  type=kitchen  size=12m2  frontier=0  status=scanned(full rotation, 2min ago)  "
-                                    "searched=40s  seen: fridge, sink")
+    assert format_node(KITCHEN) == ("id=0  ROOM  type=kitchen  size=12m2  frontier=0  exits=0  "
+                                    "status=scanned(full rotation, 2min ago)  searched=40s  seen: fridge, sink")
     assert format_node(LIVING).endswith("status=entered  searched=20s  here=yes  seen: sofa, television")
-    assert format_node(UNKNOWN) == ("id=2  ROOM  type=unknown  size=18m2  frontier=3  status=never_entered  searched=0s  "
-                                    "seen: nothing yet")
+    assert format_node(UNKNOWN) == ("id=2  ROOM  type=unknown  size=18m2  frontier=3  exits=0  status=never_entered  "
+                                    "searched=0s  seen: nothing yet")
     assert format_node(UP) == "id=100000  STAIRS up  to a storey NOT visited yet"
     assert format_node(DOWN) == ("id=100001  STAIRS down  to a storey ALREADY visited (storey F0: rooms found: kitchen; "
                                  "searched 2min; 1 room with frontier left)  the robot came up these stairs 10s ago "
@@ -65,10 +65,42 @@ def test_the_prompt_lists_every_node_in_the_format_the_system_prompt_explains():
     for rule in ("type=unknown", "never_entered", "scanned(<how>, <ago>)", "NEVER use distance", "do NOT make them sum to 100",
                  "independent", 'STEP 1 "home"', 'STEP 2 "house"', 'STEP 3 "stage"', "never copy its numbers",
                  "en-suite", "ONE kitchen, ONE living room", "MISSED the target", '"pass":"first|second"',
-                 "merged two rooms", "never write a room off for its size"):
+                 "merged two rooms", "never write a room off for its size", "exits=", "EXITS."):
         assert rule in SYSTEM_PROMPT, rule
     assert "no television fits" not in SYSTEM_PROMPT and "no toilet fits" not in SYSTEM_PROMPT, (
         "the example taught a 3B model to write 'no <target> fits' on every small unknown room (Hanson 2026-10-04)")
+
+
+def test_a_rooms_exits_are_attributes_on_its_line_and_the_rule_ties_them_to_the_rooms_type():
+    """Room-level GAPs (2026-10-21): a doorway or gap to unseen space is the room's attribute, never a node with a
+    number of its own, and the prompt tells the model that exits raise a room only where its type fits the target."""
+    hallway = SearchNode(7, ROOM, "hallway", area_m2=6.0, frontier_clusters=1, last_inside_ago_s=4.0,
+                         exits=2, doorways=1, glimpsed=("toilet", "Toilet", "sink"))
+    assert format_node(hallway) == ("id=7  ROOM  type=hallway  size=6m2  frontier=1  exits=2 (1 doorway)  status=entered  "
+                                    "searched=0s  seen: nothing yet  glimpsed through its exits: sink, toilet")
+    assert format_exits(0) == "0" and format_exits(3) == "3" and format_exits(3, 2) == "3 (2 doorways)"
+    assert format_exits(1, 5) == "1 (1 doorway)", "no more doorways than exits"
+    # Since 2026-10-22 the unseen floor behind the exits rides in the brackets: where the unexplored space is.
+    assert format_exits(2, 1, 30.4) == "2 (1 doorway, ~30m2 unseen behind them)"
+    assert format_exits(2, 0, 7.6) == "2 (~8m2 unseen behind them)" and format_exits(0, 0, 12.0) == "0"
+    assert format_exits(2, 0, 0.2) == "2", "under half a square metre is nothing to say"
+    wing = SearchNode(8, ROOM, "hallway", exits=2, unseen_m2=30.0)
+    assert "exits=2 (~30m2 unseen behind them)" in format_node(wing)
+    assert "unexplored floor the camera could reach beyond them" in SYSTEM_PROMPT
+    assert "glimpsed through its exits" not in format_node(SearchNode(7, ROOM, "hallway", exits=1)), "nothing glimpsed: unsaid"
+    for rule in ("exits= the doorways and gaps at its edge", "NOT nodes of their own", "glimpsed through its exits",
+                 "Exits RAISE a room ONLY when its type fits the target", "three gaps off a living room",
+                 "Exits of a hallway, a corridor or an unidentified room are valued by what the home still lacks",
+                 "offered again for what lies BEHIND them"):
+        assert rule in SYSTEM_PROMPT, rule
+    assert "id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)" in SYSTEM_PROMPT, (
+        "the worked example values rooms by their exits")
+    assert "  OPENING  " not in SYSTEM_PROMPT, "no opening node line in the room-level prompt"
+    assert system_prompt([hallway, KITCHEN], SearchContext(HOUSE)) == SYSTEM_PROMPT, "no exit node offered: no supplement"
+    # The attributes change the prompt the way any fact does, and an unchanged map keeps it byte-identical.
+    assert format_prompt("toilet", [hallway]) != format_prompt("toilet", [SearchNode(7, ROOM, "hallway", frontier_clusters=1,
+                                                                                      last_inside_ago_s=4.0)])
+    assert format_prompt("toilet", [hallway]) == format_prompt("toilet", [hallway])
 
 
 def test_the_single_storey_prompt_has_no_storey_lines_and_no_stairs_rules():
@@ -88,9 +120,10 @@ def test_the_single_storey_prompt_has_no_storey_lines_and_no_stairs_rules():
     assert format_prompt("bed", rooms).startswith("TARGET: bed\n\nHOUSE: nothing known yet\n")
 
 
-def test_an_opening_is_a_node_named_by_the_room_it_opens_from_and_what_was_glimpsed_through_it():
-    """A doorway off the hallway with a toilet seen through it is the bathroom behind the door, not
-    the hallway: the prompt says which mapped room it opens from and what the glimpse showed."""
+def test_an_opening_node_is_the_deprecated_mode_and_brings_its_own_supplement():
+    """Under ``exits_as_nodes`` (deprecated 2026-10-21) a doorway off the hallway with a toilet seen through it is a
+    node named by the room it opens from and what the glimpse showed; the rules for it are appended to the system
+    prompt only when such a node is on offer, as the stairs supplement is."""
     door = SearchNode(200001, OPENING, "doorway", objects=("toilet", "Toilet", "sink"), via="room 11 (type=unknown)")
     gap = SearchNode(200002, OPENING, "gap")
     assert format_node(door) == ("id=200001  OPENING  doorway off room 11 (type=unknown)  to space NOT seen yet  "
@@ -99,9 +132,12 @@ def test_an_opening_is_a_node_named_by_the_room_it_opens_from_and_what_was_glimp
     text = format_prompt("couch", NODES + [door, gap], SearchContext(HOUSE))
     assert "NODES (7)" in text and "id=200001  OPENING" in text
     for rule in ("OPENING: a doorway or gap", "quick look from the threshold", "room likely BEHIND it",
-                 "glimpsed objects name the home type"):
-        assert rule in SYSTEM_PROMPT, rule
-    assert "id=200001  OPENING  doorway off room 7" in SYSTEM_PROMPT, "the worked example shows an opening valued by the home"
+                 "glimpsed objects name the home type", "not counted among its room's exits="):
+        assert rule in OPENINGS_SUPPLEMENT and rule not in SYSTEM_PROMPT, rule
+    assert "id=200001  OPENING  doorway off room 7" in OPENINGS_SUPPLEMENT, "the line format, tied to the worked example"
+    assert system_prompt([KITCHEN, gap], SearchContext(HOUSE)) == SYSTEM_PROMPT + OPENINGS_SUPPLEMENT
+    assert system_prompt(NODES + [gap], SearchContext(HOUSE)) == SYSTEM_PROMPT + STAIRS_SUPPLEMENT + OPENINGS_SUPPLEMENT
+    assert system_prompt([KITCHEN, LIVING], SearchContext(HOUSE)) == SYSTEM_PROMPT
 
 
 def test_the_room_status_words():

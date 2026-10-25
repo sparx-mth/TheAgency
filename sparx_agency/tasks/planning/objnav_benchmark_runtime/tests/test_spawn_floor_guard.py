@@ -79,13 +79,17 @@ def test_the_seen_staircase_footprint_is_impassable_and_no_goal_on_it_is_accepte
     assert (confined.grid[~mask] == world.grid[~mask]).all(), "nothing but the footprint changed"
     assert world.is_free(*foot), "the observed world itself is untouched"
     assert policy.floor_guard.stats["stair_cells"] == int(mask.sum())
-    assert not policy.floor_guard.goal_allowed(obs, world, FLIGHT[0][:2], "frontier")
+    # The connector's anchor is the storey's own floor in front of the first riser: not masked, a goal like any
+    # other (the square foot, 2026-10-21); the first treads, 0.27 m up, are the staircase.
+    assert confined.grid[foot[1], foot[0]] == world.values.free and policy.floor_guard.goal_allowed(obs, world, FLIGHT[0][:2], "frontier")
+    treads = (4.0, 1.3)
+    assert not policy.floor_guard.goal_allowed(obs, world, treads, "frontier")
     assert policy.floor_guard.goal_allowed(obs, world, IN_A, "frontier")
-    assert policy._navigate(obs, confined, tuple(FLIGHT[0][:2]), "frontier") is None
+    assert policy._navigate(obs, confined, treads, "frontier") is None
     assert policy.floor_guard.stats["goals_refused"] == 2
     refused = [e for e in policy.floor_guard.events if e["event"] == "goal_refused"]
     assert refused[-1]["kind"] == "frontier" and "staircase" in refused[-1]["reason"]
-    assert tuple(FLIGHT[0][:2]) in policy._visited_frontiers, "a refused frontier is retired, not retried"
+    assert treads in policy._visited_frontiers, "a refused frontier is retired, not retried"
 
 
 def test_an_observed_drop_below_the_storey_plane_is_impassable_and_the_guard_is_inert_when_allowed():
@@ -261,6 +265,29 @@ def test_the_floor_run_of_a_flight_is_not_masked_while_its_treads_are():
     assert min(world.grid_to_world(x, y)[1] for x, y in zip(xs, ys)) >= 1.0 + FLOOR_RUN_M / 0.9 - 0.7, "capsule margin only"
 
 
+def test_the_capsule_begins_at_the_flight_and_not_a_margin_before_it():
+    """Darden (2026-10-21): the flight's foot stands in the junction of the hallway and the room beside it, and the
+    capsule's round end -- 0.55 m of plain floor in front of the first riser -- closed the junction on the planning
+    grid. The storey end is cut square; the sides keep their margin and the far end its cap."""
+    from sparx_agency.core.planning.object_search.world_model.peek_stairs import FLOOR_RUN_M, _capsule, _foot_of
+    policy, episode, world, _ = forbidden_stairs()
+    confined = policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
+    first_drawn = 1.0 + FLOOR_RUN_M / 0.9                         # the flight leaves the floor run here (slope 0.9)
+    for y in (first_drawn - 0.15, first_drawn - 0.35, first_drawn - 0.5):
+        gx, gy = world.world_to_grid(4.0, y)
+        assert confined.grid[gy, gx] == world.values.free, "the floor in front of the first riser at y=%.2f is floor" % y
+    for xy in ((4.0, first_drawn + 0.1), (4.4, first_drawn + 0.1), (3.6, first_drawn + 0.1), (4.4, 1.45)):
+        gx, gy = world.world_to_grid(*xy)
+        assert confined.grid[gy, gx] == world.values.occupied, "the flight and its side margin at %s stay masked" % (xy,)
+    gx, gy = world.world_to_grid(4.0, 1.5 + 0.3)                   # the far end keeps its cap: more flight behind it
+    assert confined.grid[gy, gx] == world.values.occupied
+    # The cut is the half-disc behind the foot and nothing else: the body's own cells are all still drawn.
+    segments = [((40, 10), (40, 15))]
+    plain, square = _capsule((60, 60), segments, 5), _capsule((60, 60), segments, 5, _foot_of(segments))
+    assert square.sum() < plain.sum() and not square[:9, :].any() and (square[10:16, 35:46] == plain[10:16, 35:46]).all()
+    assert _foot_of([((40, 10), (40, 10))]) is None, "a point flight has no direction to cut across"
+
+
 def test_an_agent_inside_the_stair_capsule_is_never_on_an_occupied_cell_and_can_plan_out(monkeypatch):
     """Collierville: the agent walked past the foot of a flight 0.6 m from its centreline; the capsule covered
     its cell as a GENUINE obstacle, A* had no start, and the fallback held for the rest of the episode."""
@@ -324,8 +351,8 @@ def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_t
     obs = obs_at(episode, 0, (5.25, 0.7))                                            # at the corridor's south end
     confined = policy.floor_guard.observe(obs, world)
     margins = policy.floor_guard.stair_margins_m
-    preferred = policy.settings.body_radius_m + policy.converter_params.goal_tolerance_m + world.resolution
-    assert list(margins.values()) == [0.3] and 0.3 < preferred, "six cells asked for, three drawn: the widest that leaves a body-wide corridor"
+    preferred = policy.settings.stair_margin_m
+    assert list(margins.values()) == [0.3] and 0.3 < preferred, "five cells asked for, three drawn: the widest that leaves a body-wide corridor"
     body = int(math.ceil(policy.settings.body_radius_m / world.resolution))
     free = confined.grid == world.values.free
     passable = _passable(free, ~free, body)
@@ -343,9 +370,18 @@ def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_t
 def test_the_capsule_keeps_its_preferred_margin_where_nothing_is_in_the_way():
     policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(2.0))     # 3.5 m of open floor to the wall
     policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
-    preferred = policy.settings.body_radius_m + policy.converter_params.goal_tolerance_m + world.resolution
-    assert list(policy.floor_guard.stair_margins_m.values()) == [round(math.ceil(preferred / world.resolution) * world.resolution, 2)]
+    preferred = policy.settings.stair_margin_m
+    assert preferred == 0.45 and list(policy.floor_guard.stair_margins_m.values()) == [
+        round(math.ceil(preferred / world.resolution) * world.resolution, 2)] == [0.5], (
+        "stairs only, 0.5 m drawn (2026-10-21; the implicit body + tolerance + cell drew 0.6)")
     assert policy.episode_info()["spawn_floor_guard"]["stair_margins_m"] == policy.floor_guard.stair_margins_m
+    # The knob is the stairs' alone and never under the body radius.
+    from sparx_agency.core.planning.object_search.settings import RPTSettings
+    with pytest.raises(ValueError):
+        RPTSettings(stair_margin_m=0.1)
+    wider, episode_w, world_w, _ = forbidden_stairs(metadata=along_the_wall(2.0), settings={"stair_margin_m": 0.55})
+    wider.floor_guard.observe(obs_at(episode_w, 0, IN_A), world_w)
+    assert list(wider.floor_guard.stair_margins_m.values()) == [0.6], "the older six cells, asked for explicitly"
 
 
 def test_the_drop_threshold_is_a_knob_at_the_atlas_tolerance_and_a_flights_floor_is_a_drop_its_treads_are_not():

@@ -1,9 +1,13 @@
 """Observed-only ObjectNav with persistent floors and frontier or planar FALCON.
 
-Stairs are a declared exception to "observed-only": with
-``RPTSettings.multifloor.stair_source == "ground_truth"`` (the default) the
-building coordinator takes the simulator's navmesh connectors from the
-episode metadata, and ``configuration()["ground_truth_stairs"]`` says so.
+Stairs included, since 2026-10-21: ``RPTSettings.multifloor.stair_source``
+is ``"observed"`` by default -- a staircase is a measured support surface
+rising within reach of the robot's own RGB-D (``world_model/stair_terrain.py``),
+masked on the planning grid from that measurement, and no simulator geometry
+is consulted (ApexNav, SG-Nav and OSG-Nav have no staircase oracle either).
+``"ground_truth"`` is the declared ablation: the building coordinator takes
+the simulator's navmesh connectors from the episode metadata, and
+``configuration()["ground_truth_stairs"]`` says so.
 An optional local NavMesh target-standoff projector is declared separately by
 ``configuration()["target_navmesh_projection"]``; evaluator goals remain private.
 """
@@ -111,16 +115,26 @@ class RPTSearchPolicy:
                                   "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
                                   "the nearest room floor; room numbers are unique across the building"
                                   % DEFAULT_SEGMENTATION.door_snap_reach_m,
-                "openings": ("doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs, "
-                             "visited by a peek (threshold, face the unknown, one look to each side) priced at %d actions; "
-                             "valued by the oracle (uncertainty floor %s, elsewhere value %s, home floor %s)"
-                             % (self.loop_settings.openings.service_steps,
-                                "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor,
-                                "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere,
-                                "off" if not self.loop_settings.home_floor else "p=%.2f" % self.loop_settings.home_floor)
+                "openings": (("every exit of the storey (a doorway or gap at the edge of the mapped floor) is an attribute "
+                              "of the room it opens from -- exits=N (k doorways) and the objects glimpsed through them on "
+                              "the room's node line -- never a node with a number of its own; the model raises a room for "
+                              "its exits only where the room's type fits the target, the room's own frontier walk looks "
+                              "through them, and a finished room with GAPs left to walk is offered again for them "
+                              "(room-level GAPs, 2026-10-21)"
+                              if self.loop_settings.room_level_gaps else
+                              "doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs "
+                              "(DEPRECATED exits_as_nodes%s), visited by a peek (threshold, face the unknown, one look to each "
+                              "side) priced at %d actions; valued by the oracle (uncertainty floor %s, elsewhere value %s, "
+                              "home floor %s)"
+                              % ("" if self.loop_settings.exploring else ", the %s visit's only way into an exit"
+                                 % self.loop_settings.visit,
+                                 self.loop_settings.openings.service_steps,
+                                 "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor,
+                                 "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere,
+                                 "off" if not self.loop_settings.home_floor else "p=%.2f" % self.loop_settings.home_floor))
                              + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
-                                "visited by the same peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
-                                                                            self.loop_settings.openings.landmark_standoff_m)
+                                "visited by a peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
+                                                                    self.loop_settings.openings.landmark_standoff_m)
                                 if self.loop_settings.openings.landmarks_enabled else "")
                              if self.loop_settings.openings.enabled else "none: openings are the exploration fallback's alone"),
                 "floor_exit_gate": ("unknown non-stair rooms get at most one peek attempt per episode before a floor change; "
@@ -129,7 +143,9 @@ class RPTSearchPolicy:
                                     "none: a floor change is the RPT* order's or the fallback rule's to take at any time"),
                 "node_oracle": {"nodes": "every room of the floor in force (finished and type-excluded ones shown with "
                                          "their status) + its staircases" + (
-                                    " + its openings" if self.loop_settings.openings.enabled else ""),
+                                    "" if not self.loop_settings.openings.enabled else
+                                    "; each room's exits are attributes on its line, not nodes"
+                                    if self.loop_settings.room_level_gaps else " + its openings"),
                                 "asks": "independent P(searching there finds target), without a fixed action horizon; "
                                         "the model is briefed with the HOUSE line (room types found, rooms unidentified, "
                                         "openings unlooked, actions used of the budget) and writes home/house/stage and a "
@@ -146,10 +162,14 @@ class RPTSearchPolicy:
                                           % self.settings.multifloor.floor_change_cost_m)
                 if self.loop_settings.stairs_as_nodes and self.settings.multifloor.stair_source == "ground_truth"
                 else "exploration fallback only",
-                "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s); "
-                                     "synchronous frame processing, one full rotation (warm-up scan) before room selection "
-                                     "on every storey first entered"
-                                     % self.settings.graph_period_steps,
+                "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s)"
+                                     "%s; synchronous frame processing, one full rotation (warm-up scan) before room "
+                                     "selection on every storey first entered"
+                                     % (self.settings.graph_period_steps,
+                                        (", every %d while a committed transit route is walked (rebuilt on the action "
+                                         "the transit ends)" % self.settings.transit_graph_period_steps)
+                                        if (self.settings.transit_graph_period_steps > self.settings.graph_period_steps
+                                            and self.loop_settings.transit_commitment) else ""),
                 "camera_control": asdict(CameraControlSettings()),
                 "perception_fusion": "coherent-depth/floor-qualified-v1" + ("/target-masked" if self.settings.segmentation else ""),
                 "segmentation": ({"enabled": True, "scope": "target boxes at or above detection_confidence",
@@ -184,8 +204,11 @@ class RPTSearchPolicy:
                     "is finished (explored), and so is a room a full rotation stood in or saw more than half of, one "
                     "with no live frontier the camera looked into or walked through, or a doorless fragment under "
                     "%.1f m2; every rotation is as many turns as the camera's field of view needs to see the circle%s; "
-                    "openings off a room that is itself a node are folded into its walk; "
                     % (loop.explore_visit_steps, loop.fragment_max_m2, self._rotation_note())
+                    + ("every exit of the storey is an attribute of the room it opens from and is walked by that "
+                       "room's visit, and a finished room with GAPs left to walk is offered again for them "
+                       "(room-level GAPs); " if loop.room_level_gaps else
+                       "openings off a room that is itself a node are folded into its walk; ")
                     + finishing)
         return ("vantage point + full rotation (as many turns as the camera's field of view needs to see the circle%s); "
                 "a scanned room (or one a scan saw more than half of) is finished for the first pass, and so is a room "
@@ -518,11 +541,26 @@ class RPTSearchPolicy:
             return command
         return self.glances.apply(observation, world, self.loop.plan(observation, world))
 
-    def _refresh_graph(self, observation, world):
-        """Refresh geometry even on a stair approach, so new rooms revoke departure."""
+    def _refresh_graph(self, observation, world, force=False):
+        """Refresh geometry even on a stair approach, so new rooms revoke departure.
+
+        The watershed, the registry, the frontier inventory and every
+        per-room fact are rebuilt every ``graph_period_steps`` actions --
+        every action by default -- EXCEPT while a committed transit route is
+        being walked, where they are rebuilt every
+        ``transit_graph_period_steps`` (:meth:`graph_period`): the follower
+        needs the map, not the partition, and the full rebuild was the
+        largest share of every decision's wall time (Corozal/000003,
+        ``c1af8954a378``, 2026-10-22: 1.4 s of a 1.7 s median decision,
+        500 times). The room-search loop forces a rebuild on the action a
+        transit ends (:meth:`~rooms.room_search_loop.RoomSearchLoop._fresh_geometry`),
+        and a loop point reasons over geometry refreshed on its own action
+        regardless. Between rebuilds the frontier inventory is not refreshed
+        either; the committed route does not read it.
+        """
         pose = observation.pose
         cost = self.navigation_cost(world)
-        if (observation.step - self._last_graph_step >= self.settings.graph_period_steps
+        if (force or observation.step - self._last_graph_step >= self.graph_period()
                 or self.doors.revision != self._last_door_revision):
             started = time.monotonic()
             self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(),
@@ -531,10 +569,32 @@ class RPTSearchPolicy:
                               preferred_cost=self.preferred_cost(world))
             self.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
             self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
-        else:
+        elif self.graph_period() == self.settings.graph_period_steps:
             self.graph.refresh_accessibility(world, cost, (pose.x, pose.y), pose.yaw, self.sweep.settings.ranking,
                                              preferred_cost=self.preferred_cost(world))
         return cost
+
+    def refresh_graph(self, observation, world, force=False):
+        """The scene graph's geometry for this action (:meth:`_refresh_graph`); ``force`` rebuilds it whatever the cadence."""
+        return self._refresh_graph(observation, world, force=force)
+
+    def graph_period(self):
+        """Actions between two rebuilds of the scene graph's geometry, as things stand this action.
+
+        ``transit_graph_period_steps`` while the room-search loop walks a
+        committed transit route under its commitment rule (the supervisor in
+        TRANSIT, the route memory holding a ``transit/`` route), else
+        ``graph_period_steps``.
+        """
+        s = self.settings
+        if s.transit_graph_period_steps <= s.graph_period_steps:
+            return s.graph_period_steps
+        supervisor, loop, route = getattr(self, "supervisor", None), getattr(self, "loop", None), self.route_memory
+        if (supervisor is not None and supervisor.state == "transit" and loop is not None
+                and getattr(loop.settings, "transit_commitment", False)
+                and route.path is not None and str(route.kind or "").startswith("transit/")):
+            return s.transit_graph_period_steps
+        return s.graph_period_steps
 
     def room_exclusion(self, world):
         """Cells that are never room floor: the footprint of every seen staircase near this storey's level.
@@ -550,8 +610,20 @@ class RPTSearchPolicy:
         return mask if mask.any() else None
 
     def navigation_cost(self, world):
-        """The common clearance-qualified map used by counts, entries and routes (passable at the body radius)."""
-        return assemble_cost_grid(self.planner.fields_for(world), self.planner_params, self.settings.body_radius_m)[0]
+        """The common clearance-qualified map used by counts, entries and routes (passable at the body radius).
+
+        Cached on the planner's distance fields for the map in force: the
+        policy, the loop and the fallback all ask for it on one action, the
+        map is rebuilt once per action, and ``planner.invalidate_cache()``
+        drops this with the fields.
+        """
+        cached = getattr(self, "_navigation_cost_cache", None)
+        fields = self.planner.fields_for(world)
+        if cached is not None and cached[0] is fields:
+            return cached[1]
+        cost = assemble_cost_grid(fields, self.planner_params, self.settings.body_radius_m)[0]
+        self._navigation_cost_cache = (fields, cost)
+        return cost
 
     def preferred_cost(self, world):
         """The cost map at the planner's PREFERRED standoff -- what A* flies wherever it can.

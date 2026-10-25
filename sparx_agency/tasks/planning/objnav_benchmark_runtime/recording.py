@@ -1,4 +1,15 @@
-"""Optional recorder wrappers around the shared runner, never a second run loop."""
+"""Optional recorder wrappers around the shared runner, never a second run loop.
+
+What a recording is FOR (2026-10-22): a review stands at any action of the
+episode and reads what the policy knew and decided there from the log --
+``steps.jsonl`` (pose, action, the method's snapshot, the command),
+``map_journal.npz`` (the map, the settled unknown and the room partition
+of every action, as deltas), ``metrics.json``, ``trajectory.csv`` -- through
+``review_recording.py`` (``summary``, ``timeline``, ``step N``, ``map N``,
+``events``). The video and the stills are for a person watching; they are
+not the record, and nothing in a review should be read off a frame that the
+log does not also say.
+"""
 from __future__ import annotations
 
 import csv
@@ -167,7 +178,10 @@ class EpisodeRecorder:
 			"display_floor_count": len(self.panels.slots) if self.panels else None,
 			"video_timebase": "one frame per decision; accelerated, not real time",
 			"frames": ("frames/<ordinal>_step<step>.jpg: every video frame as a still; the FINAL banner is final.jpg"
-			           if self.save_frames else None)}, "recording", indent=2))
+			           if self.save_frames else None),
+			"review": ("python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording <this dir> "
+			           "summary | timeline | step N | map N | events -- the log is the record: steps.jsonl holds every "
+			           "decision, map_journal.npz the map of every action")}, "recording", indent=2))
 		self._position(observation, telemetry)
 
 	def _position(self, observation, telemetry):

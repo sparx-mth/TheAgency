@@ -28,7 +28,7 @@ import os
 import pathlib
 import tempfile
 import time
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
 from sparx_agency.core.planning.objnav.interfaces.env import ObjNavEnv
@@ -350,11 +350,18 @@ def _group_line(name: str, group: Dict[str, Any]) -> str:
 
 
 def describe_progress(directory: pathlib.Path) -> str:
-    """The progress file of a run directory as a few readable lines."""
+    """The progress file of a run directory as a few readable lines; a parallel run's shards are folded into one view."""
     path = pathlib.Path(directory) / "progress.json"
     if not path.is_file():
+        shards = shard_progress_files(directory)
+        if shards:
+            return describe_shards(directory, shards)
         return "no progress.json in %s (the run has not started an episode yet)" % directory
     snap = json.loads(path.read_text(encoding="utf-8"))
+    return _describe_snapshot(snap)
+
+
+def _describe_snapshot(snap: Dict[str, Any]) -> str:
     lines = ["%s: %d/%d episodes (%.1f%%)%s" % (snap.get("label", "run"), snap["done"], snap["total"], snap["percent"],
                                                 "  FINISHED %s" % snap["finished_utc"] if snap.get("finished_utc") else "")]
     lines.append("  started %s  updated %s  elapsed %s  ETA %s" % (
@@ -374,6 +381,70 @@ def describe_progress(directory: pathlib.Path) -> str:
         lines.append(_group_line(name, group))
     if snap.get("terminations"):
         lines.append("  terminations: " + ", ".join("%s=%d" % item for item in snap["terminations"].items()))
+    return "\n".join(lines)
+
+
+# -- a parallel run (run_benchmark.sh --parallel N): one progress file per shard until the merge ----------------
+def shard_progress_files(directory: pathlib.Path) -> List[pathlib.Path]:
+    """The ``shard_<k>/progress.json`` files of a parallel run, in shard order (empty for a single-process run)."""
+    directory = pathlib.Path(directory)
+    found = []
+    for path in directory.glob("shard_*/progress.json"):
+        suffix = path.parent.name[len("shard_"):]
+        if suffix.isdigit() and path.is_file():
+            found.append((int(suffix), path))
+    return [path for _, path in sorted(found)]
+
+
+def _weighted(groups: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """One ``_Group.report()``-shaped row over several, weighted by their episode counts."""
+    n = sum(int(group["episodes"]) for group in groups)
+    dtg_n = sum(int(group["episodes"]) - int(group.get("unreachable_end", 0)) for group in groups)
+
+    def mean(key: str, weights: Sequence[int], total: int) -> float:
+        return round(sum(float(group[key]) * weight for group, weight in zip(groups, weights)) / total, 4) if total else 0.0
+
+    counts = [int(group["episodes"]) for group in groups]
+    reached = [int(group["episodes"]) - int(group.get("unreachable_end", 0)) for group in groups]
+    dtg = [float(group["DTG_m"]) if group.get("DTG_m") is not None else 0.0 for group in groups]
+    return {"episodes": n, "SR": mean("SR", counts, n), "SPL": mean("SPL", counts, n), "SoftSPL": mean("SoftSPL", counts, n),
+            "DTG_m": round(sum(d * w for d, w in zip(dtg, reached)) / dtg_n, 3) if dtg_n else None,
+            "unreachable_end": n - dtg_n, "mean_steps": round(mean("mean_steps", counts, n), 1),
+            "stop_rate": mean("stop_rate", counts, n), "agent_errors": sum(int(group["agent_errors"]) for group in groups),
+            "mean_wall_s": round(mean("mean_wall_s", counts, n), 1)}
+
+
+def describe_shards(directory: pathlib.Path, files: Sequence[pathlib.Path]) -> str:
+    """The shards of a parallel run as one view: the totals, the slowest shard's ETA, then one line per shard."""
+    snaps = [json.loads(path.read_text(encoding="utf-8")) for path in files]
+    done = sum(int(snap["done"]) for snap in snaps)
+    total = sum(int(snap["total"]) for snap in snaps)
+    etas = [snap.get("eta_s") for snap in snaps if not snap.get("finished_utc")]
+    eta = None if not etas or any(value is None for value in etas) else max(float(value) for value in etas)
+    finished = all(snap.get("finished_utc") for snap in snaps)
+    lines = ["%s: %d/%d episodes (%.1f%%) in %d shards%s" % (
+        snaps[0].get("label", "run"), done, total, 100.0 * done / total if total else 0.0, len(snaps),
+        "  ALL SHARDS FINISHED (merge pending or done)" if finished else "")]
+    lines.append("  started %s  updated %s  ETA (slowest shard) %s" % (
+        min(snap["started_utc"] for snap in snaps), max(snap["updated_utc"] for snap in snaps),
+        "n/a" if eta is None else human_duration(eta)))
+    lines.append(_group_line("overall", _weighted([snap["overall"] for snap in snaps])))
+    scenes = sorted({name for snap in snaps for name in snap.get("by_scene", {})})
+    for name in scenes:
+        lines.append(_group_line(name, _weighted([snap["by_scene"][name] for snap in snaps if name in snap.get("by_scene", {})])))
+    terminations = {}  # type: Dict[str, int]
+    for snap in snaps:
+        for key, value in (snap.get("terminations") or {}).items():
+            terminations[key] = terminations.get(key, 0) + int(value)
+    if terminations:
+        lines.append("  terminations: " + ", ".join("%s=%d" % item for item in sorted(terminations.items())))
+    for path, snap in zip(files, snaps):
+        current = snap.get("current") or {}
+        lines.append("  %-8s %3d/%3d  SR %.3f  SPL %.3f  elapsed %s  ETA %s%s" % (
+            path.parent.name, snap["done"], snap["total"], snap["overall"]["SR"], snap["overall"]["SPL"],
+            human_duration(snap["elapsed_s"]), snap.get("eta_human") or "n/a",
+            "  running %s" % current["episode_id"] if current.get("episode_id") else
+            ("  FINISHED" if snap.get("finished_utc") else "")))
     return "\n".join(lines)
 
 

@@ -108,6 +108,55 @@ def test_generic_only_evidence_is_not_classified():
         RoomLabelSettings(generic_evidence_gate="no")
 
 
+def test_an_empty_passage_is_classified_on_its_shape_alone_weakly_and_once_per_geometry():
+    """A hallway has no furniture to name it (2026-10-21): a long narrow room with doorways and nothing in it is
+    asked about on its geometry, the label is WEAK and provisional (it never rules a room out), the geometry
+    bucket is part of the cache key, and a square empty room with one door is not asked at all."""
+    class Shaped:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, system, user):
+            self.calls.append(user)
+            if "long and narrow" in user and "- sofa" not in user:
+                return {"label": "corridor", "confidence": 0.75, "reasoning": "a long empty passage with doors"}
+            return {"label": "living_room", "confidence": 0.8, "reasoning": "objects"}
+
+    client = Shaped()
+    tracker = RevisableRoomLabels(client)
+    corridor = {"area_m2": 7.0, "elongation": 4.0, "doors": 3}
+    square = {"area_m2": 12.0, "elongation": 1.1, "doors": 1}
+    labels = tracker.update({1: [], 2: [], 3: ["cabinet"]}, 0, facts={1: corridor, 2: square, 3: corridor})
+    assert labels[1].label == "hallway" and labels[2].label == "unknown", "the passage is named, the square room waits"
+    assert labels[3].label == "hallway", "generic furniture alone does not stop the shape question"
+    assert len(client.calls) == 2 and "doorways opening off it: 3" in client.calls[0]
+    assert tracker.metadata[1]["strength"] == "weak" and tracker.metadata[1]["provisional"] and tracker.metadata[1]["shape_only"]
+    assert tracker.metadata[1]["trigger"] == "shape"
+    assert tracker.update({1: []}, 1, facts={1: corridor})[1].label == "hallway" and len(client.calls) == 2, "cached"
+    # A sofa appears: the objects take over, and the geometry still travels with them.
+    labels = tracker.update({1: ["sofa"]}, 2, facts={1: corridor})
+    assert labels[1].label == "living_room" and len(client.calls) == 3 and "Room geometry:" in client.calls[-1]
+    assert not tracker.metadata[1]["shape_only"]
+    # Off by setting: an empty room is never asked about.
+    quiet = RevisableRoomLabels(Shaped(), RoomLabelSettings(shape_only_rooms=False))
+    assert quiet.update({1: []}, 0, facts={1: corridor})[1].label == "unknown"
+    assert RoomLabelSettings().shape_candidate({"area_m2": 1.0, "elongation": 5.0, "doors": 3}) is False, "a sliver is no room"
+    with pytest.raises(ValueError):
+        RoomLabelSettings(corridor_elongation=0.0)
+
+
+def test_signature_objects_of_two_room_types_in_one_region_make_a_weak_label():
+    """Darden/000000 (2026-10-21): a region with two ``bed`` (a dining table, misread) beside an oven and a
+    refrigerator was a STRONG bedroom. Signature objects of two types mean a merged region or a detector error:
+    whatever the model picks is weak and provisional, so the type prior never rules the region out on it."""
+    tracker = RevisableRoomLabels(ScriptedClassifier(bedroom_for=("bed",)))
+    tracker.update({1: ["bed", "bed", "oven", "refrigerator", "cabinet"]}, 0)
+    item = tracker.metadata[1]
+    assert item["label"] == "bedroom" and item["strength"] == "weak" and item["provisional"] and item["conflicting_signatures"]
+    tracker.update({2: ["bed", "cabinet"]}, 0)
+    assert tracker.metadata[2]["strength"] == "strong" and not tracker.metadata[2]["conflicting_signatures"]
+
+
 def test_pending_evidence_is_classified_on_request_for_one_room_only():
     """The background refresh records evidence without asking; the loop asks for the room it is in."""
     client = ScriptedClassifier()

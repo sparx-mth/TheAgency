@@ -59,15 +59,125 @@ def test_confidence_threshold_does_not_enter_legacy_pursuit():
 
 
 @pytest.mark.parametrize("depth", [float("nan"), float("inf"), 0.0])
-def test_invalid_depth_never_starts_a_takeover(depth):
-    """A confident box without depth support has nothing a second frame can be
-    checked against: it must not suspend exploration, let alone lock."""
+def test_invalid_depth_never_locks_but_begins_a_bearing_approach(depth):
+    """A confident box without depth support has nothing a second frame can be checked against: it never
+    locks. Since 2026-10-21 it does suspend exploration -- for a bounded walk along the box's bearing
+    (``bearing_start``), begun once the class has been in the frame on two consecutive actions, until a
+    frame has the depth; with the knob off, exploration keeps ownership as before."""
     p, ep = setup_policy()
-    for step in range(3):
+    first = p.plan(observation(ep, 0, depth=depth))
+    assert not first.stop and not p.closing.active, "one frame of a far box is a flicker: no walk yet"
+    for step in range(1, 4):
         command = p.plan(observation(ep, step, depth=depth))
-        assert not command.stop and not p.closing.active and not p.closing.locked
-        assert p.closing.phase == "SEARCH" and p.closing.count == 0
-    assert p.closing.releases == 0
+        assert not command.stop and p.closing.active and not p.closing.locked
+        assert p.closing.phase == "BEARING" and p.closing.count == 0 and p.closing.xyz is None
+        assert command.info["kind"] == "target_closing" and command.info["phase"] == "target_bearing"
+        assert command.info["target_visible"] and not command.info["target_measured"]
+    assert p.closing.bearing_starts == 1 and p.closing.releases == 0 and p._target_xy is None
+    off, ep_off = setup_policy(target_closing={"bearing_start": False})
+    for step in range(3):
+        command = off.plan(observation(ep_off, step, depth=depth))
+        assert not command.stop and not off.closing.active and off.closing.phase == "SEARCH"
+    assert off.closing.bearing_starts == 0
+
+
+def test_the_bearing_approach_faces_the_box_then_steps_and_a_frame_with_depth_starts_the_verification(monkeypatch):
+    """The chair box sits right of the frame centre: the first bearing action turns toward it, the next
+    ones step; when depth arrives the ordinary verification begins on THAT frame with its own clock, and
+    the lock follows on the next consecutive frame as it always did."""
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", 0.9, (520, 200, 600, 280))]     # more than a turn right of centre
+    p.plan(observation(ep, 0, depth=float("nan")))
+    command = p.plan(observation(ep, 1, depth=float("nan")))
+    assert p.closing.active and p.closing.phase == "BEARING"
+    assert not command.waypoints and command.final_yaw is not None, "face the detection first"
+    assert command.info["bearing_step"] == "face the detection" and command.final_yaw < 0, "the box is right of centre"
+    p.detector.detect = lambda rgb: [DetectionWire("chair", 0.9, (280, 200, 360, 280))]     # centred once turned
+    faced = replace(observation(ep, 2, depth=float("nan")), pose=AgentPose(0.0, 0.0, 0.0, float(command.final_yaw)))
+    stepped = p.plan(faced)
+    assert stepped.waypoints and stepped.info["bearing_step"] == "toward the detection"
+    assert p.closing.bearing["actions"] == 2 and p.closing.bearing["last_seen"] == 2
+    # Depth from closer: the verification starts here, the bearing walk's actions are not its clock's.
+    p.plan(observation(ep, 3, depth=2.0))
+    assert p.closing.active and p.closing.phase == "VERIFY" and p.closing.bearing is None
+    assert p.closing.started == 3 and p.closing.count == 1 and not p.closing.locked
+    assert p.closing.bearing_resolved == 1 and p.closing.bearing_abandoned == 0
+    freeze_global(monkeypatch, p)
+    p.plan(observation(ep, 4, depth=2.0))
+    assert p.closing.locked and p.closing.count == 2
+
+
+def test_a_bearing_approach_is_given_up_when_the_box_is_lost_or_the_actions_run_out_and_not_retried_from_the_spot():
+    p, ep = setup_policy()
+    p.plan(observation(ep, 0, depth=float("nan")))
+    p.plan(observation(ep, 1, depth=float("nan")))
+    assert p.closing.active and p.closing.phase == "BEARING"
+    seen = p.detector.detect
+    p.detector.detect = lambda rgb: []                                 # the class drops out of the frame
+    for step in range(2, 2 + p.settings.target_closing.bearing_lost_frames):
+        p.plan(observation(ep, step, depth=float("nan")))
+    assert not p.closing.active and p.closing.phase == "SEARCH" and p.closing.bearing is None
+    assert p.closing.bearing_abandoned == 1 and p.closing.last_release.startswith("bearing approach given up: lost")
+    assert p.closing.rejected == [] and p.closing.releases == 0, "nothing was placed: no rejection memory"
+    # Seen again from the same spot: refused; from well away: walked after again, within its bound.
+    p.detector.detect = seen
+    for step in range(10, 13):
+        p.plan(observation(ep, step, depth=float("nan")))
+    assert not p.closing.active and p.closing.bearing_refusals >= 1 and p.closing.bearing_starts == 1
+    far = AgentPose(3.0, 0.0, 0.0, 0.0)
+    for step in range(20, 22):
+        p.plan(replace(observation(ep, step, depth=float("nan")), pose=far))
+    assert p.closing.active and p.closing.bearing_starts == 2
+    yaw = 0.0
+    for step in range(22, 22 + p.settings.target_closing.bearing_max_actions + 2):
+        pose = AgentPose(3.0 + 0.1 * (step - 22), 0.0, 0.0, yaw)   # the agent moves, the box never gets depth
+        command = p.plan(replace(observation(ep, step, depth=float("nan")), pose=pose))
+        if command.final_yaw is not None and not command.waypoints:
+            yaw = float(command.final_yaw)
+        if not p.closing.active:
+            break
+    assert not p.closing.active and p.closing.bearing_abandoned == 2
+    assert p.closing.last_release.startswith("bearing approach given up: out of actions")
+
+
+def test_a_bearing_approach_ends_after_its_walk_or_when_the_box_is_near_and_still_depthless():
+    """Corozal/000001 (2026-10-21): a television first seen at ~5.5 m was walked toward for 3.75 m and never
+    projected (a screen is a hole in the mesh); the walk left the agent beside another television."""
+    p, ep = setup_policy()
+    p.plan(observation(ep, 0, depth=float("nan")))
+    command = p.plan(observation(ep, 1, depth=float("nan")))
+    assert p.closing.active and p.closing.phase == "BEARING"
+    far = AgentPose(3.2, 0.0, 0.0, 0.0)                               # three metres on, the box still depthless
+    p.plan(replace(observation(ep, 2, depth=float("nan")), pose=far))
+    assert not p.closing.active and p.closing.last_release.startswith("bearing approach given up: walked")
+    # Near and unmeasurable: a box a third of the frame tall without depth ends the walk, and nothing STOPs on it.
+    p2, ep2 = setup_policy()
+    p2.plan(observation(ep2, 0, depth=float("nan")))
+    p2.plan(observation(ep2, 1, depth=float("nan")))
+    assert p2.closing.active
+    p2.detector.detect = lambda rgb: [DetectionWire("chair", 0.9, (240, 120, 400, 300))]   # 180 of 480 rows
+    command = p2.plan(observation(ep2, 2, depth=float("nan")))
+    assert not p2.closing.active and not command.stop
+    assert p2.closing.last_release.startswith("bearing approach given up: near and unmeasurable")
+    with pytest.raises(ValueError):
+        TargetClosingSettings(bearing_max_walk_m=0.0)
+    with pytest.raises(ValueError):
+        TargetClosingSettings(bearing_near_box_frac=1.5)
+
+
+def test_a_bearing_approach_that_goes_nowhere_is_given_up():
+    p, ep = setup_policy()
+    p.plan(observation(ep, 0, depth=float("nan")))
+    command = p.plan(observation(ep, 1, depth=float("nan")))
+    yaw = float(command.final_yaw) if command.final_yaw is not None else 0.0
+    for step in range(2, 12):                                          # faced, stepping, and the pose never changes
+        command = p.plan(replace(observation(ep, step, depth=float("nan")), pose=AgentPose(0.0, 0.0, 0.0, yaw)))
+        if not p.closing.active:
+            break
+        if command.final_yaw is not None and not command.waypoints:
+            yaw = float(command.final_yaw)
+    assert not p.closing.active and p.closing.last_release.startswith("bearing approach given up: not moving")
+    assert p.closing.bearing_abandoned == 1 and len(p.closing.bearing_failures) == 1
 
 
 def test_depth_arrives_later_and_only_then_takes_over(monkeypatch):

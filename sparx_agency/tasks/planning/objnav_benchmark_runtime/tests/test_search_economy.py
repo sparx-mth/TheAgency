@@ -239,12 +239,12 @@ def test_a_room_lingered_in_with_almost_no_frontier_left_keeps_the_lingered_disc
     fact = policy.graph.facts[1]
     obs = obs_at(episode, 0, IN_A)
     assert policy.loop._live_frontier(1, obs, world) == 0, "room B resolved: nothing significant left"
-    # Entered briefly: half, as before.
+    # Entered briefly: half, decayed a little by the five actions inside (the dwell decay, 2026-10-21).
     policy.graph.facts[1] = RoomFacts(1, fact.frontier_clusters, 5.0, fact.cells)
     options = policy.loop._scaled_values([RoomOption(room_id=1, prob=0.6, xy=IN_B, label="R1")], [], here=0,
                                          obs=obs, world=world)
-    assert options[0].prob == pytest.approx(0.6 * settings.entered_discount)
-    # Lingered: twenty actions inside, nothing left -- a fifth.
+    assert options[0].prob == pytest.approx(0.6 * settings.entered_discount * 0.5 ** (5.0 / settings.dwell_half_life_steps))
+    # Lingered: twenty actions inside, nothing left -- a fifth (the lingered cap is lower than the decayed half).
     policy.graph.facts[1] = RoomFacts(1, fact.frontier_clusters, settings.lingered_steps * policy.settings.action_time_s, fact.cells)
     options = policy.loop._scaled_values([RoomOption(room_id=1, prob=0.6, xy=IN_B, label="R1")], [], here=0,
                                          obs=obs, world=world)
@@ -260,6 +260,49 @@ def test_a_room_lingered_in_with_almost_no_frontier_left_keeps_the_lingered_disc
         LoopSettings(lingered_discount=0.0)
     with pytest.raises(ValueError):
         LoopSettings(lingered_steps=0)
+
+
+# -- 2026-10-21: the unvisited are raised, and the entered decay with the time spent inside ------------------
+def test_a_room_never_stood_in_is_raised_and_floored_and_an_entered_one_decays_with_its_dwell():
+    """The user's recalibration: a never-entered room is where discovery is (``frontier=0`` on it measures the
+    map, not the room), so its number is raised by ``unvisited_boost`` and read at no less than
+    ``unvisited_floor``; a room entered and left loses half of its entered factor per ``dwell_half_life_steps``
+    inside, down to ``dwell_floor``. The room the agent stands in and a room the model gave 0 keep their numbers."""
+    from sparx_agency.core.planning.exploration.object_search_supervisor import RoomFacts
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    settings = policy.loop.settings
+    obs = obs_at(episode, 0, IN_A)
+    policy.graph.last_inside = {0: 9}                            # room A stood in (here); room B never
+    fact = policy.graph.facts[1]
+    policy.graph.facts[1] = RoomFacts(1, fact.frontier_clusters, 0.0, fact.cells)
+    scale = lambda prob, here=0: policy.loop._scaled_values([RoomOption(room_id=1, prob=prob, xy=IN_B, label="R1")],
+                                                            [], here=here, obs=obs, world=world)[0].prob
+    assert settings.unvisited_boost == 1.5 and settings.unvisited_floor == 0.15
+    assert scale(0.4) == pytest.approx(0.6), "never entered: raised by the boost"
+    assert scale(0.04) == pytest.approx(settings.unvisited_floor), "... and read at no less than the floor"
+    assert scale(0.9) == pytest.approx(1.0), "a probability, capped"
+    assert scale(0.0) == 0.0, "a room the model (or the type prior) gave nothing stays nothing"
+    assert policy.loop._value_factors == {}, "a zero is not a factor"
+    assert scale(0.4, here=1) == pytest.approx(0.4), "the room the agent stands in keeps its number"
+    policy.loop._finished[1] = ("peek", 3)
+    assert scale(0.4) == pytest.approx(0.4), "a room finished from outside is not raised"
+    del policy.loop._finished[1]
+    # Entered and left: the entered factor decays with the time spent inside.
+    policy.graph.last_inside[1] = 7
+    half = settings.dwell_half_life_steps * policy.settings.action_time_s
+    for inside, decay in ((0.0, 1.0), (half, 0.5), (2 * half, 0.25), (10 * half, settings.dwell_floor / settings.entered_discount)):
+        policy.graph.facts[1] = RoomFacts(1, 3, inside, fact.cells)   # three frontiers: the lingered rule does not hold
+        assert scale(0.6) == pytest.approx(0.6 * max(settings.dwell_floor, settings.entered_discount * decay)), inside
+    assert policy.loop._value_factors == {1: settings.dwell_floor}
+    # The decay off: the plain entered factor, as before 2026-10-21.
+    policy.loop.settings = replace(settings, dwell_half_life_steps=0)
+    assert scale(0.6) == pytest.approx(0.6 * settings.entered_discount)
+    policy.loop.settings = replace(settings, unvisited_boost=1.0, unvisited_floor=0.0)
+    policy.graph.last_inside = {0: 9}
+    assert scale(0.04) == pytest.approx(0.04), "the boost and the floor off: the model's number stands"
+    for bad in ({"dwell_half_life_steps": -1}, {"dwell_floor": 0.0}, {"unvisited_boost": 0.9}, {"unvisited_floor": 1.5}):
+        with pytest.raises(ValueError):
+            LoopSettings(**bad)
 
 
 def test_finished_rooms_are_left_off_the_oracles_node_list_unless_asked_for():

@@ -31,9 +31,16 @@ overrides exist for each) and is written into the plan with the measurement
 it was decided on; the plan goes into the run directory and the frozen run
 configuration, never into the policy's observations.
 
+A parallel run (``run_benchmark.sh --parallel N``) multiplies two of the
+footprints: ``HABITAT_RENDERERS`` renderers each hold a scene on the card,
+and every Ollama request slot beyond the first (``OLLAMA_NUM_PARALLEL``)
+adds its own KV cache and compute buffers to the LLM's. Both are read from
+the environment so the budget is the one the run will actually draw.
+
 ```
 python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan            # JSON
 python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.gpu_plan --format env  # shell exports
+python -m ...gibson.gpu_plan --replay runs/X/gpu_plan.json --format env   # the recorded plan again, for a resume
 ```
 """
 from __future__ import annotations
@@ -46,9 +53,16 @@ from pathlib import Path
 import subprocess
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-#: Explicit VRAM estimates (MiB), measured on the development workstation 2026-10-08.
-#: Ollama: resident Q4 weights x 1.35 (KV cache at 8k context plus compute buffers); the manifests give the weights.
-LLM_OVERHEAD_FACTOR = 1.35
+#: Explicit VRAM estimates (MiB), measured on the development workstation 2026-10-08, the LLM's re-measured 2026-10-22.
+#: Ollama: resident Q4 weights x 1.25 -- one request slot's 8k KV cache plus compute buffers for both models, measured
+#: 12.6 GB for qwen2.5:3b-instruct + qwen2.5:14b-instruct (1.21 x their 10.4 GB of weights) on the 4090 with the server's
+#: default context at 8192. The earlier 1.35 silently included the 3B loaded at the model's own 32k context, which the
+#: launcher's OLLAMA_CONTEXT_LENGTH=8192 default now prevents. The manifests give the weights.
+LLM_OVERHEAD_FACTOR = 1.25
+#: Each Ollama request slot beyond the first (OLLAMA_NUM_PARALLEL) adds its own 8k KV cache and compute buffers:
+#: measured 2026-10-22 on the 4090 as 1.7 GB per slot for qwen2.5:14b-instruct and 0.44 GB for qwen2.5:3b-instruct
+#: with OLLAMA_CONTEXT_LENGTH=8192 -- about 0.21 of the Q4 weights either way.
+LLM_SLOT_FACTOR = 0.21
 YOLO_WORLD_X_MIB = 2048          # YOLO-World X-v2 + CLIP ViT-B/32 text encoder, 640x480 inference, fp32
 HABITAT_RENDER_MIB = 1536        # habitat-sim 0.2.4 headless, one agent, 640x480 RGB-D (observed 1.3 GB)
 DEFAULT_RESERVE_MIB = 512        # the display / driver headroom the ``gibson.run`` GPU gate also keeps
@@ -156,8 +170,16 @@ def ollama_model_mib(models_dir: Path, name: str) -> Optional[int]:
     return None
 
 
-def llm_need_mib(models: Sequence[str], models_dir: Path, override: Optional[int] = None) -> Tuple[int, str]:
-    """The LLM's VRAM estimate: both resident models' weights x the overhead factor, or the explicit override."""
+def llm_need_mib(models: Sequence[str], models_dir: Path, override: Optional[int] = None,
+                 parallel: int = 1) -> Tuple[int, str]:
+    """The LLM's VRAM estimate: both resident models' weights x the overhead factor, or the explicit override.
+
+    Args:
+        parallel: Ollama request slots (``OLLAMA_NUM_PARALLEL``); each slot
+            beyond the first adds :data:`LLM_SLOT_FACTOR` of the weights.
+    """
+    if type(parallel) is not int or parallel < 1:
+        raise ValueError("OLLAMA_NUM_PARALLEL must be a positive integer, got %r" % (parallel,))
     if override is not None:
         return int(override), "LLM_VRAM_MIB override"
     sizes = {name: ollama_model_mib(models_dir, name) for name in dict.fromkeys(models)}
@@ -166,28 +188,36 @@ def llm_need_mib(models: Sequence[str], models_dir: Path, override: Optional[int
         raise RuntimeError("No Ollama manifest for %s under %s; pull the model or set LLM_VRAM_MIB"
                            % (", ".join(missing), models_dir))
     weights = sum(sizes.values())
-    return int(round(weights * LLM_OVERHEAD_FACTOR)), "%s weights %d MiB x %.2f" % (
-        " + ".join("%s %d" % item for item in sizes.items()), weights, LLM_OVERHEAD_FACTOR)
+    factor = LLM_OVERHEAD_FACTOR + LLM_SLOT_FACTOR * (parallel - 1)
+    slots = "" if parallel == 1 else ", %d request slots" % parallel
+    return int(round(weights * factor)), "%s weights %d MiB x %.2f%s" % (
+        " + ".join("%s %d" % item for item in sizes.items()), weights, factor, slots)
 
 
 def components(llm_mib: int, llm_note: str, yolo_mib: int = YOLO_WORLD_X_MIB, habitat_mib: int = HABITAT_RENDER_MIB,
-               habitat_cpu_render: bool = False, pins: Optional[Dict[str, str]] = None) -> Tuple[Component, ...]:
+               habitat_cpu_render: bool = False, pins: Optional[Dict[str, str]] = None,
+               habitat_count: int = 1) -> Tuple[Component, ...]:
     """The three processes; ``pins`` maps a component name to ``auto`` / ``gpu`` / ``cpu`` (``GPU_PLAN_<NAME>``).
 
     Pinning Habitat to the CPU is the software-rendering opt-in itself, so it
-    needs no ``HABITAT_CPU_RENDER=1`` beside it.
+    needs no ``HABITAT_CPU_RENDER=1`` beside it. ``habitat_count`` renderers
+    (one per parallel shard) each take ``habitat_mib``.
     """
     pins = dict(pins or {})
     unknown = sorted(set(pins) - set(COMPONENT_NAMES))
     if unknown:
         raise ValueError("No such component to pin: %s (known: %s)" % (", ".join(unknown), ", ".join(COMPONENT_NAMES)))
+    if type(habitat_count) is not int or habitat_count < 1:
+        raise ValueError("HABITAT_RENDERERS must be a positive integer, got %r" % (habitat_count,))
     habitat_pin = pins.get("habitat", "auto")
+    renderers = "" if habitat_count == 1 else "%d renderers x %d MiB; " % (habitat_count, habitat_mib)
     return (Component("llm", 1, llm_mib, cpu_capable=True, partial=True, note=llm_note, pin=pins.get("llm", "auto")),
             Component("yolo", 2, yolo_mib, cpu_capable=True, note="YOLO-World X-v2 + CLIP text encoder, 640x480",
                       pin=pins.get("yolo", "auto")),
-            Component("habitat", 3, habitat_mib, cpu_capable=habitat_cpu_render or habitat_pin == "cpu", pin=habitat_pin,
-                      note="habitat-sim headless EGL renderer; CPU only with HABITAT_CPU_RENDER=1 or GPU_PLAN_HABITAT=cpu "
-                           "(software EGL on Mesa llvmpipe)"))
+            Component("habitat", 3, habitat_mib * habitat_count, cpu_capable=habitat_cpu_render or habitat_pin == "cpu",
+                      pin=habitat_pin,
+                      note=renderers + "habitat-sim headless EGL renderer; CPU only with HABITAT_CPU_RENDER=1 or "
+                           "GPU_PLAN_HABITAT=cpu (software EGL on Mesa llvmpipe)"))
 
 
 def plan(parts: Sequence[Component], gpu_index: int, gpu_name: str, total_mib: int, used_mib: int,
@@ -256,21 +286,47 @@ def pins_from_environment(env: Dict[str, str]) -> Dict[str, str]:
 
 def plan_from_environment(gpu_index: int = 0, run: Callable[[Sequence[str]], str] = None,
                           env: Optional[Dict[str, str]] = None) -> GpuPlan:
-    """The plan for this machine, from nvidia-smi and the ``LLM_*`` / ``*_VRAM_MIB`` / ``GPU_PLAN_*`` environment."""
+    """The plan for this machine, from nvidia-smi and the ``LLM_*`` / ``*_VRAM_MIB`` / ``GPU_PLAN_*`` environment.
+
+    ``OLLAMA_NUM_PARALLEL`` (request slots) and ``HABITAT_RENDERERS`` (one
+    per parallel shard) scale the LLM's and the renderer's footprints.
+    """
     env = os.environ if env is None else env
     name, total, used = nvidia_smi_memory(gpu_index, run)
     models = [env.get("LLM_MODEL", "qwen2.5:3b-instruct"), env.get("LLM_REASONING_MODEL", "qwen2.5:14b-instruct")]
     models_dir = Path(env.get("OLLAMA_MODELS_DIR", env.get("OLLAMA_MODELS", "~/models/objnav/ollama")))
     override = env.get("LLM_VRAM_MIB")
-    llm_mib, note = llm_need_mib(models, models_dir, int(override) if override else None)
+    llm_mib, note = llm_need_mib(models, models_dir, int(override) if override else None,
+                                 int(env.get("OLLAMA_NUM_PARALLEL", "1") or 1))
     parts = components(llm_mib, note, int(env.get("YOLO_VRAM_MIB", YOLO_WORLD_X_MIB)),
                        int(env.get("HABITAT_VRAM_MIB", HABITAT_RENDER_MIB)),
-                       env.get("HABITAT_CPU_RENDER", "0") == "1", pins_from_environment(env))
+                       env.get("HABITAT_CPU_RENDER", "0") == "1", pins_from_environment(env),
+                       int(env.get("HABITAT_RENDERERS", "1") or 1))
     return plan(parts, gpu_index, name, total, used, int(env.get("GPU_RESERVE_MIB", DEFAULT_RESERVE_MIB)))
 
 
+def replay_environment(path: Path) -> Dict[str, str]:
+    """The ``environment`` a recorded plan (``gpu_plan.json``) emitted, so a resume starts its services on the same devices.
+
+    Raises:
+        RuntimeError: The file is missing, is not a plan, or holds no environment.
+    """
+    try:
+        record = json.loads(Path(path).read_text())
+        environment = record["environment"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("%s is not a recorded GPU plan with an environment: %s" % (path, exc))
+    if not isinstance(environment, dict) or not environment:
+        raise RuntimeError("%s records no environment to replay" % path)
+    return {str(key): str(value) for key, value in environment.items()}
+
+
 def render_env(result: GpuPlan) -> str:
-    return "\n".join("export %s=%s" % (key, _quote(value)) for key, value in result.environment().items()) + "\n"
+    return render_environment(result.environment())
+
+
+def render_environment(environment: Dict[str, str]) -> str:
+    return "\n".join("export %s=%s" % (key, _quote(value)) for key, value in environment.items()) + "\n"
 
 
 def _quote(value: str) -> str:
@@ -282,7 +338,17 @@ def main(argv=None):
     parser.add_argument("--gpu-device", type=int, default=int(os.environ.get("GPU_DEVICE", "0")))
     parser.add_argument("--format", choices=("json", "env"), default="json")
     parser.add_argument("--write", type=Path, help="Also write the plan as JSON to this path")
+    parser.add_argument("--replay", type=Path, metavar="GPU_PLAN_JSON",
+                        help="Do not plan: re-emit the plan this run recorded, so a resume's services start on the "
+                             "devices the frozen configuration holds (--write copies it when the path differs)")
     args = parser.parse_args(argv)
+    if args.replay:
+        environment = replay_environment(args.replay)
+        if args.write and args.write.resolve() != args.replay.resolve():
+            args.write.parent.mkdir(parents=True, exist_ok=True)
+            args.write.write_text(args.replay.read_text())
+        print(render_environment(environment) if args.format == "env" else json.dumps(environment, indent=2))
+        return 0
     result = plan_from_environment(args.gpu_device)
     record = dict(asdict(result), environment=result.environment())
     if args.write:

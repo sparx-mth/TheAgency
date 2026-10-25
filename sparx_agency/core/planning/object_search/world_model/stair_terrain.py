@@ -1,4 +1,20 @@
-"""RGB-D support surfaces for stairs; no simulator geometry is consulted."""
+"""RGB-D support surfaces for stairs; no simulator geometry is consulted.
+
+A candidate flight is a reachable run of measured support rising
+``stair_min_rise_m`` within 5 m **whose height profile is a flight's**
+(:func:`stair_profile`, since 2026-10-22): at least ``stair_min_risers``
+risers of ``stair_riser_min_m`` to ``max_step_m`` each, every tread between
+them ``stair_min_tread_m`` to ``stair_max_tread_m`` deep, climbing one way.
+Before that any climbable chain of surfaces 0.4 m up qualified --
+Corozal/000003 of the 25-episode campaign placed a "staircase" on a coffee
+table and the sofa behind it, Darden/000000 one on a bed, each masking a
+square metre or two of the room on the planning grid and excluding it from
+the room partition. A table top, a sofa seat or a mattress is a tread half a
+metre deep or more; the apron and edge of a table or a sofa's arm, seen
+obliquely, rasterise as a ramp of one-cell levels -- risers of a tread's
+size with no tread between them; and no piece of furniture is three
+tread-sized risers tall.
+"""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -10,6 +26,66 @@ from sparx_agency.core.planning.exploration.falcon.ordering import Deadline
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
 from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_cells
 from sparx_agency.core.planning.object_search.world_model.stair_grid import build_support_grid
+
+
+def _segments(path, tolerance_m=0.06):
+    """Collapse a path's points into ``[(height, run_m), ...]`` -- one entry per level, with the distance walked on it.
+
+    A level's run counts the step onto it, so one cell of a level is one
+    cell's run (0.1 m at the ObjectNav resolution), two cells two: a tread
+    two cells deep reads 0.2 m, a ramp of single cells 0.1 m each.
+    """
+    segments = []
+    previous = None
+    for point in path:
+        x, y, z = float(point[0]), float(point[1]), float(point[2])
+        step = 0.0 if previous is None else math.hypot(x - previous[0], y - previous[1])
+        if segments and abs(z - segments[-1][0]) <= tolerance_m:
+            height, run, count = segments[-1]
+            segments[-1] = ((height * count + z) / (count + 1), run + step, count + 1)
+        else:
+            segments.append((z, step, 1))
+        previous = (x, y)
+    return [(height, run) for height, run, _ in segments]
+
+
+def stair_profile(path, sign, params):
+    """``(risers, rise_m)`` of the longest flight-like stretch of ``path``, or None when there is none.
+
+    A flight climbs one way (``sign`` +1 up, -1 down) in risers of
+    ``stair_riser_min_m`` to ``max_step_m``, with a tread of
+    ``stair_min_tread_m`` to ``stair_max_tread_m`` between consecutive
+    risers; a level walked for longer than that is a floor, a landing or a
+    piece of furniture, one shorter is the rasterised edge of something
+    (a ramp of single cells), and either ends the stretch. The stretch must
+    hold ``stair_min_risers`` risers and rise ``stair_min_rise_m`` in all.
+    A riser smaller than the minimum is noise on one tread and merges into
+    it; one larger than ``max_step_m`` is a cliff the route graph never
+    joins.
+    """
+    levels = _segments(path)
+    if len(levels) < 2:
+        return None
+    # Merge sub-riser steps (noise within one tread) into the tread before them.
+    merged = [list(levels[0])]
+    for height, run in levels[1:]:
+        if abs(height - merged[-1][0]) < params.stair_riser_min_m:
+            merged[-1][1] += run
+        else:
+            merged.append([height, run])
+    best = None
+    risers, rise, start_height = 0, 0.0, merged[0][0]
+    for index in range(1, len(merged)):
+        step = sign * (merged[index][0] - merged[index - 1][0])
+        tread_ok = risers == 0 or params.stair_min_tread_m <= merged[index - 1][1] <= params.stair_max_tread_m
+        if params.stair_riser_min_m <= step <= params.max_step_m and tread_ok:
+            risers += 1
+            rise = sign * (merged[index][0] - start_height)
+        else:
+            risers, rise, start_height = 0, 0.0, merged[index][0]   # a landing or furniture: the next stretch starts here
+        if risers >= params.stair_min_risers and rise >= params.stair_min_rise_m and (best is None or rise > best[1]):
+            best = (risers, float(rise))
+    return best
 
 
 class StairTerrain:
@@ -92,9 +168,10 @@ class StairTerrain:
             chosen = int(indices[np.argmax(scores)])
             cell = (int(self.routes.x[chosen]), int(self.routes.y[chosen]))
             path = self.path(cell)
-            levels = {int(round(p[2] / 0.12)) for p in path}
-            if len(path) >= 3 and len(levels) >= 3:
-                self.candidates.append({"direction": sign, "path": path, "rise_m": float(rise[chosen])})
+            profile = stair_profile(path, sign, self.params)
+            if len(path) >= 3 and profile is not None:
+                self.candidates.append({"direction": sign, "path": path, "rise_m": float(rise[chosen]),
+                                        "risers": profile[0], "profile_rise_m": profile[1]})
 
     def path(self, cell):
         cells = self.routes.path(self.start, cell, Deadline(1.0))

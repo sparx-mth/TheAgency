@@ -5,6 +5,229 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-10-22)
+- **Five-scene campaign on the committed-target changes** (`runs/benchmark_25episodes_20261022T081925Z`, 25 of 25 scored in
+  16 minutes, everything recorded with the map journal; `docs/progress/entries/036-objnav-committed-target-and-log-review.md`):
+  SR 0.880, SPL 0.631, SoftSPL 0.652, DTG 0.61 m, 71 actions and 37.5 s per episode. On the nineteen episodes the
+  04:43 run had scored before it was stopped: SR 0.895 -> 0.895, SPL 0.631 -> 0.693, DTG 0.76 -> 0.58 m, 98.7 -> 60.6
+  actions, 130 -> 32.8 s per episode; Corozal/000003 toilet SR 0 -> 1 (500 -> 202 actions, three LLM calls where
+  there were nineteen). Two wrong STOPs on detector false positives (Markleeville/000000 `bed`, Wiconisco/000003
+  `sofa` with a 0.34 m footprint), diagnosed from the logs; the closing's, not the search's.
+### Changed (2026-10-22, the Corozal/000003 toilet recording `c1af8954a378`: a target set is a target reached)
+- **The committed-target rule** (`rooms/room_search_loop.py` `LoopSettings.transit_commitment` on, `rebind_reach_m`
+  0.6; `object_search_supervisor.py` `rebind`). Eleven of the episode's eighteen selections were `unreachable`
+  releases of a room the watershed had merely renumbered on the way to it (`room_missing_held` -> `release` three
+  actions later), each buying a room-LLM call (10 s) and an RPT* solve, and at action 137 the agent re-planned to the
+  toilet's room while committed to its neighbour. A transit now ends only by arrival, a route the planner refuses or
+  the follower makes no progress on, the follower's wedge, the supervisor's clocks, or the target takeover: the room
+  in force is RE-BOUND to the live room holding the committed entry point (else the lost room's centre) under its new
+  number, with its entry, estimate and probability (`room_rebound` events, `rooms_rebound`); a visit in force follows
+  the room renumbered under the agent's feet; no classifier call is spent in transit (`relabels_deferred`; the arrival
+  asks) and the ledger's `finished_in_transit` no longer ends a walk -- both are judged at arrival. The place walked
+  to with no room under it at all is given up after `room_missing_grace` (10) actions as before. Off, the 2026-10-21
+  behaviour; the regressions that encode it say so.
+- **The scene graph is not rebuilt on every action of a committed transit** (`policy.py` `graph_period`,
+  `refresh_graph`; `RPTSettings.transit_graph_period_steps` 5). The watershed, registry, frontier inventory and
+  per-room facts were 1.4 s of a 1.7 s median decision, 500 times; the follower needs the map and its route, not a
+  fresh partition. Rebuilt every fifth action while the route is walked, on the action the transit ends (before the
+  visit's first decision), and at every loop point as before; every action in SEARCH and SELECT as before. The
+  body-radius cost grid is built once per map and shared (`navigation_cost` cache; the loop asked for it twice).
+- **A place the agent keeps failing to reach is given up** (`LoopSettings.entry_failure_limit` 2,
+  `entry_failure_radius_m` 0.75, `entry_failure_backoff` 2; `entry_failure` events, `unreachable:<n>` exclusions).
+  `unreachable`, `blocked` and `transit_timeout` releases are remembered by the entry's POSITION, so the memory
+  survives the renumbering the supervisor's `max_attempts` does not: a room whose failed places add up to the limit,
+  or whose candidate entry lies at one, is withheld for `failure_cooldown_steps * 2 ** (n - 2)` actions, and the
+  explore entry passes such places over for the room's next frontier or doorstep. 0 disables.
+- **A frontier wrapping a block of unknown is one cluster per side** (`core/mapping/topology/frontier_split.py`;
+  `room_costs.frontier_clusters`, `room_stats.count_frontier_clusters` `split_sides`). The floor mapped along three
+  sides of an unmapped room was one 8-connected component with one goal, on whichever side its centroid fell nearest
+  -- action 291: the gap O30 on one side of an unknown square and nothing on the side the agent could reach. A
+  component whose cells face different sides of their unknown and whose centre lies on the unknown side of them (it
+  wraps a block; an arc bulging into the open unknown has its centre behind it and stays whole) is cut at the corners
+  into one cluster per side of at least a doorway's width (`SIDE_MIN_M` 0.9); the goal maker and the scene graph's
+  count make the same cut. The per-cluster extraction reads each component's bounding box, not the whole grid.
+- **Trodden ground ranks under ground barely visited** (`frontier_ranking.py` `FrontierRankingParams.visit_weight`
+  0.05 / `visit_radius_m` 1.5, `trail_visits`; the loop's `_visits`, the fallback's `_by_view_gain`). A frontier
+  goal's utility is divided by `1 + 0.05 * actions spent within 1.5 m of it`, read off the sight ledger's trail: the
+  route back through the open room crossed five times (action 291) now ranks behind the frontiers in the wings the
+  agent never walked. 0 disables.
+- **The unseen floor behind a room's exits is on its oracle line** (`opening_nodes.RoomExits.unseen_m2`,
+  `search_node_oracle.SearchNode.unseen_m2`, `format_exits`): `exits=2 (1 doorway, ~30m2 unseen behind them)`, the
+  rays' reach from the exits' thresholds summed, and the prompt told that a room whose exits open onto a large
+  unseen area is where the rooms not found yet must be -- the model can prefer the way to another room over the
+  living room it has seen.
+- **The floor panel draws the accessible frontier goals** (`floor_panels.py` `FRONTIER_COLOR`; `search_panel.py`):
+  the column counted "blue diamonds" the map did not show, so a recording could not say which way the inventory
+  pointed. One small diamond per cluster.
+- **A recording is reviewed from its log, by step, never from a frame** (`floor_panels.py` map journal ->
+  `map_journal.npz`; `visualization.py` `search_snapshot` `frontier_goals` / `transit` / `entry_failures`, the
+  explore visit's `ranked` goals; `review_recording.py`; `recording.py` and `episode.json` say so). The per-step
+  row had the frontier goals as bare coordinates and the only saved map was the final one, so "what lay to the
+  agent's left at action 261 and why was none of it a goal" was answerable only from a video frame. Now every
+  action's occupancy, settled-unknown and room-partition deltas are journaled, each frontier goal rides with its
+  size, walk, facing, utility and room, and `review_recording.py <dir> summary | timeline | step N | map N |
+  events` answers from the log -- `step N` with the map of that action by sector round the agent (free /
+  occupied / unknown / settled area, raw frontier cells, the goals and openings in the sector). Older
+  recordings fall back to the final map and say so. `LESSONS.md` has the entry.
+### Fixed (2026-10-22, after 19 episodes of the 25-episode campaign: stair false positives, classifier churn, update cost)
+- **An observed staircase must have a flight's profile** (`world_model/stair_terrain.py` `stair_profile`;
+  `MultiFloorParams.stair_min_risers` 3, `stair_riser_min_m` 0.10, `stair_max_tread_m` 0.55): any climbable chain of
+  support surfaces 0.4 m up was a candidate -- Corozal/000003 placed a "staircase" on a coffee table's shelf and top
+  and the sofa behind them, Darden/000000 one on a bed, each masking a square metre or two of the room on the planning
+  grid and excluding it from the partition (Corozal's toilet episode ran to the 500-step limit, DTG 8.5 m). Now the
+  path must climb one way in at least three risers of 0.10 m to `max_step_m`, with no level between them walked for
+  more than 0.55 m: a table top, a seat or a mattress is a tread half a metre deep or more, and no furniture is three
+  tread-sized risers tall; a landing ends one stretch and the next flight starts at it. `risers` / `profile_rise_m`
+  on the candidate. One new test in `test_multifloor.py`.
+- **The room classifier is keyed by a room's objects alone** (`room_classifier.py` `_signature`,
+  `revisable_room_labels.py`): with the geometry bucket in every cache key, a room re-asked the model whenever it grew
+  from small to medium or gained a doorway -- 80-100 classifier calls per long episode. The bucket now keys only a
+  room with no objects (the shape-only question); the geometry is still shown in the prompt when a query happens.
+- **`_parts_skeleton` judges a choke on the skeleton's bounding box, not the whole grid** (`room_watershed.py`): the
+  800x800 grid was labelled twice per candidate, a hundred times per scene-graph update -- 0.4 s of the update's
+  0.76 s on Corozal/000003's map, the update being 1.4 s median over the 500 steps. Exact (9,600 random verdicts on
+  three recorded maps unchanged, the Corozal partition identical); the update halves to 0.37 s on that map.
+### Changed (2026-10-21, afternoon: observed stairs, the unvisited raised, wide glances, the room taxonomy)
+- **Stairs are observed, never read from the navmesh** (`core/localization/floor_atlas.py`
+  `MultiFloorParams.stair_source` default `observed`; `core/planning/object_search/multifloor/multifloor_policy.py`,
+  `policy.py`, `spawn_floor_guard.py` docstrings). The ground-truth connector's footprint was the navmesh centreline,
+  which in Darden begins 0.45 m before the first riser on a sloped threshold -- drawn on the grid the flight stood
+  lower than the stairs do, and with the capsule's foot it closed the junction below. The method now takes its stairs
+  from its own RGB-D: a reachable run of measured treads rising `stair_min_rise_m` (0.40 m) within 5 m
+  (`world_model/stair_terrain.py` candidates) is a portal of the storey, placed from the measurement, masked by the
+  same capsule (`peek_stairs`), with the observed drops and the map's obstacle band as before -- no simulator geometry
+  is consulted, the footing of ApexNav, SG-Nav and OSG-Nav. `configuration()["ground_truth_stairs"]` reads False;
+  `stair_source="ground_truth"` is the declared ablation and the fixtures that hand an episode a scene structure ask
+  for it (`tests/test_method.py setup_policy`, the baseline's `baseline()`).
+- **A room never stood in is raised; a room entered decays with the time spent inside** (`rooms/room_search_loop.py`
+  `_scaled_values`, `LoopSettings.unvisited_boost` 1.5 / `unvisited_floor` 0.15 / `dwell_half_life_steps` 20 /
+  `dwell_floor` 0.05; the oracle prompt's STEP 4, `search_node_oracle.py`). The models read a never-entered room's
+  `frontier=0` or `1` as little to find, when the count measures the map and not the room -- one boundary cleared
+  opens the whole of it. A never-entered, unfinished room the model gave anything is read at 1.5x its number and no
+  less than 0.15 (a room given 0 by the model or the type prior stays 0; the room the agent stands in keeps its
+  number); a room entered and left keeps `entered_discount * 0.5 ** (steps inside / 20)`, floored at 0.05, the
+  lingered rule still capping it. The prompt: never below 15 for a never-entered unknown room, never lowered for a
+  low frontier count; the longer `searched=` reads, the lower. `test_search_economy.py`: the lingered test follows
+  the decay; one new test.
+- **Side glances turn to 120 degrees when the far band pays** (`exploration/path_glances.py`
+  `GlanceSettings.wide_rad` 2pi/3, `GlancePlan.turn_rad`, `wide` plans and counters). A right angle with the 79-degree
+  camera shows the floor to about 130 degrees off the route; a pocket beside and a little behind the agent -- the
+  alcove just passed, the room whose door opens back toward it -- lies in the 130-160 band only a wider look
+  reaches. Every candidate point is scored for the wide look too, taken only when the extra band alone pays for the
+  two extra turns each way at `min_gain_per_action_m2`; the sector memory, the committed plan and the HUD carry
+  the angle. Two new tests in `test_path_glances.py`.
+- **The room taxonomy is residential, and a label is never locked** (`core/mapping/topology/room_classifier.py`
+  `HOME_LABEL_SET`, `LABEL_ALIASES`, geometry facts in the prompt and the cache key; `revisable_room_labels.py`
+  `shape_only_rooms`; `rooms/scene_graph.py` `_room_geometry`; `core/mapping/objects/landmarks.py` `max_misses`;
+  `perception/cycle.py` `_count_misses`; `RPTSettings.landmark_max_misses` 4 and the miss view bounds). Hallway /
+  corridor, foyer / entryway, dining room, office / study, laundry / utility, balcony / patio, closet / pantry /
+  storage and garage are the set offered first, synonyms and slashed forms are read as the set's labels, and the
+  prompt names the detector's confusions (a table or a sofa for a bed). A room is told its floor area, its shape and
+  the doorways off it, and a room with nothing in it that reads as a passage -- long and narrow, or two or more
+  doorways, 2 m2 or more -- is asked about on its shape alone, once per geometry bucket, WEAK and provisional (it
+  rules nothing out). The lock: confirmation was one-way, so a dining table YOLO called `bed` at 0.52 twice named a
+  kitchen a bedroom for the episode (Darden/000000). A confirmed landmark that stands in a CLEAR view -- inside the
+  frame by 40 px, 0.8-3.5 m away, the depth at its pixel reaching it -- without a detection of its class is missed,
+  once per distinct viewpoint (0.5 m or 30 degrees from the last counted miss); as many misses as
+  `max(landmark_max_misses, its observations)` -- four for the twice-seen table, twelve for a sofa seen twelve times
+  (a flat four retracted 29 of Markleeville's 51 confirmed objects, most of them real) -- retract it from the
+  confirmed set (the room's evidence, the target landmark nodes), the evidence gate
+  takes the room's label back at the next scene-graph update and the label history records it; the next detection
+  that folds into it reinstates it. `perception.counts` `landmark_misses` / `landmark_views_occluded` /
+  `landmark_retractions`, `perception.retractions` in the record. Tests: `test_room_classifier.py` (3),
+  `test_rooms.py` (1), `test_perception_association.py` (3).
+### Fixed (2026-10-21, the audit after the first room-level run: doorways, glances, closing, stairs, spins)
+- **The doorway partition: the space beyond an observed open door is a node of its own** (`core/mapping/topology/
+  room_watershed.py`, `core/planning/object_search/rooms/scene_graph.py`, `room_search_loop.py`). The sliver of floor
+  glimpsed through a doorway had no clearance peak, so no watershed label, and `_reclaim_carved` handed it to the
+  nearest seeded room ACROSS the very cut carved to part them (the toilet seen through the door named the hallway a
+  bathroom). Now: `ObservedSceneGraph.note_openings` (called by the loop with every action's openings and the viewing
+  pose) reads the doorway off the line of sight from the viewpoint to the opening -- `sightline_thresholds`, the
+  floor narrowing between OBSERVED jambs with the unknown passable, so an open room's frontier is no doorway -- snaps
+  the dip to the doorway's choke (`SIGHTLINE_SNAP_REACH_M` 0.8) and keeps it as a sticky threshold
+  (`threshold_events` `source: sightline`); the carve there is a two-cell LINE across the passage (`_severing_cut`,
+  the disk of old swallowed a thin sliver or left two crescents of it), chokes are ranked by clearance to observed
+  obstacles (`ChokeFields`), a short far side counts when it leads into the unknown (`_parts_skeleton`, `leads_on`,
+  `LEADS_ON_CELLS`), a choke must be walled on both sides across the passage (`_walled_both_sides`) and must have a
+  cut that parts the floor; and the seedless floor beyond a cut that borders unknown is seeded as a **stub room**
+  (`_stub_rooms`, `WatershedRoomParams.stub_min_cells`, 4 in `DEFAULT_SEGMENTATION`, 0 = the older behaviour), exempt
+  from `min_room_cells`, keeping its number as it grows. `segment_rooms_watershed(unknown_mask=...)`,
+  `door_carve_mask(unknown_mask=...)`. The scene graph's edges now include every threshold with the room pair it
+  joins through the doorway coordinate (`graph.doors`, kind `threshold`, index `t<k>`; doors carry kind `door`), and
+  a door's annulus starts at the door cell so the stub beyond it is linked. Tests: `tests/test_doorway_partition.py`
+  (2), four in `test_room_watershed.py`.
+- **Side glances were scheduled and never taken** (`core/planning/object_search/exploration/path_glances.py`). The
+  audit of the fifteen recordings of 2026-10-21 found the scheduler wired and firing (40 glances, 33 of them side or
+  cue), but the geometric side looks re-planned away before the agent reached them -- Collierville/000000: 27
+  scheduled, 4 taken; Markleeville/000000: 27 and none -- the re-scoring every two actions moving the plan to the next
+  doorway as the map grew. The plan in force is now **committed**: re-scored on the fresh map, kept while its gain
+  clears the floors, replaced only by a candidate at or nearer than its point, taken when its point is reached or
+  passed. Three new tests.
+- **Redundant circles** (`path_glances.py`): a full circle must pay for its four extra turns with the circle's extra over
+  the better side glance (`_full_worth_it`), and is never taken inside a room the search has finished, that has no
+  frontier left, or whose frontier walk is in force (`_full_allowed_at`): the recordings' circles promised 5.5 and
+  18.5 m2 and revealed 0.8 and 1.9. The loop already re-selects on the action a room's visit ends; no other rotation
+  source exists (the sweep's look-around allowance is 0, the fallback never spins).
+- **The takeover starts on an RGB detection without depth** (`core/planning/object_search/closing/target_closing.py`):
+  a confident whole box of the target's class with no usable depth -- beyond the sensor's ~5 m -- begins a bounded
+  BEARING approach once the class has been in the frame on two consecutive actions (`bearing_start`): face the box by
+  its image-space bearing, step toward it, re-face it each frame it is seen, until a frame projects with depth and the
+  ordinary VERIFY starts there with its own clock. Given up without a rejection memory after `bearing_max_actions`
+  (16), `bearing_lost_frames` (3) frames without the class, three steps that moved the agent nowhere,
+  `bearing_max_walk_m` (3.0 m) walked toward the box -- a box first seen within the depth cap plus that distance is in
+  range by then, and one still depthless is unmeasurable (a television screen is a hole in the Gibson mesh,
+  Corozal/000001: the unbounded walk went 3.75 m, never projected, and left the agent to STOP on a second television
+  6.95 m from the goal; with the bound the episode succeeds) or not where the bearing pointed -- or a box
+  `bearing_near_box_frac` (0.30) of the frame's height tall without depth, which is within reach and cannot be
+  positioned, so no blind STOP is taken on it; no retry within `bearing_retry_m` (1.5 m) of the spot the walk began.
+  `phase=target_bearing`; counters `bearing_starts` / `bearing_resolved` / `bearing_abandoned` / `bearing_refusals`.
+  `test_invalid_depth_never_starts_a_takeover` became `test_invalid_depth_never_locks_but_begins_a_bearing_approach`;
+  four more tests.
+- **The stair capsule's half-width is a setting, slightly reduced** (`settings.py` `RPTSettings.stair_margin_m` 0.45 m,
+  five cells drawn; `world_model/peek_stairs.py`): before, body radius + arrival tolerance + a cell, 0.6 m drawn, which
+  with the planner's body-radius inflation on top narrowed the passages beside Markleeville's stairwell on the 2D grid.
+  Stairs only; the adaptive capsule still narrows it to the body radius where a corridor would close. Not scene-specific
+  by design: the method names no scene. Tests updated in `test_spawn_floor_guard.py`.
+- **The stair capsule's storey end is square** (`world_model/peek_stairs.py` `_foot_of` / `_square_foot`, Darden,
+  same day): OpenCV's thick line ends in half-discs, and the one at the storey end lay on the floor in front of the
+  first riser -- the margin's whole radius of plain floor, 0.55 m with five cells drawn. Darden's flight has its foot
+  in the junction of the hallway and the room beside it, and that half-disc, with the planner's inflation on top,
+  drew the junction as one oval (`Darden/000000`, the campaign of 2026-10-21: 204 cells, 50 of them hallway floor
+  between y 1.03 and 1.53 across the junction's whole width). The end nearest the storey plane is now cut flat across
+  the flight's direction, inside every candidate radius of `adaptive_capsule` as well; the sides keep their margin and
+  the far end its cap, more flight being behind it. The connector's anchor itself -- the storey floor in front of the
+  flight -- is no longer masked or refused as a goal; the first treads still are. Not scene-specific. One new test in
+  `test_spawn_floor_guard.py`; two probes moved from the anchor to the first treads. *What the square foot does not
+  open:* the doorways between Darden's west and east halves are 0.2 m humps in the mesh (the navmesh walks them; the
+  observed map's obstacle band begins 0.15 m above the plane), see progress entry 035.
+### Changed (2026-10-21, room-level GAPs: the decision hierarchy of the room search)
+- **Exits are a room's attributes, never nodes; the room's visit walks them** (`core/mapping/topology/
+  search_node_oracle.py`, `core/planning/object_search/rooms/{room_search_loop,opening_nodes,scene_graph}.py`,
+  `policy.py`, `objnav_benchmark_runtime/search_panel.py`). A standalone LLM number per doorway or gap let the RPT*
+  order chase open passes for their own sake -- every gap of a living room, in a search for a toilet -- instead of
+  the room-level prior. Under `explore` every exit read off the live map is now folded into the room it opens from
+  (`_fold_openings`); the room's node line carries its exits as attributes (`SearchNode.exits` / `doorways` /
+  `glimpsed`, rendered `exits=2 (1 doorway)  glimpsed through its exits: toilet`, `opening_nodes.room_exits`;
+  `ObservedSceneGraph.reason(exits=...)`); the system prompt's new EXITS rule ties them to the room's type (exits
+  raise a room only where its type fits the target's home; a hallway's or an unidentified room's by what the home
+  still lacks behind them; a living room's gaps never for a toilet), its worked example values rooms by their
+  exits, and the OPENING node rules moved to `OPENINGS_SUPPLEMENT`, appended only when an exit node is offered.
+  The global decision is over rooms and stairs; the look through a doorway is a step of the chosen room's local
+  exploration (the explore visit's frontier walk), which ends when the room's GAPs are exhausted or
+  `explore_visit_steps` runs out and whose release is the loop point that re-selects. A ledger-finished room with
+  GAPs left to walk (`_gaps_left`: significant live frontier on a room with an exit) is **reopened** for them
+  (`_exclusions` -> `_reopened`, event `room_reopened`, stat `rooms_reopened`, `reopened_for_gaps` in the
+  diagnostics, `exits` / `reopened` in the estimate events): shown as `status=scanned(...)` with its `exits=`,
+  entered at its best frontier, priced by its frontiers, discounted as an entered room, walked and not re-scanned;
+  a mid-visit rotation finishes the room in the ledger but no longer ends the visit while GAPs are left, and a
+  room in transit with GAPs left is not released `finished_in_transit`. A new exit on an offered room buys the
+  oracle a call at most every `revalue_actions` (`_exits_at_call`), as a new opening node did; the HOUSE line
+  counts every exit of the storey. `OpeningSettings.exits_as_nodes` (default False) keeps the 2026-10-04 design
+  as a deprecated mode -- the opening-node regressions in `test_opening_nodes.py` (scan mode, unchanged) and
+  `test_explore_visit.py` run it explicitly; `scan` and `sweep` visits keep exits as peek nodes regardless, and
+  target landmarks are nodes in every mode. Visited-node decay (`entered_discount`, `lingered_discount`, the
+  supervisor's cooldowns) and the footprint tracking are untouched. Nine regressions in
+  `tests/test_room_level_gaps.py`; the room line's `exits=` field is pinned in `test_search_node_oracle.py`.
 ### Added (2026-10-19, HM3D under the Gibson-validated method)
 - **`feat/objnav-benchmark-infra-nadav` merged into `feat/objnav-habitat-hm3d-nadav`**: the HM3D adapter now runs
   the method from `core/planning/object_search/` exactly as the Gibson val result did. `core/` differs from the
@@ -60,6 +283,8 @@ future-you, not for a commit log.
   explorers, with and without a target, and the FALCON+YOLO baseline -- produce byte-identical traces, diagnostics
   and frozen configurations before and after.
 ### Added
+- **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261018T105339Z/`, 2026-10-19): SR 0.788, SPL 0.465, DTG 0.96 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
+- **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261018_14b_sam/`, 2026-10-19): SR 0.784, SPL 0.480, DTG 1.00 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.
 - **The FALCON + YOLO + closing baseline on the Gibson val split** (`gibson/results/gibson_val_falcon-yolo_20261018T173302Z/`, 2026-10-19): SR 0.665, SPL 0.337, DTG 1.75 m over the same 1,000 episodes as the full method's SR 0.792, SPL 0.464, DTG 0.94 m; per scene and per category in entry 032. `supervise_benchmark.sh` kills a run stalled for `STALL_MINUTES` (a habitat-sim segfault left a zombie it waited on for five hours) and calls an episode deterministic after three deaths.
 - **The FALCON + YOLO + closing exploration baseline** (`objnav_benchmark_runtime/methods/falcon_yolo_baseline.py` new, `gibson/run.py --agent falcon-yolo`, `five_scene.py`, `run_benchmark.sh --agent`, `launch_detached.sh` `RUN_ARGS`, `supervise_benchmark.sh`, `floor_panels.py`, `visualization.py`, `search_panel.py`, `gibson/progress.py`, `gibson/FALCON_YOLO_BASELINE.md`, 2026-10-18): goal-free planar FALCON over the storey (bounded transactions in a 4 m disc about the agent, A* relocation to the nearest frontier when the disc is exhausted, a look-around and a STOP when the storey is) with the full method's YOLO perception cycle, `TargetClosing` takeover and legacy pursuit, camera controller and spawn-floor confinement unchanged, and no LLM, RPT*, scene graph, rooms, doors, openings, peeks or glances. The recorder draws the explorer's column in place of the search panel; lean records keep `exploration`. Twenty-one tests in `tests/test_falcon_yolo_baseline.py`. The swept-motion veto judges FALCON's own routes only (a relocation's or the pursuit's A* route is the planner's, as in the full method's frontier explorer; Wiconisco/000000 had spent 179 vetoes in its first doorway). The first fifteen recorded episodes (`runs/benchmark_falcon-yolo_15episodes_20261018T152349Z`): SR 0.800, SPL 0.433, DTG 0.94 m against the full method's 0.867 / 0.641 / 0.16 m on the same episodes.
 - **Gibson validation result** (`objnav_benchmark_runtime/gibson/BENCHMARK_RESULTS.md`, `gibson/results/gibson_val_20261016_small_llm/`, 2026-10-18): SR 0.792, SPL 0.464, DTG 0.94 m over 1000 of the 1,000 published SemExp v1.1 val episodes (5 scenes x 200), lean records, habitat-sim 0.2.4; per scene and per category, beside the paper's Table 2 rows, with the frozen configuration, in the file.

@@ -51,7 +51,8 @@ class FloorContextBank:
         # on the bed) stays in the library behind ``class_votes=True``; the room
         # objects, the LLM and the target evidence see each class's own landmarks.
         p.landmarks = ObjectLandmarkMap(dedupe_radius_m=p.settings.landmark_dedupe_radius_m, nearest_match=True,
-                                        class_votes=False, footprint_iou=p.settings.landmark_footprint_iou)
+                                        class_votes=False, footprint_iou=p.settings.landmark_footprint_iou,
+                                        max_misses=p.settings.landmark_max_misses)
         p.target_evidence = TargetEvidence(p.target_settings)
         p.supervisor = ObjectSearchSupervisor(p.supervisor_params, solver=p.solver)
         # The loop mirrors the supervisor: the room in force and the local

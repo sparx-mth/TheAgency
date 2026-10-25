@@ -202,6 +202,26 @@ split. Three ways to make that manageable:
 - **Shard across machines.** `run_benchmark.sh --shards 4 --shard-index 0` (… 1, 2, 3)
   on four machines, then merge the four complete directories into one result with
   `python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.report <dir0> <dir1> <dir2> <dir3> --merge-output <merged>`.
+- **Shard on this machine (`--parallel N`).** `run_benchmark.sh --parallel 3` runs the same
+  interleaved shards as N `gibson.run` processes at once against one set of services, each
+  into `<output>/shard_<k>/`, and merges them into `<output>/` when the last one finishes --
+  the same `run.json` / `episodes.jsonl` / `summary.json` / `comparison.md` a single process
+  writes, with `merged_from` naming the shards. What bounds N is the card, not the CPU: every
+  shard holds its own renderer (~1.4 GB, measured 2026-10-22 on the 4090), and the node oracle
+  is about a third of a shard's wall time, so the launcher gives the native Ollama ceil(N/2)
+  request slots (`OLLAMA_NUM_PARALLEL`; each slot beyond the first is ~1.7 GB of KV cache for
+  the 14B) and budgets both in the GPU plan (`HABITAT_RENDERERS`, section 3.1). On a 24 GB
+  card beside a desktop, `--parallel 3` with the 3B/14B pair leaves ~2.5 GB free; four shards
+  fit only on paper. A single process never has more than one shard's worth of the policy's
+  CPU work in flight, and the only wall-clock-sensitive knob in the policy is FALCON's
+  `planning_deadline_s`, so keep the CPU unoversubscribed rather than pushing N for its own
+  sake. `--status <output>` folds the shards' progress files into one view until the merge;
+  the shards' own logs are `<output>/shard_<k>/run.log`. The same command with `--output
+  <output>` resumes: each shard resumes its own rows, and the services start from the
+  `gpu_plan.json` the run recorded (`GPU_PLAN_REPLAY`) so the frozen configuration matches.
+  `--parallel` takes the full split only; `launch_detached.sh` and the supervisor (2.6) know
+  nothing of the shard layout -- launch it in its own session by hand (`setsid nohup ... &`)
+  and stop it with a TERM to the launcher, which stops the shards before the services.
 - **Run detached.** One command does what the recipe below spells out -- the launcher in its own session with its
   PID recorded, the monitor (2.4) beside it, and the supervisor (2.6) once the run is past its preflight -- and the
   *same* command brings the run back after the machine restarted (2.6):
@@ -389,9 +409,10 @@ footprint is reserved first (software rendering is an opt-in experiment,
 
 The plan is printed at start-up, written to `gpu_plan.json` beside the services' logs and
 recorded in every run's frozen configuration (`run.json` → `config.gpu_plan`). The
-footprints are explicit, dated estimates: Ollama weights from the pulled manifests x 1.35
-(KV cache and buffers), 2 GB for YOLO-World X + CLIP, 1.5 GB for the renderer; override
-any of them when your measurement differs.
+footprints are explicit, dated estimates: Ollama weights from the pulled manifests x 1.25
+(one request slot's 8k KV cache and buffers for both models; + 0.21 per further slot), 2 GB
+for YOLO-World X + CLIP, 1.5 GB per renderer; override any of them when your measurement
+differs.
 
 An operator may **pin** a process instead of letting the budget decide: `GPU_PLAN_LLM`,
 `GPU_PLAN_YOLO`, `GPU_PLAN_HABITAT` = `auto` (default), `gpu` or `cpu`. A `cpu` pin takes
@@ -414,8 +435,11 @@ GPU_PLAN_LLM=gpu GPU_PLAN_HABITAT=cpu LLM_VRAM_MIB=2800 run_benchmark.sh --five-
 |---|---|---|
 | `GPU_PLAN` | `auto` | `off` restores CPU services with the renderer alone on the GPU |
 | `GPU_PLAN_LLM`, `GPU_PLAN_YOLO`, `GPU_PLAN_HABITAT` | `auto` | `gpu` / `cpu` pins that process regardless of the budget (a Habitat `cpu` pin is software rendering) |
-| `LLM_VRAM_MIB`, `YOLO_VRAM_MIB`, `HABITAT_VRAM_MIB` | manifests x 1.35, `2048`, `1536` | the footprint estimates (`LLM_VRAM_MIB` is required in docker mode: the manifests live in the container's volume) |
+| `LLM_VRAM_MIB`, `YOLO_VRAM_MIB`, `HABITAT_VRAM_MIB` | manifests x 1.25, `2048`, `1536` | the footprint estimates (`LLM_VRAM_MIB` is required in docker mode: the manifests live in the container's volume) |
 | `GPU_RESERVE_MIB` | `512` | headroom left for the driver / a desktop |
+| `HABITAT_RENDERERS` | `1` (`--parallel N` sets N) | renderers on the card at once; the Habitat estimate is multiplied by it |
+| `OLLAMA_NUM_PARALLEL` | `1` (`--parallel N` sets ceil(N/2)) | the native server's request slots; each one beyond the first adds `LLM_SLOT_FACTOR` (0.21) of the weights to the LLM estimate -- its KV cache and compute buffers |
+| `GPU_PLAN_REPLAY` | unset | a recorded `gpu_plan.json` to start the services from instead of planning again (a parallel resume sets it) |
 | `HABITAT_CPU_RENDER` | `0` | `1` lets the plan offload the renderer to software EGL when the card is short (experimental) |
 | `CLIP_WEIGHTS` | `$MODELS/clip/ViT-B-32.pt` | the detector's local text encoder, passed when present |
 | `OLLAMA_MODELS_DIR` | `$MODELS/ollama` | where the manifests the LLM estimate reads live (native mode's model store) |
@@ -436,6 +460,7 @@ every layer, `0` CPU, empty = the server decides) is sent as Ollama's `num_gpu` 
 | `YOLO_WEIGHTS` | `$MODELS/yolov8x-worldv2.pt` (`MODELS=~/models/objnav`) | detector checkpoint |
 | `OLLAMA_MODE` | `docker` | `docker` / `native` / `external` (see 1.3) |
 | `OLLAMA_CONTAINER` | `ollama-scene-graph` | the container name in docker mode |
+| `OLLAMA_CONTEXT_LENGTH` | `8192` | the context the native server loads a model with when the request names none: the room-label calls do not, and the model's own default loads `qwen2.5:3b-instruct` at 32k -- 2.3 GB of KV cache per slot for prompts of a few hundred tokens (measured 2026-10-22). The node oracle asks for `LLM_REASONING_NUM_CTX` itself |
 | `LLM_BASE_URL` | `http://127.0.0.1:11434` | where the LLM answers |
 | `LLM_MODEL` / `LLM_REASONING_MODEL` | `qwen2.5:3b-instruct` / `qwen2.5:14b-instruct` | room labels / the node oracle |
 | `LLM_REASONING_TIMEOUT_S` | `900` | how long one oracle call may take (the search waits rather than guessing) |

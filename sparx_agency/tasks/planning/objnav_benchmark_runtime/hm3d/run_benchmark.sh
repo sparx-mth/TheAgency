@@ -31,8 +31,8 @@
 #                        geodesic (99% within 1 mm, or the scene refuses to run: that is the navmesh check)   default 1
 #   EXCLUDE_UNREACHABLE  1: drop, and record, an episode whose goal view points are unreachable instead of stopping   default 0
 #   SPLIT                val (the benchmark); train / val_mini are development splits and are labelled subsets   default val
-#   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; with --jobs N, about N/2 keeps the children from
-#                        queueing on the LLM (each slot is its own KV cache)                                    default 1
+#   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; --jobs N defaults it to ceil(N/2) (and budgets N
+#                        renderers in the GPU plan) unless set here; each slot is its own KV cache          default 1
 set -euo pipefail
 
 usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -41,6 +41,7 @@ usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${OBJNAV_REPO:-$(cd -- "$HERE/../../../../.." && pwd)}"
 DETECTOR_PORT="${DETECTOR_PORT:-18092}"            # before the shared defaults: HM3D's own port, see above
+OPERATOR_OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-}"      # the operator's word, before the library's default of 1
 source "$HERE/../benchmark_services.sh"
 objnav_services_defaults
 HM3D_SCENES_DIR="${HM3D_SCENES_DIR:-$DATA/scene_datasets}"
@@ -102,6 +103,12 @@ HM3D_EPISODES_DIR="${HM3D_EPISODES_DIR:-$DATA/objectnav/hm3d/$VERSION/$SPLIT}"
 [[ "$SMOKE" == 0 || -z "$SCENE" ]] || die "--smoke is a campaign over scenes; use --scene X --limit 1 for one scene"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer"
 [[ "$JOBS" == 1 || -z "$SCENE" ]] || die "--jobs runs scenes of a campaign at once; a --scene run is one process"
+if [[ "$JOBS" -gt 1 ]]; then
+  # As gibson/run_benchmark.sh --parallel: the GPU plan budgets one renderer per child, and the native Ollama gets
+  # ceil(N/2) request slots unless the operator named a number (the node oracle is about a third of a child's wall time).
+  HABITAT_RENDERERS="$JOBS"
+  [[ -n "$OPERATOR_OLLAMA_NUM_PARALLEL" ]] || OLLAMA_NUM_PARALLEL=$(( (JOBS + 1) / 2 ))
+fi
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   TAG="${CATEGORY:+${CATEGORY}_}"

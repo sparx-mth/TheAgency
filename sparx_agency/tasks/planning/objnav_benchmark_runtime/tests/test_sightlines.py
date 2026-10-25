@@ -307,8 +307,9 @@ def test_a_finished_room_is_withheld_at_the_loop_point_and_released_on_the_way_t
     policy.sight.observe(pitched(episode, 0, (3.0, 5.5), yaw=0.0), world)          # the corridor, walked through
     policy.loop._exclusions(obs_at(episode, 1, (8.0, 5.0)), world)
     assert policy.loop._excluded == {0: "scanned:%s" % SEEN_THROUGH}
-    # A room chosen while unfinished and finished by what the walk showed is released before it is entered.
-    policy, episode, _, _, _ = loop_policy(order=(0, 1), visit="scan")
+    # A room chosen while unfinished and finished by what the walk showed is released before it is entered --
+    # the historical rule, behind ``transit_commitment=False`` since 2026-10-22.
+    policy, episode, _, _, _ = loop_policy(order=(0, 1), visit="scan", transit_commitment=False)
     world, labels = narrow_hall_world()
     rooms = install(policy, world, labels)
     policy.graph.facts[0] = RoomFacts(0, 1, 0.0, rooms[0].n_cells)                 # a frontier left: a node

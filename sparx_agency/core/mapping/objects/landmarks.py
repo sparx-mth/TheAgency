@@ -41,6 +41,25 @@ associates by disc overlap alone, never by the centroid radius
 (``cross_class_footprint_only``): the centroid rule folded every small thing
 near a big one into it.
 
+**A landmark can be retracted** (``max_misses``, since 2026-10-21; off by
+default). Confirmation was one-way: two detections made an object, and no
+later frame could unmake it -- a dining table YOLO called ``bed`` at 0.52
+twice stayed a bed, and the kitchen it stood in stayed a "bedroom" for the
+rest of the episode (Darden/000000). The observer that knows the camera
+tells the map when a confirmed landmark stood in a clear view -- inside the
+frame, within detection range, the depth showing nothing in front of it --
+and no detection of its class landed on it (:meth:`ObjectLandmarkMap.note_missed`,
+once per frame; the observer also keeps the views distinct). **Negative
+evidence must outweigh the positive**: the landmark is retracted once its
+misses reach ``max(max_misses, count)`` -- the twice-seen table after four
+clear misses, a sofa seen twelve times only after twelve (the first run
+with a flat four retracted 29 of Markleeville's 51 confirmed objects, most
+of them real, missed from the angles the detector is poor at). A retracted
+landmark leaves :meth:`confirmed` (the room evidence, the target landmark
+nodes) but stays on the map, and the next detection that folds into it
+clears the misses and confirms it again. A miss is counted, never a vote:
+the classes-never-merge rule stands.
+
 Landmark XY is **world ENU** (the frame of ``Pose2D`` and the BEV grid), e.g.
 from :func:`sparx_agency.core.mapping.objects.geometry.backproject_bbox_to_world`.
 """
@@ -70,6 +89,10 @@ class ObjectLandmark:
             class voting (``count`` is then the only tally).
         radius_m: Running-average footprint half-extent, when the observer
             measured one; None otherwise.
+        misses: Clear views of the landmark since its last observation in
+            which no detection of its class landed on it (see
+            :meth:`ObjectLandmarkMap.note_missed`); reset by an observation.
+        retractions: How many times the landmark has been retracted.
     """
 
     id: int
@@ -78,6 +101,8 @@ class ObjectLandmark:
     count: int
     votes: Dict[str, int] = field(default_factory=dict)
     radius_m: Optional[float] = None
+    misses: int = 0
+    retractions: int = 0
 
     def plurality(self) -> Tuple[Optional[str], int, int]:
         """``(leading class, its votes, runner-up votes)``; the leader is None without votes."""
@@ -160,16 +185,21 @@ class ObjectLandmarkMap:
             class other than the landmark's, with both footprints measured,
             associates by the disc-overlap test alone (see the module
             docstring). False restores the centroid rule across classes.
+        max_misses: Clear views without a detection of its class after which
+            a confirmed landmark is retracted from :meth:`confirmed` -- or as
+            many as its observations, whichever is more (see the module
+            docstring); 0 -- the default -- never retracts.
 
     Raises:
         ValueError: If ``dedupe_radius_m`` is not positive, ``min_observations``
-            is less than 1, or ``footprint_iou`` is outside ``(0, 1]``.
+            is less than 1, ``footprint_iou`` is outside ``(0, 1]`` or
+            ``max_misses`` is negative.
     """
 
     def __init__(self, dedupe_radius_m: float = 0.70,
                  min_observations: int = 2, nearest_match: bool = False,
                  class_votes: bool = False, footprint_iou: float = 0.25,
-                 cross_class_footprint_only: bool = True) -> None:
+                 cross_class_footprint_only: bool = True, max_misses: int = 0) -> None:
         if float(dedupe_radius_m) <= 0.0:
             raise ValueError("dedupe_radius_m must be positive, got %r"
                              % (dedupe_radius_m,))
@@ -178,22 +208,68 @@ class ObjectLandmarkMap:
                              % (min_observations,))
         if not 0.0 < float(footprint_iou) <= 1.0:
             raise ValueError("footprint_iou must lie in (0, 1], got %r" % (footprint_iou,))
+        if isinstance(max_misses, bool) or int(max_misses) < 0:
+            raise ValueError("max_misses must be a non-negative integer, got %r" % (max_misses,))
         self._radius_sq = float(dedupe_radius_m) ** 2
         self._min_obs = int(min_observations)
         self._nearest_match = bool(nearest_match)
         self._class_votes = bool(class_votes)
         self._footprint_iou = float(footprint_iou)
         self._cross_class_footprint_only = bool(cross_class_footprint_only)
+        self._max_misses = int(max_misses)
         self._frames = {}  # type: Dict[int, int]
+        self._missed_frames = {}  # type: Dict[int, int]
         self._landmarks = {}  # type: Dict[int, ObjectLandmark]
         self._next_id = 0
         #: ``(landmark id, old class, new class, count at the change)`` per relabel.
         self.relabels = []  # type: List[Tuple[int, str, str, int]]
+        #: ``(landmark id, class, count, misses, frame)`` per retraction.
+        self.retractions = []  # type: List[Tuple[int, str, int, int, Optional[int]]]
 
     @property
     def class_votes(self) -> bool:
         """Whether this map lets the classes of co-located observations vote."""
         return self._class_votes
+
+    @property
+    def max_misses(self) -> int:
+        """Clear views without its class after which a landmark is retracted; 0 never."""
+        return self._max_misses
+
+    def misses_to_retract(self, landmark: ObjectLandmark) -> int:
+        """Clear misses that retract this landmark: ``max(max_misses, count)``; 0 with retraction off."""
+        return max(self._max_misses, landmark.count) if self._max_misses > 0 else 0
+
+    def is_retracted(self, landmark: ObjectLandmark) -> bool:
+        """Whether the landmark has missed as many clear views as retract it since it was last observed."""
+        return self._max_misses > 0 and landmark.misses >= self.misses_to_retract(landmark)
+
+    def note_missed(self, landmark_id: int, frame_id: Optional[int] = None) -> bool:
+        """Count a clear view of landmark ``landmark_id`` that carried no detection of its class.
+
+        The caller judges the view (the landmark inside the frame, within
+        detection range, nothing measured in front of it); this counts it,
+        once per ``frame_id``, and retracts the landmark when the count
+        reaches ``max_misses``. Returns True the frame the retraction
+        happens. With ``max_misses`` 0 nothing is counted.
+        """
+        if self._max_misses <= 0:
+            return False
+        landmark = self._landmarks.get(int(landmark_id))
+        if landmark is None:
+            return False
+        if frame_id is not None and self._missed_frames.get(landmark.id) == frame_id:
+            return False
+        if frame_id is not None:
+            self._missed_frames[landmark.id] = frame_id
+        if self.is_retracted(landmark):
+            return False                           # already retracted: nothing more to count
+        landmark.misses += 1
+        if self.is_retracted(landmark):
+            landmark.retractions += 1
+            self.retractions.append((landmark.id, landmark.class_name, landmark.count, landmark.misses, frame_id))
+            return True
+        return False
 
     def _associated(self, landmark: ObjectLandmark, wx: float, wy: float,
                     radius_m: Optional[float], class_name: Optional[str] = None) -> bool:
@@ -272,6 +348,7 @@ class ObjectLandmarkMap:
             if frame_id is not None and self._frames.get(landmark.id) == frame_id:
                 return landmark
             self._fold(landmark, class_name, wx, wy, radius_m)
+            landmark.misses = 0                    # seen again: a retracted landmark is reinstated
             if frame_id is not None:
                 self._frames[landmark.id] = frame_id
             return landmark
@@ -304,20 +381,26 @@ class ObjectLandmarkMap:
             landmark.class_name = leader
 
     def is_confirmed(self, landmark: ObjectLandmark) -> bool:
-        """Whether one landmark passes the confirmation rule of this map."""
+        """Whether one landmark passes the confirmation rule of this map, and is not retracted."""
+        if self.is_retracted(landmark):
+            return False
         if not self._class_votes:
             return landmark.count >= self._min_obs
         _, top, second = landmark.plurality()
         return top >= self._min_obs and top > second
 
     def confirmed(self) -> List[ObjectLandmark]:
-        """Landmarks observed at least ``min_observations`` times, id order.
+        """Landmarks observed at least ``min_observations`` times and not retracted, id order.
 
         Under class voting: whose leading class holds that many votes and
         strictly more than the runner-up -- a bed/sofa tie is not an object
         the search may act on yet.
         """
         return [lm for lm in self._landmarks.values() if self.is_confirmed(lm)]
+
+    def retracted(self) -> List[ObjectLandmark]:
+        """Landmarks currently retracted (``max_misses`` clear views without their class), id order."""
+        return [lm for lm in self._landmarks.values() if self.is_retracted(lm)]
 
     def all_landmarks(self) -> List[ObjectLandmark]:
         """Every landmark, confirmed or not, in id order (for diagnostics)."""

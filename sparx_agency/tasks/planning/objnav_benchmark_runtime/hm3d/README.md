@@ -412,10 +412,14 @@ is labelled as such.
 - The campaign exits non-zero when any scene crashed or produced no rows, so it
   can gate a scripted sweep.
 - `--jobs N` runs N scenes at once (each child's console goes to
-  `<root>/<scene>.console.log`; `run_benchmark.sh --jobs N` forwards it). A child
+  `<root>/<scene>.console.log`; `run_benchmark.sh --jobs N` forwards it, budgets
+  `N` renderers in the GPU plan (`HABITAT_RENDERERS`) and, unless you set
+  `OLLAMA_NUM_PARALLEL` yourself, gives a native Ollama `ceil(N/2)` request slots --
+  the same rule as `gibson/run_benchmark.sh --parallel`). A child
   spends roughly half its time waiting on the 14B oracle, so give a native Ollama
   more slots with `OLLAMA_NUM_PARALLEL` -- but every slot is its own KV cache
-  (~1.5 GiB for the 14B at 8192 tokens), and when the two models no longer fit
+  (~1.5 GiB for the 14B at 8192 tokens; the plan charges `LLM_SLOT_FACTOR` per
+  slot beyond the first), and when the two models no longer fit
   beside the renderers Ollama evicts one, requests time out at `LLM_TIMEOUT_S`,
   and the policy falls back to the nearest frontier: the run continues with a
   *different method*. Measured on the RTX 4090 (2026-10-22): `OLLAMA_NUM_PARALLEL=4`

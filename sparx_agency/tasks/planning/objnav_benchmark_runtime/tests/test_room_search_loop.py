@@ -115,10 +115,11 @@ def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None,
     reasoned, refreshed = [], []
 
     def reason(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=(),
-               scanned=None):
+               scanned=None, exits=None):
         reasoned.append(step)
         policy.reasoned_with.append({"stairs": [n.id for n in extra_nodes], "context": context, "here": here_xy,
-                                     "exclude": tuple(exclude), "scanned": dict(scanned or {})})
+                                     "exclude": tuple(exclude), "scanned": dict(scanned or {}),
+                                     "exits": dict(exits or {})})
         for pid in policy.graph.registry.rooms:             # like the real one: every room gets a probability
             policy.graph.probs.setdefault(pid, 0.05)
         for pid in exclude:
@@ -560,9 +561,10 @@ def test_a_loop_point_reasons_over_geometry_refreshed_on_that_action():
     assert policy.refreshed == [0] and reasoned == [0]
     assert policy._last_graph_step == 0
 
-    policy._last_graph_step = 2                                 # the policy refreshed on this action already
+    policy._last_graph_step = 1                                 # the policy refreshed on this action already
     in_room_goal = policy.route_memory.goal
-    policy.loop.plan(obs_at(episode, 1, in_room_goal), world)
+    policy.loop.plan(obs_at(episode, 1, in_room_goal), world)   # arrival: fresh already, so not rebuilt again
+    assert policy.refreshed == [0]
     policy._last_graph_step = 2
     for _ in range(policy.loop.settings.local_steps):
         policy.loop.charge()
@@ -615,9 +617,11 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
     """A sink seen through room B's doorway while walking to it: room B is a bathroom now (weakly: a sink
     alone could be a kitchen's), a fact the oracle has not valued. The turn ends on the action the clue
     lands, the estimate and the order are redone, and -- the stub oracle unmoved -- the same room is
-    chosen straight back, uncooled."""
+    chosen straight back, uncooled. The historical rule, behind ``transit_commitment=False`` since 2026-10-22:
+    under the committed-target rule the clue waits for the arrival (``test_explore_visit``)."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+                                                          transit_commitment=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
     see(policy, {1: ["sink"]}, step=1)
@@ -637,10 +641,11 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
 def test_the_oracle_decides_what_the_new_name_is_worth():
     """The same clue, with an oracle that gives a bathroom nothing for a chair: the order goes elsewhere."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+                                                          transit_commitment=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     def oracle(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=(),
-               scanned=None):
+               scanned=None, exits=None):
         reasoned.append(step)
         info = policy.graph.label_info(1) or {}
         policy.graph.probs = {0: 0.6, 1: 0.0 if info.get("label") == "bathroom" else 0.4}
@@ -671,7 +676,8 @@ def test_a_room_in_force_re_identified_by_a_new_kind_of_object_ends_its_turn_on_
     assert TRAVERSED not in policy.supervisor_params.cooldown_verdicts and EXHAUSTED in policy.supervisor_params.cooldown_verdicts
 def test_a_second_object_of_a_kind_already_seen_is_not_a_clue():
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+                                                          transit_commitment=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     see(policy, {1: ["toilet"]}, step=1)
     policy.loop.plan(obs_at(episode, 1, IN_A), world)
@@ -686,7 +692,8 @@ def test_a_second_object_of_a_kind_already_seen_is_not_a_clue():
     assert policy.graph.label_info(1)["strength"] == "strong"
 def test_a_room_llm_in_back_off_leaves_the_name_standing_and_the_turn_running():
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+                                                          transit_commitment=False)
     obs = obs_at(episode, 0, IN_A)
     policy.loop.plan(obs, world)
     policy.fallback.note_service_failure(obs, ROOM_LLM, RuntimeError("away"))

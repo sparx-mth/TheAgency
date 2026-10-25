@@ -74,6 +74,32 @@ class TargetClosingSettings:
     # toilet (/000188, actions 20-31) was in view at 5 m on every other frame and the
     # verification turned in place at it for its whole budget, twice.
     max_verify_approach_steps: int = 24
+    # THE TAKEOVER MAY START ON AN RGB DETECTION WITHOUT DEPTH (since 2026-10-21). The depth sensor
+    # returns nothing past about 5 m, and the detector finds the target's class in the RGB frame well
+    # beyond that; such a box has no 3-D projection, so nothing could start on it and the search walked
+    # on. With ``bearing_start`` a confident, whole box of the target's class WITHOUT a usable depth
+    # begins a bounded BEARING approach: the agent faces the box by its image-space bearing and steps
+    # toward it, re-facing it on every frame it is seen, until a frame projects with depth -- then the
+    # ordinary verification starts there, as if the box had been seen fresh from that spot (its clock
+    # starts at that frame; the bearing steps are not verification actions). The approach gives up,
+    # without a rejection memory (nothing was placed), after ``bearing_max_actions`` actions, after
+    # ``bearing_lost_frames`` consecutive frames without the class in the frame at ``track_confidence``,
+    # or when the steps stop moving the agent (something in the way); the spot it gave up from is
+    # remembered, and no bearing approach starts again within ``bearing_retry_m`` of it on the same
+    # storey -- the far flicker is given one walk, not one per frame. Two more ends (Corozal/000001 of
+    # 2026-10-21: a television first seen at about 5.5 m was walked toward for the whole bound, 3.75 m, and
+    # never projected -- a screen is a hole in the Gibson mesh, depthless at any range -- and the walk left
+    # the agent beside another television it then STOPped on): ``bearing_max_walk_m`` ends the approach once
+    # the agent has walked that far toward the box, since a box first seen within the depth cap plus that
+    # distance is in range by then and one still depthless is unmeasurable or not where the bearing pointed;
+    # ``bearing_near_box_frac`` ends it when the box fills that share of the frame's height without depth --
+    # the object is within arm's reach and cannot be positioned, and no blind STOP is taken on it.
+    bearing_start: bool = True
+    bearing_max_actions: int = 16
+    bearing_lost_frames: int = 3
+    bearing_retry_m: float = 1.5
+    bearing_max_walk_m: float = 3.0
+    bearing_near_box_frac: float = 0.30
     # THE SWEEP IS ONE CIRCLE, NOT THE BUDGET (since 2026-10-14). An unlocked candidate that has
     # dropped out of view is swept for at the bearing and one turn to each side (``_scan``: the
     # headings 0, +30, 0, -30); the cycle takes four or five actions, and a candidate not in any
@@ -408,6 +434,18 @@ class TargetClosingSettings:
         if (isinstance(self.track_confidence, bool) or not math.isfinite(self.track_confidence)
                 or not 0 < self.track_confidence <= self.confidence):
             raise ValueError("track_confidence must be in (0, confidence]")
+        if type(self.bearing_start) is not bool:
+            raise ValueError("bearing_start must be a bool")
+        for key in ("bearing_max_actions", "bearing_lost_frames"):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 1:
+                raise ValueError("%s must be a positive int" % key)
+        if isinstance(self.bearing_retry_m, bool) or not math.isfinite(self.bearing_retry_m) or self.bearing_retry_m < 0:
+            raise ValueError("bearing_retry_m must be finite and non-negative")
+        if isinstance(self.bearing_max_walk_m, bool) or not math.isfinite(self.bearing_max_walk_m) or self.bearing_max_walk_m <= 0:
+            raise ValueError("bearing_max_walk_m must be positive and finite")
+        if (isinstance(self.bearing_near_box_frac, bool) or not math.isfinite(self.bearing_near_box_frac)
+                or not 0 < self.bearing_near_box_frac <= 1):
+            raise ValueError("bearing_near_box_frac must lie in (0, 1]")
         for key in ("association_radius_m", "look_down_distance_m", "terminal_distance_m", "range_tolerance_m",
                     "refine_distance_m", "rejection_radius_m", "rejection_min_range_m", "failed_inspection_radius_factor",
                     "elevation_band_m"):
@@ -613,6 +651,13 @@ class TargetClosing:
         self.occluder_reads = 0            # candidate frames whose box was read around a surface standing in front of the target
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
         self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
+        self.bearing_starts = 0            # bearing approaches begun on an RGB box without a usable depth
+        self.bearing_resolved = 0          # ... of which a frame with depth turned into a verification
+        self.bearing_abandoned = 0         # ... and those given up: lost, out of actions, or not moving
+        self.bearing_refusals = 0          # depthless boxes refused a bearing approach: cooldown, boxed in, or a spot already tried
+        self.bearing_failures = []         # (robot xy, floor id, action) per bearing approach given up
+        self._depthless = []               # this frame's strong, whole boxes of the class with no usable depth
+        self._in_frame = []                # this frame's whole boxes of the class at the threshold in force
         self._clear()
 
     def _clear(self):
@@ -667,6 +712,7 @@ class TargetClosing:
         self.inspection_turn = None        # (step, sign) of the inspection's last centring turn on a fresh box
         self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
         self.overshoot = None              # the decided STOP's forward steps in progress (``_terminal``), else None
+        self.bearing = None                # the BEARING approach in force (an RGB box without depth): its box, yaw, counts
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -756,7 +802,7 @@ class TargetClosing:
         """
         p, s = self.policy, self.settings
         k = obs.camera.intrinsics
-        tracking = self.active and self.anchor is not None
+        tracking = self.active and (self.anchor is not None or self.bearing is not None)
         threshold = s.track_confidence if tracking else s.confidence
         boxes = [d for d in p.perception.detections if p.target.accepts(d.cls)
                  and d.conf >= threshold
@@ -771,18 +817,22 @@ class TargetClosing:
                 1 for d in kept if d.conf >= s.confidence)
             boxes = kept
         projected, kept, glimpses = [], [], []
+        self._depthless = []
+        self._in_frame = list(boxes)                                   # whole boxes of the class at the threshold
         for detection in boxes:
             rows = []
             strong = detection.conf >= s.confidence
             values = list(observed_objects(obs, (detection,), threshold, rows, masks=p.perception.masks))
             if not values:
-                # No usable depth. A strong box is kept for the record; one that lies on the active
-                # candidate's bearing is a GLIMPSE of it -- the verification faces and approaches it
-                # (:meth:`_scan`), since the depth that failed from here is had from closer.
+                # No usable depth. A strong box is kept for the record -- and may begin a BEARING
+                # approach (``bearing_start``); one that lies on the active candidate's bearing is a
+                # GLIMPSE of it -- the verification faces and approaches it (:meth:`_scan`), since
+                # the depth that failed from here is had from closer.
                 if tracking and not self.locked and self._on_anchor_bearing(obs, detection.xyxy):
                     glimpses.append(detection)
                 if strong:
                     kept.append(detection)
+                    self._depthless.append(detection)
                 continue
             label, xyz = values[0]
             range_m = math.dist((obs.pose.x, obs.pose.y), xyz[:2])
@@ -926,10 +976,22 @@ class TargetClosing:
                 self.last_sighting = obs.step
             return
         boxes, projected, glimpses = self._candidates(obs)
+        if self.bearing is not None:
+            if projected:
+                # The step closer gave the box its depth: the verification begins HERE, on this
+                # frame, with a clock of its own (the bearing steps were not verification actions).
+                self.bearing_resolved += 1
+                self.bearing = None
+                self.active = False
+            else:
+                self._track_bearing(obs)
+                return
         # Only a candidate with a coherent 3-D projection starts a takeover: a confident
         # box without depth support has nothing the next frame can be checked against,
         # and the twelve-step verifications it bought (Ranchester attempts 4 and 5:
-        # "waiting for valid target depth" from 3.8 m) released every time.
+        # "waiting for valid target depth" from 3.8 m) released every time. Since
+        # 2026-10-21 such a box begins a BEARING approach instead (``bearing_start``): the
+        # agent walks toward it along its image-space bearing until a frame has the depth.
         if not self.active and projected:
             self.active, self.started, self.phase = True, obs.step, "VERIFY"
             self.verification_yaw = obs.pose.yaw
@@ -943,6 +1005,9 @@ class TargetClosing:
                 # force it resumed, stale, after the release (turns toward a yaw the
                 # route no longer has).
                 glances.abort(obs, "target_takeover")
+        elif not self.active and self._depthless and s.bearing_start:
+            self._start_bearing(obs)
+            return
         if not self.active:
             return
         here = (float(obs.pose.x), float(obs.pose.y))
@@ -1068,6 +1133,106 @@ class TargetClosing:
                 # something else since (the sofa from four metres is the bed from two).
                 self.map_releases += 1
                 self._release(obs, radius_factor=s.failed_inspection_radius_factor, why="contradicted by the map")
+
+    # -- the BEARING approach: an RGB detection without depth, walked toward until a frame has the depth ----------
+    def _start_bearing(self, obs):
+        """Begin a bearing approach on this frame's strongest depthless box, or refuse it (counted).
+
+        Refused during the release cooldown, from a boxed-in spot, within
+        ``bearing_retry_m`` of a spot a bearing approach was already given
+        up from on this storey, and unless the class was in the frame on
+        the previous action too (``strong_box_steps``): one flicker of a
+        far false positive is not walked after.
+        """
+        p, s = self.policy, self.settings
+        here = (float(obs.pose.x), float(obs.pose.y))
+        best = max(self._depthless, key=lambda d: d.conf)
+        cooling = self.released_step is not None and obs.step - self.released_step < s.release_cooldown_actions
+        tried = any(floor == p.mapping.floor_id and math.dist(here, spot) <= s.bearing_retry_m
+                    for spot, floor, _ in self.bearing_failures)
+        persistent = (int(obs.step) - 1) in self.strong_box_steps
+        if cooling or tried or not persistent or self._boxed_in_here(obs):
+            self.bearing_refusals += 1
+            return
+        error = self._bbox_error(obs, best.xyxy)
+        self.active, self.started, self.phase = True, int(obs.step), "BEARING"
+        self.verification_yaw = float(obs.pose.yaw)
+        self.floor_id = p.mapping.floor_id
+        self.label = best.cls
+        self.bearing = dict(started=int(obs.step), actions=0, last_seen=int(obs.step), box=tuple(best.xyxy),
+                            conf=float(best.conf), yaw=float(normalize_angle(obs.pose.yaw + error)), lost=0,
+                            moves=[], spot=here)
+        self.bearing_starts += 1
+        p.route_memory.clear("target_bearing")
+        p._route = p._goal = None
+        p.peek.cancel(obs, "target_bearing", restore=False)
+        p.camera_control.inspection = None
+        glances = getattr(p, "glances", None)
+        if glances is not None and glances.active is not None:
+            glances.abort(obs, "target_bearing")
+
+    def _track_bearing(self, obs):
+        """Keep the bearing approach on this frame's box of the class, or give it up: lost, out of actions, not moving."""
+        b, s, p = self.bearing, self.settings, self.policy
+        if p.mapping.floor_id != self.floor_id:
+            return self._end_bearing(obs, "storey changed")
+        if self._in_frame:
+            best = max(self._in_frame, key=lambda d: d.conf)
+            b.update(last_seen=int(obs.step), box=tuple(best.xyxy), conf=float(best.conf), lost=0,
+                     yaw=float(normalize_angle(obs.pose.yaw + self._bbox_error(obs, best.xyxy))))
+        else:
+            b["lost"] += 1
+            if b["lost"] >= s.bearing_lost_frames:
+                return self._end_bearing(obs, "lost: %d frames without the class in view" % b["lost"])
+        if b["actions"] >= s.bearing_max_actions:
+            return self._end_bearing(obs, "out of actions (%d)" % b["actions"])
+        here = (float(obs.pose.x), float(obs.pose.y))
+        walked = math.dist(b["spot"], here)
+        if walked >= s.bearing_max_walk_m:
+            return self._end_bearing(obs, "walked %.1f m toward it without the depth" % walked)
+        k = obs.camera.intrinsics
+        if b["last_seen"] == obs.step and (b["box"][3] - b["box"][1]) >= s.bearing_near_box_frac * float(k.height):
+            return self._end_bearing(obs, "near and unmeasurable: the box fills %.0f%% of the frame without depth"
+                                     % (100.0 * (b["box"][3] - b["box"][1]) / float(k.height)))
+        moves = b["moves"]
+        step = p.episode.action_spec.forward_step_m
+        if len(moves) >= 3 and math.dist(moves[-3], here) < 0.5 * step:
+            return self._end_bearing(obs, "not moving: three steps toward it went nowhere")
+
+    def _end_bearing(self, obs, why):
+        """Give the bearing approach up: no rejection memory (nothing was placed), the spot remembered, the search resumes."""
+        b = self.bearing
+        self.bearing_abandoned += 1
+        self.bearing_failures.append((tuple(b["spot"]), self.policy.mapping.floor_id, int(obs.step)))
+        self.last_release = "bearing approach given up: %s" % why
+        self._clear()
+
+    def _bearing_command(self, obs, world):
+        """Face the depthless box by its image-space bearing, then step toward it; the search's clocks do not run.
+
+        The frame's own box gives the bearing when the class is in view;
+        otherwise the yaw it was last seen at. Faced within one turn, the
+        agent takes one MOVE_FORWARD (a two-step waypoint, as the
+        verification's step does), and the next frame is nearer -- the
+        depth that failed from here is had from closer.
+        """
+        b, p = self.bearing, self.policy
+        actions = p.episode.action_spec
+        turn = actions.turn_angle_rad
+        b["actions"] += 1
+        here = (float(obs.pose.x), float(obs.pose.y))
+        seen = b["last_seen"] == obs.step
+        error = self._bbox_error(obs, b["box"]) if seen else normalize_angle(b["yaw"] - obs.pose.yaw)
+        info = {"kind": "target_closing", "phase": "BEARING", "target_visible": seen, "target_measured": False,
+                "reason": "RGB detection of the target without depth: approaching along its bearing",
+                "bearing_action": b["actions"], "bearing_conf": round(float(b["conf"]), 2)}
+        if abs(error) > turn + 1e-6:
+            return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + error),
+                                          info=dict(info, bearing_step="face the detection"))
+        b["moves"].append(here)
+        reach = 2.0 * actions.forward_step_m
+        ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
+        return NavigationCommand.follow([here, ahead], info=dict(info, bearing_step="toward the detection"))
 
     def _confirmed(self):
         """Whether the consecutive frames so far lock the candidate.
@@ -1570,6 +1735,8 @@ class TargetClosing:
             return self._overshoot_step(obs)
         if self.blind():
             return self._blind_frame(obs, world)
+        if self.bearing is not None:
+            return self._bearing_command(obs, world)
         if obs.step - self.started >= s.max_closing_steps:
             self.fail("closing action bound reached")
         if not self.locked and not s.release_unverified and obs.step - self.started >= s.max_verify_steps:
@@ -2295,6 +2462,9 @@ class TargetClosing:
 
     def diagnostics(self):
         return {"active": self.active, "locked": self.locked, "phase": self.phase,
+                "bearing": None if self.bearing is None else {k: v for k, v in self.bearing.items() if k != "moves"},
+                "bearing_starts": self.bearing_starts, "bearing_resolved": self.bearing_resolved,
+                "bearing_abandoned": self.bearing_abandoned, "bearing_refusals": self.bearing_refusals,
                 "persistent_lock": self.locked, "visible": self.last_seen == self.processed,
                 "navmesh_goal_xyz": self.path.goal_xyz, "goal_refinements": self.path.refinements,
                 "occluded_path_steps": self.occluded_path_steps, "inspection_started_step": self.inspection_started,

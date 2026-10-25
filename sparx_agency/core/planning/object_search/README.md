@@ -69,6 +69,24 @@ and `core/mapping` imports nothing from `core/planning`. Moving the shared map
 and pose vocabulary down into `core/common/types` would let it move; that is
 a repository-wide change (over a hundred importers) and not this package's.
 
+## The committed-target rule and the cadence
+
+Once the loop has chosen a room and a route to its entry point, the walk is
+committed (`LoopSettings.transit_commitment`, since 2026-10-22): the room may
+be renumbered by the watershed on the way -- merged, split, re-drawn -- and
+the turn follows the place under the new number (`room_rebound`,
+`ObjectSearchSupervisor.rebind`); a new name for the room, or the ledger
+finishing it from outside, waits for the arrival; no classifier call is spent
+in transit. A transit ends only by arrival, a refused or stalled route, the
+follower's wedge, the supervisor's clocks, or the target takeover at the
+policy level. While the committed route is walked the policy rebuilds the
+scene graph's geometry every `RPTSettings.transit_graph_period_steps` actions
+instead of every action (it was most of every decision's wall time), and
+rebuilds it on the action the transit ends; a loop point always reasons over
+geometry refreshed on its own action. Places a transit repeatedly failed to
+reach are remembered by position (`entry_failure`, `unreachable:<n>`
+exclusions) and left alone with a doubling back-off.
+
 ## How a component talks to the policy
 
 The sub-components are constructed with the policy and read its shared state
