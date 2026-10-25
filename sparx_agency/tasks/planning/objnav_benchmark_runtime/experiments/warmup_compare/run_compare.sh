@@ -4,6 +4,7 @@
 #   run_compare.sh                       # every config in configs/ (about 120 episodes each)
 #   run_compare.sh baseline scan360      # only these configs
 #   OUT=runs/my_compare run_compare.sh   # resume: finished (config, scene) directories are skipped
+#   PER_SCENE=10 run_compare.sh          # a short test: the first 10 listed episodes of each scene
 #
 # Services come from hm3d/run_benchmark.sh (HAB_PY, DETECT_PY, HM3D_EPISODES_DIR, HM3D_SCENES_DIR, OLLAMA_MODE ...).
 set -euo pipefail
@@ -20,7 +21,7 @@ for config in "${CONFIGS[@]}"; do
   while read -r scene; do
     target="$OUT/$config/$scene"
     [[ -f "$target/summary.json" ]] && { echo "skip $config/$scene (finished)"; continue; }
-    mapfile -t ids < <(grep "^$scene/" "$EPISODES")
+    mapfile -t ids < <(grep "^$scene/" "$EPISODES" | head -n "${PER_SCENE:-40}")
     "$LAUNCHER" --version v1 --scene "$scene" --output "$target" \
       --policy-config "$HERE/configs/$config.json" --episode-ids "${ids[@]}"
   done < <(cut -d/ -f1 "$EPISODES" | uniq)
