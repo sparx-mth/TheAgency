@@ -37,6 +37,7 @@ from sparx_agency.core.planning.object_search.exploration.frontier_sweep import 
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningRegistry
 from sparx_agency.core.planning.object_search.exploration.path_glances import GlanceScheduler, GlanceSettings
 from sparx_agency.core.planning.object_search.rooms.pattern_scan import PatternScan
+from sparx_agency.core.planning.object_search.falcon.prescan import FalconPrescan
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
 from sparx_agency.core.planning.object_search.rooms.room_scans import RoomScanLedger
 from sparx_agency.core.planning.object_search.world_model.sightlines import SightLedger, SightSettings
@@ -259,6 +260,7 @@ class RPTSearchPolicy:
         # its actions; performed as a suspended phase when the agent gets there.
         self.glances = GlanceScheduler(self, self.glance_settings)
         self.pattern_scan = PatternScan(self, s.pattern_scan)
+        self.prescan = FalconPrescan(self, s.prescan) if s.prescan.steps else None
         # One look-around is as many turns as the camera's field of view needs to see the
         # whole circle (ten at 30 degrees with a 79-degree field), bounded by ``warmup_steps``.
         self.warmup_turns = min(s.warmup_steps, self.rotation_turns())
@@ -311,6 +313,8 @@ class RPTSearchPolicy:
         self._route, self._goal = None, None
         if self.hierarchy is not None and self._action_owner not in SUSPENDED_PHASES:
             self.hierarchy.blocked()
+        if self.prescan is not None and self._action_owner == "prescan":
+            self.prescan.blocked(observation)
 
     def plan(self, observation):
         if observation.step == self._decision_step:
@@ -347,6 +351,8 @@ class RPTSearchPolicy:
             guarded = self.building.departure.filter_action(observation, action)
             if guarded != action:
                 return guarded
+        if self._action_owner == "prescan":
+            return self.prescan.filter_action(observation, action)
         if self._action_owner in SUSPENDED_PHASES:
             return action  # A* already qualified this route; do not apply the suspended FALCON room mask.
         return self.hierarchy.filter_action(observation, action) if self.hierarchy else action
@@ -395,6 +401,8 @@ class RPTSearchPolicy:
         self.closing.observe(observation)
         if self.closing.active:
             self._action_owner = "target_closing"
+            if self.prescan is not None and self.prescan.active:
+                self.prescan.suspend("target_closing")
             # No global decision/fallback try block may catch closing failures.
             # Keep the current-floor collision map fresh without advancing any
             # building/room task or consuming privileged goal data.
@@ -654,6 +662,7 @@ class RPTSearchPolicy:
     def episode_info(self):
         return {"method": self.name, "rooms": len(self.graph.registry.rooms), "landmarks": len(self.landmarks),
                 "warmup": {"actions": self.warmup_actions, "budget": self.warmup_turns, "bound": self.settings.warmup_steps},
+                "prescan": None if self.prescan is None else self.prescan.diagnostics(),
                 "doorway_peek": self.peek.diagnostics(),
                 "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
                 "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,

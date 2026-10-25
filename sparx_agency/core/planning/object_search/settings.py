@@ -8,6 +8,7 @@ from sparx_agency.core.planning.exploration.falcon.params import FalconParams
 from sparx_agency.core.localization.floor_atlas import MultiFloorParams
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
 from sparx_agency.core.planning.object_search.rooms.pattern_scan import PatternScanSettings
+from sparx_agency.core.planning.object_search.falcon.prescan import PrescanSettings
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
 
 
@@ -136,6 +137,7 @@ class RPTSettings:
     room_visit: str = "explore"
     scan_kind: str = "rotate"
     pattern_scan: PatternScanSettings = field(default_factory=PatternScanSettings)
+    prescan: PrescanSettings = field(default_factory=PrescanSettings)
     warmup_steps: int = 12
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
@@ -178,6 +180,10 @@ class RPTSettings:
             object.__setattr__(self, "pattern_scan", PatternScanSettings(**self.pattern_scan))
         if not isinstance(self.pattern_scan, PatternScanSettings):
             raise ValueError("pattern_scan must be PatternScanSettings or parameter overrides")
+        if isinstance(self.prescan, dict):
+            object.__setattr__(self, "prescan", PrescanSettings(**self.prescan))
+        if not isinstance(self.prescan, PrescanSettings):
+            raise ValueError("prescan must be PrescanSettings or parameter overrides")
         if isinstance(self.target_closing, dict):
             object.__setattr__(self, "target_closing", TargetClosingSettings(**self.target_closing))
         if not isinstance(self.target_closing, TargetClosingSettings):

@@ -10,7 +10,7 @@ from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import threshold_cells
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import RoomReasoningUnavailable
 
-SUSPENDED_PHASES = ("warmup", "doorway_peek", "room_return", "discovery_fallback", "glance")
+SUSPENDED_PHASES = ("warmup", "prescan", "doorway_peek", "room_return", "discovery_fallback", "glance")
 
 
 def discover(p, obs, world, cost):
@@ -37,7 +37,12 @@ def discover(p, obs, world, cost):
         if ledger is not None:
             pid = p.graph.room_at(world, (obs.pose.x, obs.pose.y))
             ledger.record(obs, p.graph.registry.rooms.get(pid) if pid is not None else None, source="warmup")
-    signature = (p.mapping.floor_id, tuple(sorted(p.graph.registry.rooms)),
+    if p.prescan is not None and p.prescan.active:
+        command = p.prescan.plan(obs, world)
+        if command is not None:
+            p._action_owner = "prescan"
+            return command
+    signature =(p.mapping.floor_id, tuple(sorted(p.graph.registry.rooms)),
                  tuple((pid, tuple(sorted(set(p.graph.objects_in(pid))))) for pid in sorted(p.graph.registry.rooms)))
     previous = p._semantic_signature
     event = p.peek.pending_reason or (previous is not None and signature != previous)

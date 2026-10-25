@@ -84,6 +84,7 @@ class SpawnFloorGuard:
         self.spawn_z: Optional[float] = None
         self.drops: Dict[int, np.ndarray] = {}
         self.mask: Optional[np.ndarray] = None
+        self._mask_world = None                 # the grid ``mask`` is indexed on, whatever resolution a caller plans at
         self.off_plane: bool = False
         self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
@@ -121,6 +122,7 @@ class SpawnFloorGuard:
         self.stats["stair_cells"] = 0 if stairs is None else int(stairs.sum())
         self.stats["walked_exempt_cells"] = exempt
         self.mask = mask if mask.any() else None
+        self._mask_world = world
         if self.mask is None:
             return world
         grid = world.grid.copy()
@@ -134,8 +136,9 @@ class SpawnFloorGuard:
         if self.off_plane:
             return self._refuse(obs, goal, kind, "storey %.2f m from the spawn plane" % self._plane_offset())
         if self.mask is not None:
-            gx, gy = world.world_to_grid(goal[0], goal[1])
-            if world.in_bounds(gx, gy) and self.mask[gy, gx]:
+            grid = world if self._mask_world is None else self._mask_world
+            gx, gy = grid.world_to_grid(goal[0], goal[1])
+            if grid.in_bounds(gx, gy) and self.mask[gy, gx]:
                 return self._refuse(obs, goal, kind, "goal on a staircase or an observed drop")
         return True
 
