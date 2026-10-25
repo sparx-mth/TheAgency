@@ -14,6 +14,9 @@ LAUNCHER="$HERE/../../hm3d/run_benchmark.sh"
 OUT="${OUT:-runs/warmup_compare_$(date -u +%Y%m%d)}"
 EPISODES="$HERE/episodes_hm3d_v1_start_floor.txt"
 
+# A resident model takes VRAM, so the next launch's GPU plan would move YOLO to the CPU: every launch starts empty.
+unload_models() { ollama ps 2>/dev/null | awk 'NR > 1 {print $1}' | xargs -r -n1 ollama stop || true; }
+
 CONFIGS=("$@")
 [[ ${#CONFIGS[@]} -gt 0 ]] || { for f in "$HERE"/configs/*.json; do CONFIGS+=("$(basename "$f" .json)"); done; }
 
@@ -22,6 +25,8 @@ for config in "${CONFIGS[@]}"; do
     target="$OUT/$config/$scene"
     [[ -f "$target/summary.json" ]] && { echo "skip $config/$scene (finished)"; continue; }
     mapfile -t ids < <(grep "^$scene/" "$EPISODES" | head -n "${PER_SCENE:-40}")
+    unload_models
+    sleep 5
     "$LAUNCHER" --version v1 --scene "$scene" --output "$target" \
       --policy-config "$HERE/configs/$config.json" --episode-ids "${ids[@]}"
   done < <(cut -d/ -f1 "$EPISODES" | uniq)
