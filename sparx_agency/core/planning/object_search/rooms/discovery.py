@@ -17,7 +17,8 @@ def discover(p, obs, world, cost):
     """One synchronous discovery decision; None hands control to the room task.
 
     The warm-up is a look-around where the agent stands, before any room is chosen, and again on every new storey.
-    It is a full rotation (``policy.warmup_turns``) or, under ``scan_kind="pattern"``, only the headings that reveal unknown floor.
+    It is a full rotation (``policy.warmup_turns``), only the headings that reveal unknown floor (``scan_kind="pattern"``),
+    or, under ``scan_kind="falcon"``, no rotation at the start: the prescan below is the warm-up (a new storey still rotates).
     """
     if p.hierarchy is not None:
         p.hierarchy.sync_floor(obs, world)

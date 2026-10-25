@@ -16,10 +16,11 @@ ROOM_VISIT_LOOP = {
     "explore": dict(visit="explore"),
     "scan360": dict(visit="scan", scan_local="rotate"),
     "nearest_frontier": dict(visit="scan", scan_local="nearest_frontier"),
+    "falcon": dict(visit="explore", local_explorer="falcon"),
 }
 
 
-SCAN_KINDS = ("rotate", "pattern")
+SCAN_KINDS = ("rotate", "pattern", "falcon")
 
 
 @dataclass(frozen=True)
@@ -28,11 +29,13 @@ class RPTSettings:
 
     Attributes:
         scan_kind: The look-around used at episode start and in every room scan: ``rotate``
-            turns a full circle, ``pattern`` turns only toward headings that reveal unknown floor.
+            turns a full circle, ``pattern`` turns only toward headings that reveal unknown floor, ``falcon``
+            makes the start warm-up the FALCON prescan (``prescan.steps`` > 0) and leaves room scans a full circle.
         room_visit: What a room visit does once the room is chosen: ``explore``
             walks its frontiers by view gain, ``scan360`` goes to the room's middle and
             turns a full circle, ``nearest_frontier`` enters at the nearest frontier and
-            keeps walking the nearest one until none is left (no walk to the middle).
+            keeps walking the nearest one until none is left (no walk to the middle), ``falcon`` lets FALCON choose
+            viewpoints inside the room on the fine map until it has none.
         detour_factor: The planner's "squeeze or detour" rule
             (``WeightedAStarParams.detour_factor``): a route at the preferred
             clearance more than this many times longer than the route the
@@ -184,6 +187,8 @@ class RPTSettings:
             object.__setattr__(self, "prescan", PrescanSettings(**self.prescan))
         if not isinstance(self.prescan, PrescanSettings):
             raise ValueError("prescan must be PrescanSettings or parameter overrides")
+        if self.scan_kind == "falcon" and self.prescan.steps == 0:
+            raise ValueError("scan_kind falcon needs prescan.steps above 0")
         if isinstance(self.target_closing, dict):
             object.__setattr__(self, "target_closing", TargetClosingSettings(**self.target_closing))
         if not isinstance(self.target_closing, TargetClosingSettings):

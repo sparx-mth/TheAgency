@@ -5,14 +5,18 @@ import numpy as np
 import pytest
 
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.object_search.falcon.prescan import PrescanSettings
+from sparx_agency.core.planning.object_search.falcon.room_falcon import room_scope
 from sparx_agency.core.planning.object_search.rooms.discovery import discover
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.core.planning.object_search.world_model.coarse_map import downsample_world
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
-    IN_A, loop_policy, obs_at)
+    IN_A, cell_in, loop_policy, obs_at)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_explore_visit import resolve_around, walk
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import refresh
 
 VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
 
@@ -129,3 +133,75 @@ def test_the_block_under_the_agent_is_free_even_when_a_wall_pixel_shares_it():
     world = small_world({(0, 0): 100})
     assert downsample_world(world, 3).grid[0, 0] == 100
     assert downsample_world(world, 3, agent_xy=(1.05, 2.05)).grid[0, 0] == 0
+
+
+def test_falcon_as_the_warmup_needs_a_prescan_budget():
+    with pytest.raises(ValueError, match="prescan.steps"):
+        RPTSettings(scan_kind="falcon")
+    assert RPTSettings(scan_kind="falcon", prescan={"steps": 20}).scan_kind == "falcon"
+
+
+def test_falcon_as_the_warmup_replaces_the_start_rotation():
+    policy, episode = setup_policy("bed", discovery=True, scan_kind="falcon", prescan={"steps": 4},
+                                   doorway_peek={"enabled": False})
+    assert policy.warmup_actions == policy.warmup_turns and not policy._warmup_pending
+    kinds = []
+    for step in range(6):
+        obs = observation(episode, step, depth=3)
+        kinds.append(policy.plan(obs).info.get("kind"))
+        policy.notify_action(obs, DiscreteAction.TURN_LEFT)
+    assert "warmup" not in kinds and policy.scans.records == []
+    assert policy.prescan.ended in ("budget", "exhausted") or policy.prescan.actions > 0
+
+
+def falcon_room_policy():
+    from dataclasses import replace
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0), visit="explore", local_explorer="falcon")
+    policy.sight.settings = replace(policy.sight.settings, enabled=False)
+    refresh(policy, world, IN_A)
+    return policy, episode, world, rooms
+
+
+def test_the_falcon_room_visit_walks_falcon_viewpoints_inside_the_room_then_finishes_it():
+    policy, episode, world, rooms = falcon_room_policy()
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    entry = policy.route_memory.goal
+    inside = (entry[0] - 0.3, entry[1]) if cell_in(world, rooms[1], (entry[0] - 0.3, entry[1])) else entry
+    resolve_around(world, inside, 1.2)
+    refresh(policy, world, inside)
+    policy.sight.observe(obs_at(episode, 1, inside), world)
+    first = policy.loop.plan(obs_at(episode, 1, inside), world)
+    assert policy.supervisor.state == SEARCH and first.info["kind"] == "falcon" and first.waypoints
+    policy.loop.charge()
+    commands = walk_facing(policy, episode, world, 2, inside)
+    assert {c.info.get("kind") for c in commands[:-1]} <= {"falcon"}
+    assert policy.supervisor.history[-1][:2] == (1, EXHAUSTED)
+    assert policy.room_falcon.visits == 1 and policy.loop.stats["explore_exhausted"] == 1
+
+
+def test_the_room_scope_is_the_room_plus_a_margin():
+    mask = np.zeros((10, 10), bool)
+    mask[4:6, 4:6] = True
+    scope = room_scope(small_world({}), mask, margin_m=0.2)
+    assert scope[4:6, 4:6].all() and scope[3, 4] and not scope[1, 1]
+
+
+def walk_facing(policy, episode, world, start_step, start_xy, max_actions=60):
+    """Like ``walk``, but the agent also ends each route facing the command's final heading, as the follower does."""
+    commands, xy, yaw = [], start_xy, 0.0
+    for step in range(start_step, start_step + max_actions):
+        obs = obs_at(episode, step, xy, yaw=yaw)
+        policy.sight.observe(obs, world)
+        command = policy.loop.plan(obs, world)
+        commands.append(command)
+        if policy.supervisor.state != SEARCH or policy.loop.room_id is None:
+            return commands
+        policy.loop.charge()
+        if command.waypoints:
+            end = command.waypoints[-1]
+            xy = (float(end[0]), float(end[1]))
+        if command.final_yaw is not None:
+            yaw = float(command.final_yaw)
+        resolve_around(world, xy, 1.5)
+        refresh(policy, world, xy)
+    raise AssertionError("the visit never ended")

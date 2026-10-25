@@ -38,6 +38,7 @@ from sparx_agency.core.planning.object_search.rooms.opening_nodes import Opening
 from sparx_agency.core.planning.object_search.exploration.path_glances import GlanceScheduler, GlanceSettings
 from sparx_agency.core.planning.object_search.rooms.pattern_scan import PatternScan
 from sparx_agency.core.planning.object_search.falcon.prescan import FalconPrescan
+from sparx_agency.core.planning.object_search.falcon.room_falcon import RoomFalcon
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
 from sparx_agency.core.planning.object_search.rooms.room_scans import RoomScanLedger
 from sparx_agency.core.planning.object_search.world_model.sightlines import SightLedger, SightSettings
@@ -261,11 +262,12 @@ class RPTSearchPolicy:
         self.glances = GlanceScheduler(self, self.glance_settings)
         self.pattern_scan = PatternScan(self, s.pattern_scan)
         self.prescan = FalconPrescan(self, s.prescan) if s.prescan.steps else None
+        self._room_falcon = None
         # One look-around is as many turns as the camera's field of view needs to see the
         # whole circle (ten at 30 degrees with a 79-degree field), bounded by ``warmup_steps``.
         self.warmup_turns = min(s.warmup_steps, self.rotation_turns())
-        self.warmup_actions = 0
-        self._warmup_pending = True       # the warm-up rotation's scan has not been recorded yet
+        self.warmup_actions = self.warmup_turns if s.scan_kind == "falcon" else 0
+        self._warmup_pending = s.scan_kind != "falcon"   # the warm-up rotation's scan has not been recorded yet
         self._action_owner = "search"
         self._notified_step = self._decision_step = -1
         self._decision_command = None
@@ -315,6 +317,8 @@ class RPTSearchPolicy:
             self.hierarchy.blocked()
         if self.prescan is not None and self._action_owner == "prescan":
             self.prescan.blocked(observation)
+        if self._room_falcon is not None:
+            self._room_falcon.blocked(observation)
 
     def plan(self, observation):
         if observation.step == self._decision_step:
@@ -355,7 +359,15 @@ class RPTSearchPolicy:
             return self.prescan.filter_action(observation, action)
         if self._action_owner in SUSPENDED_PHASES:
             return action  # A* already qualified this route; do not apply the suspended FALCON room mask.
-        return self.hierarchy.filter_action(observation, action) if self.hierarchy else action
+        filtered = self.hierarchy.filter_action(observation, action) if self.hierarchy else action
+        return self._room_falcon.filter_action(observation, filtered) if self._room_falcon is not None else filtered
+
+    @property
+    def room_falcon(self):
+        """The in-room FALCON explorer, built the first time a room visit asks for it."""
+        if self._room_falcon is None:
+            self._room_falcon = RoomFalcon(self)
+        return self._room_falcon
 
     def notify_action(self, observation, action):
         if observation.step == self._notified_step:
@@ -403,6 +415,8 @@ class RPTSearchPolicy:
             self._action_owner = "target_closing"
             if self.prescan is not None and self.prescan.active:
                 self.prescan.suspend("target_closing")
+            if self._room_falcon is not None:
+                self._room_falcon.suspend("target_closing")
             # No global decision/fallback try block may catch closing failures.
             # Keep the current-floor collision map fresh without advancing any
             # building/room task or consuming privileged goal data.
@@ -663,6 +677,7 @@ class RPTSearchPolicy:
         return {"method": self.name, "rooms": len(self.graph.registry.rooms), "landmarks": len(self.landmarks),
                 "warmup": {"actions": self.warmup_actions, "budget": self.warmup_turns, "bound": self.settings.warmup_steps},
                 "prescan": None if self.prescan is None else self.prescan.diagnostics(),
+                "room_falcon": None if self._room_falcon is None else self._room_falcon.diagnostics(),
                 "doorway_peek": self.peek.diagnostics(),
                 "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
                 "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,

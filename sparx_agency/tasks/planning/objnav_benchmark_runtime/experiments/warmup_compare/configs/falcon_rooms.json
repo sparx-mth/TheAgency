@@ -1,0 +1,3 @@
+{"room_visit": "falcon", "scan_kind": "rotate",
+ "falcon": {"cell_size_m": 4.0, "min_cluster_cells": 2, "candidate_radii_m": [0.5, 1.0, 1.5],
+            "candidate_angles": 8, "top_viewpoints": 2, "max_order_nodes": 128, "max_grid_nodes": 60000, "planning_deadline_s": 3.0}}

@@ -1,0 +1,4 @@
+{"room_visit": "explore", "scan_kind": "falcon",
+ "prescan": {"steps": 100, "resolution_factor": 3},
+ "falcon": {"scope_radius_m": 12.0, "cell_size_m": 4.0, "min_cluster_cells": 2, "candidate_radii_m": [0.5, 1.0, 1.5],
+            "candidate_angles": 8, "top_viewpoints": 2, "max_order_nodes": 128}}

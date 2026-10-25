@@ -134,6 +134,7 @@ from sparx_agency.core.planning.exploration.room_costs import build_instance
 from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_from_camera
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
+from sparx_agency.core.planning.object_search.falcon.room_falcon import room_scope
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ROOM_LLM
 from sparx_agency.core.planning.object_search.rooms.house_context import house_line, scan_words
 from sparx_agency.core.mapping.topology.room_priors import home_object, implausible_room, ruled_out
@@ -374,6 +375,7 @@ class LoopSettings:
 
     visit: str = "explore"
     scan_local: str = "rotate"
+    local_explorer: str = "frontier"
     local_steps: int = 10
     explore_visit_steps: int = 60
     explore_service_steps: int = 12
@@ -411,6 +413,8 @@ class LoopSettings:
             raise ValueError("visit must be 'explore', 'scan' or 'sweep'; no silent fallback")
         if self.scan_local not in ("rotate", "nearest_frontier"):
             raise ValueError("scan_local must be 'rotate' or 'nearest_frontier'; no silent fallback")
+        if self.local_explorer not in ("frontier", "falcon"):
+            raise ValueError("local_explorer must be 'frontier' or 'falcon'; no silent fallback")
         for name in ("local_steps", "supervisor_rounds", "scan_visit_steps", "scan_approach_steps",
                      "explore_visit_steps", "explore_service_steps", "explore_frontier_steps"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
@@ -462,6 +466,11 @@ class LoopSettings:
     def scanning(self):
         """Whether a visit is a scan (vantage point, full rotation, finished for good)."""
         return self.visit == "scan"
+
+    @property
+    def falcon_visit(self):
+        """Whether the explore visit is driven by FALCON's own viewpoints inside the room instead of the view-gain walk."""
+        return self.exploring and self.local_explorer == "falcon"
 
     @property
     def nearest_frontier_scan(self):
@@ -2491,24 +2500,10 @@ class RoomSearchLoop:
         return None, {"frontier_exhausted": True}
 
     def _explore_visit(self, obs, world, cost, state, room):
-        """Walk the room's frontiers, best first by what each reveals, until none is left; then the room is done.
+        """Walk the room's frontiers by view gain, or (``local_explorer="falcon"``) FALCON's viewpoints, until none is left.
 
-        Every action: the room's admissible frontier goals are re-ranked by
-        view gain over distance (:meth:`_explore_goals`) and the sweep
-        drives the best one -- keeping a committed goal while it is still
-        passable, still near the room and still has unknown beside it, and
-        taking the next the action the camera resolves it (the route
-        follower faces each goal as it walks, so the frame at arrival shows
-        what lay behind the boundary). Routes are planned on the
-        room-confined map while the agent stands in the room, on the
-        observed map when the confinement walls the goal off. With no
-        admissible goal left the visit ends ``exhausted`` and the ledger's
-        ``explored`` verdict finishes the room: the agent has stood in it
-        and nothing unknown borders it (:class:`~room_scans.RoomScanLedger`).
-        A full rotation completed inside the room since the visit began --
-        a glance taken on the way -- finishes it at once
-        (``finished_by_rotation``): no circle is turned twice. The whole
-        visit is bounded by :attr:`LoopSettings.explore_visit_steps`.
+        With none left the visit ends ``exhausted`` and the scan ledger's ``explored`` verdict finishes the room.
+        The visit is bounded by ``explore_visit_steps``; a full rotation completed in the room since it began ends it at once.
         """
         p = self.policy
         visit = self._explore
@@ -2520,6 +2515,12 @@ class RoomSearchLoop:
                       frontier=self._live_frontier(state.room_id, obs, world))
         if self._finished_by_rotation(obs, world, state.room_id, room, visit["started"]):
             return None, {"frontier_exhausted": True}
+        if self.settings.falcon_visit:
+            command = p.room_falcon.plan(obs, world, room_scope(world, room.mask))
+            if command is not None:
+                return command, {}
+            p.room_falcon.end()
+            return self._end_explore(obs, visit, 0)
         goals = self._explore_goals(obs, world, cost, room)
         visit["frontier_left"] = len(goals)
         if goals:
@@ -2537,10 +2538,14 @@ class RoomSearchLoop:
                               gain=round(float(goals[0].utility), 3))
                 return command, {}
             self.stats["plan_failures"] += 1
+        return self._end_explore(obs, visit, len(goals))
+
+    def _end_explore(self, obs, visit, frontier_left):
+        """The explore visit is over: count it, log it and release the room ``exhausted``."""
         self.stats["explore_exhausted"] += 1
         self.stats["exhausted_releases"] += 1
-        self._log(obs, "explore_complete", room=state.room_id, goals=visit["goals"],
-                  actions=int(obs.step) - visit["started"], frontier_left=len(goals))
+        self._log(obs, "explore_complete", room=visit["room"], goals=visit["goals"],
+                  actions=int(obs.step) - visit["started"], frontier_left=frontier_left)
         self._explore = None
         return None, {"frontier_exhausted": True}
 
