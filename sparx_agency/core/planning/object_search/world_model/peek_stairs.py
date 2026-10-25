@@ -102,6 +102,11 @@ def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
         margin_m = policy.settings.body_radius_m + policy.converter_params.goal_tolerance_m + res
     preferred = int(math.ceil(max(float(margin_m), float(policy.settings.body_radius_m)) / res))
     body = int(math.ceil(policy.settings.body_radius_m / res))
+    # Passability is judged where the planner's FLOOR rung may stand (``WeightedAStarParams.inflate_floor_m``,
+    # ``RPTSettings.min_clearance_m`` since 2026-10-25), not at the body radius: a corridor the capsule leaves
+    # body-wide but under the rung is a corridor A* refuses.
+    planner_params = getattr(policy, "planner_params", None)
+    rung = int(math.ceil(float(getattr(planner_params, "inflate_floor_m", policy.settings.body_radius_m)) / res))
     for portal in building.portals:
         if portal["floor_id"] != policy.mapping.floor_id:
             continue
@@ -114,7 +119,7 @@ def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
                                  tuple(int(v) for v in world.world_to_grid(*b[:2]))))
         if not segments:
             continue
-        capsule, radius = adaptive_capsule(world, segments, preferred, body, body, foot=_foot_of(segments))
+        capsule, radius = adaptive_capsule(world, segments, preferred, body, max(body, rung), foot=_foot_of(segments))
         mask |= capsule
         if report is not None:
             report[str(portal["id"])] = round(radius * res, 2)

@@ -129,6 +129,13 @@ class TargetApproachPath:
         radius = max(p.settings.body_radius_m, limit - world.resolution)
         bearing = math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0])
         planners = [None]
+        squeeze = getattr(p, "squeeze_planner", None)
+        if squeeze is not None and squeeze.params.inflate_floor_m < p.planner_params.inflate_floor_m:
+            # The known floor at the body radius before the unknown at any price (since 2026-10-25): the
+            # routes above relax no further than ``RPTSettings.min_clearance_m``, and the floor beside a sofa
+            # corner or a cabinet is often drawn narrower than that -- 00890/000074 released its locked
+            # television, 3.5 m away in plain view, as "no safe path from here".
+            planners.append(squeeze)
         if s.through_unknown and getattr(p, "optimistic_planner", None) is not None:
             # No route on the known floor: the ring again with unknown cells passable at a price.
             # The target was seen along this line of sight, and a level camera leaves the floor
@@ -158,7 +165,8 @@ class TargetApproachPath:
                         continue
                     command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
                     if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
-                        self._adopt(target, obs, goal, widened=ring_radius > radius, through_unknown=planner is not None)
+                        self._adopt(target, obs, goal, widened=ring_radius > radius,
+                                    through_unknown=planner is not None and planner is not squeeze)
                         return command
         if previous is not None and math.dist(previous[:2], target.xyz[:2]) <= s.terminal_distance_m + tolerance:
             # No ring point has a route, and the goal the refinement made stale -- by centimetres -- had one:

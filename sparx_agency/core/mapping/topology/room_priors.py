@@ -23,7 +23,8 @@ the toilet standing a metre from the sink.
 from __future__ import annotations
 
 #: Prompt aliases collapse to one key, as in the room labeller.
-_ALIASES = {"couch": "sofa", "tv": "television", "tv monitor": "television", "plant": "potted plant"}
+_ALIASES = {"couch": "sofa", "tv": "television", "tv monitor": "television", "monitor": "television",
+            "armchair": "chair", "plant": "potted plant"}
 
 #: Target -> room types it is not worth searching for it.
 IMPLAUSIBLE_ROOMS = {

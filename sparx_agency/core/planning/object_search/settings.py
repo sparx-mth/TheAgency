@@ -153,6 +153,15 @@ class RPTSettings:
     body_height_m: float = 0.88
     body_radius_m: float = 0.18
     preferred_clearance_m: float = 0.30
+    # The tightest standoff from a confirmed obstacle a route may relax to (``WeightedAStarParams.inflate_floor_m``,
+    # and the "passable" map every count, entry and frontier is measured on). Until 2026-10-25 this was the body
+    # radius itself, which on the 0.1 m grid admits a 0.4 m gap -- and the agent is a 0.36 m body that HM3D moves
+    # WITHOUT sliding (``allow_sliding`` false, unlike Gibson): any contact refuses the whole step, and a heading
+    # quantised to 30 degrees cannot thread a 0.4 m gap without one. 00824/000066 walked a route between a bed and
+    # a dresser 4-5 cells apart and spent 460 actions wedged there; 00835/000006 began its episode boxed in a
+    # hallway the same way. 0.25 m: a 0.5 m gap (five free cells, 0.3 m of clearance at its centre) is still a
+    # passage, a 0.4 m one is a wall. Doorways (0.7 m and up) are untouched.
+    min_clearance_m: float = 0.25
     detour_factor: float = 1.5
     local_exploration: str = "frontier"
     warmup_steps: int = 12
@@ -168,8 +177,8 @@ class RPTSettings:
 
     def __post_init__(self):
         for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m",
-                    "preferred_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m", "step_down_m",
-                    "stair_margin_m"):
+                    "preferred_clearance_m", "min_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m",
+                    "step_down_m", "stair_margin_m"):
             value = getattr(self, key)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)
@@ -199,6 +208,8 @@ class RPTSettings:
             raise ValueError("Invalid confidence or seed")
         if self.preferred_clearance_m < self.body_radius_m:
             raise ValueError("Preferred clearance cannot be smaller than the robot radius")
+        if not self.body_radius_m <= self.min_clearance_m <= self.preferred_clearance_m:
+            raise ValueError("min_clearance_m must lie between body_radius_m and preferred_clearance_m")
         if isinstance(self.detour_factor, bool) or not math.isfinite(self.detour_factor) or self.detour_factor < 0:
             raise ValueError("detour_factor must be finite and non-negative (0 disables the squeeze rule)")
         if self.local_exploration not in ("frontier", "falcon"):

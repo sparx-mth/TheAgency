@@ -51,6 +51,7 @@ from sparx_agency.core.localization.floor_atlas import STAIR_SOURCE_GROUND_TRUTH
 from sparx_agency.core.planning.exploration.room_costs import build_instance
 from sparx_agency.core.planning.exploration.room_search_policy import RoomCandidate
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.object_search.multifloor.floor_decision import approach_points, decide_floor_change
 from sparx_agency.core.planning.object_search.multifloor.floor_departure import FloorDepartureGuard
@@ -104,11 +105,17 @@ class MultiFloorSearch:
         self.arrived_step = None
         self._departure_ignored = False  # one event per off-level excursion, not one per action
         self._approach_failures = 0      # consecutive actions the approach to the active portal failed to plan
+        #: The forbidden-mode retreat in force (:meth:`_retreat_to_storey`), or None.
+        self._retreat = None
         self.departure = FloorDepartureGuard(self)
 
     @property
     def phase(self):
-        return self.transition.phase if self.transition else "APPROACH_STAIRS" if self.active is not None else "SEARCH"
+        if self.transition:
+            return self.transition.phase
+        if self._retreat is not None:
+            return "RETREAT"
+        return "APPROACH_STAIRS" if self.active is not None else "SEARCH"
 
     @property
     def path(self):
@@ -209,6 +216,85 @@ class MultiFloorSearch:
         self.events.append({"action": obs.step, "event": "height_departure_ignored",
                             "height_m": round(obs.pose.z - height, 3),
                             "reason": "stair traversal disabled (allow_stair_traversal is false)"})
+
+    def _retreat_to_storey(self, obs):
+        """Traversal forbidden, the atlas in transition, no traversal of ours: walk the storey trail back.
+
+        The agent is on a flight it was never meant to take -- a committed
+        route whose end lay past the top tread walked it down three risers
+        before the atlas called the height a departure (00814/000009,
+        00873/000049, 00873/000002, 2026-10-25). Nothing is climbed here and
+        no map is read: the planning world is blank while the atlas is in
+        transition. The retreat follows the storey poses the coordinator
+        kept (``source_trail``: the last poses within ``stable_height_m`` of
+        the plane) from the one nearest the agent back to the earliest -- far
+        enough onto the plane for the atlas's plateau test to record a
+        source return, after which the search resumes with the flight's foot
+        among the observed drops. A retreat that has regained nothing within
+        ``retreat_actions``, or whose trail is spent, is given up once: the
+        floor's search and the spawn-floor guard's half-level adoption then
+        take over, as they would have without the crash.
+        """
+        atlas = self.policy.mapping.atlas
+        here = (float(obs.pose.x), float(obs.pose.y))
+        if self._retreat is None:
+            trail = [tuple(float(v) for v in point) for point in self.source_trail]
+            if not trail:
+                return None
+            self._retreat = {"started": int(obs.step), "trail": trail, "index": len(trail) - 1, "given_up": False}
+            self.events.append({"action": obs.step, "event": "retreat_started", "portal_id": None,
+                                "reason": "height departure with stair traversal disabled",
+                                "height_m": round(float(obs.pose.z) - float(atlas.elevation_m), 3),
+                                "trail_points": len(trail)})
+            self.policy.route_memory.clear("retreat to the storey plane")
+        state = self._retreat
+        if abs(float(obs.pose.z) - float(atlas.elevation_m)) <= self.params.stable_height_m and obs.step > state["started"]:
+            # Back at the plane: confirm the return now, given up or not. The atlas's own plateau test wants
+            # three translated samples at the height, which a retreat ending at the flight's head may never
+            # supply (00873/000002, 2026-10-25: back on the landing at action 23, "in transition" for 477 more).
+            if atlas.settle(obs.pose, float(atlas.elevation_m)):
+                self._end_retreat(obs, atlas.completion_reason or "storey height regained")
+                return None
+        if state["given_up"]:
+            return None
+        if obs.step - state["started"] >= self.params.retreat_actions:
+            state["given_up"] = True
+            self.events.append({"action": obs.step, "event": "retreat_given_up",
+                                "reason": "retreat_actions exhausted off the storey plane"})
+            return None
+        trail = state["trail"]
+        reached = self.policy.converter_params.goal_tolerance_m + self.policy.settings.map_resolution_m
+        while state["index"] >= 0 and math.dist(trail[state["index"]][:2], here) <= reached:
+            state["index"] -= 1
+        if state["index"] < 0 and not state.get("extended"):
+            # The trail is walked and the plane not regained: the storey lies past its last point (a trail of
+            # one pose, the spawn, when the first step was already a tread). One point two steps beyond it,
+            # along the way back, so the follower has a goal past the edge; then the retreat is spent.
+            last = trail[0][:2]
+            dx, dy = last[0] - here[0], last[1] - here[1]
+            span = math.hypot(dx, dy)
+            if span < 0.05:
+                dx, dy, span = math.cos(obs.pose.yaw), math.sin(obs.pose.yaw), 1.0
+            reach = 2.0 * self.policy.episode.action_spec.forward_step_m
+            state["trail"] = trail = [(last[0] + reach * dx / span, last[1] + reach * dy / span)]
+            state["index"], state["extended"] = 0, True
+        if state["index"] < 0:
+            state["given_up"] = True
+            self.events.append({"action": obs.step, "event": "retreat_given_up", "reason": "storey trail spent"})
+            return None
+        points = [here] + [trail[i][:2] for i in range(state["index"], -1, -1)]
+        return NavigationCommand.follow(points, info={"kind": "RETREAT", "portal": None,
+                                                      "reason": "off the storey with stair traversal disabled; "
+                                                                "walking the storey trail back",
+                                                      "trail_points_left": state["index"] + 1})
+
+    def _end_retreat(self, obs, reason):
+        if self._retreat is None:
+            return
+        self.events.append({"action": obs.step, "event": "retreat_ended", "reason": reason,
+                            "actions": int(obs.step) - self._retreat["started"]})
+        self._retreat = None
+        self.policy.route_memory.clear("retreat ended")
 
     def _see_stairs(self, obs):
         """Run the perfect detector on this frame and record what it saw; the first sighting of a staircase is an event."""
@@ -319,6 +405,8 @@ class MultiFloorSearch:
             self.policy.route_memory.clear("completed floor transition")
         elif self.transition and self.transition.retreat_path is not None and not atlas.in_transition:
             self._abandon(obs, self.transition.completion_reason)
+        if self._retreat is not None and not atlas.in_transition:
+            self._end_retreat(obs, atlas.completion_reason or "atlas settled")
         if not self.traversing:
             if not atlas.floors or abs(obs.pose.z - atlas.elevation_m) <= self.params.stable_height_m:
                 if self.ground_truth is not None:
@@ -440,6 +528,12 @@ class MultiFloorSearch:
                 self._abandon(obs, "stair traversal disabled (allow_stair_traversal is false)")
             return None
         if self.traversing:
+            if self.transition is None:
+                # Observed mode, traversal forbidden: the atlas alone says the agent is off its
+                # storey (``_forbid_departure`` started nothing). Until 2026-10-25 this line
+                # dereferenced the missing traversal on every action for the rest of the
+                # episode (00814, 00873 x2: three treads down, then 400+ recorded crashes).
+                return self._retreat_to_storey(obs)
             return self.transition.plan(obs)
         if self.active is not None and not self.can_leave_floor(obs):
             # A room may be discovered while approaching a previously allowed
@@ -500,7 +594,7 @@ class MultiFloorSearch:
         storey it deemed searched out, and the approach was abandoned.
         """
         p = self.policy
-        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.planner_params.inflate_floor_m)[0]
         approaches = approach_points([self.active], obs, world, cost)
         approach = None if approaches is None else approaches.get(int(self.active["id"]))
         if approach is None:
@@ -533,7 +627,7 @@ class MultiFloorSearch:
         if not self.can_leave_floor(obs):
             return
         p = self.policy
-        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.planner_params.inflate_floor_m)[0]
         portals = [q for q in self.portals if q["floor_id"] == self.floor_id and q.get("connector_id") is not None]
         if self.way_back_held(obs.step):
             held = [q for q in portals if q.get("connector_id") == self.arrived_by]
@@ -603,7 +697,7 @@ class MultiFloorSearch:
                     and q["observations"] >= 2 and obs.step >= q["cooldown_until"]]
         if not eligible:
             return
-        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+        cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.planner_params.inflate_floor_m)[0]
         goals = {q["id"]: tuple(q["entry"][:2]) for q in eligible}
         states = p.floors.save()
         probabilities = {}
@@ -683,6 +777,8 @@ class MultiFloorSearch:
                 self.transition.failures += 1
                 self.transition.path = []
                 self.transition.surface_goal = None
+        elif self._retreat is not None and not self._retreat["given_up"]:
+            self._retreat["index"] -= 1      # this heading is refused: aim at the next trail point back
         self.terrain.blocked(obs.pose, self.policy.episode.action_spec.forward_step_m)
 
     def filter_action(self, obs, action):
@@ -696,8 +792,10 @@ class MultiFloorSearch:
                 if not h.motion.permits(obs, action):
                     return DiscreteAction.TURN_LEFT
             return action
-        if self.ground_truth is not None:
-            return action                        # the connector is navmesh ground truth; depth cannot veto it
+        if self.ground_truth is not None or self.transition is None:
+            # The connector is navmesh ground truth, or the trail retreat walks ground the body
+            # stood on this episode: depth cannot veto either.
+            return action
         if action == DiscreteAction.MOVE_FORWARD and not self.terrain.permits(obs.pose, self.policy.episode.action_spec.forward_step_m):
             self.safety_vetoes += 1
             return DiscreteAction.TURN_LEFT
@@ -710,6 +808,8 @@ class MultiFloorSearch:
                 "stairs_seen": self.sightings.diagnostics(),
                 "atlas": self.policy.mapping.atlas.diagnostics(),
                 "transition": self.transition.diagnostics() if self.transition else None,
+                "trail_retreat": ({k: self._retreat[k] for k in ("started", "index", "given_up")}
+                                  if self._retreat is not None else None),
                 "completed_transitions": list(self.completed), "safety_vetoes": self.safety_vetoes,
                 "room_coverage": self.policy.peek.diagnostics()["coverage"],
                 "coverage_vetoes": self.departure.vetoes,

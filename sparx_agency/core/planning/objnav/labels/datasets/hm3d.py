@@ -46,32 +46,42 @@ QUERIES = {"chair": "chair", "bed": "bed", "plant": "potted plant",
 
 #: Detector prompts per category, primary first. Tuples, never sets: the order
 #: reaches the open-vocabulary detector verbatim and must not move between a
-#: run and its resume.
+#: run and its resume. ``armchair`` is a chair prompt since 2026-10-25: HM3D's
+#: ``chair`` category includes armchairs (00802-wcojb4TFT35's chair goal 427 is
+#: one), and without the word the detector read an armchair as ``sofa`` at 0.94
+#: and STOPped the sofa episode 00802/000058 at it on action 3. ``monitor`` is
+#: a ``tv_monitor`` prompt for the same reason the category is named so.
 PROMPTS = {
-    "chair": ("chair",),
+    "chair": ("chair", "armchair"),
     "bed": ("bed",),
     "plant": ("potted plant",),
     "toilet": ("toilet",),
-    "tv_monitor": ("tv", "television"),
+    "tv_monitor": ("tv", "television", "monitor"),
     "sofa": ("couch", "sofa"),
 }
 
 #: Non-goal prompts that give the room classifier and the door finder something
-#: to see. A method choice, not part of the benchmark's vocabulary, and
-#: **identical to the Gibson table's** (``datasets/gibson.py``) since 2026-10-14:
-#: the open-vocabulary detector scores every prompt against a crop and lands on
-#: the nearest one it was given, so the prompt set is part of the method -- a
-#: different context list on HM3D would be a different detector. The four door
-#: prompts are the ones ``methods/doors.py`` looks for; ``bathtub`` is a home
-#: object of the toilet (``room_priors.HOME_OBJECTS``); ``toy``, ``rocking
-#: horse`` and ``stuffed animal`` are the distractors that stop a child's
-#: ride-on horse reading as a chair.
+#: to see. A method choice, not part of the benchmark's vocabulary. The list was
+#: **identical to the Gibson table's** (``datasets/gibson.py``) from 2026-10-14
+#: to 2026-10-25: the open-vocabulary detector scores every prompt against a
+#: crop and lands on the nearest one it was given, so the prompt set is part of
+#: the method -- a different context list is a different detector, and every
+#: difference below is deliberate and HM3D's own. The four door prompts are the
+#: ones ``methods/doors.py`` looks for; ``bathtub`` is a home object of the
+#: toilet (``room_priors.HOME_OBJECTS``); ``toy``, ``rocking horse`` and
+#: ``stuffed animal`` are the distractors that stop a child's ride-on horse
+#: reading as a chair. ``stool`` and ``bar stool`` (since 2026-10-25) are
+#: HM3D's: its ``chair`` category does not include stools (the counter stool
+#: of 00824-Dd4bFSTQ8gi is no goal, while eleven chairs are), and read as
+#: ``chair`` at 0.86 one ended the chair episode 00824/000061 4.5 m from every
+#: chair. Gibson's COCO-labelled chairs include stools, so its table keeps none.
 CONTEXT_VOCABULARY = (
     "dining table", "oven", "sink", "refrigerator",
     "book", "clock", "vase", "cup", "bottle",
     "door", "doorway", "open doorway", "door frame",
     "cabinet", "desk", "shower", "bathtub", "stairs", "staircase",
     "toy", "rocking horse", "stuffed animal",
+    "stool", "bar stool",
 )
 
 

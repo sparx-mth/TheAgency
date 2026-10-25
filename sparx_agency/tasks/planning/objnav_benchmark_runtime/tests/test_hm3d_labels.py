@@ -42,11 +42,11 @@ PUBLISHED_ORDER = ("chair", "bed", "plant", "toilet", "tv_monitor", "sofa")
 #: Per category: the LLM query, the detector prompts in order, and every
 #: detector label that ends an episode.
 EXPECTED = {
-    "chair": ("chair", ("chair",), {"chair"}),
+    "chair": ("chair", ("chair", "armchair"), {"chair", "armchair"}),
     "bed": ("bed", ("bed",), {"bed"}),
     "plant": ("potted plant", ("potted plant",), {"potted plant"}),
     "toilet": ("toilet", ("toilet",), {"toilet"}),
-    "tv_monitor": ("tv", ("tv", "television"), {"tv", "television"}),
+    "tv_monitor": ("tv", ("tv", "television", "monitor"), {"tv", "television", "monitor"}),
     "sofa": ("couch", ("couch", "sofa"), {"couch", "sofa"}),
 }
 

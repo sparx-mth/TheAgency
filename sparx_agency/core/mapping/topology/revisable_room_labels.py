@@ -218,7 +218,7 @@ class RevisableRoomLabels:
     @staticmethod
     def _signature(classes):
         # Prompt aliases must not count as extra kinds of semantic evidence.
-        aliases = {"couch": "sofa", "tv": "television"}
+        aliases = {"couch": "sofa", "tv": "television", "monitor": "television", "armchair": "chair"}
         return tuple(sorted(Counter(aliases.get(name, name) for name in classes).items()))
 
     def _objects_ready(self, pid, classes):

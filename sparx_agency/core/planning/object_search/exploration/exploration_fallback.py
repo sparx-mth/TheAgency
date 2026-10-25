@@ -47,6 +47,11 @@ raised, it produces a command that MOVES, in this order:
    every exit is spent, and so is the bathroom;
 4. frontiers already retired -- a goal retired for a transient plan failure
    is still unknown space;
+4b. a **squeeze** (since 2026-10-25, :meth:`ExplorationFallback._squeeze`):
+   the frontier goals reachable at the body radius alone, routed by the
+   policy's ``squeeze_planner`` -- everything above is measured at the
+   planner's floor rung (``RPTSettings.min_clearance_m``), and a doorway
+   the map draws 0.4 m wide closes a whole wing at that rung;
 5. a relocation: the farthest reachable known cell, for a new vantage point
    from which the map may show a frontier it does not show from here;
 6. a **footing sweep** (since 2026-10-05): when nothing on the observed map
@@ -109,6 +114,15 @@ class FallbackSettings:
             the floor, or it is not a new vantage point.
         relocation_candidates: How many of the farthest cells are offered to
             the planner before relocation gives up for this action.
+        relocation_revisit_m: A cell within this of a vantage point already
+            walked to during the current run of fallback actions is not a
+            new vantage point (since 2026-10-25). Only the LAST point was
+            excluded before, so a pocket with two ends was relocated between
+            for ever -- 00835/000064 made 458 relocations across a 2 m strip
+            beside a bed and never reached the footing and escape rungs that
+            would have probed the strip's one exit. The memory is cleared
+            when the floor's search takes an action of its own between two
+            fallback actions: the map has changed meanwhile.
         service_backoff_actions: Actions a failed model service (room LLM,
             detector) is left alone after its first failure; doubles per
             consecutive failure.
@@ -185,6 +199,7 @@ class FallbackSettings:
     frontier_attempts: int = 6
     relocation_min_m: float = 1.5
     relocation_candidates: int = 5
+    relocation_revisit_m: float = 1.0
     service_backoff_actions: int = 25
     service_backoff_max_actions: int = 200
     exits_first: bool = True
@@ -214,6 +229,9 @@ class FallbackSettings:
             raise ValueError("min_gain_m2 must be None (the loop's threshold), 0 (off) or a positive area")
         if isinstance(self.relocation_min_m, bool) or not math.isfinite(self.relocation_min_m) or self.relocation_min_m <= 0:
             raise ValueError("relocation_min_m must be positive and finite")
+        if (isinstance(self.relocation_revisit_m, bool) or not math.isfinite(self.relocation_revisit_m)
+                or self.relocation_revisit_m <= 0):
+            raise ValueError("relocation_revisit_m must be positive and finite")
         if self.service_backoff_max_actions < self.service_backoff_actions:
             raise ValueError("service_backoff_max_actions cannot be shorter than the first back-off")
         if type(self.exits_first) is not bool:
@@ -231,7 +249,8 @@ class FallbackSettings:
 
 
 #: Classes that cast no floor shadow whatever the frontier beside them: on a wall or a surface, not on the floor.
-SHADOWLESS_CLASSES = frozenset({"clock", "vase", "book", "bottle", "cup", "toy", "stuffed animal", "television", "tv"})
+SHADOWLESS_CLASSES = frozenset({"clock", "vase", "book", "bottle", "cup", "toy", "stuffed animal", "television", "tv",
+                                "monitor"})
 
 
 def object_shadow(goal, landmarks, resolution_m, margin_m, default_radius_m, length_factor, min_radius_m=0.0):
@@ -333,6 +352,7 @@ class ExplorationFallback:
         self.settings = settings or FallbackSettings()
         self.failures = []
         self.stats = {"invocations": 0, "frontier": 0, "stairs": 0, "frontier_demoted": 0, "frontier_retired": 0,
+                      "frontier_squeeze": 0,
                       "room_peek": 0, "relocation": 0, "footing": 0, "escape": 0, "hold": 0, "failures": 0,
                       "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0, "slivers_demoted": 0,
                       "goal_kept": 0, "goal_switched": 0, "goal_outranked": 0,
@@ -342,6 +362,8 @@ class ExplorationFallback:
         self.retry_step = {}
         self._last_relocation = None
         self._relocation_step = None      # the action the relocation target was last driven on
+        self._vantage_points = []         # every relocation target of the current run of fallback actions
+        self._invocation_step = None      # the last action the fallback planned; a gap clears the vantage memory
         self.last_demoted = []            # [{"xy", "why"}] of the last action's demoted frontiers, for the record
         self.goal = None                  # the frontier goal in force: xy, its rung, the action it was last driven
         self.goal_stage = None
@@ -387,8 +409,11 @@ class ExplorationFallback:
         p = self.policy
         self.stats["invocations"] += 1
         self.last_stage = None                                 # this action's rung, not the last invocation's
+        if self._invocation_step is not None and int(obs.step) - self._invocation_step > 1:
+            self._vantage_points = []                          # the floor's search had the actions between: a new map
+        self._invocation_step = int(obs.step)
         if cost is None:
-            cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.settings.body_radius_m)[0]
+            cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.planner_params.inflate_floor_m)[0]
         ids, graph = passable_graph(cost)                    # one graph for the ranking and the relocation
         inventory = p.graph.frontier_inventory
         ranked = (list(inventory.goals) if inventory is not None else
@@ -429,6 +454,9 @@ class ExplorationFallback:
         command, _ = self._try_goals(obs, planning, retired)
         if command is not None:
             return self._tag(command, "frontier_retired", reason)
+        command = self._squeeze(obs, planning, world)
+        if command is not None:
+            return self._tag(command, "frontier_squeeze", reason)
         command = self._relocate(obs, planning, ids, graph)
         if command is not None:
             return self._tag(command, "relocation", reason)
@@ -463,6 +491,39 @@ class ExplorationFallback:
             if command is not None:
                 return command, tuple(goal)
         return None, None
+
+    def _squeeze(self, obs, planning, world):
+        """Rung 4b (since 2026-10-25): the frontier goals reachable at the BODY radius only, through the squeeze planner.
+
+        The passable map everything above is measured on relaxes no further
+        than ``RPTSettings.min_clearance_m`` (0.25 m): a non-sliding body
+        cannot walk a tighter gap without a refused touch. But a doorway the
+        depth map draws 0.4 m wide is a doorway the body walked through on
+        the way in (00835/000064: the strip beside the bed, 458 relocations
+        and 211 probes with five frontier goals a squeeze away), so when
+        NOTHING is reachable at the rung, the goals reachable at the body
+        radius are offered through ``RPTSearchPolicy.squeeze_planner`` --
+        the same planner with the body radius as its floor -- before the
+        relocation and the probes. A refused step on the way retires the
+        goal as any blocked frontier's, and the sticky bars of a second
+        refusal close the gap on the map for good.
+        """
+        p = self.policy
+        planner = getattr(p, "squeeze_planner", None)
+        if planner is None or planner.params.inflate_floor_m >= p.planner_params.inflate_floor_m:
+            return None
+        cost = assemble_cost_grid(p.planner.fields_for(world), planner.params, planner.params.inflate_floor_m)[0]
+        ids, graph = passable_graph(cost)
+        ranked = ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
+                                       (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
+                                       ids=ids, graph=graph)
+        goals = [g.xy for g in p.sweep.admissible(obs, world, ranked)]
+        for goal in goals[:self.settings.frontier_attempts]:
+            command = p._navigate(obs, planning, tuple(goal), "frontier", planner=planner)
+            if command is not None:
+                self.stats["frontier_squeeze"] += 1
+                return command
+        return None
 
     def _frontiers(self, obs, world, goals, stage):
         """Drive the goal in force of this rung, or the best goal of the rung, and remember which."""
@@ -598,7 +659,8 @@ class ExplorationFallback:
         """
         here = (obs.pose.x, obs.pose.y)
         last, last_step = self._last_relocation, self._relocation_step
-        if last is not None and last_step is not None and obs.step - last_step <= 1 and math.dist(here, last) >= 1.0:
+        revisit = self.settings.relocation_revisit_m
+        if last is not None and last_step is not None and obs.step - last_step <= 1 and math.dist(here, last) >= revisit:
             command = self.policy._navigate(obs, world, last, "relocate")
             if command is not None:
                 self._relocation_step = int(obs.step)
@@ -621,12 +683,13 @@ class ExplorationFallback:
             if not reachable[node]:
                 break
             x, y = (float(v) for v in world.grid_to_world(int(node_cells[node][0]), int(node_cells[node][1])))
-            if last is not None and math.dist((x, y), last) < 1.0:
-                continue                                   # never the last vantage point again
+            if any(math.dist((x, y), seen) < revisit for seen in self._vantage_points):
+                continue                                   # never a vantage point of this run again
             command = self.policy._navigate(obs, world, (x, y), "relocate")
             tried += 1
             if command is not None:
                 self._last_relocation, self._relocation_step = (x, y), int(obs.step)
+                self._vantage_points.append((x, y))
                 return command
             if tried >= self.settings.relocation_candidates:
                 break

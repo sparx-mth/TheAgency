@@ -110,3 +110,37 @@ def test_the_episode_record_carries_the_probe():
     record = policy.episode_info()["escape_probe"]
     assert record["stats"]["probes"] == 1 and record["last"]["step"] == 0
     assert record["settings"]["max_barrier_m"] == 0.4
+
+
+def wedged():
+    """IN_A in a 0.5 m wide pocket running 0.8 m to the north, closed by a thick band everywhere else (00824/000066).
+
+    Thin barriers at the pocket's south and east were already refused at this
+    cell; the open run north ends at a bed too thick to probe. Until 2026-10-25
+    no heading qualified and the fallback held for 450 actions.
+    """
+    g = np.full((60, 120), 100, np.int8)
+    g[28:41, 28:33] = 0           # a five-cell-wide pocket from the agent's row (y 2.8) north to y 4.1
+    g[27, 28:33] = -1             # one unknown cell south: a thin band with nothing worth reaching behind it
+    g[26, 28:33] = 100
+    return OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+
+
+def test_a_long_free_run_is_probed_even_when_a_thick_band_closes_it():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    pocket = wedged()
+    obs = obs_at(episode, 0, IN_A, yaw=0.0)
+    north = [c for c in policy.escape.candidates(obs, pocket) if abs(normalize_angle(c["heading"] - math.pi / 2)) < 0.01]
+    assert north and north[0]["rule"] == "open_run" and north[0]["pocket_m"] >= 0.5, "0.8 m of free floor north is a step worth taking"
+    assert north[0]["barrier_m"] > policy.escape.settings.max_barrier_m, "... although the band beyond it is no probe's"
+    command = policy.loop.plan(obs, pocket)
+    assert command.info["kind"] == "escape" and command.info["escape"]["rule"] == "open_run"
+    assert abs(normalize_angle(command.final_yaw - math.pi / 2)) < 0.01, "turning toward the open run"
+    # With the run under two steps the heading is no candidate, and nothing else here is: the hold.
+    short = wedged()
+    short.grid[32:41, 28:33] = 100
+    assert not [c for c in policy.escape.candidates(obs_at(episode, 1, IN_A, yaw=0.0), short)
+                if abs(normalize_angle(c["heading"] - math.pi / 2)) < 0.01]
+    with pytest.raises(ValueError):
+        EscapeSettings(min_pocket_m=0.0)

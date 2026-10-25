@@ -74,6 +74,6 @@ def test_goal_and_inflation_floor_are_recorded_without_initial_sweep():
     policy.plan(observation(episode, 0, depth=3))
     config = policy.configuration()
     assert config["falcon_running"] is False
-    assert config["planner"]["inflate_floor_m"] == config["adaptation"]["body_radius_m"]
+    assert config["planner"]["inflate_floor_m"] == config["adaptation"]["min_clearance_m"] > config["adaptation"]["body_radius_m"]
     assert policy._plan_calls >= 1  # starts navigating, not a forced 360-degree routine
 

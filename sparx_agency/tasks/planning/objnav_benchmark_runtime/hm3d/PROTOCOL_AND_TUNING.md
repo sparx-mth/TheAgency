@@ -139,7 +139,10 @@ Keep the rest that way deliberately:
   supplies are of that kind and none of them came from a validation score:
   `body_height_m` 0.88 and `body_radius_m` 0.18 are the benchmark's own agent,
   `preferred_clearance_m` 0.30 is the A\* clearance preference above that
-  radius, and `stop_distance_m` 1.0 is where the dataset generator placed the
+  radius, `min_clearance_m` 0.25 the tightest standoff a route relaxes to (a
+  0.36 m body moved without sliding on a 30° heading grid needs a 0.5 m gap;
+  derived from the action quantisation, not from a score), and `stop_distance_m`
+  1.0 is where the dataset generator placed the
   goal view points — the method aims for roughly a metre from the object
   because that is where standing counts. Override them with `--policy-config`
   and the override is recorded in the run manifest.

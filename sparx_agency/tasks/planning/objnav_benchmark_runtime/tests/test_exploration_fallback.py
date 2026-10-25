@@ -437,6 +437,66 @@ def test_the_relocation_target_is_kept_until_reached():
     assert policy.fallback.stats["relocation"] == 8
 
 
+def test_a_vantage_point_already_walked_to_is_not_relocated_to_again_so_a_closed_pocket_reaches_the_escape_rung():
+    """00835/000064 (2026-10-25): a 2 m strip beside a bed, fully known, no frontier; the farthest cell flipped
+    between the strip's two ends and the fallback relocated 458 times without once reaching the escape probe
+    that would have tried the strip's one thin exit. A vantage point of the current run of fallback actions is
+    never a target again; with both ends walked, the rungs below relocation get their turn."""
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    g = np.full(world.grid.shape, OCC, np.int8)
+    g[27:34, 10:50] = FREE                                   # a 0.7 m wide, 4 m long strip, closed everywhere
+    g[27:34, 50] = OCC                                       # ... by one occupied cell at its east end, free beyond
+    g[27:34, 51:60] = FREE
+    strip = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    no_rooms(policy)
+    here, goals, stages = (3.0, 3.0), [], []
+    for step in range(60):
+        command = policy.loop.plan(obs_at(episode, step, here, yaw=0.0), strip)
+        stages.append(command.info.get("fallback_stage") or command.info.get("kind"))
+        if command.info.get("fallback_stage") == "relocation":
+            goal = tuple(round(float(v), 2) for v in command.waypoints[-1])
+            goals.append(goal)
+            dx, dy = goal[0] - here[0], goal[1] - here[1]
+            span = math.hypot(dx, dy)
+            if span > 1e-6:
+                here = (here[0] + 0.25 * dx / span, here[1] + 0.25 * dy / span)
+        elif command.info.get("fallback_stage") == "escape":
+            break
+    assert "escape" in stages, "the escape rung is reached once the strip's vantage points are spent: %r" % (stages,)
+    vantage = {g for g in goals}
+    assert 1 <= len(vantage) <= 3, "each end of the strip at most once: %r" % (sorted(vantage),)
+    assert policy.fallback.stats["relocation"] < 40
+    with pytest.raises(ValueError):
+        FallbackSettings(relocation_revisit_m=0.0)
+
+
+def test_a_frontier_behind_a_gap_the_floor_rung_refuses_is_reached_by_the_squeeze_rung_before_any_relocation():
+    """00835/000064 (2026-10-25): the strip beside the bed opened onto the rest of the flat through a doorway the
+    map drew 0.4 m wide -- walked on the way in, impassable at the planner's 0.25 m floor rung, so the inventory
+    held no reachable frontier and the fallback relocated and probed inside the strip for 480 actions. Nothing
+    reachable at the rung: the goals reachable at the body radius are routed through the squeeze planner."""
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    g = np.full(world.grid.shape, OCC, np.int8)
+    g[27:34, 20:40] = FREE                                   # the agent's strip: 0.7 m wide, 2 m long
+    g[29:33, 40:46] = FREE                                   # a 0.4 m wide, 0.6 m long gap out of it ...
+    g[20:40, 46:70] = FREE                                   # ... onto open floor ...
+    g[20:40, 70:80] = UNK                                    # ... with unknown beyond: the only frontier
+    pocket = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    no_rooms(policy)
+    command = policy.loop.plan(obs_at(episode, 0, IN_A, yaw=0.0), pocket)
+    assert command.info["fallback_stage"] == "frontier_squeeze" and command.info["kind"] == "frontier"
+    assert command.info.get("squeeze") is True and command.waypoints
+    assert command.waypoints[-1][0] > 4.6, "the goal lies on the open floor beyond the gap"
+    assert any(4.0 <= x <= 4.6 for x, _ in command.waypoints), "the route threads the gap"
+    assert policy.fallback.stats["frontier_squeeze"] >= 1 and policy.fallback.stats["relocation"] == 0
+    # With the gap a cell wider the ordinary rungs reach the frontier themselves and the squeeze rung is not asked.
+    g[28:34, 40:46] = FREE
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    command = policy.loop.plan(obs_at(episode, 0, IN_A, yaw=0.0), OccupancyGrid2D(g, pocket.params, values=VALUES))
+    assert command.info["fallback_stage"] == "frontier" and "squeeze" not in command.info
+
+
 def test_the_snapshot_names_this_actions_rung_including_a_hold():
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
     no_rooms(policy)

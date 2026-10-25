@@ -20,7 +20,7 @@ from dataclasses import replace
 from sparx_agency.core.common.math.bbox import iou
 
 #: Detector prompt -> the canonical class the method reasons in.
-ALIASES = {"couch": "sofa", "tv": "television"}
+ALIASES = {"couch": "sofa", "tv": "television", "monitor": "television", "armchair": "chair"}
 
 
 def deduplicate_detections(detections):

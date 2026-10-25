@@ -2870,3 +2870,52 @@ isolating the interior first — the outdoors silently joins every room into one
 list look innocent. And don't assume a hand-tuned door list ported from another stack covers the
 world it is pointed at; this repo already ships a derived portal set for this hospital, so
 reconcile with it rather than trusting the port.
+
+---
+
+## 2026-10-25 — HM3D ObjectNav: fifteen replayed failures, none of them the search
+
+**Symptom:** 0/15 on a replay of failed HM3D v1 val episodes with a method that clears the Gibson
+benchmarks. Eight timeouts, seven STOPs on the wrong object. Three of the timeouts spent 400+
+actions turning in place; three more spent most of the episode "boxed in" by their own map.
+
+**Root cause:** Four independent things, none visible in the summary numbers and all in the
+recordings (`steps.jsonl`, `map_journal.npz`, `review_recording.py map N`):
+1. `MultiFloorSearch.plan` dereferenced a traversal it had refused to start. With the benchmark
+   default (`allow_stair_traversal=False`) and the observed stair source (the default since
+   2026-10-21), a route whose end lay past the top tread walked the agent three risers down, the
+   floor atlas called the height a departure, `traversing` became true from the atlas alone, and
+   `self.transition.plan(obs)` raised `AttributeError` on every action for the rest of the episode
+   (417, 108 and 941 recorded decision failures). The fallback crashed on the same line. The
+   ground-truth stair mode never had the bug, which is why Gibson never showed it.
+2. HM3D moves the agent WITHOUT sliding (`allow_sliding: False`; Gibson slides). The planner relaxed
+   routes down to the body radius (0.18 m), which on the 0.1 m grid admits a 0.4 m gap -- and a
+   0.36 m body with a 30-degree heading grid cannot thread one without a lateral touch, which
+   refuses the whole step. The route walked into the gap, the bumps wrote sticky bars across the
+   agent's own trail, and the agent read itself as "completely surrounded" (00824/000066, 460
+   actions; 00835/000006 began boxed in a hallway).
+3. The escape probe only pushed against THIN barriers with floor beyond; a wedge whose open side
+   ran 0.6 m to a bed (too thick to probe) had no candidate at all, and every heading it did probe
+   was a refused touch. The relocation rung flipped between the two ends of a closed pocket for
+   ever (458 relocations in one episode) and never let the escape rung have a turn.
+4. The detector, and the benchmark's own annotations: an armchair that IS an HM3D chair read as
+   "sofa" at 0.94, a counter stool (no HM3D goal) as "chair" at 0.86, a real TV and a real plant
+   that are simply not annotated, and the goal TV of 00890 -- a broken black mesh, as HM3D TVs
+   are -- never above 0.28 while the agent stood inside the success radius for 86 actions.
+
+**Fix / workaround:** (1) a forbidden-mode retreat along the storey trail (`_retreat_to_storey`),
+bounded by `retreat_actions`, instead of the crash; (2) `RPTSettings.min_clearance_m` = 0.25 m as
+the planner's floor rung and the "passable" map everything is measured on (0.5 m gaps pass, 0.4 m
+ones are walls), cells the body has stood on free for planning (`policy._walked_passable`), and
+the stair capsule judged at the rung; (3) `EscapeSettings.min_pocket_m`: a heading with two steps
+of free floor is a probe whatever lies beyond, and `FallbackSettings.relocation_revisit_m`: no
+vantage point of the current fallback run twice; (4) `armchair` as a chair prompt, `monitor` as a
+tv prompt, `stool`/`bar stool` as HM3D distractors -- honest about their reach: on the recorded
+frames YOLO-World still says sofa 0.94 and chair 0.72.
+
+**Don't:** Don't read a 500-step timeout as "the search was slow"; read `review_recording.py
+timeline` first -- three of eight were a crash. Don't carry a Gibson-tuned clearance to a
+simulator that forbids sliding without re-deriving what a step can physically do. Don't let one
+rung of a fallback ladder (relocation) succeed indefinitely: a rung that can always "succeed" by
+oscillating starves every rung below it. And don't score a vocabulary change by its semantics
+alone -- probe the detector on the frame that failed.

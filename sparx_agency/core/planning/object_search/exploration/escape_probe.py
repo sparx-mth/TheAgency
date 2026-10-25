@@ -46,6 +46,15 @@ class EscapeSettings:
         min_beyond_m: The least free or unknown floor that must lie beyond
             the band (or straight ahead, when there is none) for the heading
             to lead anywhere.
+        min_pocket_m: A heading with at least this much free or unknown
+            floor BEFORE the first occupied cell is worth a step whatever
+            lies beyond -- two forward steps by default (since 2026-10-25).
+            The thinnest-barrier rule alone left a wedged agent spinning:
+            00824/000066 stood for 450 actions in a pocket whose open side
+            ran 0.6 m to a bed (a barrier too thick to probe) while every
+            heading it did probe was a refused lateral touch. A step along
+            the open side moves the body to a cell the planner may well
+            leave; the simulator decides, as for every probe.
         memory_actions: A heading the simulator blocked at a cell is not
             probed again from that cell for this many actions.
     """
@@ -54,14 +63,15 @@ class EscapeSettings:
     range_m: float = 3.0
     max_barrier_m: float = 0.4
     min_beyond_m: float = 0.5
+    min_pocket_m: float = 0.5
     memory_actions: int = 80
 
     def __post_init__(self):
-        for name in ("range_m", "max_barrier_m", "min_beyond_m"):
+        for name in ("range_m", "max_barrier_m", "min_beyond_m", "min_pocket_m"):
             if not float(getattr(self, name)) > 0.0:
                 raise ValueError("%s must be positive, got %r" % (name, getattr(self, name)))
-        if self.max_barrier_m >= self.range_m or self.min_beyond_m >= self.range_m:
-            raise ValueError("max_barrier_m and min_beyond_m must be under range_m")
+        if self.max_barrier_m >= self.range_m or self.min_beyond_m >= self.range_m or self.min_pocket_m >= self.range_m:
+            raise ValueError("max_barrier_m, min_beyond_m and min_pocket_m must be under range_m")
         if int(self.memory_actions) < 1:
             raise ValueError("memory_actions must be at least 1")
 
@@ -138,7 +148,7 @@ class EscapeProbe:
 
     # -- the probe -------------------------------------------------------------
     def candidates(self, obs, world) -> List[dict]:
-        """Every turn heading worth a step, best first: thin band, much floor beyond, few turns to face it."""
+        """Every turn heading worth a step, best first: thin band with much floor beyond, or a long free run; few turns to face it."""
         p, s = self.policy, self.settings
         spec = p.episode.action_spec
         turn = spec.turn_angle_rad
@@ -150,12 +160,15 @@ class EscapeProbe:
             offset = k if k <= turns // 2 else k - turns          # signed turns from the current yaw
             heading = normalize_angle(obs.pose.yaw + offset * turn)
             pocket, barrier, beyond = ray_profile(world, xy, heading, skip, s.range_m)
-            if barrier > s.max_barrier_m or beyond < s.min_beyond_m or self._remembered(obs, world, heading):
+            thin = barrier <= s.max_barrier_m and beyond >= s.min_beyond_m
+            open_run = pocket >= s.min_pocket_m
+            if (not thin and not open_run) or self._remembered(obs, world, heading):
                 continue
-            score = beyond - 2.0 * barrier - 0.05 * abs(offset)
+            gain = max(beyond - 2.0 * barrier if thin else -math.inf, pocket if open_run else -math.inf)
+            score = gain - 0.05 * abs(offset)
             out.append({"heading": float(heading), "turns": int(offset), "pocket_m": round(float(pocket), 2),
                         "barrier_m": round(float(barrier), 2), "beyond_m": round(float(beyond), 2),
-                        "score": float(score)})
+                        "rule": "thin_barrier" if thin else "open_run", "score": float(score)})
         out.sort(key=lambda c: -c["score"])
         return out
 
@@ -185,5 +198,5 @@ class EscapeProbe:
     def diagnostics(self):
         return {"settings": {"enabled": self.settings.enabled, "range_m": self.settings.range_m,
                              "max_barrier_m": self.settings.max_barrier_m, "min_beyond_m": self.settings.min_beyond_m,
-                             "memory_actions": self.settings.memory_actions},
+                             "min_pocket_m": self.settings.min_pocket_m, "memory_actions": self.settings.memory_actions},
                 "stats": dict(self.stats), "last": self.last}

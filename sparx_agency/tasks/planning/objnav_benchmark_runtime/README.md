@@ -824,12 +824,12 @@ and a pose, and answers in world coordinates.
 | `world_model/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run and off the agent's own trail, its capsule margin (`stair_margin_m`, 0.45 m) bounded per flight so it never splits a body-passable corridor (`adaptive_capsule`), its storey end cut square so no half-disc of floor in front of the first riser is drawn (`_square_foot`, Darden 2026-10-21); excluded from the room partition, from peek viewpoints and from a peek-only A* copy |
 | `world_model/stair_terrain.py`, `world_model/stair_grid.py` | RGB-D support surfaces for the observed stair source |
 | `exploration/exploration_fallback.py` | Where every failed plan, model or decision lands: the best floor-wide exit (object shadows and frontiers of rooms the target cannot be in wait behind it), the stairs by the explicit fallback rule, the demoted frontiers, a retired frontier, a relocation, a footing sweep, an escape probe -- a move, never an idle spin; failure records and service back-off |
-| `exploration/escape_probe.py` | The fallback's rung before its idle turn: boxed in on the inflated map, the grid read without inflation along every turn heading, one turn or one forward step toward the thinnest occupied band with the most floor beyond it; the simulator decides, a blocked heading is remembered per cell |
+| `exploration/escape_probe.py` | The fallback's rung before its idle turn: boxed in on the inflated map, the grid read without inflation along every turn heading, one turn or one forward step toward the thinnest occupied band with the most floor beyond it, or (since 2026-10-25) along the longest free run of at least two steps whatever closes it; the simulator decides, a blocked heading is remembered per cell |
 | `exploration/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
 | `exploration/path_glances.py`, `exploration/doorway_peek.py`, `exploration/doorway_candidates.py` | Informative glances along a route; the one-shot doorway inspection and its candidates |
 | `exploration/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
 | `multifloor/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied, and `_navigate` refusing a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`); inert when traversal is allowed |
-| `multifloor/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock |
+| `multifloor/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock. With traversal forbidden, a height departure the atlas reports (a flight walked down by a committed route, three treads before the atlas calls it one) is walked back up the storey trail (`_retreat_to_storey`, `retreat_started` / `retreat_ended` events, bounded by `multifloor.retreat_actions`) -- until 2026-10-25 it was an `AttributeError` on every remaining action of the episode |
 | `multifloor/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
 | `multifloor/stair_ground_truth.py`, `multifloor/floor_decision.py`, `multifloor/ground_truth_traversal.py`, `multifloor/stair_sightings.py` | Ground-truth stairs (the `stair_source: "ground_truth"` ablation): the navmesh connectors as the policy reads them, the fallback rule's up/down choice, the committed polyline traversal, the perfect stair detector |
 | `world_model/stair_terrain.py`, `world_model/stair_grid.py`, `multifloor/stair_traversal.py` | Observed stairs (the default since 2026-10-21): measured support surfaces, step-connected candidate paths rising `stair_min_rise_m` in a flight's profile (`stair_profile`: `stair_min_risers` risers of `stair_riser_min_m`-`max_step_m`, treads at most `stair_max_tread_m`) -- the portals the capsule masks under the benchmark's confinement -- and, with traversal allowed, native-heading safety checks and the committed transition lifecycle |
@@ -1766,8 +1766,9 @@ never labels, so the bed, the desks and the wardrobe of that bedroom were
 
 **Distances are measured the way A\* flies them** (since 2026-10-05).
 The planner plans at the preferred standoff (`preferred_clearance_m`,
-0.30 m) and relaxes to the body radius (0.18 m) only when nothing else
-gets through; the frontier inventory and the RPT* instance used to
+0.30 m) and relaxes to the floor rung (`RPTSettings.min_clearance_m`,
+0.25 m since 2026-10-25; the body radius, 0.18 m, before) only when nothing
+else gets through; the frontier inventory and the RPT* instance used to
 measure every distance on the body-radius graph, so a threshold 3.5 m
 away through a 0.5 m squeeze read as 3.5 m while the route around the
 squeeze was 12.5 m (Hanson, actions 166-196: a 30-action approach bound
@@ -1786,7 +1787,17 @@ safest feasible route first" is right for an aircraft; a ground agent that
 walks 12.7 m round a room because a 0.5 m pinch on the 7.5 m way read as
 0.25 m short of its standoff (Corozal/000076, actions 394-486: a committed
 route through unvisited space replaced by one back through visited rooms)
-is not safer, only late.
+is not safer, only late. **The floor rung is 0.25 m, not the body radius**
+(since 2026-10-25, `RPTSettings.min_clearance_m`, also the "passable" map
+every count, entry and frontier is measured on): on the 0.1 m grid the body
+radius admitted a 0.4 m gap, and HM3D moves the agent without sliding
+(`allow_sliding: false`, unlike Gibson) -- a 0.36 m body with a 30-degree
+heading grid cannot thread one without a lateral touch, and a touch refuses
+the whole step. 00824/000066 walked a route between a bed and a dresser
+4-5 cells apart and spent 460 actions wedged there, fencing itself in with
+its own bump marks. A 0.5 m gap (five free cells) is still a passage; the
+cells the body has stood on this storey are free for planning whatever a
+frame or a bump wrote there (`RPTSearchPolicy._walked_passable`).
 
 Steps 2–6 run on the action a room's turn ends, so a released room is
 replaced by a transit at once -- never by a throwaway floor-wide route. A
@@ -1883,8 +1894,20 @@ Every way the decision pipeline can fail lands in one place,
    still unknown space (a goal under the agent's feet is not retired but
    unreachable by construction: the converter has no action for a waypoint
    inside its arrival tolerance, and would spend an idle turn on it);
+4b. a **squeeze** (since 2026-10-25, `ExplorationFallback._squeeze`): the
+   frontier goals reachable at the body radius alone, routed by the policy's
+   `squeeze_planner` (the planner with the body radius as its floor rung, 0.18 m
+   under the 0.25 m everything above is measured at). A doorway the depth map
+   draws 0.4 m wide -- walked on the way in -- closes a whole wing at the rung
+   (00835/000064: five frontier goals a squeeze away, 458 relocations instead);
+   the target closing's standoff rings try the same planner before the one
+   through the unknown;
 5. a **relocation** to the farthest reachable known cell, for a vantage point
-   the map may show a frontier from;
+   the map may show a frontier from -- never one within `relocation_revisit_m`
+   (1.0 m) of a vantage point already walked to during the current run of
+   fallback actions (since 2026-10-25: a closed pocket's two ends were
+   relocated between 458 times in 00835/000064 while the rungs below never
+   got a turn);
 6. a **footing sweep** (since 2026-10-05) when nothing on the observed map is
    reachable and at least `footing_unknown_fraction` (0.25) of the cells
    within `footing_radius_m` (1.2 m) of the agent are unknown: an agent that
@@ -1900,7 +1923,11 @@ Every way the decision pipeline can fail lands in one place,
    the first occupied band, and the free or unknown floor beyond it. A heading
    whose band is at most `max_barrier_m` (0.4 m) thick with at least
    `min_beyond_m` (0.5 m) of floor beyond it is a candidate, scored by the
-   floor beyond minus twice the band minus the turns to face it; the best gets
+   floor beyond minus twice the band minus the turns to face it -- and so is
+   (since 2026-10-25) a heading with at least `min_pocket_m` (0.5 m, two
+   steps) of free floor BEFORE anything occupied, whatever lies beyond,
+   scored by that run: a wedge whose open side ends at a bed too thick to
+   probe had no candidate at all (00824/000066, 450 actions); the best gets
    one turn toward it or one forward step along it, and **the simulator
    decides**: a step that moves re-maps the pocket and the ordinary rungs take
    over, a step the simulator blocks is remembered for that cell and heading
@@ -2415,9 +2442,10 @@ habitat-lab's ObjectNav actually runs. Whichever an adapter picks,
 ### Explicit embodiment and method settings
 
 `RPTSettings` (`core/planning/object_search/settings.py`) carries `body_height_m`,
-`body_radius_m`, `preferred_clearance_m` and `stop_distance_m`; each task's
-`run.py` sets them from its protocol's agent, never from a benchmark name. Physical
-inflation is never relaxed below the supplied body radius. The stop distance
+`body_radius_m`, `preferred_clearance_m`, `min_clearance_m` and `stop_distance_m`;
+each task's `run.py` sets the embodiment from its protocol's agent, never from a
+benchmark name. Physical inflation is never relaxed below `min_clearance_m`
+(0.25 m), itself never below the supplied body radius. The stop distance
 is a method choice, not an override of the evaluator's success definition.
 
 `RPTSearchPolicy` records its planner, loop, fallback, sweep, door, room-label

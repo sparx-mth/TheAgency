@@ -23,6 +23,7 @@ from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSo
 from sparx_agency.core.planning.exploration.view_gain import camera_rotation_turns
 from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCON_SOURCE
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
+from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.params import WeightedAStarParams
@@ -67,9 +68,10 @@ class RPTSearchPolicy:
             self.name = "sparx-rpt-llm-falcon-planar"
         self.converter_params = ActionConverterParams(heading_hysteresis_deg=1.0)
         # A ground agent squeezes rather than detours: a route at the preferred standoff more than
-        # ``detour_factor`` times the body-radius route is a detour, and the squeeze is walked.
+        # ``detour_factor`` times the squeeze route is a detour, and the squeeze is walked -- down to
+        # ``min_clearance_m``, not the body radius (see RPTSettings: HM3D refuses any contact).
         self.planner_params = WeightedAStarParams(
-            inflate_radius_m=s.preferred_clearance_m, inflate_floor_m=s.body_radius_m,
+            inflate_radius_m=s.preferred_clearance_m, inflate_floor_m=s.min_clearance_m,
             detour_factor=s.detour_factor,
             unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
             start_skip_m=0.0, search_margin_m=s.map_size_m)
@@ -229,6 +231,9 @@ class RPTSearchPolicy:
         # cells passable at a price (``target_closing.through_unknown``), for the standoff ring alone.
         self.optimistic_planner = WeightedAStarPlanner2D(replace(
             self.planner_params, unknown_blocked=False, unknown_cost=s.target_closing.through_unknown_cost))
+        # The exploration fallback's squeeze rung (since 2026-10-25): the same planner relaxing to the BODY radius,
+        # for the frontier goals nothing reaches at ``min_clearance_m`` -- a doorway the map draws 0.4 m wide.
+        self.squeeze_planner = WeightedAStarPlanner2D(replace(self.planner_params, inflate_floor_m=s.body_radius_m))
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
         self.fallback = ExplorationFallback(self, self.fallback_settings)
         # The fallback's rung before its idle turn: boxed in on the inflated map, one
@@ -314,9 +319,13 @@ class RPTSearchPolicy:
             self._route = self._goal = None
             return
         if self.building and self.building.traversing:
-            self._blocked += 1
             self.building.blocked(observation)
-            return
+            if self.building.transition is not None:
+                self._blocked += 1
+                return
+            # No traversal of ours (the atlas alone reports the departure): the probe's memory and the
+            # bump marks apply as on the storey, or the escape rung pushes into one wall for the rest of
+            # the episode (00873/000002, 2026-10-25: 473 refused steps at one cell).
         self.mapping.notify_blocked(observation, self.episode.action_spec.forward_step_m)
         self._blocked += 1
         self.escape.note_blocked(observation)
@@ -610,7 +619,7 @@ class RPTSearchPolicy:
         return mask if mask.any() else None
 
     def navigation_cost(self, world):
-        """The common clearance-qualified map used by counts, entries and routes (passable at the body radius).
+        """The common clearance-qualified map used by counts, entries and routes (passable at the planner's floor standoff).
 
         Cached on the planner's distance fields for the map in force: the
         policy, the loop and the fallback all ask for it on one action, the
@@ -621,7 +630,7 @@ class RPTSearchPolicy:
         fields = self.planner.fields_for(world)
         if cached is not None and cached[0] is fields:
             return cached[1]
-        cost = assemble_cost_grid(fields, self.planner_params, self.settings.body_radius_m)[0]
+        cost = assemble_cost_grid(fields, self.planner_params, self.planner_params.inflate_floor_m)[0]
         self._navigation_cost_cache = (fields, cost)
         return cost
 
@@ -639,16 +648,48 @@ class RPTSearchPolicy:
         return discover(self, obs, world, cost)
 
     def _confine(self, observation, world):
-        """The world every decision plans on: seen stairs and observed drops impassable while traversal is forbidden.
+        """The world every decision plans on: seen stairs and observed drops impassable while traversal is forbidden, the trail free.
 
         Stored back as the floor's world so the display panels, the peek
         copy and the terrain all read the same map; the observed log-odds
         grid underneath is untouched and rebuilds the world next action.
         """
+        original = world
+        world = self._walked_passable(observation, world)
         confined = self.floor_guard.observe(observation, world)
-        if confined is not world:
+        if confined is not original:
             self.mapping.worlds[self.mapping.floor_id] = confined
         return confined
+
+    def _walked_passable(self, observation, world):
+        """Cells the body has stood on this storey are free for planning, whatever a depth frame painted there.
+
+        The observed map clears the footprint under the agent on every
+        action except where the cell already reads occupied, and a forward
+        step the simulator refused writes an occupied cell a quarter metre
+        ahead -- on the very cells the agent just walked when, as in HM3D
+        without sliding, the refusal was a lateral touch and not a wall
+        ahead (00824/000066, 2026-10-25: the agent's own bump marks fenced
+        it into the pocket it had entered on foot, 460 actions). The trail
+        (the sight ledger's poses, one cell about each) is the one fact no
+        ray or bump outvotes. The sticky bars of repeated bumps lie two to
+        three cells ahead of where the body stood and are untouched unless
+        the body later stands on them -- in which case they were wrong.
+        """
+        sight = getattr(self, "sight", None)
+        if sight is None:
+            return world
+        occupied = world.grid == world.values.occupied
+        if not occupied.any():
+            return world
+        walked = sight.walked_mask(world, self.mapping.floor_id, world.resolution,
+                                   include=[(float(observation.pose.x), float(observation.pose.y))])
+        clear = walked & occupied
+        if not clear.any():
+            return world
+        grid = world.grid.copy()
+        grid[clear] = world.values.free
+        return OccupancyGrid2D(grid, world.params, values=world.values)
 
     def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None):
         planner = self.planner if planner is None else planner
@@ -673,7 +714,7 @@ class RPTSearchPolicy:
         self._route, self._goal = self.route_memory.path, self.route_memory.goal
         info = {"route": self.route_memory.reason, "kind": kind}
         if planner is not self.planner:
-            info["through_unknown"] = True
+            info["squeeze" if planner is getattr(self, "squeeze_planner", None) else "through_unknown"] = True
         if self.route_memory.reason == "new_goal_or_invalid_route":
             info["route_replaced"] = self.route_memory.replaced
         return NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)

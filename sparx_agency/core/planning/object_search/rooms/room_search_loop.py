@@ -3173,7 +3173,7 @@ class RoomSearchLoop:
         data[others] = world.values.unknown
         confined = OccupancyGrid2D(data, world.params, values=world.values)
         confined_cost = assemble_cost_grid(p.planner.fields_for(confined), p.planner_params,
-                                           p.settings.body_radius_m)[0]
+                                           p.planner_params.inflate_floor_m)[0]
         p.telemetry.latencies["room_confinement"].append((time.monotonic() - started) * 1000)
         self.stats["confined_actions"] += 1
         return confined, confined_cost

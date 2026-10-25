@@ -18,7 +18,7 @@ class GroundMotion:
         self.world = world
         p = self.policy
         fields = p.planner.fields_for(world)
-        self.topology_cost = assemble_cost_grid(fields, p.planner_params, p.settings.body_radius_m)[0]
+        self.topology_cost = assemble_cost_grid(fields, p.planner_params, p.planner_params.inflate_floor_m)[0]
         cost = self.topology_cost.copy()
         cost[fields.soft_clearance <= p.settings.body_radius_m] = np.inf
         x, y = world.world_to_grid(observation.pose.x, observation.pose.y)

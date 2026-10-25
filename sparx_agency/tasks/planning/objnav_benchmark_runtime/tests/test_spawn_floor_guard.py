@@ -7,6 +7,7 @@ import math
 import numpy as np
 import pytest
 
+from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
 from sparx_agency.core.planning.object_search.settings import RPTSettings
@@ -342,20 +343,24 @@ def along_the_wall(x):
 
 def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_the_wall_passable():
     """Markleeville: the only way from the south of the room to the north ran between the stairwell and the
-    wall, 0.55 m wide; the 0.6 m capsule left 0.25 m of it. Here the flight stands 0.7 m from room A's east
-    wall with a cabinet run closing its west side, so that corridor is the only way north."""
+    wall, 0.55 m wide; the 0.6 m capsule left 0.25 m of it. Here the flight stands 0.9 m from room A's east
+    wall with a cabinet run closing its west side, so that corridor is the only way north (0.7 m until
+    2026-10-25: the 0.4 m the body-radius capsule then left is under the planner's floor rung of 0.25 m --
+    a squeeze a non-sliding body cannot walk -- and is no corridor to spare any more)."""
     from scipy import ndimage
     from sparx_agency.core.planning.object_search.world_model.peek_stairs import _passable
-    policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(4.8))     # 0.7 m from the wall
-    world.grid[5:55, 30:46] = world.values.occupied                                 # x 3.0-4.6, y 0.5-5.5: no way round
+    policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(4.6))     # 0.9 m from the wall
+    world.grid[5:55, 30:44] = world.values.occupied                                 # x 3.0-4.4, y 0.5-5.5: no way round
     obs = obs_at(episode, 0, (5.25, 0.7))                                            # at the corridor's south end
     confined = policy.floor_guard.observe(obs, world)
     margins = policy.floor_guard.stair_margins_m
     preferred = policy.settings.stair_margin_m
-    assert list(margins.values()) == [0.3] and 0.3 < preferred, "five cells asked for, three drawn: the widest that leaves a body-wide corridor"
-    body = int(math.ceil(policy.settings.body_radius_m / world.resolution))
+    # Five cells asked for, three drawn: the widest that leaves a corridor the planner's floor rung
+    # (``min_clearance_m`` 0.25 m, three cells; the body radius alone until 2026-10-25) can stand in.
+    assert list(margins.values()) == [0.3] and 0.3 < preferred, "five cells asked for, three drawn: the widest that leaves a rung-wide corridor"
+    rung = int(math.ceil(policy.planner_params.inflate_floor_m / world.resolution))
     free = confined.grid == world.values.free
-    passable = _passable(free, ~free, body)
+    passable = _passable(free, ~free, rung)
     labels, _ = ndimage.label(passable, structure=np.ones((3, 3)))
     south, north = world.world_to_grid(5.3, 0.5), world.world_to_grid(5.3, 4.8)
     assert labels[south[1], south[0]] and labels[south[1], south[0]] == labels[north[1], north[0]], \
@@ -418,3 +423,87 @@ def test_the_drop_threshold_is_a_knob_at_the_atlas_tolerance_and_a_flights_floor
     tight.mapping._anchor = 0.0
     tight.floor_guard.observe(frame_of(-0.20, 1), world2)
     assert tight.floor_guard.stats["drop_cells"] > 0, "0.15: the storey's own floor, 0.2 m under the pose, is a drop"
+
+
+# -- a flight walked down by accident (00814/000009, 00873/000049, 00873/000002, 2026-10-25) -----------------
+def test_a_flight_walked_down_with_traversal_forbidden_is_walked_back_up_the_trail_not_crashed_on():
+    """Observed stairs, traversal forbidden: the atlas alone says the agent is off its storey after three treads.
+
+    Until 2026-10-25 ``MultiFloorSearch.plan`` dereferenced the traversal it
+    had refused to start, on every action for the rest of the episode (417,
+    108 and 941 recorded decision failures in the three HM3D runs). Now the
+    coordinator walks the storey trail back; the atlas records a source
+    return, and the search resumes.
+    """
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas = policy.building, policy.mapping.atlas
+    assert building.ground_truth is None and not building.allowed
+    step = 0
+    for i in range(6):                                                    # along the storey
+        policy.plan(at(episode, step, 1.0 + 0.25 * i, 1.0, depth=3.0)); step += 1
+    for z in (-0.18, -0.35, -0.52):                                       # three treads down a flight the route led onto
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=z, depth=3.0)); step += 1
+    assert atlas.in_transition and building.transition is None and building.traversing
+    command = policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=-0.52, depth=3.0)); step += 1
+    assert not policy.fallback.failures, "no decision failure: the missing traversal is not dereferenced"
+    assert building.phase == "RETREAT" and command.info["kind"] == "RETREAT" and command.info["phase"] == "RETREAT"
+    assert command.waypoints[0] == pytest.approx((1.0 + 0.25 * (step - 1), 1.0))
+    assert list(command.waypoints[-1]) == pytest.approx([1.0, 1.0]), "back along the trail to its earliest storey pose"
+    started = [e for e in building.events if e["event"] == "retreat_started"]
+    assert len(started) == 1 and started[0]["height_m"] == pytest.approx(-0.52) and started[0]["trail_points"] == 6
+    assert policy.filter_action(at(episode, step, 1.0 + 0.25 * step, 1.0, z=-0.52), DiscreteAction.MOVE_FORWARD) == DiscreteAction.MOVE_FORWARD, \
+        "the terrain cannot veto a step onto ground the body stood on"
+    x = 1.0 + 0.25 * step
+    for z in (-0.35, -0.18, 0.0, 0.0, 0.0, 0.0, 0.0):                     # up the treads and onto the plane
+        x -= 0.25
+        policy.plan(at(episode, step, x, 1.0, z=z, depth=3.0)); step += 1
+    assert not atlas.in_transition and atlas.completion_reason == "source_platform_returned"
+    assert building._retreat is None and building.phase == "SEARCH" and not building.traversing
+    ended = [e for e in building.events if e["event"] == "retreat_ended"]
+    assert len(ended) == 1 and ended[0]["reason"] == "source_platform_returned"
+    assert not policy.fallback.failures
+    # A retreat that regains nothing within the budget is given up once, and the search goes on without a crash.
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building = policy.building
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    policy.plan(at(episode, 1, 1.25, 1.0, depth=3.0))
+    for step in range(2, 2 + building.params.retreat_actions + 2):
+        command = policy.plan(at(episode, step, 1.75, 1.0, z=-0.6, depth=3.0))
+    assert [e["reason"] for e in building.events if e["event"] == "retreat_given_up"] == ["retreat_actions exhausted off the storey plane"]
+    assert command.info["kind"] != "RETREAT" and not policy.fallback.failures
+
+
+def test_a_one_pose_trail_is_extended_past_its_last_point_and_the_return_is_confirmed_at_the_plane_height():
+    """00873/000002 as replayed on 2026-10-25 with the retreat alone: the spawn was a landing and the first step a
+    tread, so the storey trail was one pose; the retreat called it spent 0.25 m short of the plane, the atlas kept
+    waiting for three translated samples that a blocked agent never gave, and `notify_blocked` -- short-circuited
+    while "traversing" -- let the escape rung push into one wall 473 times. Now the trail is extended two steps
+    past its last pose, the return is confirmed the action the body is back at the plane height, and a refused
+    step is remembered by the probe and written to the map as on the storey."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas = policy.building, policy.mapping.atlas
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    policy.plan(at(episode, 1, 1.0, 1.0, yaw=0.5, depth=3.0))
+    step = 2
+    for z in (-0.18, -0.35, -0.52):
+        policy.plan(at(episode, step, 1.0 + 0.25 * (step - 1), 1.0, z=z, depth=3.0)); step += 1
+    command = policy.plan(at(episode, step, 1.75, 1.0, z=-0.52, depth=3.0)); step += 1
+    assert command.info["kind"] == "RETREAT" and list(command.waypoints[-1]) == pytest.approx([1.0, 1.0])
+    x = 1.75
+    for z in (-0.35, -0.18):
+        x -= 0.25
+        command = policy.plan(at(episode, step, x, 1.0, z=z, depth=3.0)); step += 1
+        assert command.info["kind"] == "RETREAT", "0.25 m from the one trail pose and still a tread down: not spent"
+    assert command.waypoints[-1][0] < 1.0, "the goal lies past the trail's last pose, onto the storey"
+    assert not [e for e in building.events if e["event"] == "retreat_given_up"]
+    x -= 0.25
+    command = policy.plan(at(episode, step, x, 1.0, z=-0.02, depth=3.0)); step += 1
+    assert not atlas.in_transition and atlas.completion_reason == "source_platform_returned"
+    assert building.phase == "SEARCH" and command.info["kind"] != "RETREAT"
+    assert [e["event"] for e in building.events if e["event"].startswith("retreat")] == ["retreat_started", "retreat_ended"]
+    # A refused step on the storey after the return is the probe's and the map's business again.
+    obs = at(episode, step, x, 1.0, z=-0.02, depth=3.0)
+    policy.plan(obs)
+    policy.notify_blocked(obs)
+    assert policy.escape.stats["blocked"] == 1 and policy.mapping.integrity()[0]["bumps"] == 1
+    assert not policy.fallback.failures
