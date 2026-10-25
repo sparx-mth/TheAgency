@@ -34,8 +34,8 @@ def run_smoke(args):
     from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.robothor.protocol import PROTOCOL
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.robothor.run import _simulator, _gpu_gate, embodiment
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy, RPTSettings
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
+    from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import source_fingerprint
 
     if not args.scene.startswith("FloorPlan_Train") or not 1 <= args.steps <= 50:

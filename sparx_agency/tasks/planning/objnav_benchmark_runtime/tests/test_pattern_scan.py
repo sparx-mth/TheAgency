@@ -7,8 +7,8 @@ import pytest
 
 from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.pattern_scan import PatternScanSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
+from sparx_agency.core.planning.object_search.rooms.pattern_scan import PatternScanSettings
+from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_explore_visit import walk
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (

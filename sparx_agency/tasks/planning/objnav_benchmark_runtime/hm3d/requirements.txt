@@ -1,0 +1,5 @@
+# HM3D adapter extras, on top of ../requirements.txt.
+# Install habitat-sim in its own conda environment; it is not pip-installable
+# into the numpy-only test environment, and nothing here needs habitat-lab.
+habitat-sim==0.2.4
+numpy-quaternion

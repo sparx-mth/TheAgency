@@ -37,7 +37,7 @@ class GibsonEnv(ObjNavEnv):
         self._camera, self._actions = protocol.camera(), protocol.actions()
         self._simulator = simulator if simulator is not None else HabitatRGBDSimulator(
             self._camera, self._actions, protocol.agent_radius_m, protocol.allow_sliding, gpu_device,
-            depth_holes=protocol.depth_holes())
+            height_m=protocol.agent_height_m, depth_holes=protocol.depth_holes())
         self._episode = None
         self._steps, self._stopped = 0, False
         self.sentinel_start_ids = []

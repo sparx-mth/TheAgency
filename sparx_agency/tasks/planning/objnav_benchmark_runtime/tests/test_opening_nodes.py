@@ -18,11 +18,11 @@ import pytest
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH, SELECT, TRANSIT, UNREACHABLE
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.floor_panels import FloorPanels
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import (
+from sparx_agency.core.planning.object_search.rooms.opening_nodes import (
     OPENING_NODE_BASE, OpeningRegistry, OpeningSettings, detect_openings, is_opening_node, opening_index_of,
     opening_node_id, unknown_heading)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_nodes import is_stair_node, stair_node_id
+from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
+from sparx_agency.core.planning.object_search.rooms.stair_nodes import is_stair_node, stair_node_id
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import _name, render_search_panel
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
     IN_A, IN_B, OCC, UNK, NamingLLM, loop_policy, obs_at, see, two_room_world)
@@ -414,7 +414,7 @@ def test_the_stair_exclusion_counts_only_the_masked_cells_on_the_exits_unknown_s
     way, was struck off the openings for the whole episode by the omnidirectional test."""
     from types import SimpleNamespace
     from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import beyond, near_stair_mask
+    from sparx_agency.core.planning.object_search.rooms.opening_nodes import beyond, near_stair_mask
     world = OccupancyGrid2D(np.zeros((100, 100), np.int8), OccupancyGrid2DParams(0.1, -5.0, -5.0))
     mask = np.zeros((100, 100), bool)
     gx, gy = world.world_to_grid(-0.9, 1.2)                        # the flight: north-west of the door, 1.5 m off
@@ -534,7 +534,7 @@ def test_a_confirmed_landmark_of_the_targets_class_is_a_node_at_a_fixed_probabil
         policy.landmarks.observe("bed", (9.5, 4.0), frame_id=frame, radius_m=0.8)             # not the target's class
     assert sorted(lm.class_name for lm in policy.landmarks.confirmed()) == ["bed", "chair"]
     cost = policy.navigation_cost(world)
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import LANDMARK, LANDMARK_INDEX_BASE, landmark_openings
+    from sparx_agency.core.planning.object_search.rooms.opening_nodes import LANDMARK, LANDMARK_INDEX_BASE, landmark_openings
     nodes = landmark_openings(policy, obs_at(episode, 0, IN_A), world, cost, policy.loop.settings.openings, set())
     [node] = nodes
     lid = next(lm.id for lm in policy.landmarks.confirmed() if lm.class_name == "chair")
@@ -724,7 +724,7 @@ def test_a_completed_look_covers_the_frontier_it_reveals_through_the_same_door()
     """Allensville toilet run: a peek reveals 1-3 m of floor beyond the threshold, the frontier re-snaps
     there, and the registry issued a new id for the same doorway -- twenty peeks. A seed inside the cone
     a completed look swept is covered; one behind the agent, or beyond the looked range, is not."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OpeningRegistry
+    from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningRegistry
     registry = OpeningRegistry(match_m=1.0, done_m=1.0)
     registry.mark_peeked(0, (5.0, 5.0), step=40, heading=0.0, cone_rad=math.radians(70.0), looked_m=3.0)
     assert registry.peeked(0, (5.5, 5.2)), "within done_m, as before"
@@ -746,7 +746,7 @@ def test_a_target_landmark_seen_once_at_the_closings_confidence_is_a_node_a_weak
     """Wiconisco/000014 (2026-10-14): the toilet seen once at 0.54 from 3.2 m was fused as a landmark with one
     observation, which the map does not confirm; no `T` node, and the search went elsewhere for 65 actions. A
     single sighting at ``landmark_sighting_confidence`` (the closing's 0.50) is a node; a 0.35 glimpse is not."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import LANDMARK, landmark_openings, target_landmarks
+    from sparx_agency.core.planning.object_search.rooms.opening_nodes import LANDMARK, landmark_openings, target_landmarks
     policy, episode, world, rooms, reasoned = opening_policy(order=(1, 0))
     chair = (8.5, 1.5)
     weak = (8.5, 3.5)

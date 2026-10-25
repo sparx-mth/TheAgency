@@ -19,14 +19,14 @@ import pytest
 
 from sparx_agency.core.mapping.topology.room_classifier import RoomLabel
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
-from sparx_agency.core.planning.exploration.floor_atlas import FloorAtlas, MultiFloorParams, ObservedFloor
+from sparx_agency.core.localization.floor_atlas import FloorAtlas, MultiFloorParams, ObservedFloor
 from sparx_agency.core.planning.exploration.object_search_supervisor import RoomFacts
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_decision import (
+from sparx_agency.core.planning.object_search.multifloor.floor_decision import (
     DecisionSettings, approach_points, decide_floor_change, floor_at, floor_worth_visiting, stair_cost_m)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import RPTSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_nodes import (
+from sparx_agency.core.planning.object_search.settings import RPTSettings
+from sparx_agency.core.planning.object_search.rooms.stair_nodes import (
     STAIR_NODE_BASE, is_stair_node, portal_id_of, search_context, stair_node_id, stair_options, storey_position,
     summarise_floor)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy

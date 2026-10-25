@@ -36,7 +36,8 @@ def render_replay(run_dir, subframes=4):
     used = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"], text=True)
     if int(used.strip()) > 512:
         raise RuntimeError("Wait for the evaluation to release its rendering GPU")
-    bridge = HabitatRGBDSimulator(PROTOCOL.camera(), PROTOCOL.actions(), PROTOCOL.agent_radius_m, PROTOCOL.allow_sliding)
+    bridge = HabitatRGBDSimulator(PROTOCOL.camera(), PROTOCOL.actions(), PROTOCOL.agent_radius_m, PROTOCOL.allow_sliding,
+                                  height_m=PROTOCOL.agent_height_m)
     outputs = []
     try:
         for trajectory in sorted((root / "recordings").glob("*/trajectory.csv")):

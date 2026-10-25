@@ -16,7 +16,7 @@ from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosingSettings
+from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 
 
@@ -302,14 +302,14 @@ def test_bbox_servo_does_not_interrupt_astar_corner_heading(monkeypatch):
 
 @pytest.mark.parametrize("snap", [(float("nan"), 0, 0), (-2, 4, -1), (-20, 3, -1)])
 def test_navmesh_rejects_invalid_remote_or_other_floor_snaps(snap):
-    sim = HabitatRGBDSimulator(None, None, .18, True)
+    sim = HabitatRGBDSimulator(None, None, .18, True, height_m=.88)
     sim._sim = SimpleNamespace(pathfinder=SimpleNamespace(snap_point=lambda point: snap))
     assert sim.project_target((1, 2, 3)) is None
 
 
 def test_navmesh_round_trip_enu_native_coordinates():
     received = []
-    sim = HabitatRGBDSimulator(None, None, .18, True)
+    sim = HabitatRGBDSimulator(None, None, .18, True, height_m=.88)
     sim._sim = SimpleNamespace(pathfinder=SimpleNamespace(snap_point=lambda point: received.append(point) or point))
     assert sim.project_target((1, 2, 3)) == (1, 2, 3)
     np.testing.assert_allclose(received[0], [-2, 3, -1])
@@ -692,7 +692,7 @@ def test_a_confirmed_object_of_another_class_at_the_anchor_is_a_second_object_an
     p.closing.observe(obs)                                          # the policy's own order: perceive, then the closing
     assert p.closing.active and p.closing.locked and p.closing.phase != "RELEASED"
     assert p.closing.map_releases == 0 and p.closing.last_release is None and p.closing.rejected == []
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception_cycle import contradicted_by_map
+    from sparx_agency.core.planning.object_search.perception.cycle import contradicted_by_map
     assert contradicted_by_map(p, "chair", anchor) is None, "no class vote, no contradiction"
     # The library's voting mode keeps the historical release available for whoever wires it.
     from sparx_agency.core.mapping.objects.landmarks import ObjectLandmarkMap
@@ -1641,7 +1641,7 @@ def arrived_at_a_kept_standoff(monkeypatch, **closing):
     """A chair locked two metres ahead (standoff goal at x = 1.35); the memory then refined to 2.3 m -- the goal,
     0.95 m from it, is kept -- and the agent stands at (1.15, 0): 0.20 m from the goal (inside the executor's
     0.25 m arrival tolerance) and 1.15 m from the memory, beyond ``terminal_distance_m``."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_memory import TargetMemory3D
+    from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
     p, ep, _ = locked_at_two_metres(monkeypatch, **closing) if closing else locked_at_two_metres(monkeypatch)
     goal = p.closing.path.goal_xyz
     assert goal is not None and abs(goal[0] - 1.35) < 0.05

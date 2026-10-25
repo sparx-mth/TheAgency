@@ -8,8 +8,8 @@ import pytest
 
 from sparx_agency.core.mapping.topology.room_classifier import RoomLabel
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings, doorway_candidates
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import peek_planning_world, stair_peek_mask
+from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings, doorway_candidates
+from sparx_agency.core.planning.object_search.world_model.peek_stairs import peek_planning_world, stair_peek_mask
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_discovery import peek_rig, refresh
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_coverage import coverage_rig
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import IN_A, obs_at

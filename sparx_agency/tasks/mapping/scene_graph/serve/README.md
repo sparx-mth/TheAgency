@@ -181,7 +181,7 @@ Failures are recorded, not replaced with a successful weaker configuration.
 protocol's JPEG frame (base64) plus the boxes to segment and returns one
 lossless PNG mask per box **in box order**, so the client lines masks up with
 its detections by position (`segmentation_contract.py`; the runtime client is
-`objnav_benchmark_runtime/methods/segmentation.HttpSegmenter`). It is a
+`objnav_benchmark_runtime/services/http_segmenter.HttpSegmenter`). It is a
 **separate process on its own port** on purpose: the detector service pins
 its identity per run and every client refuses drift, so a segmenter inside
 it would have changed that identity for every run, segmentation on or off.

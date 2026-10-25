@@ -9,8 +9,8 @@ import numpy as np
 
 from sparx_agency.tasks.mapping.scene_graph.viz_canvas import compute_extent, world_to_px
 from sparx_agency.tasks.mapping.scene_graph.viz_render import render_scene
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import render_search_panel
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.discovery import SUSPENDED_PHASES
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import render_baseline_panel, render_search_panel
+from sparx_agency.core.planning.object_search.rooms.discovery import SUSPENDED_PHASES
 
 FRAME_SIZE = (1600, 900)
 #: The right-hand side of the frame: floor maps, then the search column.
@@ -202,6 +202,10 @@ def method_snapshot(policy):
     stair_boxes = list(getattr(building, "last_sightings", ()) or ()) if building is not None else []
     atlas = building.policy.mapping.atlas.diagnostics() if building else {}
     state = hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting")
+    explorer = getattr(policy, "explorer", None)
+    exploration = explorer.snapshot() if callable(getattr(explorer, "snapshot", None)) else None
+    if exploration is not None and hierarchy is None and supervisor is None:
+        state = "FALCON_" + str(exploration.get("mode", "idle")).upper()     # the goal-free baseline's explorer
     if getattr(policy, "_action_owner", None) in SUSPENDED_PHASES:
         state = policy._action_owner
     if building and building.phase != "SEARCH":
@@ -232,6 +236,7 @@ def method_snapshot(policy):
             "rooms": len(graph.registry.rooms) if graph is not None else 0,
             "solver": str(solver.last.reason) if solver is not None else "not called",
             "fallback": policy.fallback.snapshot() if hasattr(policy, "fallback") and hasattr(policy.fallback, "snapshot") else {},
+            "exploration": exploration,
             "search": search_snapshot(policy)}
 
 
@@ -315,7 +320,12 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
         if len(points) >= 2:
             cv2.polylines(panel, [np.asarray(points, np.int32)], False, (255, 180, 0), 2, cv2.LINE_AA)
     frame[40:40 + MAP_PANEL[1], 640:640 + MAP_PANEL[0]] = panel
-    frame[40:40 + SEARCH_PANEL[1], 640 + MAP_PANEL[0]:] = render_search_panel(search, SEARCH_PANEL)
+    if not search and snapshot.get("exploration") is not None:
+        column = render_baseline_panel(dict(snapshot, pose=(observation.pose.x, observation.pose.y)),
+                                       observation.target_category, SEARCH_PANEL)
+    else:
+        column = render_search_panel(search, SEARCH_PANEL)
+    frame[40:40 + SEARCH_PANEL[1], 640 + MAP_PANEL[0]:] = column
     transition = snapshot.get("transition") or {}
     camera = snapshot.get("camera", {})
     _text(frame, "pitch %.0f deg down | %s | connector %s | %s" % (

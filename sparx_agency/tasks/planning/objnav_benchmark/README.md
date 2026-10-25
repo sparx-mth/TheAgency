@@ -13,9 +13,11 @@ It exits 1, and says why, unless the oracle scores SR 100% with no agent errors
 — so it can gate a scripted sweep. Results land in
 `~/objnav_benchmark/<benchmark>/<split>/<UTC stamp>/`.
 
-**Gibson real-simulator runs:** see the
-[`Gibson runtime runbook`](../objnav_benchmark_runtime/gibson/README.md).
-Optional Habitat/FMM/HTTP/LLM dependencies live in the sibling
+**Optional real-simulator integrations:** see the
+[`shared runtime runbook`](../objnav_benchmark_runtime/README.md), and the
+per-dataset runbooks for [Gibson](../objnav_benchmark_runtime/gibson/README.md)
+and [HM3D](../objnav_benchmark_runtime/hm3d/README.md).
+Optional Habitat/FMM/HTTP/LLM/recording dependencies live in the sibling
 `objnav_benchmark_runtime`, not in this numpy-only harness. That runtime
 composes the existing algorithms and calls this same runner/logger/scorer.
 
@@ -105,14 +107,20 @@ pairing is what lets a few hundred episodes separate them.
 
 ### Explicit alternative path accounting
 
-The default remains `path_length_dimension="3d"`, with no initial offset.
-SemExp's Gibson evaluator measures horizontal travel and starts its path
-accumulator at `1e-5 m`. Its caller passes `path_length_dimension="planar"`
-and `path_length_epsilon_m=1e-5` to `run_benchmark` (or `run_episode`), and
-records both in its run configuration. The independent observed-path check
-then uses the same declared convention; it is not disabled. Gibson also
-explicitly allows sliding and success without STOP at the step limit.
-Do not import these choices into the HM3D/MP3D defaults.
+The default remains `path_length_dimension="3d"`, with no initial offset and
+STOP required for success. An adapter whose published protocol differs can
+explicitly pass `path_length_dimension="planar"`, `path_length_epsilon_m`,
+`require_stop_for_success` and its measured kinematic tolerances. These choices
+belong to the adapter, not a universal benchmark default. Record all of them
+in run metadata. The independent observed-path cross-check remains enabled
+and uses exactly the declared convention. Shared runtime execution serializes
+these settings and checks them when resuming or validating a configuration lock.
+Concretely, SemExp's Gibson evaluator measures horizontal travel and starts its
+path accumulator at `1e-5 m`, allows sliding, and counts success without STOP at
+the step limit; its adapter passes `path_length_dimension="planar"` and
+`path_length_epsilon_m=1e-5` and records both. HM3D keeps the `3d` default with
+STOP required, as habitat-lab does. Do not import one dataset's choices into
+another's defaults.
 
 ## The results directory
 

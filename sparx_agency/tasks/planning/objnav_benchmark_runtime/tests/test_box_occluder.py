@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.box_occluder import depth_band_m, occluder_in_front
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import observed_objects
+from sparx_agency.core.mapping.objects.box_occluder import depth_band_m, occluder_in_front
+from sparx_agency.core.planning.object_search.perception.projection import observed_objects
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 
 #: The television's box of the recording (113 x 68 px, centred), the television at 4.1 m, the rail at 1.33 m.

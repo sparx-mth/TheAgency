@@ -18,7 +18,7 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_labe
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.detector_options import add_detector_options
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL as PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run import _gpu_gate, _method, source_fingerprint
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
@@ -40,7 +40,7 @@ def run(args):
     recorder = EpisodeRecorder(args.output, policy, display_floor_counts={args.scene: args.display_floors})
     agent = RecordingAgent(HeadlessObjNavAgent(probe, gibson_label_mapper()), probe, recorder)
     bridge = HabitatRGBDSimulator(PROTOCOL.camera(), PROTOCOL.actions(), PROTOCOL.agent_radius_m,
-                                  PROTOCOL.allow_sliding, args.gpu_device)
+                                  PROTOCOL.allow_sliding, args.gpu_device, height_m=PROTOCOL.agent_height_m)
     args.output.mkdir(parents=True, exist_ok=False)
     try:
         frame = bridge.reset(args.scenes_dir / (args.scene + ".glb"), args.scenes_dir / (args.scene + ".navmesh"),

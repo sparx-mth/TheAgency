@@ -10,7 +10,7 @@ from dataclasses import replace
 import pytest
 
 from sparx_agency.core.planning.exploration.object_search_supervisor import EXHAUSTED, SEARCH
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_settings import ROOM_VISIT_LOOP, RPTSettings
+from sparx_agency.core.planning.object_search.settings import ROOM_VISIT_LOOP, RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_explore_visit import resolve_around, walk
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import refresh

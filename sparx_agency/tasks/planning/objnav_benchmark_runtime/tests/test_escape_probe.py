@@ -13,7 +13,7 @@ import pytest
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.escape_probe import (
+from sparx_agency.core.planning.object_search.exploration.escape_probe import (
     EscapeProbe, EscapeSettings, ray_profile)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_exploration_fallback import no_rooms
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (

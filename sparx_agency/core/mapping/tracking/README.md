@@ -56,6 +56,17 @@ dead-reckoned box.
 Config: `MedianFlowConfig` / `LKBoxTrackerConfig` / `MotionModelConfig` /
 `TargetTrackerConfig` / `DetectionOnlyConfig` — see the dataclasses.
 
+## 3-D target memory (`target_memory_3d.py`)
+
+The one tracker here that is not image-space: `TargetMemory3D` is the
+object-search method's memory of a target candidate across frames -- one fused
+XYZ centroid, precision-weighted (`1 / sigma(range)^2`, `sigma = 0.03 m +
+0.03 m per metre`, so a frame from one metre says more than one from four),
+with its standard error, the weighted spread of the observations and the
+first centroid kept as the association anchor. Standard library only; the
+closing in `core/planning/object_search/closing/` reads it for the elevation
+it tilts toward, the range it approaches against and the spot it STOPs at.
+
 ## Swap seam
 
 ```python

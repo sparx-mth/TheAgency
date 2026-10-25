@@ -21,8 +21,8 @@ from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosingSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_context import (
+from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
+from sparx_agency.core.planning.object_search.perception.target_context import (
     CLASS_HEIGHT_BANDS, height_conflict, room_conflict, suspect)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_target_closing import freeze_global

@@ -28,10 +28,10 @@ forward/turn geometry. It must call `observe` on incoming maps, revalidate a
 committed route, and charge actual actions. Physical embodiment and safe scopes
 are adapter responsibilities, never inferred from a benchmark name.
 
-The Gibson adapter adds measured-footprint clearance, final-action vetoes,
-room entry/revisit history, route pause/resume, accumulated room reasoning and
-the existing RPT* and A*/WA* implementations. It does not use this local CP to
-order the building's rooms.
+The object-search method (`core/planning/object_search/falcon/`) adds
+measured-footprint clearance, final-action vetoes, room entry/revisit history,
+route pause/resume, accumulated room reasoning and the existing RPT* and A*/WA*
+implementations. It does not use this local CP to order the building's rooms.
 
 See [sourced component mapping and run instructions](../../../../tasks/planning/objnav_benchmark_runtime/gibson/BOUNDED_FALCON.md).
 Tests live with the benchmark rig under `objnav_benchmark_runtime/tests/test_falcon*.py`.

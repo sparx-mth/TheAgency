@@ -9,8 +9,8 @@ import numpy as np
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_ground_truth import Connector, GroundTruthStairs
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.stair_sightings import (
+from sparx_agency.core.planning.object_search.multifloor.stair_ground_truth import Connector, GroundTruthStairs
+from sparx_agency.core.planning.object_search.multifloor.stair_sightings import (
     DEPTH_SLACK_M, MIN_VISIBLE_POINTS, GroundTruthStairDetector, StairSighting, StairSightings)
 
 CAMERA = PROTOCOL.camera()

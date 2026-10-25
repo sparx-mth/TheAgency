@@ -69,13 +69,14 @@ class MemoryVideo:
         pass
 
 
-def test_recording_wraps_actual_runner_and_keeps_gt_out_of_decisions(tmp_path):
+def record_line_episode(tmp_path, **recorder_kwargs):
+    """Run one LinePolicy episode through the real recorder wiring; return (summary, output, recording dir)."""
     episodes, assets = write_dataset(tmp_path, semantic_map())
     base = GibsonEnv(GibsonDataset(episodes, assets, full=False, scene=SCENES[0]), simulator=LineSimulator())
     policy = LinePolicy()
     output = tmp_path / "recorded"
     output.mkdir()
-    recorder = EpisodeRecorder(output, policy, writer_factory=MemoryVideo)
+    recorder = EpisodeRecorder(output, policy, writer_factory=MemoryVideo, **recorder_kwargs)
     probe = PolicyProbe(policy)
     agent = RecordingAgent(HeadlessObjNavAgent(probe, gibson_label_mapper()), probe, recorder)
     env = RecordingEnv(base, recorder)
@@ -86,8 +87,12 @@ def test_recording_wraps_actual_runner_and_keeps_gt_out_of_decisions(tmp_path):
                                 progress=lambda i, n, row: recorder.complete(row),
                                 kinematics=PROTOCOL.kinematics())
     env.close()
+    return summary, output, next((output / "recordings").iterdir())
+
+
+def test_recording_wraps_actual_runner_and_keeps_gt_out_of_decisions(tmp_path):
+    summary, output, directory = record_line_episode(tmp_path)
     assert summary.overall.success_rate == 1
-    directory = next((output / "recordings").iterdir())
     decisions = [json.loads(line) for line in (directory / "steps.jsonl").read_text().splitlines()]
     assert len(decisions) == 5 and decisions[-1]["decision"]["action"] == "STOP"
     assert all("distance_to_goal_m" not in row for row in decisions)
@@ -96,10 +101,27 @@ def test_recording_wraps_actual_runner_and_keeps_gt_out_of_decisions(tmp_path):
     assert len(trajectory) == 6 and float(trajectory[-1]["distance_to_goal_m"]) == 0
     report = write_dashboard(output)
     text = report.read_text()
-    assert "NOT a full Gibson benchmark" in text and "SoftSPL" in text
+    assert "gibson / val ObjectNav results" in text and "not automatically a complete published split" in text and "SoftSPL" in text
     for artifact in ("latest.jpg", "metrics.png", "metrics.csv", "demo_metrics.json", "live.html"):
         assert (output / artifact).is_file()
     assert (directory / "trajectory.png").is_file()
+    assert not (directory / "frames").exists()
+    assert json.loads((directory / "episode.json").read_text())["frames"] is None
+
+
+def test_save_frames_keeps_one_still_per_video_frame_named_by_step(tmp_path):
+    import cv2
+
+    _, _, directory = record_line_episode(tmp_path, save_frames=True)
+    stills = sorted((directory / "frames").glob("*.jpg"))
+    decisions = (directory / "steps.jsonl").read_text().splitlines()
+    # One still per decision, then the terminal frame; the FINAL banner frame is final.jpg only.
+    assert len(stills) == len(decisions) + 1 == 6
+    assert [still.name for still in stills][:2] == ["00000_step00000.jpg", "00001_step00001.jpg"]
+    assert stills[-1].name == "00005_step00005.jpg"
+    assert cv2.imread(str(stills[0])).shape == (900, 1600, 3)
+    assert (directory / "final.jpg").is_file()
+    assert json.loads((directory / "episode.json").read_text())["frames"].startswith("frames/")
 
 
 def test_metrics_cannot_be_fabricated_for_an_empty_recording(tmp_path):

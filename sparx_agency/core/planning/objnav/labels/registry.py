@@ -161,6 +161,15 @@ def default_label_mapper_registry() -> LabelMapperRegistry:
     """
     registry = LabelMapperRegistry()
 
+    def _hm3d() -> LabelMapper:
+        from sparx_agency.core.planning.objnav.labels.datasets.hm3d import (
+            hm3d_label_mapper)
+        return hm3d_label_mapper()
+
+    registry.register(LabelMapperFactory(
+        name="hm3d", create=_hm3d,
+        description="HM3D ObjectNav (v1 and v2), 6 categories"))
+
     def _gibson() -> LabelMapper:
         from sparx_agency.core.planning.objnav.labels.datasets.gibson import (
             gibson_label_mapper)

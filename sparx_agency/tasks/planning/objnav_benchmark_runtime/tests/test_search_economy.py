@@ -25,9 +25,9 @@ from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.planners.astar.params import WeightedAStarParams
 from sparx_agency.core.planning.planners.astar.weighted_planner_2d import WeightedAStarPlanner2D
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import (
+from sparx_agency.core.planning.object_search.rooms.opening_nodes import (
     Opening, OpeningSettings, detect_openings, opening_value_factor)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_search_loop import LoopSettings
+from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_explore_visit import explore_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import (
     opening_policy, openings_of, refresh, west_gap)

@@ -14,10 +14,11 @@ import tempfile
 
 import numpy as np
 
-from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+from sparx_agency.core.common.types import Intrinsics
+from sparx_agency.core.planning.objnav.types.actions import DiscreteAction, DiscreteActionSpec
+from sparx_agency.core.planning.objnav.types.camera import CameraSpec
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
-from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
+from sparx_agency.tasks.planning.objnav_benchmark.kinematics import KinematicTolerance, check_motion
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
 
 
@@ -30,9 +31,13 @@ def run(gpu_device=0):
         raise RuntimeError("Renderer smoke requires a free GPU; no ownership override")
     import habitat_sim
 
-    camera, actions = PROTOCOL.camera(), PROTOCOL.actions()
-    bridge = HabitatRGBDSimulator(camera, actions, PROTOCOL.agent_radius_m,
-                                  PROTOCOL.allow_sliding, gpu_device)
+    # Deliberately synthetic dimensions, not a published benchmark profile.
+    camera = CameraSpec(Intrinsics(320, 240, 160.0, 160.0, 159.5, 119.5),
+                        height_m=1.2, min_depth_m=0.1, max_depth_m=6.0)
+    actions = DiscreteActionSpec(forward_step_m=0.3, turn_angle_deg=45.0,
+                                actions=(DiscreteAction.STOP, DiscreteAction.MOVE_FORWARD,
+                                         DiscreteAction.TURN_LEFT, DiscreteAction.TURN_RIGHT))
+    bridge = HabitatRGBDSimulator(camera, actions, 0.2, False, gpu_device, height_m=1.0)
     with tempfile.TemporaryDirectory(prefix="objnav-renderer-") as tmp:
         scene, mesh = Path(tmp) / "room.obj", Path(tmp) / "room.navmesh"
         vertices = [(-4, 0, -4), (4, 0, -4), (4, 0, 4), (-4, 0, 4),
@@ -46,8 +51,8 @@ def run(gpu_device=0):
         try:
             settings = habitat_sim.NavMeshSettings()
             settings.set_defaults()
-            settings.agent_height = camera.height_m
-            settings.agent_radius = PROTOCOL.agent_radius_m
+            settings.agent_height = bridge.height_m
+            settings.agent_radius = bridge.radius_m
             if not sim.recompute_navmesh(sim.pathfinder, settings):
                 raise RuntimeError("Cannot build synthetic smoke navmesh")
             sim.pathfinder.save_nav_mesh(str(mesh))
@@ -67,7 +72,7 @@ def run(gpu_device=0):
             for step, action in enumerate(sequence, 1):
                 frame = bridge.step(action)
                 observation = ObjNavObservation(*frame, camera, "chair", step)
-                check_motion(action, before, observation.pose, actions, PROTOCOL.kinematics())
+                check_motion(action, before, observation.pose, actions, KinematicTolerance())
                 before = observation.pose
             if not np.isclose(before.x - initial.pose.x, actions.forward_step_m, atol=1e-4):
                 raise AssertionError("Forward action did not advance in public ENU +x")
