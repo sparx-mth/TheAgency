@@ -7,6 +7,7 @@ import math
 from sparx_agency.core.planning.exploration.falcon.params import FalconParams
 from sparx_agency.core.planning.exploration.floor_atlas import MultiFloorParams
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.doorway_candidates import PeekSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.pattern_scan import PatternScanSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.target_closing import TargetClosingSettings
 
 
@@ -17,11 +18,16 @@ ROOM_VISIT_LOOP = {
 }
 
 
+SCAN_KINDS = ("rotate", "pattern")
+
+
 @dataclass(frozen=True)
 class RPTSettings:
     """Method configuration.
 
     Attributes:
+        scan_kind: The look-around used at episode start and in every room scan: ``rotate``
+            turns a full circle, ``pattern`` turns only toward headings that reveal unknown floor.
         room_visit: What a room visit does once the room is chosen: ``explore``
             walks its frontiers by view gain, ``scan360`` goes to the room's middle and
             turns a full circle, ``nearest_frontier`` enters at the nearest frontier and
@@ -128,6 +134,8 @@ class RPTSettings:
     detour_factor: float = 1.5
     local_exploration: str = "frontier"
     room_visit: str = "explore"
+    scan_kind: str = "rotate"
+    pattern_scan: PatternScanSettings = field(default_factory=PatternScanSettings)
     warmup_steps: int = 12
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
@@ -164,6 +172,12 @@ class RPTSettings:
             raise ValueError("local_exploration must be frontier or falcon; no silent fallback")
         if self.room_visit not in ROOM_VISIT_LOOP:
             raise ValueError("room_visit must be one of %s; no silent fallback" % ", ".join(ROOM_VISIT_LOOP))
+        if self.scan_kind not in SCAN_KINDS:
+            raise ValueError("scan_kind must be one of %s; no silent fallback" % ", ".join(SCAN_KINDS))
+        if isinstance(self.pattern_scan, dict):
+            object.__setattr__(self, "pattern_scan", PatternScanSettings(**self.pattern_scan))
+        if not isinstance(self.pattern_scan, PatternScanSettings):
+            raise ValueError("pattern_scan must be PatternScanSettings or parameter overrides")
         if isinstance(self.target_closing, dict):
             object.__setattr__(self, "target_closing", TargetClosingSettings(**self.target_closing))
         if not isinstance(self.target_closing, TargetClosingSettings):

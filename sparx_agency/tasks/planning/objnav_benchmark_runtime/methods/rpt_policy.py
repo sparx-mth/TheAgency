@@ -36,6 +36,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.floor_context 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.frontier_sweep import FrontierSweep, SweepSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.opening_nodes import OpeningRegistry
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.path_glances import GlanceScheduler, GlanceSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.pattern_scan import PatternScan
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.peek_stairs import stair_peek_mask
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.room_scans import RoomScanLedger
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.sightlines import SightLedger, SightSettings
@@ -257,6 +258,7 @@ class RPTSearchPolicy:
         # Where along the route in force a look to the side (or all round) is worth
         # its actions; performed as a suspended phase when the agent gets there.
         self.glances = GlanceScheduler(self, self.glance_settings)
+        self.pattern_scan = PatternScan(self, s.pattern_scan)
         # One look-around is as many turns as the camera's field of view needs to see the
         # whole circle (ten at 30 degrees with a 79-degree field), bounded by ``warmup_steps``.
         self.warmup_turns = min(s.warmup_steps, self.rotation_turns())

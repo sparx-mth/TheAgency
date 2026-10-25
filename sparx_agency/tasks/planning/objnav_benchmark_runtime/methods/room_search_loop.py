@@ -2586,16 +2586,16 @@ class RoomSearchLoop:
             here = (obs.pose.x, obs.pose.y)
             if vantage is None:
                 if inside:
-                    return self._begin_rotation(obs, scan, "no vantage: scanning in place")
+                    return self._begin_rotation(obs, world, scan, "no vantage: scanning in place")
                 self.stats["scan_unreachable"] += 1
                 return None, {"route_failed": True}
             arrived = (math.dist(here, vantage) <= self.settings.vantage_arrival_m
                        or (p.route_memory.kind == "vantage" and p.route_memory.arrived(obs)))
             if arrived and inside:
-                return self._begin_rotation(obs, scan, "vantage reached")
+                return self._begin_rotation(obs, world, scan, "vantage reached")
             if scan["approach_actions"] >= self.settings.scan_approach_steps:
                 if inside:
-                    return self._begin_rotation(obs, scan, "approach budget spent: scanning in place")
+                    return self._begin_rotation(obs, world, scan, "approach budget spent: scanning in place")
                 self.stats["scan_unreachable"] += 1
                 self._log(obs, "scan_abandoned", room=state.room_id, reason="approach budget spent outside the room")
                 return None, {"route_failed": True}
@@ -2607,27 +2607,21 @@ class RoomSearchLoop:
                 return command, {}
             self.stats["plan_failures"] += 1
             if inside:
-                return self._begin_rotation(obs, scan, "vantage unreachable: scanning in place")
+                return self._begin_rotation(obs, world, scan, "vantage unreachable: scanning in place")
             self.stats["scan_unreachable"] += 1
             self._log(obs, "scan_abandoned", room=state.room_id, reason="vantage unreachable from outside the room")
             return None, {"route_failed": True}
         if scan["phase"] == "frontier":
             return self._nearest_frontier_step(obs, world, cost, state, room, scan)
+        if p.settings.scan_kind == "pattern":
+            return self._pattern_turn(obs, world, scan)
         turn = p.episode.action_spec.turn_angle_rad
         if scan["last_yaw"] is not None:
             scan["swept"] += max(0.0, normalize_angle(obs.pose.yaw - scan["last_yaw"]))
         scan["last_yaw"] = float(obs.pose.yaw)
         full_circle = p.rotation_turns()
         if scan["swept"] >= (full_circle - 0.5) * turn - 1e-9 or scan["turns"] >= full_circle + 2:
-            p.scans.record(obs, room, source="room_scan")
-            self.stats["scans_completed"] += 1
-            self.stats["exhausted_releases"] += 1
-            self._log(obs, "scan_complete", room=state.room_id, turns=scan["turns"],
-                      swept_degrees=round(math.degrees(scan["swept"]), 1), actions=int(obs.step) - scan["started"],
-                      approach_actions=scan["approach_actions"], in_place=scan.get("in_place", False),
-                      revisit=scan.get("revisit", False))
-            self._scan = None
-            return None, {"frontier_exhausted": True}
+            return self._finish_scan(obs, room, scan, "room_scan")
         scan["turns"] += 1
         return NavigationCommand.hold(
             final_yaw=normalize_angle(obs.pose.yaw + turn),
@@ -2657,7 +2651,27 @@ class RoomSearchLoop:
         self._scan = None
         return None, {"frontier_exhausted": True}
 
-    def _begin_rotation(self, obs, scan, why):
+    def _finish_scan(self, obs, room, scan, source):
+        """Record the scan in the ledger, finish the room for the episode and end its turn."""
+        self.policy.scans.record(obs, room, source=source)
+        self.stats["scans_completed"] += 1
+        self.stats["exhausted_releases"] += 1
+        self._log(obs, "scan_complete", room=scan["room"], turns=scan["turns"], source=source,
+                  swept_degrees=round(math.degrees(scan["swept"]), 1), actions=int(obs.step) - scan["started"],
+                  approach_actions=scan["approach_actions"], in_place=scan.get("in_place", False),
+                  revisit=scan.get("revisit", False))
+        self._scan = None
+        return None, {"frontier_exhausted": True}
+
+    def _pattern_turn(self, obs, world, scan):
+        """One turn of the gain-ranked look-around; the scan is finished once little unknown floor is left."""
+        command = self.policy.pattern_scan.step(obs, world)
+        if command is None:
+            return self._finish_scan(obs, self.policy.graph.registry.rooms.get(scan["room"]), scan, "pattern_scan")
+        scan["turns"] += 1
+        return replace(command, info=dict(command.info, kind="room_scan", room=scan["room"])), {}
+
+    def _begin_rotation(self, obs, world, scan, why):
         """Switch the visit in force to its rotation phase and emit its first turn."""
         p = self.policy
         scan["phase"] = "rotate"
@@ -2668,6 +2682,9 @@ class RoomSearchLoop:
         p.route_memory.clear("scan_rotation")
         p._route = p._goal = None
         self._log(obs, "scan_rotate", room=scan["room"], why=why, approach_actions=scan["approach_actions"])
+        if p.settings.scan_kind == "pattern":
+            p.pattern_scan.begin()
+            return self._pattern_turn(obs, world, scan)
         turn = p.episode.action_spec.turn_angle_rad
         scan["turns"] = 1
         return NavigationCommand.hold(
