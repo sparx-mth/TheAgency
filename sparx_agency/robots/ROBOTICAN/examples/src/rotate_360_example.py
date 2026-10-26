@@ -46,6 +46,14 @@ YAW_STICK_R = 200.0
 YAW_MAX_WAIT_S = 40.0        # safety fallback if azimuth feedback never confirms completion
 YAW_SETTLE_TIME_S = 3.0      # hold still after Position mode confirms, before yawing
 
+# Descend with the throttle stick after Position mode so the scan is lower than the takeoff
+# height (PX4 params untouched). Stick value/rate unconfirmed - first flight needs a safety pilot.
+SCAN_HEIGHT = 1.0                  # m above the arm point to scan at
+DESCENT_STICK_Z = MANUAL_CONTROL_NEUTRAL_Z - 50.0   # gentle: just below neutral
+DESCENT_STOP_MARGIN = 0.15         # release this far above target; it keeps sinking briefly
+DESCENT_MIN_HEIGHT = 0.7           # never keep descending at or below this
+DESCENT_MAX_WAIT_S = 12.0          # give up, return to neutral and scan from where it is
+
 # Holds (rather than keeps commanding) if state feedback goes quiet - see ../TODO.md item 2.
 STATE_STALE_TIMEOUT_S = 2.0
 
@@ -66,10 +74,11 @@ STEP_WAIT_ARM_CONFIRM = 0
 STEP_TAKEOFF = 1
 STEP_MONITOR_ALTITUDE = 2
 STEP_VERIFY_POSITION = 3
-STEP_SETTLE_BEFORE_YAW = 4
-STEP_YAW_360 = 5
-STEP_WAIT_YAW_DONE = 6
-STEP_DONE = 7
+STEP_DESCEND = 4
+STEP_SETTLE_BEFORE_YAW = 5
+STEP_YAW_360 = 6
+STEP_WAIT_YAW_DONE = 7
+STEP_DONE = 8
 
 
 def get_namespace_id():
@@ -91,6 +100,7 @@ class TakeoffAndRotate(Node):
         self.arm_wait_start_time = None
         self.position_wait_start_time = None
         self.settle_start_time = None
+        self.descent_start_time = None
         self.last_state_msg_time = None
         self.last_uav_state_msg_time = None
         self.current_azimuth = None
@@ -309,6 +319,7 @@ class TakeoffAndRotate(Node):
                 f"No state update in over {STATE_STALE_TIMEOUT_S:.1f}s (comms dropout?) -- "
                 "stopping automated commands and holding. Confirm the link is back, then "
                 "run land_and_disarm_example.py.")
+            self.manual_control.z = MANUAL_CONTROL_NEUTRAL_Z
             self.stop_camera_capture()
             self.step = STEP_DONE
             return
@@ -351,15 +362,38 @@ class TakeoffAndRotate(Node):
         elif self.step == STEP_VERIFY_POSITION:
             if self.flight_mode == KeepAlive.FLIGHT_MODE_POSITION:
                 self.get_logger().info(f"Position mode confirmed (flight_mode={self.flight_mode})")
-                self.start_camera_capture()
-                self.settle_start_time = time.monotonic()
-                self.step = STEP_SETTLE_BEFORE_YAW
+                self.descent_start_time = time.monotonic()
+                self.step = STEP_DESCEND
                 return
             if time.monotonic() - self.position_wait_start_time > POSITION_RETRY_INTERVAL:
                 self.get_logger().warn(
                     f"Position not confirmed yet (flight_mode={self.flight_mode}) -- re-requesting")
                 self.request_flight_mode(KeepAlive.FLIGHT_MODE_POSITION)
                 self.position_wait_start_time = time.monotonic()
+
+        elif self.step == STEP_DESCEND:
+            h = self.height_above_arm()
+            release_at = SCAN_HEIGHT + DESCENT_STOP_MARGIN
+            reason = None
+            if h is None:
+                reason = "no height feedback"
+            elif h <= release_at:
+                reason = f"height {h:.2f}m <= {release_at:.2f}m"
+            elif h <= DESCENT_MIN_HEIGHT:
+                reason = f"floor reached ({h:.2f}m)"
+            elif time.monotonic() - self.descent_start_time > DESCENT_MAX_WAIT_S:
+                reason = f"timeout after {DESCENT_MAX_WAIT_S:.0f}s at {h:.2f}m"
+
+            if reason is not None:
+                self.manual_control.z = MANUAL_CONTROL_NEUTRAL_Z
+                self.get_logger().info(f"Descent done ({reason}) -- stick back to neutral")
+                self.start_camera_capture()
+                self.settle_start_time = time.monotonic()
+                self.step = STEP_SETTLE_BEFORE_YAW
+            elif self.manual_control.z != DESCENT_STICK_Z:
+                self.get_logger().info(
+                    f"Descending from {h:.2f}m to ~{SCAN_HEIGHT:.2f}m (stick z={DESCENT_STICK_Z:.0f})")
+                self.manual_control.z = DESCENT_STICK_Z
 
         elif self.step == STEP_SETTLE_BEFORE_YAW:
             if time.monotonic() - self.settle_start_time >= YAW_SETTLE_TIME_S:
