@@ -18,17 +18,44 @@ that cell and heading (:meth:`EscapeProbe.note_blocked`) and the next probe
 takes the next heading. The planner's own map is never rewritten: LESSONS
 2026-10-08 is the reason -- opening "genuine" obstacles around the start is
 the one way A* threads a real wall.
+
+**Mapped floor beyond a band outranks unknown beyond it** (since 2026-10-26).
+Nothing is ever mapped outside the house, so the thin exterior wall of a
+room always reads as a one-cell band with the whole probe range "free or
+unknown" behind it, and by the floor-beyond score it beat every real exit:
+00835/000064 (``680ae26a733b``) probed its bedroom's west wall 71 times over
+351 actions while the strip's one exit -- a one-cell bump bar with 1.8 m of
+MAPPED floor behind it -- was ranked below it on every action. A heading
+whose far side holds known free cells is tried before any heading whose far
+side is unknown alone; the unknown-only headings keep their turn after it,
+for the pocket the camera has never seen out of.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+
+
+class RayProfile(NamedTuple):
+    """What one heading holds, in metres, read without inflation (:func:`ray_profile`).
+
+    ``pocket_m`` and ``beyond_m`` count free OR unknown cells, as the planner's
+    "impassable unknown" does not apply to a probing step; ``pocket_mapped_m``
+    and ``beyond_mapped_m`` are the KNOWN free part of each -- the floor the
+    camera has actually seen there.
+    """
+
+    pocket_m: float
+    barrier_m: float
+    beyond_m: float
+    pocket_mapped_m: float
+    beyond_mapped_m: float
 
 
 @dataclass(frozen=True)
@@ -76,20 +103,23 @@ class EscapeSettings:
             raise ValueError("memory_actions must be at least 1")
 
 
-def ray_profile(world, xy, heading, skip_m, range_m) -> Tuple[float, float, float]:
-    """``(pocket_m, barrier_m, beyond_m)`` along ``heading`` from ``xy``, read at half-cell steps without inflation.
+def ray_profile(world, xy, heading, skip_m, range_m) -> RayProfile:
+    """The :class:`RayProfile` along ``heading`` from ``xy``, read at half-cell steps without inflation.
 
     ``pocket_m`` is the free or unknown run from ``skip_m`` (the agent's own
     footprint, which the map clears by construction) to the first occupied
     cell; ``barrier_m`` the occupied band that follows, and ``beyond_m`` the
     free or unknown run after the band, up to the next occupied cell, the
-    grid's edge or ``range_m``. With no occupied cell in range the heading
-    is open: the pocket is reported as ``beyond_m`` too, and the barrier is
-    zero. A band that reaches the range is returned as ``range_m`` with
-    nothing beyond.
+    grid's edge or ``range_m``; the ``*_mapped_m`` fields are how much of
+    each run is KNOWN free rather than unknown (the far side of a house's
+    exterior wall has none). With no occupied cell in range the heading is
+    open: the pocket is reported as the beyond too, and the barrier is zero.
+    A band that reaches the range is returned as ``range_m`` with nothing
+    beyond.
     """
     step = world.resolution / 2.0
     pocket = barrier = beyond = 0.0
+    pocket_mapped = beyond_mapped = 0.0
     phase = "pocket"
     distance = skip_m
     while distance <= range_m:
@@ -97,11 +127,13 @@ def ray_profile(world, xy, heading, skip_m, range_m) -> Tuple[float, float, floa
         if not world.in_bounds(gx, gy):
             break
         blocked = world.is_occupied(gx, gy)
+        known = world.is_free(gx, gy)
         if phase == "pocket":
             if blocked:
                 phase = "barrier"
             else:
                 pocket += step
+                pocket_mapped += step if known else 0.0
         if phase == "barrier":
             if blocked:
                 barrier += step
@@ -111,10 +143,11 @@ def ray_profile(world, xy, heading, skip_m, range_m) -> Tuple[float, float, floa
             if blocked:
                 break
             beyond += step
+            beyond_mapped += step if known else 0.0
         distance += step
     if phase == "pocket":
-        beyond = pocket
-    return pocket, min(barrier, range_m), beyond
+        beyond, beyond_mapped = pocket, pocket_mapped
+    return RayProfile(pocket, min(barrier, range_m), beyond, pocket_mapped, beyond_mapped)
 
 
 class EscapeProbe:
@@ -148,7 +181,7 @@ class EscapeProbe:
 
     # -- the probe -------------------------------------------------------------
     def candidates(self, obs, world) -> List[dict]:
-        """Every turn heading worth a step, best first: thin band with much floor beyond, or a long free run; few turns to face it."""
+        """Every turn heading worth a step, best first: mapped floor on the far side before unknown alone; within that, a thin band with much floor beyond or a long free run, few turns to face it."""
         p, s = self.policy, self.settings
         spec = p.episode.action_spec
         turn = spec.turn_angle_rad
@@ -159,17 +192,22 @@ class EscapeProbe:
         for k in range(turns):
             offset = k if k <= turns // 2 else k - turns          # signed turns from the current yaw
             heading = normalize_angle(obs.pose.yaw + offset * turn)
-            pocket, barrier, beyond = ray_profile(world, xy, heading, skip, s.range_m)
+            ray = ray_profile(world, xy, heading, skip, s.range_m)
+            pocket, barrier, beyond = ray.pocket_m, ray.barrier_m, ray.beyond_m
             thin = barrier <= s.max_barrier_m and beyond >= s.min_beyond_m
             open_run = pocket >= s.min_pocket_m
             if (not thin and not open_run) or self._remembered(obs, world, heading):
                 continue
             gain = max(beyond - 2.0 * barrier if thin else -math.inf, pocket if open_run else -math.inf)
             score = gain - 0.05 * abs(offset)
+            # The floor the step leads onto: past the band for a probe, along the pocket for an open run.
+            mapped = max(ray.beyond_mapped_m if thin else 0.0, ray.pocket_mapped_m if open_run else 0.0)
             out.append({"heading": float(heading), "turns": int(offset), "pocket_m": round(float(pocket), 2),
                         "barrier_m": round(float(barrier), 2), "beyond_m": round(float(beyond), 2),
+                        "mapped_m": round(float(mapped), 2),
                         "rule": "thin_barrier" if thin else "open_run", "score": float(score)})
-        out.sort(key=lambda c: -c["score"])
+        # The far side of an exterior wall is never mapped; a heading onto known floor goes first (00835/000064).
+        out.sort(key=lambda c: (c["mapped_m"] <= 0.0, -c["score"]))
         return out
 
     def plan(self, obs, world) -> Optional[NavigationCommand]:

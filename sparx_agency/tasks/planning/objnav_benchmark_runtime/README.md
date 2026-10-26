@@ -824,11 +824,11 @@ and a pose, and answers in world coordinates.
 | `world_model/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run and off the agent's own trail, its capsule margin (`stair_margin_m`, 0.45 m) bounded per flight so it never splits a body-passable corridor (`adaptive_capsule`), its storey end cut square so no half-disc of floor in front of the first riser is drawn (`_square_foot`, Darden 2026-10-21); excluded from the room partition, from peek viewpoints and from a peek-only A* copy |
 | `world_model/stair_terrain.py`, `world_model/stair_grid.py` | RGB-D support surfaces for the observed stair source |
 | `exploration/exploration_fallback.py` | Where every failed plan, model or decision lands: the best floor-wide exit (object shadows and frontiers of rooms the target cannot be in wait behind it), the stairs by the explicit fallback rule, the demoted frontiers, a retired frontier, a relocation, a footing sweep, an escape probe -- a move, never an idle spin; failure records and service back-off |
-| `exploration/escape_probe.py` | The fallback's rung before its idle turn: boxed in on the inflated map, the grid read without inflation along every turn heading, one turn or one forward step toward the thinnest occupied band with the most floor beyond it, or (since 2026-10-25) along the longest free run of at least two steps whatever closes it; the simulator decides, a blocked heading is remembered per cell |
+| `exploration/escape_probe.py` | The fallback's rung before its idle turn: boxed in on the inflated map, the grid read without inflation along every turn heading, one turn or one forward step toward the thinnest occupied band with the most floor beyond it, or (since 2026-10-25) along the longest free run of at least two steps whatever closes it, headings onto MAPPED floor before ones whose far side is unknown alone (since 2026-10-26); the simulator decides, a blocked heading is remembered per cell |
 | `exploration/frontier_sweep.py` | Frontier goal generation for a room or the floor, committed-goal lifetime, optional look-around (the `sweep` ablation) |
 | `exploration/path_glances.py`, `exploration/doorway_peek.py`, `exploration/doorway_candidates.py` | Informative glances along a route; the one-shot doorway inspection and its candidates |
 | `exploration/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
-| `multifloor/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied, and `_navigate` refusing a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`); inert when traversal is allowed |
+| `multifloor/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied, and `_navigate` refusing a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`); a spawn storey never walked level is provisional, and the first storey the agent settles on from it becomes the spawn plane (`rebase`, since 2026-10-26); inert when traversal is allowed |
 | `multifloor/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock. With traversal forbidden, a height departure the atlas reports (a flight walked down by a committed route, three treads before the atlas calls it one) is walked back up the storey trail (`_retreat_to_storey`, `retreat_started` / `retreat_ended` events, bounded by `multifloor.retreat_actions`) -- until 2026-10-25 it was an `AttributeError` on every remaining action of the episode |
 | `multifloor/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
 | `multifloor/stair_ground_truth.py`, `multifloor/floor_decision.py`, `multifloor/ground_truth_traversal.py`, `multifloor/stair_sightings.py` | Ground-truth stairs (the `stair_source: "ground_truth"` ablation): the navmesh connectors as the policy reads them, the fallback rule's up/down choice, the committed polyline traversal, the perfect stair detector |
@@ -1438,6 +1438,17 @@ refresh.
    default (false) no staircase is offered to the oracle or the solver, `commit`
    and the fallback's explicit rule refuse, an unplanned height departure starts
    no traversal, and the spawn-floor guard keeps every goal on the spawn plane.
+   **A spawn on the stairs is the one departure that does start a traversal**
+   (since 2026-10-26): until the agent has walked `multifloor.stable_distance_m`
+   level on it the spawn storey is provisional (`MultiFloorSearch.storey_confirmed`
+   false), and a height departure before that is the agent leaving the flight
+   it spawned on -- walked as an observed traversal toward the nearer storey
+   the terrain can see (event `spawn_storey_provisional`), after which the
+   storey it settles on becomes the spawn plane (`SpawnFloorGuard.rebase`,
+   event `spawn_plane_rebased`; a floor-sized plateau is adopted at once, not
+   after the half-level's thirty actions). 00873/000002 (`02cc26973cab`) spawned
+   three treads below its bed's storey and spent 447 actions boxed in between
+   two masked flights.
    **The way back is the one exception**: under `scan` the staircase the
    agent arrived by is withheld while this storey still has a room that is
    neither finished nor ruled out (`way_back_held` events) -- the storey is
@@ -1927,7 +1938,14 @@ Every way the decision pipeline can fail lands in one place,
    (since 2026-10-25) a heading with at least `min_pocket_m` (0.5 m, two
    steps) of free floor BEFORE anything occupied, whatever lies beyond,
    scored by that run: a wedge whose open side ends at a bed too thick to
-   probe had no candidate at all (00824/000066, 450 actions); the best gets
+   probe had no candidate at all (00824/000066, 450 actions). Candidates
+   whose far side -- the floor beyond the band, or the run itself -- holds
+   KNOWN free cells are tried before any whose far side is unknown alone
+   (since 2026-10-26): nothing is ever mapped outside the house, so a room's
+   exterior wall read as a one-cell band with the whole range "beyond" it
+   and outscored every real exit -- 00835/000064 (`680ae26a733b`) pushed
+   into its west wall 71 times over 351 actions while the strip's one exit, a
+   one-cell bump bar with 1.8 m of mapped floor behind it, waited; the best gets
    one turn toward it or one forward step along it, and **the simulator
    decides**: a step that moves re-maps the pocket and the ordinary rungs take
    over, a step the simulator blocks is remembered for that cell and heading
@@ -1937,7 +1955,8 @@ Every way the decision pipeline can fail lands in one place,
    Collierville/000036 (`6bc7ace42dcf`) spawned behind a sofa and spent 488
    actions on the hold below, twice; with the probe it was out in 12.
    `escape_probe` in the episode record carries the settings, the counts
-   (`probes`, `turns`, `steps`, `blocked`) and the last probe;
+   (`probes`, `turns`, `steps`, `blocked`) and the last probe (with its
+   `mapped_m`);
 8. a single hold only when even that has been done here, where the idle
    turn is the one action that changes anything.
 

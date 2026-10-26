@@ -174,7 +174,7 @@ def test_evaluation_settings_demand_stop_and_exact_three_dimensional_path_accoun
     assert settings.require_stop_for_success is True
     assert settings.path_length_dimension == "3d"
     assert settings.path_length_epsilon_m == 0.0
-    assert settings.kinematics == KinematicTolerance(climb_m=0.60)
+    assert settings.kinematics == KinematicTolerance(climb_m=0.60, reproject_m=0.15)
     assert replace(HM3D_V1, path_length_epsilon_m=0.01
                    ).evaluation_settings().path_length_epsilon_m == 0.01
 
@@ -191,6 +191,29 @@ def test_the_climb_bound_admits_a_stair_tread_and_still_refuses_a_jump():
     with pytest.raises(EnvContractError, match="height by at most 0.600 m"):
         check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0.0, 0.61, 0.0),
                      HM3D_V1.actions(), HM3D_V1.kinematics())
+
+
+def test_the_step_filters_placement_admits_the_two_motions_that_ended_scenes_of_the_full_v1_sweep():
+    """2026-10-22, 1,871 episodes: 00878-XB4GS9ShBRE/000001 action 156 (a TURN_LEFT carried 0.071 m at -52 degrees)
+    and 00873-bxsVRursffK/000068 action 315 (a MOVE_FORWARD carried 0.094 m at -53.4 degrees and 0.057 m up) each
+    ended a 99-episode scene under the default bounds; a slide of a stride, and a LOOK that moves, are still refused."""
+    from sparx_agency.core.planning.objnav.errors import EnvContractError
+    from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+    from sparx_agency.core.planning.objnav.types.pose import AgentPose
+    from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
+    spec, tolerance = HM3D_V1.actions(), HM3D_V1.kinematics()
+    assert tolerance.reproject_m == 0.15 < spec.forward_step_m
+    before = AgentPose(0.0, 0.0, 0.0, 0.0)
+    turn = AgentPose(0.071 * math.cos(math.radians(-52.0)), 0.071 * math.sin(math.radians(-52.0)), 0.0, spec.turn_angle_rad)
+    step = AgentPose(0.094 * math.cos(math.radians(-53.4)), 0.094 * math.sin(math.radians(-53.4)), 0.057, 0.0)
+    for action, after in ((DiscreteAction.TURN_LEFT, turn), (DiscreteAction.MOVE_FORWARD, step)):
+        with pytest.raises(EnvContractError):
+            check_motion(action, before, after, spec, KinematicTolerance(climb_m=0.60))
+        check_motion(action, before, after, spec, tolerance)
+    with pytest.raises(EnvContractError, match="along its heading"):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.0, -0.25, 0.0, 0.0), spec, tolerance)
+    with pytest.raises(EnvContractError, match="tilt in place"):
+        check_motion(DiscreteAction.LOOK_DOWN, before, AgentPose(0.071, 0.0, 0.0, 0.0, spec.tilt_angle_rad), spec, tolerance)
 
 
 def test_the_navmesh_is_the_agents_own_and_no_unmeasured_third_option_is_accepted():

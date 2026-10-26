@@ -344,3 +344,53 @@ def test_a_first_action_pull_onto_the_mesh_edge_is_excused_only_up_to_settle_xy_
     assert KinematicTolerance(settle_xy_m=0.0).settle_xy_m == 0.0, "zero is allowed, like settle_m"
 
 
+
+
+def _off_heading(pose, across_m, course_deg, dz=0.0):
+    """``pose`` carried ``across_m`` over the floor at ``course_deg`` from its heading (and ``dz`` up), heading kept."""
+    return moved(pose, dx=across_m * math.cos(pose.yaw + math.radians(course_deg)),
+                 dy=across_m * math.sin(pose.yaw + math.radians(course_deg)), dz=dz)
+
+
+def test_the_step_filters_placement_is_excused_on_any_body_action_only_up_to_reproject_m():
+    """The 2026-10-22 HM3D v1 sweep (1,871 episodes) lost two 99-episode scenes to habitat-sim's navmesh step
+    filter carrying an off-mesh agent back onto the mesh: 00878-XB4GS9ShBRE/000001 action 156, a TURN_LEFT that
+    "moved" 0.071 m at -52 degrees from its heading; 00873-bxsVRursffK/000068 action 315, a MOVE_FORWARD that
+    went 0.094 m at -53.4 degrees and 0.057 m up. With ``reproject_m`` that much placement is taken off any turn
+    or step -- across the heading, behind the start, past the reach -- and the rest is judged as before; a LOOK or
+    STOP that moves, a larger pull, and a sliding step are still refused."""
+    pose = AgentPose(3.0, -1.0, 0.5, math.radians(110.0))
+    pulled_turn = moved(_off_heading(pose, 0.071, -52.0), dyaw_deg=30.0)
+    pulled_step = _off_heading(pose, 0.094, -53.4, dz=0.057)
+    with pytest.raises(EnvContractError, match="turn in place"):
+        check_motion(A.TURN_LEFT, pose, pulled_turn, SPEC, KinematicTolerance(climb_m=0.60))
+    with pytest.raises(EnvContractError, match="along its heading"):
+        check_motion(F, pose, pulled_step, SPEC, KinematicTolerance(climb_m=0.60))
+    hm3d = KinematicTolerance(climb_m=0.60, reproject_m=0.15)
+    check_motion(A.TURN_LEFT, pose, pulled_turn, SPEC, hm3d)
+    check_motion(F, pose, pulled_step, SPEC, hm3d)
+    check_motion(A.TURN_RIGHT, pose, moved(_off_heading(pose, 0.12, 140.0, dz=0.1), dyaw_deg=-30.0), SPEC, hm3d), \
+        "a turn's placement is three-dimensional: 0.12 m across and 0.10 m up is 0.156 m, 0.006 m over the slack, under 0.02"
+    # Mid-episode, not only the first action; and the heading still has to be kept.
+    check_motion(A.TURN_LEFT, pose, pulled_turn, SPEC, hm3d, first=False)
+    with pytest.raises(EnvContractError, match="turn [+]30.0 deg"):
+        check_motion(A.TURN_LEFT, pose, moved(_off_heading(pose, 0.071, -52.0), dyaw_deg=-30.0), SPEC, hm3d)
+    # A full step with the placement across it passes; the placement cannot explain a step beyond reach + slack.
+    heading = (math.cos(pose.yaw), math.sin(pose.yaw))
+    step = moved(_off_heading(pose, 0.10, -90.0), dx=0.25 * heading[0], dy=0.25 * heading[1])
+    check_motion(F, pose, step, SPEC, hm3d)
+    with pytest.raises(EnvContractError, match="advance at most"):
+        check_motion(F, pose, moved(pose, dx=0.44 * heading[0], dy=0.44 * heading[1]), SPEC, hm3d), "0.44 > 0.28 + 0.15"
+    # More than the slack across the heading is still a slide, a mirrored frame, or a wrong-axis read.
+    with pytest.raises(EnvContractError, match="along its heading"):
+        check_motion(F, pose, _off_heading(pose, 0.25, -70.0), SPEC, hm3d), "0.235 m across: 0.085 m over the slack at 0.09 m along"
+    with pytest.raises(EnvContractError, match="turn in place"):
+        check_motion(A.TURN_LEFT, pose, moved(_off_heading(pose, 0.18, -52.0), dyaw_deg=30.0), SPEC, hm3d), "0.18 - 0.15 > 0.02"
+    # LOOKs and STOP go to the sensors, never through the step filter: no slack for them.
+    with pytest.raises(EnvContractError, match="tilt in place"):
+        check_motion(A.LOOK_DOWN, pose, moved(_off_heading(pose, 0.071, -52.0), dpitch_deg=30.0), SPEC, hm3d)
+    with pytest.raises(EnvContractError, match="leave the pose unchanged"):
+        check_motion(STOP, pose, _off_heading(pose, 0.071, -52.0), SPEC, hm3d)
+    assert KinematicTolerance().reproject_m == 0.0, "off by default"
+    with pytest.raises(HarnessError):
+        KinematicTolerance(reproject_m=-0.1)

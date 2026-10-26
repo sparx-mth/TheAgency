@@ -467,8 +467,10 @@ def test_a_flight_walked_down_with_traversal_forbidden_is_walked_back_up_the_tra
     building = policy.building
     policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
     policy.plan(at(episode, 1, 1.25, 1.0, depth=3.0))
-    for step in range(2, 2 + building.params.retreat_actions + 2):
-        command = policy.plan(at(episode, step, 1.75, 1.0, z=-0.6, depth=3.0))
+    policy.plan(at(episode, 2, 1.5, 1.0, depth=3.0))                   # two level steps: the storey is confirmed
+    assert building.storey_confirmed
+    for step in range(3, 3 + building.params.retreat_actions + 2):
+        command = policy.plan(at(episode, step, 2.0, 1.0, z=-0.6, depth=3.0))
     assert [e["reason"] for e in building.events if e["event"] == "retreat_given_up"] == ["retreat_actions exhausted off the storey plane"]
     assert command.info["kind"] != "RETREAT" and not policy.fallback.failures
 
@@ -479,11 +481,16 @@ def test_a_one_pose_trail_is_extended_past_its_last_point_and_the_return_is_conf
     waiting for three translated samples that a blocked agent never gave, and `notify_blocked` -- short-circuited
     while "traversing" -- let the escape rung push into one wall 473 times. Now the trail is extended two steps
     past its last pose, the return is confirmed the action the body is back at the plane height, and a refused
-    step is remembered by the probe and written to the map as on the storey."""
+    step is remembered by the probe and written to the map as on the storey.
+
+    Since 2026-10-26 a storey never walked level is provisional and its departure a traversal, not a retreat
+    (``test_a_departure_from_a_spawn_storey_never_walked_level_is_a_traversal_to_the_nearer_storey``); the
+    one-pose retreat below is the CONFIRMED storey's -- the trail starts afresh after every arrival."""
     policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
     building, atlas = policy.building, policy.mapping.atlas
     policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
     policy.plan(at(episode, 1, 1.0, 1.0, yaw=0.5, depth=3.0))
+    building.storey_confirmed = True                                    # a storey the agent has stood on
     step = 2
     for z in (-0.18, -0.35, -0.52):
         policy.plan(at(episode, step, 1.0 + 0.25 * (step - 1), 1.0, z=z, depth=3.0)); step += 1
@@ -506,4 +513,107 @@ def test_a_one_pose_trail_is_extended_past_its_last_point_and_the_return_is_conf
     policy.plan(obs)
     policy.notify_blocked(obs)
     assert policy.escape.stats["blocked"] == 1 and policy.mapping.integrity()[0]["bumps"] == 1
+    assert not policy.fallback.failures
+
+
+# -- a spawn on the stairs (00873/000002, ``02cc26973cab``, 2026-10-26) ------------------------------------------
+def test_a_departure_from_a_spawn_storey_never_walked_level_is_a_traversal_to_the_nearer_storey():
+    """The first pose was a tread: the atlas's floor 0 is the middle of a flight. The replay of 2026-10-25 retreated
+    to it and then spent 447 actions boxed in by the two masked flights. A storey never walked ``stable_distance_m``
+    level is provisional; its departure is walked as a traversal -- toward the nearer storey the terrain can see,
+    else the way already taken -- and never retreated from."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas = policy.building, policy.mapping.atlas
+    assert not building.allowed and not building.storey_confirmed
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    policy.plan(at(episode, 1, 1.0, 1.0, yaw=0.5, depth=3.0))              # the warm-up turns in place: still provisional
+    assert not building.storey_confirmed
+    step = 2
+    for z in (-0.18, -0.35, -0.52):                                        # the frontier route leads down the flight
+        command = policy.plan(at(episode, step, 1.0 + 0.25 * (step - 1), 1.0, z=z, depth=3.0)); step += 1
+    assert atlas.in_transition and building.transition is not None and building.traversing
+    assert building.phase == "TRAVERSE" and command.info["phase"] == "TRAVERSE"
+    assert building._retreat is None and not [e for e in building.events if e["event"].startswith("retreat")]
+    provisional = [e for e in building.events if e["event"] == "spawn_storey_provisional"]
+    assert len(provisional) == 1 and provisional[0]["direction"] == "down" and provisional[0]["flights_seen"] == []
+    assert provisional[0]["height_m"] == pytest.approx(-0.52)
+    started = [e for e in building.events if e["event"] == "traversal_started"]
+    assert len(started) == 1 and started[0]["direction"] == -1 and started[0]["selected_by"] == "unplanned"
+    assert building.diagnostics()["storey_confirmed"] is False
+    assert not policy.fallback.failures
+    # The terrain sees a flight up with the smaller rise: that is the nearer storey, whichever way the first step went.
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building = policy.building
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    building.terrain.candidates = [{"direction": -1, "rise_m": 2.4, "path": []}, {"direction": 1, "rise_m": 0.5, "path": []}]
+    building.terrain._candidate_paths = lambda pose: None                 # keep the stubbed flights through the frame's update
+    policy.plan(at(episode, 1, 1.25, 1.0, z=-0.52, depth=3.0))
+    provisional = [e for e in building.events if e["event"] == "spawn_storey_provisional"]
+    assert provisional[0]["direction"] == "up" and building.active["direction"] == 1
+    assert provisional[0]["flights_seen"] == [{"direction": "up", "rise_m": 0.5}, {"direction": "down", "rise_m": 2.4}]
+    # Two level steps first, and the same flight is the accidental one: the trail retreat, as before.
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building = policy.building
+    for i in range(3):
+        policy.plan(at(episode, i, 1.0 + 0.25 * i, 1.0, depth=3.0))
+    assert building.storey_confirmed
+    for i, z in enumerate((-0.18, -0.35, -0.52)):
+        command = policy.plan(at(episode, 3 + i, 1.75 + 0.25 * i, 1.0, z=z, depth=3.0))
+    assert building.transition is None and building.phase == "RETREAT" and command.info["kind"] == "RETREAT"
+    assert not [e for e in building.events if e["event"] == "spawn_storey_provisional"]
+
+
+def test_the_storey_a_provisional_spawn_settles_on_becomes_the_spawn_plane():
+    """Up three treads onto a floor 0.5 m above the tread the agent spawned on: a settled plateau of floor size is
+    adopted at once -- not after thirty actions -- and becomes the spawn plane itself, with goals on it allowed.
+    Down to a storey the atlas creates on its own: the plane moves there too, where before every goal on it was
+    refused as "off the spawn plane"."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    assert guard.spawn_z == 0.0 and guard.spawn_floor == 0 and guard.provisional
+    step = 1
+    for z in (0.18, 0.35, 0.52):                                           # up the flight the agent spawned on
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=z, depth=3.0)); step += 1
+    assert building.transition is not None and building.phase == "TRAVERSE"
+    building.terrain.plateau_area = atlas.plateau_observer = lambda pose: 4.0   # the floor at the top is of storey size
+    for i in range(4):                                                      # settled: level, translated past the samples
+        policy.plan(at(episode, step, 2.0 + 0.25 * i, 1.0, z=0.5, depth=3.0)); step += 1
+        if atlas.active_id != 0:
+            break
+    assert atlas.active_id == 1 and not atlas.in_transition and atlas.completion_reason == "half_level_adopted"
+    assert atlas.diagnostics()["transition_ticks"] == 0
+    rebased = [e for e in guard.events if e["event"] == "spawn_plane_rebased"]
+    assert len(rebased) == 1 and rebased[0]["floor_id"] == 1 and rebased[0]["height_m"] == pytest.approx(0.5, abs=0.05)
+    assert rebased[0]["after_actions"] < 30, "no thirty-action wait on a storey the agent never stood on"
+    assert guard.spawn_z == pytest.approx(0.5, abs=0.05) and guard.spawn_floor == 1 and guard.half_levels == set()
+    assert guard.stats["rebased"] == 1 and guard.stats["half_levels_adopted"] == 0
+    assert building.storey_confirmed and building.transition is None and building.phase == "SEARCH"
+    assert [e["event"] for e in building.events if e["event"] in ("floor_arrival", "retreat_started")] == ["floor_arrival"]
+    obs = at(episode, step, 3.0, 1.0, z=0.5, depth=3.0)
+    policy.plan(obs)
+    assert not guard.off_plane and guard.goal_allowed(obs, policy.last_world, (3.5, 1.0), "room_entry")
+    assert not guard.provisional and policy.mapping.floor_id == 1
+    assert policy.episode_info()["spawn_floor_guard"]["spawn_floor"] == 1
+    assert not policy.fallback.failures
+    # Down a whole storey: the atlas's own arrival, and the plane follows it instead of refusing every goal.
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    building.terrain.plateau_area = atlas.plateau_observer = lambda pose: 4.0
+    step = 1
+    for z in (-0.4, -0.8, -1.2, -1.6, -2.0):
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=z, depth=3.0)); step += 1
+    assert building.transition is not None and atlas.in_transition
+    for i in range(8):
+        policy.plan(at(episode, step, 2.25 + 0.25 * i, 1.0, z=-2.0, depth=3.0)); step += 1
+        if atlas.active_id != 0:
+            break
+    assert atlas.active_id == 1 and atlas.completion_reason == "destination_platform_confirmed"
+    assert guard.spawn_z == pytest.approx(-2.0, abs=0.05) and guard.spawn_floor == 1 and not guard.off_plane
+    assert [e["reason"] for e in guard.events if e["event"] == "spawn_plane_rebased"] == ["the atlas settled on a storey from the provisional spawn storey"]
+    assert building.storey_confirmed and building.transition is None
+    obs = at(episode, step, 4.5, 1.0, z=-2.0, depth=3.0)
+    policy.plan(obs)
+    assert guard.goal_allowed(obs, policy.last_world, (5.0, 1.0), "room_entry") and guard.stats["goals_refused"] == 0
     assert not policy.fallback.failures

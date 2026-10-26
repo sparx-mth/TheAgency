@@ -54,7 +54,9 @@ It reads `HM3D_EPISODES_DIR` (default `$DATA/objectnav/hm3d/<version>/<split>`) 
 `LLM_*`, `GPU_PLAN*`, `DETECTOR_PORT` -- 18092 here, 18095 for Gibson, because a detector is pinned to its class
 order and the two tables order their words differently), and two HM3D knobs: `VALIDATE_STARTS=1` (default)
 measures every start's shortest path before its scene runs and refuses the scene unless 99% of them reproduce the
-publisher's own geodesic within a millimetre -- the navmesh check -- and `EXCLUDE_UNREACHABLE=1` drops (and
+publisher's own geodesic within a millimetre -- the navmesh check; a scene too small for 1% to be a whole start may
+still have up to three starts a hair off a view point, each within a stride (v1 val's 99-start scenes, since
+2026-10-26) -- and `EXCLUDE_UNREACHABLE=1` drops (and
 records) an episode with no reachable view point instead of stopping. Anything it does not know is forwarded to
 `hm3d.run` verbatim (`--category toilet`, `--shuffle`, `--episode-ids ...`, `--agent falcon-yolo`).
 
@@ -405,6 +407,12 @@ is labelled as such.
 - `--resume` restarts a scene that started but did not finish; an unchanged
   configuration and unchanged data are required — the logger refuses anything
   else. Never resume after changing source, models or settings: use a new root.
+  The one exception is a harness-only fix: `--resume-accepting-changes kinematics
+  evaluation source_sha256 gpu_plan` after `--` lets the scenes that continue
+  differ from their record in the kinematic self-check and in provenance (never a
+  decision or a score; `run.json`'s resume entry says what differed), and the
+  campaign withholds it from a scene that starts afresh. That is how the two scenes
+  the 2026-10-22 v1 sweep lost to the self-check were finished.
 - `--scenes 00877-4ok3usBNeis 00880-Nfvxx8J5NCo …` restricts the sweep to named
   buildings (a subset, labelled as such).
 - `--aggregate-only` rebuilds the aggregate from the scenes that finished.

@@ -31,21 +31,23 @@ def ringed():
 
 def test_the_ray_profile_reads_pocket_band_and_the_floor_beyond_without_inflation():
     world = ringed()
-    pocket, barrier, beyond = ray_profile(world, IN_A, 0.0, 0.18, 3.0)
-    assert barrier == pytest.approx(0.1, abs=0.051), "one ring cell to the east"
-    assert beyond > 2.0, "unknown floor beyond it to the range"
-    assert pocket == pytest.approx(0.1, abs=0.051)
-    _, west_barrier, west_beyond = ray_profile(world, IN_A, math.pi, 0.18, 3.0)
-    assert west_barrier == pytest.approx(0.5, abs=0.051), "five cells to the west: thicker than a probe pushes against"
-    assert west_beyond > 2.0
-    # A heading with no occupied cell in range is open: the pocket is the floor beyond.
+    ray = ray_profile(world, IN_A, 0.0, 0.18, 3.0)
+    assert ray.barrier_m == pytest.approx(0.1, abs=0.051), "one ring cell to the east"
+    assert ray.beyond_m > 2.0, "unknown floor beyond it to the range"
+    assert ray.pocket_m == pytest.approx(0.1, abs=0.051)
+    assert ray.beyond_mapped_m == 0.0, "nothing beyond the ring is mapped"
+    west = ray_profile(world, IN_A, math.pi, 0.18, 3.0)
+    assert west.barrier_m == pytest.approx(0.5, abs=0.051), "five cells to the west: thicker than a probe pushes against"
+    assert west.beyond_m > 2.0
+    # A heading with no occupied cell in range is open: the pocket is the floor beyond, and here all of it is mapped.
     free = OccupancyGrid2D(np.zeros((60, 120), np.int8), OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
-    pocket, barrier, beyond = ray_profile(free, IN_A, 0.0, 0.18, 3.0)
+    pocket, barrier, beyond, pocket_mapped, beyond_mapped = ray_profile(free, IN_A, 0.0, 0.18, 3.0)
     assert barrier == 0.0 and beyond == pytest.approx(pocket) and beyond > 2.5
+    assert pocket_mapped == pytest.approx(pocket) and beyond_mapped == pytest.approx(beyond)
     # A wall that fills the range is a band with nothing beyond.
     wall = OccupancyGrid2D(np.full((60, 120), 100, np.int8), OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
-    _, barrier, beyond = ray_profile(wall, IN_A, 0.0, 0.18, 3.0)
-    assert barrier == pytest.approx(3.0, abs=0.2) and beyond == 0.0
+    ray = ray_profile(wall, IN_A, 0.0, 0.18, 3.0)
+    assert ray.barrier_m == pytest.approx(3.0, abs=0.2) and ray.beyond_m == 0.0 and ray.beyond_mapped_m == 0.0
 
 
 def test_boxed_in_by_a_thin_ring_the_fallback_probes_the_thinnest_side_instead_of_holding():
@@ -144,3 +146,42 @@ def test_a_long_free_run_is_probed_even_when_a_thick_band_closes_it():
                 if abs(normalize_angle(c["heading"] - math.pi / 2)) < 0.01]
     with pytest.raises(ValueError):
         EscapeSettings(min_pocket_m=0.0)
+
+
+def walled_strip():
+    """IN_A in a 0.5 m strip between the house's west wall and a bed (00835/000064, ``680ae26a733b``).
+
+    West: a one-cell wall with nothing but unknown behind it -- the outdoors,
+    never mapped. South: a one-cell bump bar across the strip with the
+    room's MAPPED floor behind it. North: a thick band. By the floor-beyond
+    score alone the west wall won (2.7 m "beyond" against 1.8 m), and the
+    recording pushed into it 71 times over 351 actions.
+    """
+    g = np.full((60, 120), -1, np.int8)
+    g[20:41, 28:33] = 0           # the strip: five cells wide, y 2.0 .. 4.1
+    g[0:46, 27] = 100             # the house's west wall, one cell; x < 2.7 stays unknown for ever
+    g[20:41, 33:46] = 100         # the bed
+    g[41:46, 27:46] = 100         # closed to the north
+    g[19, 27:46] = 100            # the bar across the strip's south end, one cell
+    g[0:19, 28:50] = 0            # the room's floor south of it: mapped
+    return OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+
+
+def test_a_thin_band_onto_mapped_floor_outranks_a_thinner_wall_with_unknown_alone_behind_it():
+    policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
+    no_rooms(policy)
+    strip = walled_strip()
+    obs = obs_at(episode, 0, IN_A, yaw=0.0)
+    found = policy.escape.candidates(obs, strip)
+    by_heading = {round(math.degrees(c["heading"])): c for c in found}
+    west, south = by_heading[180], by_heading[-90]
+    assert west["rule"] == "thin_barrier" and west["mapped_m"] == 0.0 and west["beyond_m"] > 2.0, "the outdoors: unknown alone"
+    assert south["barrier_m"] == pytest.approx(0.1, abs=0.051) and south["mapped_m"] >= 1.5, "the room's floor behind the bar"
+    assert west["score"] > south["score"], "by the floor-beyond score the exterior wall still wins ..."
+    assert found[0] is south, "... but a heading onto mapped floor is tried first"
+    assert [c["mapped_m"] > 0 for c in found] == sorted([c["mapped_m"] > 0 for c in found], reverse=True), "mapped headings before unknown-only ones"
+    command = policy.loop.plan(obs, strip)
+    assert command.info["kind"] == "escape" and abs(normalize_angle(command.final_yaw + math.pi / 2)) < 0.01, "turning south"
+    # Nothing mapped on any far side -- the ring the camera never saw out of -- keeps the old order: the thinnest band.
+    assert all(c["mapped_m"] == 0.0 for c in policy.escape.candidates(obs_at(episode, 1, IN_A, yaw=0.0), ringed()))
+    assert policy.escape.candidates(obs_at(episode, 1, IN_A, yaw=0.0), ringed())[0]["turns"] == 0

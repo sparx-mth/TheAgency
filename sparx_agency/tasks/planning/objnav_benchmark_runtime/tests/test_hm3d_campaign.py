@@ -209,6 +209,26 @@ def test_a_few_starts_may_sit_exactly_on_a_view_point():
     assert run.GEODESIC_AGREEMENT_FRACTION < 1.0
 
 
+def test_a_small_scene_may_miss_a_handful_of_starts_by_less_than_a_stride():
+    """v1 val runs 99 starts per scene, where 99% admits none: the 2026-10-22 sweep refused five of its twenty
+    scenes at this gate -- 98, 98, 98, 97 and 96 of 99 within a millimetre, the median at 3 micrometres, the worst
+    0.016-0.090 m -- and five scenes had to be re-run by hand with --allow-geodesic-mismatch. Up to three starts
+    a hair off a view point pass; a fourth, or one a stride off, is still the wrong-navmesh complaint."""
+    for within, worst in ((98, 0.054), (98, 0.090), (97, 0.016), (96, 0.090)):
+        sweep = {"episodes": 99, "within_1mm": within, "median_abs_m": 3.4e-6, "max_abs_m": worst}
+        assert run.geodesic_agreement_issue(sweep) is None, (within, worst)
+    assert run.GEODESIC_AGREEMENT_MIN_MISSES == 3 and run.GEODESIC_MISS_MAX_M == 0.25
+    four = {"episodes": 99, "within_1mm": 95, "median_abs_m": 3.4e-6, "max_abs_m": 0.09}
+    complaint = run.geodesic_agreement_issue(four)
+    assert complaint is not None and "95 of 99" in complaint and "3 starts" in complaint and "0.25 m" in complaint
+    far = {"episodes": 99, "within_1mm": 98, "median_abs_m": 3.4e-6, "max_abs_m": 0.26}
+    assert run.geodesic_agreement_issue(far) is not None, "one start a stride from where the publisher measured it"
+    assert run.geodesic_agreement_issue(far, allow=True) is None
+    # The fraction still governs a split-sized set: ten misses of a thousand pass, eleven do not.
+    assert run.geodesic_agreement_issue({"episodes": 1000, "within_1mm": 990, "median_abs_m": 0.0, "max_abs_m": 0.5}) is None
+    assert run.geodesic_agreement_issue({"episodes": 1000, "within_1mm": 989, "median_abs_m": 0.0, "max_abs_m": 0.09}) is not None
+
+
 # -- scenes at once (--jobs) -------------------------------------------------
 
 def test_concurrent_scenes_overlap_and_log_beside_not_inside_the_scene_directories(tmp_path):
@@ -263,6 +283,47 @@ def test_concurrent_resume_skips_finished_scenes_and_resumes_started_ones(tmp_pa
     assert results[0]["status"] == "already finished"
     assert len(seen) == 1 and "--resume" in seen[0]
     assert seen[0][seen[0].index("--scenes") + 1] == SCENES[1]
+
+
+def test_a_resume_acceptance_reaches_only_the_scenes_that_continue(tmp_path):
+    """The 2026-10-22 v1 sweep lost two scenes mid-way to the kinematic self-check; finishing them under the
+    corrected tolerance is a resume whose frozen config differs in that check and in the source hash, which
+    ``run.py`` admits only when told (``--resume-accepting-changes``) and only with ``--resume``. The launcher
+    forwards the flag to every child, so the campaign must hand it to the scene that continues and withhold it
+    from a scene that starts afresh -- that child would refuse to start otherwise -- and refuse it on a fresh root."""
+    third = "00803-k1cupFYWXJ6"
+    write_scene(tmp_path, SCENES[0], 1)                                   # finished: skipped
+    write_scene(tmp_path, SCENES[1], 1, finish=False)                     # started: resumed with the acceptance
+    seen = []
+
+    def runner(command, stdout=None, stderr=None):
+        seen.append(command)
+        return types.SimpleNamespace(returncode=0)
+
+    extra = ["--lean", "--resume-accepting-changes", "kinematics", "evaluation", "source_sha256", "--validate-starts"]
+    campaign.run_campaign(tmp_path, version="v2", episodes_dir="E", scenes_dir="S",
+                          scenes=list(SCENES) + [third], runner=runner, resume=True, jobs=2, extra=extra)
+    by_scene = {command[command.index("--scenes") + 1]: command for command in seen}
+    assert set(by_scene) == {SCENES[1], third}
+    continued, fresh = by_scene[SCENES[1]], by_scene[third]
+    assert "--resume" in continued and "--resume-accepting-changes" in continued
+    assert continued[continued.index("--resume-accepting-changes") + 1:continued.index("--resume-accepting-changes") + 4] == \
+        ["kinematics", "evaluation", "source_sha256"]
+    assert "--lean" in continued and "--validate-starts" in continued
+    assert "--resume" not in fresh and "--resume-accepting-changes" not in fresh and "kinematics" not in fresh
+    assert "--lean" in fresh and "--validate-starts" in fresh
+    # Each child's command is one run.py accepts: the continued one resumes with the acceptance, the fresh one without.
+    assert run.parser().parse_args(continued[continued.index("--version"):]).resume_accepting_changes == \
+        ["kinematics", "evaluation", "source_sha256"]
+    assert run.parser().parse_args(fresh[fresh.index("--version"):]).resume_accepting_changes == ()
+    assert campaign.split_resume_acceptance(["--lean"]) == (["--lean"], [])
+    with pytest.raises(ValueError, match="resume"):
+        campaign.run_campaign(tmp_path / "fresh", version="v2", episodes_dir="E", scenes_dir="S",
+                              scenes=list(SCENES), runner=runner, extra=["--resume-accepting-changes", "kinematics"])
+    # And run.py itself refuses the acceptance without a resume, and an unknown key.
+    with pytest.raises(SystemExit):
+        run.parser().parse_args(["--version", "v1", "--resume-accepting-changes", "policy"])
+    assert set(run.RESUMABLE_CONFIG_CHANGES) == {"kinematics", "evaluation", "source_sha256", "gpu_plan"}
 
 
 def test_jobs_below_one_is_refused(tmp_path):

@@ -29,7 +29,11 @@ The slack (:class:`KinematicTolerance`) is sized for real simulators, not for
 rounding: AI2-THOR's documented actuation noise (a turn N(0, 0.5) deg, the
 heading of a move N(0, 0.25) deg, its length N(0.001, 0.005) m) and Habitat's
 partial no-sliding steps and stairs (up to 0.2 m up one step, slopes up to 45
-degrees).
+degrees). Habitat's navmesh step filter is the one more thing a protocol may
+have to size for (``reproject_m``): it starts every body action -- a turn
+included -- from the agent's projection onto the mesh, so an agent it finds a
+few centimetres off its mesh is carried back onto it by that action, a
+placement the action did not ask for.
 
 Python 3.8 syntax, standard library only.
 """
@@ -137,10 +141,31 @@ class KinematicTolerance:
             off (toward zero, along its own direction) before the in-place,
             step and heading bounds are judged, once, on the first action
             that moves the agent. 0 (the default) excuses nothing.
+        reproject_m: How far the navmesh step filter may carry the agent on
+            ANY turn or MOVE_FORWARD beyond the bounds above, metres (since
+            2026-10-26). habitat-sim 0.2.4's ``try_step`` starts every body
+            action from ``findNearestPoly(start)`` -- the agent's projection
+            onto the mesh -- and returns a point on the mesh, so an agent it
+            finds a few centimetres off its mesh (HM3D's recomputed mesh,
+            its stairs) is pulled back onto it by the next body action, a
+            turn included: the 2026-10-22 v1 sweep lost 00878-XB4GS9ShBRE
+            at action 156 of its second episode to a TURN_LEFT that "moved"
+            0.071 m, and 00873-bxsVRursffK at action 315 of its 69th to a
+            MOVE_FORWARD that went 0.094 m across the floor 53 degrees off
+            its heading and 0.057 m up -- two actions in some half a million,
+            each ending a 99-episode scene. On a turn that much of the
+            displacement (3-D, along its own direction) is taken off before
+            the in-place bound; on a MOVE_FORWARD that much of what lies
+            ACROSS the heading, behind the start, or past the step's reach,
+            each separately, before the step, heading and climb bounds --
+            the step itself is still judged along the heading it began with.
+            LOOKs and STOP, which habitat executes on the sensors alone, get
+            none of it. 0 (the default) excuses nothing; the protocol that
+            knows its simulator sets it.
 
     Raises:
         HarnessError: On a tolerance that is not a positive finite number
-            (``settle_m`` and ``settle_xy_m`` may be 0).
+            (``settle_m``, ``settle_xy_m`` and ``reproject_m`` may be 0).
     """
 
     position_m: float = 0.02
@@ -153,11 +178,12 @@ class KinematicTolerance:
     climb_m: float = 0.2
     settle_m: float = 0.0
     settle_xy_m: float = 0.0
+    reproject_m: float = 0.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
             value = getattr(self, item.name)
-            lowest_allowed = 0.0 if item.name in ("settle_m", "settle_xy_m") else None
+            lowest_allowed = 0.0 if item.name in ("settle_m", "settle_xy_m", "reproject_m") else None
             if not (is_length(value) and (value > 0.0 or value == lowest_allowed)):
                 raise HarnessError(
                     "KinematicTolerance.%s must be a %sfinite number, "
@@ -267,6 +293,32 @@ def _check_forward(action, motion, spec, tolerance) -> None:
     _check_pitch_kept(action, motion, tolerance)
 
 
+def _without_reprojection(action: DiscreteAction, before: AgentPose, after: AgentPose,
+                          spec: DiscreteActionSpec, tolerance: KinematicTolerance) -> AgentPose:
+    """``after`` with up to ``tolerance.reproject_m`` of the step filter's placement taken off (see :class:`KinematicTolerance`)."""
+    slack = tolerance.reproject_m
+    dx, dy, dz = after.x - before.x, after.y - before.y, after.z - before.z
+    if action == _A.MOVE_FORWARD:
+        # The step is judged along and across the heading it began with: the placement is what lies
+        # across it, behind its start, or past its reach -- each taken off separately, up to the bound.
+        cos_yaw, sin_yaw = math.cos(before.yaw), math.sin(before.yaw)
+        along, across = dx * cos_yaw + dy * sin_yaw, dy * cos_yaw - dx * sin_yaw
+        across = math.copysign(max(0.0, abs(across) - slack), across)
+        if along < 0.0:
+            along = min(0.0, along + slack)
+        reach = spec.forward_step_m + tolerance.forward_overshoot_m
+        if along > reach:
+            along = max(reach, along - slack)
+        return replace(after, x=before.x + along * cos_yaw - across * sin_yaw,
+                       y=before.y + along * sin_yaw + across * cos_yaw)
+    # A turn asked for no displacement: whatever there is, up to the bound, is the placement.
+    moved = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if moved <= 0.0:
+        return after
+    kept = max(0.0, moved - slack) / moved
+    return replace(after, x=before.x + dx * kept, y=before.y + dy * kept, z=before.z + dz * kept)
+
+
 def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
                  spec: DiscreteActionSpec, tolerance: KinematicTolerance,
                  first: bool = False) -> None:
@@ -284,7 +336,10 @@ def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
             of horizontal motion is the simulator placing the agent on the
             mesh and is taken off before the bounds are judged (see
             :attr:`KinematicTolerance.settle_m` and
-            :attr:`KinematicTolerance.settle_xy_m`).
+            :attr:`KinematicTolerance.settle_xy_m`). On any turn or
+            MOVE_FORWARD up to ``tolerance.reproject_m`` of the navmesh step
+            filter's placement is taken off likewise
+            (:attr:`KinematicTolerance.reproject_m`).
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -312,6 +367,9 @@ def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
         if across > 0.0:
             scale = min(across, tolerance.settle_xy_m) / across
             after = replace(after, x=after.x - dx * scale, y=after.y - dy * scale)
+    if tolerance.reproject_m > 0.0 and (action in _TURN_SIGN or action == _A.MOVE_FORWARD):
+        # The step filter's placement is the simulator's too, on any body action: take it off, keep the rest.
+        after = _without_reprojection(action, before, after, spec, tolerance)
     motion = _motion(before, after)
     if action in _TURN_SIGN:
         _check_turn(action, motion, spec, tolerance)

@@ -11,6 +11,8 @@
 #   hm3d/run_benchmark.sh --limit 2 --record --save-frames  # ... plus every dashboard frame as a JPEG still (frames/)
 #   hm3d/run_benchmark.sh --category toilet --limit 3       # the published toilet episodes, three per scene
 #   hm3d/run_benchmark.sh --output runs/hm3d_v2_val_X       # continue an interrupted campaign there (finished scenes are kept)
+#   hm3d/run_benchmark.sh --output runs/X --resume-accepting-changes kinematics evaluation source_sha256 gpu_plan
+#                                                           # ... after a harness-only fix: the scenes that continue may differ in the self-check and provenance
 #   hm3d/run_benchmark.sh --preflight                       # services + data + configuration check, no episode
 #   hm3d/run_benchmark.sh --status runs/hm3d_v2_val_X       # the live progress of a campaign (or of one scene's directory)
 #   hm3d/run_benchmark.sh --agent falcon-yolo --smoke       # the FALCON + YOLO + closing baseline (no LLM)
@@ -28,14 +30,15 @@
 #   HM3D_EPISODES_DIR    the split directory holding <split>.json.gz and content/      default $DATA/objectnav/hm3d/<version>/<split>
 #   HM3D_SCENES_DIR      habitat-lab's data/scene_datasets/, holding hm3d/ (v1) or hm3d_v0.2/ (v2)   default $DATA/scene_datasets
 #   VALIDATE_STARTS=1    measure every start's shortest path before its scene runs and check it against the publisher's own
-#                        geodesic (99% within 1 mm, or the scene refuses to run: that is the navmesh check)   default 1
+#                        geodesic (99% within 1 mm -- or, in a scene too small for 1% to be a start, at most three
+#                        starts off by less than a stride -- or the scene refuses to run: the navmesh check)   default 1
 #   EXCLUDE_UNREACHABLE  1: drop, and record, an episode whose goal view points are unreachable instead of stopping   default 0
 #   SPLIT                val (the benchmark); train / val_mini are development splits and are labelled subsets   default val
 #   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; --jobs N defaults it to ceil(N/2) (and budgets N
 #                        renderers in the GPU plan) unless set here; each slot is its own KV cache          default 1
 set -euo pipefail
 
-usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +56,7 @@ CAMPAIGN_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.campai
 PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
 
 # -- the command line -----------------------------------------------------------------------
-VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=()
+VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -61,6 +64,8 @@ while [[ $# -gt 0 ]]; do
     --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
     --scene) SCENE="$2"; shift 2 ;;                            # one scene, run directly by hm3d.run
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do SCENES+=("$1"); shift; done ;;   # a subset of the campaign's scenes
+    --resume-accepting-changes) ACCEPT=("$1"); shift; while [[ $# -gt 0 && "$1" != --* ]]; do ACCEPT+=("$1"); shift; done ;;
+                                                           # a resume's alone (hm3d.run refuses it otherwise): never the preflight's
     --limit) LIMIT="$2"; shift 2 ;;                            # episodes (per scene, in the campaign)
     --jobs) JOBS="$2"; shift 2 ;;                              # scenes at once (campaign only)
     --smoke) SMOKE=1; shift ;;
@@ -186,7 +191,7 @@ date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"
 if [[ -n "$SCENE" ]]; then
   RUN_ARGS=("${DATA_ARGS[@]}" "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" --scenes "$SCENE" --output "$OUTPUT")
   [[ -n "$LIMIT" ]] && RUN_ARGS+=(--limit "$LIMIT")
-  [[ -s "$OUTPUT/episodes.jsonl" ]] && { say "resuming: $OUTPUT already holds episodes" | tee -a "$LOG"; RUN_ARGS+=(--resume); }
+  [[ -s "$OUTPUT/episodes.jsonl" ]] && { say "resuming: $OUTPUT already holds episodes" | tee -a "$LOG"; RUN_ARGS+=(--resume "${ACCEPT[@]}"); }
   say "running $SCENE; progress: $OUTPUT/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
   set +e
   "${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$RUN_MODULE" "${RUN_ARGS[@]}" 2>&1 | tee -a "$LOG"
@@ -211,7 +216,7 @@ fi
 # hm3d.run's --version/--split/--episodes-dir/--scenes-dir come from the campaign itself; the rest is passed through after "--".
 say "campaign ($AGENT): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; else echo "every ${CATEGORY:+$CATEGORY }episode of the split"; fi), one process per scene, $JOBS at once; per-scene progress under $OUTPUT/<scene>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
 set +e
-"${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$CAMPAIGN_MODULE" "${CAMPAIGN_ARGS[@]}" -- "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" 2>&1 | tee -a "$LOG"
+"${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$CAMPAIGN_MODULE" "${CAMPAIGN_ARGS[@]}" -- "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" "${ACCEPT[@]}" 2>&1 | tee -a "$LOG"
 RUN_CODE=${PIPESTATUS[0]}
 set -e
 [[ "$RUN_CODE" == 0 ]] || die "the campaign exited with $RUN_CODE (see $LOG and $OUTPUT/<scene>/run.json); rerun the same command with --output $OUTPUT to resume the unfinished scenes"

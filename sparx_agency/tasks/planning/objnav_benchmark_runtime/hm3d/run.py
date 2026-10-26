@@ -41,6 +41,24 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
 #: 100%: a handful of starts sit exactly on a view point, where float32 and
 #: navmesh snapping put the two numbers a hair apart.
 GEODESIC_AGREEMENT_FRACTION = 0.99
+#: A scene too small for one per cent to be a whole start -- v1 val runs 99 per
+#: scene, where the fraction admits none -- may still miss this many, each off
+#: by no more than ``GEODESIC_MISS_MAX_M`` (since 2026-10-26). The 2026-10-22 v1
+#: sweep refused five of its twenty scenes at the gate for one to three starts
+#: 0.016-0.090 m off with the median at 3 micrometres: snapping at a view
+#: point, not another mesh, which moves the median by decimetres. One stride
+#: (0.25 m) is the bound: a start a stride from where the publisher measured
+#: it is not the same start.
+GEODESIC_AGREEMENT_MIN_MISSES = 3
+GEODESIC_MISS_MAX_M = 0.25
+
+#: The frozen-config keys a ``--resume`` may differ in when the operator names them (``--resume-accepting-changes``):
+#: provenance (``source_sha256``, ``gpu_plan``) and the kinematic self-check (``kinematics``, and ``evaluation``,
+#: which nests it) -- none an input to a decision or a score, so the rows before and after are one experiment.
+#: The 2026-10-22 v1 sweep lost two scenes mid-way to the self-check (00873 at its 69th episode, 00878 at its
+#: second); finishing them under the corrected tolerance means exactly these differences, as Gibson's did on
+#: 2026-10-11 (``gibson/run.py``). Anything else still refuses the resume.
+RESUMABLE_CONFIG_CHANGES = ("kinematics", "evaluation", "source_sha256", "gpu_plan")
 
 #: Packages the runtime needs, and the distribution each version is read from.
 RUNTIME_PACKAGES = (
@@ -105,6 +123,11 @@ def parser():
                         "recordings/<key>/frames/ (one per decision, ~0.3 MB each) so single "
                         "moments can be inspected without decoding the video")
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--resume-accepting-changes", nargs="+", choices=RESUMABLE_CONFIG_CHANGES, default=(),
+                   metavar="KEY", dest="resume_accepting_changes",
+                   help="With --resume: the frozen-config keys that may differ from the recorded run -- "
+                        "provenance or the kinematic self-check only (%s); what differed is written into "
+                        "run.json's resume entry" % ", ".join(RESUMABLE_CONFIG_CHANGES))
     p.add_argument("--validate-starts", action="store_true",
                    help="Load every selected scene and measure l up front. Slow, "
                         "and the only way to find an unreachable start before "
@@ -142,20 +165,29 @@ def geodesic_agreement_issue(agreement, *, allow=False):
         allow: The operator has said the deviation is deliberate.
 
     Returns:
-        The complaint, or ``None`` when the agreement is good enough or was
+        The complaint, or ``None`` when the agreement is good enough -- at
+        least ``GEODESIC_AGREEMENT_FRACTION`` of the starts within a
+        millimetre, or no more than ``GEODESIC_AGREEMENT_MIN_MISSES`` of them
+        outside it and none by more than ``GEODESIC_MISS_MAX_M`` -- or was
         explicitly accepted.
     """
     if agreement is None or allow:
         return None
     if agreement["within_1mm"] >= GEODESIC_AGREEMENT_FRACTION * agreement["episodes"]:
         return None
+    misses = int(agreement["episodes"]) - int(agreement["within_1mm"])
+    if misses <= GEODESIC_AGREEMENT_MIN_MISSES and agreement["max_abs_m"] <= GEODESIC_MISS_MAX_M:
+        return None                       # a small scene's handful at a view point, each within a stride
     return ("Only %d of %d checked starts reproduce the publisher's own geodesic "
-            "distance within 1 mm (median off by %.3f m, worst %.3f m). That is "
-            "the same quantity as l, so this is most likely the wrong navmesh, "
-            "and every SPL would be wrong with it. Investigate, or pass "
-            "--allow-geodesic-mismatch to record the deviation and continue."
+            "distance within 1 mm (median off by %.3f m, worst %.3f m): more than "
+            "the %d starts a scene may have a hair off a view point, or one off by "
+            "more than %.2f m. That is the same quantity as l, so this is most "
+            "likely the wrong navmesh, and every SPL would be wrong with it. "
+            "Investigate, or pass --allow-geodesic-mismatch to record the "
+            "deviation and continue."
             % (agreement["within_1mm"], agreement["episodes"],
-               agreement["median_abs_m"], agreement["max_abs_m"]))
+               agreement["median_abs_m"], agreement["max_abs_m"],
+               GEODESIC_AGREEMENT_MIN_MISSES, GEODESIC_MISS_MAX_M))
 
 
 def _runtime(issues):
@@ -391,6 +423,8 @@ def main(argv=None, *, frozen_lock=None, expected_episode_ids=None):
         return 0
     if args.resume and args.output is None:
         parser().error("--resume requires --output")
+    if args.resume_accepting_changes and not args.resume:
+        parser().error("--resume-accepting-changes requires --resume")
     protocol = protocol_for(args.version).with_split(args.split)
     env, policy, label_mapper, config, issues = prepare(args)
     closed = False
@@ -414,7 +448,7 @@ def main(argv=None, *, frozen_lock=None, expected_episode_ids=None):
         summary = run_evaluation(
             env, policy, label_mapper, output=output, config=config,
             settings=protocol.evaluation_settings(), episode_ids=selected,
-            resume=args.resume, frozen_lock=frozen_lock,
+            resume=args.resume, accept_changes=tuple(args.resume_accepting_changes), frozen_lock=frozen_lock,
             expected_episode_ids=expected_episode_ids, record=args.record,
             video_fps=args.video_fps, save_frames=args.save_frames, progress=progress, wrap_env=wrap_env,
             agent_class=LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent)

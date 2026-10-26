@@ -2919,3 +2919,83 @@ simulator that forbids sliding without re-deriving what a step can physically do
 rung of a fallback ladder (relocation) succeed indefinitely: a rung that can always "succeed" by
 oscillating starves every rung below it. And don't score a vocabulary change by its semantics
 alone -- probe the detector on the frame that failed.
+
+## 2026-10-26 — HM3D ObjectNav: two "unwinnable" episodes of the replay were the probe's ranking and a tread called a storey
+
+**Symptom:** After the 2026-10-25 fixes, 00835/000064 (chair, 3.0 m away) still spent 351 of 500
+actions in the escape rung with 71 refused steps, and 00873/000002 (bed) 447 actions in it with the
+agent never more than a metre from its spawn. Entry 038 had written both off: "a physically
+marginal doorway the simulator refuses" and "a landing between two flights, unwinnable under the
+single-storey rule".
+
+**Root cause:** Both verdicts came from the summary counters, not the map journal.
+1. 00835: the agent spawned in a dead-end alcove behind a bed whose only exit was a 0.5-0.7 m strip
+   it had walked IN through. Its own bump marks (one sticky bar on the walk-in corridor, one at the
+   strip's south end after a lateral touch of the bed at x=1.28 where x=1.1 passes) sealed the strip
+   on the map at every clearance, and then the escape probe -- which DID see the exit on every
+   action: a one-cell bar with 1.8 m of mapped floor behind it -- ranked the room's exterior wall
+   above it every time, because the wall is a one-cell band with 2.7 m of "free or unknown"
+   behind it and nothing outside a house is ever mapped. 71 pushes into the west wall. Replaying the
+   new ordering on the recorded maps puts the south exit first at every stuck position.
+2. 00873: the first pose was a tread three risers below the bed's storey. The atlas made floor 0 of
+   it, the guard confined the search to `Z_spawn +/- 0.5 m` (neither storey), the first accidental
+   step down was retreated from, and both flights off the "storey" were then masked as stairs or
+   drops: boxed in by its own rules. The half-level adoption that could have rescued it needs a
+   settled plateau the retreat never let the agent reach.
+
+**Fix / workaround:** (1) `EscapeProbe.candidates` orders headings whose far side holds known free
+cells before any whose far side is unknown alone (`RayProfile.*_mapped_m`); unknown-only headings
+keep their turn after them. (2) The spawn storey is PROVISIONAL until the agent has walked
+`stable_distance_m` level on it (`MultiFloorSearch.storey_confirmed`); a height departure before
+that is walked as an observed traversal toward the nearer storey the terrain can see
+(`_leave_spawn_stairs`), and the storey it settles on becomes the spawn plane
+(`SpawnFloorGuard.rebase`, adopting a floor-sized plateau at once). A departure from a confirmed
+storey is the retreat as before.
+
+**Don't:** Don't accept "the simulator refuses it" for a passage the agent walked through on the way
+in -- diff the journal between the step it entered and the step it was stuck (`map_journal.npz`,
+newly occupied cells per step) before calling geometry marginal. Don't let a score that counts
+unknown as floor compare an exterior wall with an interior one. And don't treat the first pose's
+height as a storey until the agent has stood level on it: a tread is a pose too.
+
+## 2026-10-26 — The full HM3D v1 sweep stopped at 1,871 of 2,000: five scenes refused by a 99% rule that admits nothing at n = 99, two killed by a 7 cm navmesh re-projection, none resumable
+
+**Symptom:** `runs/hm3d_v1_val_j8p3_20261022` (20 scenes, 8 at once) ended with `complete: false`. In the first pass
+five scenes exited 1 after 0.0 h; a second pass restricted to them (`--scenes ... --allow-geodesic-mismatch`)
+finished them. Two more scenes exited 1 mid-way -- `00878-XB4GS9ShBRE` after 1 episode, `00873-bxsVRursffK` after
+68 (10.2 h) -- and were never restarted: 1,871 rows, no aggregate for the split.
+
+**Root cause:** Three separate things, all in the harness, none in the method.
+1. The start-validation gate demanded `within_1mm >= 0.99 * n`. v1 val runs 99 starts per scene, so one start more
+   than a millimetre off (98/99 = 98.99%) refused the scene. The five scenes had 1-3 starts off by 0.016-0.090 m
+   with the median at 3 micrometres -- snapping at a view point, not another mesh (which moves the median by
+   decimetres; 15 scenes agreed to 10 micrometres on all 99).
+2. The kinematic self-check refused two motions: a TURN_LEFT that "moved" 0.071 m at -52 degrees from its heading
+   (00878/000001, action 156) and a MOVE_FORWARD that went 0.094 m at -53 degrees and 0.057 m up on the stairs
+   (00873/000068, action 315). habitat-sim 0.2.4's `tryStep` starts every body action -- a turn included -- from
+   `findNearestPoly(start)` and returns a point on the mesh (`PathFinder.cpp`; the no-sliding branch of habitat's
+   patched `moveAlongSurface`), so an agent it finds a few centimetres off the recomputed mesh is carried back onto
+   it by the next action. Two actions in some half a million, each ending a 99-episode scene process, and the
+   refusals' "likely ..." clauses blamed frames and sliding that 1,871 episodes of agreeing path lengths rule out
+   (the same misreading as 2026-10-20).
+3. Even with the check corrected, `hm3d/run.py --resume` would have refused both scenes: the frozen config differs
+   in `kinematics` (and `evaluation`, which nests it) and `source_sha256`, and the HM3D runner had no
+   `--resume-accepting-changes` -- Gibson's had since 2026-10-11, for the identical situation. The only way on was to
+   delete 69 finished episodes and start the two scenes over.
+
+**Fix / workaround:** (1) `run.py`: a scene may miss up to `GEODESIC_AGREEMENT_MIN_MISSES` (3) starts each within
+`GEODESIC_MISS_MAX_M` (0.25 m, a stride) when 1% of it is less than a start; the fraction still governs a split.
+(2) `KinematicTolerance.reproject_m` (shared rule, default 0) and `HM3DProtocol.kinematics()` = 0.15 m: on a turn
+that much 3-D displacement, on a MOVE_FORWARD that much across the heading, behind the start or past the reach, is
+the step filter's and is taken off before the bounds; LOOKs and STOP get none. (3) `hm3d/run.py
+--resume-accepting-changes kinematics evaluation source_sha256 gpu_plan`, plumbed through `run_evaluation`; the
+campaign hands it only to the scenes that continue; the launcher parses it so the preflight never sees it. To finish
+this sweep: `hm3d/run_benchmark.sh --version v1 --jobs 2 --output runs/hm3d_v1_val_j8p3_20261022
+--resume-accepting-changes kinematics evaluation source_sha256 gpu_plan` (no `--scenes`: the 18 finished scenes are
+skipped, the two continue from their 2nd and 69th episodes).
+
+**Don't:** Don't write a percentage gate without asking what it admits at the smallest n it will meet. Don't let a
+per-action self-check end a 99-episode process for a one-off placement the simulator itself made; size the
+protocol's tolerance from the recorded motion and pin it in a test, as 2026-10-07/10-11/10-20 did. And don't ship a
+resumable runner whose resume refuses the one kind of change a harness fix makes -- the acceptance list is part of
+the fix.

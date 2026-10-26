@@ -201,7 +201,7 @@ class HM3DProtocol:
             actions=ALL_ACTIONS)
 
     def kinematics(self) -> KinematicTolerance:
-        """The shared default, with the climb bound HM3D's stairs need.
+        """The shared default, with the climb bound HM3D's stairs need and the step filter's placement.
 
         Sliding is off here, so a blocked MOVE_FORWARD moves nothing at all and
         the horizontal bounds stand unchanged. ``climb_m`` (since 2026-10-20) is
@@ -215,8 +215,25 @@ class HM3DProtocol:
         2026-10-20). The trade is the same as Gibson accepted: a step that
         reads entirely as height is no longer refused by this bound alone,
         and the independent path-length and heading checks remain.
+
+        ``reproject_m`` (since 2026-10-26) is 0.15 m: habitat-sim's step
+        filter starts every body action from the agent's projection onto the
+        navmesh and ends it on the mesh, so an agent it finds a few
+        centimetres off the recomputed mesh is carried back onto it by its
+        next turn or step. The full v1 sweep of 2026-10-22 (1,871 episodes,
+        some half a million actions) met it twice, and each ended a
+        99-episode scene: ``00878-XB4GS9ShBRE/000001`` action 156, a
+        TURN_LEFT that "moved" 0.071 m across the floor at -52 degrees from
+        its heading; ``00873-bxsVRursffK/000068`` action 315, a MOVE_FORWARD
+        that went 0.094 m at -53 degrees and 0.057 m up on the stairs. Both
+        refusals' "likely ..." clauses named frame and sliding faults that
+        1,871 episodes of agreeing path lengths rule out. The bound stays well
+        under a stride: a simulator that slides along a wall, or a pose
+        stream in the wrong frame, still fails the heading check on its first
+        real step, LOOKs and STOP get no slack at all, and the independent
+        path-length check remains.
         """
-        return KinematicTolerance(climb_m=0.60)
+        return KinematicTolerance(climb_m=0.60, reproject_m=0.15)
 
     def evaluation_settings(self) -> EvaluationSettings:
         """The harness options this protocol requires, stated explicitly."""

@@ -51,7 +51,7 @@ def evaluation_configuration(config, episode_ids, settings=None, *, policy):
 
 
 def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
-                   episode_ids=None, resume=False, frozen_lock=None,
+                   episode_ids=None, resume=False, accept_changes=(), frozen_lock=None,
                    expected_episode_ids=None, record=False, video_fps=6,
                    writer_factory=None, save_frames=False, dashboard=True, progress=None,
                    wrap_env=None, agent_class=HeadlessObjNavAgent):
@@ -62,6 +62,11 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
     No simulator or model is launched/downloaded here. A frozen lock is checked
     against THIS execution configuration before output creation or environment
     reset, never only against an earlier preflight.
+
+    ``accept_changes`` names the top-level frozen-config keys a ``resume`` may
+    differ in from the recorded run (:class:`MetricsLogger`); the adapter
+    restricts them to provenance and self-checks, and the logger writes what
+    differed into ``run.json``.
 
     ``wrap_env(env, logger)`` may return a pass-through wrapper (live progress, say) applied
     beneath the recorder; ``agent_class`` swaps the headless agent for a variant with the
@@ -88,7 +93,7 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
         params = HeadlessAgentParams(converter=converter)
         output = Path(output).expanduser()
         # MetricsLogger claims the output/resume lock before any video is written.
-        with MetricsLogger(output, prepared, resume=resume) as logger:
+        with MetricsLogger(output, prepared, resume=resume, accept_changes=tuple(accept_changes)) as logger:
             if wrap_env is not None:
                 active_env = wrap_env(env, logger)
             if record:

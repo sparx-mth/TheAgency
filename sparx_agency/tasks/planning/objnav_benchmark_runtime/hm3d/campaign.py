@@ -92,6 +92,35 @@ def scene_command(scene, output, *, version, episodes_dir, scenes_dir, limit=Non
     return command + list(extra)
 
 
+#: The child flag that only a resuming child may carry (``run.py``: it requires ``--resume``).
+RESUME_ACCEPTANCE_FLAG = "--resume-accepting-changes"
+
+
+def split_resume_acceptance(extra):
+    """``(rest, acceptance)``: the child arguments without ``--resume-accepting-changes KEY...``, and that group.
+
+    The campaign hands ``extra`` to every child unchanged, but the acceptance
+    is a resume's: ``run.py`` refuses it on a fresh scene. So a resumed root
+    gives it to the scenes that continue and withholds it from the ones that
+    start, and the operator writes the launcher's command line once.
+    """
+    rest, acceptance = [], []
+    tokens = list(extra)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == RESUME_ACCEPTANCE_FLAG:
+            acceptance.append(token)
+            index += 1
+            while index < len(tokens) and not str(tokens[index]).startswith("--"):
+                acceptance.append(tokens[index])
+                index += 1
+            continue
+        rest.append(token)
+        index += 1
+    return rest, acceptance
+
+
 def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=None,
                  split="val", extra=(), resume=False, runner=subprocess.run, smoke=False,
                  jobs=1):
@@ -107,7 +136,9 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
         scenes: Restrict to these scenes; all of the split by default.
         extra: Further ``run.py`` arguments, passed to every child unchanged.
         resume: Skip a scene that already holds a finished ``summary.json``,
-            and pass ``--resume`` to one that started but did not finish.
+            and pass ``--resume`` to one that started but did not finish --
+            with the ``--resume-accepting-changes KEY...`` of ``extra``, if
+            any, which a scene that starts afresh never receives.
         runner: Injected for tests; must behave like ``subprocess.run``.
         smoke: Run the minimal cover instead -- one explicit published episode
             per scene, chosen so every goal category appears at least once
@@ -135,6 +166,9 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
                                      "HM3D smoke plan", indent=2))
     if int(jobs) < 1:
         raise ValueError("jobs must be at least 1, got %r" % (jobs,))
+    shared, acceptance = split_resume_acceptance(extra)
+    if acceptance and not resume:
+        raise ValueError("%s is a resume's: it needs a campaign root that already holds scenes" % RESUME_ACCEPTANCE_FLAG)
     results, pending = [], []
     for scene in selected:
         output = root / scene
@@ -143,9 +177,9 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
             results.append({"scene": scene, "status": "already finished",
                             "returncode": 0, "output": str(output)})
             continue
-        arguments = list(extra)
+        arguments = list(shared)
         if resume and output.exists():
-            arguments.append("--resume")
+            arguments += ["--resume"] + acceptance
         command = scene_command(scene, output, version=version, split=split,
                                 episodes_dir=episodes_dir, scenes_dir=scenes_dir,
                                 limit=limit, extra=arguments, episode_ids=plan.get(scene))
