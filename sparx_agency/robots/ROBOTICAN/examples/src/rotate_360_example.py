@@ -39,7 +39,10 @@ YAW_RATE_DEG_S = 30.0        # requested rate; actual achieved rate is unconfirm
 YAW_DIRECTION = 1.0          # 1 = clockwise, -1 = counter-clockwise
 YAW_RELATIVE = 1.0           # 1 = relative to current heading, 0 = absolute
 YAW_TOLERANCE_DEG = 10.0     # consider the turn done within this margin
-YAW_RESEND_INTERVAL_S = 4.0  # re-issue the command for the remaining degrees at this cadence
+# Position mode ignores MAV_CMD_CONDITION_YAW (the centered stick holds heading; R3 test: only
+# ~15 deg in 40s), so the turn is driven with the manual_control yaw stick instead. Stick units
+# are +-1000; magnitude/sign unconfirmed - raise it if the turn is still too slow.
+YAW_STICK_R = 200.0
 YAW_MAX_WAIT_S = 40.0        # safety fallback if azimuth feedback never confirms completion
 YAW_SETTLE_TIME_S = 3.0      # hold still after Position mode confirms, before yawing
 
@@ -94,7 +97,6 @@ class TakeoffAndRotate(Node):
         self.yaw_last_azimuth = None
         self.yaw_accumulated_deg = 0.0
         self.yaw_wait_start_time = None
-        self.yaw_last_resend_time = None
         self.step = None
 
         self.cam_thread = None
@@ -287,6 +289,7 @@ class TakeoffAndRotate(Node):
 
     def stop_camera_capture(self):
         self.manual_control.x = 0.0
+        self.manual_control.r = 0.0
         if self.capture_timer is not None:
             self.capture_timer.cancel()
             self.capture_timer = None
@@ -366,16 +369,12 @@ class TakeoffAndRotate(Node):
 
         elif self.step == STEP_YAW_360:
             self.get_logger().info(
-                f"Requesting {YAW_TURN_DEGREES:.0f} deg relative turn at {YAW_RATE_DEG_S} deg/s "
-                f"(MAV_CMD_CONDITION_YAW)")
-            self.send_command_long(MAV_CMD_CONDITION_YAW,
-                                   YAW_TURN_DEGREES, YAW_RATE_DEG_S,
-                                   YAW_DIRECTION, YAW_RELATIVE)
+                f"Turning {YAW_TURN_DEGREES:.0f} deg with yaw stick r={YAW_DIRECTION * YAW_STICK_R:.0f}")
+            self.manual_control.r = YAW_DIRECTION * YAW_STICK_R
             self.yaw_accumulated_deg = 0.0
             self.yaw_last_azimuth = self.current_azimuth
             now = time.monotonic()
             self.yaw_wait_start_time = now
-            self.yaw_last_resend_time = now
             self.step = STEP_WAIT_YAW_DONE
 
         elif self.step == STEP_WAIT_YAW_DONE:
@@ -392,16 +391,6 @@ class TakeoffAndRotate(Node):
                 self.stop_camera_capture()
                 self.step = STEP_DONE
                 return
-
-            if now - self.yaw_last_resend_time > YAW_RESEND_INTERVAL_S:
-                remaining = YAW_TURN_DEGREES - abs(self.yaw_accumulated_deg)
-                self.get_logger().info(
-                    f"Re-sending yaw for the remaining {remaining:.1f} deg "
-                    f"({self.yaw_accumulated_deg:.1f} deg done so far)")
-                self.send_command_long(MAV_CMD_CONDITION_YAW,
-                                       remaining, YAW_RATE_DEG_S,
-                                       YAW_DIRECTION, YAW_RELATIVE)
-                self.yaw_last_resend_time = now
 
     def destroy_node(self):
         self.stop_camera_capture()
