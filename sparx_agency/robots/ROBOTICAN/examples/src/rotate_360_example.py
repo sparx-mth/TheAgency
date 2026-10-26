@@ -234,7 +234,7 @@ class TakeoffAndRotate(Node):
         self.cam_thread.start()
 
         ts = time.strftime("%Y_%m_%d___%H_%M_%S")
-        self.capture_session_dir = Path(FRAMES_ROOT) / f"rotate_scan_{ts}"
+        self.capture_session_dir = Path(FRAMES_ROOT) / f"rotate_scan_{self.id}_{ts}"
         self.capture_session_dir.mkdir(parents=True, exist_ok=True)
         self.capture_count = 0
         self.get_logger().info(f"Capturing rotation scan to {self.capture_session_dir}")
@@ -270,7 +270,7 @@ class TakeoffAndRotate(Node):
 
         ts = time.strftime("%Y_%m_%d___%H_%M_%S")
         idx = self.capture_count
-        img_name = f"frame_{ts}_{idx:03d}.jpg"
+        img_name = f"frame_{self.id}_{ts}_{idx:03d}.jpg"
         img_path = self.capture_session_dir / img_name
         if not cv2.imwrite(str(img_path), frame):
             return
@@ -282,7 +282,7 @@ class TakeoffAndRotate(Node):
             "resolution": frame.shape[:2],
             "session": self.capture_session_dir.name,
         }
-        with open(self.capture_session_dir / f"frame_{ts}_{idx:03d}.json", "w") as f:
+        with open(self.capture_session_dir / f"frame_{self.id}_{ts}_{idx:03d}.json", "w") as f:
             json.dump(meta, f, indent=2)
 
         self.capture_count += 1
