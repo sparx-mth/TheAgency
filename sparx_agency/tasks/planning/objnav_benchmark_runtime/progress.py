@@ -37,7 +37,7 @@ from sparx_agency.tasks.planning.objnav_benchmark.records import EpisodeRecord
 UTC = "%Y-%m-%dT%H:%M:%SZ"
 
 #: The policy diagnostics a lean record keeps whole (all small, all counters or verdicts).
-LEAN_POLICY_KEYS = ("method", "rooms", "max_rooms", "landmarks", "warmup", "llm_queries", "oracle_reuses",
+LEAN_POLICY_KEYS = ("method", "rooms", "max_rooms", "landmarks", "warmup", "prescan", "room_falcon", "llm_queries", "oracle_reuses",
                     "room_label_queries", "plan_calls", "duplicates_removed", "blocked", "floor_revisions",
                     "oracle_repair_attempts", "oracle_repair_successes", "target_closing", "spawn_floor_guard",
                     "target_evidence", "room_scans", "openings", "glances", "sight", "doors", "doorway_peek",

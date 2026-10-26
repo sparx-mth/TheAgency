@@ -43,7 +43,12 @@ def discover(p, obs, world, cost):
         if command is not None:
             p._action_owner = "prescan"
             return command
-    signature =(p.mapping.floor_id, tuple(sorted(p.graph.registry.rooms)),
+        if p.warmup_actions < budget:       # the FALCON warm-up gave up before a look-around: the rotation takes over
+            command = _warmup_command(p, obs, world, budget)
+            if command is not None:
+                p._action_owner = "warmup"
+                return command
+    signature = (p.mapping.floor_id, tuple(sorted(p.graph.registry.rooms)),
                  tuple((pid, tuple(sorted(set(p.graph.objects_in(pid))))) for pid in sorted(p.graph.registry.rooms)))
     previous = p._semantic_signature
     event = p.peek.pending_reason or (previous is not None and signature != previous)

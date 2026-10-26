@@ -1,6 +1,8 @@
 """The multi-resolution prescan: goal-free FALCON on a coarse copy of the map, then the room reasoning."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -78,11 +80,36 @@ def test_the_prescan_explores_on_the_coarse_map_and_ends_at_its_budget():
     assert policy._route is None and policy._goal is None
 
 
-def test_the_prescan_ends_when_falcon_has_nothing_left_to_explore():
+def test_the_prescan_turns_in_place_while_falcon_is_patient_and_ends_when_it_stops():
     policy, episode, world = prescan_policy(steps=50)
     world.grid[world.grid == world.values.unknown] = world.values.free
-    assert policy.prescan.plan(obs_at(episode, 0, IN_A), world) is None
-    assert policy.prescan.ended == "exhausted"
+    first = policy.prescan.plan(obs_at(episode, 0, IN_A), world)
+    assert first is not None and first.info["kind"] == "exploration_exhausted_turn" and not first.waypoints
+    step = 1
+    while policy.prescan.active:
+        policy.prescan.plan(obs_at(episode, step, IN_A), world)
+        step += 1
+        assert step < 60
+    assert policy.prescan.ended == "exhausted" and policy.prescan.actions >= policy.warmup_turns
+
+
+def test_a_falcon_warmup_that_gives_up_early_hands_over_to_the_rotation():
+    policy, _, _ = prescan_policy(steps=50)
+    policy.settings = replace(policy.settings, scan_kind="falcon")
+    policy.warmup_actions, policy._warmup_pending = policy.warmup_turns, False
+    policy.prescan.actions = 3
+    policy.prescan._end("exhausted")
+    assert policy.warmup_actions == 0 and policy._warmup_pending and policy.prescan.rotation_fallback
+
+
+def test_a_falcon_warmup_that_explored_enough_does_not_rotate_again():
+    policy, _, _ = prescan_policy(steps=50)
+    policy.settings = replace(policy.settings, scan_kind="falcon")
+    policy.warmup_actions, policy._warmup_pending = policy.warmup_turns, False
+    policy.prescan.actions = policy.warmup_turns
+    policy.prescan._end("exhausted")
+    assert policy.warmup_actions == policy.warmup_turns and not policy.prescan.rotation_fallback
+
 
 
 def test_discovery_hands_the_action_to_the_prescan_then_to_the_room_loop():
@@ -205,3 +232,26 @@ def walk_facing(policy, episode, world, start_step, start_xy, max_actions=60):
         resolve_around(world, xy, 1.5)
         refresh(policy, world, xy)
     raise AssertionError("the visit never ended")
+
+
+def test_falcon_plans_from_a_level_camera_at_the_fixed_body_height():
+    from sparx_agency.core.planning.object_search.falcon.ground_height import level_camera
+    from dataclasses import replace as dc_replace
+    from sparx_agency.core.planning.objnav.types.pose import AgentPose
+    tilted = dc_replace(obs_at(setup_policy()[1], 0, IN_A), pose=AgentPose(3.0, 3.0, 0.0, 0.5, camera_pitch=0.4))
+    level = level_camera(tilted)
+    assert level.pose.camera_pitch == 0.0
+    assert (level.pose.x, level.pose.y, level.pose.z, level.pose.yaw) == (3.0, 3.0, 0.0, 0.5)
+    assert tilted.pose.camera_pitch == 0.4
+
+
+def test_a_tilted_camera_does_not_change_what_falcon_is_asked():
+    policy, episode, world = prescan_policy(steps=3)
+    from dataclasses import replace as dc_replace
+    from sparx_agency.core.planning.objnav.types.pose import AgentPose
+    seen = []
+    original = policy.prescan.explorer.explorer.plan
+    policy.prescan.explorer.explorer.plan = lambda w, c, s, request, h: (seen.append(request.pose.camera_pitch), original(w, c, s, request, h))[1]
+    tilted = dc_replace(obs_at(episode, 0, IN_A), pose=AgentPose(IN_A[0], IN_A[1], 0.0, 0.0, camera_pitch=0.4))
+    policy.prescan.plan(tilted, world)
+    assert seen and set(seen) == {0.0}

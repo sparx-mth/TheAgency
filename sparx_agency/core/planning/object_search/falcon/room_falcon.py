@@ -4,6 +4,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import binary_dilation
 
+from sparx_agency.core.planning.object_search.falcon.ground_height import level_camera
+
 ROOM_MARGIN_M = 0.5
 
 
@@ -44,7 +46,7 @@ class RoomFalcon:
     def plan(self, obs, world, scope):
         """The next command inside ``scope``, or None when FALCON has no viewpoint left in it."""
         self.explorer.room_scope = scope
-        command = self.explorer.plan(obs, world)
+        command = self.explorer.plan(level_camera(obs), world)
         if command.stop or str(command.info.get("kind", "")).startswith("exploration_exhausted"):
             return None
         return command

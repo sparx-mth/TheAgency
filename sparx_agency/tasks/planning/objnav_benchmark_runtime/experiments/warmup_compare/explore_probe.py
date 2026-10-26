@@ -14,7 +14,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run import parser
 
 
 def main(argv=None):
-    args = parser().parse_args(["--explorer", "frontier", "--lean", *(sys.argv[1:] if argv is None else argv)])
+    args = parser().parse_args(["--explorer", "frontier", *(sys.argv[1:] if argv is None else argv)])
     protocol = protocol_for(args.version).with_split(args.split)
     env, policy, label_mapper, config, issues = prepare(args)
     if issues:
