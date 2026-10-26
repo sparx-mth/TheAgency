@@ -16,6 +16,13 @@
 #   hm3d/run_benchmark.sh --preflight                       # services + data + configuration check, no episode
 #   hm3d/run_benchmark.sh --status runs/hm3d_v2_val_X       # the live progress of a campaign (or of one scene's directory)
 #   hm3d/run_benchmark.sh --agent falcon-yolo --smoke       # the FALCON + YOLO + closing baseline (no LLM)
+#   hm3d/run_benchmark.sh --version v1 --perception ground-truth --jobs max
+#                                                           # the perception UPPER BOUND: habitat-sim's semantic sensor in place of
+#                                                           # YOLO-World and SAM (boxes, labels, instance masks from the HM3D-Semantics
+#                                                           # annotations), the method otherwise unchanged; as many scenes at once as
+#                                                           # the card and the cores hold; output runs/gt_oracle_2000ep_<stamp>; non-publishable
+#   hm3d/run_benchmark.sh --version v1 --perception ground-truth --scene 00800-TEEsavR23oF --limit 1
+#                                                           # ... one oracle episode of one scene
 #
 # The whole split runs as hm3d/campaign.py: one hm3d.run process per scene, each writing its own complete results
 # directory under the output root, then one aggregate (campaign_summary.json) over the scenes that finished. A
@@ -24,7 +31,9 @@
 # The services (GPU plan, Ollama, the YOLO-World detector started with the HM3D label table's vocabulary, the optional
 # segmenter, FFmpeg) are benchmark_services.sh, shared with gibson/run_benchmark.sh, so the method's services are
 # provisioned the same way on both benchmarks. The detector port defaults to 18092 here, 18095 for Gibson: the two
-# tables share their words but not their order, and a detector is pinned to its order.
+# tables share their words but not their order, and a detector is pinned to its order. --perception ground-truth
+# starts neither the detector nor the segmenter (benchmark_services.sh PERCEPTION); it needs the HM3D-Semantics
+# annotations beside the scenes (hm3d.assets --instructions, step 5) and refuses at preflight without them.
 #
 # Environment (defaults for the development laptop; the rest is in benchmark_services.sh and hm3d/README.md):
 #   HM3D_EPISODES_DIR    the split directory holding <split>.json.gz and content/      default $DATA/objectnav/hm3d/<version>/<split>
@@ -36,9 +45,11 @@
 #   SPLIT                val (the benchmark); train / val_mini are development splits and are labelled subsets   default val
 #   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; --jobs N defaults it to ceil(N/2) (and budgets N
 #                        renderers in the GPU plan) unless set here; each slot is its own KV cache          default 1
+#   GT_MIN_PIXELS        with --perception ground-truth: the oracle's resolution floor in pixels (--ground-truth-min-pixels;
+#                        the module default, 64, when empty)
 set -euo pipefail
 
-usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +65,7 @@ EXCLUDE_UNREACHABLE="${EXCLUDE_UNREACHABLE:-0}"
 RUN_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run
 CAMPAIGN_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.campaign
 PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
+POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool
 
 # -- the command line -----------------------------------------------------------------------
 VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=()
@@ -62,12 +74,14 @@ while [[ $# -gt 0 ]]; do
     --version) VERSION="$2"; shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
     --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
+    --perception) PERCEPTION="$2"; shift 2 ;;                  # service (default) or ground-truth: benchmark_services.sh PERCEPTION
+    --ground-truth-min-pixels) GT_MIN_PIXELS="$2"; shift 2 ;;  # the oracle's resolution floor (benchmark_services.sh GT_MIN_PIXELS)
     --scene) SCENE="$2"; shift 2 ;;                            # one scene, run directly by hm3d.run
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do SCENES+=("$1"); shift; done ;;   # a subset of the campaign's scenes
     --resume-accepting-changes) ACCEPT=("$1"); shift; while [[ $# -gt 0 && "$1" != --* ]]; do ACCEPT+=("$1"); shift; done ;;
                                                            # a resume's alone (hm3d.run refuses it otherwise): never the preflight's
     --limit) LIMIT="$2"; shift 2 ;;                            # episodes (per scene, in the campaign)
-    --jobs) JOBS="$2"; shift 2 ;;                              # scenes at once (campaign only)
+    --jobs) JOBS="$2"; shift 2 ;;                              # scenes at once (campaign only); "max" = what the card and the cores hold
     --smoke) SMOKE=1; shift ;;
     --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
     --record) RECORD=1; shift ;;
@@ -96,17 +110,27 @@ cd "$REPO"
 say() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 
-case "$VERSION" in v1) SCENE_ROOT=hm3d ;; v2) SCENE_ROOT=hm3d_v0.2 ;; *) die "--version must be v1 or v2" ;; esac
+case "$VERSION" in v1) SCENE_ROOT=hm3d; PUBLISHED_SCENES=20; PUBLISHED_EPISODES=2000 ;; v2) SCENE_ROOT=hm3d_v0.2; PUBLISHED_SCENES=36; PUBLISHED_EPISODES=1000 ;; *) die "--version must be v1 or v2" ;; esac
 HM3D_EPISODES_DIR="${HM3D_EPISODES_DIR:-$DATA/objectnav/hm3d/$VERSION/$SPLIT}"
 [[ -x "$HAB_PY" ]] || die "Habitat interpreter not found at $HAB_PY (set HAB_PY; see hm3d/README.md section 1)"
-[[ -x "$DETECT_PY" ]] || die "detector interpreter not found at $DETECT_PY (set DETECT_PY; see hm3d/README.md section 1)"
+[[ "$PERCEPTION" == service || "$PERCEPTION" == ground-truth ]] || die "--perception must be service or ground-truth"
+if [[ "$PERCEPTION" == service ]]; then
+  [[ -x "$DETECT_PY" ]] || die "detector interpreter not found at $DETECT_PY (set DETECT_PY; see hm3d/README.md section 1)"
+  [[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
+  [[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS)"
+fi
 [[ -f "$HM3D_EPISODES_DIR/$SPLIT.json.gz" ]] || die "no $SPLIT.json.gz under $HM3D_EPISODES_DIR (set HM3D_EPISODES_DIR to the split directory; hm3d/README.md section 1.2)"
 [[ -d "$HM3D_SCENES_DIR/$SCENE_ROOT/$SPLIT" ]] || die "no HM3D $VERSION scenes at $HM3D_SCENES_DIR/$SCENE_ROOT/$SPLIT (set HM3D_SCENES_DIR to habitat-lab's scene_datasets/; the scenes are licensed -- hm3d/README.md section 1.2)"
-[[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
-[[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS)"
 [[ "$SMOKE" == 0 || -z "$LIMIT" ]] || die "--smoke chooses one episode per scene itself; it takes no --limit"
 [[ "$SMOKE" == 0 || -z "$SCENE" ]] || die "--smoke is a campaign over scenes; use --scene X --limit 1 for one scene"
-[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer"
+if [[ "$JOBS" == max ]]; then
+  # What the machine holds: one renderer's VRAM per child after the reserve, one core per child, never more than scenes.
+  [[ -z "$SCENE" ]] || die "--jobs max runs scenes of a campaign at once; a --scene run is one process"
+  CAMPAIGN_SCENES=$PUBLISHED_SCENES; [[ ${#SCENES[@]} -gt 0 ]] && CAMPAIGN_SCENES=${#SCENES[@]}
+  JOBS="$(HABITAT_VRAM_MIB="${HABITAT_VRAM_MIB:-400}" "$HAB_PY" -m "$POOL_MODULE" --scenes "$CAMPAIGN_SCENES" --gpu-device "$GPU_DEVICE" --explain)" \
+    || die "could not size --jobs max (nvidia-smi?); pass a number"
+fi
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer or max"
 [[ "$JOBS" == 1 || -z "$SCENE" ]] || die "--jobs runs scenes of a campaign at once; a --scene run is one process"
 if [[ "$JOBS" -gt 1 ]]; then
   # As gibson/run_benchmark.sh --parallel: the GPU plan budgets one renderer per child, and the native Ollama gets
@@ -118,7 +142,13 @@ if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   TAG="${CATEGORY:+${CATEGORY}_}"
   [[ "$AGENT" != rpt ]] && TAG="${AGENT}_${TAG}"
-  if [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/hm3d_${VERSION}_${SCENE}_${TAG}${STAMP}"
+  if [[ "$PERCEPTION" == ground-truth ]]; then
+    # The oracle's directories say what they are at a glance, and the full split by its episode count.
+    if [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/gt_oracle_${VERSION}_${SCENE}_${TAG}${STAMP}"
+    elif [[ "$SMOKE" == 1 ]]; then OUTPUT="$RUNS_ROOT/gt_oracle_${VERSION}_${SPLIT}_smoke_${TAG}${STAMP}"
+    elif [[ -n "$LIMIT" || ${#SCENES[@]} -gt 0 || -n "$CATEGORY" ]]; then OUTPUT="$RUNS_ROOT/gt_oracle_${VERSION}_${SPLIT}_${TAG}${LIMIT:+${LIMIT}per-scene_}${STAMP}"
+    else OUTPUT="$RUNS_ROOT/gt_oracle_${PUBLISHED_EPISODES}ep_${STAMP}"; fi
+  elif [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/hm3d_${VERSION}_${SCENE}_${TAG}${STAMP}"
   elif [[ "$SMOKE" == 1 ]]; then OUTPUT="$RUNS_ROOT/hm3d_${VERSION}_${SPLIT}_smoke_${TAG}${STAMP}"
   elif [[ -n "$LIMIT" ]]; then OUTPUT="$RUNS_ROOT/hm3d_${VERSION}_${SPLIT}_${TAG}${LIMIT}per-scene_${STAMP}"
   else OUTPUT="$RUNS_ROOT/hm3d_${VERSION}_${SPLIT}_${TAG}${STAMP}"; fi
@@ -131,6 +161,7 @@ LOG="$SERVICE_DIR/run.log"
 say "repo $REPO" | tee -a "$LOG"
 say "output $OUTPUT" | tee -a "$LOG"
 say "HM3D $VERSION $SPLIT: episodes $HM3D_EPISODES_DIR, scenes $HM3D_SCENES_DIR/$SCENE_ROOT/$SPLIT" | tee -a "$LOG"
+[[ "$PERCEPTION" == ground-truth ]] && say "PERCEPTION UPPER BOUND: ground-truth boxes, labels and instance masks from habitat-sim's semantic sensor; YOLO-World and SAM are bypassed; the method is otherwise unchanged; non-publishable" | tee -a "$LOG"
 git --no-pager rev-parse HEAD > "$SERVICE_DIR/source-commit.txt" 2>/dev/null || true
 git --no-pager diff --no-ext-diff > "$SERVICE_DIR/source-changes.diff" 2>/dev/null || true
 
@@ -141,7 +172,9 @@ objnav_services_up
 # DATA_ARGS name the split (the campaign passes them to its children itself); CHILD_ARGS are the method, the services
 # and the records; VALIDATE_ARGS load a scene, so they join the run but never the mesh-free preflight.
 DATA_ARGS=(--version "$VERSION" --split "$SPLIT" --episodes-dir "$HM3D_EPISODES_DIR" --scenes-dir "$HM3D_SCENES_DIR")
-CHILD_ARGS=(--detector-url "$DETECTOR_URL" --detector-backend yolo_world --seed "$SEED" --gpu-device "$GPU_DEVICE")
+CHILD_ARGS=(--seed "$SEED" --gpu-device "$GPU_DEVICE")
+if [[ "$PERCEPTION" == ground-truth ]]; then CHILD_ARGS+=("${PERCEPTION_FLAGS[@]}")                      # no detector, no segmenter
+else CHILD_ARGS+=(--detector-url "$DETECTOR_URL" --detector-backend yolo_world); fi
 [[ "$AGENT" == rpt ]] && CHILD_ARGS+=(--explorer frontier)        # as gibson/run_benchmark.sh: the baseline explores with FALCON only
 [[ "$RECORD" == 1 ]] && CHILD_ARGS+=(--record)
 [[ "$LEAN" == 1 ]] && CHILD_ARGS+=(--lean)
@@ -178,11 +211,19 @@ print("  method: %s | lean records: %s | publishable: %s" % (config["method"]["m
 llm = config["method"].get("llm")
 print("  llm: %s" % ("none (the FALCON + YOLO + closing baseline)" if not llm else
                       "%s (labels) + %s (node oracle) at %s" % (llm["model"], llm["reasoning_model"], llm["base_url"])))
-print("  detector: %s" % config["method"]["detector"]["metadata"].get("backend"))
+if config.get("perception") == "ground-truth":
+    oracle = config["method"]["ground_truth"]
+    print("  perception: GROUND TRUTH -- habitat-sim semantic sensor in place of %s (confidence %.1f, min %d px per instance); "
+          "the run is NOT a benchmark result" % (" and ".join(oracle["bypassed"]), oracle["confidence"], oracle["min_pixels"]))
+else:
+    print("  detector: %s" % config["method"]["detector"]["metadata"].get("backend"))
 print("  renderer: %s" % config.get("renderer", "cuda gpu"))
 segmenter = config["method"].get("segmenter")
-print("  segmentation: %s" % ("ON -- %s on %s at %s" % (segmenter["model"], segmenter["device"], config["method"].get("segmenter_url"))
-                              if segmenter else "off (box depth)"))
+if config.get("perception") == "ground-truth":
+    print("  segmentation: %s" % ("ON -- exact instance masks from the semantic sensor" if segmenter else "off (ground-truth boxes read the box way; policy config)"))
+else:
+    print("  segmentation: %s" % ("ON -- %s on %s at %s" % (segmenter["model"], segmenter["device"], config["method"].get("segmenter_url"))
+                                  if segmenter else "off (box depth)"))
 PY
 if [[ "$PREFLIGHT" == 1 ]]; then say "preflight only: done"; exit 0; fi
 date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"
@@ -214,7 +255,8 @@ if [[ -f "$OUTPUT/campaign.json" ]] || ls -d "$OUTPUT"/*/ > /dev/null 2>&1; then
   CAMPAIGN_ARGS+=(--resume)
 fi
 # hm3d.run's --version/--split/--episodes-dir/--scenes-dir come from the campaign itself; the rest is passed through after "--".
-say "campaign ($AGENT): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; else echo "every ${CATEGORY:+$CATEGORY }episode of the split"; fi), one process per scene, $JOBS at once; per-scene progress under $OUTPUT/<scene>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
+PERCEPTION_NOTE=""; [[ "$PERCEPTION" == ground-truth ]] && PERCEPTION_NOTE=", ground-truth perception"
+say "campaign ($AGENT$PERCEPTION_NOTE): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; else echo "every ${CATEGORY:+$CATEGORY }episode of the split"; fi), one process per scene, $JOBS at once; per-scene progress under $OUTPUT/<scene>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
 set +e
 "${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$CAMPAIGN_MODULE" "${CAMPAIGN_ARGS[@]}" -- "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" "${ACCEPT[@]}" 2>&1 | tee -a "$LOG"
 RUN_CODE=${PIPESTATUS[0]}

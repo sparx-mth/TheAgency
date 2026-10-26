@@ -34,7 +34,7 @@ import json
 from pathlib import Path
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import (
-    HM3DDataset, PUBLISHED_VAL)
+    ANNOTATED_SCENE_DATASET_CONFIG, HM3DDataset, PUBLISHED_VAL)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
     PROTOCOLS, protocol_for)
 
@@ -51,6 +51,24 @@ TOKEN_URL = "https://my.matterport.com/settings/account/devtools"
 #: Approximate val-split download sizes, from the publisher's own tables.
 SCENE_DOWNLOAD_GB = {"v1": 3.8, "v2": 5.3}
 
+#: Approximate val-split sizes of the HM3D-Semantics annotation archives (the
+#: instance-coloured ``.semantic.glb`` meshes plus the ``.semantic.txt``
+#: descriptors), which the ground-truth perception upper bound needs and a
+#: benchmark run does not.
+SEMANTIC_DOWNLOAD_GB = {"v1": 1.4, "v2": 2.1}
+
+
+def semantic_download_uids(protocol):
+    """The two ``datasets_download`` uids of this split's HM3D-Semantics annotations: the annots, then the configs.
+
+    The annots archive holds every scene's ``.semantic.glb`` / ``.semantic.txt``;
+    the configs archive holds ``hm3d_annotated_basis.scene_dataset_config.json``,
+    without which habitat-sim does not look for them.
+    """
+    release = protocol.scene_release[len("hm3d-v"):]
+    return ("hm3d_%s_semantic_annots_v%s" % (protocol.split, release),
+            "hm3d_%s_semantic_configs_v%s" % (protocol.split, release))
+
 
 def episode_dir(data_root, protocol):
     """Where this version's episodes belong under ``data_root``."""
@@ -63,7 +81,7 @@ def scenes_dir(data_root):
     return Path(data_root).expanduser() / "scene_datasets"
 
 
-def check_installation(episodes_dir, scenes_root, protocol, *, sample=None):
+def check_installation(episodes_dir, scenes_root, protocol, *, sample=None, semantic=False):
     """Report exactly what is present and what is missing, without downloading.
 
     Args:
@@ -74,11 +92,15 @@ def check_installation(episodes_dir, scenes_root, protocol, *, sample=None):
         protocol: The :class:`HM3DProtocol` being provisioned for.
         sample: Check only this many scenes, for a quick look. ``None`` checks
             every scene the split references.
+        semantic: Also require each scene's HM3D-Semantics annotations and the
+            annotated scene dataset config -- what the ground-truth perception
+            upper bound needs beyond a benchmark run.
 
     Returns:
         A JSON-safe report: whether the episodes and scenes are complete, the
         counts found against the counts published, and the missing files
-        (capped at twenty, with the full count beside them).
+        (capped at twenty, with the full count beside them); with
+        ``semantic``, ``semantic_ready`` and the missing annotations too.
     """
     expected = PUBLISHED_VAL[protocol.dataset_version]
     report = {"dataset_version": protocol.dataset_version,
@@ -151,7 +173,30 @@ def check_installation(episodes_dir, scenes_root, protocol, *, sample=None):
     if missing:
         report["problems"].append(
             "Scenes: %d file(s) missing under %s" % (len(missing), release_dir))
+    if semantic:
+        _check_semantic(report, root, release_dir, wanted, expected)
     return report
+
+
+def _check_semantic(report, root, release_dir, wanted, expected):
+    """Fill in the HM3D-Semantics half of a report: the annotated config and every scene's annotation pair."""
+    missing = []
+    config = release_dir / ANNOTATED_SCENE_DATASET_CONFIG
+    if not config.is_file() or config.stat().st_size == 0:
+        missing.append(str(config))
+    for episode in wanted:
+        glb = root / episode.scene_relative_path
+        stem = glb.name[:-len(".basis.glb")]
+        for path in (glb.with_name(stem + ".semantic.glb"), glb.with_name(stem + ".semantic.txt")):
+            if not path.is_file() or path.stat().st_size == 0:
+                missing.append(str(path))
+    report["semantic_missing_count"] = len(missing)
+    report["semantic_missing"] = sorted(missing)[:20]
+    report["semantic_ready"] = not missing and len(wanted) == expected["scenes"]
+    if missing:
+        report["problems"].append(
+            "Semantic annotations: %d file(s) missing under %s (the ground-truth perception upper bound needs "
+            "them; a benchmark run does not) -- see --instructions, step 5" % (len(missing), release_dir))
 
 
 def download_instructions(protocol, data_root):
@@ -196,6 +241,35 @@ def download_instructions(protocol, data_root):
         "# ---- 4. Verify before running anything ----",
         "python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.assets \\",
         "  --version %s --data-root %s --check" % (version, root),
+        "",
+    ] + semantic_download_instructions(protocol, data_root).splitlines())
+
+
+def semantic_download_instructions(protocol, data_root):
+    """The commands for the HM3D-Semantics annotations: what the ground-truth perception upper bound needs beyond a run.
+
+    Same licence, same token, same downloader as the scenes; printed, never
+    executed. The archives unpack beside the scenes already installed (the
+    downloader's ``versioned_data/hm3d-<release>/hm3d`` that
+    ``scene_datasets/hm3d`` links to) and the configs archive leaves
+    ``hm3d_annotated_basis.scene_dataset_config.json`` at the release root.
+    """
+    root = Path(data_root).expanduser()
+    version = protocol.dataset_version
+    annots, configs = semantic_download_uids(protocol)
+    return "\n".join([
+        "# ---- 5. HM3D-Semantics annotations (~%.1f GB, licensed; ONLY for --perception ground-truth) ----"
+        % SEMANTIC_DOWNLOAD_GB[version],
+        "# The oracle perception reads habitat-sim's semantic sensor, which renders each scene's",
+        "# <stem>.semantic.glb through the annotated scene dataset config. Same token as step 2.",
+        "python -m habitat_sim.utils.datasets_download \\",
+        "  --username <token-id> --password <token-secret> \\",
+        "  --uids %s %s --data-path %s/" % (annots, configs, root),
+        "# The annotations land beside the meshes already installed; the config at the release root:",
+        "#   %s/scene_datasets/%s/%s" % (root, protocol.scene_root_name, ANNOTATED_SCENE_DATASET_CONFIG),
+        "#   %s/scene_datasets/%s/%s/<scene>/<stem>.semantic.{glb,txt}" % (root, protocol.scene_root_name, protocol.split),
+        "python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.assets \\",
+        "  --version %s --data-root %s --check --semantic" % (version, root),
     ])
 
 
@@ -210,6 +284,9 @@ def parser():
                    help="Override what data/scene_datasets points at")
     p.add_argument("--sample", type=int, help="Check only this many scenes")
     p.add_argument("--check", action="store_true")
+    p.add_argument("--semantic", action="store_true",
+                   help="With --check: also require the HM3D-Semantics annotations the ground-truth "
+                        "perception upper bound (--perception ground-truth) reads")
     p.add_argument("--instructions", action="store_true")
     return p
 
@@ -224,9 +301,12 @@ def main(argv=None):
         print()
     episodes = args.episodes_dir or episode_dir(args.data_root, protocol)
     scenes = args.scenes_dir or scenes_dir(args.data_root)
-    report = check_installation(episodes, scenes, protocol, sample=args.sample)
+    report = check_installation(episodes, scenes, protocol, sample=args.sample, semantic=args.semantic)
     print(json.dumps(report, indent=2))
-    return 0 if report["episodes_ready"] and report["scenes_ready"] else 1
+    ready = report["episodes_ready"] and report["scenes_ready"]
+    if args.semantic:
+        ready = ready and report.get("semantic_ready", False)
+    return 0 if ready else 1
 
 
 if __name__ == "__main__":

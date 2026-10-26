@@ -5,6 +5,32 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-10-26, the perception upper bound)
+- **Ground-truth (oracle) perception for the HM3D ObjectNav harness** (`objnav_benchmark_runtime/ground_truth/`,
+  `hm3d.run --perception ground-truth`, `hm3d/run_benchmark.sh --perception ground-truth --jobs max` ->
+  `runs/gt_oracle_2000ep_<stamp>`): habitat-sim's semantic sensor (per-pixel HM3D-Semantics instance ids, rendered by
+  `HabitatRGBDSimulator(semantic=True)` through the publisher's annotated scene dataset config and published by
+  `HM3DEnv` to a `GroundTruthSource`) answers the method's `Detector` and `Segmenter` contracts in place of YOLO-World
+  and SAM -- every visible annotated instance in the label table's vocabulary as a confidence-1.0 detection with its
+  tight box, the instance's exact pixels as the target's mask; 100 % precision/recall against the annotations, no box
+  drift, no label noise, one declared floor (`--ground-truth-min-pixels`, 64). Goal categories take the publisher's own
+  goal instance ids per scene (`HM3DDataset.goal_instances`; an instance named for a listed category but not among its
+  goals is dropped and counted); the context vocabulary comes from an exact raw-name table (`hm3d_categories.py`,
+  SHA-256 in the frozen configuration). Nothing of the method changes -- dedup, gates, doors, projection, landmarks, LLM
+  room labels, RPT*, frontier/FALCON, side-looks, A*, closing -- and the run is `publishable: false`. The source
+  answers only for the frame it was given; another frame ends the run. Verified end to end on the public HM3D example
+  scene (908 annotated instances; sensor ids reproduce `semantic.txt`; one full RPT episode: 320 frames, 145 labelled
+  instances, 336 door detections -> 8 door landmarks, 10 rooms, closing to STOP). The licensed val annotations
+  (`hm3d_val_semantic_{annots,configs}_v0.1`, ~1.4 GB) are a hard prerequisite: `hm3d.assets --check --semantic` and
+  `--instructions` step 5 name them, the preflight refuses the run by file name without them.
+- **`--jobs max`** (`hm3d/scene_pool.max_workers`): one scene child per scene at most, bounded by cores and by the free
+  VRAM at `HABITAT_VRAM_MIB` per renderer.
+### Fixed (2026-10-26)
+- **A resident Ollama is no longer re-placed by the GPU plan** (`benchmark_services.sh`): with the card held by an
+  already-running LLM the plan read "no room for the LLM" and exported `LLM_NUM_GPU=0`, so every child of the new run
+  would have asked the *shared* server for `num_gpu=0` and reloaded both models on the CPU for the live campaign too.
+  An LLM answering at `LLM_BASE_URL` before the plan is budgeted as placed and its device left alone.
+
 ### Added (2026-10-22)
 - **Five-scene campaign on the committed-target changes** (`runs/benchmark_25episodes_20261022T081925Z`, 25 of 25 scored in
   16 minutes, everything recorded with the map journal; `docs/progress/entries/036-objnav-committed-target-and-log-review.md`):

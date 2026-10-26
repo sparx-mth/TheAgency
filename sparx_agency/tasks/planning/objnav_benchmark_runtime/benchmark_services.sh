@@ -13,8 +13,10 @@
 #   objnav_services_up            after the command line is parsed and SERVICE_DIR/LOG/AGENT/RECORD/RUN_MODULE
 #                                 are known: GPU plan -> renderer -> Ollama -> detector -> segmenter -> FFmpeg,
 #                                 and the EXIT trap. Afterwards the launcher reads DETECTOR_URL, SEGMENTER_FLAGS,
-#                                 RENDER_WRAP, RENDER_FLAGS, GPU_DEVICE and ALLOW_SHARED_GPU (both possibly
-#                                 changed by the plan) and OBJNAV_{LLM,YOLO,HABITAT}_DEVICE.
+#                                 PERCEPTION_FLAGS, RENDER_WRAP, RENDER_FLAGS, GPU_DEVICE and ALLOW_SHARED_GPU (both
+#                                 possibly changed by the plan) and OBJNAV_{LLM,YOLO,HABITAT}_DEVICE.
+#                                 Under PERCEPTION=ground-truth no detector or segmenter is started (DETECTOR_URL is
+#                                 empty) and PERCEPTION_FLAGS carries --perception ground-truth for the children.
 #
 # The launcher provides: HAB_PY DETECT_PY RUN_MODULE SERVICE_DIR LOG AGENT RECORD, and say()/die().
 # RUN_MODULE is the benchmark's run CLI (its --print-vocabulary names the detector's classes, in the order
@@ -39,6 +41,12 @@ objnav_services_defaults() {
   # The segmentation experiment (2026-10-12): SEGMENTATION=1 starts the box-prompted Segment Anything service
   # beside the detector and runs the policy with its `segmentation` setting on; 0 (the default) is the box pipeline.
   SEGMENTATION="${SEGMENTATION:-0}"
+  # PERCEPTION=ground-truth (2026-10-26): no detector and no segmenter at all -- the children read habitat-sim's
+  # semantic sensor in place of both (hm3d.run --perception ground-truth, the method's upper bound under ideal
+  # perception, non-publishable). YOLO and SAM are neither started nor budgeted; the LLM is provisioned as usual.
+  # GT_MIN_PIXELS forwards --ground-truth-min-pixels (the oracle's declared resolution floor; the module default when empty).
+  PERCEPTION="${PERCEPTION:-service}"
+  GT_MIN_PIXELS="${GT_MIN_PIXELS:-}"
   SAM_WEIGHTS="${SAM_WEIGHTS:-$MODELS/mobile_sam.pt}"
   SEGMENTER_PORT="${SEGMENTER_PORT:-18096}"
   SEGMENTER_DEVICE="${SEGMENTER_DEVICE:-cpu}"        # cpu: ~0.3 s per frame with target boxes (MobileSAM, 4 threads)
@@ -91,6 +99,24 @@ objnav_services_up() {
     # The baseline runs no LLM: the card goes to YOLO and Habitat, and the plan needs no Ollama manifest.
     export GPU_PLAN_LLM="${GPU_PLAN_LLM:-cpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
   fi
+  case "$PERCEPTION" in
+    service) ;;
+    ground-truth)
+      # No detector process exists: nothing of YOLO's goes on the card or into the budget.
+      export GPU_PLAN_YOLO="${GPU_PLAN_YOLO:-cpu}" YOLO_VRAM_MIB="${YOLO_VRAM_MIB:-0}"
+      [[ "$SEGMENTATION" == 0 ]] || die "PERCEPTION=ground-truth reads its masks from the simulator; SEGMENTATION=1 contradicts it" ;;
+    *) die "PERCEPTION must be service or ground-truth" ;;
+  esac
+  # An LLM already answering at LLM_BASE_URL is resident: its VRAM is already in nvidia-smi's "used", so the plan
+  # must neither budget it again nor re-place it. Left to itself the plan would read the full card as "no room for
+  # the LLM" and export LLM_NUM_GPU=0 -- and every child would then ask the SHARED server for num_gpu=0, reloading
+  # both models on the CPU for every run using it, a live campaign included (found 2026-10-26 planning the
+  # ground-truth run beside the running v1 sweep).
+  LLM_RESIDENT=0
+  if [[ "$AGENT" != falcon-yolo ]] && curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
+    LLM_RESIDENT=1
+    export GPU_PLAN_LLM="${GPU_PLAN_LLM:-gpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
+  fi
   if [[ "$GPU_PLAN" == "auto" ]]; then
     export OLLAMA_MODELS_DIR OLLAMA_NUM_PARALLEL HABITAT_RENDERERS
     if [[ -n "$GPU_PLAN_REPLAY" ]]; then
@@ -107,6 +133,10 @@ objnav_services_up() {
     OPERATOR_SHARED_GPU="$ALLOW_SHARED_GPU"
     eval "$PLAN_ENV"                      # sets ALLOW_SHARED_GPU=1 when more than one process (or a desktop) holds the card
     [[ "$OPERATOR_SHARED_GPU" == 1 ]] && ALLOW_SHARED_GPU=1
+    if [[ "$LLM_RESIDENT" == 1 ]]; then
+      export LLM_NUM_GPU=""                # the resident server keeps the placement it was started with
+      say "LLM already resident at $LLM_BASE_URL: budgeted as placed (its VRAM is in 'used'); requests leave its device alone" | tee -a "$LOG"
+    fi
     export OBJNAV_GPU_PLAN_JSON="$SERVICE_DIR/gpu_plan.json"
     say "GPU plan: LLM=$OBJNAV_LLM_DEVICE  YOLO=$OBJNAV_YOLO_DEVICE  Habitat=$OBJNAV_HABITAT_DEVICE  (gpu_plan.json; GPU_PLAN=off for CPU services)" | tee -a "$LOG"
     "$HAB_PY" - "$SERVICE_DIR/gpu_plan.json" <<'PY' | tee -a "$LOG"
@@ -185,6 +215,16 @@ PY
   VOCAB="$(OMP_NUM_THREADS=2 "$HAB_PY" -m "$RUN_MODULE" --print-vocabulary 2>/dev/null | tail -1)"
   [[ -n "$VOCAB" ]] || die "$RUN_MODULE --print-vocabulary printed nothing (does $HAB_PY import the repo?)"
   printf '%s\n' "$VOCAB" > "$SERVICE_DIR/vocabulary.txt"
+  PERCEPTION_FLAGS=()
+  SEGMENTER_FLAGS=()
+  if [[ "$PERCEPTION" == ground-truth ]]; then
+    # The children read the simulator's semantic sensor in place of the detector AND the segmenter: nothing to
+    # start, nothing to pin. The vocabulary file still says which words the oracle may emit.
+    DETECTOR_URL=""
+    PERCEPTION_FLAGS=(--perception ground-truth)
+    [[ -n "$GT_MIN_PIXELS" ]] && PERCEPTION_FLAGS+=(--ground-truth-min-pixels "$GT_MIN_PIXELS")
+    say "perception: GROUND TRUTH -- habitat-sim's semantic sensor stands in for YOLO-World and SAM (no detector or segmenter started; the run is non-publishable)" | tee -a "$LOG"
+  else
   if curl -fsS --max-time 5 "$DETECTOR_URL/health" > /dev/null 2>&1; then
     # A detector is pinned to its class list in that order (HttpDetector refuses another), so one started for
     # another benchmark's table -- Gibson's and HM3D's share the words but not the order -- cannot be reused.
@@ -205,7 +245,6 @@ PY
   fi
 
   # -- the segmentation service (SEGMENTATION=1): Segment Anything prompted with the target's boxes ---------------
-  SEGMENTER_FLAGS=()
   if [[ "$SEGMENTATION" == 1 ]]; then
     SEGMENTER_URL="http://$DETECTOR_HOST:$SEGMENTER_PORT"
     if curl -fsS --max-time 5 "$SEGMENTER_URL/health" > /dev/null 2>&1; then
@@ -224,6 +263,7 @@ PY
     SEGMENTER_FLAGS=(--segmentation --segmenter-url "$SEGMENTER_URL" --segmenter-model "$(basename "$SAM_WEIGHTS")")
     say "segmentation ON: the target's depth is read on its SAM mask (policy setting segmentation=true)" | tee -a "$LOG"
   fi
+  fi   # PERCEPTION=service
 
   # -- FFmpeg for --record: PATH, then any imageio-ffmpeg binary an environment on this machine ships ------
   if [[ "$RECORD" == 1 && -z "${IMAGEIO_FFMPEG_EXE:-}" ]] && ! command -v ffmpeg > /dev/null 2>&1; then

@@ -20,6 +20,19 @@ Beyond RGB-D and pose the bridge exposes two evaluator/policy-side readings of
 the loaded navmesh: :meth:`scene_structure` (storeys and stair connectors, the
 one declared ground-truth input of the multi-floor search) and
 :attr:`last_collision` (recorder-only). Neither is part of an observation.
+
+**The semantic sensor is opt-in and privileged** (``semantic=True``). It
+renders habitat-sim's per-pixel instance ids from the scene's HM3D-Semantics
+annotation mesh, registered to the depth camera, into :attr:`last_semantic`
+after every :meth:`reset` and :meth:`step`; :meth:`semantic_objects` names
+each instance's raw annotation category. The RGB-D/pose tuple the bridge
+returns is unchanged, so nothing reaches a policy through an observation: the
+ground-truth perception of the benchmark runtime (``ground_truth/``) reads the
+frame beside it and stands in for the detector and the segmenter. Loading the
+annotations needs the publisher's *annotated* scene dataset config
+(``scene_dataset_config``), without which habitat-sim renders every pixel as
+instance 0 and says nothing -- so a scene that loads no semantic objects is
+refused rather than flown blind.
 """
 from __future__ import annotations
 
@@ -99,15 +112,26 @@ class HabitatRGBDSimulator:
             ``"agent"`` for habitat-sim's own load-then-recompute-at-the-agent's
             -dimensions behaviour, which is what habitat-lab's ObjectNav does.
             See the module docstring; this is a protocol decision.
+        semantic: Render the per-pixel instance-id frame beside RGB-D (see the
+            module docstring). Off for a benchmark run; on only for the
+            ground-truth perception upper bound.
+        scene_dataset_config: The publisher's annotated scene dataset config
+            (``hm3d_annotated_basis.scene_dataset_config.json``), which tells
+            habitat-sim where each scene's ``.semantic.glb`` / ``.semantic.txt``
+            are. Required with ``semantic=True``.
     """
 
     def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, *,
-                 height_m, navmesh="published", depth_holes=None):
+                 height_m, navmesh="published", depth_holes=None, semantic=False,
+                 scene_dataset_config=None):
         if any(isinstance(v, bool) or not math.isfinite(v) or v <= 0
                for v in (radius_m, height_m)):
             raise ValueError("Explicit positive finite body radius and height are required")
         if navmesh not in ("published", "agent"):
             raise ValueError("navmesh must be 'published' or 'agent', got %r" % (navmesh,))
+        if semantic and scene_dataset_config is None:
+            raise ValueError("semantic=True needs the annotated scene_dataset_config; without it "
+                             "habitat-sim renders every pixel as instance 0 and says nothing")
         self.navmesh = navmesh
         self.camera = camera
         self.actions = actions
@@ -115,14 +139,21 @@ class HabitatRGBDSimulator:
         self.height_m = height_m
         self.allow_sliding = allow_sliding
         self.gpu_device = gpu_device
+        self.semantic = bool(semantic)
+        self.scene_dataset_config = None if scene_dataset_config is None else str(scene_dataset_config)
         self.depth_holes = depth_holes          # DepthHoleFill or None (every hole dropped, as the baselines do)
         self.depth_hole_stats = {"frames": 0, "frames_with_holes": 0, "holes": 0, "filled": 0,
                                  "pixels_filled": 0, "pixels_left": 0}
         self._sim = None
         self._scene = None
         self._structure = None  # per-scene navmesh storeys and stair connectors
+        self._semantic_objects = None  # per-scene {instance id: raw annotation category}
         self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
         self.last_sensor_alignment = None
+        #: Privileged, refreshed every _observe() under ``semantic=True``: the
+        #: HxW int32 instance-id frame registered to the depth frame. Never
+        #: part of the returned tuple; ``None`` without the sensor.
+        self.last_semantic = None
         # Diagnostic only, never read by the policy: the navmesh-corrected
         # height's gap from the raw published one, set fresh each reset().
         self.last_reset_settle_gap_m = 0.0
@@ -168,6 +199,7 @@ class HabitatRGBDSimulator:
                         "measured on it" % scene_path)
             self._scene = str(scene_path)
             self._structure = None
+            self._semantic_objects = self._read_semantic_objects(scene_path) if self.semantic else None
         self._sim.seed(seed)
         raw_position = np.asarray(position, dtype=np.float32)
         self.last_reset_settle_gap_m = 0.0
@@ -209,6 +241,53 @@ class HabitatRGBDSimulator:
             self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
         return self._structure
 
+    def semantic_objects(self):
+        """``{instance id: raw annotation category}`` of the loaded scene, under ``semantic=True``.
+
+        The ids are the ones :attr:`last_semantic` renders and the ones the
+        published episodes' goal rows name as ``object_id``; the category is
+        the annotator's own word (``"armchair"``, ``"tv stand"``), not a
+        detector label -- the mapping into the method's vocabulary is the
+        ground-truth perception's, not the bridge's.
+
+        Raises:
+            EnvContractError: No scene is loaded, or the sensor is off.
+        """
+        if self._sim is None or self._semantic_objects is None:
+            raise EnvContractError("Simulator not reset with semantic=True; there are no annotations to read")
+        return self._semantic_objects
+
+    def _read_semantic_objects(self, scene_path):
+        """Read the loaded scene's annotation table, refusing a scene that has none.
+
+        habitat-sim does not fail when a scene's ``.semantic.glb`` or
+        ``.semantic.txt`` is missing: it renders instance 0 everywhere and
+        ``semantic_scene.objects`` is empty. An oracle that sees nothing would
+        score like a blind agent and look like a method result, so this is a
+        contract error here, with the file the publisher ships named.
+        """
+        objects = {}
+        for obj in getattr(self._sim.semantic_scene, "objects", ()) or ():
+            if obj is None:
+                continue
+            try:
+                instance = int(obj.semantic_id)
+            except (AttributeError, TypeError, ValueError):
+                # habitat-sim 0.2.x names instances "<region>_<id>"; the id is the trailing field
+                instance = int(str(obj.id).rsplit("_", 1)[-1])
+            category = obj.category.name() if obj.category is not None else ""
+            if instance <= 0:
+                continue                  # habitat-sim's id 0 is "unknown": not an instance
+            objects[instance] = str(category).strip().lower()
+        if not objects:
+            self.close()
+            raise EnvContractError(
+                "habitat-sim loaded no semantic annotations for %s: the scene dataset config (%s) must be the "
+                "publisher's annotated one and the scene's .semantic.glb / .semantic.txt must sit beside the mesh "
+                "(HM3D-Semantics annotations; hm3d.assets --instructions names the download)"
+                % (scene_path, self.scene_dataset_config))
+        return objects
+
     def _configuration(self, scene_path):
         import habitat_sim
 
@@ -217,14 +296,21 @@ class HabitatRGBDSimulator:
         config.gpu_device_id = self.gpu_device
         config.enable_physics = False
         config.allow_sliding = self.allow_sliding
+        if self.semantic:
+            # The annotated dataset config names each scene's .semantic.glb/.semantic.txt;
+            # without load_semantic_mesh the sensor renders instance 0 everywhere.
+            config.scene_dataset_config_file = self.scene_dataset_config
+            config.load_semantic_mesh = True
         agent = habitat_sim.agent.AgentConfiguration()
         agent.height = self.height_m
         agent.radius = self.radius_m
         sensors = []
         k = self.camera.intrinsics
         hfov = math.degrees(2 * math.atan(k.width / (2 * k.fx)))
-        for name, kind in (("rgb", habitat_sim.SensorType.COLOR),
-                           ("depth", habitat_sim.SensorType.DEPTH)):
+        kinds = [("rgb", habitat_sim.SensorType.COLOR), ("depth", habitat_sim.SensorType.DEPTH)]
+        if self.semantic:
+            kinds.append(("semantic", habitat_sim.SensorType.SEMANTIC))
+        for name, kind in kinds:
             sensor = habitat_sim.CameraSensorSpec()
             sensor.uuid = name
             sensor.sensor_type = kind
@@ -324,6 +410,12 @@ class HabitatRGBDSimulator:
                 or not np.allclose(rgb_rotation, depth_rotation, atol=1e-5, rtol=0)
                 or not np.allclose(depth_sensor.position, expected_position, atol=1e-4, rtol=0)):
             raise EnvContractError("RGB/depth/pose extrinsics are not registered to the declared camera mount")
+        if self.semantic:
+            semantic_sensor = state.sensor_states["semantic"]
+            if (not np.allclose(semantic_sensor.position, depth_sensor.position, atol=1e-5, rtol=0)
+                    or not np.allclose(quaternion.as_rotation_matrix(semantic_sensor.rotation), depth_rotation,
+                                       atol=1e-5, rtol=0)):
+                raise EnvContractError("The semantic sensor is not registered to the depth camera")
         body_rotation = quaternion.as_rotation_matrix(state.rotation)
         pose = habitat_pose(state.position, body_rotation, depth_rotation)
         rgb_pose = habitat_pose(state.position, body_rotation, rgb_rotation)
@@ -333,6 +425,13 @@ class HabitatRGBDSimulator:
         snapped = self._sim.pathfinder.snap_point(state.position)
         self.last_pose_on_navmesh = bool(abs(float(snapped[1]) - float(state.position[1])) <= _NAVMESH_CONFIRM_M)
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
+        if self.semantic:
+            ids = np.asarray(raw["semantic"])
+            if ids.ndim == 3 and ids.shape[2] == 1:
+                ids = ids[..., 0]
+            if ids.shape != rgb.shape[:2]:
+                raise EnvContractError("The semantic frame %s is not the RGB frame's size %s" % (ids.shape, rgb.shape[:2]))
+            self.last_semantic = ids.astype(np.int32, copy=True)
         counts = {}
         depth = metric_depth(raw["depth"], self.camera, depth_holes=self.depth_holes, stats=counts)
         totals = self.depth_hole_stats
@@ -350,4 +449,6 @@ class HabitatRGBDSimulator:
         self._sim = None
         self._scene = None
         self._structure = None
+        self._semantic_objects = None
+        self.last_semantic = None
 

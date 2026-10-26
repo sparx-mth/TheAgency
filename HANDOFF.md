@@ -1,4 +1,80 @@
-# Handoff — HM3D ObjectNav benchmark, 2026-10-01
+# Handoff — HM3D ObjectNav benchmark
+
+## 2026-10-26 — The perception upper bound (ground-truth oracle) is built; the 2,000-episode run waits on one download
+
+Branch: `feat/objnav-habitat-hm3d-nadav`. Everything below is in the working tree (uncommitted at the time of
+writing; see `git status`).
+
+**What was asked.** Before comparing detectors/segmenters, run the HM3D-v1 val split (2,000 episodes, 20 scenes)
+with *ideal* perception -- boxes, labels and instance masks from the simulator's annotations instead of
+YOLO-World and SAM -- with every navigation layer unchanged, in parallel, into `runs/gt_oracle_2000ep_<stamp>`.
+
+**What exists now** (`sparx_agency/tasks/planning/objnav_benchmark_runtime/`, operator's manual in
+`hm3d/README.md` section 3.5, design notes in `README.md` "Ideal perception from the simulator"):
+
+- `habitat/simulator.py`: `HabitatRGBDSimulator(semantic=True, scene_dataset_config=...)` renders habitat-sim's
+  semantic sensor (HM3D-Semantics instance ids) beside RGB-D into `last_semantic`; `semantic_objects()` is the
+  scene's `{instance id: raw category}`; a scene that loads no annotations is refused.
+- `ground_truth/`: `GroundTruthSource` (env -> oracle hand-off, strict frame identity), `GroundTruthDetector` /
+  `GroundTruthSegmenter` (the method's own `Detector`/`Segmenter` contracts), `hm3d_categories.py` (publisher's
+  goal ids first, exact raw-name table second), `semantic_frame.py` (boxes/masks from an id frame).
+- `hm3d/env.py` publishes each frame under `ground_truth=`; `hm3d/dataset.py` has `goal_instances`,
+  `semantic_assets`, `annotated_scene_dataset_config`; `hm3d/run.py` has `--perception ground-truth` with a
+  file-by-file annotation preflight; `policy_factory.build_policy(..., ground_truth=)` builds the pair, turns
+  `segmentation` on, marks the run `publishable: false`.
+- `hm3d/run_benchmark.sh --perception ground-truth --jobs max` (no YOLO/SAM started, output
+  `runs/gt_oracle_2000ep_<stamp>`); `benchmark_services.sh PERCEPTION`; `scene_pool.max_workers` behind `--jobs max`.
+- Tests: `tests/test_ground_truth_perception.py` (32). Suite status unchanged otherwise (the 20 pre-existing
+  failures are `skfmm` missing in `.venv` and the uninstalled v2 split).
+
+**Verified end to end** on Matterport's *public* HM3D example scene (`00861-GLAQ4DNUx5U`, fetched to
+`/tmp/hm3d_example`, synthetic one-episode release in `/tmp/hm3d_example_run`; both disposable, both re-creatable
+without a licence): habitat-sim 0.2.4 loads 908 instances through the annotated config, the rendered ids reproduce
+`semantic.txt` exactly, and a full RPT episode ran through `hm3d.run --perception ground-truth` (320 oracle frames,
+0 lookup misses, 145 labelled instances, 336 door detections -> 8 door landmarks, 10 rooms via 26 LLM calls,
+closing to STOP; exit 0) and a second through the launcher's **campaign path**
+(`run_benchmark.sh --perception ground-truth --scenes 00861-GLAQ4DNUx5U --limit 1 --jobs 2`: services, preflight,
+`campaign.py` -> `scene_pool`, child, aggregate; 460 frames, STOP at 0.28 m from a view point after 459 actions,
+`campaign_summary.json` with `complete: false` for the subset; exit 0). The synthetic episode's scores mean nothing
+(its view points were a handful of random samples); the plumbing does.
+
+**The one blocker: the HM3D-Semantics v0.1 annotations for the val scenes are not on this machine**
+(`hm3d-val-semantic-annots-v0.1.tar.gz` + `hm3d-val-semantic-configs-v0.1.tar`, ~1.4 GB, Matterport API token --
+the same licence as the scenes; nothing in this repo may hold the token). `hm3d.assets --version v1 --check
+--semantic` reports 41 files missing (the config + 20 x {`.semantic.glb`, `.semantic.txt`}); the preflight
+refuses the run by name. To unblock, the licence holder runs, in `objnav-habitat`:
+
+```bash
+python -m habitat_sim.utils.datasets_download --username <token-id> --password <token-secret> \
+    --uids hm3d_val_semantic_annots_v0.1 hm3d_val_semantic_configs_v0.1 --data-path ~/datasets/
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.assets --version v1 --check --semantic
+```
+
+**Then launch** (the operator's environment of the running sweep, plus the oracle switch):
+
+```bash
+cd ~/GIT/TheAgency
+HAB_PY=~/miniconda3/envs/objnav-habitat/bin/python LLM_BASE_URL=http://127.0.0.1:11435 OLLAMA_MODE=native \
+OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=4096 HABITAT_VRAM_MIB=400 \
+  sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/run_benchmark.sh --version v1 --perception ground-truth --jobs max
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/run_benchmark.sh --status runs/gt_oracle_2000ep_<stamp>
+```
+
+`--jobs max` gave 10 while the YOLO sweep held the card (4.2 GB free at 400 MiB a renderer); on an idle card it
+is 20 (one child per scene). **The YOLO baseline sweep `runs/hm3d_v1_val_j8p2_20261026` was running throughout**
+(8 jobs, ~484 s/episode, ETA ~33 h from 09:20 UTC); the oracle run shares its Ollama, so the two slow each other
+on the LLM -- starting the oracle after it finishes is the cleaner measurement. Starting it beside the sweep is
+safe only because of the `benchmark_services.sh` fix described in `LESSONS.md` 2026-10-26 (a resident Ollama is
+no longer re-placed; before it, the new run would have moved the shared LLM to the CPU).
+
+**What to look at in the results**: `campaign_summary.json` (SR/SPL/SoftSPL/DTG, `complete`), each scene's
+`evaluation_diagnostics.jsonl` `ground_truth.scene_report` (`reported_by_label`, `unmapped_raw_names`,
+`named_for_a_goal_category_but_not_a_goal`) -- a frequent unmapped raw name that should be a context word is a
+one-line addition to `ground_truth/hm3d_categories.py` (its hash is in the frozen config, so note the change).
+
+---
+
+## Handoff — HM3D ObjectNav benchmark, 2026-10-01
 
 Branch: `feat/objnav-habitat-hm3d-daphna` (tracks `origin/feat/objnav-habitat-hm3d-nadav`).
 Everything below is committed on this branch unless marked otherwise.

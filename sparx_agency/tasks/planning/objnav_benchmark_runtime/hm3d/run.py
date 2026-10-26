@@ -23,7 +23,8 @@ import subprocess
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
 from sparx_agency.core.planning.objnav.labels.datasets.hm3d import hm3d_label_mapper
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import add_detector_options
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
+    PERCEPTION_GROUND_TRUTH, add_detector_options)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import (  # noqa: F401  (StopDiagnostic re-exported for the sibling CLIs)
     AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy)
@@ -205,7 +206,7 @@ def _runtime(issues):
     return packages
 
 
-def _method(args, protocol):
+def _method(args, protocol, ground_truth=None):
     """Build the search policy and prove its services are the ones recorded.
 
     One builder for every benchmark (``policy_factory.build_policy``). The
@@ -213,11 +214,56 @@ def _method(args, protocol):
     benchmark's own agent -- body height and radius -- so every method knob
     (clearance, stop distance, closing, peeks, ...) is ``RPTSettings``'
     default here exactly as it is on Gibson. Nothing here came from an HM3D
-    validation score.
+    validation score. ``ground_truth`` is the semantic-frame source under
+    ``--perception ground-truth``, built by :func:`prepare` beside the
+    environment that publishes to it.
     """
     embodiment = {"body_height_m": protocol.agent_height_m,
                   "body_radius_m": protocol.agent_radius_m}
-    return build_policy(args, hm3d_label_mapper(), defaults=embodiment)
+    return build_policy(args, hm3d_label_mapper(), defaults=embodiment, ground_truth=ground_truth)
+
+
+def ground_truth_issues(dataset, episode_ids=None):
+    """Why the ground-truth perception could not run on this installation: the annotations it needs and lacks.
+
+    habitat-sim renders instance 0 everywhere when a scene's HM3D-Semantics
+    files are absent and says nothing, so the files are checked here, before
+    a renderer exists, for every scene the run would touch -- and the message
+    names the one command that provisions them.
+
+    Args:
+        dataset: The loaded :class:`HM3DDataset` (already restricted to the
+            run's scenes).
+        episode_ids: The selection, to check only its scenes; every loaded
+            scene by default.
+
+    Returns:
+        A list of complaints, empty when every annotation is present.
+    """
+    issues = []
+    try:
+        dataset.annotated_scene_dataset_config()
+    except (OSError, ValueError) as exc:
+        issues.append(str(exc))
+    seen, missing = set(), []
+    episodes = (dataset.episodes[i] for i in episode_ids) if episode_ids is not None else dataset.episodes.values()
+    for episode in episodes:
+        if episode.scene_key in seen:
+            continue
+        seen.add(episode.scene_key)
+        try:
+            dataset.semantic_assets(episode)
+        except (OSError, ValueError) as exc:
+            missing.append((episode.scene_key, str(exc)))
+    if missing:
+        issues.append("%d of %d selected scenes lack their HM3D-Semantics annotations (first: %s)"
+                      % (len(missing), len(seen), missing[0][1]))
+    if issues:
+        issues.append("Provision them with the licence holder's token: python -m %s --version %s --instructions "
+                      "(step 5), then verify with --check --semantic" % (
+                          "sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.assets",
+                          dataset.protocol.dataset_version))
+    return issues
 
 
 def _gpu_gate(args):
@@ -273,6 +319,8 @@ def prepare(args):
         issues.append("Rendering GPU: %s" % exc)
     runtime = _runtime(issues)
     sim_match = runtime.get("habitat-sim") == protocol.reference_habitat_sim_version
+    oracle = args.perception == PERCEPTION_GROUND_TRUTH
+    ground_truth = None
     dataset = env = policy = None
     ids, method, manifest = (), {}, None
     excluded, start_distances = [], {}
@@ -288,18 +336,26 @@ def prepare(args):
                                   full=not subset, scenes=args.scenes,
                                   episodes_per_scene=args.episodes_per_scene)
             manifest = dataset.manifest(hash_scenes=not args.skip_scene_hashes)
-            # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
-            # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
-            env = HM3DEnv(dataset, protocol, args.seed,
-                          -1 if args.software_render else args.gpu_device)
-            pool = episodes_of_category(env.episode_ids(), dataset.episodes, args.category,
-                                        CATEGORIES)
+            if oracle:
+                # The annotations are checked before a renderer exists: habitat-sim says nothing when they are absent.
+                annotation_issues = ground_truth_issues(dataset)
+                issues.extend("Ground-truth perception: %s" % issue for issue in annotation_issues)
+                if not annotation_issues:
+                    from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.source import GroundTruthSource
+                    ground_truth = GroundTruthSource(hm3d_label_mapper())
+            if not oracle or ground_truth is not None:
+                # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
+                # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
+                env = HM3DEnv(dataset, protocol, args.seed,
+                              -1 if args.software_render else args.gpu_device, ground_truth=ground_truth)
+            pool = episodes_of_category(dataset.episode_ids() if env is None else env.episode_ids(),
+                                        dataset.episodes, args.category, CATEGORIES)
             if args.episode_ids:
                 ids = explicit_episodes(args.episode_ids, pool)
             else:
                 ids = select_episodes(pool, args.limit, args.shards, args.shard_index,
                                       shuffle_seed=args.seed if args.shuffle else None)
-            if args.validate_starts:
+            if args.validate_starts and env is not None:
                 start_distances = env.validate_starts(ids)
                 excluded = list(env.unreachable_episode_ids)
                 if excluded and not args.exclude_unreachable:
@@ -314,7 +370,9 @@ def prepare(args):
         except (OSError, ValueError, KeyError, ImportError) as exc:
             issues.append("Dataset/scorer: %s" % exc)
     try:
-        policy, method = _method(args, protocol)
+        if oracle and ground_truth is None:
+            raise RuntimeError("ground-truth perception has no annotations to read (see the issues above)")
+        policy, method = _method(args, protocol, ground_truth)
         if args.agent in ("rpt", "falcon-yolo"):
             policy.target_projector = getattr(env, "target_projector", None)
             method["target_navmesh_projection"] = policy.target_projector is not None
@@ -386,6 +444,10 @@ def prepare(args):
             if env.navmesh_by_scene:
                 config["navmesh_by_scene"] = dict(sorted(env.navmesh_by_scene.items()))
     config["selected_episode_ids"] = list(ids)
+    if oracle:
+        # Only the oracle's record carries the key: a service run's config stays what it was, so a run
+        # recorded before the oracle existed resumes under this code (the lock compares verbatim).
+        config["perception"] = PERCEPTION_GROUND_TRUTH
     return env, policy, hm3d_label_mapper(), config, issues
 
 

@@ -509,6 +509,82 @@ took — are in `agent_info` of every `episodes.jsonl` row
 (`room_search_loop.events`, `exploration_fallback.failures`, `building.events`,
 `route_commitment`).
 
+### 3.5 The perception upper bound: ground-truth boxes and masks from the simulator
+
+Before comparing open-vocabulary detectors or segmenters, measure what the
+navigation and mapping architecture does under **ideal perception**:
+
+```bash
+HAB_PY=... LLM_BASE_URL=http://127.0.0.1:11435 OLLAMA_MODE=native HABITAT_VRAM_MIB=400 \
+  hm3d/run_benchmark.sh --version v1 --perception ground-truth --jobs max
+#  -> runs/gt_oracle_2000ep_<stamp>/   (one directory per scene, campaign_summary.json, campaign_metrics.csv)
+hm3d/run_benchmark.sh --status runs/gt_oracle_2000ep_<stamp>                          # progress, then SR / SPL / SoftSPL
+hm3d/run_benchmark.sh --version v1 --perception ground-truth --scene 00800-TEEsavR23oF --limit 1   # one oracle episode
+```
+
+What `--perception ground-truth` changes, and only that (`../ground_truth/`,
+`hm3d.run --perception ground-truth`):
+
+- **YOLO-World and SAM are bypassed.** `HabitatRGBDSimulator` renders habitat-sim's
+  **semantic sensor** (per-pixel HM3D-Semantics instance ids, registered to the
+  depth camera) beside RGB-D; `HM3DEnv` publishes each frame to a
+  `GroundTruthSource`, and a `GroundTruthDetector` / `GroundTruthSegmenter`
+  built on it answer the method's own `Detector` / `Segmenter` contracts: every
+  visible annotated instance in the label table's vocabulary becomes a
+  confidence-1.0 detection with its tight pixel box, and the segmenter's mask
+  for a target box is the instance's exact pixels. Precision and recall against
+  the annotations are 100 % by construction; there is no box drift and no label
+  noise. The one declared floor is `--ground-truth-min-pixels` (default 64, an
+  8×8 patch): a smaller sliver is not reported, as no detector would.
+- **Labels come from the publisher first.** The episode files list, per scene
+  and category, the instance ids that *are* its goals
+  (`HM3DDataset.goal_instances`) — exactly what the success radius is measured
+  to — and those ids carry the category's primary prompt. An instance *named*
+  for a listed category but not among its goals is **dropped** (a publisher-
+  excluded "chair" would otherwise end a chair episode with a false STOP); the
+  scene report counts them (`named_for_a_goal_category_but_not_a_goal`). The
+  context vocabulary (doors, stairs, kitchen and bathroom fixtures, the
+  distractors) and, where a scene's episodes never ask for a category, that
+  category's instances come from the exact-match table in
+  `ground_truth/hm3d_categories.py`, whose SHA-256 is in the frozen
+  configuration. Unlisted raw names are not emitted (the vocabulary is closed);
+  the twenty most frequent are in each scene's report so a gap is visible in
+  the run directory, not inferred from a score. Known difference: an *open
+  doorway* with no door is not an annotated instance, so the oracle reports
+  fewer `open doorway` boxes than YOLO does; the map's own gaps still find them.
+- **Everything else is the method, unchanged**: alias folding and duplicate
+  suppression, the confidence gates, the door finder, the projection and the
+  landmark map, room classification by the LLM, RPT\* room order, frontier /
+  FALCON local exploration, side-looks, weighted A\*, the target closing. The
+  same `RPTSearchPolicy`, built by the same `policy_factory.build_policy`.
+- **Masks are on by default** (`segmentation=true` unless `--policy-config`
+  says otherwise: then ground-truth boxes are read the box way), the run is
+  recorded `publishable: false`, `method.perception = "ground-truth"`, and
+  `method.ground_truth` says what was bypassed. It is a diagnostic of the
+  method, never a benchmark result, and `report.py` treats it so.
+- **No detector or segmenter is started** (`benchmark_services.sh PERCEPTION`);
+  the GPU plan budgets nothing for YOLO. The LLM is provisioned as for any run,
+  and an Ollama already answering at `LLM_BASE_URL` is budgeted as placed and
+  left on the device it was started with.
+- `--jobs max` sizes the campaign to the machine — one child per scene at most,
+  bounded by cores and by free VRAM at `HABITAT_VRAM_MIB` per renderer
+  (`scene_pool.max_workers`) — so a run beside another campaign takes what is
+  left and a run on an idle card takes one process per scene.
+
+**It needs the HM3D-Semantics annotations**, which a benchmark run does not:
+each scene's `<stem>.semantic.glb` / `<stem>.semantic.txt` beside its mesh and
+the publisher's `hm3d_annotated_basis.scene_dataset_config.json` at the release
+root (section 1.2, step 5 of `hm3d.assets --instructions`; same licence and
+token as the scenes, ~1.4 GB for v1 val). The preflight checks every selected
+scene before a renderer exists and refuses the run by file name without them;
+`hm3d.assets --check --semantic` reports the installation. habitat-sim would
+otherwise render instance 0 everywhere and say nothing — a scene that loads no
+semantic objects is refused at reset for the same reason.
+
+Per-episode, `evaluation_diagnostics.jsonl` carries `ground_truth`: frames
+served, frames with nothing annotated, lookup misses (always 0; a frame the
+oracle was not given ends the run) and the scene report above.
+
 ### Development split
 
 `--split train --episodes-per-scene N` runs the HM3D training split for
@@ -642,13 +718,14 @@ issue.
 | `protocol.py` | `HM3DProtocol`, `HM3D_V1`, `HM3D_V2`, the navmesh choice, the named ApexNav radius |
 | `dataset.py` | the published episodes and goals, scene-qualified ids, XYZW→WXYZ, the manifest |
 | `geodesic.py` | habitat-lab's `DistanceToGoal` to view points, on habitat-sim's pathfinder |
-| `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance |
-| `assets.py` | what is installed, what is missing, and the commands that would fix it |
-| `run_benchmark.sh` | The one-command launcher: services (`../benchmark_services.sh`), preflight, `campaign.py` or a `run.py` scene, the aggregate |
+| `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance; under `ground_truth=` it publishes the semantic sensor's frames to the oracle perception |
+| `assets.py` | what is installed, what is missing, and the commands that would fix it (`--check --semantic` and step 5 for the HM3D-Semantics annotations) |
+| `run_benchmark.sh` | The one-command launcher: services (`../benchmark_services.sh`), preflight, `campaign.py` or a `run.py` scene, the aggregate; `--perception ground-truth`, `--jobs max` |
+| `../ground_truth/` | the perception upper bound: `semantic_frame.py` (boxes/masks from an id frame), `hm3d_categories.py` (raw names → vocabulary, the publisher's goal ids first), `source.py` (the env→oracle hand-off, strict frame identity), `perception.py` (`GroundTruthDetector` / `GroundTruthSegmenter`) |
 | `../tests/hm3d_stand_in_fixture.py` | an HM3D-format `dev_gibson` split on a Gibson mesh, to run this adapter's real path where the HM3D scenes are absent |
 | `run.py` | preflight and the run, on the shared `run_evaluation` (progress, lean rows and diagnostics via its `wrap_env` / `agent_class` hooks); builds the shared `RPTSearchPolicy` from this protocol's agent |
 | `campaign.py` | one child process per scene, then an aggregate over what finished |
-| `scene_pool.py` | `--jobs N`: N scene children at once, each logging to `<root>/<scene>.console.log` |
+| `scene_pool.py` | `--jobs N`: N scene children at once, each logging to `<root>/<scene>.console.log`; `max_workers` behind `--jobs max` |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
 | `sota.py` | the published numbers, with the table each came from |
 | `frozen_eval.py` | freeze an exact configuration, then run the full split under it |

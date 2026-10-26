@@ -11,6 +11,36 @@ Format per entry:
 
 ---
 
+## 2026-10-26 — Planning a second campaign beside a running one: the GPU plan would have sent `num_gpu=0` to the SHARED Ollama and put the live sweep's LLM on the CPU
+
+**Symptom:** The first launcher preflight of the ground-truth perception run (`hm3d/run_benchmark.sh
+--perception ground-truth --jobs max`), taken while the v1 YOLO sweep (`runs/hm3d_v1_val_j8p2_20261026`,
+eight scenes, native Ollama on 11435 holding 15 GB of the card) was running, printed a plan of
+`LLM=cpu  YOLO=cpu  Habitat=gpu` -- "llm cpu offloaded: needs 15203 MiB, 211 MiB left" -- and its
+`gpu_plan.json` environment carried `LLM_NUM_GPU=0`. Nothing had failed yet; the run was refused one step
+later for the missing annotations, which is the only reason the plan was read before a child ran.
+
+**Root cause:** `gpu_plan.py` reads nvidia-smi's "used" as *other people's* memory and places the three
+processes into what is left. It cannot tell that the 15 GB are the very Ollama this run is about to share
+(`benchmark_services.sh` reuses any server answering at `LLM_BASE_URL`). Placing "the LLM" on the CPU then
+exports `LLM_NUM_GPU=0`, which `LLMConfig.from_env` turns into `options.num_gpu = 0` on **every request**
+of every child -- and Ollama honours a per-request `num_gpu` by reloading the model with that many layers on
+the card. The new run would have moved `qwen2.5:3b-instruct` and `qwen2.5:14b-instruct` to the CPU for the
+server, i.e. for the eight children of the live sweep as well, a few seconds into its first episode, and
+every one of their LLM calls would have gone from seconds to minutes with no error anywhere.
+
+**Fix / workaround:** `benchmark_services.sh` probes `LLM_BASE_URL` *before* the plan; an LLM already
+answering is resident, so it is pinned `GPU_PLAN_LLM=gpu` with `LLM_VRAM_MIB=0` (budgeted as placed: its
+memory is already in "used") and after the plan `LLM_NUM_GPU` is forced empty, so requests carry no
+`num_gpu` and the server keeps whatever placement it was started with. The log says so
+("LLM already resident ... requests leave its device alone"). The same preflight now plans
+`LLM=gpu  YOLO=cpu  Habitat=gpu` with 10 renderers in the 4.2 GB left.
+
+**Don't:** Don't start a second campaign against a shared Ollama without reading its `gpu_plan.json`
+environment first, and don't treat a plan's `LLM_NUM_GPU` as advisory: it is sent with every request. Don't
+"fix" a slow shared LLM by restarting Ollama under a live sweep either -- its children would record every
+call during the restart as a failure and back off.
+
 ## 2026-10-22 — Reviewing Corozal/000003 from video frames when the step log should have answered: the recording did not keep the map of each action
 
 **Symptom:** Asked why, at action 261 of the toilet episode `c1af8954a378`, the agent never looked at the

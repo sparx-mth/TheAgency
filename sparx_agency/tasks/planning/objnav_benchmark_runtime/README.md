@@ -737,7 +737,8 @@ tasks/planning/objnav_benchmark_runtime/   THIS TREE: the adapters and the opera
     detector_options.py, gpu_plan.py, provenance.py, progress.py   the shared CLI options, GPU placement, run provenance, live progress + lean records
     evaluation.py      the shared run loop the HM3D / MP3D / RoboTHOR adapters call (Gibson's run.py keeps its own, see below)
     services/          the HTTP clients the method is given: detector, segmenter, room LLM
-    habitat/           the habitat-sim RGB-D bridge (navmesh="published"|"agent") and the navmesh storey/stair reader (any Habitat dataset)
+    ground_truth/      the perception upper bound (--perception ground-truth): the semantic sensor answering the detector and segmenter contracts
+    habitat/           the habitat-sim RGB-D bridge (navmesh="published"|"agent", optional semantic sensor) and the navmesh storey/stair reader (any Habitat dataset)
     benchmark_services.sh   the services every launcher brings up the same way: GPU plan, Ollama, the detector with the
                        benchmark's vocabulary, the segmenter, FFmpeg, teardown (sourced by gibson/ and hm3d/ run_benchmark.sh)
     gibson/            the Gibson v1.1 adapter: protocol, dataset, SemExp scorer, ObjNavEnv, run CLI, launcher, reports
@@ -2358,6 +2359,28 @@ it as `segmenter_http`). Tests:
 `tests/test_segmented_projection.py` (the occluder scene with and without the
 mask, the failure families, the HUD), `core/mapping/segmentation/tests`, and
 `tasks/mapping/scene_graph/tests/test_segmentation_service.py`.
+
+### Ideal perception from the simulator: `--perception ground-truth` (2026-10-26, HM3D)
+
+The method never knows what answers its `Detector` and `Segmenter` contracts,
+and `ground_truth/` uses that seam to measure the architecture's upper bound
+under ideal perception: `GroundTruthDetector` reports every annotated instance
+visible in the frame whose annotation maps into the label table's vocabulary --
+confidence 1.0, the tight pixel box, once -- and `GroundTruthSegmenter` returns
+the instance's exact pixels for each target box; both read the per-pixel
+instance ids habitat-sim's **semantic sensor** renders, which the HM3D
+environment publishes to a `GroundTruthSource` as it builds each observation.
+The source answers only for the RGB array it was given (same object or
+pixel-identical) and ends the run otherwise -- an oracle for the wrong frame
+would be a silent perception error inside the run meant to have none. Goal
+categories take the publisher's own goal instance ids per scene (what the
+success radius is measured to); the context vocabulary comes from an explicit
+raw-name table (`hm3d_categories.py`), hashed into the frozen configuration.
+Everything downstream -- `deduplicate_detections`, the gates, the door finder,
+the projection, the landmark map, the room search -- is the same code on the
+same inputs' *shape*. The run is `publishable: false`; the operator's manual is
+[the HM3D README, section 3.5](hm3d/README.md). Tests:
+`tests/test_ground_truth_perception.py`.
 
 ## Models and vocabulary
 

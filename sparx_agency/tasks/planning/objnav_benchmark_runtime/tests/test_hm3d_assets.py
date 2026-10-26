@@ -226,13 +226,19 @@ def test_the_cli_composes_the_documented_layout_from_one_data_root(tmp_path):
 
 
 def test_the_scene_half_is_instructed_with_placeholders_and_never_a_credential(tmp_path):
-    """The token belongs to whoever accepted the licence; this process must not see one."""
+    """The token belongs to whoever accepted the licence; this process must not see one.
+
+    Two licensed downloads are instructed -- the scenes (step 2) and, for the
+    ground-truth perception only, the HM3D-Semantics annotations (step 5) --
+    and both carry the placeholders.
+    """
     root = tmp_path / "datasets"
     text = download_instructions(HM3D_V2, root)
     assert LICENCE_URL in text and TOKEN_URL in text
     commands = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
     assert re.findall(r"--(?:username|password)\s+(\S+)", commands) == [
-        "<token-id>", "<token-secret>"]
+        "<token-id>", "<token-secret>"] * 2
+    assert "--uids hm3d_val_semantic_annots_v0.2 hm3d_val_semantic_configs_v0.2" in commands
     assert not root.exists() and list(tmp_path.iterdir()) == []
 
 

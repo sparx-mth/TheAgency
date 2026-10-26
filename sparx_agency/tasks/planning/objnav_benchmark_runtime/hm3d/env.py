@@ -32,6 +32,16 @@ from the navmesh in force (``HabitatRGBDSimulator.scene_structure``) -- which
 the multi-floor search declares as its ground-truth stair source in
 ``configuration()["ground_truth_stairs"]``. A simulator without that reading
 (the synthetic ones in tests) yields empty metadata.
+
+**The ground-truth perception upper bound** (``ground_truth=`` a
+:class:`~...ground_truth.source.GroundTruthSource`) is the one deliberate
+exception, and it still reaches no observation: the simulator renders the
+semantic sensor beside RGB-D, this environment publishes each instance-id
+frame to the source as it builds the observation, and the oracle detector
+and segmenter the policy was built with read it there. The per-scene instance
+labels combine the simulator's annotation table with the publisher's own
+goal instance ids (``HM3DDataset.goal_instances``); the account of each scene
+goes into ``evaluation_diagnostics()``, never into the episode.
 """
 from __future__ import annotations
 
@@ -70,6 +80,12 @@ class HM3DEnv(ObjNavEnv):
             success rule, the path accounting and the measurement arithmetic
             can be tested without habitat-sim, on geometry chosen by the test
             rather than by a 3 GB download.
+        ground_truth: A :class:`~...ground_truth.source.GroundTruthSource` to
+            publish the semantic sensor's frames to (the perception upper
+            bound). ``None``, the default, renders no semantic sensor. With
+            the default simulator this loads the scene's HM3D-Semantics
+            annotations through the dataset's annotated config, which must be
+            installed (``HM3DDataset.annotated_scene_dataset_config``).
     """
 
     #: Identifier of the environment. The version is part of it: rows from the
@@ -78,7 +94,7 @@ class HM3DEnv(ObjNavEnv):
     name = "habitat/hm3d-objectnav"
 
     def __init__(self, dataset, protocol, seed=0, gpu_device=0, simulator=None,
-                 excluded_episode_ids=(), distance_factory=None):
+                 excluded_episode_ids=(), distance_factory=None, ground_truth=None):
         self.name = "habitat/hm3d-objectnav-%s" % protocol.dataset_version
         self._distance_factory = distance_factory or ViewPointDistance
         self._dataset = dataset
@@ -86,10 +102,16 @@ class HM3DEnv(ObjNavEnv):
         self._seed = seed
         self._camera = protocol.camera()
         self._actions = protocol.actions()
+        self._ground_truth = ground_truth
         self._simulator = simulator if simulator is not None else HabitatRGBDSimulator(
             self._camera, self._actions, protocol.agent_radius_m,
             protocol.allow_sliding, gpu_device, height_m=protocol.agent_height_m,
-            navmesh=protocol.navmesh, depth_holes=protocol.depth_holes())
+            navmesh=protocol.navmesh, depth_holes=protocol.depth_holes(),
+            semantic=ground_truth is not None,
+            scene_dataset_config=dataset.annotated_scene_dataset_config() if ground_truth is not None else None)
+        if ground_truth is not None and not callable(getattr(self._simulator, "semantic_objects", None)):
+            raise EnvContractError("Ground-truth perception needs a simulator with a semantic sensor "
+                                   "(semantic_objects() and last_semantic)")
         self._distances = {}
         self._episode = None
         self._observation = None
@@ -211,6 +233,9 @@ class HM3DEnv(ObjNavEnv):
                                       row.start_rotation_wxyz, seed)
         if reloading:
             self._distances = {}
+        if self._ground_truth is not None and (reloading or self._ground_truth.scene_key != row.scene_key):
+            self._ground_truth.begin_scene(row.scene_key, self._simulator.semantic_objects(),
+                                           self._dataset.goal_instances(row.scene_key))
         self._row = row
         self._steps, self._stopped = 0, False
         self._path_m = self._protocol.path_length_epsilon_m
@@ -253,6 +278,11 @@ class HM3DEnv(ObjNavEnv):
 
     def _observation_from(self, frame):
         rgb, depth, pose = frame
+        if self._ground_truth is not None:
+            ids = getattr(self._simulator, "last_semantic", None)
+            if ids is None:
+                raise EnvContractError("The simulator rendered no semantic frame for the ground-truth perception")
+            self._ground_truth.publish(rgb, ids)
         return ObjNavObservation(rgb, depth, pose, self._camera,
                                  self._episode.target_category, self._steps)
 
@@ -295,14 +325,18 @@ class HM3DEnv(ObjNavEnv):
         """Recorder/evaluator-only values. Never part of an observation."""
         if self._episode is None:
             raise EnvContractError("No episode has been reset")
-        return {"distance_to_goal_m": self._distance.distance(self._habitat_position()),
-                "path_length_m": self._path_m,
-                "shortest_path_m": self._start_dtg,
-                "success_distance_m": self._protocol.success_distance_m,
-                "published_geodesic_m": self._row.published_geodesic_m,
-                "view_points": self._distance.view_point_count,
-                "collisions": self._collisions if self._collision_available else None,
-                "depth_holes": dict(getattr(self._simulator, "depth_hole_stats", None) or {})}
+        diagnostics = {"distance_to_goal_m": self._distance.distance(self._habitat_position()),
+                       "path_length_m": self._path_m,
+                       "shortest_path_m": self._start_dtg,
+                       "success_distance_m": self._protocol.success_distance_m,
+                       "published_geodesic_m": self._row.published_geodesic_m,
+                       "view_points": self._distance.view_point_count,
+                       "collisions": self._collisions if self._collision_available else None,
+                       "depth_holes": dict(getattr(self._simulator, "depth_hole_stats", None) or {})}
+        if self._ground_truth is not None:
+            diagnostics["ground_truth"] = dict(self._ground_truth.diagnostics(),
+                                               scene_report=dict(self._ground_truth.scene_report))
+        return diagnostics
 
     def measure(self):
         if not self.episode_over:

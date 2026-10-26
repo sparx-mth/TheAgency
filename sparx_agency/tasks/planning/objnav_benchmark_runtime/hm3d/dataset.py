@@ -65,6 +65,11 @@ def published_counts(protocol):
 #: is reproduced rather than assumed away.
 SCENE_PATH_PREFIX = "data/scene_datasets/"
 
+#: The publisher's scene dataset config that knows where each scene's semantic
+#: annotations are: every episode row names it (``scene_dataset_config``), and
+#: it lives at the root of the release directory, beside the split folders.
+ANNOTATED_SCENE_DATASET_CONFIG = "hm3d_annotated_basis.scene_dataset_config.json"
+
 
 def _vector(value, size, name):
     array = np.asarray(value, dtype=np.float64)
@@ -326,6 +331,84 @@ class HM3DDataset:
     def goals_for(self, episode):
         """The evaluator-only goal rows of ``episode``. Never given to a policy."""
         return self.goals[episode.goals_key]
+
+    def goal_instances(self, scene_key):
+        """``{category: frozenset(object_id)}``: every annotated instance the publisher counts as a goal in a scene.
+
+        The ``object_id`` of a goal row is the instance id of the scene's
+        HM3D-Semantics annotation -- the number the semantic sensor renders --
+        so this is the publisher's own word on which instances *are* a
+        ``chair``, a ``bed``, ... in that building, and it is exactly the set
+        the success radius is measured to. Only the categories with episodes
+        in the scene are listed; a scene with chairs but no chair episodes has
+        no ``chair`` entry.
+
+        Privileged: this feeds the ground-truth perception upper bound only,
+        never a method's observation.
+        """
+        instances = {}
+        prefix = None
+        for episode in self.episodes.values():
+            if episode.scene_key == scene_key:
+                prefix = episode.goals_key[:-len(episode.category)]
+                break
+        if prefix is None:
+            raise KeyError("No episodes of scene %r are loaded" % (scene_key,))
+        for category in CATEGORIES:
+            rows = self.goals.get(prefix + category)
+            if rows:
+                instances[category] = frozenset(int(row["object_id"]) for row in rows)
+        return instances
+
+    def annotated_scene_dataset_config(self):
+        """The publisher's annotated scene dataset config for this release, checked to exist.
+
+        ``hm3d_annotated_basis.scene_dataset_config.json`` is what every
+        episode row's ``scene_dataset_config`` names (relative to
+        habitat-lab's ``data/``), and what habitat-sim needs to find a scene's
+        semantic mesh. It ships in the ``hm3d_<split>_semantic_configs_<v>``
+        archive, beside the scenes.
+
+        Raises:
+            FileNotFoundError: Not installed; the message names the archive.
+            ValueError: This dataset was loaded without a scenes directory.
+        """
+        if self.scenes_dir is None:
+            raise ValueError("This dataset was loaded without scene assets")
+        path = self.scenes_dir / self.protocol.scene_root_name / ANNOTATED_SCENE_DATASET_CONFIG
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(
+                "Missing the annotated scene dataset config %s (the hm3d_%s_semantic_configs_v%s archive of "
+                "habitat-sim's datasets_download); the semantic sensor cannot locate a scene's annotations without it"
+                % (path, self.protocol.split, self.protocol.scene_release[len("hm3d-v"):]))
+        return path
+
+    def semantic_assets(self, episode):
+        """The scene's HM3D-Semantics annotation mesh and descriptor, both checked to exist.
+
+        Returns:
+            ``(semantic_glb, semantic_txt)``: ``<stem>.semantic.glb`` (the
+            instance-coloured mesh the semantic sensor renders) and
+            ``<stem>.semantic.txt`` (instance id, colour, raw category, region
+            per line), beside ``<stem>.basis.glb``.
+
+        Raises:
+            FileNotFoundError: Either is missing or empty; the message names
+                the archive they ship in.
+            ValueError: This dataset was loaded without a scenes directory.
+        """
+        glb, _ = self.scene_assets(episode)
+        stem = glb.name[:-len(".basis.glb")]
+        mesh = glb.with_name(stem + ".semantic.glb")
+        descriptor = glb.with_name(stem + ".semantic.txt")
+        for path in (mesh, descriptor):
+            if not path.is_file() or path.stat().st_size == 0:
+                raise FileNotFoundError(
+                    "Missing or empty HM3D-Semantics annotation %s (the hm3d_%s_semantic_annots_v%s archive of "
+                    "habitat-sim's datasets_download, beside the scene). Without it the semantic sensor renders "
+                    "nothing; this loader never generates one."
+                    % (path, self.protocol.split, self.protocol.scene_release[len("hm3d-v"):]))
+        return mesh, descriptor
 
     def scene_assets(self, episode):
         """The scene mesh and its **published** navmesh, both checked to exist.
