@@ -8,7 +8,9 @@
 #   --by-scene         scene outermost, configs inside it: a cut-off leaves every config with the same scenes
 #   --deadline         no launch starts after this time (today, or tomorrow if already past); a launch under way finishes
 #
-# OUT names the output root (default runs/warmup_compare_<date>); finished (config, scene, tag) directories are skipped.
+# OUT names the output root (default runs/warmup_compare_<date>). A launch runs only the slice's episodes that no
+# directory of that (config, scene, tag) holds yet, into a fresh directory: a crash costs the unfinished episodes, never
+# a resume (the frozen GPU plan records free memory, so a resumed run refuses itself).
 set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,19 +37,29 @@ done
 # A resident model takes VRAM, so the next launch's GPU plan would move YOLO to the CPU: every launch starts empty.
 unload_models() { ollama ps 2>/dev/null | awk 'NR > 1 {print $1}' | xargs -r -n1 ollama stop || true; }
 
+# The ids given that no directory of this target (any suffix) has recorded in an episodes.jsonl yet.
+missing_ids() {
+  local target="$1" recorded id; shift
+  recorded="$(cat "$target"*/episodes.jsonl 2>/dev/null | grep -o '"episode_id": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' || true)"
+  for id in "$@"; do grep -qxF "$id" <<< "$recorded" || echo "$id"; done
+}
+
 launch() {
-  local config="$1" scene="$2" target="$OUT/$1/$2$TAG"
-  [[ -f "$target/summary.json" ]] && { echo "skip $config/$scene$TAG (finished)"; return; }
+  local config="$1" scene="$2" target="$OUT/$1/$2$TAG" attempt dir
+  local -a ids remaining
   if [[ -n "$DEADLINE_EPOCH" && "$(date +%s)" -ge "$DEADLINE_EPOCH" ]]; then
     echo "deadline passed: not starting $config/$scene$TAG"; return
   fi
   mapfile -t ids < <(grep "^$scene/" "$EPISODES" | tail -n +"$FIRST" | head -n "$COUNT")
-  unload_models
-  sleep 5
-  local attempt
   for attempt in 1 2 3; do
-    "$LAUNCHER" --version v1 --scene "$scene" --output "$target" \
-      --policy-config "$HERE/configs/$config.json" --episode-ids "${ids[@]}" && break
+    mapfile -t remaining < <(missing_ids "$target" "${ids[@]}")
+    [[ ${#remaining[@]} -gt 0 ]] || { echo "skip $config/$scene$TAG (finished)"; return; }
+    dir="$target"
+    [[ -e "$target/episodes.jsonl" || -e "$target/run.json" ]] && dir="${target}_r$(date +%H%M%S)"
+    unload_models
+    sleep 5
+    "$LAUNCHER" --version v1 --scene "$scene" --output "$dir" \
+      --policy-config "$HERE/configs/$config.json" --episode-ids "${remaining[@]}" && break
     echo "launch failed (attempt $attempt of 3): $config/$scene$TAG"; sleep 20
   done || true
 }
