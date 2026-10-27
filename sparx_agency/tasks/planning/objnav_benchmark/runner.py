@@ -60,14 +60,18 @@ def _drive(env: ObjNavEnv, agent: ObjNavAgent, episode: ObjNavEpisode,
     moved = False      # until the first action that displaces the agent (its first translation)
     # checked_reset refused an episode already over. Forced STOP ends it.
     on_navmesh = getattr(env, "pose_confirmed_on_navmesh", lambda: False)
+    # An environment that knows where its step filter starts a body action (the pose projected onto the
+    # navmesh) reports it, and the motion is judged from there (check_motion's ``placed``).
+    placed_pose = getattr(env, "placed_pose", lambda: None)
     while not env.episode_over:
         action, agent_error = decide(agent, observation, episode.action_spec, mode)
         before = observation.pose
+        placed = placed_pose()
         observation = env.step(action)
         sent += 1
         counts[action.name] += 1
         check_step(env, episode, observation, action, sent, before=before,
-                   kinematics=kinematics, moved=moved)
+                   kinematics=kinematics, moved=moved, placed=placed)
         if observation.pose.position() != before.position():
             moved = True
         positions.append(observation.pose.position())

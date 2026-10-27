@@ -204,7 +204,7 @@ class HM3DProtocol:
         """The shared default, with the climb bound HM3D's stairs need and the step filter's placement.
 
         Sliding is off here, so a blocked MOVE_FORWARD moves nothing at all and
-        the horizontal bounds stand unchanged. ``climb_m`` (since 2026-10-20) is
+        the horizontal bounds stand unchanged. ``climb_m`` (2026-10-20) was
         0.60 m, as Gibson's: the default 0.20 m is one stair riser, but the
         navmesh habitat-sim recomputes here (``agent_max_climb`` 0.20 m,
         ``agent_max_slope`` 45 degrees) lets one 0.25 m stride cross a riser
@@ -232,8 +232,48 @@ class HM3DProtocol:
         stream in the wrong frame, still fails the heading check on its first
         real step, LOOKs and STOP get no slack at all, and the independent
         path-length check remains.
+
+        The full v1 sweep of 2026-10-26/27 (1,926 episodes) met the filter
+        twice more, and each again ended a 99-episode scene:
+        ``00878-XB4GS9ShBRE/000095`` action 187, a MOVE_FORWARD carried
+        0.197 m across its heading (0.305 m in all, at the same height), and
+        ``00832-qyAac8rV8Zk/000029`` action 43, a MOVE_FORWARD that went
+        0.203 m along the floor and 0.679 m down. Both are the filter's own
+        doing, read in habitat-sim 0.2.4's source and reproduced with this
+        simulator (148,500 seeded random actions per scene): ``tryStep``
+        starts every body action from ``projectToPoly(start)``, the
+        3-D-nearest polygon point, walks the straight line from there to the
+        point the action asked for from the unprojected pose, stops at a
+        wall, takes the height from ``getPolyHeight`` without checking that
+        it found one, and returns the pose *untouched* when the two
+        projections are not connected or no path exists. On 00878's stairs a
+        stride advanced 0.063 m, dropped 0.474 m and left the agent standing
+        0.316 m from the nearest mesh point at a tread's height; from there a
+        refused step moved nothing, a turn carried it 0.313 m onto the tread,
+        and a step that went through ran from the tread (0.299 m across).
+        A scalar ``reproject_m`` large enough for 0.197 m would also excuse a
+        full backward stride (from 0.20 m what it leaves of one is at the
+        heading check's 0.05 m floor, and a mirrored simulator passes), so
+        since 2026-10-27 the environment reports
+        the projection itself (``HM3DEnv.placed_pose``, habitat-sim's own
+        ``snap_point`` of the pose, which *is* ``tryStep``'s start) and the
+        check judges each body action from there toward where it aimed, or
+        as a step that moved nothing (``check_motion(placed=...)``); 0.15 m
+        stays for the path without it.
+
+        ``climb_m`` is 0.85 m since the same day, derived from the navmesh
+        habitat-sim recomputes here rather than from one riser: with
+        ``cell_height`` 0.20 m and ``agent_max_climb`` 0.20 m the voxel grid
+        connects neighbouring cells whose quantised floors differ by one
+        cell, i.e. a real riser of anything under 2 x 0.20 m; a 45-degree run
+        over the rest of a 0.25 m stride adds 0.25 m; and the detail mesh is
+        sampled to within one ``cell_height`` (``detail_sample_max_error``
+        1.0). 0.40 + 0.25 + 0.20 = 0.85 m is the most height one stride can
+        legitimately read as on this mesh; the 0.679 m drop lies under it, a
+        storey (2.5 m and more) or a teleport is still refused, and the
+        path-length and heading checks are untouched.
         """
-        return KinematicTolerance(climb_m=0.60, reproject_m=0.15)
+        return KinematicTolerance(climb_m=0.85, reproject_m=0.15)
 
     def evaluation_settings(self) -> EvaluationSettings:
         """The harness options this protocol requires, stated explicitly."""

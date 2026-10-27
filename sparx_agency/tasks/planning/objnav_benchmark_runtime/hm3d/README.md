@@ -412,7 +412,13 @@ is labelled as such.
   differ from their record in the kinematic self-check and in provenance (never a
   decision or a score; `run.json`'s resume entry says what differed), and the
   campaign withholds it from a scene that starts afresh. That is how the two scenes
-  the 2026-10-22 v1 sweep lost to the self-check were finished.
+  the 2026-10-22 v1 sweep lost to the self-check were finished, and the two the
+  2026-10-26 sweep lost to it (since 2026-10-27 the check judges each body action
+  from where habitat-sim's step filter started it, `HM3DEnv.placed_pose`, so a
+  placement of any size is the filter's and a slide or a backward stride is still
+  refused; LESSONS.md 2026-10-27). Launch from a worktree, or a checkout nothing
+  else edits: bash reads the running launcher by byte offset, and the campaign's
+  children import whatever is on disk when each starts.
 - `--scenes 00877-4ok3usBNeis 00880-Nfvxx8J5NCo …` restricts the sweep to named
   buildings (a subset, labelled as such).
 - `--aggregate-only` rebuilds the aggregate from the scenes that finished.

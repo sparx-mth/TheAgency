@@ -55,6 +55,7 @@ from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.measurement import (
     EpisodeMeasurement, TERMINATION_STEP_LIMIT, TERMINATION_STOP)
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
+from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import (
     HabitatRGBDSimulator)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.geodesic import (
@@ -315,6 +316,21 @@ class HM3DEnv(ObjNavEnv):
         policy. See HabitatRGBDSimulator._observe.
         """
         return bool(getattr(self._simulator, "last_pose_on_navmesh", False))
+
+    def placed_pose(self):
+        """Checker-only: where the simulator's step filter starts the next
+        body action -- the last observation's pose with its position
+        projected onto this run's navmesh (habitat-sim's ``tryStep`` begins
+        at ``projectToPoly(start)``, which ``pathfinder.snap_point`` is), or
+        None when the simulator has no answer. The runner hands it to the
+        kinematic check (``check_motion(placed=...)``), which then judges a
+        turn or step from there toward where it aimed, as the filter
+        executed it. Never seen by the policy. See HabitatRGBDSimulator._observe.
+        """
+        if self._observation is None:
+            return None
+        placed = getattr(self._simulator, "last_placed_pose", None)
+        return placed if isinstance(placed, AgentPose) else None
 
     @property
     def episode_over(self):

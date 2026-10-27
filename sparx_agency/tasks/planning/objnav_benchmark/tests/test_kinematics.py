@@ -394,3 +394,105 @@ def test_the_step_filters_placement_is_excused_on_any_body_action_only_up_to_rep
     assert KinematicTolerance().reproject_m == 0.0, "off by default"
     with pytest.raises(HarnessError):
         KinematicTolerance(reproject_m=-0.1)
+
+
+def _placed(pose, dx=0.0, dy=0.0, dz=0.0):
+    """``pose`` as the step filter placed it: the same heading and pitch, its position carried by the given amounts."""
+    return moved(pose, dx=dx, dy=dy, dz=dz)
+
+
+def test_a_reported_placement_judges_a_body_action_from_where_the_step_filter_started_it():
+    """habitat-sim's tryStep projects the agent onto the mesh (``placed``), walks the straight line from there to
+    where the action aimed from the reported pose, and with sliding off stops at the first wall: the realised end
+    lies on that segment. 00878-XB4GS9ShBRE/000095 action 187 (2026-10-27) was a 0.305 m placement onto the next
+    tread and a step blocked at once; an unblocked step from an off-mesh pose still lands a stride ahead of the
+    reported pose. Both pass with the placement reported and neither does on the 0.15 m slack."""
+    pose = AgentPose(2.0, -1.0, 0.3, math.radians(40.0), 0.0)
+    hm3d = KinematicTolerance(climb_m=0.85, reproject_m=0.15)
+    placed = _placed(pose, dx=0.233 * math.cos(pose.yaw) + 0.197 * math.sin(pose.yaw),
+                     dy=0.233 * math.sin(pose.yaw) - 0.197 * math.cos(pose.yaw))
+    with pytest.raises(EnvContractError, match="along its heading"):
+        check_motion(F, pose, placed, SPEC, hm3d)
+    check_motion(F, pose, placed, SPEC, hm3d, placed=placed)                       # blocked at once: ends where placed
+    aimed = moved(pose, dx=SPEC.forward_step_m * math.cos(pose.yaw), dy=SPEC.forward_step_m * math.sin(pose.yaw))
+    far = _placed(pose, dx=-0.30 * math.sin(pose.yaw), dy=0.30 * math.cos(pose.yaw))   # 0.30 m off the mesh, sideways
+    check_motion(F, pose, aimed, SPEC, hm3d, placed=far)                            # unblocked: lands a stride ahead
+    half = AgentPose((far.x + aimed.x) / 2, (far.y + aimed.y) / 2, pose.z, pose.yaw, 0.0)
+    check_motion(F, pose, half, SPEC, hm3d, placed=far)                             # blocked half-way along the line
+    check_motion(F, pose, pose, SPEC, hm3d, placed=far)                             # refused outright: moved nothing
+    check_motion(A.TURN_LEFT, pose, moved(pose, dyaw_deg=30.0), SPEC, hm3d, placed=far)   # turned where it stood
+    with pytest.raises(EnvContractError, match="keep the heading"):
+        check_motion(F, pose, moved(pose, dyaw_deg=5.0), SPEC, hm3d, placed=far)
+    # Off the segment is a slide, past its end is another step length, backwards is a mirrored frame: all refused.
+    with pytest.raises(EnvContractError, match="toward where it aimed"):
+        check_motion(F, pose, moved(half, dx=0.12 * math.sin(pose.yaw), dy=-0.12 * math.cos(pose.yaw)), SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match="advance at most"):
+        check_motion(F, pose, moved(aimed, dx=0.2 * math.cos(pose.yaw), dy=0.2 * math.sin(pose.yaw)), SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match="toward where it aimed"):
+        check_motion(F, pose, moved(pose, dx=-0.25 * math.cos(pose.yaw), dy=-0.25 * math.sin(pose.yaw)), SPEC, hm3d,
+                     placed=_placed(pose, dx=0.02 * math.sin(pose.yaw), dy=-0.02 * math.cos(pose.yaw)))
+    # The height is judged from the mesh point the filter started at, so a stale height corrects itself.
+    check_motion(F, pose, moved(aimed, dz=-0.35), SPEC, hm3d, placed=_placed(pose, dz=-0.35))
+    with pytest.raises(EnvContractError, match="height by at most 0.850 m from the mesh"):
+        check_motion(F, pose, moved(aimed, dz=-1.3), SPEC, hm3d, placed=_placed(pose, dz=-0.35))
+    # A turn heads back to the reported pose: ending where placed, at the pose, or between is the filter's; beyond is not.
+    turned = moved(pose, dyaw_deg=30.0)
+    check_motion(A.TURN_LEFT, pose, moved(far, dyaw_deg=30.0), SPEC, hm3d, placed=far)
+    check_motion(A.TURN_LEFT, pose, turned, SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match="turn in place"):
+        check_motion(A.TURN_LEFT, pose, moved(far, dyaw_deg=30.0), SPEC, hm3d)
+    with pytest.raises(EnvContractError, match="advance at most"):   # past the pose, on its far side
+        check_motion(A.TURN_LEFT, pose, moved(turned, dx=0.30 * math.sin(pose.yaw), dy=-0.30 * math.cos(pose.yaw)), SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match=r"turn \+30.0 deg"):
+        check_motion(A.TURN_LEFT, pose, moved(far, dyaw_deg=-30.0), SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match="camera pitch"):
+        check_motion(A.TURN_LEFT, pose, moved(far, dyaw_deg=30.0, dpitch_deg=5.0), SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match="keep the heading"):
+        check_motion(F, pose, moved(aimed, dyaw_deg=5.0), SPEC, hm3d, placed=far)
+    # LOOKs and STOP go to the sensors: the placement is not theirs, and a body that moves to it is refused.
+    check_motion(A.LOOK_DOWN, pose, moved(pose, dpitch_deg=30.0), SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match="tilt in place"):
+        check_motion(A.LOOK_DOWN, pose, moved(far, dpitch_deg=30.0), SPEC, hm3d, placed=far)
+    with pytest.raises(EnvContractError, match="leave the pose unchanged"):
+        check_motion(STOP, pose, far, SPEC, hm3d, placed=far)
+    # A placement at the pose, or none, is the ordinary check, slack and all.
+    check_motion(F, pose, _off_heading(pose, 0.094, -53.4, dz=0.057), SPEC, hm3d, placed=pose)
+    check_motion(F, pose, _off_heading(pose, 0.094, -53.4, dz=0.057), SPEC, hm3d, placed=None)
+    with pytest.raises(TypeError, match="placed"):
+        check_motion(F, pose, aimed, SPEC, hm3d, placed=(0.0, 0.0, 0.0))
+
+
+class PlacingEnv(MotionEnv):
+    """The corridor whose simulator keeps the agent ``offset`` off its mesh sideways: every MOVE_FORWARD starts
+    from the projection and ends a stride ahead of the reported pose (unblocked), every turn carries the agent back
+    onto the mesh -- habitat-sim's step filter, in miniature -- and ``placed_pose`` reports the projection."""
+
+    def __init__(self, offset, report=True, **options):
+        super().__init__(executes(SPEC), **options)
+        self.offset = offset
+        self.report = report
+
+    def placed_pose(self):
+        if not self.report:
+            return None
+        return moved(self.pose, dx=-self.offset * math.sin(self.pose.yaw), dy=self.offset * math.cos(self.pose.yaw))
+
+    def step(self, action):
+        if action in (A.TURN_LEFT, A.TURN_RIGHT):
+            before = self.pose
+            self.pose = moved(apply_action(before, action, SPEC), dx=-self.offset * math.sin(before.yaw),
+                              dy=self.offset * math.cos(before.yaw))
+            self.path += math.dist(before.position(), self.pose.position())
+            self.steps += 1
+            self.stopped = self.stopped or action == STOP
+            return self.observation(self.steps, "step")
+        return super().step(action)
+
+
+def test_the_runner_hands_the_environments_placement_to_the_check():
+    """A turn that carries the agent 0.30 m back onto the mesh ends the run when the environment does not report
+    where the step filter started -- and is the filter's own doing when it does."""
+    with pytest.raises(EnvContractError, match="turn in place"):
+        one_episode(PlacingEnv(0.30, report=False), ScriptedAgent((F, A.TURN_LEFT, F, STOP)), kinematics=TOLERANCE)
+    record = one_episode(PlacingEnv(0.30, report=True), ScriptedAgent((F, A.TURN_LEFT, F, STOP)), kinematics=TOLERANCE)
+    assert record.steps == 4 and record.agent_error is None

@@ -176,7 +176,8 @@ def check_run_identity(episode: ObjNavEpisode,
 
 def check_step(env: ObjNavEnv, episode: ObjNavEpisode, observation: Any,
                action: DiscreteAction, sent: int, *, before: AgentPose,
-               kinematics: Optional[KinematicTolerance], moved: bool = True) -> None:
+               kinematics: Optional[KinematicTolerance], moved: bool = True,
+               placed: Optional[AgentPose] = None) -> None:
     """Refuse an observation, or an episode end, that breaks the contract after action ``sent``.
 
     Args:
@@ -192,6 +193,9 @@ def check_step(env: ObjNavEnv, episode: ObjNavEpisode, observation: Any,
             ``settle_m`` applies (:func:`check_motion`).
         kinematics: How far the realised motion may stray from the episode's
             action spec (:func:`check_motion`); None skips that check.
+        placed: Where the simulator's step filter started the action, when
+            the environment reports it (``env.placed_pose()``; see
+            :func:`check_motion`); None when it does not.
 
     Raises:
         EnvContractError: If the observation is not an
@@ -211,7 +215,7 @@ def check_step(env: ObjNavEnv, episode: ObjNavEpisode, observation: Any,
     if kinematics is not None:
         try:
             check_motion(action, before, observation.pose, episode.action_spec,
-                         kinematics, first=not moved)
+                         kinematics, first=not moved, placed=placed)
         except EnvContractError as exc:
             raise EnvContractError("episode %r, action %d: %s"
                                    % (episode.episode_id, sent, exc)) from exc

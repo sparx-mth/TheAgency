@@ -638,3 +638,36 @@ def test_a_turn_reuses_the_previous_distance_instead_of_re_querying(monkeypatch)
     assert pathfinder.calls == distance.queries == 1
     assert distance.distance((0.25, 0.0, 0.0)) == 2.5   # a forward step
     assert pathfinder.calls == distance.queries == 2
+
+
+class PlacingSimulator(FakeSimulator):
+    """A bridge whose step filter would start the next body action ``offset_m`` to the agent's left: it reports
+    the projection the way HabitatRGBDSimulator does (``last_placed_pose``, refreshed with every frame)."""
+
+    def __init__(self, protocol, offset_m):
+        super().__init__(protocol)
+        self.offset_m = offset_m
+        self.last_placed_pose = None
+
+    def _frame(self):
+        pose = self._pose
+        self.last_placed_pose = replace(pose, x=pose.x - self.offset_m * math.sin(pose.yaw),
+                                        y=pose.y + self.offset_m * math.cos(pose.yaw))
+        return super()._frame()
+
+
+def test_the_environment_reports_where_the_step_filter_starts_the_next_body_action(tmp_path):
+    """``placed_pose`` is the last observation's pose projected onto the navmesh, as the simulator reports it -- the
+    runner hands it to the kinematic check; a simulator without the projection, or no episode yet, reports None."""
+    fixture = rig(tmp_path, simulator=PlacingSimulator(PROTOCOL, 0.3))
+    assert fixture.env.placed_pose() is None
+    _, observation = fixture.env.reset(EPISODE)
+    placed = fixture.env.placed_pose()
+    assert placed is not None and placed.yaw == observation.pose.yaw and placed.z == observation.pose.z
+    assert math.hypot(placed.x - observation.pose.x, placed.y - observation.pose.y) == pytest.approx(0.3)
+    observation = fixture.env.step(A.MOVE_FORWARD)
+    placed = fixture.env.placed_pose()
+    assert math.hypot(placed.x - observation.pose.x, placed.y - observation.pose.y) == pytest.approx(0.3)
+    plain = rig(tmp_path / "plain")
+    plain.env.reset(EPISODE)
+    assert plain.env.placed_pose() is None

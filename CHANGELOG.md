@@ -5,6 +5,23 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-10-27, the kinematic self-check and habitat-sim's step filter)
+- **A body action is judged from where habitat-sim's step filter started it** (`objnav_benchmark/kinematics.py`
+  `check_motion(placed=...)`, `HabitatRGBDSimulator.last_placed_pose`, `HM3DEnv.placed_pose`, the runner): the second
+  full HM3D v1 sweep (`runs/hm3d_v1_val_j8p2_20261026`, 1,926 of 2,000) lost `00878-XB4GS9ShBRE` at its 96th episode to
+  a MOVE_FORWARD carried 0.197 m across its heading and `00832-qyAac8rV8Zk` at its 30th to one that dropped 0.679 m --
+  the filter's own placements, read in habitat-sim 0.2.4's source and reproduced with the harness's simulator:
+  `tryStep` starts every body action from the 3-D-nearest polygon point, can leave the agent off the mesh (a stride on
+  00878's stairs advanced 0.063 m, dropped 0.474 m and stood 0.316 m from the nearest mesh point), moves nothing when
+  it refuses a step from there, and carries the agent onto the mesh with the next turn or step. The simulator now
+  reports that projection (`pathfinder.snap_point`, which *is* `tryStep`'s start) and the check judges a turn or step
+  from it toward where the action aimed -- the end anywhere on that segment, or the pose itself, the height judged from
+  the mesh; a slide off the segment, a step past it or a backward stride is still refused, which no scalar
+  `reproject_m` over 0.20 m could promise.
+  `HM3DProtocol.kinematics()` `climb_m` 0.60 -> 0.85 m, derived from the recomputed navmesh (a riser under two cell
+  heights, a 45-degree run over the stride, the detail mesh's sample error). 148,500 seeded random actions per scene
+  with the harness's simulator reproduced both placements (turns displaced up to 0.313 m, strides climbed up to
+  0.740 m), which pass under the new check (LESSONS.md 2026-10-27).
 ### Added (2026-10-26, the perception upper bound)
 - **Ground-truth (oracle) perception for the HM3D ObjectNav harness** (`objnav_benchmark_runtime/ground_truth/`,
   `hm3d.run --perception ground-truth`, `hm3d/run_benchmark.sh --perception ground-truth --jobs max` ->
