@@ -27,7 +27,7 @@ ground-truth perception of 80273cfa strictly opt-in; only `source_sha256` differ
 **Root cause:** Both are the step filter's own placements, read in habitat-sim 0.2.4's source
 (`src/esp/nav/PathFinder.cpp`, `tryStep`) and its Detour fork (`erikwijmans/recastnavigation`, `moveAlongSurface`
 with `allowSliding=false`), then reproduced with the harness's own simulator (148,500 seeded random actions per
-scene, `placement_probe*.py` in the session files): every body action -- a turn included -- starts from
+scene: `hm3d/placement_probe.py`, 1,500 actions from each published start, seed 17): every body action -- a turn included -- starts from
 `projectToPoly(start)`, the 3-D-nearest polygon point within +-2 m horizontally and +-4 m vertically (the very
 point `pathfinder.snap_point` returns), walks the straight line from there to the point the action asked for *from
 the unprojected pose*, with sliding off stops where that line meets a wall edge, sets the height from
