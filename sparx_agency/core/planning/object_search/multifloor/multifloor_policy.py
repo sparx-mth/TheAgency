@@ -131,9 +131,14 @@ class MultiFloorSearch:
     def phase(self):
         if self.transition:
             return self.transition.phase
-        if self._retreat is not None:
+        if self.retreating:
             return "RETREAT"
         return "APPROACH_STAIRS" if self.active is not None else "SEARCH"
+
+    @property
+    def retreating(self):
+        """Whether the forbidden-mode trail retreat is in force: started and not given up (a given-up one is the floor's search)."""
+        return self._retreat is not None and not self._retreat["given_up"]
 
     @property
     def path(self):
@@ -265,7 +270,8 @@ class MultiFloorSearch:
             trail = [tuple(float(v) for v in point) for point in self.source_trail]
             if not trail:
                 return None
-            self._retreat = {"started": int(obs.step), "trail": trail, "index": len(trail) - 1, "given_up": False}
+            self._retreat = {"started": int(obs.step), "trail": trail, "index": len(trail) - 1, "given_up": False,
+                             "blocked": 0}
             self.events.append({"action": obs.step, "event": "retreat_started", "portal_id": None,
                                 "reason": "height departure with stair traversal disabled",
                                 "height_m": round(float(obs.pose.z) - float(atlas.elevation_m), 3),
@@ -285,6 +291,14 @@ class MultiFloorSearch:
             state["given_up"] = True
             self.events.append({"action": obs.step, "event": "retreat_given_up",
                                 "reason": "retreat_actions exhausted off the storey plane"})
+            return None
+        if state["blocked"] >= self.params.retreat_blocked:
+            # The trail is not walkable back (a ledge dropped off, a step the body cannot climb): pushing at
+            # it for the rest of the allowance is what 00802/000015 did for 351 actions. The floor's search and
+            # the spawn-floor guard's half-level adoption take over now (since 2026-10-28).
+            state["given_up"] = True
+            self.events.append({"action": obs.step, "event": "retreat_given_up",
+                                "reason": "%d refused steps on the storey trail" % state["blocked"]})
             return None
         trail = state["trail"]
         reached = self.policy.converter_params.goal_tolerance_m + self.policy.settings.map_resolution_m
@@ -830,8 +844,9 @@ class MultiFloorSearch:
                 self.transition.failures += 1
                 self.transition.path = []
                 self.transition.surface_goal = None
-        elif self._retreat is not None and not self._retreat["given_up"]:
+        elif self.retreating:
             self._retreat["index"] -= 1      # this heading is refused: aim at the next trail point back
+            self._retreat["blocked"] += 1
         self.terrain.blocked(obs.pose, self.policy.episode.action_spec.forward_step_m)
 
     def filter_action(self, obs, action):
@@ -861,7 +876,7 @@ class MultiFloorSearch:
                 "stairs_seen": self.sightings.diagnostics(),
                 "atlas": self.policy.mapping.atlas.diagnostics(),
                 "transition": self.transition.diagnostics() if self.transition else None,
-                "trail_retreat": ({k: self._retreat[k] for k in ("started", "index", "given_up")}
+                "trail_retreat": ({k: self._retreat[k] for k in ("started", "index", "given_up", "blocked")}
                                   if self._retreat is not None else None),
                 "completed_transitions": list(self.completed), "safety_vetoes": self.safety_vetoes,
                 "room_coverage": self.policy.peek.diagnostics()["coverage"],

@@ -43,6 +43,11 @@ raised, it produces a command that MOVES, in this order:
    and climbs when the order says so. This rung is for the floor where that
    machinery has nothing left -- the room LLM is away, or no node is worth
    anything and the frontier is gone;
+2b. the exits of rung 1 again at the BODY radius (since 2026-10-28, the
+   ``exits_only`` form of the squeeze below): a doorway the map draws
+   0.5 m wide is still the way to the rooms not yet seen, and it comes
+   before any shadow or sliver that happens to be reachable at the floor
+   standoff;
 3. the demoted frontiers of rung 1 -- a shadow is still unknown space once
    every exit is spent, and so is the bathroom;
 4. frontiers already retired -- a goal retired for a transient plan failure
@@ -444,6 +449,12 @@ class ExplorationFallback:
             command = p.building.plan(obs, world, exhausted=True)
             if command is not None:
                 return self._tag(command, "stairs", reason)
+        # An EXIT reachable at the body radius before any shadow, sliver or retired goal at the floor
+        # rung (since 2026-10-28): the doorway the map draws 0.5 m wide is still the way to the rooms
+        # not yet seen, and the GT-oracle sweep of 2026-10-26 walked to the strips behind beds first.
+        command = self._squeeze(obs, planning, world, exits_only=True)
+        if command is not None:
+            return self._tag(command, "frontier_squeeze", reason)
         command = self._frontiers(obs, planning, demoted, "frontier_demoted")
         if command is not None:
             return self._tag(command, "frontier_demoted", reason)
@@ -492,7 +503,7 @@ class ExplorationFallback:
                 return command, tuple(goal)
         return None, None
 
-    def _squeeze(self, obs, planning, world):
+    def _squeeze(self, obs, planning, world, exits_only=False):
         """Rung 4b (since 2026-10-25): the frontier goals reachable at the BODY radius only, through the squeeze planner.
 
         The passable map everything above is measured on relaxes no further
@@ -507,6 +518,11 @@ class ExplorationFallback:
         relocation and the probes. A refused step on the way retires the
         goal as any blocked frontier's, and the sticky bars of a second
         refusal close the gap on the map for good.
+
+        With ``exits_only`` (the rung between rung 1 and the demoted goals,
+        since 2026-10-28) only the EXITS among them are offered -- the
+        shadows, slivers and the frontiers of rooms the target cannot be
+        in wait for their own rungs as at the floor standoff.
         """
         p = self.policy
         planner = getattr(p, "squeeze_planner", None)
@@ -517,13 +533,31 @@ class ExplorationFallback:
         ranked = ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
                                        (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
                                        ids=ids, graph=graph)
-        goals = [g.xy for g in p.sweep.admissible(obs, world, ranked)]
+        admissible = p.sweep.admissible(obs, world, ranked)
+        if exits_only:
+            if not self.settings.exits_first:
+                return None
+            admissible = self._exit_goals(obs, world, admissible)
+        goals = [g.xy for g in admissible]
         for goal in goals[:self.settings.frontier_attempts]:
             command = p._navigate(obs, planning, tuple(goal), "frontier", planner=planner)
             if command is not None:
                 self.stats["frontier_squeeze"] += 1
                 return command
         return None
+
+    def _exit_goals(self, obs, world, goals):
+        """The exits among ``goals`` by :func:`split_exits`, utility order kept -- the test of :meth:`_exits` without its ledger."""
+        p, s = self.policy, self.settings
+        if not goals:
+            return []
+        landmarks = list(p.landmarks.confirmed()) if getattr(p, "landmarks", None) is not None else []
+        excluded = getattr(getattr(p, "loop", None), "excluded", None) or {}
+        inventory = p.graph.frontier_inventory
+        exits, _ = split_exits(goals, landmarks, world.resolution, s, excluded=excluded,
+                               room_of=goal_rooms(inventory), type_rule=True,
+                               exempt=self._reveals_a_room(obs, world))
+        return exits
 
     def _frontiers(self, obs, world, goals, stage):
         """Drive the goal in force of this rung, or the best goal of the rung, and remember which."""

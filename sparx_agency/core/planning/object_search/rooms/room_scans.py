@@ -84,6 +84,9 @@ SEEN_FROM_SCAN = "seen_from_scan"
 SEEN_THROUGH = "seen_through"
 FRAGMENT = "fragment"
 EXPLORED = "explored"
+#: The verdicts reached from OUTSIDE the room -- never stood in: the ones the loop may offer again once the
+#: storey is covered (``LoopSettings.revisit_unentered``, since 2026-10-28).
+OUTSIDE_VERDICTS = frozenset({SEEN_FROM_SCAN, SEEN_THROUGH})
 
 
 def visible_fraction(world, xy, mask, max_range_m, samples=120):
@@ -122,7 +125,17 @@ class RoomScanLedger:
             ``room`` (the pid credited at the time, or None for the warm-up),
             ``cells`` (that room's size then, for the recording), ``source``.
         seen_fraction: The share of a room a scan must have had in view to
-            finish it without standing in it.
+            finish it without standing in it (``seen_from_scan``,
+            ``seen_through``). 0.8 by the loop's default since 2026-10-28,
+            up from 0.5: the GT-oracle sweep of 2026-10-26 finished rooms
+            never entered 4.2 times per timed-out episode against once per
+            success, and a toilet beside the jamb, a television on the near
+            wall or a bed behind a wardrobe stands in the half a doorway's
+            cone never held.
+        seen_range_m: How far from the pose a cell counts as seen for those
+            two verdicts; 0 reads the camera's depth range. A room seen
+            whole from its door is seen within a few metres; the far half
+            of a long room is not, whatever the depth sensor's range.
         fragment_max_m2: Largest room with no live frontier and no door that
             is a fragment rather than a room; 0 disables the test.
         walkthrough_clearance_m: A room whose widest point has no more
@@ -149,9 +162,11 @@ class RoomScanLedger:
     """
 
     def __init__(self, policy, seen_fraction=0.5, fragment_max_m2=3.0, walkthrough_clearance_m=0.9, pose_batch=8,
-                 regrow_factor=1.5, explored=None, explored_inset_m=0.5):
+                 regrow_factor=1.5, explored=None, explored_inset_m=0.5, seen_range_m=0.0):
         if not 0.0 < float(seen_fraction) <= 1.0:
             raise ValueError("seen_fraction must lie in (0, 1], got %r" % (seen_fraction,))
+        if isinstance(seen_range_m, bool) or not math.isfinite(float(seen_range_m)) or float(seen_range_m) < 0.0:
+            raise ValueError("seen_range_m must be finite and non-negative (0: the camera's depth range), got %r" % (seen_range_m,))
         for name, value in (("fragment_max_m2", fragment_max_m2), ("walkthrough_clearance_m", walkthrough_clearance_m),
                             ("regrow_factor", regrow_factor), ("explored_inset_m", explored_inset_m)):
             if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
@@ -164,6 +179,7 @@ class RoomScanLedger:
             raise ValueError("explored must be a bool or None, got %r" % (explored,))
         self.policy = policy
         self.seen_fraction = float(seen_fraction)
+        self.seen_range_m = float(seen_range_m)
         self.fragment_max_m2 = float(fragment_max_m2)
         self.walkthrough_clearance_m = float(walkthrough_clearance_m)
         self.pose_batch = int(pose_batch)
@@ -220,6 +236,14 @@ class RoomScanLedger:
         floor = self.policy.mapping.floor_id
         key = (floor, int(pid))
         sticky = self._finished.get(key)
+        if sticky in OUTSIDE_VERDICTS and self._scan_point_inside(world, room):
+            # Finished by sight from outside, then stood in and scanned (a second-pass or an unentered-room
+            # revisit, since 2026-10-28): the verdict is the stronger one now, and the room is no longer
+            # one the loop may offer again as never entered.
+            sticky = self._finished[key] = SCAN_POINT_INSIDE
+            self._finished_cells[key] = int(room.n_cells)
+            self._finished_step[key] = self._verdict_step(world, room, sticky, step)
+            self._cache.clear()
         if sticky is not None:
             then = self._finished_cells.get(key)
             if not (self.regrow_factor > 0.0 and then and int(room.n_cells) > self.regrow_factor * then):
@@ -265,15 +289,25 @@ class RoomScanLedger:
         floor = self.policy.mapping.floor_id if floor_id is None else floor_id
         return self._finished_step.get((floor, int(pid)))
 
+    def _seen_range(self):
+        """The range a cell counts as seen at for the outside verdicts: ``seen_range_m``, bounded by the camera's depth."""
+        camera = float(self.policy.episode.camera.max_depth_m)
+        return min(camera, self.seen_range_m) if self.seen_range_m > 0.0 else camera
+
+    def _scan_point_inside(self, world, room):
+        for record in self.on_floor():
+            gx, gy = world.world_to_grid(*record["xy"])
+            if world.in_bounds(gx, gy) and room.mask[gy, gx]:
+                return True
+        return False
+
     def _status(self, world, room):
         records = self.on_floor()
         if not records:
             return None
-        for record in records:
-            gx, gy = world.world_to_grid(*record["xy"])
-            if world.in_bounds(gx, gy) and room.mask[gy, gx]:
-                return SCAN_POINT_INSIDE
-        max_range = float(self.policy.episode.camera.max_depth_m)
+        if self._scan_point_inside(world, room):
+            return SCAN_POINT_INSIDE
+        max_range = self._seen_range()
         for record in records:
             if visible_fraction(world, record["xy"], room.mask, max_range) >= self.seen_fraction:
                 return SEEN_FROM_SCAN
@@ -338,7 +372,7 @@ class RoomScanLedger:
         camera = self.policy.episode.camera
         k = camera.intrinsics
         half_fov = math.atan(0.5 * float(k.width) / float(k.fx))
-        max_range = float(camera.max_depth_m)
+        max_range = self._seen_range()
         mask = np.asarray(room.mask, dtype=bool)
         ys, xs = np.nonzero(mask)
         if not len(xs):
@@ -401,7 +435,7 @@ class RoomScanLedger:
 
     def diagnostics(self):
         floor = getattr(getattr(self.policy, "mapping", None), "floor_id", None)
-        return {"seen_fraction": self.seen_fraction, "fragment_max_m2": self.fragment_max_m2,
+        return {"seen_fraction": self.seen_fraction, "seen_range_m": self.seen_range_m, "fragment_max_m2": self.fragment_max_m2,
                 "walkthrough_clearance_m": self.walkthrough_clearance_m, "regrow_factor": self.regrow_factor,
                 "explored": self.explored, "explored_inset_m": self.explored_inset_m,
                 "records": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in r.items()} for r in self.records],

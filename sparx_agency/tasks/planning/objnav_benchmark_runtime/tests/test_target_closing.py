@@ -1429,7 +1429,7 @@ def test_a_suspect_candidate_may_step_inside_the_terminal_range_to_earn_its_seco
 def test_a_locked_target_without_a_path_is_kept_in_frame_rather_than_turned_away_from(monkeypatch):
     """The pathless wait held the centred target with a satisfied hold, which the headless agent
     executes as a turn, and the next frame turned back: 233 reversals in one Darden episode."""
-    p, ep, near = locked_at_two_metres(monkeypatch)
+    p, ep, near = locked_at_two_metres(monkeypatch, nearest_approaches=0)   # the wait itself, without the walk below
     monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)
     monkeypatch.setattr(p.camera_control, "begin_inspection", lambda *a, **kw: False)
     far = replace(observation(ep, 2, depth=1.6), pose=AgentPose(0.4, 0, 0, 0))    # 1.6 m off: not terminal
@@ -1437,6 +1437,29 @@ def test_a_locked_target_without_a_path_is_kept_in_frame_rather_than_turned_away
     assert p.closing.locked and not command.stop
     assert command.info.get("verify_step", "").startswith(("look", "turn")), (
         "a frame that keeps the box whole, never an idle hold: %r" % (command.info,))
+
+
+def test_a_locked_target_without_a_standoff_route_is_walked_toward_over_the_reachable_floor(monkeypatch):
+    """The GT-oracle sweep of 2026-10-26 released 75 locked targets as 'no safe path from here' at a median
+    4.1 m with the target in view. When no ring point has a route the reachable cell nearest the target is
+    walked to first (``nearest_approaches``); the sweep and the release wait behind it."""
+    p, ep, near = locked_at_two_metres(monkeypatch)
+    monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)
+    monkeypatch.setattr(p.camera_control, "begin_inspection", lambda *a, **kw: False)
+    far = replace(observation(ep, 2, depth=1.6), pose=AgentPose(0.4, 0, 0, 0))
+    command = p.plan(far)
+    assert p.closing.locked and not command.stop and p.closing.phase == "CLOSE_NEAREST"
+    assert command.info["kind"] == "target_closing" and command.info["phase"] == "target_close_nearest"
+    assert command.waypoints and math.dist(command.waypoints[-1], (2.0, 0.0)) < 1.6 - p.closing.settings.nearest_progress_m
+    assert p.closing.nearest_routes == 1 and p.closing.diagnostics()["nearest_routes"] == 1
+    # The walk in force is kept on the next action rather than re-chosen; a projector that refuses every
+    # point leaves nothing to walk to, and the pathless wait of before stands.
+    again = p.plan(replace(observation(ep, 3, depth=1.4), pose=AgentPose(0.6, 0, 0, 0)))
+    assert p.closing.nearest_routes == 1 and again.info["phase"] == "target_close_nearest"
+    p.closing.nearest_goal, p.closing.nearest_tried = None, []
+    p.target_projector = lambda point: None
+    held = p.plan(replace(observation(ep, 4, depth=1.4), pose=AgentPose(0.6, 0, 0, 0)))
+    assert p.closing.nearest_routes == 1 and held.info.get("verify_step", "").startswith(("look", "turn"))
 
 
 # -- the toilets of the 1,000-episode run (2026-10-11): the part of the object a frame shows moves -----------
@@ -2090,3 +2113,31 @@ def test_a_pending_inspection_step_does_not_outlive_its_frame(monkeypatch):
     assert not p.closing.inspection_step_pending
     p.closing.note_blocked()
     assert not p.closing.inspection_blocked, "a block after the frame changed is not the inspection step's"
+
+
+def test_the_closing_bound_releases_the_lock_instead_of_ending_the_episode(monkeypatch):
+    """The GT-oracle sweep of 2026-10-26 ended 34 episodes with 'closing action bound reached' at a mean step 242,
+    six of them inside a metre of the goal. The bound ends the LOCK: released without a rejection, the spot boxed
+    in, one turn, and the search resumes; ``release_on_bound=False`` restores the error."""
+    p, ep, near = locked_at_two_metres(monkeypatch, max_closing_steps=4)
+    monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)
+    monkeypatch.setattr(p.camera_control, "begin_inspection", lambda *a, **kw: False)
+    p.target_projector = lambda point: None                     # nothing to walk to: the wait runs into the bound
+    pose = AgentPose(0.4, 0, 0, 0)
+    command = None
+    for step in range(2, 12):
+        command = p.plan(replace(observation(ep, step, depth=1.6), pose=pose))
+        if not p.closing.active:
+            break
+    assert not p.closing.active and p.closing.phase == "RELEASED" and p.closing.bound_releases == 1
+    assert command.info["kind"] == "target_released" and "closing action bound reached" in command.info["reason"]
+    assert p.closing.rejected == [], "the candidate was not disproved"
+    assert len(p.closing.boxed_in) == 1 and p.closing.diagnostics()["bound_releases"] == 1
+    assert step <= 6, "released at the bound, not after it"
+    p, ep, near = locked_at_two_metres(monkeypatch, max_closing_steps=4, release_on_bound=False)
+    monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)
+    monkeypatch.setattr(p.camera_control, "begin_inspection", lambda *a, **kw: False)
+    p.target_projector = lambda point: None
+    with pytest.raises(RuntimeError, match="closing action bound reached"):
+        for step in range(2, 12):
+            p.plan(replace(observation(ep, step, depth=1.6), pose=pose))

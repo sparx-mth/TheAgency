@@ -4,9 +4,14 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 
+import numpy as np
+from scipy.sparse.csgraph import dijkstra
+
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import pitch_action, turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+from sparx_agency.core.planning.exploration.room_costs import passable_graph, snap_cell
+from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.object_search.closing.approach_history import ApproachHistory
 from sparx_agency.core.control.camera.box_pitch_servo import (
     REGION_CENTRE, REGION_CUT_BOTTOM, REGION_CUT_TOP, REGION_LOWER, REGION_UPPER, vertical_fix)
@@ -348,6 +353,20 @@ class TargetClosingSettings:
     footing_after_steps: int = 2
     release_after_footing_steps: int = 6
     boxed_in_radius_m: float = 1.0
+    # Before the sweep and the release, the walk that IS possible (since 2026-10-28): when no standoff
+    # ring point has a route from here, the reachable cell nearest the target -- at the floor standoff,
+    # then at the body radius -- is walked to when it brings the agent ``nearest_progress_m`` closer,
+    # up to ``nearest_approaches`` such walks per lock. From the new spot the floor between fills in and
+    # the ring is tried again on every action. The GT-oracle sweep of 2026-10-26 released 75 locked
+    # targets as "no safe path from here" at a median 4.1 m, with the target in plain view; the search
+    # that resumed had the same map and the same planner. 0 walks disables the rung.
+    nearest_approaches: int = 3
+    nearest_progress_m: float = 0.5
+    # The closing's action bound and a storey change under a lock end the LOCK, not the episode (since
+    # 2026-10-28): the lock is released without a rejection, the spot remembered as boxed in, and the
+    # search resumes. Until then both raised, and the GT-oracle sweep of 2026-10-26 ended 34 episodes
+    # that way at a mean step 242 -- six of them inside a metre of the goal. False restores the error.
+    release_on_bound: bool = True
     # The sweep is asked for only where the floor around the feet is still unknown:
     # at least this share of the cells within ``footing_radius_m`` of the agent.
     footing_radius_m: float = 1.2
@@ -546,9 +565,15 @@ class TargetClosingSettings:
         for key in ("history_stop_after_missing", "backoff_steps", "backoff_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
-        for key in ("backoff", "support_surface_resilience", "through_unknown", "closest_approach_stop"):
+        for key in ("backoff", "support_surface_resilience", "through_unknown", "closest_approach_stop",
+                    "release_on_bound"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
+        if type(self.nearest_approaches) is not int or self.nearest_approaches < 0:
+            raise ValueError("nearest_approaches must be a non-negative int (0 disables the rung)")
+        if (isinstance(self.nearest_progress_m, bool) or not math.isfinite(self.nearest_progress_m)
+                or self.nearest_progress_m <= 0):
+            raise ValueError("nearest_progress_m must be positive and finite")
         for key in ("max_verify_approach_steps", "inspection_max_steps", "verify_sweep_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 0:
                 raise ValueError("%s must be a non-negative int" % key)
@@ -610,6 +635,8 @@ class TargetClosing:
         self.footing_sweeps = 0            # footing sweeps asked for by a lock with no safe path
         self.boxed_releases = 0            # locks released because no path existed from where the agent stood
         self.boxed_in = []                 # (robot xy, floor id, action) per boxed-in release
+        self.nearest_routes = 0            # walks to the reachable cell nearest a locked target with no standoff route
+        self.bound_releases = 0            # locks released at the closing's action bound (``release_on_bound``)
         self.overrides = 0                 # takeovers started past the memory by ``override_confidence``
         self.context_rejections = 0        # confident boxes the context penalty kept under the start threshold
         self.suspect_locks_held = 0        # frames a suspect candidate had the frames but not the viewpoints
@@ -683,6 +710,8 @@ class TargetClosing:
         self.no_path_steps = 0             # consecutive actions the LOCKED target had no safe path
         self.footing_done = False          # a footing sweep was asked for by this lock
         self.pathless_after_footing = 0    # pathless actions since the sweep ended
+        self.nearest_goal = None           # the nearest-reachable walk in force (``_nearest_reachable``)
+        self.nearest_tried = []            # spots walked to under this lock for want of a standoff route
         self.close_trail = []              # (x, y) per consecutive CLOSE action, for the stall clock
         self.suspect = None                # why the context check doubts this candidate (``target_context``)
         self.sightings = []                # (x, y) of the agent per counted consecutive frame
@@ -1345,6 +1374,24 @@ class TargetClosing:
         # the evaluator records it as failure, with any forced STOP distinguished.
         raise RuntimeError("Target closing failed (exploration remains locked): " + reason)
 
+    def _release_bound(self, obs, why):
+        """The closing's own bound (or a storey change under the lock) ends the LOCK: released, the spot boxed in, one turn.
+
+        ``release_on_bound`` (since 2026-10-28). The candidate was never
+        disproved, so it is not rejected -- a re-sighting from elsewhere may
+        lock it again -- but the spot the bound ran out on is remembered as
+        boxed in (``boxed_in_radius_m``), so the same lock is not retaken
+        from where it just failed, and the search's own walk comes first.
+        """
+        p = self.policy
+        self.bound_releases += 1
+        self.boxed_in.append(((float(obs.pose.x), float(obs.pose.y)), p.mapping.floor_id, int(obs.step)))
+        self._release(obs, why=why, remember=False)
+        turn = p.episode.action_spec.turn_angle_rad
+        return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + turn),
+                                      info={"kind": "target_released", "phase": "RELEASED",
+                                            "reason": "%s; the search resumes" % why})
+
     def _elevation(self, obs, distance=None):
         """Where the target stands against the camera: ``+1`` above, ``-1`` below, ``0`` level.
 
@@ -1738,13 +1785,17 @@ class TargetClosing:
         if self.bearing is not None:
             return self._bearing_command(obs, world)
         if obs.step - self.started >= s.max_closing_steps:
-            self.fail("closing action bound reached")
+            if not s.release_on_bound:
+                self.fail("closing action bound reached")
+            return self._release_bound(obs, "closing action bound reached (%d actions)" % (obs.step - self.started))
         if not self.locked and not s.release_unverified and obs.step - self.started >= s.max_verify_steps:
             self.fail("candidate never received consecutive depth-consistent confirmations")
         if self.xyz is None:
             return self._scan(obs, None, "waiting for valid target depth")
         if p.mapping.floor_id != self.floor_id:
-            self.fail("target floor changed")
+            if not s.release_on_bound:
+                self.fail("target floor changed")
+            return self._release_bound(obs, "target floor changed")
         distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2])
         if not self.locked:
             command = self._backoff_command(obs, world, distance)
@@ -1879,6 +1930,9 @@ class TargetClosing:
         p, s = self.policy, self.settings
         camera = p.camera_control
         self.no_path_steps += 1
+        command = self._nearest_reachable(obs, world, distance)
+        if command is not None:
+            return command
         if (s.footing_sweep and not self.footing_done and p.episode.action_spec.has_camera_tilt
                 and self.no_path_steps >= s.footing_after_steps):
             self.footing_done = True
@@ -1900,6 +1954,92 @@ class TargetClosing:
                     info={"kind": "target_released", "phase": "RELEASED",
                           "reason": "no safe path to the target %.1f m away from here; the search moves on" % distance})
         return self._scan(obs, None, "no safe target path; exploration remains suspended")
+
+    def _nearest_reachable(self, obs, world, distance):
+        """No standoff has a route: walk to the reachable cell nearest the target, when that brings the agent nearer.
+
+        The rung before the footing sweep and the boxed-in release (since
+        2026-10-28, ``nearest_approaches``). The standoff ring is tried
+        with every planner on every action; this is for the actions none
+        of them has a route. The passable graph is read at the floor
+        standoff and then at the body radius (the squeeze planner); over
+        the cells reachable from here the one nearest the target is chosen,
+        provided it lies ``nearest_progress_m`` nearer the target than the
+        agent and is not a spot already walked to under this lock. The walk
+        is a ``target_closing`` route like the ring's own, kept while it
+        makes progress; from its end the floor between fills in and the
+        ring is tried again. When no such cell exists, or
+        ``nearest_approaches`` walks have been made, the sweep and the
+        release follow as before.
+        """
+        p, s = self.policy, self.settings
+        if s.nearest_approaches <= 0 or self.xyz is None:
+            return None
+        here = (float(obs.pose.x), float(obs.pose.y))
+        target = (float(self.xyz[0]), float(self.xyz[1]))
+        arrival = p.converter_params.goal_tolerance_m + world.resolution
+        if self.nearest_goal is not None:
+            goal = self.nearest_goal
+            arrived = math.dist(here, goal) <= arrival or (p.route_memory.kind == "target_closing" and p.route_memory.arrived(obs))
+            if not arrived:
+                command = p._navigate(obs, world, goal, "target_closing")
+                if command is not None:
+                    return self._nearest_command(command, distance)
+            self.nearest_tried.append(goal)
+            self.nearest_goal = None
+        if len(self.nearest_tried) >= s.nearest_approaches:
+            return None
+        planners = [p.planner]
+        squeeze = getattr(p, "squeeze_planner", None)
+        if squeeze is not None and squeeze.params.inflate_floor_m < p.planner_params.inflate_floor_m:
+            planners.append(squeeze)
+        gx, gy = world.world_to_grid(*here)
+        snap = max(1, int(round(p.sweep.settings.ranking.snap_radius_m / world.resolution)))
+        for planner in planners:
+            cost = assemble_cost_grid(p.planner.fields_for(world), planner.params, planner.params.inflate_floor_m)[0]
+            ids, graph = passable_graph(cost)
+            source = snap_cell(ids, gx, gy, snap)
+            if source is None or ids.max() < 0:
+                continue
+            distances = dijkstra(graph, directed=False, indices=int(ids[source[1], source[0]]))
+            ys, xs = np.nonzero(ids >= 0)
+            nodes = ids[ys, xs]
+            reachable = np.isfinite(distances[nodes])
+            if not reachable.any():
+                continue
+            xs, ys = xs[reachable], ys[reachable]
+            wx = world.origin_x + (xs + 0.5) * world.resolution
+            wy = world.origin_y + (ys + 0.5) * world.resolution
+            euclid = np.hypot(wx - target[0], wy - target[1])
+            nearer = euclid <= distance - s.nearest_progress_m
+            if not nearer.any():
+                continue
+            for index in np.argsort(np.where(nearer, euclid, np.inf), kind="stable")[: s.nearest_approaches * 2]:
+                if not nearer[index]:
+                    break
+                goal = (float(wx[index]), float(wy[index]))
+                if any(math.dist(goal, spot) <= s.nearest_progress_m for spot in self.nearest_tried):
+                    continue
+                if p.target_projector is not None:
+                    # The same seam the standoff ring uses: a goal is a navmesh point when the adapter can say so.
+                    snapped = p.target_projector((goal[0], goal[1], float(obs.pose.z)))
+                    if snapped is None or abs(float(snapped[2]) - float(obs.pose.z)) > 0.2:
+                        continue
+                    goal = (float(snapped[0]), float(snapped[1]))
+                    if math.hypot(goal[0] - target[0], goal[1] - target[1]) > distance - s.nearest_progress_m:
+                        continue
+                command = p._navigate(obs, world, goal, "target_closing", planner=None if planner is p.planner else planner)
+                if command is not None:
+                    self.nearest_goal = goal
+                    self.nearest_routes += 1
+                    return self._nearest_command(command, distance)
+        return None
+
+    def _nearest_command(self, command, distance):
+        self.phase = "CLOSE_NEAREST"
+        return replace(command, info=dict(command.info, kind="target_closing", phase="CLOSE_NEAREST", persistent_lock=True,
+                                          reason="no route to any standoff: walking to the reachable floor nearest the target "
+                                                 "%.1f m away" % distance))
 
     def _continue_footing(self, obs, world, distance):
         """The footing sweep in force, one action at a time -- cut short the moment a path exists.
@@ -2510,6 +2650,8 @@ class TargetClosing:
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
+                "nearest_routes": self.nearest_routes, "bound_releases": self.bound_releases,
+                "nearest_goal": None if self.nearest_goal is None else [round(v, 2) for v in self.nearest_goal],
                 "occluder_reads": self.occluder_reads,
                 "overshoot_commands": self.overshoot_commands,
                 "stop_overshoot": None if self.overshoot is None else {

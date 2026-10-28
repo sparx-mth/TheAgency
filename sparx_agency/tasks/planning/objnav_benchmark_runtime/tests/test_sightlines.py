@@ -254,9 +254,17 @@ def test_a_narrow_room_walked_through_with_no_frontier_left_is_finished_a_wide_o
     # One step into the wide room facing along its west wall: in it, but a sixth of it in view.
     policy.sight.observe(pitched(episode, 1, (6.5, 5.5), yaw=math.pi / 2), world)
     assert ledger.status(world, 1, rooms[1], frontier=0) is None, "a wide room stepped into is not walked through"
-    # Facing into it from the same spot, most of it is in one view: finished like a room a scan saw.
+    # Facing into it from the same spot, half of it is in one view. Until 2026-10-28 that finished it; a 5 x 5 m
+    # room's near corners, beside the door, are where the GT-oracle sweep's unseen toilets and televisions stood:
+    # under ``scan_seen_fraction`` 0.8 within ``scan_seen_range_m`` it is scanned from inside like any wide room.
     policy.sight.observe(pitched(episode, 2, (6.5, 5.5), yaw=0.0), world)
-    assert ledger.status(world, 1, rooms[1], frontier=0) == SEEN_THROUGH
+    assert ledger.status(world, 1, rooms[1], frontier=0) is None
+    assert ledger.seen_fraction == 0.8 and ledger.seen_range_m == 4.0
+    policy, episode, _, _, _ = loop_policy(visit="scan")       # the rule of before, as knobs
+    rooms = install(policy, world, labels)
+    policy.scans.seen_fraction, policy.scans.seen_range_m = 0.5, 0.0
+    policy.sight.observe(pitched(episode, 0, (6.5, 5.5), yaw=0.0), world)
+    assert policy.scans.status(world, 1, rooms[1], frontier=0) == SEEN_THROUGH
     # The walk-through half of the rule is a knob.
     policy, episode, _, _, _ = loop_policy(visit="scan")
     rooms = install(policy, world, labels)
@@ -265,9 +273,24 @@ def test_a_narrow_room_walked_through_with_no_frontier_left_is_finished_a_wide_o
     assert policy.scans.status(world, 0, rooms[0], frontier=0) is None
 
 
-def test_a_room_one_pose_saw_more_than_half_of_through_its_door_is_finished_without_a_step_inside():
+def closet_world():
+    """The corridor of :func:`narrow_hall_world` into a 1.5 m wide, 3 m deep room (room 1): a walk-in closet, a WC."""
+    h, w = 90, 120
+    g = np.full((h, w), OCC, np.int8)
+    g[48:63, 60:90] = FREE                  # the room: x 6-9, y 4.8-6.3
+    g[49:61, 10:60] = FREE                  # the corridor: x 1-6, y 4.9-6.1
+    world = OccupancyGrid2D(g, OccupancyGrid2DParams(RES, 0.0, 0.0, "world"), values=VALUES)
+    labels = np.zeros((h, w), np.int32)
+    labels[49:61, 10:60] = 1
+    labels[48:63, 60:90] = 2
+    return world, labels
+
+
+def test_a_room_one_pose_saw_nearly_whole_through_its_door_is_finished_without_a_step_inside():
+    """The closet seen from its door: ``scan_seen_fraction`` (0.8) of it within ``scan_seen_range_m`` in one cone.
+    A 5 x 5 m room's half, which finished it until 2026-10-28, no longer does (the test above)."""
     policy, episode, _, _, _ = loop_policy(visit="scan")
-    world, labels = narrow_hall_world()
+    world, labels = closet_world()
     rooms = install(policy, world, labels)
     for step, x in enumerate((2.0, 2.5)):
         policy.sight.observe(pitched(episode, step, (x, 5.5), yaw=math.pi), world)    # looking away, down the corridor
@@ -276,6 +299,33 @@ def test_a_room_one_pose_saw_more_than_half_of_through_its_door_is_finished_with
     assert policy.scans.status(world, 1, rooms[1], frontier=0) == SEEN_THROUGH
     diagnostics = policy.scans.diagnostics()
     assert "f0/r1:seen_through" in diagnostics["finished"]
+    # The same closet 5 m deep: its far end lies past the seen range, and the door's view no longer finishes it.
+    policy, episode, _, _, _ = loop_policy(visit="scan")
+    deep, deep_labels = closet_world()
+    deep.grid[48:63, 90:110] = FREE
+    deep_labels[48:63, 90:110] = 2
+    rooms = install(policy, deep, deep_labels)
+    policy.sight.observe(pitched(episode, 0, (5.8, 5.5), yaw=0.0), deep)
+    assert policy.scans.status(deep, 1, rooms[1], frontier=0) is None
+    policy, episode, _, _, _ = loop_policy(visit="scan")
+    rooms = install(policy, deep, deep_labels)
+    policy.scans.seen_range_m = 0.0                              # the camera's own range: the knob of before
+    policy.sight.observe(pitched(episode, 0, (5.8, 5.5), yaw=0.0), deep)
+    assert policy.scans.status(deep, 1, rooms[1], frontier=0) == SEEN_THROUGH
+
+
+def test_a_room_finished_from_outside_is_scanned_inside_once_the_storey_is_covered_and_then_finished_for_good():
+    """``revisit_unentered`` (since 2026-10-28): the ledger's verdict becomes ``scan_point_inside`` the moment a
+    completed rotation stands in the room, so the loop offers it once and excludes it after."""
+    from sparx_agency.core.planning.object_search.rooms.room_scans import OUTSIDE_VERDICTS, SCAN_POINT_INSIDE
+    policy, episode, _, _, _ = loop_policy(visit="scan")
+    world, labels = closet_world()
+    rooms = install(policy, world, labels)
+    policy.sight.observe(pitched(episode, 0, (5.8, 5.5), yaw=0.0), world)
+    assert policy.scans.status(world, 1, rooms[1], frontier=0) == SEEN_THROUGH and SEEN_THROUGH in OUTSIDE_VERDICTS
+    policy.scans.record(pitched(episode, 1, (7.5, 5.5), yaw=0.0), rooms[1], source="room_scan")
+    assert policy.scans.status(world, 1, rooms[1]) == SCAN_POINT_INSIDE, "stood in and scanned: the stronger verdict"
+    assert "f0/r1:scan_point_inside" in policy.scans.diagnostics()["finished"]
 
 
 def test_a_small_doorless_room_with_no_frontier_is_a_fragment_a_doored_or_bigger_one_is_not():

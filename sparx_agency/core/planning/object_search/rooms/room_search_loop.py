@@ -160,7 +160,7 @@ from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ROOM_LLM
 from sparx_agency.core.planning.object_search.rooms.house_context import house_line, scan_words
 from sparx_agency.core.mapping.topology.room_priors import home_object, implausible_room, ruled_out
-from sparx_agency.core.planning.object_search.rooms.room_scans import SCAN_POINT_INSIDE
+from sparx_agency.core.planning.object_search.rooms.room_scans import OUTSIDE_VERDICTS, SCAN_POINT_INSIDE
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import (
     LANDMARK, OpeningSettings, detect_openings, is_opening_node, landmark_openings, near_stair_mask,
     opening_options, opening_value_factor, room_exits)
@@ -349,7 +349,26 @@ class LoopSettings:
             must have had in clear view (within depth range, through
             observed free space) to finish it WITHOUT standing in it: the
             half of a split room the scan stood in, the small room fully
-            visible from the corridor.
+            visible from the corridor. 0.8 since 2026-10-28 (0.5 before):
+            the GT-oracle sweep of 2026-10-26 finished rooms it never
+            entered 4.2 times per timed-out episode against once per
+            success, and in 88 % of the same-storey episodes that never saw
+            the target the oracle's last word was "all home seen".
+        scan_seen_range_m: How far from the pose a cell counts as seen for
+            those verdicts (``RoomScanLedger.seen_range_m``); 0 reads the
+            camera's depth range. 4 m by default: a room seen whole from
+            its threshold is seen within a few metres, and the far half of
+            a long room was not looked at because the sensor reaches it.
+        revisit_unentered: Offer the rooms finished by sight from OUTSIDE
+            (``seen_from_scan``, ``seen_through``: never stood in) as nodes
+            again once the storey is COVERED -- the gate of ``second_pass``,
+            without re-offering the rooms a circle was turned in. The visit
+            is a scan from a vantage point inside the room, which finishes
+            it for good (the ledger upgrades the verdict to
+            ``scan_point_inside``). On by default since 2026-10-28; the
+            HOUSE line of the sweep's timed-out episodes read "one bathroom
+            found but never entered; no unexplored places left" with the
+            toilet 2.7 m away.
         type_prior: Drop a room whose identified type cannot hold the
             target (:mod:`room_priors`) from the nodes altogether, whatever
             the oracle said -- when the label is STRONG (two or more kinds
@@ -495,7 +514,9 @@ class LoopSettings:
     scan_approach_steps: int = 20
     vantage_arrival_m: float = 0.6
     vantage_min_clearance_m: float = 0.4
-    scan_seen_fraction: float = 0.5
+    scan_seen_fraction: float = 0.8
+    scan_seen_range_m: float = 4.0
+    revisit_unentered: bool = True
     type_prior: bool = False
     min_prob: float = 0.05
     second_pass: bool = False
@@ -556,6 +577,10 @@ class LoopSettings:
                 raise ValueError("%s must lie in [0, 1)" % name)
         if isinstance(self.scan_seen_fraction, bool) or not math.isfinite(self.scan_seen_fraction) or not 0 < self.scan_seen_fraction <= 1:
             raise ValueError("scan_seen_fraction must lie in (0, 1]")
+        if isinstance(self.scan_seen_range_m, bool) or not math.isfinite(self.scan_seen_range_m) or self.scan_seen_range_m < 0:
+            raise ValueError("scan_seen_range_m must be finite and non-negative (0: the camera's depth range)")
+        if type(self.revisit_unentered) is not bool:
+            raise ValueError("revisit_unentered must be a bool")
         if isinstance(self.openings, dict):
             object.__setattr__(self, "openings", OpeningSettings(**self.openings))
         if not isinstance(self.openings, OpeningSettings):
@@ -694,6 +719,7 @@ class RoomSearchLoop:
         self._finished = {}           # pid -> (how, step) for every room the scan ledger has finished, offered or not
         self._reopened = set()        # finished rooms offered again for the GAPs left to walk in them (room-level GAPs)
         self._revisits = set()        # finished rooms offered as second-pass nodes at the last SELECT
+        self._unentered_offered = set()   # rooms finished from outside re-offered as nodes (``revisit_unentered``)
         self._second_pass_logged = False   # the second_pass event is logged once per stretch of the verdict
         self._exhausted = False       # the floor has no unfinished room, no exit and no reachable frontier left
         self._covered = False         # ... no unfinished room and no exit (the second pass's gate; frontier may remain)
@@ -740,6 +766,7 @@ class RoomSearchLoop:
                       "finished_by_rotation": 0, "explore_goals": 0, "explore_visits": 0, "explore_exhausted": 0,
                       "openings_folded": 0, "openings_provisional": 0, "rooms_reopened": 0,
                       "second_pass_rounds": 0, "second_pass_forced": 0, "revisits_offered": 0, "revisits_chosen": 0,
+                      "unentered_rounds": 0,
                       "revisit_scans": 0, "oracle_calls_skipped": 0,
                       "reconsiders_deferred": 0,
                       "confined_actions": 0, "unconfined_actions": 0, "plan_failures": 0,
@@ -1228,8 +1255,9 @@ class RoomSearchLoop:
             if nid in by_node:
                 factor = opening_value_factor(by_node[nid].opening, settings.openings)
             elif (nid in p.graph.registry.rooms and p.graph.last_inside.get(nid) is None and nid != here
-                  and (nid not in self._finished or nid in self._reopened)):
-                # Never stood in and not finished from outside: the whole room is still to be seen,
+                  and (nid not in self._finished or nid in self._reopened or nid in self._unentered_offered)):
+                # Never stood in and not finished from outside -- or finished from outside and offered again
+                # once the storey was covered (``revisit_unentered``): the whole room is still to be seen,
                 # whatever its frontier count reads.
                 if settings.unvisited_boost > 1.0 and prob > 0.0:
                     factor = settings.unvisited_boost
@@ -1602,11 +1630,20 @@ class RoomSearchLoop:
                    and not self._significant_frontier_left(obs, world))
         exhausted = covered and not self._frontier_left()
         revisiting = self.second_pass(exhausted=exhausted, covered=covered) and bool(verdicts)
+        # The rooms never stood in -- finished by sight from a doorway or a scan point outside -- are nodes
+        # again once the storey is covered (``revisit_unentered``, since 2026-10-28): the same gate as the
+        # second pass, for those rooms alone; the visit is a scan from inside, after which the ledger's
+        # verdict is ``scan_point_inside`` and the room is excluded as any scanned room.
+        unentered = (not revisiting and self.settings.revisit_unentered and self.settings.finishing
+                     and (covered or exhausted)
+                     and sorted(pid for pid, how in verdicts.items() if how in OUTSIDE_VERDICTS and pid not in reopened))
         for pid in p.graph.registry.rooms:
             if pid == in_force:
                 continue
             how = verdicts.get(pid)
             if how is not None and not revisiting and pid not in reopened:
+                if unentered and pid in unentered:
+                    continue
                 excluded[pid] = "scanned:%s" % how
                 continue
             if self.settings.type_prior:
@@ -1632,6 +1669,13 @@ class RoomSearchLoop:
                       oracle_pass=self.oracle_pass())
         elif not revisiting:
             self._second_pass_logged = False
+        if unentered and set(unentered) != self._unentered_offered:
+            self.stats["unentered_rounds"] += 1
+            if not after_reasoning:
+                self._needs_reason = True       # the rooms never entered are nodes now: value them afresh
+            self._log(obs, "unentered_revisit", rooms=[int(pid) for pid in unentered], forced=exhausted,
+                      oracle_pass=self.oracle_pass())
+        self._unentered_offered = set(unentered) if unentered else set()
         if set(excluded) != set(self._excluded):
             newly = sorted(set(excluded) - set(self._excluded))
             self.stats["excluded_scanned"] += sum(1 for pid in newly if excluded[pid].startswith("scanned"))

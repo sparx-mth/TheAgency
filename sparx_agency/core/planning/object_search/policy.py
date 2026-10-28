@@ -224,7 +224,8 @@ class RPTSearchPolicy:
     def reset(self, episode, target):
         self.episode, self.target = episode, target
         s = self.settings
-        self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m, s.multifloor)
+        self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m, s.multifloor,
+                                   sticky_bump_actions=s.sticky_bump_actions)
         self.solver = RptStarRoomSolver(rng=random.Random("%s/%s" % (s.seed, episode.episode_id)), max_rooms=s.max_rooms)
         self.planner = WeightedAStarPlanner2D(self.planner_params)
         # The LOCKED target's last resort before a boxed-in release: the same planner with unknown
@@ -249,7 +250,8 @@ class RPTSearchPolicy:
         # it and no live frontier is left (its frontiers were walked until none was).
         self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction,
                                     fragment_max_m2=self.loop_settings.fragment_max_m2,
-                                    walkthrough_clearance_m=self.loop_settings.walkthrough_clearance_m)
+                                    walkthrough_clearance_m=self.loop_settings.walkthrough_clearance_m,
+                                    seen_range_m=self.loop_settings.scan_seen_range_m)
         # Sticky ids for the floor's openings and the ones already peeked into,
         # building-wide like the room numbers: "O3" names one doorway in the recording.
         self.openings = OpeningRegistry(match_m=self.loop_settings.openings.match_m,
@@ -260,6 +262,8 @@ class RPTSearchPolicy:
         self._last_graph_step = -s.graph_period_steps
         self._plan_step = -s.replan_steps
         self._blocked = self._plan_calls = self._duplicates_removed = 0
+        self._goal_bumps = {}             # goal cell -> actions of the refused steps toward it (``_bumped_toward``)
+        self._goals_retired_by_bumps = 0
         self._solver_records = []
         self.last_world = None
         self.telemetry = ExplorationMetrics()
@@ -332,11 +336,46 @@ class RPTSearchPolicy:
         if self._blocked_since is None:
             self._blocked_since = self._floor_time
         if self._goal is not None and not self._action_owner.startswith("doorway_peek"):
-            self._visited_frontiers.append(self._goal)
+            self._bumped_toward(observation, self._goal, self.route_memory.kind)
         self.route_memory.clear("forward_blocked")
         self._route, self._goal = None, None
         if self.hierarchy is not None and self._action_owner not in SUSPENDED_PHASES:
             self.hierarchy.blocked()
+
+    def _bumped_toward(self, observation, goal, kind):
+        """A refused forward step on the way to ``goal``: the ROUTE is given up at once, the GOAL only after repeated bumps.
+
+        Until 2026-10-28 one refused step retired the goal itself
+        (``_visited_frontiers``), and with it every frontier within the
+        sweep's ``visited_radius_m`` of it for the next hundred retirements.
+        A doorway's jamb clipped by a 30-degree heading on the way to the
+        exit behind it retired the exit; the next exit through the same
+        doorway clipped the other jamb and was retired too, and the wing
+        behind the door was gone from rung 1 of the fallback for good. The
+        GT-oracle sweep of 2026-10-26 (2000 episodes) made the cost
+        measurable: same-storey success ran 97 % with no refused step, 82 %
+        with three to five and 30 % with eleven to twenty. The bump is still
+        written on the map (``ObservedMap.notify_blocked``) and the route
+        re-planned round it; the goal is retired when
+        ``RPTSettings.goal_bump_retire`` refused steps toward the same place
+        fall within ``goal_bump_window`` actions -- the place, not the way.
+        Only a frontier goal is retired (the sweep's, the fallback's, a
+        room's frontier entry), as in :meth:`_navigate`: a standoff or a
+        vantage point has its owner's own stall rules.
+        """
+        s = self.settings
+        if not (kind == "frontier" or (kind or "").startswith("transit/")):
+            return
+        key = (round(float(goal[0]) / s.goal_bump_match_m), round(float(goal[1]) / s.goal_bump_match_m))
+        step = int(observation.step)
+        steps = [t for t in self._goal_bumps.get(key, ()) if step - t <= s.goal_bump_window]
+        steps.append(step)
+        if len(steps) >= s.goal_bump_retire:
+            self._visited_frontiers.append(tuple(goal))
+            self._goal_bumps.pop(key, None)
+            self._goals_retired_by_bumps += 1
+            return
+        self._goal_bumps[key] = steps
 
     def plan(self, observation):
         if observation.step == self._decision_step:
@@ -693,21 +732,29 @@ class RPTSearchPolicy:
 
     def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None):
         planner = self.planner if planner is None else planner
+        # A goal nothing reaches is retired from the frontier memory when it IS a frontier (the
+        # sweep's and the fallback's goals, a room's frontier entry). Until 2026-10-28 every kind
+        # was: the closing's standoff ring alone asked for up to 72 routes per action, and their
+        # refusals flushed the hundred-goal memory and hid every frontier within 0.4 m of the ring.
+        retiring = kind == "frontier" or kind.startswith("transit/")
         if not self.floor_guard.goal_allowed(observation, world, goal, kind):
-            self._visited_frontiers.append(tuple(goal))
+            if retiring:
+                self._visited_frontiers.append(tuple(goal))
             self.route_memory.clear("goal off the spawn floor")
             self._route = self._goal = None
             return None
         if not self.route_memory.reusable(observation, world, planner, goal, kind):
             if self.route_memory.reason == "no_progress":
-                self._visited_frontiers.append(tuple(goal))
+                if retiring:
+                    self._visited_frontiers.append(tuple(goal))
                 self._route = self._goal = None
                 self._blocked_since = self._floor_time
                 return None
             path = (self._plan_to(observation, world, goal) if planner is self.planner
                     else self._plan_to(observation, world, goal, planner=planner))
             if path is None:
-                self._visited_frontiers.append(tuple(goal))
+                if retiring:
+                    self._visited_frontiers.append(tuple(goal))
                 self._route = self._goal = None
                 return None
             self.route_memory.adopt(path, goal, kind, observation)
@@ -764,7 +811,8 @@ class RPTSearchPolicy:
                 "doorway_peek": self.peek.diagnostics(),
                 "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
                 "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,
-                "blocked": self._blocked, "doors": self.doors.diagnostics(), "max_rooms": self.graph.max_rooms,
+                "blocked": self._blocked, "goals_retired_by_bumps": self._goals_retired_by_bumps,
+                "doors": self.doors.diagnostics(), "max_rooms": self.graph.max_rooms,
                 "room_label_queries": self.graph.label_tracker.queries, "room_label_history": list(self.graph.label_tracker.history),
                 "last_reasoning": self.graph.last_reasoning, "route_commitment": dict(self.route_memory.stats),
                 "plan_calls": self._plan_calls, "duplicates_removed": self._duplicates_removed,

@@ -757,6 +757,48 @@ def test_an_exhausted_floor_forces_the_second_pass_whatever_the_verdict():
         LoopSettings(revisit_standoff_m=-1.0)
 
 
+def test_a_room_finished_from_outside_is_a_node_again_once_the_storey_is_covered_and_is_scanned_inside():
+    """``revisit_unentered`` (since 2026-10-28). The GT-oracle sweep's timed-out episodes ended with the HOUSE
+    line "one bathroom found but never entered; no unexplored places left": the room was finished through its
+    door and the second pass is off. Once the storey is covered the rooms never stood in are nodes again, at no
+    less than the unvisited floor, the visit is a scan from inside, and the scan finishes the room for good."""
+    from sparx_agency.core.planning.object_search.rooms.room_scans import SEEN_THROUGH
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0))
+    assert LoopSettings().revisit_unentered is True and LoopSettings().second_pass is False
+    policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")      # stood in and scanned
+    policy.scans.mark(1, SEEN_THROUGH, step=7)                                        # looked into from its door
+    command = policy.loop.plan(obs_at(episode, 20, IN_A), world)
+    assert policy.loop._exhausted and not policy.loop.second_pass()
+    assert policy.loop._excluded == {0: "scanned:" + SCAN_POINT_INSIDE}, "the room scanned from inside stays finished"
+    assert policy.loop._unentered_offered == {1} and policy.loop.stats["unentered_rounds"] == 1
+    assert [e for e in policy.loop.events if e["event"] == "unentered_revisit"][0]["rooms"] == [1]
+    assert reasoned == [20], "the room never entered is valued afresh as a node"
+    assert policy.loop._revisits == {1} and policy.loop.stats["revisits_offered"] == 1
+    assert policy.loop._value_factors.get(1, 1.0) >= 1.0, "never stood in: the unvisited rules apply, not the entered discount"
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1"
+    goal = policy.route_memory.goal
+    assert cell_in(world, rooms[1], goal), "entered at a vantage point inside, not looked at from the door again"
+    policy.loop.plan(obs_at(episode, 21, goal), world)
+    assert policy.supervisor.state == SEARCH and policy.loop._scan["revisit"] is True
+    # The scan completes inside: the ledger's verdict is the stronger one and the room is excluded from now on.
+    policy.scans.record(obs_at(episode, 40, goal), rooms[1], source="room_scan")
+    policy.loop._scan = None
+    policy.supervisor.state = SELECT
+    policy.loop.plan(obs_at(episode, 41, goal), world)
+    assert policy.scans.status(world, 1, rooms[1]) == SCAN_POINT_INSIDE
+    assert policy.loop._excluded.get(1) == "scanned:" + SCAN_POINT_INSIDE and policy.loop._unentered_offered == set()
+    # Off, a room finished from outside is never a node again (the rule of before).
+    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), revisit_unentered=False)
+    policy.scans.record(obs_at(episode, 5, IN_A), rooms[0], source="room_scan")
+    policy.scans.mark(1, SEEN_THROUGH, step=7)
+    policy.loop.plan(obs_at(episode, 20, IN_A), world)
+    assert set(policy.loop._excluded) == {0, 1} and reasoned == []
+    with pytest.raises(ValueError):
+        LoopSettings(revisit_unentered=1)
+    with pytest.raises(ValueError):
+        LoopSettings(scan_seen_range_m=-1.0)
+
+
 def test_the_house_line_is_the_big_picture_in_the_prompts_words():
     from sparx_agency.core.planning.object_search.rooms.house_context import house_line, scan_words
     policy, episode, world, rooms, _ = scan_policy(order=(1, 0), llm=NamingLLM())

@@ -104,6 +104,10 @@ class MultiFloorParams:
     floor_search_actions: int = 140
     transition_actions: int = 120
     retreat_actions: int = 80
+    # Refused forward steps a trail retreat (traversal forbidden) absorbs before it is given up: a ledge the
+    # agent dropped off is not climbed back by pushing at it (since 2026-10-28; 00802/000015 and /000088 of the
+    # GT-oracle sweep spent 351 and 394 actions off their storey with 334 and 371 refused steps).
+    retreat_blocked: int = 6
     exit_distance_m: float = 0.75
     portal_cooldown_actions: int = 100
     max_step_m: float = 0.24
@@ -137,7 +141,7 @@ class MultiFloorParams:
                 or not math.isfinite(self.floor_change_cost_m) or self.floor_change_cost_m < 0):
             raise ValueError("floor_change_cost_m must be finite and non-negative")
         for name in ("stable_samples", "floor_search_actions", "transition_actions",
-                     "retreat_actions", "portal_cooldown_actions", "max_failures",
+                     "retreat_actions", "retreat_blocked", "portal_cooldown_actions", "max_failures",
                      "commit_failures", "commit_stall_actions", "confirm_actions", "approach_failures",
                      "arrival_grace_actions", "stair_min_risers"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:

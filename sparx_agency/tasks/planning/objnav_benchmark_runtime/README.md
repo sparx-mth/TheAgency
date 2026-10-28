@@ -420,7 +420,21 @@ beside a bed with the potted plant in view 4.4 m away and spent 159 actions
 turning on "no safe target path": the floor under the camera's blind radius
 (a level camera 0.88 m up sees the floor from about 1.4 m out) was unknown,
 unknown is impassable, and the lock waited for A* until the 160-action
-closing bound ended the episode as an agent error. After
+closing bound ended the episode as an agent error. Since 2026-10-28 the
+first answer is the walk that IS possible: when no standoff ring point has
+a route with any planner, the reachable cell nearest the target -- at the
+floor standoff, then at the body radius, snapped onto the navmesh where the
+adapter can -- is walked to when it brings the agent `nearest_progress_m`
+(0.5 m) closer, up to `nearest_approaches` (3) such walks per lock (phase
+`CLOSE_NEAREST`, `nearest_routes` in the record); the ring is tried again
+on every action from the new floor. The GT-oracle sweep of 2026-10-26 had
+released 75 locked targets as "no safe path from here" at a median 4.1 m
+with the target in plain view. And the closing's 160-action bound (and a
+storey change under the lock) now ends the LOCK, not the episode
+(`release_on_bound`: released without a rejection, the spot boxed in,
+`bound_releases`) -- the same sweep ended 34 episodes on the bound at a
+mean step 242, six of them inside a metre of the goal. Then, as before:
+after
 `footing_after_steps` (2) pathless actions, while at least
 `footing_unknown_fraction` (0.25) of the cells within `footing_radius_m`
 (1.2 m) of the agent are unknown, the closing asks the camera
@@ -820,7 +834,7 @@ and a pose, and answers in world coordinates.
 | `rooms/opening_nodes.py` | Doorways and gaps at the edge of the mapped floor -- a room's exits, its attributes to the oracle and its visit's to walk (`room_exits`); the peek that visits a target landmark, and the exits as nodes under the deprecated `exits_as_nodes` |
 | `rooms/house_context.py`, `rooms/oracle_retry.py` | The HOUSE line of the oracle's prompt; one bounded schema repair around its scoring |
 | `rooms/floor_context.py`, `rooms/discovery.py` | Per-storey policy state with shared ledgers; episode start, semantic interrupts and the resumption of a local task |
-| `world_model/observed_map.py` | Independent per-storey occupancy from RGB-D on the core log-odds integrator; a blocked forward step marks the cell ahead occupied outright (`LogOddsGridCostmap.mark_occupied`), and a second bump within `repeat_bump_m` (0.5 m) of an earlier one leaves a sticky bar one body wide across the heading, forced occupied in every export for the rest of the episode (`_touched`) |
+| `world_model/observed_map.py` | Independent per-storey occupancy from RGB-D on the core log-odds integrator; a blocked forward step marks the cell ahead occupied outright (`LogOddsGridCostmap.mark_occupied`), and a second bump within `repeat_bump_m` (0.5 m) of an earlier one leaves a sticky bar one body wide across the heading, forced occupied in every export for `sticky_bump_actions` (120; 0 = the rest of the episode) and renewed by a further bump, never across a cell the agent's centre has stood on (`_touched`, since 2026-10-28). A refused step no longer retires the goal it was taken toward: `RPTSearchPolicy._bumped_toward` retires it after `goal_bump_retire` (3) refusals toward the same place within `goal_bump_window` (40) actions -- the GT-oracle sweep of 2026-10-26 ran 97 % same-storey success with no refused step and 51 % with six to ten, the wing behind a clipped doorway sealed by the one-bump rule |
 | `world_model/sightlines.py` | The sight ledger: unknown looked through without a depth return (within 2.5 m, from two poses) and enclosed unknown pockets under 3 m2 are settled -- written occupied for the frontier logic alone -- and every camera pose per storey |
 | `world_model/peek_stairs.py` | Floor-local seen-connector footprint: the flight within the departure band but off the floor run and off the agent's own trail, its capsule margin (`stair_margin_m`, 0.45 m) bounded per flight so it never splits a body-passable corridor (`adaptive_capsule`), its storey end cut square so no half-disc of floor in front of the first riser is drawn (`_square_foot`, Darden 2026-10-21); excluded from the room partition, from peek viewpoints and from a peek-only A* copy |
 | `world_model/stair_terrain.py`, `world_model/stair_grid.py` | RGB-D support surfaces for the observed stair source |
@@ -1056,8 +1070,9 @@ refresh.
    new number three times in a row. A room is finished when a completed
    rotation stood inside its mask (`scan_point_inside`: the warm-up, a room
    scan, or a **full glance** -- recorded in the ledger since 2026-10-13),
-   when a completed rotation *saw* more than `scan_seen_fraction` (0.5) of
-   its cells within the camera's depth range through observed free space
+   when a completed rotation *saw* more than `scan_seen_fraction` (0.8
+   since 2026-10-28, 0.5 before) of its cells within `scan_seen_range_m`
+   (4 m; 0 = the camera's depth range) through observed free space
    (`seen_from_scan`: the small room fully visible from the corridor, the
    half of a split room the scan stood in; unknown cells end the sightline,
    so nothing unresolved is credited -- and, since 2026-10-13, a room with
@@ -1156,7 +1171,19 @@ refresh.
    scanned once is finished. With the storey covered the exploration
    fallback carries the search to the unknown the first pass skipped -- the
    slivers and shadows, now ranked by what a look from each reveals (below)
-   -- which is where an unseen target is. **Finished rooms are left off the
+   -- which is where an unseen target is. **Since 2026-10-28 the rooms
+   finished by sight from OUTSIDE** -- `seen_from_scan`, `seen_through`:
+   never stood in -- **are nodes again once the storey is covered**
+   (`LoopSettings.revisit_unentered`, on by default; the same gate as the
+   second pass, for those rooms alone): the GT-oracle sweep of 2026-10-26
+   ended 88 % of the same-storey episodes that never saw their target with
+   the oracle's "all home seen", the HOUSE line reading "one bathroom found
+   but never entered; no unexplored places left" with the toilet 2.7 m away.
+   The visit is a scan from a vantage point inside, the ledger upgrades the
+   verdict to `scan_point_inside` the moment the rotation stands in the room
+   (`unentered_revisit` event, `unentered_rounds`), and the room is excluded
+   from then on; the unvisited floor applies to it while it is offered.
+   **Finished rooms are left off the
    oracle's node list too** (`scanned_to_oracle: false`): they are no node,
    so their line bought the model nothing but a longer prompt and, for
    `qwen2.5:3b`, the `pass: second` confusion; the HOUSE line still names
@@ -1449,7 +1476,19 @@ refresh.
    event `spawn_plane_rebased`; a floor-sized plateau is adopted at once, not
    after the half-level's thirty actions). 00873/000002 (`02cc26973cab`) spawned
    three treads below its bed's storey and spent 447 actions boxed in between
-   two masked flights.
+   two masked flights. **An unplanned departure from a confirmed storey is a
+   trail retreat**, and since 2026-10-28 it is bounded by refused steps as
+   well as actions (`multifloor.retreat_blocked`, 6: a ledge dropped off is
+   not climbed back by pushing at it -- 00802/000015 and /000088 of the
+   GT-oracle sweep spent 351 and 394 actions off their storey with 334 and
+   371 refused steps), `phase` reads `RETREAT` only while it is in force,
+   and a transition the atlas cannot settle because the agent cannot move
+   (its planning world frozen with the transition) is resolved by the guard
+   after the half-level's thirty actions from the pose heights alone: within
+   `floor_match_m` of the plane the storey is confirmed in place
+   (`transition_settled_in_place`, `stalled_returns`), otherwise the plateau
+   is adopted as a half-level (`half_level_adopted` with `stalled: true`,
+   `stalled_adoptions`).
    **The way back is the one exception**: under `scan` the staircase the
    agent arrived by is withheld while this storey still has a room that is
    neither finished nor ruled out (`way_back_held` events) -- the storey is

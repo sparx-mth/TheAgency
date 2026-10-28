@@ -82,6 +82,10 @@ from sparx_agency.core.planning.object_search.world_model.peek_stairs import sta
 MAX_EVENTS = 50
 #: Actions a settled plateau inside the separation rule may stay "in transition" before it is adopted.
 HALF_LEVEL_ACTIONS = 30
+#: Consecutive actions at one height (within the atlas's ``stable_height_m``) that make a plateau of a spot the
+#: agent cannot translate on -- the atlas's own test wants ``stable_distance_m`` of walking, and the map is frozen
+#: while the transition stands (since 2026-10-28).
+STALLED_SAMPLES = 8
 
 
 class SpawnFloorGuard:
@@ -104,7 +108,9 @@ class SpawnFloorGuard:
         self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
         self.stats = {"goals_refused": 0, "drop_cells": 0, "stair_cells": 0, "off_plane_actions": 0,
-                      "half_levels_adopted": 0, "walked_exempt_cells": 0, "rebased": 0}
+                      "half_levels_adopted": 0, "walked_exempt_cells": 0, "rebased": 0, "stalled_adoptions": 0,
+                      "stalled_returns": 0}
+        self._transition_heights: List[float] = []   # the pose height on every action of the transition in force
         self.stair_margins_m = {}               # portal id -> capsule margin drawn, metres (``adaptive_capsule``)
 
     # -- per action -----------------------------------------------------------
@@ -206,10 +212,15 @@ class SpawnFloorGuard:
         """
         atlas = getattr(self.policy.mapping, "atlas", None)
         if atlas is None or not atlas.params.enabled or not atlas.in_transition or self.spawn_z is None:
+            self._transition_heights = []
             return
+        self._transition_heights.append(float(obs.pose.z))
         height = atlas.destination_height_m
-        if height is None:
-            return
+        stalled = height is None
+        if stalled:
+            height = self._stalled_plateau(obs, atlas)
+            if height is None:
+                return
         provisional = self.provisional
         if atlas.transition_ticks < HALF_LEVEL_ACTIONS:
             if (not provisional or atlas.plateau_observer is None
@@ -220,6 +231,9 @@ class SpawnFloorGuard:
             return                                  # another storey: confined, as the protocol says
         waited = int(atlas.transition_ticks)              # adopt_level resets the atlas's count
         floor = atlas.adopt_level(obs.pose, float(height))
+        self._transition_heights = []
+        if stalled:
+            self.stats["stalled_adoptions"] += 1
         if provisional:
             self.rebase(obs, floor, float(height), "settled on a storey from the provisional spawn storey", waited)
             return
@@ -227,7 +241,44 @@ class SpawnFloorGuard:
         self.stats["half_levels_adopted"] += 1
         self._record({"action": obs.step, "event": "half_level_adopted", "floor_id": int(floor),
                       "height_m": round(float(height), 3), "offset_m": round(float(height) - self.spawn_z, 3),
-                      "after_actions": waited})
+                      "after_actions": waited, "stalled": stalled})
+
+    def _stalled_plateau(self, obs, atlas):
+        """The height of a transition that cannot settle because the agent cannot move, once it has stood long enough.
+
+        The atlas confirms a plateau on ``stable_samples`` TRANSLATED
+        samples; the map is not integrated while a transition stands, so
+        an agent whose planning world froze on a step or a ledge takes no
+        step that would settle it, and until 2026-10-28 the transition
+        stood for the rest of the episode (the ``RETREAT`` episodes of the
+        GT-oracle sweep: SR 6.6 %). After ``HALF_LEVEL_ACTIONS`` actions in
+        transition, with the retreat not in force and the last
+        ``STALLED_SAMPLES`` pose heights within ``stable_height_m`` of each
+        other, that height is the plateau. Within ``floor_match_m`` of the
+        storey it is the storey, confirmed in place (``stalled_returns``);
+        otherwise the caller adopts it as any settled plateau
+        (``stalled_adoptions``). None while the agent still moves in height,
+        the retreat still walks, or the wait is not over.
+        """
+        building = getattr(self.policy, "building", None)
+        if building is not None and getattr(building, "retreating", False):
+            return None
+        if atlas.transition_ticks < HALF_LEVEL_ACTIONS or len(self._transition_heights) < STALLED_SAMPLES:
+            return None
+        heights = self._transition_heights[-STALLED_SAMPLES:]
+        if max(heights) - min(heights) > float(atlas.params.stable_height_m):
+            return None
+        height = sum(heights) / len(heights)
+        if abs(height - float(atlas.elevation_m)) <= float(atlas.params.floor_match_m):
+            # The storey itself, a step's worth off its plane: the return the plateau test never confirmed.
+            if atlas.settle(obs.pose, float(atlas.elevation_m)):
+                self.stats["stalled_returns"] += 1
+                self._record({"action": obs.step, "event": "transition_settled_in_place", "height_m": round(height, 3),
+                              "offset_m": round(height - float(atlas.elevation_m), 3),
+                              "after_actions": int(self.policy.mapping.atlas.transition_ticks)})
+                self._transition_heights = []
+            return None
+        return height
 
     def _track_plane(self, obs):
         offset = self._plane_offset()

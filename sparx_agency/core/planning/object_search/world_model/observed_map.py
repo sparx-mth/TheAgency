@@ -20,20 +20,23 @@ class ObservedMap:
     """
 
     def __init__(self, size_m=80.0, resolution_m=0.1, stride=8, body_height_m=0.88, body_radius_m=0.18, multifloor=None,
-                 repeat_bump_m=0.5):
+                 repeat_bump_m=0.5, sticky_bump_actions=0):
         self.grid = LogOddsGridCostmap(LogOddsGridConfig(size_m=size_m, resolution_m=resolution_m))
         self.stride = stride
         self.body_height_m = body_height_m
         self.body_radius_m = body_radius_m
         self.repeat_bump_m = float(repeat_bump_m)
+        self.sticky_bump_actions = int(sticky_bump_actions)   # 0: a sticky bar stands for the rest of the episode
         self._anchor = None
         self.floor_revision = 0
         self.atlas = FloorAtlas(multifloor or MultiFloorParams())
         self.floor_id = 0
         self.maps, self.worlds = {0: self.grid}, {}
         self._bumps = {}          # floor id -> [(x, y) the body touched]
-        self._touched = {}        # floor id -> {(gx, gy)} forced occupied in every export (see notify_blocked)
+        self._touched = {}        # floor id -> {(gx, gy): action written} forced occupied in every export (see notify_blocked)
+        self._stood = {}          # floor id -> {(gx, gy)} the agent's centre has stood on: never a bar's cell
         self.sticky_bumps = 0
+        self.sticky_expired = 0
 
     def update(self, observation, integrate=True, *, arrival_allowed=True):
         pose, camera = observation.pose, observation.camera
@@ -103,10 +106,17 @@ class ObservedMap:
         block = data[max(0, gy - radius):min(data.shape[0], gy + radius + 1),
                      max(0, gx - radius):min(data.shape[1], gx + radius + 1)]
         block[footprint & (block != 100)] = 0
+        self._stood.setdefault(self.floor_id, set()).add((int(gx), int(gy)))
         touched = self._touched.get(self.floor_id)
         if touched:
             # What the body learned by touching it twice outranks every ray: see notify_blocked.
-            for tx, ty in touched:
+            # A bar older than ``sticky_bump_actions`` is spent (since 2026-10-28); a new bump renews it.
+            step = int(observation.step)
+            for (tx, ty), when in list(touched.items()):
+                if self.sticky_bump_actions and step - int(when) > self.sticky_bump_actions:
+                    del touched[(tx, ty)]
+                    self.sticky_expired += 1
+                    continue
                 if 0 <= ty < data.shape[0] and 0 <= tx < data.shape[1]:
                     data[ty, tx] = 100
         data[gy, gx] = 0
@@ -140,6 +150,16 @@ class ObservedMap:
         in 25 actions and lost the three nodes it was walking to, one by one,
         to the releases. The first bump stays a single decaying cell, so one
         spurious refusal walls nothing off.
+
+        **A bar is not for ever, and not across the agent's own trail**
+        (since 2026-10-28). It stands ``sticky_bump_actions`` actions (0: the
+        episode) and a further bump at the place renews it: the GT-oracle
+        sweep of 2026-10-26 showed the wing behind a doorway whose jambs a
+        30-degree heading had clipped twice closed for the rest of the
+        episode -- the bar across a doorway the body HAD walked through. A
+        cell the agent's centre has stood on this storey is never part of a
+        bar: the body was there, and nothing written for planning outvotes
+        that.
         """
         p = observation.pose
         ahead = (p.x + forward_step_m * math.cos(p.yaw), p.y + forward_step_m * math.sin(p.yaw))
@@ -155,13 +175,19 @@ class ObservedMap:
         count = int(math.ceil(2.0 * self.body_radius_m / resolution)) + 1
         bar = [(ahead[0] + t * normal[0], ahead[1] + t * normal[1])
                for t in np.linspace(-self.body_radius_m, self.body_radius_m, count)]
-        touched = self._touched.setdefault(self.floor_id, set())
+        touched = self._touched.setdefault(self.floor_id, {})
+        stood = self._stood.get(self.floor_id, ())
+        kept = []
         for x, y in bar:
             gx = int(math.floor((x - grid.origin_x) / resolution))
             gy = int(math.floor((y - grid.origin_y) / resolution))
+            if (gx, gy) in stood:
+                continue
             if 0 <= gx < grid.width and 0 <= gy < grid.height:
-                touched.add((gx, gy))
-        self.grid.mark_occupied(np.asarray(bar))
+                touched[(gx, gy)] = int(observation.step)
+            kept.append((x, y))
+        if kept:
+            self.grid.mark_occupied(np.asarray(kept))
         self.sticky_bumps += 1
 
     def integrity(self):

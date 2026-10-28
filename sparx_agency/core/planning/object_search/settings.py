@@ -163,6 +163,20 @@ class RPTSettings:
     # passage, a 0.4 m one is a wall. Doorways (0.7 m and up) are untouched.
     min_clearance_m: float = 0.25
     detour_factor: float = 1.5
+    # What a refused MOVE_FORWARD costs the goal it was taken toward (``RPTSearchPolicy._bumped_toward``, since
+    # 2026-10-28). The route is re-planned round the bump at once; the GOAL is retired -- taken out of the frontier
+    # memory with every frontier within the sweep's ``visited_radius_m`` of it -- only when ``goal_bump_retire``
+    # refused steps toward the same place (``goal_bump_match_m`` cells) fall within ``goal_bump_window`` actions.
+    # 1 restores the one-bump rule of before, which the GT-oracle sweep of 2026-10-26 showed sealing whole wings:
+    # same-storey success 97 % with no refused step, 51 % with six to ten.
+    goal_bump_retire: int = 3
+    goal_bump_window: int = 40
+    goal_bump_match_m: float = 0.5
+    # How long the STICKY bar a second bump writes across the heading stays forced occupied
+    # (``ObservedMap.notify_blocked``), in actions; a further bump at the place renews it. 0 keeps it for the rest
+    # of the episode, as before 2026-10-28. A bar at a doorway the body did pass -- the jamb clipped twice by a
+    # quantised heading -- closed the doorway for good; a ledge the camera reads as floor earns its bar again.
+    sticky_bump_actions: int = 120
     local_exploration: str = "frontier"
     warmup_steps: int = 12
     allow_stair_traversal: bool = False
@@ -201,9 +215,14 @@ class RPTSettings:
         if self.landmark_miss_max_range_m <= self.landmark_miss_min_range_m:
             raise ValueError("landmark_miss_max_range_m must exceed landmark_miss_min_range_m")
         for key in ("depth_stride", "graph_period_steps", "transit_graph_period_steps", "replan_steps",
-                    "target_memory_steps", "max_rooms", "warmup_steps"):
+                    "target_memory_steps", "max_rooms", "warmup_steps", "goal_bump_retire", "goal_bump_window"):
             if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
                 raise ValueError("%s must be a positive integer" % key)
+        if type(self.sticky_bump_actions) is not int or self.sticky_bump_actions < 0:
+            raise ValueError("sticky_bump_actions must be a non-negative integer (0 keeps a bar for the episode)")
+        if (isinstance(self.goal_bump_match_m, bool) or not math.isfinite(self.goal_bump_match_m)
+                or self.goal_bump_match_m <= 0):
+            raise ValueError("goal_bump_match_m must be positive and finite")
         if not 0 <= self.detection_confidence <= 1 or type(self.seed) is not int:
             raise ValueError("Invalid confidence or seed")
         if self.preferred_clearance_m < self.body_radius_m:

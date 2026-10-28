@@ -10,6 +10,7 @@ import pytest
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
+from sparx_agency.core.localization.floor_atlas import MultiFloorParams
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
@@ -473,6 +474,66 @@ def test_a_flight_walked_down_with_traversal_forbidden_is_walked_back_up_the_tra
         command = policy.plan(at(episode, step, 2.0, 1.0, z=-0.6, depth=3.0))
     assert [e["reason"] for e in building.events if e["event"] == "retreat_given_up"] == ["retreat_actions exhausted off the storey plane"]
     assert command.info["kind"] != "RETREAT" and not policy.fallback.failures
+
+
+def test_a_retreat_refused_on_its_trail_is_given_up_and_the_stalled_plateau_is_adopted():
+    """00802/000015 and /000088 of the GT-oracle sweep (2026-10-26): off the storey, the trail retreat pushed at a
+    ledge for 351 and 394 actions (334 and 371 refused steps), and when it was given up the map stayed frozen
+    with the transition -- the atlas's plateau test wants translation an agent boxed in cannot make. Since
+    2026-10-28 ``retreat_blocked`` refused steps end the retreat, the phase reads SEARCH from then on, and after
+    HALF_LEVEL_ACTIONS at one height the guard adopts the plateau without the translated settle."""
+    from sparx_agency.core.planning.object_search.multifloor.spawn_floor_guard import HALF_LEVEL_ACTIONS, STALLED_SAMPLES
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    assert building.params.retreat_blocked == 6
+    for step in range(12):
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, depth=3.0))          # the storey is confirmed, a long trail
+    step = 12
+    command = policy.plan(at(episode, step, 4.0, 1.0, z=-0.6, depth=3.0))         # dropped off a ledge
+    assert building.retreating and building.phase == "RETREAT" and command.info["kind"] == "RETREAT"
+    for _ in range(building.params.retreat_blocked):                              # every step back up is refused
+        obs = at(episode, step, 4.0, 1.0, z=-0.6, depth=3.0)
+        policy.notify_blocked(obs)
+        step += 1
+        command = policy.plan(obs)
+    assert not building.retreating and building.phase == "SEARCH" and command.info["kind"] != "RETREAT"
+    assert [e["reason"] for e in building.events if e["event"] == "retreat_given_up"] == [
+        "%d refused steps on the storey trail" % building.params.retreat_blocked]
+    assert building.diagnostics()["trail_retreat"]["blocked"] == building.params.retreat_blocked
+    assert step < building.params.retreat_actions, "given up long before the action allowance"
+    assert atlas.in_transition and not policy.fallback.failures
+    # Standing still at one height: the plateau the atlas cannot settle is adopted once the wait is over.
+    while atlas.transition_ticks < HALF_LEVEL_ACTIONS + STALLED_SAMPLES and atlas.in_transition:
+        policy.plan(at(episode, step, 4.0, 1.0, z=-0.6, depth=3.0)); step += 1
+    assert not atlas.in_transition and atlas.completion_reason == "half_level_adopted"
+    assert guard.half_levels == {1} and guard.stats["half_levels_adopted"] == 1 and guard.stats["stalled_adoptions"] == 1
+    adopted = [e for e in guard.events if e["event"] == "half_level_adopted"]
+    assert len(adopted) == 1 and adopted[0]["stalled"] is True and adopted[0]["height_m"] == pytest.approx(-0.6, abs=0.05)
+    policy.plan(at(episode, step, 4.0, 1.0, z=-0.6, depth=3.0)); step += 1       # the mapping takes the atlas's floor
+    assert policy.mapping.floor_id == 1 and building.phase == "SEARCH" and not policy.fallback.failures
+    assert policy.mapping.worlds[1].grid.max() >= 0, "the new level is mapped: integration resumed with the transition over"
+    # Within ``floor_match_m`` of the plane -- the ledge climbed but for a step -- the storey itself is confirmed in place.
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    for step in range(12):
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, depth=3.0))
+    policy.plan(at(episode, 12, 4.0, 1.0, z=-0.6, depth=3.0))
+    assert atlas.in_transition and building.retreating
+    step = 13
+    for _ in range(building.params.retreat_blocked):
+        obs = at(episode, step, 3.75, 1.0, z=-0.2, depth=3.0)                     # one step up, no further
+        policy.notify_blocked(obs)
+        step += 1
+        policy.plan(obs)
+    assert not building.retreating and atlas.in_transition
+    while atlas.transition_ticks < HALF_LEVEL_ACTIONS + STALLED_SAMPLES and atlas.in_transition:
+        policy.plan(at(episode, step, 3.75, 1.0, z=-0.2, depth=3.0)); step += 1
+    assert not atlas.in_transition and atlas.completion_reason == "source_platform_returned"
+    assert guard.half_levels == set() and guard.stats["stalled_returns"] == 1 and len(atlas.floors) == 1
+    assert [e for e in guard.events if e["event"] == "transition_settled_in_place"][0]["offset_m"] == pytest.approx(-0.2, abs=0.05)
+    assert policy.mapping.floor_id == 0 and not policy.fallback.failures
+    with pytest.raises(ValueError):
+        MultiFloorParams(retreat_blocked=0)
 
 
 def test_a_one_pose_trail_is_extended_past_its_last_point_and_the_return_is_confirmed_at_the_plane_height():
