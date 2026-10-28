@@ -9,7 +9,10 @@ never decides where the target is.
 Four kinds of command, one type:
 
 * **follow** a path of waypoints (the last one is the goal), optionally
-  re-aiming the camera and facing a heading at the end;
+  re-aiming the camera and facing a heading at the end -- and optionally
+  carrying the exact body actions that walk it (``actions``, from the pose
+  ``plan_pose``), which the converter executes verbatim while the agent is
+  where the plan expects it and falls back from to the path otherwise;
 * **hold** position while re-aiming the camera or turning to a heading;
 * **stop** -- the policy believes it is at the target and ends the episode;
 * nothing at all (an empty hold): the policy has no opinion this step.
@@ -32,10 +35,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from sparx_agency.core.planning.objnav.errors import CommandError
+from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.angles import MAX_ANGLE_RAD
 
 #: A world-ENU point ``(x, y)``, metres.
 Waypoint = Tuple[float, float]
+#: A planned pose ``(x, y, yaw)``: world-ENU metres and radians.
+PlanPose = Tuple[float, float, float]
+#: The actions a plan may carry: the body moves. A LOOK is the camera pitch's business, a STOP the policy's.
+PLAN_ACTIONS = (DiscreteAction.MOVE_FORWARD, DiscreteAction.TURN_LEFT, DiscreteAction.TURN_RIGHT)
 
 
 def _finite_real(value) -> bool:
@@ -77,6 +85,32 @@ def _info(info: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
     return {} if info is None else info
 
 
+def _plan_actions(actions) -> Tuple[DiscreteAction, ...]:
+    """``actions`` as a tuple of body actions, or CommandError naming the bad one."""
+    out = []
+    for index, action in enumerate(actions):
+        if not isinstance(action, DiscreteAction) or action not in PLAN_ACTIONS:
+            raise CommandError(
+                "planned action %d must be MOVE_FORWARD, TURN_LEFT or TURN_RIGHT, got %r -- a LOOK is the "
+                "camera pitch's business and a STOP the policy's" % (index, action))
+        out.append(action)
+    return tuple(out)
+
+
+def _plan_pose(pose) -> Optional[PlanPose]:
+    """``pose`` as a finite ``(x, y, yaw)`` triple, or None, or CommandError."""
+    if pose is None:
+        return None
+    try:
+        x, y, yaw = pose
+    except (TypeError, ValueError):
+        raise CommandError("plan_pose must be an (x, y, yaw) triple, got %r" % (pose,))
+    if not (_finite_real(x) and _finite_real(y) and _finite_real(yaw)):
+        raise CommandError("plan_pose must be finite, got %r" % (pose,))
+    _check_angle("plan_pose yaw", yaw)
+    return (float(x), float(y), float(yaw))
+
+
 @dataclass(frozen=True)
 class NavigationCommand:
     """One step's instruction from the search policy to the action converter.
@@ -107,14 +141,25 @@ class NavigationCommand:
             step later stops a turn too late. It is still the policy's
             decision -- asked for in advance, taken on exactly the step the
             command completes.
+        actions: The body actions that walk the path from ``plan_pose``, in
+            order, as a kinematic planner emitted them (since 2026-10-28):
+            MOVE_FORWARD, TURN_LEFT and TURN_RIGHT only. The converter
+            executes the first one when the agent stands at ``plan_pose``
+            (within its tolerances) and otherwise follows the waypoints as
+            if no plan were given; the policy, which sees every executed
+            action, sends the remaining suffix next step. Empty for no plan.
+        plan_pose: The pose ``(x, y, yaw)`` the actions start from. Required
+            with ``actions``; None without.
 
     Raises:
         CommandError: On a waypoint that is not a finite ``(x, y)`` pair; a
             ``stop`` or ``stop_on_arrival`` that is not a bool; a non-finite
             angle, or one beyond ``MAX_ANGLE_RAD``; an ``info`` that is not a
             mapping; a stop that also carries waypoints, a pitch, a heading or
-            ``stop_on_arrival``; or ``stop_on_arrival`` on a command that asks
-            for nothing else (that is :meth:`stop_here`).
+            ``stop_on_arrival``; ``stop_on_arrival`` on a command that asks
+            for nothing else (that is :meth:`stop_here`); a planned action
+            that is not a body move; actions without waypoints or without
+            ``plan_pose``; or a ``plan_pose`` without actions.
     """
 
     waypoints: Tuple[Waypoint, ...] = ()
@@ -123,9 +168,17 @@ class NavigationCommand:
     final_yaw: Optional[float] = None
     info: Dict[str, Any] = field(default_factory=dict)
     stop_on_arrival: bool = False
+    actions: Tuple[DiscreteAction, ...] = ()
+    plan_pose: Optional[PlanPose] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "waypoints", _float_pairs(self.waypoints))
+        object.__setattr__(self, "actions", _plan_actions(self.actions))
+        object.__setattr__(self, "plan_pose", _plan_pose(self.plan_pose))
+        if self.actions and not self.waypoints:
+            raise CommandError("planned actions walk a path: a command with actions needs waypoints")
+        if bool(self.actions) != (self.plan_pose is not None):
+            raise CommandError("actions and plan_pose come together: the actions start from that pose")
         for name in ("stop", "stop_on_arrival"):
             value = getattr(self, name)
             if not isinstance(value, bool):
@@ -159,7 +212,8 @@ class NavigationCommand:
     def follow(cls, points, camera_pitch: Optional[float] = None,
                final_yaw: Optional[float] = None,
                info: Optional[Mapping[str, Any]] = None,
-               stop_on_arrival: bool = False) -> NavigationCommand:
+               stop_on_arrival: bool = False,
+               actions=(), plan_pose=None) -> NavigationCommand:
         """Follow a path.
 
         Args:
@@ -171,6 +225,9 @@ class NavigationCommand:
             info: Diagnostics returned with the step's decision.
             stop_on_arrival: STOP on the step the path is walked (and the
                 pitch and heading reached), rather than idling there.
+            actions: The planned body actions that walk the path (see the
+                class), or none.
+            plan_pose: The ``(x, y, yaw)`` they start from; None without them.
 
         Returns:
             The command.
@@ -198,7 +255,7 @@ class NavigationCommand:
                 "follow() needs at least one waypoint; use hold() to stay")
         return cls(waypoints=tuple(pairs), camera_pitch=camera_pitch,
                    final_yaw=final_yaw, info=_info(info),
-                   stop_on_arrival=stop_on_arrival)
+                   stop_on_arrival=stop_on_arrival, actions=tuple(actions), plan_pose=plan_pose)
 
     @classmethod
     def hold(cls, camera_pitch: Optional[float] = None,

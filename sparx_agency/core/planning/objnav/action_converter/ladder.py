@@ -8,6 +8,14 @@ per step. The rungs, first match wins:
 
 1. A camera pitch is commanded and one LOOK brings the camera toward it: that
    LOOK.
+1b. The command carries planned actions and the agent stands at their
+   ``plan_pose``: the first of them, as planned (:func:`planned_action`,
+   since 2026-10-28). A kinematic planner chose it on the benchmark's own
+   step and turn; the ladder below would quantise the same path into turns
+   the plan did not need.
+1c. Under ``strict_plan_tracking``, a plan the agent has left the start of:
+   the turn toward the plan's heading (:func:`realign_to_plan`), so the
+   one-step ladder that follows walks on along the planned heading.
 2. No path: face ``final_yaw`` if set and a turn is needed; else the command
    is done -- ``empty`` if it asked for nothing.
 3. Arrived: the aim point is the last waypoint and the agent is within the
@@ -55,6 +63,7 @@ Python 3.8 syntax; numpy arrives only through ``core.common.types``.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 from typing import Optional, Tuple
 
@@ -144,6 +153,20 @@ def parallel_offset(spec: DiscreteActionSpec, lookahead_m: float) -> float:
     return lookahead_m * math.tan(half_turn)
 
 
+def effective_lookahead_m(spec: DiscreteActionSpec, params: ActionConverterParams,
+                          recovering: bool = False) -> float:
+    """How far along the path the ladder aims this step.
+
+    One forward step while recovering from a blocked step, and always under
+    ``params.strict_plan_tracking`` (a one-step aim turns at every kink of
+    the path instead of cutting the corner toward a farther point);
+    ``params.lookahead_m`` otherwise.
+    """
+    if recovering or params.strict_plan_tracking:
+        return spec.forward_step_m
+    return params.lookahead_m
+
+
 def check_executable(command: NavigationCommand,
                      spec: DiscreteActionSpec) -> None:
     """Raise if the benchmark cannot execute what ``command`` asks for.
@@ -161,6 +184,92 @@ def check_executable(command: NavigationCommand,
             "the command asks for camera pitch %r rad but this benchmark "
             "has no LOOK actions; plan without camera tilt"
             % (command.camera_pitch,))
+
+
+def on_plan(pose: AgentPose, command: NavigationCommand,
+            params: ActionConverterParams) -> bool:
+    """Whether the agent stands at the command's ``plan_pose``, within the converter's tolerances.
+
+    False for a command without a plan.
+    """
+    if not command.actions or command.plan_pose is None:
+        return False
+    px, py, pyaw = command.plan_pose
+    if math.hypot(pose.x - px, pose.y - py) > params.plan_position_tolerance_m:
+        return False
+    return abs(normalize_angle(pose.yaw - pyaw)) <= math.radians(params.plan_heading_tolerance_deg)
+
+
+def planned_action(pose: AgentPose, command: NavigationCommand,
+                   sample: Optional[PathSample], blocked: bool,
+                   spec: DiscreteActionSpec, params: ActionConverterParams
+                   ) -> Optional[ConversionResult]:
+    """Rung 1b: the command's first planned action, when the agent stands where the plan starts.
+
+    Args:
+        pose: The agent's true pose now.
+        command: This step's command. Not a stop.
+        sample: Where the agent is on the command's path, for the result's
+            geometry; None without a path.
+        blocked: Whether the last MOVE_FORWARD failed to move the agent.
+        spec: The benchmark's action geometry and action set.
+        params: The conversion tuning (the plan tolerances).
+
+    Returns:
+        The planned action as a ``forward`` or ``turn`` result flagged
+        ``planned``, or None when the command has no plan, the agent is not
+        at its start, or the command's camera pitch needs a LOOK first (rung
+        1 wins, as in :func:`choose_action`).
+    """
+    if command.stop or not on_plan(pose, command, params):
+        return None
+    check_executable(command, spec)
+    if command.camera_pitch is not None:
+        look = pitch_action(pose.camera_pitch, command.camera_pitch,
+                            spec.tilt_angle_rad, spec.min_pitch_rad,
+                            spec.max_pitch_rad)
+        if look is not None:
+            return None
+    action = command.actions[0]
+    if not spec.allows(action):
+        raise CommandError("the plan's %s is not in this benchmark's action set" % action.name)
+    status = STATUS_FORWARD if action == DiscreteAction.MOVE_FORWARD else STATUS_TURN
+    return replace(_result(action, status, sample, blocked), planned=True)
+
+
+def realign_to_plan(pose: AgentPose, command: NavigationCommand,
+                    sample: Optional[PathSample], blocked: bool,
+                    spec: DiscreteActionSpec, params: ActionConverterParams
+                    ) -> Optional[ConversionResult]:
+    """Rung 1c, strict tracking only: the turn toward the plan's heading when the agent has left the plan's start.
+
+    A plan the agent is no longer at the start of is stale in position, but
+    its heading is still the heading the path is to be walked on; under
+    ``strict_plan_tracking`` the heading is put right in place before the
+    one-step ladder walks on, so a displaced agent never steps off along a
+    heading the plan did not ask for.
+
+    Returns:
+        The turn, or None when there is no plan, tracking is not strict, the
+        pitch needs a LOOK first, or the heading already matches within
+        ``plan_heading_tolerance_deg``.
+    """
+    if (command.stop or not params.strict_plan_tracking or not command.actions
+            or command.plan_pose is None or on_plan(pose, command, params)):
+        return None
+    if command.camera_pitch is not None:
+        look = pitch_action(pose.camera_pitch, command.camera_pitch,
+                            spec.tilt_angle_rad, spec.min_pitch_rad,
+                            spec.max_pitch_rad)
+        if look is not None:
+            return None
+    error = normalize_angle(command.plan_pose[2] - pose.yaw)
+    if abs(error) <= math.radians(params.plan_heading_tolerance_deg):
+        return None
+    turn = turn_action(error, spec.turn_angle_rad)
+    if turn is None:
+        return None
+    return _result(turn, STATUS_TURN, sample, blocked, error)
 
 
 def choose_action(pose: AgentPose, command: NavigationCommand,

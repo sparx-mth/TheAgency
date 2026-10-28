@@ -54,18 +54,43 @@ class ActionConverterParams:
         heading_hysteresis_deg: Extra path-only deadband after forward progress
             or a reversing turn on the same path. Zero preserves legacy behavior;
             bounded to two degrees, never applied to final facing or recovery.
+        plan_position_tolerance_m: How far the agent may stand from a
+            command's ``plan_pose`` for its planned actions to be executed
+            (since 2026-10-28). The simulator executes a step to the
+            millimetre, so this only absorbs float noise and a pose read
+            from a navmesh snap; a centimetre is generous. Beyond it the
+            plan is stale and the waypoints are followed instead.
+        plan_heading_tolerance_deg: The same for the heading, degrees.
+        strict_plan_tracking: Rigid tracking (since 2026-10-28). The ladder's
+            aim is one forward step along the path instead of
+            ``lookahead_m`` -- it turns at every kink and never cuts a
+            corner -- and the heading hysteresis is off; a command with a
+            plan whose start the agent has left is answered with the turn
+            toward the plan's heading before anything else, and with the
+            one-step aim once the heading is right. For a policy that plans
+            every route on the action lattice and re-plans from the exact
+            pose: the ladder is then only ever the fallback, and a fallback
+            that shortcuts the planned turns undoes the plan.
 
     Raises:
-        ObjNavError: If any value is not a positive finite number.
+        ObjNavError: If any value is not a positive finite number, or
+            ``strict_plan_tracking`` is not a bool.
     """
 
     lookahead_m: float = 0.5
     goal_tolerance_m: float = 0.25
     blocked_epsilon_m: float = 0.05
     heading_hysteresis_deg: float = 0.0
+    plan_position_tolerance_m: float = 0.02
+    plan_heading_tolerance_deg: float = 1.0
+    strict_plan_tracking: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("lookahead_m", "goal_tolerance_m", "blocked_epsilon_m"):
+        if not isinstance(self.strict_plan_tracking, bool):
+            raise ObjNavError("ActionConverterParams.strict_plan_tracking must be a bool, got %r"
+                              % (self.strict_plan_tracking,))
+        for name in ("lookahead_m", "goal_tolerance_m", "blocked_epsilon_m", "plan_position_tolerance_m",
+                     "plan_heading_tolerance_deg"):
             value = getattr(self, name)
             if (not isinstance(value, numbers.Real) or isinstance(value, bool)
                     or not math.isfinite(value) or value <= 0):

@@ -58,9 +58,35 @@ guarantee.
 discrete action out, assuming perfect execution and re-deciding from the true
 pose every step, so the real simulator's collisions and RoboTHOR's actuation
 noise are corrected rather than accumulated. Each step walks one ladder, in
-order: stop if asked → tilt the camera if asked → rotate toward a lookahead
-point on the path when the heading error exceeds half a turn → step forward
-while that brings the agent closer → face the requested heading at the end.
+order: stop if asked → tilt the camera if asked → the command's own planned
+action, when it carries one and the agent stands where the plan starts → rotate
+toward a lookahead point on the path when the heading error exceeds half a
+turn → step forward while that brings the agent closer → face the requested
+heading at the end.
+
+**A command may carry the actions that walk it** (since 2026-10-28:
+`NavigationCommand.actions` and `plan_pose`). A kinematic planner on the
+benchmark's own step and turn -- `core/planning/planners/lattice` -- emits the
+exact MOVE_FORWARDs and TURNs that walk the path, collision-checked; the policy
+sends the remaining suffix every step from the pose the plan expects, and the
+converter executes the first action verbatim while the agent is there (within
+`plan_position_tolerance_m` / `plan_heading_tolerance_deg`, a centimetre and a
+degree: the simulator executes to the millimetre). The moment it is not -- a
+refused step, a safety veto, a simulator slide -- the ladder below takes over on
+the same waypoints, and the policy, which sees every executed action, re-plans.
+The result is flagged `planned`. The ladder on its own quantises a smooth path
+into turns the path never needed: on a 32 m synthetic route through three 0.8 m
+doorways it spent 184 actions and 53 turns, the plan 148 and 15, with the full
+standoff through every doorway.
+
+**Strict tracking** (`ActionConverterParams.strict_plan_tracking`): for a policy
+that plans every route on the lattice the ladder is only ever the fallback, and
+a fallback that shortcuts a planned turn undoes the plan. Strict, the ladder
+aims one forward step along the path instead of `lookahead_m` -- it turns at
+every kink and never cuts a corner -- the heading hysteresis is off, and a
+command whose plan the agent has left the start of is answered with the turn
+toward the plan's heading before any step (`realign_to_plan`). The policy's
+route memory reads the same aim (`effective_lookahead_m`), so arrival agrees.
 
 How it follows a path, and why:
 

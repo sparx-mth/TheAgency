@@ -59,7 +59,7 @@ from sparx_agency.core.planning.objnav.types.pose import AgentPose
 #: The keys of every decision's ``info``, and nothing else.
 STEP_INFO_KEYS = {"status", "idle", "segment_index", "heading_error_rad",
                   "distance_to_goal_m", "remaining_path_m", "cross_track_m",
-                  "forward_blocked", "policy"}
+                  "forward_blocked", "planned", "policy"}
 
 
 def test_the_converters_action_is_returned_with_its_reasons():

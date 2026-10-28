@@ -8,6 +8,8 @@ from sparx_agency.core.planning.exploration.falcon.params import FalconParams
 from sparx_agency.core.localization.floor_atlas import MultiFloorParams
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
+from sparx_agency.core.planning.object_search.navigation.settings import (KinematicSettings, LookDownSettings,
+                                                                           ScrapeSettings)
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,26 @@ class RPTSettings:
             differ in exactly one thing: which pixels count as the object.
             The policy needs a segmenter when this is on and refuses to
             start without one.
+        centreline_weight: The planner's medial-axis layer
+            (``WeightedAStarParams.centreline_weight``, since 2026-10-28):
+            inside a passage narrower than ``2 * channel_half_width_m`` the
+            cost rises linearly from the ridge of the distance transform to
+            the walls, so a route threads a doorway through its middle and
+            a corridor down its centreline instead of cutting the jamb. 4.0:
+            at a 0.8 m doorway's centre a cell costs 2.3 times open floor,
+            at the jamb-side cell 3.0; the soft band alone told them apart by
+            a tenth. 0 restores the soft band alone.
+        channel_half_width_m: Half the passage width below which the layer
+            applies and a route is in a "channel" for the scrape guard and
+            the look-down. 0.6 m: every doorway, no room.
+        kinematic: The discrete-action lattice that turns every committed
+            route into the exact actions that walk it
+            (``navigation/kinematic_follower.py``).
+        doorway_scrape: When a refused step in a doorway is a scrape, not a
+            wall, and stays off the map (``navigation/scrape_guard.py``).
+        doorway_look_down: The camera pitched on the approach to a
+            doorway and the re-plan on what it saw
+            (``navigation/doorway_look_down.py``).
     """
 
     map_size_m: float = 80.0
@@ -184,6 +206,11 @@ class RPTSettings:
     step_down_m: float = 0.30
     stair_margin_m: float = 0.45
     segmentation: bool = False
+    centreline_weight: float = 4.0
+    channel_half_width_m: float = 0.6
+    kinematic: KinematicSettings = field(default_factory=KinematicSettings)
+    doorway_scrape: ScrapeSettings = field(default_factory=ScrapeSettings)
+    doorway_look_down: LookDownSettings = field(default_factory=LookDownSettings)
     target_closing: TargetClosingSettings = field(default_factory=TargetClosingSettings)
     doorway_peek: PeekSettings = field(default_factory=lambda: PeekSettings(enabled=False))
     falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
@@ -233,6 +260,22 @@ class RPTSettings:
             raise ValueError("detour_factor must be finite and non-negative (0 disables the squeeze rule)")
         if self.local_exploration not in ("frontier", "falcon"):
             raise ValueError("local_exploration must be frontier or falcon; no silent fallback")
+        if (isinstance(self.centreline_weight, bool) or not math.isfinite(self.centreline_weight)
+                or self.centreline_weight < 0):
+            raise ValueError("centreline_weight must be finite and non-negative (0 disables the medial-axis layer)")
+        if (isinstance(self.channel_half_width_m, bool) or not math.isfinite(self.channel_half_width_m)
+                or self.channel_half_width_m <= self.body_radius_m):
+            raise ValueError("channel_half_width_m must be finite and wider than the body radius")
+        for name, cls in (("kinematic", KinematicSettings), ("doorway_scrape", ScrapeSettings),
+                          ("doorway_look_down", LookDownSettings)):
+            value = getattr(self, name)
+            if isinstance(value, dict):
+                value = cls(**value)
+                object.__setattr__(self, name, value)
+            if not isinstance(value, cls):
+                raise ValueError("%s must be %s or parameter overrides" % (name, cls.__name__))
+        if not self.body_radius_m <= self.kinematic.lattice_floor_m <= self.min_clearance_m:
+            raise ValueError("kinematic.lattice_floor_m must lie between body_radius_m and min_clearance_m")
         if isinstance(self.target_closing, dict):
             object.__setattr__(self, "target_closing", TargetClosingSettings(**self.target_closing))
         if not isinstance(self.target_closing, TargetClosingSettings):

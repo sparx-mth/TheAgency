@@ -84,6 +84,9 @@ class ConversionResult:
             forward step ahead instead of ``lookahead_m`` until a MOVE_FORWARD
             moves again; it never plans a detour. That is the policy's job,
             through its optional ``notify_blocked`` hook.
+        planned: The action is the first of the command's planned actions,
+            executed because the agent stands at the command's ``plan_pose``
+            (since 2026-10-28); False for an action the ladder chose.
 
     Raises:
         ObjNavError: On an unknown status, an action on an idle status or none
@@ -99,6 +102,7 @@ class ConversionResult:
     remaining_path_m: float = 0.0
     cross_track_m: float = 0.0
     forward_blocked: bool = False
+    planned: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:

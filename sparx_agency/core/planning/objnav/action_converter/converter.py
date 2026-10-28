@@ -45,7 +45,10 @@ from typing import Optional
 from sparx_agency.core.planning.objnav.action_converter.ladder import (
     check_executable,
     choose_action,
+    effective_lookahead_m,
     parallel_offset,
+    planned_action,
+    realign_to_plan,
 )
 from sparx_agency.core.planning.objnav.action_converter.params import (
     ActionConverterParams,
@@ -190,9 +193,16 @@ class DiscreteActionConverter:
         3. (Bookkeeping) Adopt the command's path if it differs from the
            current one, restarting the progress, and project the pose onto
            it -- the first leg within ``parallel_offset`` of it -- aiming
-           ``params.lookahead_m`` ahead (one forward step while recovering),
-           never within half a step of the agent short of the goal.
-        4. The ladder,
+           ``params.lookahead_m`` ahead (one forward step while recovering,
+           and always under ``strict_plan_tracking``), never within half a
+           step of the agent short of the goal.
+        4. The command's planned actions, when the agent stands at their
+           ``plan_pose``: the first of them, after any LOOK the pitch needs
+           (:func:`~sparx_agency.core.planning.objnav.action_converter.ladder.planned_action`);
+           under ``strict_plan_tracking``, the turn toward the plan's heading
+           when the agent has left its start
+           (:func:`~sparx_agency.core.planning.objnav.action_converter.ladder.realign_to_plan`).
+        5. The ladder,
            :func:`~sparx_agency.core.planning.objnav.action_converter.ladder.choose_action`:
            tilt, face, arrive (STOP for ``stop_on_arrival``), turn toward the
            aim, or step forward.
@@ -297,17 +307,21 @@ class DiscreteActionConverter:
         # committing the progress here equals committing it next step.
         sample = None
         if self._path_progress.path:
-            lookahead = self._params.lookahead_m
-            if self._recovering:
-                lookahead = self._spec.forward_step_m
+            lookahead = effective_lookahead_m(self._spec, self._params, self._recovering)
             sample = self._path_progress.advance(
                 pose, lookahead, self._spec.forward_step_m / 2.0,
-                parallel_offset(self._spec, self._params.lookahead_m))
+                parallel_offset(self._spec, lookahead))
+        planned = planned_action(pose, command, sample, blocked, self._spec, self._params)
+        if planned is not None:
+            return planned
+        realign = realign_to_plan(pose, command, sample, blocked, self._spec, self._params)
+        if realign is not None:
+            return realign
         result = choose_action(pose, command, sample, blocked, self._spec, self._params)
         reversing = (self._last_action, result.action) in (
             (DiscreteAction.TURN_LEFT, DiscreteAction.TURN_RIGHT),
             (DiscreteAction.TURN_RIGHT, DiscreteAction.TURN_LEFT))
-        margin = math.radians(self._params.heading_hysteresis_deg)
+        margin = 0.0 if self._params.strict_plan_tracking else math.radians(self._params.heading_hysteresis_deg)
         if (margin > 0 and same_path and not self._recovering and result.status == "turn" and result.target_xy is not None
                 and (self._last_action == DiscreteAction.MOVE_FORWARD or reversing)
                 and abs(result.heading_error_rad) <= self._spec.turn_angle_rad / 2 + margin):

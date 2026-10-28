@@ -18,6 +18,7 @@ simulator geometry beyond what the adapter declares.
                                              exploration/  frontier sweep, glances, peeks, the fallback ladder, escape
                                              multifloor/   spawn-floor guard (default) or the building coordinator
                                              closing/      the target takeover: verify, approach, pitch, STOP
+                                             navigation/   the route as the exact actions that walk it (lattice), doorway scrapes, the look-down
  NavigationCommand ◄──────────────────────  policy.py     one decision per frame, in world coordinates
 ```
 
@@ -44,12 +45,14 @@ Habitat bridge, the Gibson files and the run CLI live in
 | `closing/` | `target_closing.py`, `target_path.py`, `target_backoff.py`, `approach_history.py` |
 | `falcon/` | the planar FALCON explorer wired to the room search (`local_exploration: "falcon"`) |
 | `route_memory.py` | the committed-route memory: when a planned path is kept, re-used or released |
+| `navigation/` | the narrow-passage layer (2026-10-28): `kinematic_follower.py` (every committed route walked as the action sequence the discrete-action lattice plans, `core/planning/planners/lattice`), `bottlenecks.py` (doorways and corridors read off the clearance field), `scrape_guard.py` (a refused step in a doorway stays off the map), `doorway_look_down.py` (the camera pitched on the approach); see its README |
 | `baselines/` | `falcon_yolo.py`: goal-free FALCON + the same perception and closing, no LLM (`--agent falcon-yolo`) |
 | `tests/` | the package's contract tests: boundaries, a service-free smoke run, the failure contract; see below |
 
 What the method shares with the rest of `core` it imports from there rather
 than keeping a copy: the map vocabulary (`core/planning/environment`), the
-A\*/WA\* planners, the FALCON port, the RPT\* room solver, frontier ranking and
+A\*/WA\* planners and the discrete-action lattice (`core/planning/planners`),
+the FALCON port, the RPT\* room solver, frontier ranking and
 room costs (`core/planning/exploration`), the room watershed, registry and node
 oracle (`core/mapping/topology`), the landmark map (`core/mapping/objects`),
 the camera geometry and the action converter (`core/planning/objnav`), the

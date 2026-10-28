@@ -47,6 +47,8 @@ from sparx_agency.core.planning.object_search.world_model.sightlines import Sigh
 from sparx_agency.core.planning.object_search.multifloor.spawn_floor_guard import SpawnFloorGuard
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
 from sparx_agency.core.planning.object_search.exploration.doorway_peek import DoorwayPeek
+from sparx_agency.core.planning.object_search.navigation import (BottleneckLookDown, DoorwayScrapeGuard,
+                                                                  KinematicFollower)
 from sparx_agency.core.planning.object_search.rooms.discovery import SUSPENDED_PHASES, discover
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.core.planning.object_search.exploration.exploration_metrics import ExplorationMetrics
@@ -66,15 +68,23 @@ class RPTSearchPolicy:
             raise ValueError("RPTSettings.segmentation is on but no segmenter was given; no silent box fallback")
         if s.local_exploration == "falcon":
             self.name = "sparx-rpt-llm-falcon-planar"
-        self.converter_params = ActionConverterParams(heading_hysteresis_deg=1.0)
+        # Strict tracking (2026-10-28): the lattice follower plans every route on the benchmark's own step and
+        # turn and re-plans from the exact pose, so the converter's ladder is only ever the fallback -- aimed one
+        # step ahead, without hysteresis, so it cannot shortcut a planned turn. Off, the 1-degree hysteresis ladder.
+        self.converter_params = ActionConverterParams(
+            heading_hysteresis_deg=0.0 if s.kinematic.strict_tracking else 1.0,
+            strict_plan_tracking=s.kinematic.strict_tracking)
         # A ground agent squeezes rather than detours: a route at the preferred standoff more than
         # ``detour_factor`` times the squeeze route is a detour, and the squeeze is walked -- down to
         # ``min_clearance_m``, not the body radius (see RPTSettings: HM3D refuses any contact).
+        # The medial-axis layer (``centreline_weight``) threads doorways through their middle; the lattice
+        # follower then walks the route on the benchmark's own step and turn (``navigation/``).
         self.planner_params = WeightedAStarParams(
             inflate_radius_m=s.preferred_clearance_m, inflate_floor_m=s.min_clearance_m,
             detour_factor=s.detour_factor,
             unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
-            start_skip_m=0.0, search_margin_m=s.map_size_m)
+            start_skip_m=0.0, search_margin_m=s.map_size_m,
+            centreline_weight=s.centreline_weight, channel_half_width_m=s.channel_half_width_m)
         self.loop_settings = LoopSettings()
         self.supervisor_params = self.loop_settings.supervisor_params(s.seed)
         self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings()
@@ -111,6 +121,16 @@ class RPTSearchPolicy:
                                       self.sight_settings.pocket_max_m2, self.sight_settings.pocket_max_width_m)
                               if self.sight_settings.enabled else "none: every unknown cell is an exit"),
                 "target_closing": asdict(self.settings.target_closing),
+                "kinematic": dict(asdict(self.settings.kinematic),
+                                  rule="every committed route is walked as the action sequence a Hybrid A* over "
+                                       "(x, y, heading) finds with the benchmark's own step and turn as its only "
+                                       "primitives, collision-checked on the clearance field at the route's standoff "
+                                       "and priced in actions; the converter executes it verbatim while the agent "
+                                       "stands where the plan expects it; a refused step is a pose the lattice may "
+                                       "not step forward from, not a cell on the map"
+                                       if self.settings.kinematic.enabled else "none: the converter's waypoint ladder"),
+                "doorway_scrape": asdict(self.settings.doorway_scrape),
+                "doorway_look_down": asdict(self.settings.doorway_look_down),
                 "target_navmesh_projection": self.target_projector is not None,
                 "room_visit": self._room_visit_description(),
                 "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
@@ -268,6 +288,11 @@ class RPTSearchPolicy:
         self.last_world = None
         self.telemetry = ExplorationMetrics()
         self.camera_control = CameraController(episode.action_spec)
+        # The narrow-passage layer (2026-10-28): the lattice follower that walks every route on the benchmark's
+        # own step and turn, the guard that keeps a doorway scrape off the map, the look-down at a bottleneck.
+        self.kinematic = KinematicFollower(self, s.kinematic)
+        self.scrape_guard = DoorwayScrapeGuard(self, s.doorway_scrape)
+        self.look_down = BottleneckLookDown(self, s.doorway_look_down)
         self.perception = PerceptionCycle(self)
         self.sweep = FrontierSweep(self, self.sweep_settings)
         self.hierarchy = None
@@ -315,9 +340,14 @@ class RPTSearchPolicy:
         return camera_rotation_turns(k.width, k.fx, self.episode.action_spec.turn_angle_rad)
 
     def notify_blocked(self, observation):
+        # The refused step is a pose the lattice may not step forward from again, whatever else it is; and
+        # inside a doorway, nearly aligned with it, it is a scrape the map is not told about (``scrape_guard``).
+        self.kinematic.note_refused(observation)
+        scrape = self.scrape_guard.judge(observation, self.last_world, self._route)
         if self.closing.active:
             self.closing.note_blocked()
-            self.mapping.notify_blocked(observation, self.episode.action_spec.forward_step_m)
+            if scrape is None:
+                self.mapping.notify_blocked(observation, self.episode.action_spec.forward_step_m)
             self._blocked += 1
             self.route_memory.clear("target_forward_blocked")
             self._route = self._goal = None
@@ -330,13 +360,14 @@ class RPTSearchPolicy:
             # No traversal of ours (the atlas alone reports the departure): the probe's memory and the
             # bump marks apply as on the storey, or the escape rung pushes into one wall for the rest of
             # the episode (00873/000002, 2026-10-25: 473 refused steps at one cell).
-        self.mapping.notify_blocked(observation, self.episode.action_spec.forward_step_m)
         self._blocked += 1
-        self.escape.note_blocked(observation)
+        if scrape is None:
+            self.mapping.notify_blocked(observation, self.episode.action_spec.forward_step_m)
+            self.escape.note_blocked(observation)
+            if self._goal is not None and not self._action_owner.startswith("doorway_peek"):
+                self._bumped_toward(observation, self._goal, self.route_memory.kind)
         if self._blocked_since is None:
             self._blocked_since = self._floor_time
-        if self._goal is not None and not self._action_owner.startswith("doorway_peek"):
-            self._bumped_toward(observation, self._goal, self.route_memory.kind)
         self.route_memory.clear("forward_blocked")
         self._route, self._goal = None, None
         if self.hierarchy is not None and self._action_owner not in SUSPENDED_PHASES:
@@ -383,7 +414,17 @@ class RPTSearchPolicy:
         self._action_owner = "search"
         started = time.monotonic()
         try:
+            if self.look_down.refreshed(observation):
+                # The first frame with the pitched view: the doorway's entry is re-planned on it.
+                self.kinematic.invalidate("look_down_refresh")
             command = self._plan(observation)
+            # The look-down applies to a walk of the search's own: not the takeover's approach, not a stair
+            # transaction, not a sweep or a glance turned in place.
+            walking = (bool(command.waypoints) and not self.closing.active and self._action_owner == "search"
+                       and not (self.building and self.building.phase != "SEARCH")
+                       and self.camera_control.inspection is None)
+            self.camera_control.bottleneck_pitch_deg = self.look_down.pitch_request(
+                observation, self.last_world, command.waypoints if walking else None)
             phase = self.hierarchy.machine.phase if self.hierarchy else str(command.info.get("kind", self.supervisor.state))
             if self._action_owner in SUSPENDED_PHASES:
                 phase = self._action_owner
@@ -422,6 +463,7 @@ class RPTSearchPolicy:
         if observation.step < self._notified_step:
             raise ValueError("Action ledger regressed")
         self._notified_step = observation.step
+        self.kinematic.note_action(observation, action)
         if self.closing.active:
             self.closing.note_action(action)
             self.telemetry.emitted(observation, action, self.telemetry.phase)
@@ -764,7 +806,8 @@ class RPTSearchPolicy:
             info["squeeze" if planner is getattr(self, "squeeze_planner", None) else "through_unknown"] = True
         if self.route_memory.reason == "new_goal_or_invalid_route":
             info["route_replaced"] = self.route_memory.replaced
-        return NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)
+        command = NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)
+        return self.kinematic.command(observation, world, planner, command)
 
     def _perceive(self, observation):
         return self.perception.fuse(observation)
@@ -829,6 +872,9 @@ class RPTSearchPolicy:
                 "glances": self.glances.diagnostics(),
                 "exploration_fallback": self.fallback.diagnostics(),
                 "escape_probe": self.escape.diagnostics(),
+                "kinematic": self.kinematic.diagnostics(),
+                "doorway_scrape": self.scrape_guard.diagnostics(),
+                "doorway_look_down": self.look_down.diagnostics(),
                 "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
                 "oracle_repair_attempts": self.graph.oracle.repair_attempts,
                 "oracle_repair_successes": self.graph.oracle.repair_successes}

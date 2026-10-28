@@ -162,7 +162,7 @@ def test_no_progress_is_a_one_shot_verdict_that_is_still_reported_on_the_next_ad
 
 
 def test_navigate_surfaces_the_replacement_reason_only_on_adoption(monkeypatch):
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(kinematic={"enabled": False})     # a stub world: no lattice walk to plan
     monkeypatch.setattr(policy, "_plan_to", lambda obs, world, goal: SimpleNamespace(points=[Pose2D(0, 0), Pose2D(*goal)]))
     world = SimpleNamespace(resolution=0.1)
     monkeypatch.setattr(policy.planner, "path_collides", lambda *a, **k: False)

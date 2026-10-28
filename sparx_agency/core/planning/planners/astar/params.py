@@ -113,6 +113,25 @@ class WeightedAStarParams:
         clearance_margin_m: Width of the soft cost band beyond the lethal
             radius. Routes are centred within corridors up to roughly
             ``2*(inflate_radius_m + clearance_margin_m)`` wide.
+        centreline_weight: The medial-axis layer for doorways and tight
+            passages (since 2026-10-28). The soft band above is a gentle
+            slope -- ``clearance_weight / clearance_margin_m`` per metre of
+            lateral offset, 3.75 at the defaults -- so inside a 0.8 m
+            doorway the centre and the jamb-side cell differ by a tenth of a
+            cell's cost and an 8-connected route cuts the corner through the
+            jamb. This layer adds ``centreline_weight * (1 - d / channel_half_width_m)``
+            to every cell whose clearance ``d`` is below
+            ``channel_half_width_m``: a slope of ``centreline_weight /
+            channel_half_width_m`` per metre, steepest exactly where the
+            passage is tightest, zero in the open. The minimum of the sum
+            across a passage is its medial axis (the ridge of the distance
+            transform), so the route threads a doorway through its middle
+            and a corridor down its centreline. 0 disables the layer (the
+            FALCON aircraft planner's default: it does not fly doorways).
+        channel_half_width_m: Half the passage width below which the
+            centreline layer applies; also the "narrow channel" threshold
+            the ground-robot callers read bottlenecks from. 0.6 m: passages
+            narrower than 1.2 m -- every doorway, no room.
         lethal_confidence: Per-cell confidence in ``[0, 1]`` an OCCUPIED cell
             needs before it blocks the search. Requires the caller to supply a
             confidence grid (see :meth:`WeightedAStarPlanner2D.set_confidence`);
@@ -169,6 +188,8 @@ class WeightedAStarParams:
     unknown_cost: float = 5.0
     clearance_weight: float = 3.0
     clearance_margin_m: float = 0.8
+    centreline_weight: float = 0.0
+    channel_half_width_m: float = 0.6
     lethal_confidence: float = 0.0
     soft_obstacle_cost: float = 25.0
     path_simplify_m: float = 0.0

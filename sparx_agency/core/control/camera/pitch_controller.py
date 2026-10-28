@@ -87,6 +87,10 @@ class CameraController:
         self.inspected = set()
         self.last_inspection = -self.settings.inspection_cooldown_actions
         self.terrain_pitch = None
+        #: A downward pitch requested for the approach to a doorway or a narrow channel, degrees, or None
+        #: (``object_search/navigation/doorway_look_down.py``, since 2026-10-28). Read under the SEARCH owner
+        #: only, after any inspection in force: a sweep, a traversal and the target takeover keep their pitch.
+        self.bottleneck_pitch_deg = None
         self.last = {}
 
     def normal_view(self, pose):
@@ -186,6 +190,8 @@ class CameraController:
                 owner = "RESTORE" if self.inspection["restoring"] else ("FOOTING" if self.footing else "INSPECT")
                 desired = (s.normal_pitch_deg if self.inspection["restoring"]
                            else self.inspection.get("pitch_deg", s.inspection_pitch_deg))
+            elif self.bottleneck_pitch_deg is not None:
+                owner, desired = "DOORWAY", float(self.bottleneck_pitch_deg)
             else:
                 desired = s.normal_pitch_deg
                 if not self.normal_view(obs.pose):

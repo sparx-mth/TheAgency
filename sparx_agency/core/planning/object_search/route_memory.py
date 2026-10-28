@@ -5,7 +5,8 @@ from dataclasses import dataclass
 import math
 
 from sparx_agency.core.common.types import Pose2D
-from sparx_agency.core.planning.objnav.action_converter.ladder import choose_action, parallel_offset
+from sparx_agency.core.planning.objnav.action_converter.ladder import (choose_action, effective_lookahead_m,
+                                                                        parallel_offset)
 from sparx_agency.core.planning.objnav.action_converter.path_progress import PathProgress
 from sparx_agency.core.planning.objnav.action_converter.types import STATUS_ARRIVED
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
@@ -82,9 +83,9 @@ class CommittedRoute:
         self.reason = "new_goal_or_invalid_route"
 
     def _sample(self, observation):
+        lookahead = effective_lookahead_m(self.spec, self.converter)      # the executor's own aim, strict or not
         return self.progress.advance(
-            observation.pose, self.converter.lookahead_m, self.spec.forward_step_m / 2,
-            parallel_offset(self.spec, self.converter.lookahead_m))
+            observation.pose, lookahead, self.spec.forward_step_m / 2, parallel_offset(self.spec, lookahead))
 
     def arrived(self, observation):
         """Use the executor's arrival rule on the actual (possibly snapped) path.

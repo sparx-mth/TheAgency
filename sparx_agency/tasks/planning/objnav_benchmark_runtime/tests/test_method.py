@@ -139,7 +139,7 @@ def test_invalid_method_settings_refused(kwargs):
 
 def test_approach_arrival_band_is_inside_stop_radius(monkeypatch):
     from types import SimpleNamespace
-    policy, episode = setup_policy()
+    policy, episode = setup_policy(kinematic={"enabled": False})     # a stub world: no lattice walk to plan
     policy._target_xy = (2.0, 0.0)
     goals = []
 
