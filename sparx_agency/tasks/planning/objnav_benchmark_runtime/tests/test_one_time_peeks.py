@@ -153,6 +153,24 @@ def test_stair_only_region_is_not_a_pending_room():
     assert p.peek.pending_rooms() == [] and p.peek.floor_ready()
 
 
+def test_pending_rooms_are_judged_on_the_rooms_grid_not_the_traversal_window():
+    """Mid-traversal ``last_world`` is the terrain's small window; the stair mask must still meet the room masks."""
+    p, ep, world, rooms, _ = peek_rig()
+    stair_at_door(p)
+    stair_only = np.zeros_like(rooms[1].mask)
+    stair_only[25:36, 56:65] = True
+    p.graph.registry.rooms = {7: replace(rooms[1], id=7, mask=stair_only), 8: rooms[1]}
+    p.mapping.worlds[p.mapping.floor_id] = world                       # the storey map the rooms were segmented on
+    p.last_world = world
+    expected = p.peek.pending_rooms()
+    assert expected == [8], "the stair connector is excluded; the real room is still owed its peek"
+    window = type(world)(np.full((12, 12), world.values.free, np.int8),
+                         replace(world.params, origin_x=5.5, origin_y=2.5), values=world.values)
+    p.last_world = window                                              # what StairTraversal.plan leaves behind
+    assert p.peek.pending_rooms() == expected
+    assert p.peek.diagnostics()["coverage"]["pending_rooms"] == expected
+
+
 def test_vetoed_room_transit_is_released_instead_of_replanned_forever():
     p, ep, world, _ = coverage_rig()
     p.loop.plan(obs_at(ep, 0, IN_A), world)

@@ -61,10 +61,28 @@ class DoorwayPeek:
             return "classified"
         return None
 
+    def _registry_world(self):
+        """The storey map the registry's room masks are rasterized on, or ``None`` before the first map.
+
+        The stair exclusion is ANDed with every room mask, so it must be drawn
+        on the rooms' own grid: the floor's world of record
+        (``mapping.worlds[floor_id]``, the map ``graph.update`` segmented).
+        ``last_world`` is only the map the latest decision planned on, and
+        during a stair traversal that is the terrain's local window
+        (``StairTraversal.plan`` stores it) -- a different shape, on which a
+        stair mask cannot meet an (800, 800) room mask (2026-10-28:
+        00802-wcojb4TFT35/000089 at action 17, through the recorder's
+        ``diagnostics()``, the one caller that asks mid-traversal). A policy
+        whose mapping keeps no per-floor worlds falls back to ``last_world``.
+        """
+        mapping = self.policy.mapping
+        world = getattr(mapping, "worlds", {}).get(mapping.floor_id)
+        return world if world is not None else getattr(self.policy, "last_world", None)
+
     def pending_rooms(self):
         """Unknown regions still eligible for their single peek; never demand repeats."""
         pending = []
-        world = getattr(self.policy, "last_world", None)
+        world = self._registry_world()
         excluded = stair_peek_mask(self.policy, world) if world is not None else None
         for pid, room in self.policy.graph.registry.rooms.items():
             if excluded is not None and (room.mask & excluded).any():
