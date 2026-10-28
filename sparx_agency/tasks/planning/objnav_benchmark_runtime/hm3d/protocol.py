@@ -214,7 +214,14 @@ class HM3DProtocol:
         the Y-up frame" and, through the runner, ended the scene (LESSONS.md,
         2026-10-20). The trade is the same as Gibson accepted: a step that
         reads entirely as height is no longer refused by this bound alone,
-        and the independent path-length and heading checks remain.
+        and the independent path-length and heading checks remain. Since
+        2026-10-27 the bound is 0.80 m: the ground-truth perception sweep
+        lost ``00832-qyAac8rV8Zk/000029`` at action 48 to a MOVE_FORWARD that
+        went 0.247 m along its heading and 0.748 m DOWN -- the step filter
+        carrying the agent off a ledge onto the mesh below, which the
+        recomputed navmesh connects; the refusal's "Y-up frame" clause named
+        the wrong fault, as before. 0.80 m admits that drop with a margin of a
+        tread and still refuses anything near a storey.
 
         ``reproject_m`` (since 2026-10-26) is 0.15 m: habitat-sim's step
         filter starts every body action from the agent's projection onto the
@@ -233,7 +240,7 @@ class HM3DProtocol:
         real step, LOOKs and STOP get no slack at all, and the independent
         path-length check remains.
         """
-        return KinematicTolerance(climb_m=0.60, reproject_m=0.15)
+        return KinematicTolerance(climb_m=0.80, reproject_m=0.15)
 
     def evaluation_settings(self) -> EvaluationSettings:
         """The harness options this protocol requires, stated explicitly."""
