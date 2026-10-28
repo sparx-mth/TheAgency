@@ -11,6 +11,65 @@ Format per entry:
 
 ---
 
+## 2026-10-27 — The second full HM3D v1 sweep stopped at 1,926 of 2,000: two more scenes ended by the kinematic self-check, and the habitat-sim source says why a scalar slack can never be sized for it
+
+**Symptom:** `runs/hm3d_v1_val_j8p2_20261026` (20 scenes, 8 at once, 2 Ollama slots, 32 h) ended `complete: false`:
+18 scenes exit 0, two exit 1 on `EnvContractError` from `check_step` -- `00832-qyAac8rV8Zk/000029` action 43, a
+MOVE_FORWARD that went 0.203 m along its heading and **0.679 m down** (bound 0.600 m); `00878-XB4GS9ShBRE/000095`
+action 187, a MOVE_FORWARD that read 0.238 m at -11.3 degrees *after* the 0.15 m `reproject_m` slack, i.e. a raw
+0.233 m along and **0.197 m across** at the same height. 74 episodes unrun. (Beside it: the launcher's bash died
+with `syntax error near unexpected token '('` at the very end -- `run_benchmark.sh` had been edited and committed
+in the same checkout while the 32-hour campaign ran, and bash reads a script by byte offset. The children were
+unaffected: the 8 first-wave scenes imported c81de9a3, the 12 second-wave scenes 80273cfa, with every method,
+policy, protocol, kinematics, evaluation and runtime block of their frozen configurations identical and the
+ground-truth perception of 80273cfa strictly opt-in; only `source_sha256` differs by wave.)
+
+**Root cause:** Both are the step filter's own placements, read in habitat-sim 0.2.4's source
+(`src/esp/nav/PathFinder.cpp`, `tryStep`) and its Detour fork (`erikwijmans/recastnavigation`, `moveAlongSurface`
+with `allowSliding=false`), then reproduced with the harness's own simulator (148,500 seeded random actions per
+scene: `hm3d/placement_probe.py`, 1,500 actions from each published start, seed 17): every body action -- a turn included -- starts from
+`projectToPoly(start)`, the 3-D-nearest polygon point within +-2 m horizontally and +-4 m vertically (the very
+point `pathfinder.snap_point` returns), walks the straight line from there to the point the action asked for *from
+the unprojected pose*, with sliding off stops where that line meets a wall edge, sets the height from
+`getPolyHeight` of the last polygon **without checking that it found one**, and **returns the pose untouched**
+when the two projections are not connected or no path exists. On 00878's stairs one stride advanced 0.063 m,
+dropped 0.474 m and left the agent standing 0.316 m from the nearest mesh point, at a tread's height
+(`is_navigable` false); from there a refused step moved nothing, a TURN carried the agent 0.313 m onto the tread
+("turn in place" refused), and a step that went through ran from the tread (0.299 m across its heading, "+0.000 m
+up" -- the sweep's 00878 case). 00832's strides climbed up to 0.740 m. Two placements in some 500,000 actions is
+the rate of the two sweeps. The recomputed navmesh explains the height as well: with
+`cell_height` 0.20 m and `agent_max_climb` 0.20 m, `walkableClimb` is one voxel, so neighbouring cells whose
+quantised floors differ by one cell connect -- a real riser of anything under 0.40 m -- and `detail_sample_max_error`
+is one `cell_height`. A scalar `reproject_m` cannot be sized for the horizontal case: 0.197 m across needs 0.156 m
+or more, the mechanism allows up to the stale height (~0.4 m), and from 0.20 m a mirrored simulator's full backward
+stride reads as a blocked step (what the slack leaves of it is at the heading check's 0.05 m floor).
+
+**Fix / workaround:** (1) The environment reports the projection itself: `HabitatRGBDSimulator.last_placed_pose`
+(the `snap_point` `_observe` already computed, as an `AgentPose`), `HM3DEnv.placed_pose()`, and the runner hands it
+to `check_step` -> `check_motion(placed=...)`, which judges a turn or MOVE_FORWARD **from where the filter started
+it toward where it aimed**: the realised end may lie anywhere on that segment (advance at most its length plus the
+overshoot slack, course within `heading_deg` of it) or be the pose itself (a step the filter refused outright), the
+height is judged from the mesh point the filter started at, the yaw and pitch bounds are the ordinary ones, LOOKs
+and STOP ignore it, and a placement at the pose or none is the ordinary check with `reproject_m` -- so the slack
+stays 0.15 m for the path without the hook. A slide off the segment, a step past its end and a backward stride are
+still refused, placement or none. The first draft admitted the segment alone and refused 1,245 of 00878's 148,500
+probe actions -- every one a step refused outright from the off-mesh pose; with the pose itself admitted the walk
+passes in full. (2) `climb_m` 0.85 m,
+derived: a riser under two cell heights (0.40) + a 45-degree run over the stride (0.25) + the detail mesh's sample
+error (0.20); the 0.740 m probe maximum and the 0.679 m drop lie under it, a storey or a teleport does not. Pinned
+in `test_kinematics.py` (geometry of the segment, turns, LOOKs, a runner-level `PlacingEnv`), `test_hm3d_env.py`
+(`placed_pose`) and `test_hm3d_protocol.py` (both recorded motions, the backward stride). To finish the sweep:
+`hm3d/run_benchmark.sh --version v1 --jobs 2 --output runs/hm3d_v1_val_j8p2_20261026 --resume-accepting-changes
+kinematics evaluation source_sha256 gpu_plan` (the 18 finished scenes are skipped; the two continue from their 30th
+and 96th episodes). Operationally: never edit or commit in the checkout a campaign is running from -- launch from a
+worktree, or copy the checkout -- because bash reads the running script by offset and the children import whatever
+is on disk when they start.
+
+**Don't:** Don't keep widening a scalar excuse for a mechanism you can read: the fourth placement would have needed
+0.31 m, the fifth more, and 0.20 m already blinds the check to a mirrored frame. Don't trust `getPolyHeight`'s
+return value to have been checked by the simulator. And don't resume a sweep from a checkout whose HEAD moved under
+it without diffing the frozen configurations between its waves first -- here they agreed; next time they may not.
+
 ## 2026-10-26 — Planning a second campaign beside a running one: the GPU plan would have sent `num_gpu=0` to the SHARED Ollama and put the live sweep's LLM on the CPU
 
 **Symptom:** The first launcher preflight of the ground-truth perception run (`hm3d/run_benchmark.sh

@@ -174,30 +174,38 @@ def test_evaluation_settings_demand_stop_and_exact_three_dimensional_path_accoun
     assert settings.require_stop_for_success is True
     assert settings.path_length_dimension == "3d"
     assert settings.path_length_epsilon_m == 0.0
-    assert settings.kinematics == KinematicTolerance(climb_m=0.80, reproject_m=0.15)
+    assert settings.kinematics == KinematicTolerance(climb_m=0.85, reproject_m=0.15)
     assert replace(HM3D_V1, path_length_epsilon_m=0.01
                    ).evaluation_settings().path_length_epsilon_m == 0.01
 
 
 def test_the_climb_bound_admits_a_stair_tread_and_still_refuses_a_jump():
-    """00878-XB4GS9ShBRE/000000 action 170 (0.204 m across, 0.210 m down one tread) killed the first v1 sweep under the
-    0.20 m default; 00832-qyAac8rV8Zk/000029 action 48 (0.247 m along, 0.748 m down a ledge) killed the ground-truth
-    sweep's scene under 0.60 m."""
+    """00878-XB4GS9ShBRE/000000 action 170 (0.204 m across, 0.210 m down one tread) killed the first v1 sweep under
+    the 0.20 m default; one ledge in 00832-qyAac8rV8Zk/000029 ended that scene in both sweeps of 2026-10-27 under
+    0.60 m -- action 48 of the ground-truth perception sweep (0.247 m along, 0.748 m down) and action 43 of the v1
+    sweep (0.203 m along, 0.679 m down). The bound is what the recomputed navmesh can connect within one stride: a
+    riser under two cell heights (0.40 m), a 45-degree run over the stride (0.25 m) and the detail mesh's sample error
+    (0.20 m) -- 0.85 m -- and a jump just past it, or a storey, is still refused."""
     from sparx_agency.core.planning.objnav.errors import EnvContractError
     from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
     from sparx_agency.core.planning.objnav.types.pose import AgentPose
     from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
     before = AgentPose(0.0, 0.0, 0.0, 0.0)
-    check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.204, 0.0, -0.210, 0.0),
-                 HM3D_V1.actions(), HM3D_V1.kinematics())
-    check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.247, 0.0, -0.748, 0.0),
-                 HM3D_V1.actions(), HM3D_V1.kinematics())
-    with pytest.raises(EnvContractError, match="height by at most 0.600 m"):
-        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.247, 0.0, -0.748, 0.0),
-                     HM3D_V1.actions(), KinematicTolerance(climb_m=0.60, reproject_m=0.15))
-    with pytest.raises(EnvContractError, match="height by at most 0.800 m"):
-        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0.0, 0.81, 0.0),
-                     HM3D_V1.actions(), HM3D_V1.kinematics())
+    spec, tolerance = HM3D_V1.actions(), HM3D_V1.kinematics()
+    assert tolerance.climb_m == pytest.approx(2 * 0.20 + 0.25 * math.tan(math.radians(45.0)) + 0.20)
+    one_tread = AgentPose(0.204, 0.0, -0.210, 0.0)
+    ledge_gt, ledge_v1 = AgentPose(0.247, 0.0, -0.748, 0.0), AgentPose(0.203, 0.0, -0.679, 0.0)
+    with pytest.raises(EnvContractError, match="height by at most 0.204 m"):   # the default: one riser, or the advance
+        check_motion(DiscreteAction.MOVE_FORWARD, before, one_tread, spec, KinematicTolerance())
+    for ledge in (ledge_gt, ledge_v1):
+        with pytest.raises(EnvContractError, match="height by at most 0.600 m"):
+            check_motion(DiscreteAction.MOVE_FORWARD, before, ledge, spec, KinematicTolerance(climb_m=0.60, reproject_m=0.15))
+    for motion in (one_tread, ledge_gt, ledge_v1):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, motion, spec, tolerance)
+    with pytest.raises(EnvContractError, match="height by at most 0.850 m"):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0.0, 0.86, 0.0), spec, tolerance)
+    with pytest.raises(EnvContractError, match="height by at most 0.850 m"):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.10, 0.0, -2.5, 0.0), spec, tolerance)
 
 
 def test_the_step_filters_placement_admits_the_two_motions_that_ended_scenes_of_the_full_v1_sweep():
@@ -221,6 +229,32 @@ def test_the_step_filters_placement_admits_the_two_motions_that_ended_scenes_of_
         check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.0, -0.25, 0.0, 0.0), spec, tolerance)
     with pytest.raises(EnvContractError, match="tilt in place"):
         check_motion(DiscreteAction.LOOK_DOWN, before, AgentPose(0.071, 0.0, 0.0, 0.0, spec.tilt_angle_rad), spec, tolerance)
+
+
+def test_a_reported_placement_admits_the_step_that_ended_a_scene_of_the_second_full_v1_sweep_and_no_slide():
+    """2026-10-27, 1,926 episodes: 00878-XB4GS9ShBRE/000095 action 187, a MOVE_FORWARD that carried the agent 0.233 m
+    along and 0.197 m across its heading at the same height -- the step filter projecting a stale-height agent onto
+    the neighbouring tread, then a step blocked at once -- ended a 99-episode scene under the 0.15 m slack. With the
+    projection reported (``HM3DEnv.placed_pose``) the motion is judged from it and passes; the slack alone would need
+    0.20 m, and from there a mirrored simulator's full backward stride reads as a blocked step (what it leaves is at
+    the heading check's 0.05 m floor); that stride is still refused here, placement or none."""
+    from sparx_agency.core.planning.objnav.errors import EnvContractError
+    from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+    from sparx_agency.core.planning.objnav.types.pose import AgentPose
+    from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
+    spec, tolerance = HM3D_V1.actions(), HM3D_V1.kinematics()
+    before = AgentPose(0.0, 0.0, 0.0, 0.0)
+    after = AgentPose(0.233, -0.197, 0.0, 0.0)
+    with pytest.raises(EnvContractError, match="along its heading"):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, after, spec, tolerance)
+    check_motion(DiscreteAction.MOVE_FORWARD, before, after, spec, tolerance, placed=AgentPose(0.233, -0.197, 0.0, 0.0))
+    check_motion(DiscreteAction.MOVE_FORWARD, before, after, spec, KinematicTolerance(climb_m=0.85, reproject_m=0.20))
+    backward = AgentPose(-spec.forward_step_m, 0.0, 0.0, 0.0)
+    check_motion(DiscreteAction.MOVE_FORWARD, before, backward, spec, KinematicTolerance(climb_m=0.85, reproject_m=0.21))
+    with pytest.raises(EnvContractError, match="along its heading"):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, backward, spec, tolerance)
+    with pytest.raises(EnvContractError, match="toward where it aimed"):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, backward, spec, tolerance, placed=AgentPose(0.0, -0.05, 0.0, 0.0))
 
 
 def test_the_navmesh_is_the_agents_own_and_no_unmeasured_third_option_is_accepted():

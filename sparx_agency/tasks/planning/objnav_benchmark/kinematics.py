@@ -35,12 +35,24 @@ included -- from the agent's projection onto the mesh, so an agent it finds a
 few centimetres off its mesh is carried back onto it by that action, a
 placement the action did not ask for.
 
+An environment that can *report* that projection -- habitat-sim's
+``pathfinder.snap_point`` of the agent's pose is the very point its step
+filter starts the next body action from -- passes it to :func:`check_motion`
+as ``placed``, and the action is then judged the way the filter executed it:
+from ``placed`` toward where the action aimed from the reported pose, with
+the realised end anywhere on that segment (a blocked no-sliding step stops
+at the wall) or at the pose itself (a step the filter refused outright moves
+nothing). That explains a placement of any size exactly, where a scalar
+``reproject_m`` large enough for it would also excuse a backward stride
+(since 2026-10-27; see :func:`check_motion`).
+
 Python 3.8 syntax, standard library only.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, fields, replace
+from typing import Optional
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.errors import EnvContractError
@@ -293,6 +305,70 @@ def _check_forward(action, motion, spec, tolerance) -> None:
     _check_pitch_kept(action, motion, tolerance)
 
 
+_CAUSE_OFF_SEGMENT = ("a simulator that slides along walls (habitat-sim's allow_sliding; the ObjectNav "
+                      "protocol does not slide), a mirrored handedness, or a placement the environment "
+                      "misreported: a no-sliding step filter ends every body action on the straight line "
+                      "from where it placed the agent to where the action aimed")
+
+
+def _check_from_placement(action: DiscreteAction, before: AgentPose, placed: AgentPose, after: AgentPose,
+                          spec: DiscreteActionSpec, tolerance: KinematicTolerance) -> None:
+    """Judge a body action the way a navmesh step filter executed it: from ``placed`` toward where it aimed.
+
+    habitat-sim's ``tryStep`` projects the agent onto the mesh first (``placed``), then walks the straight
+    line from there to the point the action asked for from the *reported* pose -- ``before`` plus a stride
+    for MOVE_FORWARD, ``before`` itself for a turn -- and, with sliding off, stops where that line meets a
+    wall; or it returns the unprojected pose untouched when the two projections are not connected or no
+    path exists. So the realised end either lies on that segment -- its advance along it at most the
+    segment's length (plus the overshoot slack), its course the segment's (within ``heading_deg``), its
+    height judged from the mesh point the filter started at, not from a pose that may have been left off
+    the surface -- or is the pose itself, a blocked step. The yaw and pitch bounds of the action are the
+    ordinary ones either way.
+    """
+    stayed = _motion(before, after)
+    if stayed.moved_m <= tolerance.position_m:
+        # The filter returned the pose it was given: the body did not move, the step was blocked where it stood.
+        if action in _TURN_SIGN:
+            _check_turn(action, stayed, spec, tolerance)
+        else:
+            _check_heading_kept(action, stayed, tolerance)
+            _check_pitch_kept(action, stayed, tolerance)
+        return
+    aim_x, aim_y = before.x, before.y
+    if action == _A.MOVE_FORWARD:
+        aim_x += spec.forward_step_m * math.cos(before.yaw)
+        aim_y += spec.forward_step_m * math.sin(before.yaw)
+    ex, ey = aim_x - placed.x, aim_y - placed.y
+    reach = math.hypot(ex, ey)
+    # The motion from the filter's start, its course measured against the segment's direction.
+    heading = math.atan2(ey, ex) if reach > 0.0 else before.yaw
+    motion = _motion(replace(placed, yaw=heading, camera_pitch=before.camera_pitch), after)
+    motion = replace(motion, turned_rad=_wrapped(after.yaw - before.yaw))
+    placement = math.hypot(placed.x - before.x, placed.y - before.y)
+    where = " (the step filter placed it %.3f m from its pose first)" % placement
+    slack = tolerance.forward_overshoot_m if action == _A.MOVE_FORWARD else tolerance.position_m
+    if motion.advanced_m > reach + slack:
+        raise _refuse(action, "advance at most %.3f m toward where it aimed%s" % (reach + slack, where), motion,
+                      _CAUSE_STEP % spec.forward_step_m if action == _A.MOVE_FORWARD else _CAUSE_IN_PLACE)
+    if (motion.advanced_m >= tolerance.min_heading_check_m
+            and abs(motion.course_rad) > math.radians(tolerance.heading_deg)):
+        raise _refuse(action, "advance toward where it aimed (within %.1f deg)%s" % (tolerance.heading_deg, where),
+                      motion, _CAUSE_OFF_SEGMENT)
+    climb = max(tolerance.climb_m, motion.advanced_m) if action == _A.MOVE_FORWARD else tolerance.climb_m
+    if abs(motion.climbed_m) > climb:
+        raise _refuse(action, "change its height by at most %.3f m from the mesh%s" % (climb, where), motion,
+                      _CAUSE_CLIMB)
+    if action in _TURN_SIGN:
+        expected = _TURN_SIGN[action] * spec.turn_angle_rad
+        if abs(_wrapped(motion.turned_rad - expected)) > math.radians(tolerance.turn_deg):
+            mirrored = abs(_wrapped(motion.turned_rad + expected)) <= math.radians(tolerance.turn_deg)
+            raise _refuse(action, "turn %+.1f deg (within %.1f deg)" % (math.degrees(expected), tolerance.turn_deg),
+                          motion, _CAUSE_MIRROR if mirrored else _CAUSE_TURN % spec.turn_angle_deg)
+    else:
+        _check_heading_kept(action, motion, tolerance)
+    _check_pitch_kept(action, motion, tolerance)
+
+
 def _without_reprojection(action: DiscreteAction, before: AgentPose, after: AgentPose,
                           spec: DiscreteActionSpec, tolerance: KinematicTolerance) -> AgentPose:
     """``after`` with up to ``tolerance.reproject_m`` of the step filter's placement taken off (see :class:`KinematicTolerance`)."""
@@ -321,7 +397,7 @@ def _without_reprojection(action: DiscreteAction, before: AgentPose, after: Agen
 
 def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
                  spec: DiscreteActionSpec, tolerance: KinematicTolerance,
-                 first: bool = False) -> None:
+                 first: bool = False, placed: Optional[AgentPose] = None) -> None:
     """Refuse a realised motion that the episode's action spec cannot explain.
 
     Args:
@@ -340,6 +416,22 @@ def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
             MOVE_FORWARD up to ``tolerance.reproject_m`` of the navmesh step
             filter's placement is taken off likewise
             (:attr:`KinematicTolerance.reproject_m`).
+        placed: Where the simulator's step filter started the action, when
+            the environment can report it (since 2026-10-27): ``before``
+            with its position projected onto the navmesh, the way
+            habitat-sim's ``tryStep`` begins every body action
+            (``pathfinder.snap_point`` of the agent's pose is that very
+            point). When it differs from ``before``, a turn or MOVE_FORWARD
+            is judged from ``placed`` toward where the action aimed from
+            ``before`` -- a stride ahead, or ``before`` itself for a turn --
+            with the realised end anywhere on that segment, as a no-sliding
+            filter leaves it, or at ``before`` itself (the filter returned
+            the pose untouched: a step blocked where it stood), and its
+            height judged from the mesh point the filter started at;
+            ``reproject_m`` is then not needed and not applied. LOOKs and
+            STOP, which habitat executes on the sensors alone, ignore it.
+            None, or a ``placed`` at ``before``'s position, is the ordinary
+            check.
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -355,6 +447,12 @@ def check_motion(action: DiscreteAction, before: AgentPose, after: AgentPose,
         if not isinstance(value, kind):
             raise TypeError("%s must be a %s, got %r"
                             % (name, kind.__name__, value))
+    if placed is not None and not isinstance(placed, AgentPose):
+        raise TypeError("placed must be an AgentPose or None, got %r" % (placed,))
+    if (placed is not None and (action in _TURN_SIGN or action == _A.MOVE_FORWARD)
+            and (placed.x, placed.y, placed.z) != (before.x, before.y, before.z)):
+        _check_from_placement(action, before, placed, after, spec, tolerance)
+        return
     if first and tolerance.settle_m > 0.0:
         # The settle is the simulator's, not the action's: take it off, keep the rest.
         dz = after.z - before.z

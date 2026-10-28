@@ -160,6 +160,16 @@ class HabitatRGBDSimulator:
         #: Checker-only, refreshed every _observe(): is the current pose
         #: within _NAVMESH_CONFIRM_M of the navmesh's own answer there.
         self.last_pose_on_navmesh = False
+        #: Checker-only, refreshed every _observe(): the pose the step filter
+        #: will start the next body action from -- the current pose with its
+        #: position projected onto the navmesh. habitat-sim's ``tryStep``
+        #: begins every turn and MOVE_FORWARD at ``projectToPoly(start)``,
+        #: the same projection ``pathfinder.snap_point`` returns; an agent it
+        #: finds off its mesh (a stride on a stair edge can leave it so) is
+        #: carried onto it by that action, or left where it is when it
+        #: refuses the step. None until the first observation, or when the
+        #: mesh has no answer near the agent. Never seen by the policy.
+        self.last_placed_pose = None
 
     def reset(self, scene_path, navmesh_path, position, rotation_wxyz, seed):
         """Load the scene if needed and place the agent at the published start.
@@ -422,8 +432,10 @@ class HabitatRGBDSimulator:
         self.last_sensor_alignment = {"rgb_pitch_rad": rgb_pose.camera_pitch, "depth_pitch_rad": pose.camera_pitch,
                                       "mount_error_m": float(np.linalg.norm(depth_sensor.position - expected_position)),
                                       "registered": True}
-        snapped = self._sim.pathfinder.snap_point(state.position)
+        snapped = np.asarray(self._sim.pathfinder.snap_point(state.position), dtype=float)
         self.last_pose_on_navmesh = bool(abs(float(snapped[1]) - float(state.position[1])) <= _NAVMESH_CONFIRM_M)
+        self.last_placed_pose = (habitat_pose(snapped, body_rotation, depth_rotation)
+                                 if snapped.shape == (3,) and np.isfinite(snapped).all() else None)
         rgb = np.asarray(raw["rgb"])[..., :3].copy()
         if self.semantic:
             ids = np.asarray(raw["semantic"])
