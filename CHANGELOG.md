@@ -5,6 +5,15 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed (2026-10-28/29, the narrow-passage navigation overhaul, measured)
+- **Every committed route is walked on the discrete-action lattice** (`core/planning/planners/lattice`,
+  `core/planning/object_search/navigation`): Hybrid A* over (x, y, heading) with the benchmark's step and turn as its
+  only primitives, the 2D route's medial-axis line (the planner's new `centreline_weight` layer) as its corridor, the
+  converter executing the plan verbatim under strict tracking, a refused step a pose rather than a cell on the map, a
+  doorway scrape excused and a look-down on the approach. HM3D v1 val under ground-truth perception, 2,000 episodes
+  (`runs/gt_oracle_2000ep_v2_20261028T134440Z`, `docs/progress/entries/039-hm3d-gt-oracle-v2-narrow-passage.md`):
+  **SR 65.3 % (was 58.4 %), SPL 0.353 (0.328), DTG 3.43 m (3.97 m)**, refused steps 6.1 per episode (11.9), agent
+  errors 0 (34); 17 of 20 scenes up, 00832, 00839 and 00876 within noise of before.
 ### Fixed (2026-10-27, the kinematic self-check and habitat-sim's step filter)
 - **A body action is judged from where habitat-sim's step filter started it** (`objnav_benchmark/kinematics.py`
   `check_motion(placed=...)`, `HabitatRGBDSimulator.last_placed_pose`, `HM3DEnv.placed_pose`, the runner): the second
