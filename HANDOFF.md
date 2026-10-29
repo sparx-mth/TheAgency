@@ -1,5 +1,57 @@
 # Handoff — HM3D ObjectNav benchmark
 
+## 2026-10-29 — The ground-truth oracle ran the full v1 val split with the 3B model in both LLM roles
+
+Branch: `feat/objnav-habitat-hm3d-nadav`, tree at `50bbd877`. The HM3D-Semantics v0.1 val annotations are now
+installed (`hm3d.assets --version v1 --check --semantic`: `semantic_ready: true`), which unblocked the run below.
+
+**What ran.** `runs/gt_oracle_2000ep_3b_20261028T152707Z`: HM3D v1 val, 2,000 episodes / 20 scenes,
+`--perception ground-truth` (habitat-sim's semantic sensor in place of YOLO-World and SAM, exact instance masks),
+RPT agent otherwise unchanged, **`qwen2.5:3b-instruct` for both the room labels and the node oracle**
+(`LLM_MODEL=LLM_REASONING_MODEL=qwen2.5:3b-instruct`; the 14B default was deliberately replaced to measure the
+small model). 20 scenes at once (`--jobs max` on an idle card). `complete: true`, exit 0, 15:27 → 10:11 UTC
+(~16.7 h, ~0.6 episode/min across the 20 workers). Non-publishable by construction (oracle perception).
+
+**Results** (`campaign_summary.json`, `campaign_metrics.csv`, `<scene>/comparison.md`):
+
+| SR | SPL | SoftSPL | DTG | mean steps | unreachable ends |
+|---|---|---|---|---|---|
+| **0.691** (CI 0.670–0.711) | 0.362 (CI 0.348–0.376) | 0.372 | 3.18 m | 243 | 0 |
+
+Per-scene SR spans 0.24 (`00820-mL8ThkuaVTM`, SPL 0.10) and 0.27 (`00878-XB4GS9ShBRE`) at the bottom to 0.97–0.98
+(`00829-QaLdnwvtxbs`, `00813-svBbv1Pavdk`) at the top; the two worst scenes are the first place to read
+`evaluation_diagnostics.jsonl` (`ground_truth.scene_report`, see the 2026-10-26 entry) since perception is ideal
+there and the misses are the search's.
+
+**Two launch lessons, both environmental** (nothing in the harness changed):
+
+- `DETECT_PY` defaults to `~/.venvs/objnav-detector/bin/python`, which no longer exists on this machine; the
+  conda env `detector_bench` has ultralytics and the detection server imports cleanly. Pass
+  `DETECT_PY=~/miniconda3/envs/detector_bench/bin/python` (the launcher needs it even for `--perception
+  ground-truth`, and `--status` needs `HAB_PY`).
+- With no Ollama resident, the GPU plan put the LLM on the CPU (its default 30 GB Habitat reserve exceeded the
+  card), and 20 workers on a CPU 3B model saw 30–100 s per call: ~2 episodes in 10 min. Pinning it back on the
+  card fixed it (1.5–11 s per call): `GPU_PLAN_LLM=gpu LLM_VRAM_MIB=4096 HABITAT_VRAM_MIB=700
+  OLLAMA_NUM_PARALLEL=10` -- 4.9 GB for Ollama plus 20 renderers came to ~18 GB of the 24 GB card.
+
+The exact command that produced the run:
+
+```bash
+cd ~/GIT/TheAgency
+HAB_PY=~/miniconda3/envs/objnav-habitat/bin/python DETECT_PY=~/miniconda3/envs/detector_bench/bin/python \
+LLM_BASE_URL=http://127.0.0.1:11435 OLLAMA_MODE=native \
+LLM_MODEL=qwen2.5:3b-instruct LLM_REASONING_MODEL=qwen2.5:3b-instruct \
+OLLAMA_CONTEXT_LENGTH=4096 OLLAMA_NUM_PARALLEL=10 GPU_PLAN_LLM=gpu LLM_VRAM_MIB=4096 HABITAT_VRAM_MIB=700 \
+  sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/run_benchmark.sh --version v1 --perception ground-truth \
+  --jobs max --output runs/gt_oracle_2000ep_3b_20261028T152707Z
+```
+
+Two earlier directories under `runs/` from the same session are dead starts and can be deleted:
+`hm3d_v1_val_3b_20261028T150348Z` (YOLO perception, stopped after minutes by request) and
+`gt_oracle_2000ep_3b_20261028T151516Z` (the CPU-LLM start, 2 episodes).
+
+---
+
 ## 2026-10-26 — The perception upper bound (ground-truth oracle) is built; the 2,000-episode run waits on one download
 
 Branch: `feat/objnav-habitat-hm3d-nadav`. Everything below is in the working tree (uncommitted at the time of
