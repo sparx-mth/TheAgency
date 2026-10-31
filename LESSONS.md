@@ -11,6 +11,64 @@ Format per entry:
 
 ---
 
+## 2026-10-31 — Two re-runs of 40 episodes that disagreed on 19 of them, and the glances blamed for it: the temperature-0, seeded oracle answers the same prompt differently run to run
+
+**Symptom:** the 40 failure cases re-run with geometric path glances off and then on (`runs/failure40/report_final`,
+`report_glances`, same renderer per episode) changed outcome in 19 episodes, and the glances were the suspect for the
+5 lost and the SPL drop (0.321 -> 0.283). One of the "glance" regressions, 00824/000072, took no geometric glance at
+all.
+
+**Root cause:** the step logs of the two columns agree on every input up to the warmup's end (step 10) and differ in
+the room LLM's `reasoning` text and the oracle's probabilities there in 37 of 40 episodes -- same rooms, same labels,
+same objects, `temperature` 0, `seed` 17, synchronous calls, nothing wall-clock in the prompt. The answer varies with
+what else the shared Ollama runner is doing (three workers interleave on it). With the 3B oracle's coarse
+probabilities (ties at 0.15) one changed number flips the room order: 00890/000078 went to room 2 (p 0.40) in one
+run and room 0 (room 2 at 0.15) in the other, seeing its plant at step 17 in the first and never in the second.
+Classifying each episode by what first parted the two runs: 6 parted on an oracle answer before any geometric glance
+(0 fixed, 3 lost, SPL -0.067 over the 40), 27 on a geometric glance (7 fixed, 2 lost, +0.032), 6 never parted.
+
+**Fix / workaround:** none in the method. Read a per-episode A/B by what first separated the two runs (the first step
+whose actions differ, and what each run was doing there), never by the outcome flip alone. A paired A/B needs the
+oracle's answers shared between the arms (the same prompt answered once) or enough episodes for the noise to average.
+
+**Don't:** treat "unaffected episodes replay identically" as true because the code path is unchanged -- the stage-3
+episodes of entry 040 were assumed to, and the LLM makes that false. And don't read a single episode's flip as a
+verdict on the change under test.
+
+---
+
+## 2026-10-30 — A 2,000-episode GT sweep that never asked the node oracle once: one model on two LLM routes with two context windows
+
+**Symptom:** `gt_oracle_2000ep_3b_20261028T152707Z` (HM3D v1 val, ground-truth perception, `qwen2.5:3b-instruct` as
+both `LLM_MODEL` and `LLM_REASONING_MODEL`, 20 scenes at once, Ollama `OLLAMA_NUM_PARALLEL=10`,
+`OLLAMA_CONTEXT_LENGTH=4096`) finished `complete: true`, exit 0, SR 0.691 -- and every one of its 2,000 rows reads
+`llm_queries: 0`, `oracle_repair_successes: 0`; 1,712 console lines say `Room oracle failed; refusing a uniform
+fallback run`. The whole sweep was the exploration fallback's nearest-frontier search plus the closing. Its first
+episode took 9,489 s (five oracle calls, five repairs, each hanging to the 900 s reasoning timeout). `ollama.log`:
+one model load in 17 h, ~100 `/api/chat` completions an hour for the first 6.45 h, then 21,598 HTTP 503s in 77 ms
+each.
+
+**Root cause:** The reasoning route sends `num_ctx=8192` (`LLM_REASONING_NUM_CTX`); the label route sent none, so
+the server's 4,096 applied. Ollama keys a loaded runner by its context: a matching request is served at once from
+the loaded runner, a mismatching one waits in the scheduler's pending queue for a reload that needs the runner idle
+-- which 20 workers' label calls never let it be. Each oracle call hung to its 900 s timeout and stayed queued; at
+most 4 an hour per worker x 20 workers filled the 512-slot queue (`OLLAMA_MAX_QUEUE`) in 6.4 h, and from then on
+every oracle request was refused at once. The 14B run (entry 039) never met it: a second model gets a runner of its
+own. A one-at-a-time probe of the same prompt answers perfectly -- the deadlock needs the load. Separately, at a
+4,096 window a 17-node oracle prompt (4,236 tokens) was silently cut to 2,050 from the front, system rules first.
+
+**Fix / workaround:** `LLMConfig.num_ctx` (`LLM_NUM_CTX`): when the two routes name one model it defaults to
+`reasoning_num_ctx`, so one runner serves both. `_refuse_truncation` raises when `prompt_eval_count` is under one
+token per 6 characters (prompts run 3.7-4.0) or prompt + reply fill the window. `VerifiedLLMClient.probe()` asks
+both routes a real question at preflight. `hm3d.run.oracle_alive` stops the run after `ORACLE_DEAD_EPISODES` (3)
+episodes in a row whose room LLM failed with no oracle answer used.
+
+**Don't:** trust a green campaign summary for an LLM-driven method without `llm_queries > 0` in its rows -- the
+fallback is designed to keep a dead service from costing episodes, so it also keeps it from showing. And don't read
+"SR went up with the 3B" as the 3B being better: the run measured no LLM at all.
+
+---
+
 ## 2026-10-27 — The second full HM3D v1 sweep stopped at 1,926 of 2,000: two more scenes ended by the kinematic self-check, and the habitat-sim source says why a scalar slack can never be sized for it
 
 **Symptom:** `runs/hm3d_v1_val_j8p2_20261026` (20 scenes, 8 at once, 2 Ollama slots, 32 h) ended `complete: false`:

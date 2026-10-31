@@ -153,6 +153,39 @@ class GlanceSettings:
             and 68): the unknown beyond a doorway stays unknown after the
             look -- beyond range, or a hole in the mesh -- and the
             optimistic scorer values it again every time.
+        geometric_enabled: Take the GEOMETRIC glances -- the scored side and
+            full looks of steps 1-4 above: on the way to a room, the look
+            through an open door beside the route into space not seen yet.
+            False by default since 2026-10-31, pending a paired A/B: on the
+            40 recorded failure cases the capped scorer below took them at
+            19 actions an episode for 0.26 m2 of map per action (walking
+            0.17), first sight of the target 7 times in 161 looks, and the
+            episodes whose course a geometric glance changed went 7 fixed /
+            2 lost; but the oracle's answers vary run to run on the same
+            prompt, so per-episode verdicts there are mostly that noise.
+        unknown_run_m: How much UNKNOWN each of a geometric glance's rays is
+            credited with (``UnknownView.unknown_through``); None, the
+            uncapped count before 2026-10-31. A ray that crossed any amount
+            of unknown valued a look at an unmapped wall like a look through
+            a door: on the 232 glances of the 2026-10-31 recordings the
+            promise (median 7.4 m2) did not predict what the map gained over
+            the look (median 0.20 m2; Pearson r = -0.17), and in failing
+            searches the looks took a quarter of the 500 actions. Counting
+            the first 1.0 m of unknown per ray, the same glances give
+            r = 0.39 (0.62 for the geometric ones alone) with the mean
+            predicted 0.86 m2 against 0.85 m2 realized; a look through a
+            doorway keeps its full credit -- the rays cross the threshold's
+            known floor first -- while a mapped wall gives none and an
+            unmapped one at most a metre per ray. Gating the look on a
+            recorded door or opening predicted worse (r = 0.31) and is not
+            used.
+        geometric_min_gain_m2: With ``unknown_run_m`` set, the least capped
+            gain a geometric glance must promise (``min_gain_m2`` governs the
+            uncapped count and the cues). 1.0 m2: on those glances a capped
+            promise under 0.5 m2 revealed 0.12-0.13 m2 per action, less than
+            walking (0.22); 0.5-1 m2 revealed 0.31, over 1 m2 0.33-0.40.
+        geometric_min_gain_per_action_m2: ... and per action, likewise
+            (``min_gain_per_action_m2`` for the uncapped count and the cues).
         cue_enabled: Take a **cue glance** toward a confident detection cut
             off by the frame's left or right edge (since 2026-10-05). The
             geometric scorer values unknown floor, and a small room beside
@@ -195,6 +228,10 @@ class GlanceSettings:
     blind_m: float = 0.6
     scanned_m: float = 1.5
     repeat_m: float = 1.0
+    geometric_enabled: bool = False
+    unknown_run_m: Optional[float] = 1.0
+    geometric_min_gain_m2: float = 1.0
+    geometric_min_gain_per_action_m2: float = 0.15
     cue_enabled: bool = True
     cue_confidence: float = 0.4
     cue_border_px: int = 8
@@ -204,10 +241,15 @@ class GlanceSettings:
     cue_repeat_m: float = 2.0
 
     def __post_init__(self):
-        if type(self.enabled) is not bool or type(self.cue_enabled) is not bool:
-            raise ValueError("glances.enabled and glances.cue_enabled must be bools")
+        if (type(self.enabled) is not bool or type(self.cue_enabled) is not bool
+                or type(self.geometric_enabled) is not bool):
+            raise ValueError("glances.enabled, glances.geometric_enabled and glances.cue_enabled must be bools")
+        if self.unknown_run_m is not None and (isinstance(self.unknown_run_m, bool) or not math.isfinite(self.unknown_run_m)
+                                               or self.unknown_run_m <= 0):
+            raise ValueError("glances.unknown_run_m must be None or a positive finite number of metres")
         for name in ("horizon_m", "stride_m", "arrival_m", "min_gain_m2", "min_gain_per_action_m2", "side_rad", "wide_rad",
-                     "blind_m", "scanned_m", "repeat_m", "cue_min_gain_m2", "cue_repeat_m"):
+                     "blind_m", "scanned_m", "repeat_m", "cue_min_gain_m2", "cue_repeat_m", "geometric_min_gain_m2",
+                     "geometric_min_gain_per_action_m2"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("glances.%s must be positive and finite" % name)
@@ -326,6 +368,8 @@ class GlanceScheduler:
         cue = self._cue(obs, world)
         if cue is not None:
             return self._start_cue(obs, cue)
+        if not self.settings.geometric_enabled:
+            return command
         route = self._route_points()
         if route is None:
             return command
@@ -455,14 +499,16 @@ class GlanceScheduler:
         wide_actions = 2 * int(math.ceil(s.wide_rad / turn - 1e-9)) if s.wide_enabled else side_actions
         full_actions = self._full_turns()
         half_fov = view.cone.half_fov_rad
+        floor_gain, floor_rate = self._geometric_floors()
         candidates, best, best_score = [], None, None
         previous = self.plan_in_force
         committed = None
         for index, xy, heading, along in points:
             if any(math.dist(xy, point) <= s.scanned_m for point in scanned):
                 continue                                           # a full rotation stood here: nothing more to see
-            gain = glance_gains(view, xy, heading, s.side_rad, already=walk)
-            wide = glance_gains(view, xy, heading, s.wide_rad, already=walk) if s.wide_enabled else None
+            gain = glance_gains(view, xy, heading, s.side_rad, already=walk, unknown_run_m=s.unknown_run_m)
+            wide = (glance_gains(view, xy, heading, s.wide_rad, already=walk, unknown_run_m=s.unknown_run_m)
+                    if s.wide_enabled else None)
             candidate = GlanceCandidate(index, (float(xy[0]), float(xy[1])), float(heading), float(along),
                                         gain.left_m2, gain.right_m2, gain.full_m2,
                                         0.0 if wide is None else wide.left_m2, 0.0 if wide is None else wide.right_m2)
@@ -477,10 +523,10 @@ class GlanceScheduler:
                 # The wide look is the right-angle look plus the 130-160 degree band; the band alone
                 # must pay for the extra turns, or the right angle is the better buy.
                 for kind, narrow, value in ((LEFT, gain.left_m2, wide.left_m2), (RIGHT, gain.right_m2, wide.right_m2)):
-                    if (value - narrow) / max(1, wide_actions - side_actions) >= s.min_gain_per_action_m2:
+                    if (value - narrow) / max(1, wide_actions - side_actions) >= floor_rate:
                         looks.append((kind, value, wide_actions, s.wide_rad))
             for kind, value, actions, turn_rad in looks:
-                if value < s.min_gain_m2 or value / actions < s.min_gain_per_action_m2:
+                if value < floor_gain or value / actions < floor_rate:
                     continue
                 if kind != FULL and self._already_looked(xy, heading + (0.5 if kind == LEFT else -0.5) * turn_rad,
                                                          0.5 * turn_rad + half_fov):
@@ -530,7 +576,14 @@ class GlanceScheduler:
         """
         extra_actions = max(1, int(full_actions) - int(side_actions))
         rear = float(gain.full_m2) - max(float(gain.left_m2), float(gain.right_m2))
-        return rear >= self.settings.min_gain_per_action_m2 * extra_actions
+        return rear >= self._geometric_floors()[1] * extra_actions
+
+    def _geometric_floors(self):
+        """``(least gain, least gain per action)`` a geometric glance must promise, for the capped or the uncapped count."""
+        s = self.settings
+        if s.unknown_run_m is None:
+            return s.min_gain_m2, s.min_gain_per_action_m2
+        return s.geometric_min_gain_m2, s.geometric_min_gain_per_action_m2
 
     def _full_allowed_at(self, obs, world, xy):
         """Whether a full circle at ``xy`` may be taken: not inside a room the search has finished, that has no frontier left, or whose frontier walk is in force.

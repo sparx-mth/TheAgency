@@ -10,6 +10,8 @@
 #   hm3d/run_benchmark.sh --limit 2 --record                # the first two published episodes of every scene, recorded
 #   hm3d/run_benchmark.sh --limit 2 --record --save-frames  # ... plus every dashboard frame as a JPEG still (frames/)
 #   hm3d/run_benchmark.sh --category toilet --limit 3       # the published toilet episodes, three per scene
+#   hm3d/run_benchmark.sh --version v1 --episode-ids-file cases.json --record --jobs 2
+#                                                           # exactly the JSON list's <scene>/<index> episodes (a re-run of chosen cases)
 #   hm3d/run_benchmark.sh --output runs/hm3d_v2_val_X       # continue an interrupted campaign there (finished scenes are kept)
 #   hm3d/run_benchmark.sh --output runs/X --resume-accepting-changes kinematics evaluation source_sha256 gpu_plan
 #                                                           # ... after a harness-only fix: the scenes that continue may differ in the self-check and provenance
@@ -49,7 +51,7 @@
 #                        the module default, 64, when empty)
 set -euo pipefail
 
-usage() { sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,7 +70,7 @@ PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
 POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool
 
 # -- the command line -----------------------------------------------------------------------
-VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=()
+EPISODE_FILE="" VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -83,6 +85,7 @@ while [[ $# -gt 0 ]]; do
     --limit) LIMIT="$2"; shift 2 ;;                            # episodes (per scene, in the campaign)
     --jobs) JOBS="$2"; shift 2 ;;                              # scenes at once (campaign only); "max" = what the card and the cores hold
     --smoke) SMOKE=1; shift ;;
+    --episode-ids-file) EPISODE_FILE="$2"; shift 2 ;;          # campaign: a JSON list of <scene>/<index> ids, one process per scene
     --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
     --record) RECORD=1; shift ;;
     --full-records) LEAN=0; shift ;;
@@ -249,6 +252,7 @@ CAMPAIGN_ARGS=("$OUTPUT" --version "$VERSION" --split "$SPLIT" --episodes-dir "$
 [[ -n "$LIMIT" ]] && CAMPAIGN_ARGS+=(--limit "$LIMIT")
 CAMPAIGN_ARGS+=(--jobs "$JOBS")
 [[ "$SMOKE" == 1 ]] && CAMPAIGN_ARGS+=(--smoke)
+[[ -n "$EPISODE_FILE" ]] && CAMPAIGN_ARGS+=(--episode-ids-file "$EPISODE_FILE")
 [[ ${#SCENES[@]} -gt 0 ]] && CAMPAIGN_ARGS+=(--scenes "${SCENES[@]}")
 if [[ -f "$OUTPUT/campaign.json" ]] || ls -d "$OUTPUT"/*/ > /dev/null 2>&1; then
   say "resuming: $OUTPUT already holds scenes (finished ones are kept, started ones continue)" | tee -a "$LOG"

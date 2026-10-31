@@ -98,6 +98,18 @@ series): the executed trajectory is the plan, and the plan is the route.
   planned there. `squeezed` counts them; the plan's radius is in the
   command's `info["kinematic"]`.
 
+- *Checked as it was planned* (2026-10-31). The lattice plans with
+  `start_free_radius_m` = the plan's radius: a sample in a wall's inflation
+  skirt (lethal, not occupied) near the start is passable, the body stands
+  there. The per-step feasibility check now applies the same relaxation
+  around the plan's start. Without it a plan out of a tight doorway was
+  `plan_obstructed` one turn after it was made, and the re-plan from the
+  turned heading opened with the opposite turn: 00802-wcojb4TFT35/000004
+  turned left-right eighteen times 1.2 m from the toilet. As a backstop,
+  `dither_replans` (8) re-plans in a row without an executed MOVE_FORWARD
+  leave the route to the ladder until the agent steps or the route changes
+  (`dither_cutoffs`).
+
 Measured on the synthetic doorway rig: the ladder's rollout 184 actions and
 53 turns on a 32 m route through three 0.8 m doorways; the plan 148 and 15
 with the wide corridor, 156 and 25 riding the route (0.4 m corridor, offset

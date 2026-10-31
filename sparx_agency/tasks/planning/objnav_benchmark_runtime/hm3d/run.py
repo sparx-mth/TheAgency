@@ -455,6 +455,36 @@ def _finite_or_none(value):
     return None if isinstance(value, float) and not math.isfinite(value) else value
 
 
+def oracle_alive(live, row, limit=None):
+    """Stop the run when the node oracle has answered nothing for ``limit`` episodes in a row.
+
+    The search refuses a uniform distribution and explores the nearest
+    frontier while the room LLM is away, so a dead oracle costs no episode
+    -- and nothing announces that the run stopped measuring the method. The
+    2026-10-28 GT sweep ran 2,000 episodes that way. An episode counts as
+    dead when its room LLM failed at least once and no oracle answer was
+    used (``llm_queries`` + ``oracle_reuses`` both zero); one answer resets
+    the count. ``limit`` defaults to ``ORACLE_DEAD_EPISODES`` (3); 0 disables.
+
+    Raises:
+        RuntimeError: ``limit`` dead episodes in a row; the rows written so far stand and
+            ``--resume`` continues once the LLM service is fixed.
+    """
+    if limit is None:
+        limit = int(os.environ.get("ORACLE_DEAD_EPISODES", "3"))
+    info = (getattr(row, "agent_info", None) or {}).get("policy") or {}
+    failures = int((((info.get("exploration_fallback") or {}).get("stats") or {}).get("room_llm_failures")) or 0)
+    answered = int(info.get("llm_queries") or 0) + int(info.get("oracle_reuses") or 0)
+    if answered > 0:
+        live["oracle_dead"] = 0
+    elif failures > 0:
+        live["oracle_dead"] = live.get("oracle_dead", 0) + 1
+    if limit > 0 and live.get("oracle_dead", 0) >= limit:
+        raise RuntimeError("The node oracle answered nothing in %d episodes in a row (the last: %s); the run is no "
+                           "longer measuring the method. Fix the LLM service and --resume."
+                           % (live["oracle_dead"], getattr(row, "episode_id", "?")))
+
+
 def _live_hooks(args, output, scored_env, total, label):
     """The ``wrap_env`` and per-episode callback that keep ``progress.json`` and the diagnostics sidecar.
 
@@ -469,6 +499,7 @@ def _live_hooks(args, output, scored_env, total, label):
         return ProgressEnv(env, live["tracker"])
 
     def progress(index, total_count, row):
+        oracle_alive(live, row)
         diagnostics = {key: _finite_or_none(value)
                        for key, value in scored_env.evaluation_diagnostics().items()}
         with (output / "evaluation_diagnostics.jsonl").open("a") as stream:

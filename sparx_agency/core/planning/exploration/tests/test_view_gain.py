@@ -103,3 +103,18 @@ def test_a_rotation_is_as_many_turns_as_the_field_of_view_needs_to_see_the_circl
             c.rotation_turns(bad)
     from sparx_agency.core.planning.exploration.view_gain import camera_rotation_turns
     assert camera_rotation_turns(640, 383.0, turn) == 10
+
+
+def test_a_capped_ray_counts_only_the_first_metres_of_unknown_and_still_stops_at_walls():
+    view = UnknownView(corridor_with_a_door(), cone())
+    abreast, up, half = (5.4, 2.5), math.pi / 2, math.radians(39.5)
+    full = view.unknown_in_sector(abreast, up, half)
+    capped = view.unknown_through(abreast, up, half, 1.0)
+    assert 0 < capped.sum() < 0.35 * full.sum(), "the room behind the door, but only a metre into it"
+    ys, _ = np.nonzero(capped)
+    assert ys.min() >= 31 and ys.max() <= 31 + 12, "within a metre (and a ray's slant) of the threshold"
+    assert not (capped & ~full).any(), "a capped ray sees nothing an uncapped one does not"
+    assert view.unknown_through((2.0, 2.5), up, math.radians(20.0), 1.0).sum() == 0, "a wall stops every ray"
+    assert view.unknown_through(abreast, up, half, 0.3).sum() < capped.sum() <= view.unknown_through(abreast, up, half, 2.0).sum()
+    gains = glance_gains(view, abreast, 0.0, math.pi / 2, unknown_run_m=1.0)
+    assert gains.left_m2 == pytest.approx(view.unknown_through(abreast, math.pi / 4, math.pi / 4 + half, 1.0).sum() * 0.01)

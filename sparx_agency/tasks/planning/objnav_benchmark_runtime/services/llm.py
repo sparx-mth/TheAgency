@@ -5,6 +5,11 @@ from urllib.parse import urlsplit
 
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 
+#: The probe's two nodes: a node prompt of the run's own shape, small enough to answer in seconds.
+PROBE_TARGET = "toilet"
+PROBE_HOUSE = ("rooms found: living_room (entered); 1 room unidentified; 1 opening not yet looked into; "
+               "unexplored frontier reachable; actions used about 0 of 500")
+
 
 def public_service_url(url):
     """Reject credentials in a URL that will be written to run metadata."""
@@ -60,6 +65,40 @@ class VerifiedLLMClient:
             raise ObjNavInternalError("LLM model revision changed during evaluation")
         self.identity = identity
         return identity
+
+    def probe(self):
+        """Ask both routes one real question with the run's own options; raise unless both answer usably.
+
+        :meth:`health` proves the models are provisioned, not that the server
+        answers the node oracle's request -- its model, window, reply cap and
+        timeout. The 2026-10-28 sweep passed every health check and then got
+        no oracle answer in 2,000 episodes. Run once, before the first episode.
+
+        Raises:
+            ObjNavInternalError: A route raised, or the oracle's reply does not
+                score the probe's nodes.
+        """
+        from sparx_agency.core.mapping.topology.search_node_oracle import (
+            ROOM, SearchContext, SearchNode, SearchNodeOracle, system_prompt)
+        nodes = (SearchNode(id=0, kind=ROOM, label="living_room", area_m2=20.0, frontier_clusters=1,
+                            here=True, objects=("couch",)),
+                 SearchNode(id=1, kind=ROOM, label="unknown", area_m2=6.0, frontier_clusters=1, exits=1))
+        oracle = SearchNodeOracle(self.client)
+        context = SearchContext(house=PROBE_HOUSE)
+        try:
+            reply = oracle.ask(oracle.prompt(PROBE_TARGET, nodes, context), system_prompt(nodes, context))
+        except Exception as exc:
+            raise ObjNavInternalError("The node oracle's route (%s) failed a real oracle prompt: %s"
+                                      % (self.client.cfg.reasoning_model, exc)) from exc
+        if oracle.score(reply, nodes) is None:
+            raise ObjNavInternalError("The node oracle's route (%s) answered a real oracle prompt unusably: %r"
+                                      % (self.client.cfg.reasoning_model, reply))
+        try:
+            label = self.client.chat_json('Reply with JSON only.', 'Return {"ok": true}.')
+        except Exception as exc:
+            raise ObjNavInternalError("The room-label route (%s) failed: %s" % (self.client.cfg.model, exc)) from exc
+        if not isinstance(label, dict):
+            raise ObjNavInternalError("The room-label route (%s) did not answer a JSON object" % self.client.cfg.model)
 
     def chat_json(self, *args, **kwargs):
         self.health()

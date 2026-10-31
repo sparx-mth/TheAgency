@@ -55,6 +55,7 @@ from sparx_agency.core.planning.object_search.exploration.exploration_metrics im
 from sparx_agency.core.control.camera.pitch_controller import CameraController, CameraControlSettings
 from sparx_agency.core.planning.object_search.perception.cycle import PerceptionCycle
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosing
+from sparx_agency.core.planning.object_search.closing.target_pursuit import TargetPursuit
 
 
 class RPTSearchPolicy:
@@ -92,7 +93,7 @@ class RPTSearchPolicy:
         self.sweep_settings = SweepSettings()
         self.fallback_settings = FallbackSettings()
         self.escape_settings = EscapeSettings()
-        self.glance_settings = GlanceSettings()
+        self.glance_settings = GlanceSettings(geometric_enabled=s.geometric_glances)
         self.sight_settings = SightSettings()
         self.target_projector = None  # optional simulator-local geometry, never goal annotations
 
@@ -307,6 +308,8 @@ class RPTSearchPolicy:
         self.floor_guard = SpawnFloorGuard(self)
         self.peek = DoorwayPeek(self)
         self.closing = TargetClosing(self)
+        # Locked targets the closing gave up for want of a path, walked back to once the map holds one.
+        self.pursuit = TargetPursuit(self)
         # Where along the route in force a look to the side (or all round) is worth
         # its actions; performed as a suspended phase when the agent gets there.
         self.glances = GlanceScheduler(self, self.glance_settings)
@@ -501,6 +504,7 @@ class RPTSearchPolicy:
         self.perception.observe(observation)
         self.closing.observe(observation)
         if self.closing.active:
+            self.pursuit.notify_takeover(observation)
             self._action_owner = "target_closing"
             # No global decision/fallback try block may catch closing failures.
             # Keep the current-floor collision map fresh without advancing any
@@ -617,6 +621,9 @@ class RPTSearchPolicy:
                 if command is not None:
                     return command
         if self._target_xy is None:
+            pursuit = self.pursuit.command(observation, world)
+            if pursuit is not None:
+                return pursuit
             discovery = self._discover(observation, world, cost)
             if discovery is not None:
                 return discovery
@@ -861,6 +868,7 @@ class RPTSearchPolicy:
                 "plan_calls": self._plan_calls, "duplicates_removed": self._duplicates_removed,
                 "target_evidence": self.target_evidence.diagnostics(), "floor_revisions": self.mapping.floor_revision,
                 "target_closing": self.closing.diagnostics(),
+                "target_pursuit": self.pursuit.diagnostics(),
                 "perception": self.perception.diagnostics(), "camera": dict(self.camera_control.last), "floor_maps": self.mapping.integrity(),
                 "building": self.building.diagnostics() if self.building else None,
                 "spawn_floor_guard": self.floor_guard.diagnostics(),

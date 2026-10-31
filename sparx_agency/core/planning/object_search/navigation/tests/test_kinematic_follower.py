@@ -169,3 +169,47 @@ def test_strict_tracking_sets_the_converters_params_and_can_be_turned_off():
     assert not loose.converter_params.strict_plan_tracking and loose.converter_params.heading_hysteresis_deg == 1.0
     with pytest.raises(ValueError, match="lattice_floor_m"):
         doorway_policy(kinematic={"lattice_floor_m": 0.1})
+
+
+def test_a_plan_out_of_a_walls_skirt_is_not_obstructed_by_the_skirt_it_was_planned_through():
+    """00802-wcojb4TFT35/000004 (2026-10-31): the plan's first forward step lies in the skirt of the wall the body
+    stands beside -- passable at planning time by the lattice's start relaxation -- and the check one turn later,
+    without it, dropped the plan as obstructed; the re-plan from the turned heading opened with the opposite turn."""
+    from sparx_agency.core.planning.planners.astar.cost_grid_2d import build_collision_mask
+    policy, ep = doorway_policy()
+    world = doorway_world()
+    start, goal = (DOOR_X - 0.28, DOOR_Y - 1.5, 0.0), (DOOR_X + 2.5, DOOR_Y)   # 0.18 m from the wall's face
+    route = planned_route(policy, world, start[:2], goal)
+    obs, command = follow(policy, ep, world, 1, start, route)
+    plan = policy.kinematic._plan
+    first = next(i for i, a in enumerate(plan["actions"]) if a == FORWARD)
+    assert first > 0, "the plan turns before its first step"
+    strict = build_collision_mask(world, policy.planner.params, plan["radius"])
+    x, y, yaw = plan["poses"][first]
+    gx, gy = world.world_to_grid(x + 0.05 * math.cos(yaw), y + 0.05 * math.sin(yaw))
+    assert strict[gy, gx], "the first step starts in the skirt: only the start relaxation lets it pass"
+    pose = obs.pose
+    for step in range(2, first + 2):
+        policy.notify_action(obs, command.actions[0])
+        pose = apply_action(pose, command.actions[0], ep.action_spec)
+        obs, command = follow(policy, ep, world, step, (pose.x, pose.y, pose.yaw), route)
+        assert command.info["kinematic"]["status"] == "continuing", command.info["kinematic"]
+    assert policy.kinematic.stats["replans"] == 1
+
+
+def test_re_plans_without_a_forward_step_are_cut_off_and_a_step_restores_the_lattice():
+    policy, ep = doorway_policy(kinematic={"dither_replans": 3})
+    world = doorway_world()
+    start, goal = (3.0, DOOR_Y, math.radians(90)), (9.0, DOOR_Y)
+    route = planned_route(policy, world, start[:2], goal)
+    statuses = []
+    for step in range(1, 6):
+        policy.kinematic.invalidate("test")              # as an obstruction would, every action, before any step
+        _, command = follow(policy, ep, world, step, start, route)
+        statuses.append(command.info["kinematic"]["status"])
+    assert statuses[:3] == ["planned"] * 3 and statuses[3:] == ["unplanned"] * 2
+    assert policy.kinematic.stats["dither_cutoffs"] == 1
+    obs = observe(ep, 6, *start)
+    policy.kinematic.note_action(obs, FORWARD)           # the ladder stepped
+    _, command = follow(policy, ep, world, 7, start, route)
+    assert command.info["kinematic"]["status"] == "planned"

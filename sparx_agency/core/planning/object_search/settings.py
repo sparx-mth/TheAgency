@@ -84,6 +84,20 @@ class RPTSettings:
             spawn point. The three-tread flight Darden/000034 walked down
             (-0.11, -0.18, -0.21 m, the floor -0.45 m seen by five samples)
             is inside this tolerance and remains the open item.
+        step_surface_band_m: With stair traversal forbidden, how far off the
+            storey plane measured support the agent can WALK to -- over
+            risers of at most ``multifloor.max_step_m``, through cells clear
+            to body height (``StairTerrain.step_surfaces``) -- is still this
+            storey: free on the planning grid, never a drop, and, within the
+            atlas's ``departure_m`` (the whole band from a provisional spawn
+            storey), never a stair mask either (since 2026-10-31). The map's
+            fixed bands -- free within 0.10 m of the plane, obstacle from
+            0.15 m above it, drop beyond ``step_down_m`` below it -- painted
+            every step occupied: of the single-storey HM3D v1 val episodes
+            whose shortest path changes height by 0.25-1.0 m the GT-oracle
+            sweep solved 14 %, and a spawn on a tread boxed the agent in from
+            the first action. 0.8 m: the raised and sunken parts of the
+            split-level homes there; a storey is 1.5 m and more away.
         stair_margin_m: The preferred half-width of the capsule written
             impassable around a SEEN staircase's centreline
             (``world_model/peek_stairs.stair_peek_mask``): a flight's
@@ -110,6 +124,12 @@ class RPTSettings:
             differ in exactly one thing: which pixels count as the object.
             The policy needs a segmenter when this is on and refuses to
             start without one.
+        geometric_glances: Whether the route's GEOMETRIC side and full
+            glances are taken (``GlanceSettings.geometric_enabled``; cue
+            glances are unaffected). OFF by default since 2026-10-31, pending
+            a paired A/B: ``{"geometric_glances": true}`` in
+            ``--policy-config`` turns them on, scored on capped rays
+            (``GlanceSettings.unknown_run_m``).
         centreline_weight: The planner's medial-axis layer
             (``WeightedAStarParams.centreline_weight``, since 2026-10-28):
             inside a passage narrower than ``2 * channel_half_width_m`` the
@@ -204,8 +224,10 @@ class RPTSettings:
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
     step_down_m: float = 0.30
+    step_surface_band_m: float = 0.8
     stair_margin_m: float = 0.45
     segmentation: bool = False
+    geometric_glances: bool = False
     centreline_weight: float = 4.0
     channel_half_width_m: float = 0.6
     kinematic: KinematicSettings = field(default_factory=KinematicSettings)
@@ -219,7 +241,7 @@ class RPTSettings:
     def __post_init__(self):
         for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m",
                     "preferred_clearance_m", "min_clearance_m", "landmark_dedupe_radius_m", "floor_plane_bound_m",
-                    "step_down_m", "stair_margin_m"):
+                    "step_down_m", "stair_margin_m", "step_surface_band_m"):
             value = getattr(self, key)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % key)
@@ -229,6 +251,8 @@ class RPTSettings:
             raise ValueError("allow_stair_traversal must be boolean; no silent fallback")
         if type(self.segmentation) is not bool:
             raise ValueError("segmentation must be boolean; no silent fallback")
+        if type(self.geometric_glances) is not bool:
+            raise ValueError("geometric_glances must be boolean; no silent fallback")
         if (isinstance(self.landmark_footprint_iou, bool) or not math.isfinite(self.landmark_footprint_iou)
                 or not 0 < self.landmark_footprint_iou <= 1):
             raise ValueError("landmark_footprint_iou must lie in (0, 1]")

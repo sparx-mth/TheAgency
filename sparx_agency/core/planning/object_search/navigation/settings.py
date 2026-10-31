@@ -77,6 +77,10 @@ class KinematicSettings:
             actions pass before the lattice is asked again from the same
             route (the ladder walks it meanwhile); a route change asks at
             once. 0: asked again every action (a plan costs milliseconds).
+        dither_replans: Re-plans in a row without an executed MOVE_FORWARD
+            after which the route is left to the converter's ladder until the
+            agent steps forward or the route changes (``dither_cutoffs``). 8:
+            four left-right cycles; 0 never cuts off.
     """
 
     enabled: bool = True
@@ -92,6 +96,7 @@ class KinematicSettings:
     refused_move_radius_m: float = 0.15
     plan_final_yaw: bool = False
     replan_backoff_actions: int = 0
+    dither_replans: int = 8
 
     def __post_init__(self):
         _check_bool("KinematicSettings", "enabled", self.enabled)
@@ -104,6 +109,7 @@ class KinematicSettings:
         _check_count("KinematicSettings", "max_expansions", self.max_expansions)
         _check_count("KinematicSettings", "refused_move_actions", self.refused_move_actions, allow_zero=True)
         _check_count("KinematicSettings", "replan_backoff_actions", self.replan_backoff_actions, allow_zero=True)
+        _check_count("KinematicSettings", "dither_replans", self.dither_replans, allow_zero=True)
         if self.heuristic_weight < 1.0:
             raise ValueError("KinematicSettings.heuristic_weight below 1 only slows the search")
 

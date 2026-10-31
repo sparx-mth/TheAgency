@@ -11,6 +11,17 @@ where the plan says, a fresh frame puts an obstacle on it, or the simulator
 refused a step -- and the refused step itself, remembered as a pose the
 lattice may not step forward from again, instead of a cell painted
 occupied that would seal a doorway.
+
+The plan is checked against each new map exactly as the lattice planned it:
+within the plan's radius of its start, a sample in the inflation skirt of a
+wall (lethal, not occupied) is passable -- the body stands there. Checked
+without that relaxation, a plan out of a tight doorway was "obstructed" one
+turn after it was made, and the re-plan from the turned heading opened with
+the opposite turn (00802-wcojb4TFT35/000004, 2026-10-31: eighteen
+alternating turns 1.2 m from the toilet, then the target released). A run of
+re-plans with no forward step between them is cut off after
+``dither_replans`` (the route goes to the converter's ladder until the agent
+moves or the route changes), so no other cause can spin the agent either.
 """
 from __future__ import annotations
 
@@ -50,9 +61,11 @@ class KinematicFollower:
         self._failure = None                    # why, for the command's record
         self._emitted_step = -1
         self._mask = None                       # (world id, radius) -> collision mask of the plan's radius
+        self._idle_replans = 0                  # re-plans since the last executed MOVE_FORWARD
+        self._dithered = None                   # the route whose re-plans were cut off, until a step or a new route
         self.events = []
         self.stats = {"commands": 0, "planned": 0, "continued": 0, "resynced": 0, "completed": 0, "unplanned": 0,
-                      "executed": 0, "replans": 0, "refused": 0, "squeezed": 0}
+                      "executed": 0, "replans": 0, "refused": 0, "squeezed": 0, "dither_cutoffs": 0}
 
     # ------------------------------------------------------------------
     # The command
@@ -145,15 +158,25 @@ class KinematicFollower:
         samples = self.lattice.primitives.samples
         step = self.lattice.primitives.step_m
         actions, poses = plan["actions"], plan["poses"]
+        # The lattice's own start relaxation (``start_free_radius_m`` = the plan's radius): a skirt cell near the
+        # start is passable, an occupied one never.
+        start_x, start_y = poses[0][0], poses[0][1]
+        relax = float(plan["radius"])
+        occupied = world.grid == world.values.occupied
         for i in range(plan["index"], len(actions)):
             if actions[i] != DiscreteAction.MOVE_FORWARD:
                 continue
             x, y, yaw = poses[i]
             c, s = math.cos(yaw), math.sin(yaw)
             for f in samples:
-                gx = int(math.floor((x + f * step * c - origin_x) / res))
-                gy = int(math.floor((y + f * step * s - origin_y) / res))
-                if not (0 <= gx < w and 0 <= gy < h) or mask[gy, gx]:
+                px, py = x + f * step * c, y + f * step * s
+                gx = int(math.floor((px - origin_x) / res))
+                gy = int(math.floor((py - origin_y) / res))
+                if not (0 <= gx < w and 0 <= gy < h):
+                    return False
+                if mask[gy, gx]:
+                    if not occupied[gy, gx] and math.hypot(px - start_x, py - start_y) <= relax:
+                        continue
                     return False
         return True
 
@@ -164,6 +187,16 @@ class KinematicFollower:
         if (self._failed is not None and self._failed[0] == route_key
                 and step - self._failed[1] < self.settings.replan_backoff_actions):
             return None
+        if self._dithered is not None and self._dithered == route_key:
+            return None                             # cut off: the ladder walks it until a step or a new route
+        if self._idle_replans >= self.settings.dither_replans > 0:
+            self._dithered, self._idle_replans, self._plan = route_key, 0, None
+            self.stats["dither_cutoffs"] += 1
+            self._failure = {"reason": reason, "lattice": "dither_cutoff",
+                             "message": "%d re-plans without a forward step" % self.settings.dither_replans}
+            self._event(step, "failed", reason, "dither_cutoff")
+            return None
+        self._idle_replans += 1
         self._plan = None
         self.stats["replans"] += 1
         pose = observation.pose
@@ -207,6 +240,8 @@ class KinematicFollower:
     # ------------------------------------------------------------------
     def note_action(self, observation, action):
         """The action executed on this observation: advance the cursor, or drop a plan the agent left."""
+        if action == DiscreteAction.MOVE_FORWARD:
+            self._idle_replans, self._dithered = 0, None     # a step, the plan's or the ladder's: not dithering
         plan = self._plan
         if plan is None or int(observation.step) != self._emitted_step:
             return

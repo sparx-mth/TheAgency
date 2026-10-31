@@ -343,3 +343,47 @@ def test_jobs_reaches_the_campaign_from_its_command_line(tmp_path, monkeypatch):
     campaign.main([str(tmp_path), "--version", "v2", "--episodes-dir", EPISODES,
                    "--scenes-dir", "S", "--jobs", "5"])
     assert seen["jobs"] == 5
+
+
+def test_an_explicit_episode_list_runs_only_its_scenes_with_only_its_episodes(tmp_path, monkeypatch):
+    """A re-run of chosen cases: each scene's process gets exactly that scene's ids, in the order given."""
+    monkeypatch.setattr(campaign, "scene_keys", lambda *a, **k: list(SCENES))
+    runner = fake_runner([0, 0])
+    ids = ["%s/000007" % SCENES[1], "%s/000002" % SCENES[0], "%s/000001" % SCENES[1]]
+    campaign.run_campaign(tmp_path, version="v2", episodes_dir="E", scenes_dir="S", episode_ids=ids, runner=runner)
+    plans = {command[command.index("--scenes") + 1]: command[command.index("--episode-ids") + 1:]
+             for command in runner.seen}
+    assert list(plans) == [SCENES[1], SCENES[0]]
+    assert plans[SCENES[1]][:2] == ["%s/000007" % SCENES[1], "%s/000001" % SCENES[1]]
+    assert plans[SCENES[0]][:1] == ["%s/000002" % SCENES[0]]
+
+
+def test_an_episode_list_refuses_unknown_scenes_repeats_and_a_limit():
+    with pytest.raises(ValueError, match="scene of this split"):
+        campaign.episode_plan(["nowhere/000001"], SCENES)
+    with pytest.raises(ValueError, match="twice"):
+        campaign.episode_plan(["%s/000001" % SCENES[0]] * 2, SCENES)
+    with pytest.raises(ValueError, match="names its own scenes"):
+        campaign.run_campaign("/tmp/x", version="v2", episodes_dir="E", scenes_dir="S", limit=1,
+                              episode_ids=["%s/000001" % SCENES[0]])
+
+
+def _row(queries=0, reuses=0, failures=0):
+    return types.SimpleNamespace(episode_id="s/000001", agent_info={"policy": {
+        "llm_queries": queries, "oracle_reuses": reuses,
+        "exploration_fallback": {"stats": {"room_llm_failures": failures}}}})
+
+
+def test_a_run_whose_oracle_never_answers_stops_and_one_answer_resets_the_count():
+    live = {}
+    run.oracle_alive(live, _row(failures=4), limit=3)
+    run.oracle_alive(live, _row(), limit=3)                    # no failure, no answer: an episode that ended early
+    run.oracle_alive(live, _row(failures=1), limit=3)
+    assert live["oracle_dead"] == 2
+    run.oracle_alive(live, _row(reuses=1, failures=2), limit=3)
+    assert live["oracle_dead"] == 0
+    for _ in range(2):
+        run.oracle_alive(live, _row(failures=5), limit=3)
+    with pytest.raises(RuntimeError, match="answered nothing in 3 episodes"):
+        run.oracle_alive(live, _row(failures=5), limit=3)
+    run.oracle_alive({}, _row(failures=5), limit=0)            # disabled

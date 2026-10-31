@@ -121,9 +121,29 @@ def split_resume_acceptance(extra):
     return rest, acceptance
 
 
+def episode_plan(episode_ids, known_scenes):
+    """``{scene: [episode id, ...]}`` from a flat list of ``<scene>/<index>`` ids, scenes in order of first appearance.
+
+    Raises:
+        ValueError: An id is malformed, names a scene the split does not hold, or repeats.
+    """
+    known = set(known_scenes)
+    plan, seen = {}, set()
+    for episode_id in episode_ids:
+        text = str(episode_id)
+        scene, sep, index = text.partition("/")
+        if not sep or not index or scene not in known:
+            raise ValueError("episode id %r is not <scene>/<index> of a scene of this split" % text)
+        if text in seen:
+            raise ValueError("episode id %r is listed twice" % text)
+        seen.add(text)
+        plan.setdefault(scene, []).append(text)
+    return plan
+
+
 def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=None,
                  split="val", extra=(), resume=False, runner=subprocess.run, smoke=False,
-                 jobs=1):
+                 jobs=1, episode_ids=None):
     """Run each scene in its own process and return what each one did.
 
     Args:
@@ -144,6 +164,9 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
             per scene, chosen so every goal category appears at least once
             (``smoke_plan``); the plan is written to ``<root>/smoke_plan.json``.
             Exclusive with ``limit``.
+        episode_ids: Run exactly these published episodes (``<scene>/<index>``), each scene's
+            in the order given and the scenes in order of first appearance -- the re-run of a
+            chosen set of cases after a change. Exclusive with ``smoke``, ``limit`` and ``scenes``.
         jobs: Scenes run at once. 1 runs them in order with the child's output
             on this console; more runs them through ``scene_pool``, each
             child's output in ``<root>/<scene>.console.log``. Children never
@@ -154,11 +177,16 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
     """
     if smoke and limit is not None:
         raise ValueError("--smoke chooses one episode per scene itself; it takes no --limit")
+    if episode_ids and (smoke or limit is not None or scenes):
+        raise ValueError("an explicit episode list names its own scenes; it takes no --smoke, --limit or --scenes")
     root = Path(root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     protocol = protocol_for(version).with_split(split)
     selected = list(scenes) if scenes else list(scene_keys(episodes_dir, protocol))
     plan = {}
+    if episode_ids:
+        plan = episode_plan(episode_ids, selected)
+        selected = list(plan)
     if smoke:
         plan, account = smoke_cover(episodes_dir, protocol, scenes=selected)
         write_atomically(root / "smoke_plan.json",
@@ -291,6 +319,9 @@ def main(argv=None):
                              "balanced so every one appears at least once (smoke_plan.py). A diagnostic "
                              "subset, labelled as one; exclusive with --limit")
     parser.add_argument("--scenes", nargs="+")
+    parser.add_argument("--episode-ids-file", type=Path,
+                        help="A JSON list of published episode ids (<scene>/<index>): run exactly those, one "
+                             "process per scene -- the same starts and goals for a re-run after a change")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
     parser.add_argument("--jobs", type=int, default=1,
@@ -305,7 +336,9 @@ def main(argv=None):
                                episodes_dir=args.episodes_dir,
                                scenes_dir=args.scenes_dir, limit=args.limit,
                                scenes=args.scenes, extra=extra, resume=args.resume,
-                               smoke=args.smoke, jobs=args.jobs)
+                               smoke=args.smoke, jobs=args.jobs,
+                               episode_ids=json.loads(args.episode_ids_file.read_text())
+                               if args.episode_ids_file else None)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
         if failed:
             print("Scenes that did not exit cleanly: %s" % ", ".join(failed))

@@ -8,8 +8,9 @@ be checked against the drawing.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import math
+from typing import Optional
 from types import SimpleNamespace
 
 import numpy as np
@@ -21,8 +22,48 @@ from sparx_agency.core.planning.objnav.types.observation import ObjNavObservatio
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.core.planning.object_search.rooms.discovery import SUSPENDED_PHASES
+from sparx_agency.core.planning.object_search.exploration import path_glances as _path_glances
 from sparx_agency.core.planning.object_search.exploration.path_glances import (
-    FULL, LEFT, RIGHT, GlanceScheduler, GlanceSettings)
+    FULL, LEFT, RIGHT, GlanceScheduler)
+from sparx_agency.core.planning.object_search import policy as _search_policy
+
+
+@dataclass(frozen=True)
+class GlanceSettings(_path_glances.GlanceSettings):
+    """The scheduler's mechanics under test on the UNCAPPED count these rigs were built for (``unknown_run_m=None``).
+
+    Geometric glances on, which the method's default no longer is (2026-10-31). The capped count of 2026-10-31 is
+    tested on its own below.
+    """
+
+    unknown_run_m: Optional[float] = None
+    geometric_enabled: bool = True
+
+
+@pytest.fixture(autouse=True)
+def _uncapped_glances(monkeypatch):
+    """A scheduler or a policy built without explicit settings scores on the uncapped count, as these tests expect."""
+    monkeypatch.setattr(_path_glances, "GlanceSettings", GlanceSettings)
+    monkeypatch.setattr(_search_policy, "GlanceSettings", GlanceSettings)
+
+
+def test_the_method_default_keeps_the_cues_and_scores_geometric_glances_on_capped_rays_when_turned_on():
+    default = _path_glances.GlanceSettings.__mro__[1]()
+    assert not default.geometric_enabled and default.cue_enabled, "geometric glances off pending the A/B"
+    assert default.unknown_run_m == pytest.approx(1.0)
+    assert (default.geometric_min_gain_m2, default.geometric_min_gain_per_action_m2) == pytest.approx((1.0, 0.15))
+    assert (default.min_gain_m2, default.min_gain_per_action_m2) == pytest.approx((3.0, 0.5)), "the cues' floors"
+    with pytest.raises(ValueError, match="unknown_run_m"):
+        _path_glances.GlanceSettings.__mro__[1](unknown_run_m=0.0)
+
+def test_the_policy_takes_geometric_glances_only_when_its_settings_say_so():
+    """``RPTSettings.geometric_glances`` is the A/B's switch; the scheduler sees exactly it, and nothing else flips it."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import settings
+    assert not _search_policy.RPTSearchPolicy(None, None, settings()).glance_settings.geometric_enabled
+    assert _search_policy.RPTSearchPolicy(None, None, settings(geometric_glances=True)).glance_settings.geometric_enabled
+    with pytest.raises(ValueError, match="geometric_glances"):
+        settings(geometric_glances="true")
+
 
 RES = 0.1
 FREE, OCC, UNK = 0, 100, -1
@@ -630,3 +671,51 @@ def test_no_full_circle_inside_a_room_the_search_has_finished_or_that_has_no_fro
     policy.loop = SimpleNamespace(_finished={3: ("explored", 1)}, _live_frontier=lambda pid, o, w: 5)
     scheduler.apply(obs_at(camera, 0, (1.0, 2.5)), big, follow(route_east()))
     assert scheduler.plan_in_force is None or scheduler.plan_in_force.kind != FULL
+
+
+def _variant(kind):
+    world = corridor_world(door=True)
+    g = world.grid.copy()
+    if kind == "unmapped_wall":
+        g[30, :] = UNK                      # the north wall never seen
+    elif kind == "solid":
+        g[30, 50:58] = OCC
+    return type(world)(g, world.params, values=world.values)
+
+
+def test_capped_rays_keep_the_doorways_look_and_cut_an_unmapped_walls_promise():
+    """2026-10-31: the uncapped count valued a look at a wall nobody had mapped above a look through a door."""
+    from sparx_agency.core.planning.exploration.view_gain import UnknownView, ViewCone, glance_gains
+    cone = ViewCone(half_fov_rad=math.radians(39.5), max_range_m=5.0, min_range_m=0.6)
+    run = _path_glances.GlanceSettings.__mro__[1]().unknown_run_m
+    gains = {kind: (glance_gains(UnknownView(_variant(kind), cone), (5.4, 2.5), 0.0, math.pi / 2),
+                    glance_gains(UnknownView(_variant(kind), cone), (5.4, 2.5), 0.0, math.pi / 2, unknown_run_m=run))
+             for kind in ("door", "solid", "unmapped_wall")}
+    floor = _path_glances.GlanceSettings.__mro__[1]().geometric_min_gain_m2
+    assert gains["door"][1].left_m2 >= floor, "the room beyond the open door is still worth the look"
+    assert gains["solid"][1].left_m2 == 0.0 and gains["solid"][0].left_m2 == 0.0
+    assert gains["unmapped_wall"][1].left_m2 <= 0.2 * gains["unmapped_wall"][0].left_m2, "a metre per ray, not five"
+    shallow = corridor_world(door=True)                      # the space behind the door only 1.2 m deep
+    g = shallow.grid.copy()
+    g[43, :] = OCC
+    shallow = type(shallow)(g, shallow.params, values=shallow.values)
+    capped = glance_gains(UnknownView(shallow, cone), (5.4, 2.5), 0.0, math.pi / 2, unknown_run_m=run).left_m2
+    uncapped = glance_gains(UnknownView(shallow, cone), (5.4, 2.5), 0.0, math.pi / 2).left_m2
+    assert uncapped < 0.6 * gains["door"][0].left_m2, "the uncapped count grows with the depth it cannot see"
+    assert capped == pytest.approx(gains["door"][1].left_m2, rel=0.15), "the capped one barely moves"
+
+
+def test_with_the_capped_default_turned_on_the_doorway_glance_is_still_scheduled_abreast_of_it():
+    route = route_east()
+    policy, camera, actions = fake_policy(route)
+    capped = replace(_path_glances.GlanceSettings.__mro__[1](), geometric_enabled=True)
+    scheduler = GlanceScheduler(policy, capped)
+    scheduler.apply(obs_at(camera, 0, (1.0, 2.5)), corridor_world(), follow(route))
+    plan = scheduler.plan_in_force
+    assert plan is not None and plan.kind == LEFT and 4.3 <= plan.candidate.xy[0] <= 5.8
+    off = GlanceScheduler(fake_policy(route)[0], _path_glances.GlanceSettings.__mro__[1]())
+    off.apply(obs_at(camera, 0, (1.0, 2.5)), corridor_world(), follow(route))
+    assert off.plan_in_force is None, "the method default takes no geometric glance"
+    solid = GlanceScheduler(fake_policy(route)[0], capped)
+    solid.apply(obs_at(camera, 0, (1.0, 2.5)), corridor_world(door=False), follow(route))
+    assert solid.plan_in_force is None, "nothing to see through a solid wall"

@@ -11,6 +11,7 @@ from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import pitch_action, turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.exploration.room_costs import passable_graph, snap_cell
+from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.object_search.closing.approach_history import ApproachHistory
 from sparx_agency.core.control.camera.box_pitch_servo import (
@@ -26,6 +27,11 @@ from sparx_agency.core.planning.object_search.perception.target_context import s
 from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
 from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
 
+
+
+#: Along the line from the agent to the 3-D memory, this much at the memory's end is the object and its support and is
+#: not read by :meth:`TargetClosing._memory_in_sight`.
+MEMORY_SIGHT_MARGIN_M = 0.4
 
 @dataclass(frozen=True)
 class TargetClosingSettings:
@@ -656,6 +662,7 @@ class TargetClosing:
         self.support_stops = 0             # STOPs on consistent support-surface tracking at terminal range
         self.history_holds = 0             # releases withheld inside the terminal range by the approach history
         self.history_stops = 0             # STOPs the approach history completed without a fresh aligned box
+        self.memory_sight_refusals = 0     # memory STOPs refused: the map has a wall between the agent and the memory
         self.depth_associations = 0        # re-sightings the along-ray tolerance kept that a 0.50 m sphere would have dropped
         self.floor_cut_frames = 0          # fresh frames the lower edge cut: sightings that did not move the 3-D memory
         self.floor_cut_measurements = 0    # terminal ranges read from the 3-D memory because the frame's lower edge cut the box
@@ -1233,6 +1240,10 @@ class TargetClosing:
         b = self.bearing
         self.bearing_abandoned += 1
         self.bearing_failures.append((tuple(b["spot"]), self.policy.mapping.floor_id, int(obs.step)))
+        pursuit = getattr(self.policy, "pursuit", None)
+        if pursuit is not None and why.startswith(("not moving", "lost", "walked", "out of actions")):
+            # Stopped by a wall or the frame, not disproved: the target lies on the bearing, beyond the depth range.
+            pursuit.remember_bearing(obs, self.label, float(b["yaw"]), self.policy.mapping.floor_id)
         self.last_release = "bearing approach given up: %s" % why
         self._clear()
 
@@ -1340,6 +1351,37 @@ class TargetClosing:
         s = self.settings
         return (self.history is not None and s.approach_history_m > 0
                 and self.history.qualifies(s.approach_history_m, s.approach_history_closed_m))
+
+    def _memory_in_sight(self, obs):
+        """Whether the map has nothing occupied between the agent and the 3-D memory: a STOP on the memory alone needs it.
+
+        The box goes missing for two reasons: the camera's frame or the
+        detector lost it, or something now stands between. A STOP on the
+        memory without a fresh box is right only for the first -- the map
+        says which. 00877-4ok3usBNeis/000043 (2026-10-31) STOPped 1.0 m from
+        its toilet's memory with the bathroom wall between them: 2.64 m from
+        the nearest view point. The cells within ``MEMORY_SIGHT_MARGIN_M`` of
+        the memory (the object and what it stands on) and within the body
+        radius of the agent are not read; an unknown cell does not block.
+        """
+        world = getattr(self.policy, "last_world", None)
+        if world is None or self.xyz is None:
+            return True
+        gx, gy = world.world_to_grid(obs.pose.x, obs.pose.y)
+        span = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2])
+        margin = MEMORY_SIGHT_MARGIN_M
+        start = min(span, float(self.policy.settings.body_radius_m))
+        if span - margin <= start:
+            return True
+        ux, uy = (self.xyz[0] - obs.pose.x) / span, (self.xyz[1] - obs.pose.y) / span
+        x0, y0 = world.world_to_grid(obs.pose.x + start * ux, obs.pose.y + start * uy)
+        x1, y1 = world.world_to_grid(obs.pose.x + (span - margin) * ux, obs.pose.y + (span - margin) * uy)
+        if not (world.in_bounds(gx, gy) and world.in_bounds(x0, y0) and world.in_bounds(x1, y1)):
+            return True
+        clear = line_of_sight_clear(world.grid == world.values.occupied, x0, y0, x1, y1)
+        if not clear:
+            self.memory_sight_refusals += 1
+        return clear
 
     def _boxed_in_here(self, obs):
         """Whether the agent still stands where a lock was released for want of a path (``boxed_in_radius_m``)."""
@@ -1947,6 +1989,9 @@ class TargetClosing:
             if self.pathless_after_footing >= s.release_after_footing_steps:
                 self.boxed_releases += 1
                 self.boxed_in.append(((float(obs.pose.x), float(obs.pose.y)), p.mapping.floor_id, int(obs.step)))
+                pursuit = getattr(p, "pursuit", None)
+                if pursuit is not None:
+                    pursuit.remember(obs, self)        # the target is kept: walked back to once a route exists
                 self._release(obs, why="no safe path from here", remember=False)
                 turn = p.episode.action_spec.turn_angle_rad
                 return NavigationCommand.hold(
@@ -2244,7 +2289,7 @@ class TargetClosing:
                 info, phase="STOP", reason="fresh in-range sighting after a %.1f m approach; alignment not required"
                 % self.history.path_m))
         if (history and not fresh and distance <= reach
-                and self.terminal_missing >= s.history_stop_after_missing):
+                and self.terminal_missing >= s.history_stop_after_missing and self._memory_in_sight(obs)):
             # The trajectory is complete and the detector has dropped the box for a few
             # frames: the 3-D memory refined over the approach is what we STOP on.
             self.history_stops += 1
@@ -2282,7 +2327,7 @@ class TargetClosing:
                  and self.last_seen < self.inspection_started and self.inspection_index >= len(views))
         exhausted = obs.step - self.inspection_started >= s.max_reacquire_steps
         if (blank or exhausted) and self.inspection_sighting is None and (history or support):
-            if distance <= reach and (exhausted or history):
+            if distance <= reach and (exhausted or history) and self._memory_in_sight(obs):
                 # Not "saw nothing": the approach brought us here, or the surface the target
                 # stands on is still measured at the memory's spot. Complete and STOP.
                 if history:
@@ -2633,6 +2678,7 @@ class TargetClosing:
                 "support_sightings": self.support_sightings, "support_seen_step": self.support_seen,
                 "support_xyz": self.support_xyz, "support_holds": self.support_holds, "support_stops": self.support_stops,
                 "history_holds": self.history_holds, "history_stops": self.history_stops,
+                "memory_sight_refusals": self.memory_sight_refusals,
                 "terminal_missing": self.terminal_missing,
                 "visible_floor_m": self.visible_floor_m, "lowest_m": self.lowest_m, "top_m": self.top_m,
                 "footprint_m": self.footprint_m, "depth_associations": self.depth_associations,

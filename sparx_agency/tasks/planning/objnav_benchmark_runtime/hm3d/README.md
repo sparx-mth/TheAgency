@@ -43,6 +43,8 @@ L=sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/run_benchmark.sh
 $L --preflight                                  # services + data + frozen configuration, no episode, no mesh
 $L --scene 00877-4ok3usBNeis --limit 3 --record # three recorded episodes of one scene (video + HUD + replayable trace)
 $L --smoke                                      # one published episode per scene, every category at least once
+$L --version v1 --episode-ids-file cases.json --record --jobs 2
+                                                # exactly the listed <scene>/<index> episodes, one process per scene
 $L                                              # the full published v2 val split (1,000 episodes / 36 scenes), lean records
 $L --version v1                                 # the v1 val split (2,000 episodes / 20 scenes)
 $L --output runs/hm3d_v2_val_X                  # resume: finished scenes are kept, started ones continue

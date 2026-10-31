@@ -165,6 +165,10 @@ PY
       unshare -rm true 2>/dev/null || die "HABITAT_RENDER=software needs unprivileged user namespaces (unshare -rm) to hide /dev/dri from Mesa"
       RENDER_WRAP=(unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _)
       RENDER_FLAGS=(--software-render)
+      # NVIDIA's EGL opens /dev/nvidia*, not /dev/dri: with its vendor library installed, hiding /dev/dri still left
+      # it EGL device 0, and a "software" run took ~0.5-1.4 GB of the card (2026-10-31). GLVND loads Mesa alone then.
+      MESA_EGL_VENDOR="${MESA_EGL_VENDOR:-/usr/share/glvnd/egl_vendor.d/50_mesa.json}"
+      [[ -f "$MESA_EGL_VENDOR" ]] && export __EGL_VENDOR_LIBRARY_FILENAMES="$MESA_EGL_VENDOR"
       say "renderer: Mesa llvmpipe (software), /dev/dri hidden from the run; the GPU gate is skipped" | tee -a "$LOG" ;;
     *) die "HABITAT_RENDER must be gpu or software" ;;
   esac

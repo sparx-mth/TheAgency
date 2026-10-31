@@ -189,6 +189,30 @@ class StairTerrain:
         current = components[y, x]
         return float(np.count_nonzero(components == current)) * self.resolution ** 2 if current else 0.0
 
+    def step_surfaces(self, plane_m, band_m, min_offset_m=0.10):
+        """The measured support the agent can walk to from where it stands, off the plane ``plane_m`` but within ``band_m`` of it.
+
+        Reachable over risers of at most ``max_step_m`` (the route graph's own
+        rule) through cells clear to body height -- a step, a landing, a
+        sunken or raised part of the room. A bed, a sofa seat or a table top
+        is no step: its edge is one riser taller than ``max_step_m``.
+
+        Returns:
+            ``(xy, heights)``: ``(N, 2)`` world cell centres and their ``(N,)``
+            support heights; empty before the first update.
+        """
+        if self.world is None:
+            return np.zeros((0, 2)), np.zeros(0)
+        distances, _ = self.distances
+        reach = np.isfinite(distances)
+        xs, ys = self.routes.x[reach], self.routes.y[reach]
+        heights = self.heights[ys, xs]
+        offset = np.abs(heights - float(plane_m))
+        keep = np.isfinite(heights) & (offset > float(min_offset_m)) & (offset <= float(band_m))
+        res = self.resolution
+        xy = np.stack(((xs[keep] + self.offset[0] + 0.5) * res, (ys[keep] + self.offset[1] + 0.5) * res), axis=1)
+        return xy, heights[keep]
+
     def stair_distance(self, pose):
         """Distance to reachable non-level support; walls and unknown are not stairs."""
         if self.world is None:

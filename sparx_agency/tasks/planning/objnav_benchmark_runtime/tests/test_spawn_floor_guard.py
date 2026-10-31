@@ -678,3 +678,70 @@ def test_the_storey_a_provisional_spawn_settles_on_becomes_the_spawn_plane():
     policy.plan(obs)
     assert guard.goal_allowed(obs, policy.last_world, (5.0, 1.0), "room_entry") and guard.stats["goals_refused"] == 0
     assert not policy.fallback.failures
+
+
+def _step_terrain(policy, monkeypatch, cells, height, area=6.0):
+    """The stair terrain reporting ``cells`` (world XY) as walkable support at ``height``, and ``area`` m2 of plateau."""
+    xy = np.asarray(cells, dtype=float).reshape(-1, 2)
+    monkeypatch.setattr(policy.building.terrain, "step_surfaces",
+                        lambda plane, band, min_offset_m=0.10: (xy, np.full(len(xy), float(height))))
+    monkeypatch.setattr(policy.building.terrain, "plateau_area", lambda pose: float(area))
+
+
+def test_a_step_down_the_terrain_can_walk_is_free_and_never_a_drop(monkeypatch):
+    """2026-10-31: a sunken floor 0.4 m below the plane (00835-q3zU7Yy5E5s/000006, the television there) was a drop."""
+    policy, episode, world, _ = forbidden_stairs()
+    policy.mapping._anchor = 0.0
+    obs = at(episode, 0, 3.0, 3.0, depth=3.0)
+    policy.floor_guard.observe(obs, world)
+    drops = policy.floor_guard.drops[policy.mapping.floor_id].copy()
+    assert drops.any()
+    ys, xs = np.nonzero(drops)
+    sunken = [world.grid_to_world(x, y) for x, y in zip(xs, ys)]
+    _step_terrain(policy, monkeypatch, sunken, -0.4)
+    confined = policy.floor_guard.observe(at(episode, 1, 3.0, 3.0, depth=3.0), world)
+    assert policy.floor_guard.stats["step_drop_exempt"] == int(drops.sum())
+    assert (confined.grid[drops] == world.values.free).all(), "walkable support is floor, not a drop"
+    assert policy.floor_guard.goal_allowed(obs, world, sunken[0], "frontier")
+
+
+def test_steps_free_occupied_cells_but_never_a_cell_the_body_touched(monkeypatch):
+    policy, episode, world, _ = forbidden_stairs()
+    policy.mapping._anchor = 0.0
+    grid = world.grid.copy()
+    gx, gy = world.world_to_grid(3.0, 4.0)
+    grid[gy, gx] = grid[gy, gx + 1] = world.values.occupied            # a 0.2 m riser the obstacle band painted
+    world = type(world)(grid, world.params, values=world.values)
+    policy.mapping._touched[policy.mapping.floor_id] = {(gx + 1, gy): 0}
+    _step_terrain(policy, monkeypatch, [world.grid_to_world(gx, gy), world.grid_to_world(gx + 1, gy)], 0.2)
+    confined = policy.floor_guard.observe(at(episode, 0, 3.0, 3.0), world)
+    assert confined.grid[gy, gx] == world.values.free and confined.grid[gy, gx + 1] == world.values.occupied
+
+
+@pytest.mark.parametrize("walked_level", [True, False])
+def test_standing_level_on_a_floor_sized_plane_a_step_below_re_measures_the_storey(monkeypatch, walked_level):
+    policy, episode, world, _ = forbidden_stairs()
+    monkeypatch.setattr(type(policy.floor_guard), "provisional", property(lambda self: not walked_level))
+    atlas = policy.mapping.atlas
+    assert atlas.elevation_m == pytest.approx(0.0)
+    _step_terrain(policy, monkeypatch, [], -0.35)
+    policy.floor_guard.observe(at(episode, 0, 2.8, 3.0, z=0.0), world)                    # the spawn, on the plane
+    policy.floor_guard.drops[policy.mapping.floor_id] = np.ones(world.grid.shape, bool)   # measured from the step above
+    for step in range(1, 4):
+        policy.floor_guard.observe(at(episode, step, 3.0 + 0.1 * step, 3.0, z=-0.35), world)
+    assert atlas.elevation_m == pytest.approx(-0.35) and policy.mapping._anchor == pytest.approx(-0.35)
+    assert policy.floor_guard.stats["plane_remeasured"] == 1
+    assert policy.floor_guard.events[-1]["event"] == "storey_plane_remeasured"
+    assert not policy.floor_guard.drops[policy.mapping.floor_id].all(), "the old plane's drops went with it"
+    # A storey walked level keeps its spawn plane; a spawn on a tread (provisional) moves it to the floor.
+    assert policy.floor_guard.spawn_z == pytest.approx(0.0 if walked_level else -0.35)
+
+
+def test_no_re_measure_on_a_small_plateau_or_beyond_the_atlas_departure(monkeypatch):
+    policy, episode, world, _ = forbidden_stairs()
+    atlas = policy.mapping.atlas
+    _step_terrain(policy, monkeypatch, [], -0.35, area=1.0)              # a landing, not a floor
+    for step in range(4):
+        policy.floor_guard.observe(at(episode, step, 3.0, 3.0, z=-0.35), world)
+    assert atlas.elevation_m == pytest.approx(0.0)
+    assert atlas.remeasure(0.2) is True and atlas.elevation_m == pytest.approx(0.2)

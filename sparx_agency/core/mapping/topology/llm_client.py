@@ -50,6 +50,13 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
+#: A prompt Ollama evaluated at fewer tokens than one per this many characters was cut. English prompts of
+#: the node oracle run at 3.7-4.0 characters per token under the Qwen tokenizer; the 2026-10-28 sweep's
+#: silently truncated oracle prompt read 7.8 (16,015 characters as 2,050 tokens in a 4,096 window).
+TRUNCATION_CHARS_PER_TOKEN = 6.0
+#: Below this many prompt characters the template's own tokens dominate and the ratio says nothing.
+TRUNCATION_MIN_CHARS = 2000
+
 
 def _seed_from_env(raw: str) -> Optional[int]:
     """``""`` or ``"none"`` means send no seed; anything else must parse."""
@@ -116,6 +123,17 @@ class LLMConfig:
             FRONT, which would silently drop the system prompt's rules, so
             the window is asked for explicitly rather than left to the
             server's default.
+        num_ctx: Context window requested for the DEFAULT route (Ollama
+            ``num_ctx``). None sends none, and the server's own default
+            applies -- unless the reasoning model IS the default model, in
+            which case :meth:`__post_init__` sets it to
+            ``reasoning_num_ctx``. Ollama keys a loaded model by its context:
+            two routes to one model with two windows make every call of the
+            rarer one wait for a reload that a busy runner never grants. The
+            2026-10-28 GT sweep (qwen2.5:3b in both roles, labels at the
+            server's 4,096, the oracle at 8,192, 20 workers) answered zero
+            oracle calls in 2,000 episodes: each hung to its timeout, and
+            once 512 hung in the server's queue every one was an HTTP 503.
         num_gpu: Ollama ``num_gpu`` per request: how many layers the server
             may place on the GPU. None leaves it to the server (every layer
             that fits); ``-1`` asks for all of them, ``0`` keeps inference
@@ -139,10 +157,13 @@ class LLMConfig:
     reasoning_max_tokens: int = 2048
     reasoning_num_ctx: int = 8192
     num_gpu: Optional[int] = None
+    num_ctx: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not str(self.reasoning_model).strip():
             self.reasoning_model = self.model
+        if self.num_ctx is None and self.reasoning_model == self.model:
+            self.num_ctx = int(self.reasoning_num_ctx)      # one model, one window: see ``num_ctx``
         if self.num_gpu is not None and (isinstance(self.num_gpu, bool) or int(self.num_gpu) < -1):
             raise ValueError("num_gpu must be None, -1 (all layers) or a non-negative layer count")
 
@@ -168,6 +189,7 @@ class LLMConfig:
             reasoning_max_tokens=int(get("LLM_REASONING_MAX_TOKENS", "2048")),
             reasoning_num_ctx=int(get("LLM_REASONING_NUM_CTX", "8192")),
             num_gpu=int(get("LLM_NUM_GPU", "").strip()) if get("LLM_NUM_GPU", "").strip() else None,
+            num_ctx=int(get("LLM_NUM_CTX", "").strip()) if get("LLM_NUM_CTX", "").strip() else None,
         )
 
     def models(self) -> Tuple[str, ...]:
@@ -230,7 +252,7 @@ class LLMClient:
         route = _Route(model=self.cfg.reasoning_model if reasoning else self.cfg.model,
                        timeout_s=self.cfg.reasoning_timeout_s if reasoning else self.cfg.timeout_s,
                        max_tokens=self.cfg.reasoning_max_tokens if reasoning else self.cfg.max_tokens,
-                       num_ctx=int(self.cfg.reasoning_num_ctx) if reasoning else None)
+                       num_ctx=int(self.cfg.reasoning_num_ctx) if reasoning else self.cfg.num_ctx)
         if self.cfg.backend == "ollama":
             return self._ollama_chat(system, user, t, route)
         if self.cfg.backend in ("openai", "openai-compat"):
@@ -279,9 +301,11 @@ class LLMClient:
         data = r.json()
         # Ollama's reply: {"message": {"role":"assistant","content":"..."}}
         try:
-            return data["message"]["content"]
+            content = data["message"]["content"]
         except (KeyError, TypeError) as e:
             raise RuntimeError(f"unexpected Ollama reply: {data}") from e
+        _refuse_truncation(data, len(system) + len(user), route.num_ctx)
+        return content
 
     def _openai_chat(self, system: str, user: str, temperature: float,
                      route: "_Route") -> str:
@@ -341,6 +365,31 @@ class LLMClient:
                 if attempt + 1 < tries:
                     time.sleep(0.4)
         raise RuntimeError(f"LLM request failed after {tries} tries: {last_err}")
+
+
+def _refuse_truncation(data: Dict[str, Any], prompt_chars: int, num_ctx: Optional[int]) -> None:
+    """Raise when Ollama's counters show the prompt was cut or the window ran out.
+
+    Ollama truncates a prompt that outgrows its window from the FRONT -- the
+    system prompt's rules go first -- and says nothing; a reply to the tail of
+    a prompt is a confident answer to a question nobody asked.
+
+    Raises:
+        RuntimeError: ``prompt_eval_count`` is under one token per
+            :data:`TRUNCATION_CHARS_PER_TOKEN` characters of a prompt of at
+            least :data:`TRUNCATION_MIN_CHARS`, or prompt plus reply filled
+            the requested window.
+    """
+    prompt_tokens = data.get("prompt_eval_count")
+    if not isinstance(prompt_tokens, int):
+        return
+    if prompt_chars >= TRUNCATION_MIN_CHARS and prompt_tokens * TRUNCATION_CHARS_PER_TOKEN < prompt_chars:
+        raise RuntimeError("Ollama truncated the prompt: %d characters evaluated as %d tokens (window %s); "
+                           "raise LLM_REASONING_NUM_CTX / LLM_NUM_CTX" % (prompt_chars, prompt_tokens, num_ctx))
+    reply_tokens = data.get("eval_count")
+    if num_ctx and isinstance(reply_tokens, int) and prompt_tokens + reply_tokens >= int(num_ctx):
+        raise RuntimeError("Ollama filled its %d-token window (%d prompt + %d reply); the reply is cut"
+                           % (int(num_ctx), prompt_tokens, reply_tokens))
 
 
 @dataclass(frozen=True)

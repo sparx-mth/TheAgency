@@ -47,6 +47,23 @@ plans on -- rather than in each frontier, opening, peek and route module:
   stays walkable. A plateau ``min_floor_separation_m`` or more from the
   spawn plane is another storey and is never adopted.
 
+* **steps** (since 2026-10-31, ``RPTSettings.step_surface_band_m``): the
+  map's bands are fixed offsets from the plane -- free within 0.10 m,
+  obstacle from 0.15 m above, drop beyond ``drop_m`` below -- so a single
+  step up, a raised dais or a sunken living room was a wall or a drop, and a
+  spawn on a tread a box. Support the stair terrain can WALK to from the
+  agent (``StairTerrain.step_surfaces``: risers of at most ``max_step_m``,
+  clear to body height) within the band of the plane is kept per floor, is
+  free on the planning grid, is never a drop, and within the atlas's
+  ``departure_m`` -- the whole band from a provisional spawn storey -- is
+  never a stair mask. The GT-oracle sweep of 2026-10-28 solved 14 % of the
+  single-storey episodes whose shortest path changes height by 0.25-1.0 m.
+  When the agent has stood level on such a plane of floor size, off the
+  storey plane by more than a step but inside ``departure_m`` (where the
+  atlas starts no transition), the atlas re-measures the storey there
+  (``FloorAtlas.remeasure``): on a sunken floor measured from the step above
+  it, a toilet's lid lay in the free band;
+
 Two rules keep the mask from trapping the agent itself (since 2026-10-08;
 Collierville/000000 walked past the foot of a flight 0.6 m from its
 centreline, the capsule covered its cell as a GENUINE obstacle -- which the
@@ -82,6 +99,11 @@ from sparx_agency.core.planning.object_search.world_model.peek_stairs import sta
 MAX_EVENTS = 50
 #: Actions a settled plateau inside the separation rule may stay "in transition" before it is adopted.
 HALF_LEVEL_ACTIONS = 30
+#: Consecutive actions within this height of each other, off the plane by more than ``REMEASURE_MIN_OFFSET_M``, that
+#: make the agent "standing level" on another plane for a re-measure.
+REMEASURE_SAMPLES = 3
+REMEASURE_LEVEL_M = 0.05
+REMEASURE_MIN_OFFSET_M = 0.15
 #: Consecutive actions at one height (within the atlas's ``stable_height_m``) that make a plateau of a spot the
 #: agent cannot translate on -- the atlas's own test wants ``stable_distance_m`` of walking, and the map is frozen
 #: while the transition stands (since 2026-10-28).
@@ -103,13 +125,17 @@ class SpawnFloorGuard:
         self.spawn_z: Optional[float] = None
         self.spawn_floor: Optional[int] = None  # the atlas floor the spawn plane belongs to (rebased with it)
         self.drops: Dict[int, np.ndarray] = {}
+        self.step_band_m: float = float(settings.step_surface_band_m)
+        self.steps: Dict[int, np.ndarray] = {}     # floor id -> walkable step support heights (NaN: none)
+        self._level_heights: List[float] = []
         self.mask: Optional[np.ndarray] = None
         self.off_plane: bool = False
         self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
         self.stats = {"goals_refused": 0, "drop_cells": 0, "stair_cells": 0, "off_plane_actions": 0,
                       "half_levels_adopted": 0, "walked_exempt_cells": 0, "rebased": 0, "stalled_adoptions": 0,
-                      "stalled_returns": 0}
+                      "stalled_returns": 0, "step_cells": 0, "step_cells_freed": 0, "step_drop_exempt": 0,
+                      "step_stair_exempt": 0, "plane_remeasured": 0}
         self._transition_heights: List[float] = []   # the pose height on every action of the transition in force
         self.stair_margins_m = {}               # portal id -> capsule margin drawn, metres (``adaptive_capsule``)
 
@@ -127,15 +153,26 @@ class SpawnFloorGuard:
             self.rebase(obs, int(self.policy.mapping.floor_id), float(self.policy.mapping.atlas.elevation_m),
                         "the atlas settled on a storey from the provisional spawn storey")
         self._adopt_half_level(obs)
+        self._follow_step_plane(obs)
         self._track_plane(obs)
         drops = self._drops_for(self.policy.mapping.floor_id, world)
         self._mark_drops(obs, world, drops)
-        mask = drops.copy()
+        steps = self._step_surfaces(world)
+        walkable = np.isfinite(steps)
+        self.stats["step_drop_exempt"] = int((drops & walkable).sum())
+        mask = drops & ~walkable
         margins = {}
         stairs = (stair_peek_mask(self.policy, world, obs.pose, carve=False, report=margins)
                   if getattr(self.policy, "building", None) is not None else None)
         self.stair_margins_m = margins
         if stairs is not None:
+            plane = getattr(self.policy.mapping, "_anchor", None)
+            if plane is not None and walkable.any():
+                band = self.step_band_m if self.provisional else float(self.policy.mapping.atlas.params.departure_m)
+                with np.errstate(invalid="ignore"):
+                    exempt = walkable & (np.abs(steps - float(plane)) <= band)
+                self.stats["step_stair_exempt"] = int((stairs & exempt).sum())
+                stairs = stairs & ~exempt
             mask |= stairs
         exempt = 0
         if mask.any():
@@ -148,10 +185,18 @@ class SpawnFloorGuard:
         self.stats["stair_cells"] = 0 if stairs is None else int(stairs.sum())
         self.stats["walked_exempt_cells"] = exempt
         self.mask = mask if mask.any() else None
-        if self.mask is None:
+        free = walkable & ~mask & (world.grid != world.values.free)
+        touched = getattr(self.policy.mapping, "_touched", {}).get(self.policy.mapping.floor_id) or {}
+        for tx, ty in touched:
+            if 0 <= ty < free.shape[0] and 0 <= tx < free.shape[1]:
+                free[ty, tx] = False                # what the body touched twice outranks the terrain too
+        self.stats["step_cells_freed"] = int(free.sum())
+        if self.mask is None and not free.any():
             return world
         grid = world.grid.copy()
-        grid[self.mask] = world.values.occupied
+        grid[free] = world.values.free
+        if self.mask is not None:
+            grid[self.mask] = world.values.occupied
         return OccupancyGrid2D(grid, world.params, values=world.values)
 
     def goal_allowed(self, obs, world, goal, kind) -> bool:
@@ -289,6 +334,68 @@ class SpawnFloorGuard:
             self._record({"action": obs.step, "event": "spawn_plane_left" if off_plane else "spawn_plane_regained",
                           "plane_offset_m": round(offset, 3), "height_m": round(float(obs.pose.z), 3)})
         self.off_plane = off_plane
+
+    def _step_surfaces(self, world) -> np.ndarray:
+        """The floor's walkable step support heights on the planning grid, NaN elsewhere; this action's terrain added."""
+        floor_id = self.policy.mapping.floor_id
+        heights = self.steps.get(floor_id)
+        if heights is None or heights.shape != world.grid.shape:
+            heights = np.full(world.grid.shape, np.nan, dtype=np.float32)
+            self.steps[floor_id] = heights
+        terrain = getattr(getattr(self.policy, "building", None), "terrain", None)
+        plane = getattr(self.policy.mapping, "_anchor", None)
+        atlas = getattr(self.policy.mapping, "atlas", None)
+        if terrain is not None and plane is not None and not (atlas is not None and atlas.in_transition):
+            xy, h = terrain.step_surfaces(float(plane), self.step_band_m)
+            if len(h):
+                xs = np.floor((xy[:, 0] - world.origin_x) / world.resolution).astype(int)
+                ys = np.floor((xy[:, 1] - world.origin_y) / world.resolution).astype(int)
+                inside = (xs >= 0) & (xs < world.width) & (ys >= 0) & (ys < world.height)
+                heights[ys[inside], xs[inside]] = h[inside]
+        self.stats["step_cells"] = int(np.isfinite(heights).sum())
+        return heights
+
+    def _follow_step_plane(self, obs):
+        """Re-measure the storey on the plane the agent stands level on, a step or more off it but inside ``departure_m``.
+
+        The plane must be of floor size (the terrain's connected flat support
+        under the agent, ``min_floor_area_m2``). From a provisional spawn
+        storey -- a spawn on a tread -- the spawn plane moves with it; from a
+        storey walked level, the spawn plane stays and the bound measures
+        the step against it. The drops measured from the old plane are
+        dropped with it.
+        """
+        mapping = self.policy.mapping
+        atlas = getattr(mapping, "atlas", None)
+        terrain = getattr(getattr(self.policy, "building", None), "terrain", None)
+        if atlas is None or not atlas.params.enabled or atlas.in_transition or terrain is None or not atlas.floors:
+            self._level_heights = []
+            return
+        plane = float(atlas.elevation_m)
+        offset = float(obs.pose.z) - plane
+        if not REMEASURE_MIN_OFFSET_M <= abs(offset) <= float(atlas.params.departure_m):
+            self._level_heights = []
+            return
+        self._level_heights = (self._level_heights + [float(obs.pose.z)])[-REMEASURE_SAMPLES:]
+        if (len(self._level_heights) < REMEASURE_SAMPLES
+                or max(self._level_heights) - min(self._level_heights) > REMEASURE_LEVEL_M):
+            return
+        area = float(terrain.plateau_area(obs.pose))
+        if area < float(atlas.params.min_floor_area_m2):
+            return
+        height = sum(self._level_heights) / len(self._level_heights)
+        provisional = self.provisional
+        if not atlas.remeasure(height):
+            return
+        mapping._anchor = height
+        self.drops.pop(int(mapping.floor_id), None)
+        if provisional and self.spawn_floor == int(mapping.floor_id):
+            self.spawn_z = height
+        self._level_heights = []
+        self.stats["plane_remeasured"] += 1
+        self._record({"action": obs.step, "event": "storey_plane_remeasured", "floor_id": int(mapping.floor_id),
+                      "height_m": round(height, 3), "offset_m": round(height - plane, 3),
+                      "plateau_m2": round(area, 2), "spawn_plane_moved": bool(provisional)})
 
     def _drops_for(self, floor_id, world) -> np.ndarray:
         drops = self.drops.get(floor_id)

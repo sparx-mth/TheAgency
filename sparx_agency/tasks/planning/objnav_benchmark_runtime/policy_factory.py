@@ -158,6 +158,8 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
     for name, service in services:
         try:
             identities[name] = service.health()
+            if hasattr(service, "probe"):
+                service.probe()            # a real request per route; nothing of it enters the frozen identity
         except Exception as exc:
             problems.append("%s: %s" % (name, exc))
     if problems:

@@ -126,6 +126,41 @@ def test_the_reasoning_route_uses_its_own_model_timeout_cap_and_context():
     assert big["payload"]["options"]["seed"] == 0 and big["payload"]["keep_alive"] == "30m"
 
 
+def test_one_model_on_both_routes_asks_for_one_window_on_both():
+    # 2026-10-28: qwen2.5:3b in both roles, labels at the server's window and the oracle at 8,192 --
+    # Ollama never granted the oracle's reload under load, and 2,000 episodes got no oracle answer.
+    client = _client("ollama", [_ollama_reply('{"a": 1}'), _ollama_reply('{"b": 2}')],
+                     reasoning_model="qwen2.5:3b-instruct", reasoning_num_ctx=8192)
+    assert client.cfg.num_ctx == 8192
+    client.chat_json("s", "u")
+    client.chat_json("s", "u", reasoning=True)
+    small, big = client.sess.posts
+    assert small["payload"]["options"]["num_ctx"] == big["payload"]["options"]["num_ctx"] == 8192
+
+
+def test_an_explicit_default_window_is_sent_and_two_models_keep_the_server_default(monkeypatch):
+    monkeypatch.setenv("LLM_NUM_CTX", "4096")
+    assert LLMConfig.from_env().num_ctx == 4096
+    assert LLMConfig(model="a", reasoning_model="b").num_ctx is None
+
+
+def test_a_prompt_ollama_truncated_raises_instead_of_answering_its_tail():
+    reply = FakeResponse({"message": {"content": '{"a": 1}'}, "prompt_eval_count": 2050, "eval_count": 40})
+    client = _client("ollama", [reply])
+    with pytest.raises(RuntimeError, match="truncated"):
+        client.chat_json("s" * 15000, "u" * 1000)
+
+
+def test_a_reply_that_filled_the_window_raises_and_an_honest_count_passes():
+    full = FakeResponse({"message": {"content": '{"a": 1}'}, "prompt_eval_count": 7000, "eval_count": 1192})
+    client = _client("ollama", [full], reasoning_num_ctx=8192)
+    with pytest.raises(RuntimeError, match="window"):
+        client.chat_json("s" * 26000, "u", reasoning=True)
+    honest = FakeResponse({"message": {"content": '{"a": 1}'}, "prompt_eval_count": 3125, "eval_count": 149})
+    client = _client("ollama", [honest], reasoning_num_ctx=8192)
+    assert client.chat_json("s" * 11634, "u" * 646, reasoning=True) == {"a": 1}
+
+
 def test_num_gpu_is_sent_to_ollama_only_when_the_placement_plan_sets_it(monkeypatch):
     client = _client("ollama", [_ollama_reply('{"a": 1}')])
     client.chat_json("s", "u")

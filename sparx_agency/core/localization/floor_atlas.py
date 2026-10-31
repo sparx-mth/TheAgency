@@ -367,6 +367,28 @@ class FloorAtlas:
                     heapq.heappush(queue, (cost + edge.length_m, other, edge.id if first < 0 else first))
         return None
 
+    def remeasure(self, height):
+        """Move the active floor's elevation to ``height``: the agent stands on the floor itself, not where it was first measured.
+
+        For a caller that measured the agent standing level on a large plane
+        within ``departure_m`` of the elevation -- a spawn on a tread, a
+        sunken or raised part of the room reached by a step -- where no
+        transition will ever start, and every band the mapping cuts from the
+        elevation (free floor, obstacles, drops) is off by the step.
+
+        Returns:
+            False when another floor already lies within ``floor_match_m`` of
+            ``height`` (refused), else True.
+        """
+        if not self.floors or self.in_transition:
+            return False
+        for floor in self.floors.values():
+            if floor.id != self.active_id and abs(floor.elevation_m - float(height)) <= self.params.floor_match_m:
+                return False
+        self.floors[self.active_id].elevation_m = float(height)
+        self.revision += 1
+        return True
+
     def adopt_level(self, pose, height):
         """Make ``height`` a floor of its own INSIDE the separation rule and arrive on it.
 

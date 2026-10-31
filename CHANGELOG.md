@@ -5,6 +5,22 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-10-31, the GT sweep's dead oracle and its single-storey failures, measured on 40 of them)
+- **The node oracle answers again with one model on both routes**, the run stops on a dead oracle, steps and spawns
+  on treads are walkable, standoffs on a step are standoffs, released targets are pursued, memory STOPs need line of
+  sight: 40 failed or poor-SPL single-storey episodes of `gt_oracle_2000ep_3b_20261028T152707Z` re-run with
+  geometric glances off: **SR 0.125 -> 0.600, SPL 0.014 -> 0.321**, 19 fixed, no success lost
+  (`docs/progress/entries/040-hm3d-failure40-fixes.md`, `runs/failure40/report_final/`).
+- **Geometric path glances judged on capped rays, and off by default pending an A/B**
+  (`core/planning/exploration/view_gain.py` `UnknownView.unknown_through`, `glance_gains(unknown_run_m=)`;
+  `exploration/path_glances.py` `GlanceSettings` `unknown_run_m` 1.0 m, `geometric_min_gain_m2` 1.0,
+  `geometric_min_gain_per_action_m2` 0.15; `RPTSettings.geometric_glances`, False, the run's switch through
+  `--policy-config`): a ray counts only the first metre of unknown it enters, so an unmapped wall stops promising the
+  room behind it. On the 232 recorded glances the promise went from r = -0.17 to 0.39 (0.62 geometric) with what the
+  map gained; cue glances unchanged. The same 40 cases with them on: **SR 0.650, SPL 0.283** (7 fixed, 5 lost
+  against off; `runs/failure40/report_glances/`) -- but the oracle answers the same prompt differently run to run, and
+  the 6 episodes whose runs parted on such an answer before any geometric glance carry the whole SPL drop (-0.067);
+  the 27 a glance set on a new course went 7 fixed / 2 lost, +0.032 SPL.
 ### Changed (2026-10-28/29, the narrow-passage navigation overhaul, measured)
 - **Every committed route is walked on the discrete-action lattice** (`core/planning/planners/lattice`,
   `core/planning/object_search/navigation`): Hybrid A* over (x, y, heading) with the benchmark's step and turn as its

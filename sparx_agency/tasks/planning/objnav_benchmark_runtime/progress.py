@@ -39,7 +39,7 @@ UTC = "%Y-%m-%dT%H:%M:%SZ"
 #: The policy diagnostics a lean record keeps whole (all small, all counters or verdicts).
 LEAN_POLICY_KEYS = ("method", "rooms", "max_rooms", "landmarks", "warmup", "llm_queries", "oracle_reuses",
                     "room_label_queries", "plan_calls", "duplicates_removed", "blocked", "floor_revisions",
-                    "oracle_repair_attempts", "oracle_repair_successes", "target_closing", "spawn_floor_guard",
+                    "oracle_repair_attempts", "oracle_repair_successes", "target_closing", "target_pursuit", "spawn_floor_guard",
                     "target_evidence", "room_scans", "openings", "glances", "sight", "doors", "doorway_peek",
                     "exploration")
 #: Per-action series and event logs a lean record drops, wherever they appear.

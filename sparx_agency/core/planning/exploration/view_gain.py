@@ -199,6 +199,40 @@ class UnknownView:
         seen[rows[keep], cols[keep]] = True
         return seen
 
+    def unknown_through(self, xy: Tuple[float, float], centre_rad: float, half_angle_rad: float,
+                        unknown_run_m: float) -> np.ndarray:
+        """Like :meth:`unknown_in_sector`, but each ray counts at most ``unknown_run_m`` of UNKNOWN along its length.
+
+        :meth:`unknown_in_sector` lets a ray cross any amount of unknown: a
+        wall not mapped yet is as transparent as the room behind a doorway,
+        and a look along a corridor whose walls are unseen is valued by
+        everything within range. Here a ray is followed through known free
+        cells as before, and once it enters unknown it is credited only
+        with the first ``unknown_run_m`` of it -- what a camera at the
+        threshold of an unseen space can count on seeing before the next
+        surface.
+        """
+        seen = np.zeros((self._height, self._width), dtype=bool)
+        x, y = float(xy[0]), float(xy[1])
+        half = min(math.pi, max(0.0, float(half_angle_rad)))
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(centre_rad)) or half <= 0.0:
+            return seen
+        ranges = self._ranges
+        rays = int(math.ceil(2.0 * half * self._rays_per_rad)) + 1
+        bearings = np.linspace(centre_rad - half, centre_rad + half, rays, endpoint=half < math.pi)
+        gx = np.floor((x + np.outer(np.cos(bearings), ranges) - self._origin_x) / self._resolution).astype(np.int64)
+        gy = np.floor((y + np.outer(np.sin(bearings), ranges) - self._origin_y) / self._resolution).astype(np.int64)
+        inside = (gx >= 0) & (gx < self._width) & (gy >= 0) & (gy < self._height)
+        gx_c, gy_c = np.clip(gx, 0, self._width - 1), np.clip(gy, 0, self._height - 1)
+        blocked = self._blocking[gy_c, gx_c] | ~inside
+        first = np.where(blocked.any(axis=1), blocked.argmax(axis=1), blocked.shape[1])
+        visible = np.arange(blocked.shape[1])[None, :] < first[:, None]
+        unknown = visible & self._unknown[gy_c, gx_c]
+        step = ranges[1] - ranges[0] if len(ranges) > 1 else self._resolution
+        within = unknown & (np.cumsum(unknown, axis=1) * step <= float(unknown_run_m) + 1e-9)
+        seen[gy_c[within], gx_c[within]] = True
+        return seen
+
     def unknown_ahead(self, xy: Tuple[float, float], yaw: float) -> np.ndarray:
         """The camera's own cone at ``yaw``: what a pose sees without turning."""
         return self.unknown_in_sector(xy, yaw, self.cone.half_fov_rad)
@@ -220,7 +254,7 @@ class GlanceGain:
 
 
 def glance_gains(view: UnknownView, xy: Tuple[float, float], heading: float, side_rad: float,
-                 already: Optional[np.ndarray] = None) -> GlanceGain:
+                 already: Optional[np.ndarray] = None, unknown_run_m: Optional[float] = None) -> GlanceGain:
     """The gains of a left, a right and a full glance from ``xy`` facing ``heading``.
 
     Args:
@@ -231,14 +265,22 @@ def glance_gains(view: UnknownView, xy: Tuple[float, float], heading: float, sid
         already: Optional ``(H, W)`` bool of unknown cells the walk reveals
             anyway (the forward cones along the route); subtracted from
             every gain so a glance is valued only by what is its own.
+        unknown_run_m: Credit each ray with at most this much unknown
+            (:meth:`UnknownView.unknown_through`); None lets a ray cross any
+            amount of unknown, an unmapped wall included.
 
     Returns:
         The three gains in square metres.
     """
     half_fov = view.cone.half_fov_rad
-    left = view.unknown_in_sector(xy, heading + 0.5 * side_rad, 0.5 * side_rad + half_fov)
-    right = view.unknown_in_sector(xy, heading - 0.5 * side_rad, 0.5 * side_rad + half_fov)
-    full = view.unknown_in_sector(xy, heading, math.pi)
+    if unknown_run_m is None:
+        sector = view.unknown_in_sector
+    else:
+        def sector(where, centre, half):
+            return view.unknown_through(where, centre, half, unknown_run_m)
+    left = sector(xy, heading + 0.5 * side_rad, 0.5 * side_rad + half_fov)
+    right = sector(xy, heading - 0.5 * side_rad, 0.5 * side_rad + half_fov)
+    full = sector(xy, heading, math.pi)
     if already is not None:
         left &= ~already
         right &= ~already

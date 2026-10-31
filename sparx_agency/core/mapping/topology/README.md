@@ -135,7 +135,13 @@ decides whether to keep a stale label — nothing is cached on failure.
   `LLM_REASONING_TIMEOUT_S`; `LLM_REASONING_MAX_TOKENS`;
   `LLM_REASONING_NUM_CTX` -- asked for explicitly because Ollama truncates
   an outgrown window from the front, which would drop the system prompt);
-  a request that runs into its timeout is not retried.
+  a request that runs into its timeout is not retried. When one model
+  serves both routes the default route asks for the same window
+  (`LLMConfig.num_ctx`, `LLM_NUM_CTX`): Ollama keys a loaded model by its
+  window, and under load the oracle's reload never came -- the GT sweep of
+  2026-10-28 got no oracle answer in 2,000 episodes (`LESSONS.md`). A reply
+  whose `prompt_eval_count` shows the prompt was cut, or whose prompt and
+  reply filled the window, raises (`_refuse_truncation`).
   `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
   five single-storey scenarios against the live model and checks the
   judgement, not just the schema.
