@@ -244,6 +244,7 @@ class RPTSearchPolicy:
 
     def reset(self, episode, target):
         self.episode, self.target = episode, target
+        self._llm_answers_at_reset = self._llm_answer_totals()
         s = self.settings
         self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m, s.multifloor,
                                    sticky_bump_actions=s.sticky_bump_actions)
@@ -855,11 +856,24 @@ class RPTSearchPolicy:
         self._last_plan_s = self._floor_time
         return result.path
 
+    def _llm_answer_totals(self):
+        stats = getattr(self.llm_client, "answer_stats", None)
+        return stats() if stats is not None else None
+
+    def _llm_answer_counts(self):
+        """This episode's LLM answers by origin (``llm_answer_cache``) when the client keeps a store; else nothing."""
+        now = self._llm_answer_totals()
+        if now is None:
+            return {}
+        then = getattr(self, "_llm_answers_at_reset", None) or {}
+        return {"llm_answers": {k: v - then.get(k, 0) for k, v in now.items()}}
+
     def episode_info(self):
         return {"method": self.name, "rooms": len(self.graph.registry.rooms), "landmarks": len(self.landmarks),
                 "warmup": {"actions": self.warmup_actions, "budget": self.warmup_turns, "bound": self.settings.warmup_steps},
                 "doorway_peek": self.peek.diagnostics(),
                 "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
+                **self._llm_answer_counts(),
                 "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,
                 "blocked": self._blocked, "goals_retired_by_bumps": self._goals_retired_by_bumps,
                 "doors": self.doors.diagnostics(), "max_rooms": self.graph.max_rooms,

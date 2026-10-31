@@ -50,6 +50,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
+from sparx_agency.core.mapping.topology.llm_answer_cache import request_key
+
 #: A prompt Ollama evaluated at fewer tokens than one per this many characters was cut. English prompts of
 #: the node oracle run at 3.7-4.0 characters per token under the Qwen tokenizer; the 2026-10-28 sweep's
 #: silently truncated oracle prompt read 7.8 (16,015 characters as 2,050 tokens in a 4,096 window).
@@ -213,9 +215,17 @@ class LLMClient:
     text for logging.
     """
 
-    def __init__(self, cfg: Optional[LLMConfig] = None):
+    def __init__(self, cfg: Optional[LLMConfig] = None, answers=None):
+        """Args:
+            cfg: The connection settings; read from the environment when None.
+            answers: An :class:`~sparx_agency.core.mapping.topology.llm_answer_cache.LLMAnswerStore`
+                that answers a request it holds and records every answer used, or None.
+        """
         self.cfg = cfg or LLMConfig.from_env()
         self.sess = requests.Session()
+        self.answers = answers
+        self.exclusive = None       # an ExclusiveColdStart (llm_exclusive.py): one request at a time, model reloaded
+        self.last_reply: Dict[str, Any] = {}
 
     # -- Public --------------------------------------------------------
     @classmethod
@@ -253,11 +263,28 @@ class LLMClient:
                        timeout_s=self.cfg.reasoning_timeout_s if reasoning else self.cfg.timeout_s,
                        max_tokens=self.cfg.reasoning_max_tokens if reasoning else self.cfg.max_tokens,
                        num_ctx=int(self.cfg.reasoning_num_ctx) if reasoning else self.cfg.num_ctx)
-        if self.cfg.backend == "ollama":
-            return self._ollama_chat(system, user, t, route)
-        if self.cfg.backend in ("openai", "openai-compat"):
-            return self._openai_chat(system, user, t, route)
-        raise ValueError(f"Unknown LLM_BACKEND: {self.cfg.backend!r}")
+        ollama = self.cfg.backend == "ollama"
+        if not ollama and self.cfg.backend not in ("openai", "openai-compat"):
+            raise ValueError(f"Unknown LLM_BACKEND: {self.cfg.backend!r}")
+        key = entry = None
+        if self.answers is not None:
+            key = request_key(self.cfg.backend, route.model, system, user, t, self.cfg.seed if ollama else None,
+                              route.num_ctx if ollama else None, route.max_tokens)
+            entry = {"route": "reasoning" if reasoning else "default", "model": route.model, "system": system,
+                     "user": user}
+            stored = self.answers.get(key)
+            if stored is not None:
+                self.answers.put(key, stored, dict(entry, source="replay"))
+                return stored
+        self.last_reply = {}
+        text = self._ollama_chat(system, user, t, route) if ollama else self._openai_chat(system, user, t, route)
+        if key is not None:
+            self.answers.put(key, text, dict(entry, source="model", reply=dict(self.last_reply)))
+        return text
+
+    def answer_stats(self) -> Optional[Dict[str, int]]:
+        """The answer store's counters so far (replayed, repeated, asked, recorded), or None without a store."""
+        return None if self.answers is None else dict(self.answers.stats)
 
     def ping(self) -> bool:
         """Return True if the server answers. Never raises."""
@@ -297,8 +324,15 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
         }
-        r = self._post_with_retry(url, payload, timeout_s=route.timeout_s)
+        if self.exclusive is not None:
+            with self.exclusive.held():
+                self.exclusive.unload(self.sess, self.cfg.base_url, route.model)
+                r = self._post_with_retry(url, payload, timeout_s=route.timeout_s)
+        else:
+            r = self._post_with_retry(url, payload, timeout_s=route.timeout_s)
         data = r.json()
+        self.last_reply = {k: data.get(k) for k in ("prompt_eval_count", "eval_count", "total_duration",
+                                                     "load_duration", "prompt_eval_duration", "eval_duration")}
         # Ollama's reply: {"message": {"role":"assistant","content":"..."}}
         try:
             content = data["message"]["content"]

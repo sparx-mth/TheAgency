@@ -119,14 +119,20 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         # segmentation=false is honoured (ground-truth boxes read the old way), never silently flipped.
         overrides.setdefault("segmentation", True)
     settings = RPTSettings(**dict(defaults or {}, **dict(overrides, seed=args.seed)))
-    config = client = None
+    config = client = answers = exclusive = None
     services = []
     if not baseline:
         from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
         from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.llm import VerifiedLLMClient
+        from sparx_agency.core.mapping.topology.llm_answer_cache import LLMAnswerStore
+        from sparx_agency.core.mapping.topology.llm_exclusive import ExclusiveColdStart
         config = LLMConfig.from_env()
         config.seed = args.seed
-        client = VerifiedLLMClient(LLMClient(config))
+        answers = LLMAnswerStore.from_env()          # LLM_ANSWERS_RECORD / LLM_ANSWERS_REPLAY
+        exclusive = ExclusiveColdStart.from_env(config.base_url) if config.backend == "ollama" else None
+        llm = LLMClient(config, answers=answers)
+        llm.exclusive = exclusive
+        client = VerifiedLLMClient(llm)
         services.append(("LLM", client))
     segmenter = None
     if oracle:
@@ -180,9 +186,14 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         raise RuntimeError("Detector emission threshold hides door candidates; restart with --conf 0.05")
     info = policy.configuration()
     if config is not None:
-        llm = asdict(config)
-        llm.pop("api_key", None)
-        info.update(llm=llm, llm_identity=identities["LLM"])
+        llm_config = asdict(config)
+        llm_config.pop("api_key", None)
+        info.update(llm=llm_config, llm_identity=identities["LLM"])
+        # Only when set, so a run recorded before they existed still resumes against its frozen config.
+        if answers is not None:
+            info.update(llm_answers=answers.describe())
+        if exclusive is not None:
+            info.update(llm_exclusive=exclusive.describe())
     if oracle:
         # No service, no URL, no timeout: the identity says what answered. A perception upper
         # bound is a diagnostic of the method, never a benchmark result -- publishable=False,

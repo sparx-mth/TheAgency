@@ -121,6 +121,30 @@ def test_llm_readiness_is_requested_model_not_just_live_port():
         client.chat_json("system", "user")
 
 
+def test_the_preflight_probe_asks_the_server_never_the_answer_store(tmp_path):
+    from sparx_agency.core.mapping.topology.llm_answer_cache import LLMAnswerStore
+    from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
+    asked = []
+
+    def post(url, data=None, headers=None, timeout=None):
+        import json
+        payload = json.loads(data)
+        asked.append(payload["messages"][1]["content"])
+        content = '{"ok": true}' if "Return" in asked[-1] else '{"0": {"p": 0.5}, "1": {"p": 0.5}}'
+        return Response({"message": {"content": content}})
+
+    store = LLMAnswerStore(record_dir=tmp_path)
+    raw = LLMClient(LLMConfig(model="m", reasoning_model="m"), answers=store)
+    raw.sess = SimpleNamespace(post=post)
+    try:
+        VerifiedLLMClient(raw).probe()
+    except ObjNavInternalError:
+        pass                                   # the scripted oracle reply need not score; only the routing matters
+    assert asked and raw.answers is store, "the store is reattached after the probe"
+    assert store.stats == {"replayed": 0, "repeated": 0, "asked": 0, "recorded": 0}
+    assert not list(tmp_path.glob("answers-*.jsonl")), "nothing of the probe enters the run's recorded answers"
+
+
 @pytest.mark.parametrize("url", ["http://user:secret@host", "http://host?key=secret", "file:///tmp/model"])
 def test_service_urls_do_not_leak_credentials(url):
     with pytest.raises(ValueError):

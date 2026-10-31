@@ -26,7 +26,10 @@ moves or the route changes), so no other cause can spin the agent either.
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import math
+
+import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
@@ -60,7 +63,7 @@ class KinematicFollower:
         self._failed = None                     # (route key, step) of the last failed plan from this route
         self._failure = None                    # why, for the command's record
         self._emitted_step = -1
-        self._mask = None                       # (world id, radius) -> collision mask of the plan's radius
+        self._mask = None                       # (occupied-cell digest, radius) -> collision mask of the plan's radius
         self._idle_replans = 0                  # re-plans since the last executed MOVE_FORWARD
         self._dithered = None                   # the route whose re-plans were cut off, until a step or a new route
         self.events = []
@@ -145,7 +148,16 @@ class KinematicFollower:
         return True
 
     def _collision_mask(self, world, planner, radius):
-        key = (id(world), radius)
+        """The collision mask of ``world`` at ``radius``, cached by what it is built from: the occupied cells.
+
+        Until 2026-10-31 the cache was keyed by ``id(world)``: a map freed after one action and the next one
+        allocated at its address read the same id, and the plan was judged against the older map. Two runs of
+        HM3D 00813/000000 with identical maps, poses and LLM answers differed at action 83 on whether the plan
+        was obstructed, as the allocator happened to reuse the address in one of them.
+        """
+        occupied = world.grid == world.values.occupied
+        key = (float(radius), float(world.resolution), occupied.shape,
+               hashlib.blake2b(np.packbits(occupied).tobytes(), digest_size=16).digest())
         if self._mask is None or self._mask[0] != key:
             self._mask = (key, build_collision_mask(world, planner.params, radius))
         return self._mask[1]

@@ -85,21 +85,33 @@ class VerifiedLLMClient:
                  SearchNode(id=1, kind=ROOM, label="unknown", area_m2=6.0, frontier_clusters=1, exits=1))
         oracle = SearchNodeOracle(self.client)
         context = SearchContext(house=PROBE_HOUSE)
+        # The probe proves the SERVER answers: an answer store would replay it, and record it into the run.
+        answers, self.client.answers = getattr(self.client, "answers", None), None
         try:
-            reply = oracle.ask(oracle.prompt(PROBE_TARGET, nodes, context), system_prompt(nodes, context))
-        except Exception as exc:
-            raise ObjNavInternalError("The node oracle's route (%s) failed a real oracle prompt: %s"
-                                      % (self.client.cfg.reasoning_model, exc)) from exc
-        if oracle.score(reply, nodes) is None:
-            raise ObjNavInternalError("The node oracle's route (%s) answered a real oracle prompt unusably: %r"
-                                      % (self.client.cfg.reasoning_model, reply))
-        try:
-            label = self.client.chat_json('Reply with JSON only.', 'Return {"ok": true}.')
-        except Exception as exc:
-            raise ObjNavInternalError("The room-label route (%s) failed: %s" % (self.client.cfg.model, exc)) from exc
-        if not isinstance(label, dict):
-            raise ObjNavInternalError("The room-label route (%s) did not answer a JSON object" % self.client.cfg.model)
+            try:
+                reply = oracle.ask(oracle.prompt(PROBE_TARGET, nodes, context), system_prompt(nodes, context))
+            except Exception as exc:
+                raise ObjNavInternalError("The node oracle's route (%s) failed a real oracle prompt: %s"
+                                          % (self.client.cfg.reasoning_model, exc)) from exc
+            if oracle.score(reply, nodes) is None:
+                raise ObjNavInternalError("The node oracle's route (%s) answered a real oracle prompt unusably: %r"
+                                          % (self.client.cfg.reasoning_model, reply))
+            try:
+                label = self.client.chat_json('Reply with JSON only.', 'Return {"ok": true}.')
+            except Exception as exc:
+                raise ObjNavInternalError("The room-label route (%s) failed: %s"
+                                          % (self.client.cfg.model, exc)) from exc
+            if not isinstance(label, dict):
+                raise ObjNavInternalError("The room-label route (%s) did not answer a JSON object"
+                                          % self.client.cfg.model)
+        finally:
+            self.client.answers = answers
 
     def chat_json(self, *args, **kwargs):
         self.health()
         return self.client.chat_json(*args, **kwargs)
+
+    def answer_stats(self):
+        """The wrapped client's answer-store counters, or None."""
+        stats = getattr(self.client, "answer_stats", None)
+        return stats() if stats is not None else None

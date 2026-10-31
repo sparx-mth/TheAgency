@@ -11,6 +11,26 @@ Format per entry:
 
 ---
 
+## 2026-10-31 — Two runs with the same maps, poses and LLM answers parted at action 83: a cache keyed on `id()`
+
+**Symptom:** reproducibility runs of 8 HM3D episodes with every LLM answer identical: 7 identical step for step, and
+00813/000000 identical in actions, maps (occupancy hashes) and outcome, but at action 83 one run's kinematic follower
+re-planned (`plan_obstructed`) where the other kept its plan (`continuing`); 6 of 254 steps differed, all in the
+follower's plan bookkeeping.
+
+**Root cause:** `KinematicFollower._collision_mask` cached the plan-radius collision mask under `(id(world), radius)`.
+The planning world is a new object every action and is not kept, so the next one is often allocated at the freed
+one's address and reads the same id: the plan was then judged against an older map's mask. Whether the address was
+reused depends on the allocator, which no run controls.
+
+**Fix / workaround:** the cache key is a digest of the occupied cells (what the mask is built from), the resolution
+and the radius. A test changes a map in place (same id by construction) and expects the new wall to obstruct the plan.
+
+**Don't:** key a cache on `id()` of an object the cache does not keep alive. CPython reuses the address of a freed
+object as soon as it can, so a new object reads as the old one.
+
+---
+
 ## 2026-10-31 — Two re-runs of 40 episodes that disagreed on 19 of them, and the glances blamed for it: the temperature-0, seeded oracle answers the same prompt differently run to run
 
 **Symptom:** the 40 failure cases re-run with geometric path glances off and then on (`runs/failure40/report_final`,
@@ -27,9 +47,16 @@ run and room 0 (room 2 at 0.15) in the other, seeing its plant at step 17 in the
 Classifying each episode by what first parted the two runs: 6 parted on an oracle answer before any geometric glance
 (0 fixed, 3 lost, SPL -0.067 over the 40), 27 on a geometric glance (7 fixed, 2 lost, +0.032), 6 never parted.
 
-**Fix / workaround:** none in the method. Read a per-episode A/B by what first separated the two runs (the first step
-whose actions differ, and what each run was doing there), never by the outcome flip alone. A paired A/B needs the
-oracle's answers shared between the arms (the same prompt answered once) or enough episodes for the noise to average.
+**Fix / workaround:** measured the same day on 20-40 recorded prompts (Ollama 0.33.2, `OLLAMA_NUM_PARALLEL=1`):
+one request at a time, the order alone changed 13-18 of 40 answers (15 of 17 beyond the reason text). The server keeps
+the KV state of MANY earlier prompts, not just the last: a prompt sent 19 long prompts earlier was evaluated in 30 ms,
+a fresh one in 520 ms. So a one-token flush request before each prompt changed nothing, and a per-request tag at the
+head of the system prompt still left 15-17 of 20 fresh answers order-dependent (the opening every prompt shares is
+evaluated once, by whichever request came first). Unloading the model before every request (`llm_exclusive.py`,
+`LLM_EXCLUSIVE=1`) made 20 of 20 answers order- and concurrency-independent, at 6.4 s a call against 3.5 s. Two runs of
+8 episodes in that mode then got the same 145 answers to the same 145 prompts. Independently, `llm_answer_cache.py`
+records the answers a run uses and replays them: arm B of an A/B replays arm A's, so the two part only where the
+change acts. Read a per-episode A/B by what first separated the two runs, never by the outcome flip alone.
 
 **Don't:** treat "unaffected episodes replay identically" as true because the code path is unchanged -- the stage-3
 episodes of entry 040 were assumed to, and the LLM makes that false. And don't read a single episode's flip as a

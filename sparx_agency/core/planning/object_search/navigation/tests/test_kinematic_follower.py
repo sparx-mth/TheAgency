@@ -213,3 +213,21 @@ def test_re_plans_without_a_forward_step_are_cut_off_and_a_step_restores_the_lat
     policy.kinematic.note_action(obs, FORWARD)           # the ladder stepped
     _, command = follow(policy, ep, world, 7, start, route)
     assert command.info["kinematic"]["status"] == "planned"
+
+
+def test_a_wall_that_appears_on_the_plan_is_seen_even_when_the_new_map_has_the_old_ones_id():
+    """2026-10-31: the collision mask was cached by ``id(world)``; a map allocated at the address of the one freed
+    before it read the same id, and the plan was judged against the older map (two runs of 00813/000000 parted on
+    it at action 83). A map changed in place has the old one's id by construction."""
+    policy, ep = doorway_policy()
+    world = doorway_world()
+    start, goal = (3.0, 4.2, math.radians(10)), (9.0, 7.5)
+    route = planned_route(policy, world, start[:2], goal)
+    obs, command = follow(policy, ep, world, 1, start, route)
+    plan = policy.kinematic._plan
+    assert policy.kinematic._still_feasible(plan, world, policy.planner)
+    last = max(i for i, a in enumerate(plan["actions"]) if a == FORWARD)
+    x, y, _ = plan["poses"][last]
+    gx, gy = world.world_to_grid(x, y)
+    world.grid[gy - 1:gy + 2, gx - 1:gx + 2] = world.values.occupied        # same object, same id, a new wall
+    assert not policy.kinematic._still_feasible(plan, world, policy.planner)

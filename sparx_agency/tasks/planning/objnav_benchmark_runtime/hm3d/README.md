@@ -597,6 +597,25 @@ Per-episode, `evaluation_diagnostics.jsonl` carries `ground_truth`: frames
 served, frames with nothing annotated, lookup misses (always 0; a frame the
 oracle was not given ends the run) and the scene report above.
 
+### Reproducible runs and paired comparisons
+
+The room LLM is not reproducible by itself: Ollama at temperature 0 with a fixed seed answers the same prompt
+differently according to what it was asked before (`LESSONS.md` 2026-10-31), and two runs of the same episodes part at
+their first oracle call. Two switches, both environment variables the scene children inherit:
+
+```bash
+LLM_ANSWERS_RECORD=runs/X_answers hm3d/run_benchmark.sh ...                    # keep every answer the run used
+LLM_ANSWERS_REPLAY=runs/X_answers LLM_ANSWERS_RECORD=runs/Y_answers hm3d/run_benchmark.sh ...   # same questions, same answers
+LLM_EXCLUSIVE=1 hm3d/run_benchmark.sh ...                                       # every request on a freshly loaded model
+```
+
+Replaying a run's own answers reproduces it action for action. For an A/B, arm B replays arm A's answers: until B
+does something A did not, it asks A's questions and gets A's answers, so the two arms part only where the change under
+test acts, and an episode in which the change never acted must end as in A. `LLM_EXCLUSIVE=1` also makes a FRESH run
+reproducible (a question nobody recorded gets the same answer every time) at about 1.8 times the LLM time per call;
+nothing else may use the server meanwhile. Run the arms on the same renderer per episode: GPU and software rendering
+part long episodes.
+
 ### Development split
 
 `--split train --episodes-per-scene N` runs the HM3D training split for

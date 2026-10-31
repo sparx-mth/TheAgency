@@ -5,6 +5,18 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-10-31, evening: reproducible LLM answers for a paired A/B)
+- **An LLM answer store that records and replays answers keyed on the exact request**
+  (`core/mapping/topology/llm_answer_cache.py`, `LLMClient(answers=)`, `LLM_ANSWERS_RECORD` / `LLM_ANSWERS_REPLAY`,
+  `llm_answers` per episode row, the frozen config's `llm_answers`): both LLM routes, prompts kept in the shards, the
+  preflight probe never served from it. Arm B of an A/B replays arm A's answers.
+- **A cold-start mode for Ollama** (`core/mapping/topology/llm_exclusive.py` `ExclusiveColdStart`, `LLM_EXCLUSIVE=1`):
+  a host-wide lock and a model unload before every request, the one mode measured to make an answer depend on its
+  request alone (a flush and a per-request tag did not; `LESSONS.md` 2026-10-31); 6.4 s a call against 3.5 s.
+### Fixed (2026-10-31, evening)
+- **The kinematic follower judged plans against an older map** when a new planning world was allocated at the freed
+  one's address (`navigation/kinematic_follower.py` `_collision_mask`, keyed on `id(world)`, now on a digest of the
+  occupied cells): two otherwise identical runs of 00813/000000 parted on it at action 83.
 ### Fixed (2026-10-31, the GT sweep's dead oracle and its single-storey failures, measured on 40 of them)
 - **The node oracle answers again with one model on both routes**, the run stops on a dead oracle, steps and spawns
   on treads are walkable, standoffs on a step are standoffs, released targets are pursued, memory STOPs need line of

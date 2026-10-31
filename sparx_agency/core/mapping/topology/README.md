@@ -84,7 +84,24 @@ decides whether to keep a stale label — nothing is cached on failure.
 
 - `llm_client.py` — Ollama / OpenAI-compatible HTTP client, plus
   `coerce_bool()` (never `bool()`: a small model answers with the word
-  quoted, and `bool("false")` is True).
+  quoted, and `bool("false")` is True). Two optional attachments, both off
+  unless a run names them:
+  - `llm_answer_cache.py` — `LLMAnswerStore`, answers keyed on the exact
+    request (backend, model, both prompts, temperature, seed, window, reply
+    cap, format). A run records every answer it uses
+    (`LLM_ANSWERS_RECORD=<dir>`, one JSON-lines shard per process, prompts
+    included) and can replay another run's (`LLM_ANSWERS_REPLAY=<dir>[:...]`);
+    a question asked again within a run gets its first answer. Two runs that
+    ask the same questions then get the same answers, whatever the server
+    would have said: on 2026-10-31 the temperature-0, seeded 3B answered the
+    same prompts differently by request order (`LESSONS.md`). The episode row
+    counts `llm_answers` (`replayed` / `repeated` / `asked` / `recorded`).
+  - `llm_exclusive.py` — `ExclusiveColdStart` (`LLM_EXCLUSIVE=1`): one
+    request at a time across processes (a host-wide file lock), each on a
+    freshly loaded model (unloaded, `/api/ps` checked, then asked). The only
+    mode measured to make Ollama's answer depend on the request alone: a
+    one-token flush or a per-request tag did not, because the server keeps
+    the state of many earlier prompts. 6.4 s a call against 3.5 s.
 - `room_classifier.py` — object list → room type via LLM.
   Legacy callers still cache by class set. Online callers can request
   `min_classes`, `count_sensitive=True` and `classify(..., refresh=True)` to
