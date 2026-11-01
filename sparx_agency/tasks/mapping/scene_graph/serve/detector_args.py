@@ -40,6 +40,8 @@ def parse_args(argv=None):
     parser.add_argument("--max-verifications", type=int, default=8, help="Per-frame box budget; overflow abstains")
     parser.add_argument("--verification-iou", type=float, default=0.6)
     parser.add_argument("--blip2-max-tokens", type=int, default=12)
+    parser.add_argument("--open-exclude", default="", help="closed_open: comma-list of prompts the open detector never answers")
+    parser.add_argument("--distractors", default="", help="closed_open: open-detector words that veto an overlapping closed-set chair")
     parser.add_argument("--classes", default=",".join(DEFAULT_HOSPITAL_VOCABULARY))
     parser.add_argument("--selftest", action="store_true")
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -94,6 +96,10 @@ def _complete_models(parser, args):
         args.model = args.model or args.yolo_model or YoloWorldConfig().model_path
     elif args.backend in ("grounding_dino", "grounded_vlm", "hybrid"):
         args.model = args.model or args.grounding_model
+    if args.backend == "closed_open":
+        args.yolo_model = args.yolo_model or YoloWorldConfig().model_path
+        if not args.clip_model and not args.selftest:
+            parser.error("--clip-model is required for closed_open")
     if not args.model and not args.selftest:
         parser.error("--model (or --grounding-model) is required for %s" % args.backend)
     if args.conf is None:

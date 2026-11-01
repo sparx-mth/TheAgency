@@ -43,7 +43,8 @@ class DetectionRegistry:
 
 def default_detection_registry(*, yolo_world_config=None, llmdet_config=None,
                                grounding_dino_config=None, grounded_vlm_config=None,
-                               hybrid_config=None) -> DetectionRegistry:
+                               hybrid_config=None, rfdetr_config=None,
+                               closed_open_config=None) -> DetectionRegistry:
     """Registry with the built-in backends registered.
 
     The factory imports the backend lazily so a registry can be constructed (and
@@ -86,9 +87,21 @@ def default_detection_registry(*, yolo_world_config=None, llmdet_config=None,
             raise ValueError("hybrid requires an explicit YOLO configuration")
         return GroundedVlmDetector(config)
 
+    def _make_rfdetr() -> DetectionModel:
+        from sparx_agency.core.mapping.detection.rfdetr import RfDetrDetector
+
+        return RfDetrDetector(rfdetr_config)
+
+    def _make_closed_open() -> DetectionModel:
+        from sparx_agency.core.mapping.detection.closed_open import ClosedOpenDetector
+
+        return ClosedOpenDetector(closed_open_config)
+
     reg.register(DetectorFactory(name="yolo_world", create=_make_yolo_world))
     reg.register(DetectorFactory(name="llmdet", create=_make_llmdet))
     reg.register(DetectorFactory(name="grounding_dino", create=_make_grounding_dino))
     reg.register(DetectorFactory(name="grounded_vlm", create=_make_grounded_vlm))
     reg.register(DetectorFactory(name="hybrid", create=_make_hybrid))
+    reg.register(DetectorFactory(name="rfdetr", create=_make_rfdetr))
+    reg.register(DetectorFactory(name="closed_open", create=_make_closed_open))
     return reg

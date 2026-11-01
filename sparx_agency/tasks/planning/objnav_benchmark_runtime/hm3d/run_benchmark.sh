@@ -45,13 +45,14 @@
 #                        starts off by less than a stride -- or the scene refuses to run: the navmesh check)   default 1
 #   EXCLUDE_UNREACHABLE  1: drop, and record, an episode whose goal view points are unreachable instead of stopping   default 0
 #   SPLIT                val (the benchmark); train / val_mini are development splits and are labelled subsets   default val
+#   DETECTOR_BACKEND     the mode expected on a detector already serving at DETECTOR_PORT (e.g. closed_open); the launcher only starts yolo_world   default yolo_world
 #   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; --jobs N defaults it to ceil(N/2) (and budgets N
 #                        renderers in the GPU plan) unless set here; each slot is its own KV cache          default 1
 #   GT_MIN_PIXELS        with --perception ground-truth: the oracle's resolution floor in pixels (--ground-truth-min-pixels;
 #                        the module default, 64, when empty)
 set -euo pipefail
 
-usage() { sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -177,7 +178,7 @@ objnav_services_up
 DATA_ARGS=(--version "$VERSION" --split "$SPLIT" --episodes-dir "$HM3D_EPISODES_DIR" --scenes-dir "$HM3D_SCENES_DIR")
 CHILD_ARGS=(--seed "$SEED" --gpu-device "$GPU_DEVICE")
 if [[ "$PERCEPTION" == ground-truth ]]; then CHILD_ARGS+=("${PERCEPTION_FLAGS[@]}")                      # no detector, no segmenter
-else CHILD_ARGS+=(--detector-url "$DETECTOR_URL" --detector-backend yolo_world); fi
+else CHILD_ARGS+=(--detector-url "$DETECTOR_URL" --detector-backend "${DETECTOR_BACKEND:-yolo_world}"); fi
 [[ "$AGENT" == rpt ]] && CHILD_ARGS+=(--explorer frontier)        # as gibson/run_benchmark.sh: the baseline explores with FALCON only
 [[ "$RECORD" == 1 ]] && CHILD_ARGS+=(--record)
 [[ "$LEAN" == 1 ]] && CHILD_ARGS+=(--lean)
