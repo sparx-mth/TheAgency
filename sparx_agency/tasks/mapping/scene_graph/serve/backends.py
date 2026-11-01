@@ -68,6 +68,8 @@ def build_detector(args, classes):
                                  conf_thresh=args.conf, imgsz=args.imgsz,
                                  iou_thresh=args.iou, max_det=args.max_det,
                                  clip_path=getattr(args, "clip_model", None))
+    elif args.backend in ("rfdetr", "closed_open"):
+        config = _closed_set_config(args, path)
     elif args.backend in ("llmdet", "grounding_dino", "grounded_vlm", "hybrid"):
         from sparx_agency.core.mapping.detection.llmdet import LlmDetConfig
         from sparx_agency.core.mapping.detection.grounding_dino import GroundingDinoConfig
@@ -99,9 +101,32 @@ def build_detector(args, classes):
                                        allow_shared_gpu=getattr(args, "allow_shared_gpu", False))
 
 
+def _closed_set_config(args, weights):
+    from sparx_agency.core.mapping.detection.closed_open import ClosedOpenConfig
+    from sparx_agency.core.mapping.detection.rfdetr import RfDetrConfig
+    from sparx_agency.core.mapping.detection.yolo_world import YoloWorldConfig
+
+    closed = RfDetrConfig(weights_path=str(weights), device=args.device, conf_thresh=args.conf, max_det=args.max_det)
+    if args.backend == "rfdetr":
+        return closed
+    words = lambda text: tuple(s.strip() for s in text.split(",") if s.strip())
+    open_ = YoloWorldConfig(model_path=args.yolo_model, device=args.device,
+                            conf_thresh=args.conf if args.yolo_conf is None else args.yolo_conf,
+                            imgsz=args.imgsz, iou_thresh=args.iou, max_det=args.max_det, clip_path=args.clip_model)
+    return ClosedOpenConfig(closed=closed, open_=open_, open_exclude=words(args.open_exclude),
+                            distractors=words(args.distractors))
+
+
 def selected_checkpoint_identity(args):
     """Only selected models participate: grounded-only does not require YOLO."""
     primary = checkpoint_identity(args.model)
+    if args.backend == "closed_open":
+        components = {"rfdetr": primary, "yolo_world": checkpoint_identity(args.yolo_model),
+                      "clip": checkpoint_identity(args.clip_model)}
+        digest = hashlib.sha256(json.dumps(components, sort_keys=True).encode()).hexdigest()
+        return {"checkpoint_sha256": digest, "components": components,
+                "checkpoint_files": {name + "/" + file: value for name, info in components.items()
+                                     for file, value in info["checkpoint_files"].items()}}
     clip_path = getattr(args, "clip_model", None)
     if args.backend == "yolo_world" and clip_path:
         auxiliary = checkpoint_identity(clip_path)
@@ -143,9 +168,11 @@ def detector_metadata(detector, backend, identity, *, allow_shared_gpu=False):
     import torch
 
     names = ["torch", "numpy", "Pillow", "requests"]
-    if backend != "yolo_world":
+    if backend in ("rfdetr", "closed_open"):
+        names.append("rfdetr")
+    elif backend != "yolo_world":
         names += ["transformers", "tokenizers", "safetensors", "huggingface-hub"]
-    if backend in ("yolo_world", "hybrid"):
+    if backend in ("yolo_world", "hybrid", "closed_open"):
         names += ["ultralytics", "torchvision"]
     if backend in ("grounded_vlm", "hybrid"):
         names.append("sentencepiece")
@@ -156,6 +183,8 @@ def detector_metadata(detector, backend, identity, *, allow_shared_gpu=False):
                      yolo_preprocessing(detector))
     if backend == "hybrid":
         preprocessing["yolo_world"] = yolo_preprocessing(detector.yolo)
+    if backend == "closed_open" and detector.open_prompts:
+        preprocessing["yolo_world"] = yolo_preprocessing(detector.open_)
     config = dict(asdict(detector.cfg), conf_thresh=detector.cfg.conf_thresh)
     return dict(identity, backend=backend, detector_config=config,
                 packages=packages, preprocessing=preprocessing,
@@ -184,6 +213,10 @@ def refresh_vocabulary_metadata(detector, metadata):
         updated["preprocessing"] = detector.preprocessing()
         if metadata["backend"] == "hybrid":
             updated["preprocessing"]["yolo_world"] = yolo_preprocessing(detector.yolo)
+    elif metadata.get("backend") in ("rfdetr", "closed_open"):
+        updated["preprocessing"] = detector.preprocessing()
+        if metadata["backend"] == "closed_open" and detector.open_prompts:
+            updated["preprocessing"]["yolo_world"] = yolo_preprocessing(detector.open_)
     elif metadata.get("backend") == "yolo_world":
         updated["preprocessing"] = yolo_preprocessing(detector)
     return updated

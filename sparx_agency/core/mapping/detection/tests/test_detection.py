@@ -136,7 +136,7 @@ def test_detect_bad_shape_raises_valueerror():
 # ── Registry / factory idiom ─────────────────────────────────────────────
 def test_default_registry_lists_available_detectors():
     reg = default_detection_registry()
-    assert reg.names() == ["grounded_vlm", "grounding_dino", "hybrid", "llmdet", "yolo_world"]
+    assert reg.names() == ["closed_open", "grounded_vlm", "grounding_dino", "hybrid", "llmdet", "rfdetr", "yolo_world"]
 
 
 def test_registry_create_returns_detection_model_lazily():
