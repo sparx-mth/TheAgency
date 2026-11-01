@@ -111,6 +111,12 @@ class VerifiedLLMClient:
         self.health()
         return self.client.chat_json(*args, **kwargs)
 
+    def set_answer_scope(self, scope):
+        """Forwarded to the wrapped client's answer store, when it keeps one."""
+        forward = getattr(self.client, "set_answer_scope", None)
+        if forward is not None:
+            forward(scope)
+
     def answer_stats(self):
         """The wrapped client's answer-store counters, or None."""
         stats = getattr(self.client, "answer_stats", None)

@@ -11,6 +11,25 @@ Format per entry:
 
 ---
 
+## 2026-11-01 — The A/B pilot's arm A stopped at 50 of 300 episodes: two scene workers, one question, two answers
+
+**Symptom:** the first glance A/B pilot finished arm A with 50 of 300 episodes. Every scene that started after the
+first half hour refused at preflight: `LLM answer shards disagree on key ce48...`.
+
+**Root cause:** the answer store was keyed on the request alone, and the three scene workers recorded into one
+directory. Two scenes asked the same room-label question ("no objects yet, about 3 m2, elongated, 7 doorways") and
+the shared server, warm and with two slots, answered with confidence 0.90 in one and 0.95 in the other. Each worker
+wrote its own answer. A new scene process loads the whole directory and correctly refused a store holding two
+answers to one question. Replayed, one of them would have gone to both episodes of arm B.
+
+**Fix / workaround:** the key includes the episode in force (`RPTSearchPolicy.reset` sets the store's scope), so two
+episodes never share an entry. The pilot restarted from scratch; the unscoped arm A is in `runs/glance_ab/failed_unscoped/`.
+
+**Don't:** share answers across episodes to save calls. The reproducibility runs never showed this because each scene
+asked its questions only once; it needs concurrent workers and a nondeterministic server.
+
+---
+
 ## 2026-10-31 — Two runs with the same maps, poses and LLM answers parted at action 83: a cache keyed on `id()`
 
 **Symptom:** reproducibility runs of 8 HM3D episodes with every LLM answer identical: 7 identical step for step, and

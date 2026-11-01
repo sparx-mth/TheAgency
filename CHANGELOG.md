@@ -5,6 +5,19 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-11-01)
+- **The LLM answer store keys answers by episode** (`llm_answer_cache.request_key(scope=)`, `LLMAnswerStore.scope`,
+  `LLMClient.set_answer_scope`, set by `RPTSearchPolicy.reset`): the first glance A/B pilot recorded arm A from three
+  scene workers into one directory; two asked the same room-label question, got two answers, and every scene that
+  started after that refused at preflight (`shards disagree`). 50 of 300 episodes ran; the pilot restarted clean.
+- **A resumed scene refused its own configuration** (`LLMAnswerStore.describe` recorded `loaded`, the answers already
+  on disk, which grows as the run records): the pilot's RAM pause (00:14 UTC, 61 % for 30 s with two Mesa workers on
+  large scenes) interrupted two scenes, and neither could resume. The frozen description no longer carries it; the
+  two scenes rerun afresh, their finished episodes replaying from arm A's record.
+### Added (2026-11-01)
+- **`objnav_benchmark_runtime/paired_ab.py`**: two campaigns on the same episodes compared pair by pair -- SR and
+  SPL differences with paired-bootstrap intervals, exact McNemar, flips both ways and the flip rate, the
+  never-acted integrity check, the glance decision rule, and the pairs a decision needs at the measured flip rate.
 ### Added (2026-10-31, evening: reproducible LLM answers for a paired A/B)
 - **An LLM answer store that records and replays answers keyed on the exact request**
   (`core/mapping/topology/llm_answer_cache.py`, `LLMClient(answers=)`, `LLM_ANSWERS_RECORD` / `LLM_ANSWERS_REPLAY`,

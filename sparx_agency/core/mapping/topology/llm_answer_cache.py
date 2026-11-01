@@ -12,9 +12,18 @@ answered identical prompts differently in two runs of the same 40 episodes
 
 The key is everything that shapes the answer: backend, model, system and user
 prompt, temperature, seed, context window, reply cap and the JSON format --
-never the timeout, keep-alive or GPU placement. A request asked again within a
-run is answered from the store as well, so with a store attached an answer is
-a function of its request.
+never the timeout, keep-alive or GPU placement -- within a SCOPE, the episode
+the policy is running (``LLMAnswerStore.scope``, set at each reset). A request
+asked again within the episode is answered from the store as well, so with a
+store attached an answer is a function of its request in its episode.
+
+Why the episode is part of the key: the 2026-11-01 glance A/B pilot recorded
+arm A from three scene workers into one directory, and two of them asked the
+same room-label question (no objects, 3 m2, elongated, seven doorways) and got
+two answers (confidence 0.90 and 0.95). Keyed on the request alone, one answer
+would have been replayed into both episodes of arm B, and B would part from A
+in an episode where nothing under test acted. Scoped, each episode of B gets
+what that episode of A got.
 
 On disk a store is a directory of JSON-lines shards, one per process
 (``answers-<host>-<pid>.jsonl``), so the scene workers of a campaign never
@@ -45,9 +54,10 @@ REPLAY_ENV = "LLM_ANSWERS_REPLAY"
 
 
 def request_key(backend: str, model: str, system: str, user: str, temperature: float, seed: Optional[int],
-                num_ctx: Optional[int], max_tokens: int, response_format: str = "json") -> str:
-    """SHA-256 of the request's answer-shaping fields, canonically serialised."""
-    canonical = json.dumps({"backend": backend, "model": model, "system": system, "user": user,
+                num_ctx: Optional[int], max_tokens: int, response_format: str = "json",
+                scope: Optional[str] = None) -> str:
+    """SHA-256 of the scope and the request's answer-shaping fields, canonically serialised."""
+    canonical = json.dumps({"scope": scope, "backend": backend, "model": model, "system": system, "user": user,
                             "temperature": float(temperature), "seed": seed,
                             "num_ctx": None if num_ctx is None else int(num_ctx), "max_tokens": int(max_tokens),
                             "format": response_format},
@@ -91,6 +101,7 @@ class LLMAnswerStore:
         # replayed: answered from a replay directory; repeated: a question this run had already put;
         # asked: no answer stored, the model was asked; recorded: lines written to this process's shard.
         self.stats = {"replayed": 0, "repeated": 0, "asked": 0, "recorded": 0}
+        self.scope: Optional[str] = None     # the episode in force; part of every key
 
     @classmethod
     def from_env(cls, environ: Optional[Dict[str, str]] = None) -> Optional["LLMAnswerStore"]:
@@ -103,10 +114,12 @@ class LLMAnswerStore:
         return cls(Path(record) if record else None, [Path(p.strip()) for p in replay])
 
     def describe(self) -> Dict[str, Any]:
-        """What a run's frozen configuration records of the store."""
+        """What a run's frozen configuration records of the store: never ``loaded``, which grows as the run records
+        and made every resumed scene's configuration differ from the one it started with (2026-11-01)."""
         return {"schema": SCHEMA, "record": None if self.record_dir is None else str(self.record_dir),
-                "replay": [str(d) for d in self.replay_dirs], "loaded": self.loaded,
-                "key": "sha256 of backend, model, system, user, temperature, seed, num_ctx, max_tokens, format"}
+                "replay": [str(d) for d in self.replay_dirs],
+                "key": "sha256 of the episode scope, backend, model, system, user, temperature, seed, num_ctx, "
+                       "max_tokens, format"}
 
     def get(self, key: str) -> Optional[str]:
         """The stored answer to ``key``, or None; counts it as replayed, repeated or asked."""
@@ -122,7 +135,7 @@ class LLMAnswerStore:
         self._answers.setdefault(key, answer)
         if self._shard is None or key in self._recorded:
             return
-        line = dict(entry, schema=SCHEMA, key=key, answer=answer,
+        line = dict(entry, schema=SCHEMA, key=key, answer=answer, scope=self.scope,
                     recorded_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         with self._shard.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, ensure_ascii=False) + "\n")

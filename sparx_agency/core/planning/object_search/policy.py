@@ -244,6 +244,9 @@ class RPTSearchPolicy:
 
     def reset(self, episode, target):
         self.episode, self.target = episode, target
+        scope = getattr(self.llm_client, "set_answer_scope", None)
+        if scope is not None:
+            scope(episode.episode_id)          # an answer store keys by episode (llm_answer_cache)
         self._llm_answers_at_reset = self._llm_answer_totals()
         s = self.settings
         self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m, s.multifloor,

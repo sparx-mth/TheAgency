@@ -170,3 +170,36 @@ def test_the_exclusive_lock_comes_from_the_environment(tmp_path):
     assert named.lock_path == tmp_path / "x.lock"
     default = ExclusiveColdStart.from_env("http://127.0.0.1:11434", {"LLM_EXCLUSIVE": "1"})
     assert default.lock_path.name == "sparx-llm-http_127_0_0_1_11434.lock"
+
+
+def test_the_same_question_in_two_episodes_is_two_keys_and_each_episode_replays_its_own_answer(tmp_path):
+    """2026-11-01: two scene workers asked one room-label question and got two answers; one store holds both."""
+    first = _client(['{"c": 0.90}'], LLMAnswerStore(record_dir=tmp_path / "a"))
+    first.set_answer_scope("scene1/000001")
+    first.chat_json("s", "same question")
+    second = _client(['{"c": 0.95}'], LLMAnswerStore(record_dir=tmp_path / "a"))   # another worker, same directory
+    second.set_answer_scope("scene2/000007")
+    second.chat_json("s", "same question")
+    replay = _client([], LLMAnswerStore(replay_dirs=[tmp_path / "a"]))
+    replay.set_answer_scope("scene2/000007")
+    assert replay.chat_json("s", "same question") == {"c": 0.95}
+    replay.set_answer_scope("scene1/000001")
+    assert replay.chat_json("s", "same question") == {"c": 0.90}
+    assert replay.answer_stats()["replayed"] == 2
+    scopes = sorted(json.loads(line)["scope"] for shard in (tmp_path / "a").glob("answers-*.jsonl")
+                    for line in shard.read_text().splitlines())
+    assert scopes == ["scene1/000001", "scene2/000007"]
+
+
+def test_a_scope_without_a_store_is_ignored():
+    client = _client([])
+    client.set_answer_scope("x/000001")
+    assert client.answers is None
+
+
+def test_the_frozen_description_does_not_change_as_the_run_records(tmp_path):
+    """A resumed scene compares its configuration verbatim with the one it started with (2026-11-01)."""
+    store = LLMAnswerStore(record_dir=tmp_path)
+    before = store.describe()
+    _client(['{"a": 1}'], store).chat_json("s", "u")
+    assert LLMAnswerStore(record_dir=tmp_path).describe() == before

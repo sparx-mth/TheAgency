@@ -269,7 +269,7 @@ class LLMClient:
         key = entry = None
         if self.answers is not None:
             key = request_key(self.cfg.backend, route.model, system, user, t, self.cfg.seed if ollama else None,
-                              route.num_ctx if ollama else None, route.max_tokens)
+                              route.num_ctx if ollama else None, route.max_tokens, scope=self.answers.scope)
             entry = {"route": "reasoning" if reasoning else "default", "model": route.model, "system": system,
                      "user": user}
             stored = self.answers.get(key)
@@ -281,6 +281,11 @@ class LLMClient:
         if key is not None:
             self.answers.put(key, text, dict(entry, source="model", reply=dict(self.last_reply)))
         return text
+
+    def set_answer_scope(self, scope: Optional[str]) -> None:
+        """Key the answer store's entries to ``scope`` (the episode in force) from now on; nothing without a store."""
+        if self.answers is not None:
+            self.answers.scope = scope
 
     def answer_stats(self) -> Optional[Dict[str, int]]:
         """The answer store's counters so far (replayed, repeated, asked, recorded), or None without a store."""

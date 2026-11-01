@@ -88,10 +88,13 @@ decides whether to keep a stale label — nothing is cached on failure.
   unless a run names them:
   - `llm_answer_cache.py` — `LLMAnswerStore`, answers keyed on the exact
     request (backend, model, both prompts, temperature, seed, window, reply
-    cap, format). A run records every answer it uses
-    (`LLM_ANSWERS_RECORD=<dir>`, one JSON-lines shard per process, prompts
-    included) and can replay another run's (`LLM_ANSWERS_REPLAY=<dir>[:...]`);
-    a question asked again within a run gets its first answer. Two runs that
+    cap, format) within the episode in force (the policy sets the store's
+    `scope` at each reset: two episodes asking one question get their own
+    answers, and a replay gives each episode its own). A run records every
+    answer it uses (`LLM_ANSWERS_RECORD=<dir>`, one JSON-lines shard per
+    process, prompts included) and can replay another run's
+    (`LLM_ANSWERS_REPLAY=<dir>[:...]`); a question asked again within an
+    episode gets its first answer. Two runs that
     ask the same questions then get the same answers, whatever the server
     would have said: on 2026-10-31 the temperature-0, seeded 3B answered the
     same prompts differently by request order (`LESSONS.md`). The episode row
