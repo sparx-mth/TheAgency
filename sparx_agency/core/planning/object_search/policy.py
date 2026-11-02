@@ -63,6 +63,7 @@ class RPTSearchPolicy:
 
     def __init__(self, detector, llm_client, settings=None, segmenter=None):
         self.detector, self.llm_client, self.segmenter = detector, llm_client, segmenter
+        self.target_confirmer = None       # a ``CandidateConfirmer`` the benchmark adapter sets; the closing asks it before STOP
         self.settings = settings or RPTSettings()
         s = self.settings
         if s.segmentation and segmenter is None:

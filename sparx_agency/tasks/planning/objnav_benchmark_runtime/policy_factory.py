@@ -180,6 +180,8 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
     else:
         from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
         policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter)
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.vlm_confirmer import attach_confirmer
+        attach_confirmer(policy)
         floor = min(settings.detection_confidence, policy.door_settings.confidence)
     emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
     if emitted > floor:

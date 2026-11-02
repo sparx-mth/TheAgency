@@ -26,6 +26,7 @@ from sparx_agency.core.planning.object_search.closing.target_backoff import Back
 from sparx_agency.core.planning.object_search.perception.target_context import suspect
 from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
 from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
+from sparx_agency.core.planning.object_search.closing.vlm_confirmation import NO
 
 
 
@@ -452,8 +453,21 @@ class TargetClosingSettings:
     # terminal range, the closing STOPs. False restores the former releases.
     support_surface_resilience: bool = True
     support_surface_classes: tuple = SUPPORT_SURFACE_CLASSES
+    vlm_confirm: bool = False
+    vlm_model: str = "qwen3-vl:8b"
+    vlm_url: str = "http://127.0.0.1:11434"
+    vlm_crop_margin: float = 0.3
+    vlm_rejection_radius_factor: float = 1.0
 
     def __post_init__(self):
+        if type(self.vlm_confirm) is not bool:
+            raise ValueError("vlm_confirm must be a bool")
+        if not str(self.vlm_model).strip() or not str(self.vlm_url).strip():
+            raise ValueError("vlm_model and vlm_url must be non-empty")
+        for key in ("vlm_crop_margin", "vlm_rejection_radius_factor"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError("%s must be finite and non-negative" % key)
         if isinstance(self.confidence, bool) or not math.isfinite(self.confidence) or not 0 < self.confidence <= 1:
             raise ValueError("Target confidence must be in (0, 1]")
         if (isinstance(self.track_confidence, bool) or not math.isfinite(self.track_confidence)
@@ -628,6 +642,8 @@ class TargetClosing:
         self.policy, self.settings = policy, policy.settings.target_closing
         self.path = TargetApproachPath(policy)
         self.rejected = []                 # (anchor xyz, floor id, action, radius m, why) per released candidate
+        self.confirmer = getattr(policy, "target_confirmer", None)
+        self.vlm_checks = []
         self.releases = 0
         self.inspection_releases = 0
         self.inspection_resumptions = 0    # inspections ended to step closer: seen fresh, measured out of range
@@ -2432,6 +2448,22 @@ class TargetClosing:
                        % fix.region.replace("_", " ")))
         return None
 
+    def _vlm_veto(self, obs):
+        """The release-and-turn command when the VLM says the fresh box is not the target's class, else None."""
+        if self.confirmer is None or self.box is None or self.last_seen != obs.step:
+            return None
+        label = self.label
+        verdict = self.confirmer.confirm(obs.rgb, self.box, label)
+        self.vlm_checks.append({"step": int(obs.step), "label": label, "conf": self.conf, "answer": verdict.answer,
+                                "ms": verdict.ms, "detail": verdict.detail[:200]})
+        if verdict.answer != NO:
+            return None
+        self._release(obs, radius_factor=self.settings.vlm_rejection_radius_factor, why="VLM: not a %s" % label)
+        turn = self.policy.episode.action_spec.turn_angle_rad
+        return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + turn),
+                                      info={"kind": "target_released", "phase": "RELEASED",
+                                            "reason": "the VLM says this is not a %s; the search resumes" % label})
+
     def _terminal(self, obs, distance, measured, info):
         """The decided STOP -- taken now, or after the forward steps of ``stop_overshoot_steps``.
 
@@ -2450,6 +2482,9 @@ class TargetClosing:
             measured: Its fresh near-edge range, or None without a fresh box.
             info: The STOP's diagnostics, ``reason`` included.
         """
+        vetoed = self._vlm_veto(obs)
+        if vetoed is not None:
+            return vetoed
         self.phase = "STOP"
         if self.settings.stop_overshoot_max_steps < 1:
             return NavigationCommand.stop_here(info=info)
@@ -2679,6 +2714,7 @@ class TargetClosing:
                 "support_xyz": self.support_xyz, "support_holds": self.support_holds, "support_stops": self.support_stops,
                 "history_holds": self.history_holds, "history_stops": self.history_stops,
                 "memory_sight_refusals": self.memory_sight_refusals,
+                "vlm_checks": list(self.vlm_checks),
                 "terminal_missing": self.terminal_missing,
                 "visible_floor_m": self.visible_floor_m, "lowest_m": self.lowest_m, "top_m": self.top_m,
                 "footprint_m": self.footprint_m, "depth_associations": self.depth_associations,
