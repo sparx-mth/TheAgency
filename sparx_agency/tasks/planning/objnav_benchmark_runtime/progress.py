@@ -41,7 +41,7 @@ LEAN_POLICY_KEYS = ("method", "rooms", "max_rooms", "landmarks", "warmup", "llm_
                     "room_label_queries", "plan_calls", "duplicates_removed", "blocked", "floor_revisions",
                     "oracle_repair_attempts", "oracle_repair_successes", "target_closing", "target_pursuit", "spawn_floor_guard",
                     "target_evidence", "room_scans", "openings", "glances", "sight", "doors", "doorway_peek",
-                    "exploration")
+                    "exploration", "map_changes")
 #: Per-action series and event logs a lean record drops, wherever they appear.
 LEAN_DROP_KEYS = frozenset(("coverage_curve", "events", "estimate_events", "estimates", "records", "history",
                             "label_history", "solver_records", "last_reasoning", "failures", "last_demoted",

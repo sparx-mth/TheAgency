@@ -21,6 +21,35 @@ plans on -- rather than in each frontier, opening, peek and route module:
   tighter bar masks the storey itself (Corozal/000142, 2026-10-14, 3,316
   cells); a shallow flight inside the tolerance (Darden/000034's three
   treads at -0.11, -0.18, -0.21 m) is the open item;
+* **a verdict is fixed when the cell is measured; the plane moving changes
+  nothing the camera has not seen again** (since 2026-11-03). Per floor and
+  cell the guard keeps the LOWEST height a depth point ever landed at
+  (:attr:`landed_z`), the lowest height a depth ray ever ran through the
+  cell's column without meeting a surface (:attr:`clear_z`), and the three
+  thresholds in force the last time the cell was measured -- the drop line
+  (:attr:`line_z`), the crossing line (:attr:`deep_z`) and the top of the
+  surface band (:attr:`band_z`). :meth:`_cut` compares every cell with ITS
+  OWN thresholds: a drop where the landing is below the cell's drop line, a
+  crossing where the ray ran below the cell's step reach, a surface where
+  the landing lies between the drop line and the obstacle band. A cell
+  measured again takes the thresholds of the plane in force then, and its
+  verdict may change -- that is an observation. A re-measure of the storey
+  plane (below), a rebase from a provisional spawn storey, the storey
+  confirmed: none of them touches a cell the camera does not see. Before:
+  the guard re-thresholded EVERY measured cell of the grid against the
+  plane in force on every action (and until the same day emptied the
+  layers at a re-measure), and the plane follows the agent's own level
+  (``_follow_step_plane``). 00878-XB4GS9ShBRE/000000 is split-level --
+  floors at 0.00, +0.20 and +0.30 m and a sunken room at -0.20 m -- and
+  re-measured 14 times in 500 actions; each time 270-730 cells changed, none
+  of them in the camera's view: at action 84 (plane +0.20 -> 0.00) the
+  sunken room, 0.40 m under the hall and a drop from there, was released;
+  at 150 (plane -> +0.30) it was 0.50 m under and the whole room was painted
+  occupied, its three rooms gone from the search; at 159 (plane -> 0.00)
+  released again -- and the agent went back to places it had searched. The
+  ledger (``world_model/map_ledger.py``) counts changes out of view per
+  action; the regression is ``test_spawn_floor_guard.py``'s out-of-view
+  stability test;
 * **a drop along the ray** (since 2026-10-31, :mod:`drop_rays`): a depth ray
   that lands deeper than the storey's step reach (:attr:`step_reach_m`, and
   never less than ``drop_m``) ran that deep, without meeting a surface, from
@@ -86,12 +115,19 @@ plans on -- rather than in each frontier, opening, peek and route module:
   tread, a landing or a ramp -- the provisional spawn storey, whose
   departure is walked as a traversal and rebased, not retreated from. The
   GT-oracle sweep of 2026-10-28 solved 14 % of the single-storey episodes
-  whose shortest path changes height by 0.25-1.0 m.
+  whose shortest path changes height by 0.25-1.0 m. The step's verdict --
+  within the reach of the plane or not -- is taken when the terrain reports
+  the cell (:attr:`step_ok`, since 2026-11-03) and kept until it reports it
+  again: the terrain reports what it can reach from where the agent stands,
+  within its own radius and memory, so a plane re-measured on the far side
+  of the house re-judges no step here.
   When the agent has stood level on such a plane of floor size, off the
   storey plane by more than a step but inside ``departure_m`` (where the
   atlas starts no transition), the atlas re-measures the storey there
   (``FloorAtlas.remeasure``): on a sunken floor measured from the step above
-  it, a toilet's lid lay in the free band;
+  it, a toilet's lid lay in the free band. The re-measure sets the plane for
+  what is measured from then on; nothing measured before is re-judged by it
+  (above);
 
 Two rules keep the mask from trapping the agent itself (since 2026-10-08;
 Collierville/000000 walked past the foot of a flight 0.6 m from its
@@ -158,13 +194,27 @@ class SpawnFloorGuard:
         self.drop_m: float = settings.step_down_m
         self.spawn_z: Optional[float] = None
         self.spawn_floor: Optional[int] = None  # the atlas floor the spawn plane belongs to (rebased with it)
-        self.drops: Dict[int, np.ndarray] = {}         # floor id -> cells a depth point landed in below the drop line
-        self.crossed: Dict[int, np.ndarray] = {}       # floor id -> cells such a ray crossed below the step reach
+        # The measurements, heights per cell that no plane enters (NaN: never measured) -- see the module docstring:
+        self.landed_z: Dict[int, np.ndarray] = {}      # floor id -> the lowest height a depth point landed at
+        self.clear_z: Dict[int, np.ndarray] = {}       # floor id -> the lowest height a ray ran through the column, unmet
+        # The thresholds in force when the cell was LAST measured (NaN: never): its drop line, its crossing line
+        # (the plane less the step reach) and the top of its surface band. A cell is judged against these alone.
+        self.line_z: Dict[int, np.ndarray] = {}
+        self.deep_z: Dict[int, np.ndarray] = {}
+        self.band_z: Dict[int, np.ndarray] = {}
+        # Their cut, refreshed for the floor in force on every ``observe`` (``_cut``), kept for the record and the tests:
+        self.drops: Dict[int, np.ndarray] = {}         # floor id -> landed below the cell's drop line
+        self.crossed: Dict[int, np.ndarray] = {}       # floor id -> a ray ran below the cell's crossing line
         self.surfaced: Dict[int, np.ndarray] = {}      # floor id -> landed above the drop line, under the obstacle band
         self.step_band_m: float = float(settings.step_surface_band_m)
         self.steps: Dict[int, np.ndarray] = {}     # floor id -> walkable step support heights (NaN: none)
+        # The plane the camera last measured the cell under (NaN: never) -- the step's reach is judged against it,
+        # as the drops are judged against their own thresholds; a cell the camera never measured is anchored to the
+        # plane in force when the terrain first reported it.
+        self.step_ref_z: Dict[int, np.ndarray] = {}
         self._level_heights: List[float] = []
         self.mask: Optional[np.ndarray] = None
+        self.freed: Optional[np.ndarray] = None    # the step cells written free on the last action (the ledger reads it)
         self.off_plane: bool = False
         self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
@@ -192,10 +242,14 @@ class SpawnFloorGuard:
         self._follow_step_plane(obs)
         self._track_plane(obs)
         floor_id = self.policy.mapping.floor_id
-        landed = self._layer(self.drops, floor_id, world)
-        crossed = self._layer(self.crossed, floor_id, world)
-        surfaced = self._layer(self.surfaced, floor_id, world)
-        self._mark_drops(obs, world, landed, crossed, surfaced)
+        landed_z = self._heights(self.landed_z, floor_id, world)
+        clear_z = self._heights(self.clear_z, floor_id, world)
+        line_z = self._heights(self.line_z, floor_id, world)
+        deep_z = self._heights(self.deep_z, floor_id, world)
+        band_z = self._heights(self.band_z, floor_id, world)
+        step_ref = self._heights(self.step_ref_z, floor_id, world)
+        self._mark_drops(obs, world, landed_z, clear_z, line_z, deep_z, band_z, step_ref)
+        landed, crossed, surfaced = self._cut(floor_id, landed_z, clear_z, line_z, deep_z, band_z)
         # A crossing is a drop only where no surface above the drop line was ever measured: a ray that sank into a
         # stairwell can run on under the floor slab beyond it, and that floor is the storey.
         crossed_only = crossed & ~surfaced & ~landed
@@ -230,6 +284,7 @@ class SpawnFloorGuard:
             if 0 <= ty < free.shape[0] and 0 <= tx < free.shape[1]:
                 free[ty, tx] = False                # what the body touched twice outranks the terrain too
         self.stats["step_cells_freed"] = int(free.sum())
+        self.freed = free if free.any() else None
         if self.mask is None and not free.any():
             return world
         grid = world.grid.copy()
@@ -414,12 +469,21 @@ class SpawnFloorGuard:
         self.off_plane = off_plane
 
     def _step_surfaces(self, world) -> np.ndarray:
-        """The floor's walkable step support heights on the planning grid, NaN elsewhere; this action's terrain added."""
+        """The floor's walkable step support heights on the planning grid, NaN elsewhere; this action's terrain added.
+
+        The terrain reports what it can reach from where the agent stands,
+        out of its own memory -- not what the camera sees this action -- so
+        a report changes a cell's HEIGHT only. The reference the height is
+        judged against (:attr:`step_ref_z`) is the plane the camera last
+        measured the cell under (``_mark_drops``); a cell the camera never
+        measured is anchored to the plane in force at its first report.
+        """
         floor_id = self.policy.mapping.floor_id
         heights = self.steps.get(floor_id)
         if heights is None or heights.shape != world.grid.shape:
             heights = np.full(world.grid.shape, np.nan, dtype=np.float32)
             self.steps[floor_id] = heights
+        reference = self._heights(self.step_ref_z, floor_id, world)
         terrain = getattr(getattr(self.policy, "building", None), "terrain", None)
         plane = getattr(self.policy.mapping, "_anchor", None)
         atlas = getattr(self.policy.mapping, "atlas", None)
@@ -429,22 +493,27 @@ class SpawnFloorGuard:
                 xs = np.floor((xy[:, 0] - world.origin_x) / world.resolution).astype(int)
                 ys = np.floor((xy[:, 1] - world.origin_y) / world.resolution).astype(int)
                 inside = (xs >= 0) & (xs < world.width) & (ys >= 0) & (ys < world.height)
-                heights[ys[inside], xs[inside]] = h[inside]
+                xs, ys = xs[inside], ys[inside]
+                heights[ys, xs] = h[inside]
+                unanchored = ~np.isfinite(reference[ys, xs])
+                reference[ys[unanchored], xs[unanchored]] = float(plane)
         self.stats["step_cells"] = int(np.isfinite(heights).sum())
         return heights
 
     def _walkable(self, steps) -> np.ndarray:
-        """The step cells that are this storey: support within :attr:`step_reach_m` of the plane in force.
+        """The step cells that are this storey: support within :attr:`step_reach_m` of the plane the cell was measured under.
 
-        The whole band is kept (``_step_surfaces``) and cut here, against the
-        plane as it stands now: a re-measured plane, or a provisional storey
-        confirmed by walking it, moves the cut without forgetting the terrain.
+        The reference is the cell's own (:attr:`step_ref_z`), never the plane
+        in force: a storey re-measured on another level re-judges no step the
+        camera is not looking at. The reach is the storey's -- the whole band
+        while the spawn storey is provisional, ``departure_m`` once it is
+        confirmed by walking it.
         """
-        plane = getattr(self.policy.mapping, "_anchor", None)
-        if plane is None:
+        reference = self.step_ref_z.get(self.policy.mapping.floor_id)
+        if reference is None or reference.shape != steps.shape:
             return np.zeros(steps.shape, dtype=bool)
         with np.errstate(invalid="ignore"):
-            return np.isfinite(steps) & (np.abs(steps - float(plane)) <= self.step_reach_m)
+            return np.isfinite(steps) & np.isfinite(reference) & (np.abs(steps - reference) <= self.step_reach_m)
 
     def _follow_step_plane(self, obs):
         """Re-measure the storey on the plane the agent stands level on, a step or more off it but inside ``departure_m``.
@@ -453,8 +522,13 @@ class SpawnFloorGuard:
         under the agent, ``min_floor_area_m2``). From a provisional spawn
         storey -- a spawn on a tread -- the spawn plane moves with it; from a
         storey walked level, the spawn plane stays and the bound measures
-        the step against it. The drops measured from the old plane are
-        dropped with it.
+        the step against it. Nothing already measured is re-judged here: the
+        new plane sets the thresholds of what the camera measures from now
+        on (:meth:`_mark_drops`), and a cell keeps the verdict of its last
+        measurement until it is seen again (the module docstring). Until
+        2026-11-03 the layers were emptied here, then for a few hours re-cut
+        whole against the new plane -- either way 00878-XB4GS9ShBRE/000000
+        rewrote hundreds of cells out of view on each of its re-measures.
         """
         mapping = self.policy.mapping
         atlas = getattr(mapping, "atlas", None)
@@ -479,8 +553,6 @@ class SpawnFloorGuard:
         if not atlas.remeasure(height):
             return
         mapping._anchor = height
-        for layer in (self.drops, self.crossed, self.surfaced):
-            layer.pop(int(mapping.floor_id), None)
         if provisional and self.spawn_floor == int(mapping.floor_id):
             self.spawn_z = height
             building = getattr(self.policy, "building", None)
@@ -494,54 +566,106 @@ class SpawnFloorGuard:
                       "plateau_m2": round(area, 2), "spawn_plane_moved": bool(provisional)})
 
     @staticmethod
-    def _layer(layers, floor_id, world) -> np.ndarray:
+    def _heights(layers, floor_id, world) -> np.ndarray:
+        """The floor's height layer on the planning grid, NaN where nothing was measured; created on first use."""
         layer = layers.get(floor_id)
         if layer is None or layer.shape != world.grid.shape:
-            layer = np.zeros(world.grid.shape, dtype=bool)
+            layer = np.full(world.grid.shape, np.nan, dtype=np.float32)
             layers[floor_id] = layer
         return layer
 
-    def _mark_drops(self, obs, world, landed, crossed, surfaced):
-        """This frame's depth: where points land below the drop line, the cells the rays of those landing below the
-        step reach crossed below it, and where points land above the drop line but below the obstacle band (a
-        surface the storey may stand on)."""
+    def _drop_plane(self):
+        """The plane the drop line hangs from, and the plane the obstacle band stands on (the storey's own).
+
+        On an adopted half-level the drop line hangs from the lower of the two
+        planes -- the storey below is not a drop -- while the obstacle band
+        stays the half-level's.
+        """
         plane = getattr(self.policy.mapping, "_anchor", None)
         if plane is None:
-            return
-        band = float(plane) + OBSTACLE_BAND_M
+            return None, None
+        band_plane = float(plane)
         if self.policy.mapping.floor_id in self.half_levels and self.spawn_z is not None:
-            plane = min(float(plane), self.spawn_z)   # the storey below an adopted half-level is not a drop
+            plane = min(float(plane), self.spawn_z)
+        return float(plane), band_plane
+
+    def _mark_drops(self, obs, world, landed_z, clear_z, line_z, deep_z, band_z, step_ref):
+        """This frame's depth into the height layers, and this frame's thresholds onto the cells it measured.
+
+        Where every point landed (the lowest kept), and how deep the rays of
+        those landing below the drop line ran through the cells on their way
+        without meeting a surface. Every cell a point landed in or a ray
+        crossed takes the drop line, the crossing line and the surface band
+        of the plane in force NOW, and the plane itself as the reference its
+        step support is judged against (``step_ref``): it has been measured,
+        and is judged by this measurement until the next.
+        """
+        plane, band_plane = self._drop_plane()
+        if plane is None:
+            return
         points = backproject_depth(obs.depth_m, obs.camera, obs.pose, self.policy.settings.depth_stride)
         if not len(points):
             return
         line = float(plane) - self.drop_m
-        origin, shape = (world.origin_x, world.origin_y), world.grid.shape
-        low = points[(points[:, 2] >= line) & (points[:, 2] < band)]
-        if len(low):
-            xs, ys = self._cells(low, world)
-            surfaced[ys, xs] = True
+        deep = float(plane) - max(self.drop_m, self.step_reach_m)
+        band = float(band_plane) + OBSTACLE_BAND_M
+        xs, ys, zs = self._cells(points, world)
+        self._lower(landed_z, xs, ys, zs)
+        line_z[ys, xs], deep_z[ys, xs], band_z[ys, xs], step_ref[ys, xs] = line, deep, band, float(band_plane)
         below = points[points[:, 2] < line]
         if not len(below):
             return
-        xs, ys = self._cells(below, world)
-        landed[ys, xs] = True
         camera = camera_position_world(obs.pose, obs.camera)
         if camera[2] <= float(plane):
             return                                  # a ray from under the storey's floor may run on under it
-        # Crossed below the step reach, the surface under a cell is deeper than any step the storey owns: never
-        # walkable support (a sunken floor 0.4 m down, 00878/000035, is crossed only at its height, never below it).
-        deep = float(plane) - max(self.drop_m, self.step_reach_m)
-        sunk = below[below[:, 2] < deep]
-        if len(sunk):
-            xs, ys = cells_crossed_below(camera, sunk, deep, origin, world.resolution, shape)
-            crossed[ys, xs] = True
+        # From where each ray sinks under the drop line to where it lands: the column above the ray is empty there,
+        # so the surface under every cell crossed is lower than the ray's height in it. The crossing line cuts it
+        # (``_cut``): crossed below the step reach, the surface is deeper than any step the storey owns (a sunken
+        # floor 0.4 m down, 00878/000035, is crossed only at its height, never below it).
+        xs, ys, zs = cells_crossed_below(camera, below, line, (world.origin_x, world.origin_y), world.resolution,
+                                         world.grid.shape)
+        self._lower(clear_z, xs, ys, zs)
+        line_z[ys, xs], deep_z[ys, xs], band_z[ys, xs], step_ref[ys, xs] = line, deep, band, float(band_plane)
+
+    def _cut(self, floor_id, landed_z, clear_z, line_z, deep_z, band_z):
+        """Every cell against its own thresholds: ``(landed, crossed, surfaced)``, kept per floor for the record.
+
+        Landed: the lowest point under the cell is below the cell's drop
+        line. Crossed: a ray ran through the cell's column below the cell's
+        crossing line (the plane less the step reach, never above the drop
+        line). Surfaced: the lowest point lies between the drop line and the
+        obstacle band -- a surface the storey may stand on, which outvotes a
+        crossing (``observe``). The thresholds are the ones in force when
+        the cell was last measured (``_mark_drops``), so the plane moving
+        since changes no verdict here; a cell never measured has none.
+        """
+        with np.errstate(invalid="ignore"):
+            landed = landed_z < line_z
+            surfaced = (landed_z >= line_z) & (landed_z < band_z)
+            crossed = clear_z < deep_z
+        self.drops[floor_id], self.crossed[floor_id], self.surfaced[floor_id] = landed, crossed, surfaced
+        return landed, crossed, surfaced
+
+    @staticmethod
+    def _lower(layer, xs, ys, zs):
+        """Keep in ``layer`` the lowest of ``zs`` per cell against what it holds (NaN: nothing yet); repeats welcome."""
+        if not len(xs):
+            return
+        flat = ys.astype(np.int64) * layer.shape[1] + xs.astype(np.int64)
+        order = np.lexsort((zs, flat))                # by cell, the lowest height of each first
+        flat, zs = flat[order], zs[order]
+        first = np.ones(len(flat), dtype=bool)
+        first[1:] = flat[1:] != flat[:-1]
+        cells, lowest = flat[first], zs[first]
+        rows, cols = np.divmod(cells, layer.shape[1])
+        layer[rows, cols] = np.fmin(layer[rows, cols], lowest.astype(layer.dtype))
 
     @staticmethod
     def _cells(points, world):
         xs = np.floor((points[:, 0] - world.origin_x) / world.resolution).astype(int)
         ys = np.floor((points[:, 1] - world.origin_y) / world.resolution).astype(int)
         inside = (xs >= 0) & (xs < world.width) & (ys >= 0) & (ys < world.height)
-        return xs[inside], ys[inside]
+        return xs[inside], ys[inside], points[inside, 2]
 
     def _refuse(self, obs, goal, kind, reason) -> bool:
         self.stats["goals_refused"] += 1

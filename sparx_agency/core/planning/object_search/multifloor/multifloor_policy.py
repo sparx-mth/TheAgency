@@ -596,8 +596,12 @@ class MultiFloorSearch:
         return direction
 
     def _portal(self, obs, direction, path):
+        atlas = self.policy.mapping.atlas
         portal = {"id": len(self.portals), "floor_id": self.floor_id,
                   "entry": list(path[0]), "direction": direction, "path": list(path),
+                  # The storey plane the flight was placed from: the capsule is drawn about it, not about the plane
+                  # in force later (a re-measure elsewhere on the storey must not move a staircase, peek_stairs.py).
+                  "anchor_z": float(atlas.elevation_m) if atlas.floors else float(obs.pose.z),
                   "destination": None, "cooldown_until": 0, "observations": 1, "last_step": obs.step}
         self.portals.append(portal)
         return portal

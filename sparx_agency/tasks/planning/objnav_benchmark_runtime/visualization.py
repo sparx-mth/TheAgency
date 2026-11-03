@@ -262,6 +262,7 @@ def method_snapshot(policy):
             "solver": str(solver.last.reason) if solver is not None else "not called",
             "fallback": policy.fallback.snapshot() if hasattr(policy, "fallback") and hasattr(policy.fallback, "snapshot") else {},
             "exploration": exploration,
+            "map_changes": getattr(getattr(policy, "map_ledger", None), "last", None),
             "search": search_snapshot(policy)}
 
 

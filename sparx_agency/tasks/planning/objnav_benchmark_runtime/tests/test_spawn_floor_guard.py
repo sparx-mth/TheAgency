@@ -1040,19 +1040,68 @@ def test_steps_free_occupied_cells_but_never_a_cell_the_body_touched(monkeypatch
 def test_standing_level_on_a_floor_sized_plane_a_step_below_re_measures_the_storey(monkeypatch, walked_level):
     policy, episode, world, _ = forbidden_stairs()
     monkeypatch.setattr(type(policy.floor_guard), "provisional", property(lambda self: not walked_level))
-    atlas = policy.mapping.atlas
+    atlas, guard = policy.mapping.atlas, policy.floor_guard
     assert atlas.elevation_m == pytest.approx(0.0)
     _step_terrain(policy, monkeypatch, [], -0.35)
-    policy.floor_guard.observe(at(episode, 0, 2.8, 3.0, z=0.0), world)                    # the spawn, on the plane
-    policy.floor_guard.drops[policy.mapping.floor_id] = np.ones(world.grid.shape, bool)   # measured from the step above
-    for step in range(1, 4):
-        policy.floor_guard.observe(at(episode, step, 3.0 + 0.1 * step, 3.0, z=-0.35), world)
+    policy.mapping._anchor = 0.0
+    guard.observe(at(episode, 0, 2.8, 3.0, z=0.0), world)                    # the spawn, on the plane
+    floor = policy.mapping.floor_id
+    heights, lines = guard.landed_z[floor], guard.line_z[floor]
+    heights[:40], lines[:40] = -0.35, -0.30        # the floor below, measured from the step above: a drop under the plane at 0
+    heights[10:12, 10:12] = -1.5                   # and a stairwell in it
+    guard.observe(at(episode, 1, 2.9, 3.0, z=0.0, depth=0.5), world)
+    drops_before = guard.drops[floor].copy()
+    assert drops_before[:40].all()
+    for step in range(2, 5):
+        guard.observe(at(episode, step, 3.0 + 0.1 * step, 3.0, z=-0.35, depth=0.5), world)
     assert atlas.elevation_m == pytest.approx(-0.35) and policy.mapping._anchor == pytest.approx(-0.35)
-    assert policy.floor_guard.stats["plane_remeasured"] == 1
-    assert policy.floor_guard.events[-1]["event"] == "storey_plane_remeasured"
-    assert not policy.floor_guard.drops[policy.mapping.floor_id].all(), "the old plane's drops went with it"
+    assert guard.stats["plane_remeasured"] == 1
+    assert guard.events[-1]["event"] == "storey_plane_remeasured"
+    drops = guard.drops[floor]
+    assert np.array_equal(drops[:40], drops_before[:40]), \
+        "nothing measured earlier is re-judged by the re-measure: every cell keeps the verdict of its own measurement"
+    assert (heights[:10] == np.float32(-0.35)).all() and (lines[:10] == np.float32(-0.30)).all(), "the measurements stand"
     # A storey walked level keeps its spawn plane; a spawn on a tread (provisional) moves it to the floor.
-    assert policy.floor_guard.spawn_z == pytest.approx(0.0 if walked_level else -0.35)
+    assert guard.spawn_z == pytest.approx(0.0 if walked_level else -0.35)
+
+
+def test_the_stair_capsule_stays_where_the_flight_was_placed_when_the_plane_is_re_measured():
+    """00878/000000 (2026-11-03): the capsule of the flight up moved 0.2 m along its flight at every re-measure, the
+    window ``[plane + 0.10, plane + 0.45]`` following the plane. It is drawn about the plane the portal was placed
+    from (``anchor_z``)."""
+    policy, episode, world, _ = forbidden_stairs()
+    obs = obs_at(episode, 0, IN_A)
+    before = stair_peek_mask(policy, world, obs.pose)
+    assert before.any() and all("anchor_z" in p for p in policy.building.portals)
+    atlas = policy.mapping.atlas
+    atlas.floors[atlas.active_id].elevation_m = policy.mapping._anchor = -0.20   # the storey re-measured a step lower
+    assert np.array_equal(stair_peek_mask(policy, world, obs.pose), before), "the staircase did not move"
+    for portal in policy.building.portals:
+        portal.pop("anchor_z")                                                   # a portal from before the anchor
+    assert not np.array_equal(stair_peek_mask(policy, world, obs.pose), before), "the atlas's elevation, as before"
+
+
+def test_a_step_keeps_its_verdict_until_the_terrain_reports_it_again(monkeypatch):
+    """A step cell is judged within the reach when the terrain reports it, and the verdict is kept: the plane moving
+    re-judges nothing the terrain is not reporting now; a new report re-judges it."""
+    policy, episode, world, _ = forbidden_stairs()
+    guard = policy.floor_guard
+    policy.mapping._anchor = 0.0
+    gx, gy = world.world_to_grid(3.0, 4.0)
+    step_cells = [world.grid_to_world(gx, gy), world.grid_to_world(gx + 1, gy)]
+    grid = world.grid.copy()
+    grid[gy, gx] = grid[gy, gx + 1] = world.values.occupied                # a riser the obstacle band painted
+    world = type(world)(grid, world.params, values=world.values)
+    _step_terrain(policy, monkeypatch, step_cells, -0.40)                   # 0.40 m down: within the 0.45 m reach
+    confined = guard.observe(at(episode, 0, 3.0, 3.0), world)
+    assert confined.grid[gy, gx] == world.values.free and guard.step_ok[policy.mapping.floor_id][gy, gx]
+    _step_terrain(policy, monkeypatch, [], -0.40)                           # the terrain no longer reports them
+    policy.mapping._anchor = 0.30                                            # the plane re-measured 0.3 m up elsewhere
+    confined = guard.observe(at(episode, 1, 3.0, 3.0), world)
+    assert confined.grid[gy, gx] == world.values.free, "0.70 m off the new plane, but not reported: the verdict stands"
+    _step_terrain(policy, monkeypatch, step_cells, -0.40)                   # reported again from the new plane
+    confined = guard.observe(at(episode, 2, 3.0, 3.0), world)
+    assert confined.grid[gy, gx] == world.values.occupied and not guard.step_ok[policy.mapping.floor_id][gy, gx]
 
 
 def test_a_floor_just_more_than_level_below_the_spawn_is_re_measured_with_no_gap(monkeypatch):

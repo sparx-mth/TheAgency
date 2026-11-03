@@ -42,6 +42,7 @@ from sparx_agency.core.planning.object_search.exploration.frontier_sweep import 
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningRegistry
 from sparx_agency.core.planning.object_search.exploration.path_glances import GlanceScheduler, GlanceSettings
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
+from sparx_agency.core.planning.object_search.world_model.map_ledger import MapChangeLedger
 from sparx_agency.core.planning.object_search.rooms.room_scans import RoomScanLedger
 from sparx_agency.core.planning.object_search.world_model.sightlines import SightLedger, SightSettings
 from sparx_agency.core.planning.object_search.multifloor.spawn_floor_guard import SpawnFloorGuard
@@ -310,6 +311,8 @@ class RPTSearchPolicy:
             self.building = MultiFloorSearch(self)
         # Spawn-floor confinement: inert when stair traversal is allowed.
         self.floor_guard = SpawnFloorGuard(self)
+        # What changed on the planning grid each action, by layer and in or out of the camera's view (map_ledger.py).
+        self.map_ledger = MapChangeLedger()
         self.peek = DoorwayPeek(self)
         self.closing = TargetClosing(self)
         # Locked targets the closing gave up for want of a path, walked back to once the map holds one.
@@ -747,8 +750,12 @@ class RPTSearchPolicy:
         grid underneath is untouched and rebuilds the world next action.
         """
         original = world
+        plane_before = getattr(self.mapping, "_anchor", None)
         world = self._walked_passable(observation, world)
         confined = self.floor_guard.observe(observation, world)
+        self.map_ledger.record(observation, self.mapping.floor_id, original, confined,
+                               mask=self.floor_guard.mask, freed=self.floor_guard.freed,
+                               plane_m=getattr(self.mapping, "_anchor", None), plane_before_m=plane_before)
         if confined is not original:
             self.mapping.worlds[self.mapping.floor_id] = confined
         return confined
@@ -889,6 +896,7 @@ class RPTSearchPolicy:
                 "perception": self.perception.diagnostics(), "camera": dict(self.camera_control.last), "floor_maps": self.mapping.integrity(),
                 "building": self.building.diagnostics() if self.building else None,
                 "spawn_floor_guard": self.floor_guard.diagnostics(),
+                "map_changes": self.map_ledger.diagnostics(),
                 "frontier_sweep": self.sweep.diagnostics(),
                 "room_search_loop": self.loop.diagnostics(),
                 "room_scans": self.scans.diagnostics(),

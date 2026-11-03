@@ -70,7 +70,7 @@ def walked_exemption(policy, world, pose=None) -> np.ndarray:
 
 
 def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
-    """Rasterize seen portal polylines only near the current storey's elevation, off the floor run and the trail.
+    """Rasterize seen portal polylines only near the storey each was placed from, off the floor run and the trail.
 
     Uses the existing OpenCV capsule rasterizer, not per-pixel iteration. The
     preferred margin is ``RPTSettings.stair_margin_m`` (0.45 m; a policy without
@@ -81,7 +81,10 @@ def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
     the storey end of the capsule is cut square (``_square_foot``: no half-disc
     of floor in front of the first riser), and the cells the agent has stood on
     (``walked_exemption``, ``pose`` being the one not yet in the ledger) are
-    never part of the mask. ``carve=False``
+    never part of the mask. The storey height a flight is clipped about is the
+    portal's own ``anchor_z`` -- the plane in force when it was placed -- so a
+    plane re-measured since (a split-level storey) moves no capsule; a portal
+    without one is clipped about the atlas's elevation. ``carve=False``
     returns the raw footprint for a caller that combines masks and carves once;
     ``report`` (a dict) receives the margin drawn per portal id, in metres.
     """
@@ -110,11 +113,15 @@ def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
     for portal in building.portals:
         if portal["floor_id"] != policy.mapping.floor_id:
             continue
+        # The flight is drawn about the plane it was placed from (``anchor_z``, since 2026-11-03), not the plane in
+        # force now: a storey re-measured 0.2 m lower elsewhere moved every capsule 0.2 m along its flight.
+        anchor = portal.get("anchor_z")
+        base = float(height) if anchor is None else float(anchor)
         points = portal.get("path") or [portal["entry"]]
         pairs = list(zip(points, points[1:])) or [(points[0], points[0])]
         segments = []
         for left, right in pairs:
-            for a, b in _flight_pieces(np.asarray(left[:3], float), np.asarray(right[:3], float), height, band):
+            for a, b in _flight_pieces(np.asarray(left[:3], float), np.asarray(right[:3], float), base, band):
                 segments.append((tuple(int(v) for v in world.world_to_grid(*a[:2])),
                                  tuple(int(v) for v in world.world_to_grid(*b[:2]))))
         if not segments:

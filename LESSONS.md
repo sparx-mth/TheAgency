@@ -11,6 +11,48 @@ Format per entry:
 
 ---
 
+## 2026-11-03 — The planning map flipped whole regions out of the camera's view: one moving reference re-thresholded every cell
+
+**Symptom:** 00878-XB4GS9ShBRE/000000 (`runs/failed_691/f434b_gpu`, stair traversal forbidden, GT perception). At
+action 84, standing still on a LOOK_UP, 379 cells went occupied → free, none of them in view (the two black blobs
+south-west of the agent, read on the HUD as blocked staircases, opened). Re-run with the first fix
+(`runs/failed_691/f434c_stairfix_00878-000000`): at action 150 a whole southern region — already partitioned into
+rooms R5/R10/R12 — went free → occupied (742 cells, 9 in view) and the rooms vanished from the search; at 159 it
+went back (746 cells); 14 such jumps in 500 actions, every one on an action the atlas's `revision` bumped, and NO
+out-of-view change on any other action (per-step diff of `map_journal.npz` against the camera's frustum). The agent
+walked back to places it had searched. The journal, the HUD and A* all read one object, `mapping.worlds[floor]`
+written by `_confine`: what the video shows is what the planner planned on.
+
+**Root cause:** `SpawnFloorGuard.observe` derived three whole-grid layers on every action from ONE reference height,
+the storey plane (`mapping._anchor` = `atlas.elevation_m`): the drops (`_cut`: every stored landing against
+`plane − 0.30`, every ray height against `plane − 0.45`), the walkable steps (`_walkable`: `|h − plane| ≤ 0.45`) and
+the stair capsules (`peek_stairs._flight_pieces`: the flight drawn only within `[plane ± 0.10, plane ± 0.45]`). The
+plane follows the agent's own level — `_follow_step_plane` re-measures it whenever the agent stands level 0.12–0.45 m
+off it on ≥ 3 m² of support — and this house is split-level (floors at 0.00, +0.20, +0.30 m; a sunken room at
+−0.20 m, which the navmesh walks and the HUD's blobs partly were). Each re-measure moved the reference and all
+three layers were re-thresholded for the entire grid in the same action. The original code additionally emptied the
+drop layers at a re-measure (the first fix of the day stopped that and kept heights, but still re-cut them globally,
+so the flips stayed). Nothing the camera saw had changed; the reference had.
+
+**Fix / workaround:** a verdict is fixed when the cell is measured, and the plane moving changes nothing the camera
+has not seen again. The guard keeps per cell the lowest landing (`landed_z`), the lowest ray height (`clear_z`) and
+the three thresholds in force at the last measurement (`line_z`, `deep_z`, `band_z`; `_mark_drops` writes them for
+the cells of each frame, `_cut` compares each cell with its own); a step's verdict is taken when the terrain reports
+it (`step_ok`) and kept until the next report; a portal records the plane it was placed from (`anchor_z`) and the
+capsule is drawn about that. Instrumentation: `world_model/map_ledger.py` attributes every changed planning cell per
+action (observation / guard mask / step overlay, in or out of the frustum) into `method.map_changes` of the recording
+and keeps out-of-view jumps ≥ 50 cells as events. Regression: `test_drop_rays.py`
+`test_a_re_measured_plane_changes_no_cell_out_of_view_and_the_stairwell_stays_a_drop` (the ledger is the judge; it
+fails against the re-cut), plus the capsule and step tests in `test_spawn_floor_guard.py`.
+
+**Don't:** derive a whole layer from a reference that follows the agent — the plane, the spawn height, "the storey".
+Store what was measured and the reference it was measured under, and re-judge a cell only when it is measured
+again. When a map changes by hundreds of cells on a standing-still action, diff the journal against the camera's
+frustum first: changes out of view cannot be observation. And before calling a blob on the HUD a staircase, sample
+the navmesh under it — a sunken room and the top of a flight look the same in black.
+
+---
+
 ## 2026-11-01 — The A/B pilot's arm A stopped at 50 of 300 episodes: two scene workers, one question, two answers
 
 **Symptom:** the first glance A/B pilot finished arm A with 50 of 300 episodes. Every scene that started after the

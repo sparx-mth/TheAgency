@@ -18,6 +18,7 @@ from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGri
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.core.planning.object_search.multifloor.drop_rays import cells_crossed_below
+from sparx_agency.core.planning.object_search.world_model.map_ledger import JUMP_CELLS
 from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_cells
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_spawn_floor_guard import _step_terrain
@@ -106,12 +107,16 @@ def in_well(x, y):
 
 def test_a_ray_is_a_drop_from_where_it_sinks_under_the_drop_line_to_where_it_lands():
     camera, point = (0.05, 0.05, 0.88), (3.05, 0.05, -1.0)
-    xs, ys = cells_crossed_below(camera, [point], -0.30, (0.0, 0.0), RES, (10, 40))
+    xs, ys, zs = cells_crossed_below(camera, [point], -0.30, (0.0, 0.0), RES, (10, 40))
     sinks = 0.05 + 3.0 * (0.88 + 0.30) / (0.88 + 1.0)                 # 1.93 m: the ray is 0.30 m under the plane there
     assert set(ys) == {0} and min(xs) == math.floor(sinks / RES) and max(xs) == 30
     assert set(xs) == set(range(min(xs), 31)), "no cell skipped between"
+    # The ray's height in each cell: from the line where it sinks under it down to the point where it lands.
+    assert zs.max() == pytest.approx(-0.30) and zs.min() == pytest.approx(-1.0) and np.all(np.diff(zs) <= 1e-9)
+    expected = camera[2] - (xs * RES + 0.5 * RES - camera[0]) / (point[0] - camera[0]) * (camera[2] - point[2])
+    assert np.abs(zs - expected).max() < 0.5 * RES * (camera[2] - point[2]) / (point[0] - camera[0]) + 1e-9
     empty = cells_crossed_below(camera, np.zeros((0, 3)), -0.30, (0.0, 0.0), RES, (10, 40))
-    assert len(empty[0]) == len(empty[1]) == 0
+    assert len(empty[0]) == len(empty[1]) == len(empty[2]) == 0
     off_grid = cells_crossed_below(camera, [(6.05, 0.05, -1.0)], -0.30, (0.0, 0.0), RES, (10, 40))
     assert set(off_grid[0]) == {38, 39}, "cells beyond the grid are dropped, not wrapped"
 
@@ -200,13 +205,67 @@ def test_the_cells_the_agent_stood_on_stay_free_inside_a_crossing(monkeypatch):
     assert guard.crossed[0][gy, gx] and confined.grid[gy, gx] == VALUES.occupied
 
 
-def test_a_re_measured_plane_takes_its_crossings_and_surfaces_with_its_drops(monkeypatch):
+def _re_measured_down(policy, episode, guard, world, by_m, scene=flat):
+    """Three level actions ``by_m`` below the plane on a floor-size plateau, facing AWAY from the well (yaw pi, the
+    well behind the camera): the storey is re-measured there (``SpawnFloorGuard._follow_step_plane``). Goes through
+    the policy's ``_confine`` so the map ledger judges every action. Returns the last confined world."""
+    confined = None
+    for step in range(1, 4):
+        pose = AgentPose(1.0 + 0.1 * step, 3.0, -by_m, math.pi)
+        confined = policy._confine(frame(episode, step, pose, scene), world)
+    assert guard.stats["plane_remeasured"] == 1 and policy.mapping.atlas.elevation_m == pytest.approx(-by_m)
+    return confined
+
+
+def _ledger_outside_fov(policy):
+    return [e["outside_fov"] for e in policy.map_ledger.events if e.get("event") == "map_changed_out_of_view"]
+
+
+def test_a_re_measured_plane_changes_no_cell_out_of_view_and_the_stairwell_stays_a_drop(monkeypatch):
+    """00878-XB4GS9ShBRE/000000 (2026-11-03): the storey plane re-measured 14 times between the levels of a
+    split-level house, and each time 270-730 cells changed with none of them in the camera's view -- the guard
+    re-thresholded every measured cell against the new plane. A verdict is fixed when the cell is measured: with the
+    stairwell behind the camera, the re-measure changes nothing there (the ledger counts the cells out of view), and
+    the well is still a drop."""
     policy, episode, guard, world = guarded(monkeypatch)
     _step_terrain(policy, monkeypatch, [], -0.35)
-    guard.observe(frame(episode, 0, AT_THE_EDGE, stairwell), world)
-    assert guard.crossed[0].any() and guard.surfaced[0].any()
-    for step in range(1, 4):
-        guard.observe(replace(observation(episode, step), pose=AgentPose(1.0 + 0.1 * step, 3.0, -0.35, math.pi)),
-                      world)
-    assert guard.stats["plane_remeasured"] == 1
-    assert not guard.crossed[0].any() and not guard.surfaced[0].any(), "measured against the old plane"
+    before = policy._confine(frame(episode, 0, AT_THE_EDGE, stairwell), world)
+    masked_before = (before.grid == VALUES.occupied) & (world.grid == VALUES.free)
+    assert masked_before.sum() > 50 and guard.stats["drop_cells_crossed"] > 0
+    after = _re_measured_down(policy, episode, guard, world, 0.35)
+    assert policy.map_ledger.last["plane_moved"] or policy.map_ledger.stats["actions"] == 4
+    assert max(_ledger_outside_fov(policy), default=0) < JUMP_CELLS, policy.map_ledger.events
+    assert policy.map_ledger.max_outside_fov < JUMP_CELLS
+    masked_after = (after.grid == VALUES.occupied) & (world.grid == VALUES.free)
+    assert np.array_equal(masked_before, masked_after), "the well was not looked at: not a cell of it changes"
+    assert (guard.line_z[0][masked_before] == np.float32(-guard.drop_m)).all(), "judged by the line it was measured under"
+
+
+def test_a_sunken_floor_painted_a_drop_from_the_step_above_is_released_when_seen_again_and_not_before(monkeypatch):
+    """What emptying the layers (and then re-cutting them) was for: from the step above, a floor 0.35 m down lands
+    under the drop line and is a drop; the agent steps down onto it and the plane is re-measured there. The floor
+    stays a drop until the camera sees it again -- an observation releases it, a re-measure does not."""
+    policy, episode, guard, world = guarded(monkeypatch)
+    _step_terrain(policy, monkeypatch, [], -0.35)
+    before = policy._confine(frame(episode, 0, AT_THE_EDGE, sunken(0.35)), world)
+    floor = cells(world, lambda x, y: (x >= 4.6) & (x < 5.9) & (y >= 2.1) & (y <= 3.9))
+    painted = guard.drops[0] & floor
+    assert painted.any() and (before.grid[painted] == VALUES.occupied).all()
+    assert not guard.crossed[0].any(), "inside the step reach nothing is crossed"
+    after = _re_measured_down(policy, episode, guard, world, 0.35, scene=sunken(0.35))
+    assert (after.grid[painted] == VALUES.occupied).all() and guard.drops[0][painted].all(), "not seen again: a drop still"
+    assert policy.map_ledger.max_outside_fov < JUMP_CELLS
+    # Facing the sunken floor again from the lower plane: what the camera measures again is judged under the new
+    # line and is the storey's own floor; what the well's near edge still hides from the lower camera stays as it was.
+    low = AgentPose(3.0, 3.0, -0.35, 0.0)
+    seen = policy._confine(frame(episode, 4, low, sunken(0.35)), world)
+    re_measured = painted & (guard.line_z[0] == np.float32(-0.35 - guard.drop_m))
+    hidden = painted & ~re_measured
+    assert re_measured.sum() > 20 and hidden.any()
+    assert not guard.drops[0][re_measured].any() and (seen.grid[re_measured] == VALUES.free).all()
+    assert guard.surfaced[0][re_measured].all(), "the floor is a surface the storey stands on now"
+    assert guard.drops[0][hidden].all() and (seen.grid[hidden] == VALUES.occupied).all(), "not seen: not re-judged"
+    assert np.isfinite(guard.landed_z[0][painted]).all(), "the measurements stand; the verdict changed where measured"
+    assert policy.map_ledger.last["in_fov"] > 0 and policy.map_ledger.last["outside_fov"] < JUMP_CELLS
+    ys, xs = np.nonzero(re_measured)
+    assert guard.goal_allowed(frame(episode, 5, low, sunken(0.35)), world, world.grid_to_world(xs[-1], ys[-1]), "frontier")
