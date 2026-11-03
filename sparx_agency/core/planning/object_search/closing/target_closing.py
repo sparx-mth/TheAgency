@@ -339,8 +339,18 @@ class TargetClosingSettings:
     # candidate is released like an unverified one, its anchor remembered with
     # twice the rejection radius, and the search resumes. False restores the
     # historical episode-ending error.
+    # When the map shows something occupied between the agent and the memory (the same test a
+    # memory STOP needs, ``_memory_in_sight``), the inspection was BLIND, not wrong: the standoff
+    # lies outside the bathroom's wall, behind a jamb. 00835-q3zU7Yy5E5s/000027 (2026-11-03, GT
+    # perception): the toilet seen at 4.7 m, the memory 6 degrees off it, the standoff 1.1 m from
+    # it behind the wall; "saw nothing" put a 2.0 m rejection on the real toilet, 64 refusals
+    # followed while it was in view in 83 frames, and the episode ended with the agent 0.06 m from
+    # a view point and no STOP (00814/000012, a bed, the same). With ``blind_inspection_release``
+    # such a release keeps no rejection memory -- the spot is remembered as boxed in instead, so
+    # no takeover restarts from it -- and a sighting from elsewhere may start again.
     release_on_failed_inspection: bool = True
     failed_inspection_radius_factor: float = 2.0
+    blind_inspection_release: bool = True
     # A LOCKED target with no safe path used to wait for A* for ever: the agent
     # that spawned beside a bed with the plant in view 4.4 m away (Hanson
     # 2026-10-05) spun 159 actions on "no safe target path" because the floor
@@ -530,7 +540,8 @@ class TargetClosingSettings:
         if (isinstance(self.backoff_trust_confidence, bool) or not math.isfinite(self.backoff_trust_confidence)
                 or not 0 < self.backoff_trust_confidence <= 1):
             raise ValueError("backoff_trust_confidence must lie in (0, 1]")
-        for key in ("release_unverified", "stop_on_exhausted_inspection", "release_on_failed_inspection", "footing_sweep"):
+        for key in ("release_unverified", "stop_on_exhausted_inspection", "release_on_failed_inspection", "footing_sweep",
+                    "blind_inspection_release"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
         for key in ("footing_after_steps", "release_after_footing_steps"):
@@ -630,6 +641,7 @@ class TargetClosing:
         self.rejected = []                 # (anchor xyz, floor id, action, radius m, why) per released candidate
         self.releases = 0
         self.inspection_releases = 0
+        self.blind_inspection_releases = 0  # failed inspections the map explained: something occupied between the agent and the memory (no rejection kept)
         self.inspection_resumptions = 0    # inspections ended to step closer: seen fresh, measured out of range
         self.stall_releases = 0            # locks released because the approach went nowhere
         self.map_releases = 0              # locks the map outvoted after the fact
@@ -1352,7 +1364,7 @@ class TargetClosing:
         return (self.history is not None and s.approach_history_m > 0
                 and self.history.qualifies(s.approach_history_m, s.approach_history_closed_m))
 
-    def _memory_in_sight(self, obs):
+    def _memory_in_sight(self, obs, refusal=True):
         """Whether the map has nothing occupied between the agent and the 3-D memory: a STOP on the memory alone needs it.
 
         The box goes missing for two reasons: the camera's frame or the
@@ -1363,6 +1375,8 @@ class TargetClosing:
         the nearest view point. The cells within ``MEMORY_SIGHT_MARGIN_M`` of
         the memory (the object and what it stands on) and within the body
         radius of the agent are not read; an unknown cell does not block.
+        ``refusal=False`` asks the question without counting a refused
+        memory STOP (the failed-inspection release asks it too).
         """
         world = getattr(self.policy, "last_world", None)
         if world is None or self.xyz is None:
@@ -1379,8 +1393,8 @@ class TargetClosing:
         if not (world.in_bounds(gx, gy) and world.in_bounds(x0, y0) and world.in_bounds(x1, y1)):
             return True
         clear = line_of_sight_clear(world.grid == world.values.occupied, x0, y0, x1, y1)
-        if not clear:
-            self.memory_sight_refusals += 1
+        if not clear and refusal:
+            self.memory_sight_refusals += 1          # a memory STOP refused; the failed-inspection test counts its own
         return clear
 
     def _boxed_in_here(self, obs):
@@ -2360,6 +2374,15 @@ class TargetClosing:
                 # Every view tried once and nothing seen (``blank``), or the budget spent
                 # without an in-range sighting: the lock was wrong.
                 self.inspection_releases += 1
+                if s.blind_inspection_release and not self._memory_in_sight(obs, refusal=False):
+                    # ... unless the map says the standoff was blind: something occupied stands between the agent
+                    # and the memory, and nothing seen from here says nothing about the candidate. No rejection is
+                    # kept; the spot is boxed in so no takeover restarts from it (since 2026-11-03, see the setting).
+                    self.blind_inspection_releases += 1
+                    self.boxed_in.append(((float(obs.pose.x), float(obs.pose.y)), self.policy.mapping.floor_id, int(obs.step)))
+                    self._release(obs, why="inspection blind: the map has something occupied between here and the memory",
+                                  remember=False)
+                    return None
                 self._release(obs, radius_factor=s.failed_inspection_radius_factor,
                               why="inspection saw nothing" + (" in any view" if blank else ""))
                 return None
@@ -2657,7 +2680,7 @@ class TargetClosing:
                 "consecutive_frames": self.count, "started_step": self.started,
                 "last_seen_step": self.last_seen, "xyz": self.xyz, "bbox": self.box,
                 "floor_id": self.floor_id, "label": self.label, "failure": self.failure,
-                "releases": self.releases, "inspection_releases": self.inspection_releases,
+                "releases": self.releases, "inspection_releases": self.inspection_releases, "blind_inspection_releases": self.blind_inspection_releases,
                 "inspection_resumptions": self.inspection_resumptions, "map_releases": self.map_releases,
                 "stall_releases": self.stall_releases,
                 "last_release": self.last_release, "border_rejections": self.border_rejections,

@@ -217,6 +217,31 @@ def test_without_the_history_rule_the_same_drop_releases_the_lock(monkeypatch):
                                               until=lambda policy: not policy.closing.active)
     assert DiscreteAction.STOP not in actions and lock_step is not None
     assert p.closing.inspection_releases == 1 and p.closing.history_stops == 0 and p.closing.phase == "RELEASED"
+    assert p.closing.blind_inspection_releases == 0 and p.closing.rejected, "an open floor: the lock was wrong, remembered"
+
+
+def test_a_failed_inspection_the_map_explains_keeps_no_rejection(monkeypatch):
+    """00835-q3zU7Yy5E5s/000027 (2026-11-03): the standoff lay behind the bathroom wall, the inspection saw nothing
+    from it, and the "saw nothing" rejection -- twice the radius -- refused the real toilet 64 times while it was in
+    view, the agent ending 0.06 m from a view point. With something occupied on the map between the agent and the
+    memory the standoff was blind: no rejection is kept, the spot is boxed in instead."""
+    p, ep = open_floor_policy(monkeypatch, approach_history_m=0.0, max_reacquire_steps=6)
+    world = p.mapping.update(None)                              # the open floor the harness installed
+    gx, _ = world.world_to_grid(4.15, 0.0)
+    world.grid[:, gx] = world.values.occupied                    # a wall between the standoff ring and the target
+    actions, poses, phases, lock_step = drive(p, ep, (4.6, 0.0, 0.5), "chair", near_frames("drop"), steps=60,
+                                              until=lambda policy: not policy.closing.active)
+    closing = p.closing
+    assert DiscreteAction.STOP not in actions and lock_step is not None and closing.phase == "RELEASED"
+    assert closing.inspection_releases == 1 and closing.blind_inspection_releases == 1
+    assert not closing.rejected, "nothing seen from behind a wall disproves nothing"
+    assert len(closing.boxed_in) == 1 and closing.memory_sight_refusals == 0, "the spot is boxed in; no memory STOP was refused"
+    # The setting off: the rejection as before.
+    p, ep = open_floor_policy(monkeypatch, approach_history_m=0.0, max_reacquire_steps=6, blind_inspection_release=False)
+    world = p.mapping.update(None)
+    world.grid[:, gx] = world.values.occupied
+    drive(p, ep, (4.6, 0.0, 0.5), "chair", near_frames("drop"), steps=60, until=lambda policy: not policy.closing.active)
+    assert p.closing.inspection_releases == 1 and p.closing.blind_inspection_releases == 0 and p.closing.rejected
 
 
 def test_a_history_stop_from_too_far_resumes_the_approach_instead_of_releasing(monkeypatch):

@@ -11,6 +11,33 @@ Format per entry:
 
 ---
 
+## 2026-11-03 — A standoff behind a wall: "inspection saw nothing" disproved a toilet the agent later stood beside
+
+**Symptom:** 00835-q3zU7Yy5E5s/000027 (`runs/failed_691/f434_mesa`, GT perception). The toilet seen at 4.7 m, locked,
+approached; the box slid off the left image edge as the standoff route turned right (CLOSE_OCCLUDED), the lock walked
+blind to a standoff 1.1 m from the memory, and the inspection — ±30° of yaw, three pitches, 16 actions — saw nothing.
+Released as "inspection saw nothing", anchor remembered at twice the rejection radius (2.0 m). The toilet was then in
+view in 83 frames; 24 same-spot and 40 disproved refusals later the episode ended at step 500 with the agent 0.06 m
+from a view point and no STOP. 00814-p53SfW6mjZe/000012 (a bed) ended 0.65 m from one the same way.
+
+**Root cause:** the memory was right (6° off the real toilet at 1.27 m): the standoff lay outside the bathroom wall.
+The map knew — `_memory_in_sight` (the line-of-sight test a memory STOP must pass since 2026-10-31) finds an occupied
+cell 0.5 m ahead on the ray to the memory at the release step in both episodes — but the failed-inspection release
+never asked it, and treated "nothing seen from here" as "nothing there".
+
+**Fix / workaround:** `TargetClosingSettings.blind_inspection_release` (default on): a failed inspection with the map
+obstructed between the agent and the memory releases without a rejection and boxes the spot in (no takeover restarts
+from within 1 m of it); a sighting from elsewhere may start again. Replayed: 000027 FAIL → SUCCESS (114 steps, SPL
+0.35), 000012 FAIL → SUCCESS (378 steps, SPL 0.21); across the 249 re-run episodes every failed inspection (3) was a
+blind one, so nothing else changes. Test: `test_target_backoff.py::test_a_failed_inspection_the_map_explains_keeps_no_rejection`.
+
+**Don't:** turn a non-observation into a disproof. "Saw nothing" is evidence only where seeing was possible; before
+remembering a candidate as wrong, ask the map whether the camera could have seen it from there — the same question the
+STOP already asks. And when comparing a replay with an older run, match the renderer first: 00835/000064 succeeds in
+64 steps on Mesa (as in `f434_mesa`) and fails in 500 on the GPU renderer with the same code and answers.
+
+---
+
 ## 2026-11-03 — The planning map flipped whole regions out of the camera's view: one moving reference re-thresholded every cell
 
 **Symptom:** 00878-XB4GS9ShBRE/000000 (`runs/failed_691/f434b_gpu`, stair traversal forbidden, GT perception). At
