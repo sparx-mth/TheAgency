@@ -37,19 +37,37 @@ so the flips stayed). Nothing the camera saw had changed; the reference had.
 **Fix / workaround:** a verdict is fixed when the cell is measured, and the plane moving changes nothing the camera
 has not seen again. The guard keeps per cell the lowest landing (`landed_z`), the lowest ray height (`clear_z`) and
 the three thresholds in force at the last measurement (`line_z`, `deep_z`, `band_z`; `_mark_drops` writes them for
-the cells of each frame, `_cut` compares each cell with its own); a step's verdict is taken when the terrain reports
-it (`step_ok`) and kept until the next report; a portal records the plane it was placed from (`anchor_z`) and the
+the cells of each frame, `_cut` compares each cell with its own); a step's verdict is judged against the plane the
+camera last measured the cell under (`step_ref_z`; the plane in force at its first terrain report while the camera never
+has) -- a terrain re-report is memory, not an observation; a portal records the plane it was placed from (`anchor_z`) and the
 capsule is drawn about that. Instrumentation: `world_model/map_ledger.py` attributes every changed planning cell per
 action (observation / guard mask / step overlay, in or out of the frustum) into `method.map_changes` of the recording
 and keeps out-of-view jumps ≥ 50 cells as events. Regression: `test_drop_rays.py`
 `test_a_re_measured_plane_changes_no_cell_out_of_view_and_the_stairwell_stays_a_drop` (the ledger is the judge; it
 fails against the re-cut), plus the capsule and step tests in `test_spawn_floor_guard.py`.
 
-**Don't:** derive a whole layer from a reference that follows the agent — the plane, the spawn height, "the storey".
-Store what was measured and the reference it was measured under, and re-judge a cell only when it is measured
-again. When a map changes by hundreds of cells on a standing-still action, diff the journal against the camera's
-frustum first: changes out of view cannot be observation. And before calling a blob on the HUD a staircase, sample
-the navmesh under it — a sunken room and the top of a flight look the same in black.
+**The second layer of it (same day, the replay of the fix, `runs/failed_691/f434e_percell` → `f434f_layers`):** the
+re-measures were down to 11/0/0/0 cells out of view, but 696 cells still changed out of view over the episode, and
+the ledger — once it named the layer under every changed cell, and once its frustum took the camera's pitch (a
+camera pitched 30° down reads the floor at its feet across ~55° of azimuth; the first ledger's flat ±45.5° sector
+called those readings "out of view" and inflated the count by 550) — put 627 of them on the stair capsules, redrawn
+on 47 of 500 actions. Cause: `MultiFloorSearch._discover` replaces a portal's `path` with the terrain candidate's on
+every re-detection, and that path is the *route from the agent's own cell* to the top of the flight (`StairTerrain.path`
+from `self.start`), trimmed at the agent's height — so the polyline, its square-cut foot and the capsule moved with
+every step the agent took, and `adaptive_capsule` re-chose its margin on the map of the day, so a rim of cells
+flickered 0.4 ↔ 0.5 m. Fix: the mask is drawn from `portal["mask_path"]`, the flight as placed, replaced only when a
+candidate's far end lies more than half a riser farther from the storey plane (`_extend_mask_path`), and the margin
+per portal only narrows (`capsule_radius_cells`). Verified by replay (`f434g_stable`), tests
+`test_the_stair_capsule_is_drawn_from_the_flight_measured_not_from_the_route_the_agent_stands_on` and
+`test_the_stair_capsule_margin_only_narrows`.
+
+**Don't:** derive a whole layer from a reference that follows the agent — the plane, the spawn height, "the storey",
+*or the route from where it stands*. Store what was measured and the reference it was measured under, and re-judge a
+cell only when it is measured again. When a map changes by hundreds of cells on a standing-still action, diff the
+journal against the camera's frustum first: changes out of view cannot be observation — and take the frustum from the
+camera's actual transform (pitch included), not from a horizontal sector, or the residue you chase is the ledger's.
+And before calling a blob on the HUD a staircase, sample the navmesh under it — a sunken room and the top of a
+flight look the same in black.
 
 ---
 

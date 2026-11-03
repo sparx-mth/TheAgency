@@ -18,6 +18,8 @@ import math
 import random
 import time
 
+import numpy as np
+
 from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.exploration.rpt_room_solver import RptStarRoomSolver
 from sparx_agency.core.planning.exploration.view_gain import camera_rotation_turns
@@ -753,12 +755,25 @@ class RPTSearchPolicy:
         plane_before = getattr(self.mapping, "_anchor", None)
         world = self._walked_passable(observation, world)
         confined = self.floor_guard.observe(observation, world)
+        layers = dict(self.floor_guard.layers)
+        layers["bump"] = self._bump_bars(original)
         self.map_ledger.record(observation, self.mapping.floor_id, original, confined,
-                               mask=self.floor_guard.mask, freed=self.floor_guard.freed,
+                               mask=self.floor_guard.mask, freed=self.floor_guard.freed, layers=layers,
                                plane_m=getattr(self.mapping, "_anchor", None), plane_before_m=plane_before)
         if confined is not original:
             self.mapping.worlds[self.mapping.floor_id] = confined
         return confined
+
+    def _bump_bars(self, world):
+        """``(H, W)`` bool of the observed map's sticky bump bars on this floor, for the ledger's attribution."""
+        touched = getattr(self.mapping, "_touched", {}).get(self.mapping.floor_id) or {}
+        if not touched:
+            return None
+        bars = np.zeros(world.grid.shape, dtype=bool)
+        for tx, ty in touched:
+            if 0 <= ty < bars.shape[0] and 0 <= tx < bars.shape[1]:
+                bars[ty, tx] = True
+        return bars
 
     def _walked_passable(self, observation, world):
         """Cells the body has stood on this storey are free for planning, whatever a depth frame painted there.

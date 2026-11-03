@@ -116,11 +116,13 @@ plans on -- rather than in each frontier, opening, peek and route module:
   departure is walked as a traversal and rebased, not retreated from. The
   GT-oracle sweep of 2026-10-28 solved 14 % of the single-storey episodes
   whose shortest path changes height by 0.25-1.0 m. The step's verdict --
-  within the reach of the plane or not -- is taken when the terrain reports
-  the cell (:attr:`step_ok`, since 2026-11-03) and kept until it reports it
-  again: the terrain reports what it can reach from where the agent stands,
-  within its own radius and memory, so a plane re-measured on the far side
-  of the house re-judges no step here.
+  within the reach of the plane or not -- is judged against the plane the
+  camera last measured the cell under (:attr:`step_ref_z`, since
+  2026-11-03; the plane in force at the cell's first terrain report while
+  the camera never has), never the plane in force now: the terrain reports
+  what it can reach from where the agent stands, out of its own memory, so
+  neither a plane re-measured on the far side of the house nor the terrain
+  reporting the cell again re-judges a step the camera is not looking at.
   When the agent has stood level on such a plane of floor size, off the
   storey plane by more than a step but inside ``departure_m`` (where the
   atlas starts no transition), the atlas re-measures the storey there
@@ -215,6 +217,8 @@ class SpawnFloorGuard:
         self._level_heights: List[float] = []
         self.mask: Optional[np.ndarray] = None
         self.freed: Optional[np.ndarray] = None    # the step cells written free on the last action (the ledger reads it)
+        # The layers the last action's mask and overlay were made of, by name (the ledger attributes changes to them).
+        self.layers: Dict[str, Optional[np.ndarray]] = {}
         self.off_plane: bool = False
         self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
@@ -233,6 +237,7 @@ class SpawnFloorGuard:
             self.spawn_floor = int(self.policy.mapping.floor_id)
         if not self.enabled:
             self.mask = None
+            self.layers = {}
             return world
         if self.provisional and int(self.policy.mapping.floor_id) != self.spawn_floor:
             # The atlas arrived on a storey of its own from a spawn storey never walked level: THIS is the spawn storey.
@@ -267,6 +272,7 @@ class SpawnFloorGuard:
             self.stats["step_stair_exempt"] = int((stairs & walkable).sum())
             mask |= stairs & ~walkable
         exempt = 0
+        walked = None
         if mask.any():
             # Where the agent stands or has stood is passable, whatever the depth said about it
             # (a drop painted under a step the agent then took): never a cell A* cannot start from.
@@ -285,6 +291,8 @@ class SpawnFloorGuard:
                 free[ty, tx] = False                # what the body touched twice outranks the terrain too
         self.stats["step_cells_freed"] = int(free.sum())
         self.freed = free if free.any() else None
+        self.layers = {"drop": landed, "crossed": crossed_only, "stairs": stairs, "walkable": walkable,
+                       "walked": walked, "freed": self.freed}
         if self.mask is None and not free.any():
             return world
         grid = world.grid.copy()

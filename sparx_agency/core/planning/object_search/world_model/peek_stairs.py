@@ -84,7 +84,14 @@ def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
     never part of the mask. The storey height a flight is clipped about is the
     portal's own ``anchor_z`` -- the plane in force when it was placed -- so a
     plane re-measured since (a split-level storey) moves no capsule; a portal
-    without one is clipped about the atlas's elevation. ``carve=False``
+    without one is clipped about the atlas's elevation. The polyline drawn is
+    the portal's ``mask_path`` -- the flight as measured, grown only as more
+    of it is measured (``MultiFloorSearch._extend_mask_path``) -- never its
+    ``path``, the route from the agent's own cell that changes with every
+    step; and the margin found per portal only narrows over the episode
+    (``capsule_radius_cells`` on the portal), so the mask changes where the
+    camera measured more of the flight or the map opened a corridor beside
+    it, and nowhere else (2026-11-03). ``carve=False``
     returns the raw footprint for a caller that combines masks and carves once;
     ``report`` (a dict) receives the margin drawn per portal id, in metres.
     """
@@ -117,7 +124,9 @@ def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
         # force now: a storey re-measured 0.2 m lower elsewhere moved every capsule 0.2 m along its flight.
         anchor = portal.get("anchor_z")
         base = float(height) if anchor is None else float(anchor)
-        points = portal.get("path") or [portal["entry"]]
+        # ... and from the flight geometry on record for the mask (``mask_path``, since 2026-11-03), not the route
+        # from wherever the agent stands now (``path``): see ``MultiFloorSearch._extend_mask_path``.
+        points = portal.get("mask_path") or portal.get("path") or [portal["entry"]]
         pairs = list(zip(points, points[1:])) or [(points[0], points[0])]
         segments = []
         for left, right in pairs:
@@ -126,7 +135,12 @@ def stair_peek_mask(policy, world, pose=None, carve=True, report=None):
                                  tuple(int(v) for v in world.world_to_grid(*b[:2]))))
         if not segments:
             continue
-        capsule, radius = adaptive_capsule(world, segments, preferred, body, max(body, rung), foot=_foot_of(segments))
+        # The margin only narrows over the episode: a corridor the capsule once had to leave open stays open, and
+        # a rim of cells out of the camera's view does not flicker with the map around the flight (2026-11-03).
+        ceiling = portal.get("capsule_radius_cells")
+        widest = preferred if ceiling is None else min(preferred, int(ceiling))
+        capsule, radius = adaptive_capsule(world, segments, widest, body, max(body, rung), foot=_foot_of(segments))
+        portal["capsule_radius_cells"] = int(radius)
         mask |= capsule
         if report is not None:
             report[str(portal["id"])] = round(radius * res, 2)

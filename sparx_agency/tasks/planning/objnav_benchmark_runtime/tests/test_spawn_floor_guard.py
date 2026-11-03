@@ -1081,11 +1081,66 @@ def test_the_stair_capsule_stays_where_the_flight_was_placed_when_the_plane_is_r
     assert not np.array_equal(stair_peek_mask(policy, world, obs.pose), before), "the atlas's elevation, as before"
 
 
-def test_a_step_keeps_its_verdict_until_the_terrain_reports_it_again(monkeypatch):
-    """A step cell is judged within the reach when the terrain reports it, and the verdict is kept: the plane moving
-    re-judges nothing the terrain is not reporting now; a new report re-judges it."""
+def test_the_stair_capsule_is_drawn_from_the_flight_measured_not_from_the_route_the_agent_stands_on(monkeypatch):
+    """00878/000000 (2026-11-03): the terrain's candidate path is the route from the agent's own cell to the top of
+    the flight, so it changed with every step and the capsule with it -- redrawn on 47 of 500 actions, 627 cells out
+    of the camera's view. The mask keeps the flight geometry the portal was placed with (``mask_path``); a candidate
+    that reaches farther up the flight replaces it, a candidate that merely starts from elsewhere does not."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, world = policy.building, policy.mapping.update(at(episode, 0, 1.0, 1.0, depth=3.0))
+    monkeypatch.setattr(building.terrain, "_candidate_paths", lambda pose: None)
+    policy.mapping._anchor = 0.0
+    first = [(1.0, 1.0, 0.0), (1.5, 1.0, 0.15), (2.0, 1.0, 0.3)]
+    building.terrain.candidates = [{"direction": 1, "rise_m": 0.3, "path": list(first)}]
+    obs = at(episode, 0, 1.0, 1.0, depth=3.0)
+    policy.mapping.atlas.update(obs.pose)
+    building.observe(obs)
+    assert len(building.portals) == 1 and building.portals[0]["mask_path"] == first
+    placed = stair_peek_mask(policy, world, obs.pose, carve=False)
+    assert placed.any()
+    # The agent a step away: the same flight, routed from another cell -- the approach path follows, the mask not.
+    elsewhere = [(0.8, 1.3, 0.0), (1.2, 1.1, 0.05), (1.5, 1.0, 0.15), (2.0, 1.0, 0.3)]
+    building.terrain.candidates = [{"direction": 1, "rise_m": 0.3, "path": list(elsewhere)}]
+    moved = at(episode, 1, 0.8, 1.3, depth=3.0)
+    building.observe(moved)
+    portal = building.portals[0]
+    assert len(building.portals) == 1 and portal["path"] == elsewhere and portal["mask_path"] == first
+    assert np.array_equal(stair_peek_mask(policy, world, moved.pose, carve=False), placed), "the capsule did not move"
+    # More of the flight measured: a tread higher than half a riser over the record -- the mask takes it, and grows.
+    longer = [(1.0, 1.0, 0.0), (1.5, 1.0, 0.15), (2.0, 1.0, 0.3), (2.5, 1.0, 0.45)]
+    building.terrain.candidates = [{"direction": 1, "rise_m": 0.45, "path": list(longer)}]
+    building.observe(at(episode, 2, 1.0, 1.0, depth=3.0))
+    assert portal["mask_path"] == longer
+    grown = stair_peek_mask(policy, world, obs.pose, carve=False)
+    assert grown.sum() > placed.sum() and (grown | placed).sum() == grown.sum(), "grown, with nothing released"
+
+
+def test_the_stair_capsule_margin_only_narrows():
+    """``adaptive_capsule`` re-judges the margin on the observed grid every action; a map that opens and closes a
+    corridor beside the flight redrew the capsule's rim out of view. Once narrowed for a corridor, a portal's
+    margin stays narrowed (``capsule_radius_cells``), the floor of the planner's rung and the body never passed."""
+    policy, episode, world, _ = forbidden_stairs()
+    obs = obs_at(episode, 0, IN_A)
+    report = {}
+    wide = stair_peek_mask(policy, world, obs.pose, carve=False, report=report)
+    portal = policy.building.portals[0]
+    assert portal["capsule_radius_cells"] == int(math.ceil(policy.settings.stair_margin_m / world.resolution))
+    narrowed = dict(portal, capsule_radius_cells=portal["capsule_radius_cells"] - 2)   # a corridor once found open
+    portal.update(narrowed)
+    narrow = stair_peek_mask(policy, world, obs.pose, carve=False, report=report)
+    assert narrow.sum() < wide.sum() and (narrow & ~wide).sum() == 0, "narrower, inside the wide one"
+    assert portal["capsule_radius_cells"] == narrowed["capsule_radius_cells"], "the open map did not widen it back"
+    assert np.array_equal(stair_peek_mask(policy, world, obs.pose, carve=False), narrow)
+
+
+def test_a_step_keeps_its_verdict_until_the_camera_measures_it_again(monkeypatch):
+    """A step cell is judged against the plane the camera last measured it under -- the plane in force at its first
+    terrain report while the camera never has (``step_ref_z``). The plane moving re-judges nothing the camera is not
+    looking at, and neither does the terrain reporting the cell again: a report is the terrain's memory, not an
+    observation. A frame that measures the cell takes the plane in force then, and the verdict may change."""
     policy, episode, world, _ = forbidden_stairs()
     guard = policy.floor_guard
+    floor = policy.mapping.floor_id
     policy.mapping._anchor = 0.0
     gx, gy = world.world_to_grid(3.0, 4.0)
     step_cells = [world.grid_to_world(gx, gy), world.grid_to_world(gx + 1, gy)]
@@ -1093,15 +1148,20 @@ def test_a_step_keeps_its_verdict_until_the_terrain_reports_it_again(monkeypatch
     grid[gy, gx] = grid[gy, gx + 1] = world.values.occupied                # a riser the obstacle band painted
     world = type(world)(grid, world.params, values=world.values)
     _step_terrain(policy, monkeypatch, step_cells, -0.40)                   # 0.40 m down: within the 0.45 m reach
-    confined = guard.observe(at(episode, 0, 3.0, 3.0), world)
-    assert confined.grid[gy, gx] == world.values.free and guard.step_ok[policy.mapping.floor_id][gy, gx]
+    confined = guard.observe(at(episode, 0, 3.0, 3.0), world)              # facing +x: the step lies beside the frame
+    assert confined.grid[gy, gx] == world.values.free and guard.step_ref_z[floor][gy, gx] == np.float32(0.0)
     _step_terrain(policy, monkeypatch, [], -0.40)                           # the terrain no longer reports them
     policy.mapping._anchor = 0.30                                            # the plane re-measured 0.3 m up elsewhere
     confined = guard.observe(at(episode, 1, 3.0, 3.0), world)
-    assert confined.grid[gy, gx] == world.values.free, "0.70 m off the new plane, but not reported: the verdict stands"
-    _step_terrain(policy, monkeypatch, step_cells, -0.40)                   # reported again from the new plane
+    assert confined.grid[gy, gx] == world.values.free, "0.70 m off the new plane, but not measured: the verdict stands"
+    _step_terrain(policy, monkeypatch, step_cells, -0.40)                   # reported again: memory, not observation
     confined = guard.observe(at(episode, 2, 3.0, 3.0), world)
-    assert confined.grid[gy, gx] == world.values.occupied and not guard.step_ok[policy.mapping.floor_id][gy, gx]
+    assert confined.grid[gy, gx] == world.values.free and guard.step_ref_z[floor][gy, gx] == np.float32(0.0)
+    # The camera measures the cells under the new plane: a frame facing +y whose depth lands on the cell centres.
+    cx, cy = step_cells[0]
+    confined = guard.observe(at(episode, 3, cx, cy - 0.75, yaw=math.pi / 2, depth=0.75), world)
+    assert guard.step_ref_z[floor][gy, gx] == np.float32(0.30), "measured: judged under the plane in force now"
+    assert confined.grid[gy, gx] == world.values.occupied, "0.70 m under the plane it was measured under: not a step of it"
 
 
 def test_a_floor_just_more_than_level_below_the_spawn_is_re_measured_with_no_gap(monkeypatch):

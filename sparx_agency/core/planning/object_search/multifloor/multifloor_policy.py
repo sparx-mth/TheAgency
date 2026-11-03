@@ -97,6 +97,22 @@ from sparx_agency.core.planning.object_search.multifloor.spawn_switch import Spa
 #: Who chose the active portal: the loop's RPT* order, or the fallback rule.
 SELECTED_BY_LOOP = "rpt_star"
 SELECTED_BY_FALLBACK = "floor_decision"
+#: A flight's far end must lie this much (half a riser) farther from the storey plane than the mask geometry's before
+#: the mask takes the newer path.
+MASK_PATH_GROWTH_M = 0.08
+
+
+def _flight_extent(path, anchor_z) -> float:
+    """How far from the storey plane ``anchor_z`` the flight path's far end lies, metres; 0 for an empty path.
+
+    The far end is the top (or bottom) of the flight the terrain has measured
+    so far, which grows as more treads are seen; the near end is trimmed at
+    the agent's own height and says nothing about the flight.
+    """
+    if not len(path):
+        return 0.0
+    base = float(path[0][2]) if anchor_z is None else float(anchor_z)
+    return abs(float(path[-1][2]) - base)
 
 
 class MultiFloorSearch:
@@ -602,9 +618,32 @@ class MultiFloorSearch:
                   # The storey plane the flight was placed from: the capsule is drawn about it, not about the plane
                   # in force later (a re-measure elsewhere on the storey must not move a staircase, peek_stairs.py).
                   "anchor_z": float(atlas.elevation_m) if atlas.floors else float(obs.pose.z),
+                  # The flight geometry the MASK is drawn from (``stair_peek_mask``): what was measured of the flight,
+                  # grown only as more of it is measured (``_extend_mask_path``), never the route from where the
+                  # agent stands now -- ``path`` is that route, kept fresh for an approach.
+                  "mask_path": list(path),
                   "destination": None, "cooldown_until": 0, "observations": 1, "last_step": obs.step}
         self.portals.append(portal)
         return portal
+
+    @staticmethod
+    def _extend_mask_path(portal, path):
+        """Replace the portal's mask geometry only when more of the flight is on record than before.
+
+        A terrain candidate's path is the route from the agent's own cell to
+        the top of the flight, trimmed at the agent's height, so it changes
+        with every action the agent takes -- and until 2026-11-03 the mask
+        followed it: 00878-XB4GS9ShBRE/000000 redrew its capsules on 47 of
+        500 actions, 627 cells out of the camera's view, as the agent's own
+        level alternated between 0.0 and 0.2 m. What grows when more treads
+        are measured is how far the flight's far end lies from the storey
+        plane (:func:`_flight_extent`); the mask takes a path whose extent
+        exceeds the one on record by more than half a riser, and nothing else.
+        """
+        anchor = portal.get("anchor_z")
+        current = portal.get("mask_path") or []
+        if _flight_extent(path, anchor) > _flight_extent(current, anchor) + MASK_PATH_GROWTH_M:
+            portal["mask_path"] = list(path)
 
     def _portal_for(self, obs, connector, height):
         """The portal record of a ground-truth connector as seen from the floor in force.
@@ -675,6 +714,7 @@ class MultiFloorSearch:
                 # executed edge is different: its measured trail is immutable.
                 if "edge_id" not in match:
                     match["path"] = path
+                    self._extend_mask_path(match, path)
         for edge in self.policy.mapping.atlas.connections:
             if self.floor_id not in (edge.source, edge.destination):
                 continue
