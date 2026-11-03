@@ -114,3 +114,27 @@ the 300-pair pilot, measure p_d, then extend along the same order to the n it im
 - Whether to raise `OLLAMA_NUM_PARALLEL` for throughput. The store makes the resulting nondeterminism harmless, but it
   means restarting the Ollama container.
 - Which effect size is the decision threshold.
+
+## 5. The pilot (2026-11-01, 300 pairs, `runs/glance_ab/`)
+- **Setup:** arm A without geometric glances, recording its LLM answers; arm B with glances, replaying them. Ollama
+  ran with 2 slots, 1.4 times the throughput.
+- **Interruptions:**
+  - The first start stopped at 50 episodes: the answer store was keyed without the episode (`LESSONS.md` 2026-11-01).
+  - Two RAM pauses: at 00:14, two Mesa workers on heavy scenes; at 12:15, the user's own applications. After the
+    first, one Mesa worker; the user accepted about 61 % to finish.
+  - Arm B's Mesa half first died on a resume-only flag.
+  - Finished 2026-11-01 18:10 UTC.
+
+| | SR | SPL | DTG (m) |
+|---|---|---|---|
+| A, without glances | 0.853 | 0.469 | 0.88 |
+| B, with glances | 0.837 | 0.465 | 1.04 |
+| B - A | -1.7 pts, 95% CI [-5.0, +1.7], McNemar p = 0.44 | -0.003, CI [-0.023, +0.016], p = 0.75 | |
+
+- **Flips:** 11 to success, 16 to failure; flip rate 9.0 %.
+- **Integrity:** B never glanced in 124 episodes, and all 124 end exactly as in A.
+- **Answer replay:** 35 % of B's LLM answers came from A.
+- **Decision rule:** OFF. The SR gain is not significant, and the interval excludes a gain above 1.7 points. At the
+  measured flip rate, detecting +3 points takes 783 pairs and +2 points 1,764, about 18 h and 56 h more at 0.038 h a
+  pair. But the pilot makes a true gain of that size unlikely: with a true +1 point, extending to all 1,614 pairs
+  ends significant with a probability of about 8 %.
