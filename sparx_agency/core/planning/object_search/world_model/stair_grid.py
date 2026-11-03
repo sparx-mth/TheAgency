@@ -14,22 +14,38 @@ def build_support_grid(terrain, pose):
     half = int(math.ceil(t.params.terrain_radius_m / r))
     t.offset = (int(math.floor(pose.x / r)) - half, int(math.floor(pose.y / r)) - half)
     heights = _visible_support(t, pose, 2 * half + 1)
+    measured = np.isfinite(heights)             # horizontal support of the cell's own, before anything is borrowed
     planar = _borrow_floor(t, pose, heights)
     _close_holes(heights, t.params.max_step_m)
     _footprint(t, pose, heights, half)
-    obstacles = _obstacles(t, pose, heights, planar)
-    clearance = distance_transform_edt(~obstacles) * r if obstacles.any() else np.full_like(heights, np.inf)
-    safe = np.isfinite(heights) & ~obstacles & (clearance > t.body_radius)
-    safe[half, half] = True
+    borrowed, sensed = _obstacles(t, pose, heights, planar)
+    obstacles = borrowed | sensed
+    safe = _safe(heights, obstacles, t.body_radius, r, half)
+    passable, walls = safe, obstacles
+    if getattr(t, "traversing", False):
+        # The storey map records a flight rising off its plane as occupied, and a stair spawn's storey is one of
+        # the flight's own treads: its neighbours lie inside the borrowed band, and the occupancy walled off the
+        # foot of the flight the departure was walking (00802/000003, 2026-11-02, a row of borrowed cells across
+        # the first treads). A traversal steers on what it measured: a cell with support of its own is not vetoed
+        # by borrowed occupancy, only by what it sensed above that support. The plateau tests keep ``safe``.
+        walls = sensed | (borrowed & ~measured)
+        passable = _safe(heights, walls, t.body_radius, r, half)
     data = np.full(heights.shape, -1, np.int8)
-    data[safe] = 0
-    data[obstacles] = 100
-    t.heights, t.safe = heights, safe
+    data[passable] = 0
+    data[walls] = 100
+    t.heights, t.safe, t.passable = heights, safe, passable
     t.world = OccupancyGrid2D(data, OccupancyGrid2DParams(r, t.offset[0] * r, t.offset[1] * r, "world"),
                               values=OccupancyValues(free=0, occupied=100, unknown=-1))
-    t.routes = _routes(safe, heights, r, t.params.max_step_m)
+    t.routes = _routes(passable, heights, r, t.params.max_step_m)
     t.start = (half, half)
     t.distances = t.routes.distances(t.start, Deadline(1.0))
+
+
+def _safe(heights, obstacles, body_radius, resolution, half):
+    clearance = distance_transform_edt(~obstacles) * resolution if obstacles.any() else np.full_like(heights, np.inf)
+    safe = np.isfinite(heights) & ~obstacles & (clearance > body_radius)
+    safe[half, half] = True
+    return safe
 
 
 def _visible_support(t, pose, n):
@@ -90,10 +106,13 @@ def _footprint(t, pose, heights, half):
 
 
 def _obstacles(t, pose, heights, planar):
+    """``(borrowed, sensed)``: the storey map's occupancy at the source floor's height, and what the samples and
+    the bumps place above the measured support."""
     # The borrowed slab is anchored to its SOURCE floor, not the moving base.
     # Real measured walls still enter the body-height check below.
-    obstacles = (planar & (np.abs(heights - t._floor_height) < 0.08)
-                 if t._floor_height is not None else np.zeros_like(planar))
+    borrowed = (planar & (np.abs(heights - t._floor_height) < 0.08)
+                if t._floor_height is not None else np.zeros_like(planar))
+    obstacles = np.zeros_like(borrowed)
     h, w = heights.shape
     for (x, y, _), (z, _, _) in t.samples.items():
         x, y = x - t.offset[0], y - t.offset[1]
@@ -104,7 +123,7 @@ def _obstacles(t, pose, heights, planar):
         x, y = x - t.offset[0], y - t.offset[1]
         if 0 <= x < w and 0 <= y < h and abs(height * 0.1 - pose.z) < t.params.floor_match_m:
             obstacles[y, x] = True
-    return obstacles
+    return borrowed, obstacles
 
 
 def _routes(safe, heights, resolution, max_step):

@@ -20,6 +20,20 @@ from sparx_agency.core.planning.object_search.closing.target_closing import Targ
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 
 
+def floored(obs):
+    """``obs`` with the floor in front of its flat depth: a row whose ray meets the floor first reads the floor.
+
+    A flat depth alone is a wall reaching below the floor with nothing between -- a pit in front of the object,
+    and since 2026-10-31 the guard measures drops along those rays (``multifloor/drop_rays``).
+    """
+    k, depth = obs.camera.intrinsics, obs.depth_m.copy()
+    for v in range(k.height):
+        dz = (v - k.cy) / k.fy
+        if dz > 1e-3:
+            depth[v, :] = np.minimum(depth[v, :], obs.camera.height_m / dz)
+    return replace(obs, depth_m=depth)
+
+
 def forbidden(*args, **kwargs):
     raise AssertionError("Global exploration was called after target takeover")
 
@@ -1176,15 +1190,15 @@ def test_the_legacy_target_evidence_does_not_walk_after_what_the_takeover_refuse
     legacy pursuit walked nine actions toward the same landmark, moving the agent off its warm-up spot."""
     p, ep = setup_policy(target_closing={"max_verify_steps": 2})
     p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
-    p.plan(observation(ep, 0, depth=3.5))
+    p.plan(floored(observation(ep, 0, depth=3.5)))
     assert p.closing.active and not p.closing.locked
     p.detector.detect = lambda rgb: []
-    p.plan(observation(ep, 1, depth=3.5))
-    p.plan(observation(ep, 2, depth=3.5))
+    p.plan(floored(observation(ep, 1, depth=3.5)))
+    p.plan(floored(observation(ep, 2, depth=3.5)))
     assert not p.closing.active and p.closing.last_release == "unverified" and p.closing.rejected
     p.detector.detect = lambda rgb: [DetectionWire("chair", .7, (280, 200, 360, 280))]
     for step in (3, 4, 5):
-        p.plan(observation(ep, step, depth=3.5))
+        p.plan(floored(observation(ep, step, depth=3.5)))
     assert p._target_xy is None, "the released spot is not a legacy target either"
     assert p.perception.counts["refused_evidence"] >= 1
     assert any(row.get("target_evidence") == "refused_by_takeover" for row in p.perception.projections)

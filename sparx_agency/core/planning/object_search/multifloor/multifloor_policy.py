@@ -58,6 +58,23 @@ is walked as an observed traversal toward the nearer storey the terrain can
 see -- not retreated from -- and the storey it settles on becomes the spawn
 storey (``SpawnFloorGuard.rebase``). A departure from a confirmed storey is
 the accidental flight as before.
+
+Three rules since 2026-11-02, from the 174 HM3D v1 val episodes that start on
+stairs (``runs/stair_spawn``; 86 of them with the target 0.45-2 m up or down
+succeeded 9 % of the time, and most failures never left the start height):
+
+* **A storey is confirmed on support of floor size** (``confirm_area_m2``):
+  walking ``stable_distance_m`` across a landing and onto the first tread had
+  confirmed the landing, and the flight became a departure to retreat from.
+* **The flight is walked on purpose** (:meth:`_spawn_departure_due`): no
+  frontier route leads off a landing, so a spawn storey still provisional at
+  ``spawn_leave_after_actions``, with a flight seen from it and less than
+  ``min_floor_area_m2`` of level support under the agent, walks that flight to
+  the nearer storey.
+* **One switch to the flight's other end** (``spawn_switch.py``): once the
+  nearer storey is searched out, the agent walks back along the flight to the
+  storey at its far end -- once, and that storey is final. Two storeys at
+  most, never back: the agent cannot go up and down between floors.
 """
 from __future__ import annotations
 
@@ -75,6 +92,7 @@ from sparx_agency.core.planning.object_search.multifloor.stair_sightings import 
     GroundTruthStairDetector, StairSightings)
 from sparx_agency.core.planning.object_search.world_model.stair_terrain import StairTerrain
 from sparx_agency.core.planning.object_search.multifloor.stair_traversal import StairTraversal
+from sparx_agency.core.planning.object_search.multifloor.spawn_switch import SpawnStairsSwitch
 
 #: Who chose the active portal: the loop's RPT* order, or the fallback rule.
 SELECTED_BY_LOOP = "rpt_star"
@@ -117,6 +135,11 @@ class MultiFloorSearch:
         #: Whether the spawn storey is a storey at all: True once the agent has walked ``stable_distance_m`` on it
         #: at its height, or arrived on a storey. False while a tread may be all the atlas's floor 0 ever was.
         self.storey_confirmed = False
+        self._small_plateau_seen = False   # one event per episode for a level walk on a landing or a tread
+        self.flights_seen_from_spawn = False   # the terrain saw a flight while the spawn storey was provisional
+        self._spawn_flights = []               # the flight candidates last seen from it
+        self._departures = 0                   # deliberate departures from a stair spawn started (bounded)
+        self._departure_ended = None           # the action the last one ended back at the spawn storey's height
         self._last_decision = None
         #: Connector id of the stairs the agent last came up or down, and the action it arrived on.
         self.arrived_by = None
@@ -126,6 +149,8 @@ class MultiFloorSearch:
         #: The forbidden-mode retreat in force (:meth:`_retreat_to_storey`), or None.
         self._retreat = None
         self.departure = FloorDepartureGuard(self)
+        #: The one switch to the other storey of the flight a stair spawn settled off (``spawn_switch.py``).
+        self.switch = SpawnStairsSwitch(self)
 
     @property
     def phase(self):
@@ -207,7 +232,11 @@ class MultiFloorSearch:
         atlas = self.policy.mapping.atlas
         height = atlas.elevation_m if atlas.floors else obs.pose.z
         floor_world = self.policy.mapping.worlds.get(self.floor_id)
+        self.terrain.traversing = self.transition is not None
         self.terrain.update(obs, floor_world, height)
+        if not self.storey_confirmed and self.terrain.candidates:
+            self.flights_seen_from_spawn = True       # a flight in view of the spawn storey: a stair spawn's flight
+            self._spawn_flights = [dict(c) for c in self.terrain.candidates]
         if self.transition is None and abs(obs.pose.z - height) <= self.params.stable_height_m:
             self._departure_ignored = False
             xyz = (obs.pose.x, obs.pose.y, obs.pose.z)
@@ -215,7 +244,7 @@ class MultiFloorSearch:
                 self.source_trail.append(xyz)
                 self.source_trail = self.source_trail[-24:]
             if not self.storey_confirmed and math.dist(xyz[:2], self.source_trail[0][:2]) >= self.params.stable_distance_m:
-                self.storey_confirmed = True          # walked level this far: a storey, not a tread
+                self._confirm_storey(obs)
         if self.transition is None and atlas.floors and abs(obs.pose.z - height) > self.params.stable_height_m:
             if not self.allowed:
                 if self.storey_confirmed or self.ground_truth is not None:
@@ -230,6 +259,69 @@ class MultiFloorSearch:
                 self._start(obs)
         if self.transition is not None:
             self.transition.observe(obs)
+
+    def _spawn_departure_due(self, obs):
+        """Stair traversal forbidden: the agent still stands on the provisional spawn storey, a landing or a tread.
+
+        Waiting for the search to walk it onto the flight by accident left it boxed in: from a landing no frontier
+        route leads up or down (00800/000028: the flight up seen, 300 tread cells walkable, 500 actions at the
+        spawn height). After ``spawn_leave_after_actions``, with a flight seen from it and the level support under
+        the agent smaller than ``min_floor_area_m2``, the flight is walked to the nearer storey on purpose. On the
+        probes of 2026-11-02 that fired for 6 of 7 stuck stair starts and none of 47 floor starts. One bumped back
+        to the spawn storey's height is tried again ``spawn_leave_after_actions`` later, from wherever the agent
+        then stands, up to ``spawn_departure_attempts`` in all.
+        """
+        if self.allowed or self.ground_truth is not None or self.storey_confirmed:
+            return False
+        if self._departures >= self.params.spawn_departure_attempts or not self.flights_seen_from_spawn:
+            return False
+        if self._departures and self._departure_ended is None:
+            return False                                # one under way
+        since = obs.step if self._departure_ended is None else obs.step - self._departure_ended
+        if since < self.params.spawn_leave_after_actions:
+            return False
+        atlas = self.policy.mapping.atlas
+        if not atlas.floors or atlas.in_transition or abs(obs.pose.z - atlas.elevation_m) > self.params.stable_height_m:
+            return False
+        return float(self.terrain.plateau_area(obs.pose)) < self.params.min_floor_area_m2
+
+    def _leave_spawn(self, obs):
+        """Walk the flight seen from a stair spawn toward the nearer storey; at most ``spawn_departure_attempts`` times."""
+        self._departures += 1
+        self._departure_ended = None
+        flights = sorted(self._spawn_flights, key=lambda c: float(c["rise_m"]))
+        direction = int(flights[0]["direction"]) if flights else 1
+        height = self.policy.mapping.atlas.elevation_m
+        # The flight seen is the traversal's guide: from where the agent stands the terrain may no longer
+        # see it (00802/000008 turned in place for 18 actions and retreated without a tread climbed).
+        guide = [tuple(float(v) for v in point) for point in (flights[0].get("path") or [])] if flights else []
+        self.active = self._portal(obs, direction, [(obs.pose.x, obs.pose.y, height)] + guide)
+        self.active["selected_by"] = "spawn_departure"
+        self.events.append({"action": obs.step, "event": "spawn_stairs_departure", "attempt": self._departures,
+                            "direction": "up" if direction > 0 else "down",
+                            "plateau_m2": round(float(self.terrain.plateau_area(obs.pose)), 2),
+                            "flights_seen": [{"direction": "up" if c["direction"] > 0 else "down",
+                                              "rise_m": round(float(c["rise_m"]), 2)} for c in flights],
+                            "reason": "a stair spawn on a landing or a tread: the search alone never walks it onto "
+                                      "the flight; walking it to the nearer storey, which becomes the spawn storey"})
+        return self.transition.plan(obs) if self._start(obs, force=True) else None
+
+    def _confirm_storey(self, obs):
+        """Walked ``stable_distance_m`` level: a storey if the level support under the agent is of floor size.
+
+        A landing or a tread is walked level too -- across it, onto the next
+        tread within ``stable_height_m`` -- and confirming it made the flight
+        a departure to retreat from (00800/000040, boxed in for 460 actions);
+        it stays provisional, so the flight is walked to the storey it joins.
+        """
+        area = float(self.terrain.plateau_area(obs.pose))
+        if area >= self.params.confirm_area_m2:
+            self.storey_confirmed = True          # walked level this far on support of floor size: a storey
+            self.events.append({"action": obs.step, "event": "spawn_storey_confirmed", "plateau_m2": round(area, 2)})
+        elif not self._small_plateau_seen:
+            self._small_plateau_seen = True
+            self.events.append({"action": obs.step, "event": "spawn_storey_kept_provisional", "plateau_m2": round(area, 2),
+                                "reason": "walked level on support smaller than confirm_area_m2: a landing or a tread"})
 
     def _forbid_departure(self, obs, height):
         """Stair traversal is off: a height departure is recorded once per excursion and starts nothing.
@@ -413,10 +505,17 @@ class MultiFloorSearch:
 
     def observe(self, obs):
         atlas = self.policy.mapping.atlas
+        self.switch.accept_arrival(obs)
         if atlas.active_id != self.floor_id:
             old = self.floor_id
             self.floor_id, self.entered_step = atlas.active_id, obs.step
+            was_provisional = not self.storey_confirmed
             self.storey_confirmed = True              # the atlas settled on it: a storey, whatever the spawn was
+            old_height = atlas.floors[old].elevation_m if old in atlas.floors else obs.pose.z
+            new_height = atlas.floors[self.floor_id].elevation_m
+            self.switch.arrived(obs, self.floor_id, new_height)
+            if was_provisional and not self.allowed and self.ground_truth is None:
+                self.switch.settled(obs, self.floor_id, old_height, new_height, "arrival")
             reason = self.transition.completion_reason if self.transition else atlas.completion_reason
             self.events.append({"action": obs.step, "event": "floor_arrival", "source": old,
                                 "destination": self.floor_id, "reason": reason})
@@ -444,6 +543,11 @@ class MultiFloorSearch:
             self.policy.route_memory.clear("completed floor transition")
         elif self.transition and self.transition.retreat_path is not None and not atlas.in_transition:
             self._abandon(obs, self.transition.completion_reason)
+        elif (self.transition and not atlas.in_transition and atlas.completion_reason == "source_platform_returned"
+              and abs(obs.pose.z - atlas.elevation_m) <= self.params.stable_height_m):
+            # The atlas settled back on the floor the traversal left (the guard's known-floor rule): no tread was
+            # taken, and the traversal is over (2026-11-02).
+            self._abandon(obs, "settled back on the source floor without a tread taken")
         if self._retreat is not None and not atlas.in_transition:
             self._end_retreat(obs, atlas.completion_reason or "atlas settled")
         if not self.traversing:
@@ -591,9 +695,17 @@ class MultiFloorSearch:
         active is deferred.
         """
         if not self.allowed and not self.traversing:
-            if self.active is not None:
+            # The one exception: the switch to the other storey of the flight a stair spawn came off (spawn_switch.py).
+            if self.active is not None and not self.switch.owns(self.active):
                 self._abandon(obs, "stair traversal disabled (allow_stair_traversal is false)")
-            return None
+                return None
+            if self.active is None and self._spawn_departure_due(obs):
+                return self._leave_spawn(obs)
+            if self.active is None:
+                if not self.switch.due(obs, exhausted):
+                    return None
+                self.switch.begin(obs)
+            return self.switch.plan(obs, world)
         if self.traversing:
             if self.transition is None:
                 # Observed mode, traversal forbidden: the atlas alone says the agent is off its
@@ -785,12 +897,13 @@ class MultiFloorSearch:
             self.events.append({"action": obs.step, "event": "portal_selected", "portal_id": self.active["id"],
                                 "solver_source": p.solver.last.source, "order": list(order)})
 
-    def _start(self, obs):
+    def _start(self, obs, force=False):
+        """Begin the active portal's traversal; ``force`` skips the room-coverage gate (a stair spawn's landing)."""
         if self.transition is not None:
             return True
         allowed = self.can_leave_floor(obs)
         height = self.policy.mapping.atlas.elevation_m
-        if not allowed and abs(obs.pose.z - height) <= self.params.stable_height_m:
+        if not allowed and not force and abs(obs.pose.z - height) <= self.params.stable_height_m:
             self._abandon(obs, "rooms still need interior peeks")
             return False
         if self.ground_truth is not None:
@@ -821,10 +934,17 @@ class MultiFloorSearch:
         return True
 
     def _abandon(self, obs, reason):
-        if self.transition and not self.transition.arrival_allowed:
+        # The atlas settled back on a storey is a verified return too: the traversal's own test needs level
+        # support of floor size at the source, which a stair spawn's landing never has, and refusing here ended
+        # 00800/000040 and 00802/000008 (2026-11-02) as agent errors back on the landing they had left.
+        if self.transition and not self.transition.arrival_allowed and self.policy.mapping.atlas.in_transition:
             raise RuntimeError("Cannot abandon a committed transition before verified source return")
         self.events.append({"action": obs.step, "event": "portal_deferred", "reason": reason,
                             "portal_id": self.active["id"] if self.active else None})
+        if self.switch.owns(self.active):
+            self.switch.abandoned(obs, reason)
+        if self.active and self.active.get("selected_by") == "spawn_departure":
+            self._departure_ended = obs.step
         if self.active:
             self.active["cooldown_until"] = obs.step + self.params.portal_cooldown_actions
             self.active.pop("selected_by", None)
@@ -872,6 +992,7 @@ class MultiFloorSearch:
     def diagnostics(self):
         return {"phase": self.phase, "stair_source": self.params.stair_source,
                 "allow_stair_traversal": self.allowed, "storey_confirmed": self.storey_confirmed,
+                "spawn_switch": self.switch.diagnostics(),
                 "ground_truth": self.ground_truth.diagnostics() if self.ground_truth is not None else None,
                 "stairs_seen": self.sightings.diagnostics(),
                 "atlas": self.policy.mapping.atlas.diagnostics(),

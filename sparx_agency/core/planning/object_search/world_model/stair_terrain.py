@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import replace
 import math
 import numpy as np
-from scipy.ndimage import label
+from scipy.ndimage import distance_transform_edt, label
 
 from sparx_agency.core.planning.exploration.falcon.ordering import Deadline
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
@@ -96,6 +96,8 @@ class StairTerrain:
         self.stride = min(stride, 6)
         self.samples, self.obstacles, self.visited = {}, {}, set()
         self.world = self.routes = None
+        #: A traversal steers on this grid: see ``stair_grid.build_support_grid``. Set by the building coordinator.
+        self.traversing = False
         self.candidates = []
         self._floor_world = None
         self._floor_height = None
@@ -225,6 +227,37 @@ class StairTerrain:
         values = distances[different & np.isfinite(distances)] * self.resolution
         return float(values.min()) if len(values) else math.inf
 
+    def exit_path(self, pose, within_m=3.0):
+        """A route off the flight across the level support the agent stands on.
+
+        To the reachable cell within ``within_m``, level with the agent's support (``stable_height_m``), that lies
+        farthest from every measured cell of another height -- the stairs. A traversal standing on its destination's
+        plateau must walk clear of the stairs to arrive; in a stairwell that runs on past the storey, its route
+        down the next flight took 00820/000053 (v4, 2026-11-02) through the storey it was looking for. Empty when
+        no level cell is reachable or nothing of another height is measured.
+        """
+        if self.world is None:
+            return []
+        x, y = self.world.world_to_grid(pose.x, pose.y)
+        if not self.world.in_bounds(x, y) or not np.isfinite(self.heights[y, x]):
+            return []
+        level = np.abs(self.heights - self.heights[y, x]) <= self.params.stable_height_m
+        other = np.isfinite(self.heights) & ~level
+        if not other.any():
+            return []
+        clear = distance_transform_edt(~other) * self.resolution
+        distances, _ = self.distances
+        reach = np.isfinite(distances) & (distances * self.resolution <= float(within_m))
+        xs, ys = self.routes.x[reach], self.routes.y[reach]
+        keep = level[ys, xs]
+        if not keep.any():
+            return []
+        xs, ys = xs[keep], ys[keep]
+        best = int(np.argmax(clear[ys, xs]))
+        if clear[ys[best], xs[best]] <= clear[y, x]:
+            return []                           # already as clear of the stairs as the plateau allows
+        return self.path((int(xs[best]), int(ys[best])))
+
     def continuation(self, pose, direction, source_height, guide=None):
         """Prefer fresh support in the climb direction, including flat landings."""
         distances, _ = self.distances
@@ -250,16 +283,29 @@ class StairTerrain:
                 return path
         return []
 
-    def steering_path(self, pose, path, action_spec):
-        """Safe short segment on the actual discrete heading lattice."""
+    def steering_options(self, pose, path, action_spec, straight=False):
+        """Every lattice heading whose step is safe and nears the end of ``path``.
+
+        Args:
+            straight: Score by the straight-line distance from the step to the end of ``path`` rather than the
+                route on through the support graph -- for following a guide whose end the graph has lost (a
+                tread edge the current view leaves out). The step itself is held to the same safety either way.
+
+        Returns:
+            ``(score, -abs(turn), yaw, (x, y, z))`` per permitted heading, unsorted: higher scores are
+            shorter routes on from the step, less a small cost per turn; the point is one step and a cell
+            out along ``yaw``.
+        """
         if not path:
             return []
         step = action_spec.forward_step_m
         horizon = step + self.resolution
         goal = path[-1]
-        remaining = self.routes.distances(self.world.world_to_grid(goal[0], goal[1]), Deadline(1.0))
-        if remaining is None:
-            return []
+        remaining = None
+        if not straight:
+            remaining = self.routes.distances(self.world.world_to_grid(goal[0], goal[1]), Deadline(1.0))
+            if remaining is None:
+                return []
         options = []
         turns = int(round(180.0 / action_spec.turn_angle_deg))
         for turn in range(-turns, turns + 1):
@@ -270,29 +316,46 @@ class StairTerrain:
             x, y = pose.x + horizon * math.cos(yaw), pose.y + horizon * math.sin(yaw)
             gx, gy = self.world.world_to_grid(x, y)
             z = float(self.heights[gy, gx])
-            node = int(self.routes.ids[gy, gx])
-            distance = remaining[0][node] if node >= 0 else np.inf
+            if straight:
+                distance = math.hypot(goal[0] - x, goal[1] - y) / self.resolution
+            else:
+                node = int(self.routes.ids[gy, gx])
+                distance = remaining[0][node] if node >= 0 else np.inf
             if not np.isfinite(distance):
                 continue
             score = -float(distance) * self.resolution - 0.025 * abs(turn)
-            options.append((score, -abs(turn), x, y, z))
-        if not options:
+            options.append((score, -abs(turn), yaw, (x, y, z)))
+        return options
+
+    def steering_path(self, pose, path, action_spec, choose=None, straight=False):
+        """Safe short segment on the actual discrete heading lattice.
+
+        Args:
+            choose: Picks one of :meth:`steering_options` given ``(pose, options)`` -- called even when none
+                is safe -- or returns None for none; the best-scoring heading when omitted.
+            straight: See :meth:`steering_options`.
+        """
+        options = self.steering_options(pose, path, action_spec, straight=straight)
+        if choose is not None:
+            best = choose(pose, options)        # called with none safe too: a held heading may still be turned to
+        else:
+            best = max(options, key=lambda o: o[:2]) if options else None
+        if best is None:
             return []
-        _, _, x, y, z = max(options)
-        return [(pose.x, pose.y, pose.z), (x, y, z)]
+        return [(pose.x, pose.y, pose.z), best[3]]
 
     def permits(self, pose, step_m):
         x, y = pose.x + step_m * math.cos(pose.yaw), pose.y + step_m * math.sin(pose.yaw)
         cells = line_cells(*self.world.world_to_grid(pose.x, pose.y), *self.world.world_to_grid(x, y))
         previous = None
         for cx, cy in cells:
-            if not self.world.in_bounds(cx, cy) or not self.safe[cy, cx]:
+            if not self.world.in_bounds(cx, cy) or not self.passable[cy, cx]:
                 return False
             if previous is not None:
                 px, py = previous
                 if abs(self.heights[cy, cx] - self.heights[py, px]) > self.params.max_step_m:
                     return False
-                if cx != px and cy != py and not (self.safe[cy, px] and self.safe[py, cx]):
+                if cx != px and cy != py and not (self.passable[cy, px] and self.passable[py, cx]):
                     return False
                 if cx != px and cy != py and (abs(self.heights[cy, px] - self.heights[py, px]) > self.params.max_step_m
                                                or abs(self.heights[py, cx] - self.heights[py, px]) > self.params.max_step_m):
