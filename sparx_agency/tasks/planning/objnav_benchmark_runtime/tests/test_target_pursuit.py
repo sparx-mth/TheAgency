@@ -79,8 +79,12 @@ def test_a_standoff_on_a_step_down_is_a_standoff_of_this_storey_but_not_one_on_a
     """00835/000006 (2026-10-31): every ring point of a television 0.4 m down three treads was skipped at 0.2 m."""
     from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
     confined, _ = setup_policy("bed")
+    assert confined.floor_guard.provisional, "a spawn storey never walked level: the whole step band"
     assert TargetApproachPath(confined)._height_tolerance() == pytest.approx(confined.settings.step_surface_band_m)
     assert 0.4 < confined.settings.step_surface_band_m < confined.settings.multifloor.min_floor_separation_m
+    confined.building.storey_confirmed = True          # walked level: as far as the guard frees, the atlas's departure
+    assert TargetApproachPath(confined)._height_tolerance() == pytest.approx(confined.settings.multifloor.departure_m)
+    assert confined.settings.multifloor.departure_m > 0.4
     climbing, _ = setup_policy("bed", allow_stair_traversal=True)
     assert TargetApproachPath(climbing)._height_tolerance() == pytest.approx(0.2), "multi-storey: a step, as before"
 

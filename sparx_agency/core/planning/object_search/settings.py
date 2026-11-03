@@ -88,16 +88,22 @@ class RPTSettings:
             storey plane measured support the agent can WALK to -- over
             risers of at most ``multifloor.max_step_m``, through cells clear
             to body height (``StairTerrain.step_surfaces``) -- is still this
-            storey: free on the planning grid, never a drop, and, within the
-            atlas's ``departure_m`` (the whole band from a provisional spawn
-            storey), never a stair mask either (since 2026-10-31). The map's
+            storey: free on the planning grid, never a drop, never a stair
+            mask, and a place for the closing's standoffs (since 2026-10-31).
+            The whole band from a provisional spawn storey (a spawn on a
+            tread, a landing or a ramp, whose departure is walked as a
+            traversal and rebased); from a storey walked level only the
+            part within the atlas's ``departure_m``, where the trail retreat
+            would walk the agent back from anything further
+            (``SpawnFloorGuard.step_reach_m``). The map's
             fixed bands -- free within 0.10 m of the plane, obstacle from
             0.15 m above it, drop beyond ``step_down_m`` below it -- painted
             every step occupied: of the single-storey HM3D v1 val episodes
             whose shortest path changes height by 0.25-1.0 m the GT-oracle
             sweep solved 14 %, and a spawn on a tread boxed the agent in from
-            the first action. 0.8 m: the raised and sunken parts of the
-            split-level homes there; a storey is 1.5 m and more away.
+            the first action. 0.8 m: the goals 0.45-0.8 m off a spawn on
+            such a level there (20 of 1,586, the evaluator's navmesh); a
+            storey is 1.5 m and more away.
         stair_margin_m: The preferred half-width of the capsule written
             impassable around a SEEN staircase's centreline
             (``world_model/peek_stairs.stair_peek_mask``): a flight's

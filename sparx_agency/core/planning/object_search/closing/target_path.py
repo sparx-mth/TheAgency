@@ -181,19 +181,23 @@ class TargetApproachPath:
         return None
 
     def _height_tolerance(self):
-        """How far a projected standoff may lie above or below the agent: a step's height, or the storey's step band.
+        """How far a projected standoff may lie above or below the agent: a step's height, or the storey's step reach.
 
         With stair traversal forbidden the storey includes the support the
-        agent can walk to over steps (``RPTSettings.step_surface_band_m``,
-        ``spawn_floor_guard``), and a target on a sunken or raised part of
-        the room has every standoff there: at 0.2 m the whole ring was
-        skipped and the lock released as "no safe path" (00835/000006,
-        2026-10-31: a television 0.4 m down three treads). The route to the
-        goal is A*'s on the confined map, steps included, as before.
+        agent can walk to over steps (``SpawnFloorGuard.step_reach_m``: the
+        whole ``RPTSettings.step_surface_band_m`` from a provisional spawn
+        storey, the atlas's ``departure_m`` from one walked level), and a
+        target on a sunken or raised part of the room has every standoff
+        there: at 0.2 m the whole ring was skipped and the lock released as
+        "no safe path" (00835/000006, 2026-10-31: a television 0.4 m down
+        three treads). The route to the goal is A*'s on the confined map,
+        steps included, as before. The guard's bound, not the band: a
+        standoff further off is one the guard does not free and the trail
+        retreat would walk the agent back from.
         """
-        settings = self.policy.settings
-        if not getattr(settings, "allow_stair_traversal", True):
-            return max(0.2, float(getattr(settings, "step_surface_band_m", 0.2)))
+        guard = getattr(self.policy, "floor_guard", None)
+        if guard is not None and guard.enabled:
+            return max(0.2, float(guard.step_reach_m))
         return 0.2
 
     def _adopt(self, target, obs, goal, widened, through_unknown):

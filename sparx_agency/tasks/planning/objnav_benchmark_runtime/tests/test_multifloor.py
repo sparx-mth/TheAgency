@@ -271,6 +271,68 @@ def test_stair_steering_uses_safe_discrete_heading_and_converter_moves():
     assert terrain.permits(pose, actions.forward_step_m)
 
 
+def test_a_guide_point_off_the_support_graph_is_still_followed_a_safe_step_at_a_time():
+    """00802/000003 (2026-11-02): two actions into a departure no point of the flight's guide was on the support
+    graph -- tread edges come and go with the view -- and the continuation walked the agent round the landing. Scored
+    by the straight line to the guide point, the step is still taken, and still never over a cliff."""
+    terrain = terrain_with_surface(lambda x: max(0, x // 4) * 0.18 - 0.05)
+    pose = AgentPose(0, 0, 0, math.radians(90))
+    actions = MULTIFLOOR_PROTOCOL.actions()
+    off_graph = [(0, 0, 0), (2.5, 3.0, 0.85)]                       # beyond the measured strip: no route to it
+    assert terrain.steering_options(pose, off_graph, actions) == []
+    options = terrain.steering_options(pose, off_graph, actions, straight=True)
+    best = max(options, key=lambda o: o[:2])
+    assert 0.0 < best[2] < math.pi / 2, "toward the guide point, from facing away"
+    path = terrain.steering_path(pose, off_graph, actions, straight=True)
+    assert path[1] == best[3] and all(terrain.permits(replace(pose, yaw=o[2]), actions.forward_step_m) for o in options)
+    cliff = terrain_with_surface(lambda x: 1.0 if x > 1 else -0.05)
+    assert not [o for o in cliff.steering_options(AgentPose(0, 0, 0, 0), off_graph, actions, straight=True)
+                if abs(o[2]) < math.radians(15)], "no straight step over the cliff edge"
+
+
+def test_a_traversal_steps_onto_measured_treads_the_storey_map_calls_occupied():
+    """00802/000003 (2026-11-02): a stair spawn's storey is a tread, the storey map records the flight rising off it
+    as occupied, and that borrowed occupancy walled off the first treads the departure walked to. While a traversal
+    steers, a cell with measured support of its own is not vetoed by borrowed occupancy -- by what it sensed
+    above that support it still is -- and the plateau tests keep the conservative mask."""
+    from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+
+    def built(traversing, sensed_wall=False):
+        terrain = terrain_with_surface(lambda x: -0.05)
+        data = np.zeros((40, 60), np.int8)
+        data[:, 33:36] = 100                                        # x 0.3-0.6 m: the flight, as the storey map has it
+        terrain._floor_world = OccupancyGrid2D(data, OccupancyGrid2DParams(0.1, -3.0, -2.0, "world"),
+                                               values=OccupancyValues(free=0, occupied=100, unknown=-1))
+        terrain._floor_height, terrain.traversing = 0.0, traversing
+        if sensed_wall:
+            for y in range(-8, 9):
+                terrain.samples[(4, y, 6)] = (0.6, 0, False)       # a real wall 0.65 m above the support at x 0.4 m
+        terrain._rasterize(AgentPose(0, 0, 0, 0))
+        return terrain
+
+    pose, step = AgentPose(0, 0, 0, 0), 0.6
+    searching = built(False)
+    assert not searching.permits(pose, step), "outside a traversal the storey map still vetoes"
+    traversing = built(True)
+    assert traversing.permits(pose, step) and traversing.plateau_area(pose) == pytest.approx(searching.plateau_area(pose))
+    assert not built(True, sensed_wall=True).permits(pose, step), "what the terrain sensed still blocks"
+
+
+def test_on_the_destination_plateau_the_exit_route_leads_off_the_flight_not_on_down_it():
+    """00820/000053 (v4, 2026-11-02): the switch stood on the storey it was looking for, the stairwell ran on down,
+    and its route down the next flight took it 2.5 m past the storey. The exit route crosses the level support the
+    agent stands on to the cell farthest from the stairs; it never steps down."""
+    terrain = terrain_with_surface(lambda x: 0.0 if x <= 10 else -0.17 * (x - 10))   # a storey, then a flight down
+    pose = AgentPose(0.95, 0, 0, 0)                                                  # at the head of the flight
+    terrain._rasterize(pose)
+    path = terrain.exit_path(pose)
+    assert path, "a level route off the flight"
+    assert path[-1][0] < 0.0 and all(abs(p[2]) <= terrain.params.stable_height_m for p in path)
+    assert 1.05 - path[-1][0] >= 1.05 - pose.x + terrain.params.exit_distance_m, "an exit distance farther from the flight"
+    level = terrain_with_surface(lambda x: 0.0)
+    assert level.exit_path(AgentPose(0, 0, 0, 0)) == [], "nothing of another height: nothing to walk clear of"
+
+
 def test_campaign_jobs_select_one_explorer_without_doubling_episodes():
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.distinct_buildings import jobs_for
     assert jobs_for(["A", "B"], ["frontier"]) == [("frontier", "A"), ("frontier", "B")]

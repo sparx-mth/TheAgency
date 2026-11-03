@@ -427,7 +427,7 @@ def test_the_drop_threshold_is_a_knob_at_the_atlas_tolerance_and_a_flights_floor
 
 
 # -- a flight walked down by accident (00814/000009, 00873/000049, 00873/000002, 2026-10-25) -----------------
-def test_a_flight_walked_down_with_traversal_forbidden_is_walked_back_up_the_trail_not_crashed_on():
+def test_a_flight_walked_down_with_traversal_forbidden_is_walked_back_up_the_trail_not_crashed_on(monkeypatch):
     """Observed stairs, traversal forbidden: the atlas alone says the agent is off its storey after three treads.
 
     Until 2026-10-25 ``MultiFloorSearch.plan`` dereferenced the traversal it
@@ -438,6 +438,8 @@ def test_a_flight_walked_down_with_traversal_forbidden_is_walked_back_up_the_tra
     """
     policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
     building, atlas = policy.building, policy.mapping.atlas
+    # A storey: its level support is of floor size (``confirm_area_m2``), so walking it confirms it.
+    monkeypatch.setattr(type(building.terrain), "plateau_area", lambda self, pose: 6.0)
     assert building.ground_truth is None and not building.allowed
     step = 0
     for i in range(6):                                                    # along the storey
@@ -578,7 +580,7 @@ def test_a_one_pose_trail_is_extended_past_its_last_point_and_the_return_is_conf
 
 
 # -- a spawn on the stairs (00873/000002, ``02cc26973cab``, 2026-10-26) ------------------------------------------
-def test_a_departure_from_a_spawn_storey_never_walked_level_is_a_traversal_to_the_nearer_storey():
+def test_a_departure_from_a_spawn_storey_never_walked_level_is_a_traversal_to_the_nearer_storey(monkeypatch):
     """The first pose was a tread: the atlas's floor 0 is the middle of a flight. The replay of 2026-10-25 retreated
     to it and then spent 447 actions boxed in by the two masked flights. A storey never walked ``stable_distance_m``
     level is provisional; its departure is walked as a traversal -- toward the nearer storey the terrain can see,
@@ -612,9 +614,10 @@ def test_a_departure_from_a_spawn_storey_never_walked_level_is_a_traversal_to_th
     provisional = [e for e in building.events if e["event"] == "spawn_storey_provisional"]
     assert provisional[0]["direction"] == "up" and building.active["direction"] == 1
     assert provisional[0]["flights_seen"] == [{"direction": "up", "rise_m": 0.5}, {"direction": "down", "rise_m": 2.4}]
-    # Two level steps first, and the same flight is the accidental one: the trail retreat, as before.
+    # Two level steps first on a storey of floor size, and the same flight is the accidental one: the trail retreat.
     policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
     building = policy.building
+    monkeypatch.setattr(type(building.terrain), "plateau_area", lambda self, pose: 6.0)
     for i in range(3):
         policy.plan(at(episode, i, 1.0 + 0.25 * i, 1.0, depth=3.0))
     assert building.storey_confirmed
@@ -622,6 +625,38 @@ def test_a_departure_from_a_spawn_storey_never_walked_level_is_a_traversal_to_th
         command = policy.plan(at(episode, 3 + i, 1.75 + 0.25 * i, 1.0, z=z, depth=3.0))
     assert building.transition is None and building.phase == "RETREAT" and command.info["kind"] == "RETREAT"
     assert not [e for e in building.events if e["event"] == "spawn_storey_provisional"]
+
+
+def test_a_level_walk_across_a_landing_keeps_the_spawn_storey_provisional_and_the_flight_is_walked(monkeypatch):
+    """00800/000040 (2026-11-02): 0.35 m across a 1.7 m2 landing and onto the first tread confirmed the landing a
+    storey; the reach fell to departure_m, the flight above was masked and 460 actions went to escaping a box
+    0.4 x 0.6 m. A level walk confirms the storey only on support of floor size (``confirm_area_m2``)."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas = policy.building, policy.mapping.atlas
+    monkeypatch.setattr(type(building.terrain), "plateau_area", lambda self, pose: 1.7)
+    for i in range(3):                                                     # 0.5 m level across the landing
+        policy.plan(at(episode, i, 1.0 + 0.25 * i, 1.0, depth=3.0))
+    assert not building.storey_confirmed and policy.floor_guard.provisional
+    assert policy.floor_guard.step_reach_m == pytest.approx(policy.settings.step_surface_band_m)
+    kept = [e for e in building.events if e["event"] == "spawn_storey_kept_provisional"]
+    assert len(kept) == 1 and kept[0]["plateau_m2"] == pytest.approx(1.7)
+    step = 3
+    for z in (0.18, 0.35, 0.52):                                           # up the flight
+        command = policy.plan(at(episode, step, 1.5 + 0.25 * (step - 2), 1.0, z=z, depth=3.0)); step += 1
+    assert atlas.in_transition and building.transition is not None and building.phase == "TRAVERSE"
+    assert [e["direction"] for e in building.events if e["event"] == "spawn_storey_provisional"] == ["up"]
+    assert building._retreat is None and command.info["phase"] == "TRAVERSE"
+    # The same walk on support of floor size confirms the storey, and the flight is the accidental one as before.
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building = policy.building
+    monkeypatch.setattr(type(building.terrain), "plateau_area", lambda self, pose: 6.0)
+    for i in range(3):
+        policy.plan(at(episode, i, 1.0 + 0.25 * i, 1.0, depth=3.0))
+    assert building.storey_confirmed
+    assert [e["plateau_m2"] for e in building.events if e["event"] == "spawn_storey_confirmed"] == [6.0]
+    assert MultiFloorParams().confirm_area_m2 == pytest.approx(5.0)
+    with pytest.raises(ValueError, match="confirm_area_m2"):
+        MultiFloorParams(confirm_area_m2=0.0)
 
 
 def test_the_storey_a_provisional_spawn_settles_on_becomes_the_spawn_plane():
@@ -680,11 +715,294 @@ def test_the_storey_a_provisional_spawn_settles_on_becomes_the_spawn_plane():
     assert not policy.fallback.failures
 
 
+def test_a_stair_spawn_on_a_landing_walks_the_flight_it_saw_to_the_nearer_storey_on_purpose():
+    """00800/000028 (2026-11-02): provisional, the flight up seen, 300 tread cells walkable -- and 500 actions at the
+    spawn height, because no frontier route led onto the flight. From ``spawn_leave_after_actions`` a spawn storey
+    still provisional, with a flight seen and less than ``min_floor_area_m2`` of level support under the agent,
+    walks the flight to the nearer storey; once."""
+    def run(plateau, flights):
+        policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+        building = policy.building
+        building.terrain.plateau_area = lambda pose: plateau
+        building.terrain._candidate_paths = lambda pose: None              # keep the stubbed flights through updates
+        events = []
+        for step in range(35):
+            if step == 14 and flights:
+                building.terrain.candidates = [dict(c) for c in flights]   # the flight comes into view, then goes
+            if step == 16:
+                building.terrain.candidates = []
+            policy.plan(at(episode, step, 1.0, 1.0, yaw=0.3 * step, depth=3.0))
+            events = [e for e in building.events if e["event"] == "spawn_stairs_departure"]
+            if events:
+                return policy, building, step, events
+        return policy, building, None, events
+
+    flights = [{"direction": -1, "rise_m": 2.4, "path": [(0.5, 1.0, -0.2), (0.0, 1.0, -0.4)]},
+               {"direction": 1, "rise_m": 1.3, "path": [(1.5, 1.0, 0.2), (2.0, 1.0, 0.4)]}]
+    policy, building, step, events = run(1.0, flights)
+    assert step == policy.building.params.spawn_leave_after_actions
+    assert len(events) == 1 and events[0]["direction"] == "up" and building.transition is not None
+    assert building.active["direction"] == 1 and building.phase == "TRAVERSE" and not building.storey_confirmed
+    assert building._spawn_departure_due(at(policy.episode, step + 1, 1.0, 1.0)) is False, "once"
+    # Support of floor size under the agent, or no flight ever seen from the spawn: no departure.
+    assert run(4.0, flights)[2] is None
+    assert run(1.0, [])[2] is None
+
+
+def test_a_traversal_that_never_takes_a_tread_settles_back_and_makes_no_second_floor_at_the_same_height():
+    """2026-11-02: departures and switches that stalled at their source were adopted after thirty actions as a NEW
+    floor 0.01-0.12 m from the old one (00802/000056, 00814/000004, 00800/000086) -- "floor changes" that were none.
+    A plateau within ``floor_match_m`` of a known floor is that floor: the transition settles back on it."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    building.terrain.plateau_area = lambda pose: 1.0
+    atlas.plateau_observer = lambda pose: 1.0
+    building.terrain._candidate_paths = lambda pose: None
+    flights = [{"direction": 1, "rise_m": 1.3, "path": [(1.5, 1.0, 0.2), (2.0, 1.0, 0.4)]}]
+    step = 0
+    for step in range(31):
+        if step == 14:
+            building.terrain.candidates = [dict(c) for c in flights]
+        if step == 16:
+            building.terrain.candidates = []
+        policy.plan(at(episode, step, 1.0, 1.0, yaw=0.3 * step, depth=3.0))
+    assert building.transition is not None and atlas.in_transition, "the departure began"
+    for step in range(31, 140):                  # the flight never found: walking about at the source, no tread
+        policy.plan(at(episode, step, 1.0 + 0.3 * (step % 4), 1.0 + 0.3 * ((step // 4) % 2), yaw=0.3 * step, depth=3.0))
+    assert len(atlas.floors) == 1 and atlas.active_id == 0, [f.elevation_m for f in atlas.floors.values()]
+    assert not atlas.in_transition and building.transition is None and building.phase == "SEARCH"
+    assert [e["event"] for e in guard.events if e["event"] == "transition_settled_on_known_floor"]
+    assert not [e for e in building.events if e["event"] == "floor_arrival"]
+    assert not policy.fallback.failures
+
+
+def test_a_departure_bumped_back_to_the_spawn_height_is_retried_a_bounded_number_of_times():
+    """00802/000003 (2026-11-02): the departure was bumped back onto the spawn tread's height, the atlas called it a
+    return, and the agent bounced between two treads in the explorer's escape for 400 actions. Each departure that
+    ends back at the spawn storey's height is retried ``spawn_leave_after_actions`` later, at most
+    ``spawn_departure_attempts`` in all; never while one is under way."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, params = policy.building, policy.mapping.atlas, policy.building.params
+    building.terrain.plateau_area = lambda pose: 1.0
+    atlas.plateau_observer = lambda pose: 1.0
+    building.terrain._candidate_paths = lambda pose: None
+    flights = [{"direction": 1, "rise_m": 1.3, "path": [(1.5, 1.0, 0.2), (2.0, 1.0, 0.4)]}]
+    for step in range(400):
+        if step == 14:
+            building.terrain.candidates = [dict(c) for c in flights]
+        if step == 16:
+            building.terrain.candidates = []
+        policy.plan(at(episode, step, 1.0 + 0.3 * (step % 4), 1.0 + 0.3 * ((step // 4) % 2), yaw=0.3 * step, depth=3.0))
+    starts = [e["action"] for e in building.events if e["event"] == "spawn_stairs_departure"]
+    ends = [e["action"] for e in building.events if e["event"] == "portal_deferred"]
+    assert [e["attempt"] for e in building.events if e["event"] == "spawn_stairs_departure"] == [1, 2, 3]
+    assert starts[0] == params.spawn_leave_after_actions
+    assert all(later - end >= params.spawn_leave_after_actions for end, later in zip(ends, starts[1:]))
+    assert all(start < end for start, end in zip(starts, ends)), "never one while one is under way"
+    assert len(atlas.floors) == 1 and not building.storey_confirmed, "no storey reached, none made"
+    assert building._spawn_departure_due(at(episode, 400, 1.0, 1.0)) is False
+
+
+def test_a_stair_spawn_searches_the_nearer_storey_then_switches_once_to_the_flights_other_end():
+    """2026-11-02: the nearer storey holds the target in 112 of 174 stair starts; in most of the rest it is the
+    flight's other end (00800/000038 went down, the bed was up). Once the first storey is searched out the agent
+    walks back along the flight to the far storey -- once: two storeys at most, never back."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    building.terrain.plateau_area = atlas.plateau_observer = lambda pose: 6.0
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    step = 1
+    for z in (0.18, 0.35, 0.52):                                           # up the flight the agent spawned on
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=z, depth=3.0)); step += 1
+    for i in range(6):
+        policy.plan(at(episode, step, 2.0 + 0.25 * i, 1.0, z=0.5, depth=3.0)); step += 1
+        if atlas.active_id != 0:
+            break
+    assert atlas.active_id == 1 and guard.spawn_floor == 1
+    switch = building.switch
+    assert switch.flight is not None and switch.flight["direction"] == -1 and switch.state is None
+    armed = [e for e in building.events if e["event"] == "spawn_switch_armed"]
+    assert len(armed) == 1 and armed[0]["towards"] == "down" and armed[0]["how"] == "arrival"
+    entry = switch.flight["entry"]
+    # Its guide is the climb the atlas measured, walked back: storey first, the spawn at the far end (00814/000004
+    # wandered the storey's floor beside the flight with only the settle point to aim from).
+    guide = switch.flight["guide"]
+    assert armed[0]["guide_points"] == len(guide) >= 4
+    assert guide[0][2] == pytest.approx(0.5) and guide[-1][:2] == pytest.approx((1.0, 1.0))
+    heights = [round(p[2], 2) for p in guide]
+    assert heights.index(0.35) < heights.index(0.18) < heights.index(0.0), "down the treads, storey to spawn"
+    building.can_leave_floor = lambda obs=None: True                     # the storey's rooms are all peeked
+    early = at(episode, step, entry[0], entry[1], z=0.5, depth=3.0)
+    assert building.plan(early, policy.last_world, exhausted=True) is None and switch.state is None, "too early"
+    step = switch.flight["step"] + building.params.spawn_switch_min_floor_actions
+    assert building.plan(at(episode, step, entry[0] + 3.0, entry[1], z=0.5, depth=3.0), policy.last_world) is None, (
+        "not searched out: nothing")
+    late = at(episode, step, entry[0], entry[1], z=0.5, depth=3.0)
+    command = building.plan(late, policy.last_world, exhausted=True)
+    assert switch.state == "traverse" and building.transition is not None and building.active["direction"] == -1
+    assert building.active["path"] == [entry] + guide
+    assert command is not None and [e["direction"] for e in building.events if e["event"] == "spawn_switch_started"] == ["down"]
+    # Down past the tread it spawned on to a storey 1.7 m under the first: within 1.5 m of that tread "floor",
+    # so the atlas alone would call it a landing; the switch's traversal settles it and it is adopted.
+    step += 1
+    x = entry[0]
+    for z in (0.3, 0.1, -0.1, -0.3, -0.5, -0.7, -0.9, -1.2):
+        x -= 0.25
+        policy.plan(at(episode, step, x, 1.0, z=z, depth=3.0)); step += 1
+    for i in range(10):
+        x -= 0.25
+        policy.plan(at(episode, step, x, 1.0, z=-1.2, depth=3.0)); step += 1
+        if switch.state == "done":
+            break
+    assert switch.state == "done" and atlas.active_id == 2 and guard.spawn_floor == 2
+    assert guard.spawn_z == pytest.approx(-1.2, abs=0.05) and building.transition is None
+    assert [e["event"] for e in building.events if e["event"].startswith("spawn_switch")] == [
+        "spawn_switch_armed", "spawn_switch_started", "spawn_switch_adopted", "spawn_switch_arrived"]
+    # Searched out again, later: nothing arms or starts again, and the agent never goes back up.
+    final = at(episode, step + 200, x, 1.0, z=-1.2, depth=3.0)
+    assert building.plan(final, policy.last_world, exhausted=True) is None and building.active is None
+    assert len([e for e in building.events if e["event"] == "floor_arrival"]) == 2
+    assert policy.episode_info()["spawn_floor_guard"]["spawn_floor"] == 2
+
+
+def test_the_spawn_switch_also_fires_after_a_long_unfruitful_search_but_never_with_a_target_known():
+    """00800/000038 (2026-11-02): fourteen rooms kept frontier on the storey below for all 450 actions while the plant
+    was upstairs. After ``spawn_switch_after_actions`` on the first storey the switch fires unasked -- unless a target
+    is known there."""
+    def settled():
+        policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+        building, atlas = policy.building, policy.mapping.atlas
+        building.terrain.plateau_area = atlas.plateau_observer = lambda pose: 6.0
+        policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+        step = 1
+        for z in (0.18, 0.35, 0.52):
+            policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=z, depth=3.0)); step += 1
+        for i in range(6):
+            policy.plan(at(episode, step, 2.0 + 0.25 * i, 1.0, z=0.5, depth=3.0)); step += 1
+            if atlas.active_id != 0:
+                break
+        assert building.switch.flight is not None
+        return policy, episode, building
+    policy, episode, building = settled()
+    switch, params = building.switch, building.params
+    entry = switch.flight["entry"]
+    before = switch.flight["step"] + params.spawn_switch_after_actions - 1
+    assert building.plan(at(episode, before, entry[0], entry[1], z=0.5), policy.last_world) is None and switch.state is None
+    building.plan(at(episode, before + 1, entry[0], entry[1], z=0.5), policy.last_world)
+    assert switch.state == "traverse" and building.transition is not None
+    # A target the pursuit remembers on this storey keeps the agent here.
+    policy, episode, building = settled()
+    policy.pursuit.targets.append({"xyz": (3.0, 3.0, 0.5), "floor": building.floor_id, "label": "bed"})
+    late = building.switch.flight["step"] + params.spawn_switch_after_actions + 5
+    assert building.plan(at(episode, late, entry[0], entry[1], z=0.5), policy.last_world) is None
+    assert building.switch.state is None
+    # Too few actions left for the far storey: no switch either.
+    policy, episode, building = settled()
+    last = int(policy.episode.max_steps) - params.spawn_switch_min_actions_left + 1
+    assert building.plan(at(episode, last, entry[0], entry[1], z=0.5), policy.last_world) is None
+    assert building.switch.state is None
+
+
+def test_a_landing_reached_from_a_stair_spawn_is_never_adopted_as_its_storey():
+    """00843/000022 (v3, 2026-11-02): a climb from a spawn tread stalled on a landing 0.85 m up; after thirty actions
+    the guard adopted it as the spawn storey, which armed the switch, which walked the agent back down to the
+    spawn's height -- up and down between "floors". A plateau under ``min_floor_area_m2`` reached from a stair
+    spawn is a landing however long the agent stands on it."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    building.terrain.plateau_area = atlas.plateau_observer = lambda pose: 1.0
+    building.terrain._candidate_paths = lambda pose: None
+    flights = [{"direction": 1, "rise_m": 1.3, "path": [(1.5, 1.0, 0.2), (2.0, 1.0, 0.6)]}]
+    for step in range(31):
+        if step == 14:
+            building.terrain.candidates = [dict(c) for c in flights]
+        if step == 16:
+            building.terrain.candidates = []
+        policy.plan(at(episode, step, 1.0, 1.0, yaw=0.3 * step, depth=3.0))
+    assert atlas.in_transition and building.transition is not None
+    for step in range(31, 120):                 # up onto the landing and about on it, never further
+        z = min(0.6, 0.2 * (step - 30))
+        policy.plan(at(episode, step, 1.5 + 0.3 * (step % 3), 1.0 + 0.3 * ((step // 3) % 2), z=z, depth=3.0))
+        assert len(atlas.floors) == 1 and atlas.active_id == 0, (step, [f.elevation_m for f in atlas.floors.values()])
+    assert building.switch.flight is None and not guard.stats["stalled_adoptions"]
+    assert not [e for e in guard.events if e["event"] == "spawn_plane_rebased"]
+
+
+def test_the_switch_never_settles_back_on_the_spawn_tread_it_passes():
+    """00843/000022 (v3, 2026-11-02): the switch walked down past the tread the agent spawned on, stalled at its
+    height, and the guard settled it there -- the spawn height again. While the switch traverses the guard stands
+    aside, and no floor known when it set off can end its traversal."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas, guard = policy.building, policy.mapping.atlas, policy.floor_guard
+    building.terrain.plateau_area = atlas.plateau_observer = lambda pose: 6.0
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    step = 1
+    for z in (0.18, 0.35, 0.52):
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=z, depth=3.0)); step += 1
+    for i in range(6):
+        policy.plan(at(episode, step, 2.0 + 0.25 * i, 1.0, z=0.5, depth=3.0)); step += 1
+        if atlas.active_id != 0:
+            break
+    switch = building.switch
+    entry = switch.flight["entry"]
+    building.can_leave_floor = lambda obs=None: True
+    step = switch.flight["step"] + building.params.spawn_switch_min_floor_actions
+    building.plan(at(episode, step, entry[0], entry[1], z=0.5, depth=3.0), policy.last_world, exhausted=True)
+    assert switch.state == "traverse" and building.active["avoid_floors"] == [0, 1]
+    step += 1
+    x = entry[0]
+    for z in (0.3, 0.1, 0.0):                                      # down to the spawn tread's height, and no further
+        x -= 0.25
+        policy.plan(at(episode, step, x, 1.0, z=z, depth=3.0)); step += 1
+    for i in range(80):
+        policy.plan(at(episode, step, x - 0.3 * (i % 3), 1.0 + 0.3 * ((i // 3) % 2), z=0.0, depth=3.0)); step += 1
+        assert atlas.active_id == 1, "never back on the spawn's floor"
+    assert not [e for e in guard.events if e["event"] in ("transition_settled_on_known_floor", "spawn_plane_rebased")
+                and e["action"] > switch.flight["step"]]
+    assert switch.state in ("traverse", "abandoned")
+
+
+def test_a_switch_approach_given_up_before_the_flight_is_tried_once_more_and_no_more():
+    """00814/000004 (2026-11-02): the switch's walk to the flight was given up in a cramped corner 4.6 m short of it,
+    and the switch was spent with the agent never off its storey. An approach that never reached the flight is tried
+    once more ``spawn_switch_min_floor_actions`` later; a second one given up spends the switch."""
+    policy, episode = setup_policy("bed", multifloor={"stair_source": "observed"})
+    building, atlas = policy.building, policy.mapping.atlas
+    building.terrain.plateau_area = atlas.plateau_observer = lambda pose: 6.0
+    policy.plan(at(episode, 0, 1.0, 1.0, depth=3.0))
+    step = 1
+    for z in (0.18, 0.35, 0.52):
+        policy.plan(at(episode, step, 1.0 + 0.25 * step, 1.0, z=z, depth=3.0)); step += 1
+    for i in range(6):
+        policy.plan(at(episode, step, 2.0 + 0.25 * i, 1.0, z=0.5, depth=3.0)); step += 1
+        if atlas.active_id != 0:
+            break
+    switch, params = building.switch, building.params
+    building.can_leave_floor = lambda obs=None: True
+    far = (switch.flight["entry"][0] + 3.0, switch.flight["entry"][1])
+    first = switch.flight["step"] + params.spawn_switch_min_floor_actions
+    building.plan(at(episode, first, *far, z=0.5, depth=3.0), policy.last_world, exhausted=True)
+    assert switch.state == "approach" and switch.attempts == 1
+    building._abandon(at(episode, first + 5, *far, z=0.5), "spawn switch: the flight's entry is unreachable")
+    assert switch.state is None and switch.retry_at == first + 5 + params.spawn_switch_min_floor_actions
+    early = at(episode, switch.retry_at - 1, *far, z=0.5, depth=3.0)
+    assert building.plan(early, policy.last_world, exhausted=True) is None and switch.state is None
+    building.plan(at(episode, switch.retry_at, *far, z=0.5, depth=3.0), policy.last_world, exhausted=True)
+    assert switch.state == "approach" and switch.attempts == 2
+    building._abandon(at(episode, switch.retry_at + 5, *far, z=0.5), "spawn switch: the flight's entry is unreachable")
+    assert switch.state == "abandoned"
+    assert building.plan(at(episode, switch.retry_at + 200, *far, z=0.5, depth=3.0), policy.last_world,
+                         exhausted=True) is None and switch.state == "abandoned"
+    events = [e["event"] for e in building.events if e["event"].startswith("spawn_switch")]
+    assert events == ["spawn_switch_armed", "spawn_switch_started", "spawn_switch_deferred", "spawn_switch_started",
+                      "spawn_switch_abandoned"]
+
+
 def _step_terrain(policy, monkeypatch, cells, height, area=6.0):
-    """The stair terrain reporting ``cells`` (world XY) as walkable support at ``height``, and ``area`` m2 of plateau."""
+    """The stair terrain reporting ``cells`` (world XY) as walkable support at ``height`` (one, or one per cell), and ``area`` m2 of plateau."""
     xy = np.asarray(cells, dtype=float).reshape(-1, 2)
-    monkeypatch.setattr(policy.building.terrain, "step_surfaces",
-                        lambda plane, band, min_offset_m=0.10: (xy, np.full(len(xy), float(height))))
+    heights = np.broadcast_to(np.asarray(height, dtype=float), (len(xy),)).copy()
+    monkeypatch.setattr(policy.building.terrain, "step_surfaces", lambda plane, band, min_offset_m=0.10: (xy, heights))
     monkeypatch.setattr(policy.building.terrain, "plateau_area", lambda pose: float(area))
 
 
@@ -737,6 +1055,25 @@ def test_standing_level_on_a_floor_sized_plane_a_step_below_re_measures_the_stor
     assert policy.floor_guard.spawn_z == pytest.approx(0.0 if walked_level else -0.35)
 
 
+def test_a_floor_just_more_than_level_below_the_spawn_is_re_measured_with_no_gap(monkeypatch):
+    """00843/000083 (2026-11-02): spawned 0.149 m above its storey, the agent stepped down onto it and stood there
+    neither level with the plane (more than ``stable_height_m`` off) nor off it by the old 0.15 m re-measure floor."""
+    policy, episode, world, _ = forbidden_stairs()
+    atlas = policy.mapping.atlas
+    _step_terrain(policy, monkeypatch, [], -0.149)
+    policy.floor_guard.observe(at(episode, 0, 2.8, 3.0, z=0.0), world)
+    for step in range(1, 4):
+        policy.floor_guard.observe(at(episode, step, 3.0 + 0.1 * step, 3.0, z=-0.149), world)
+    assert atlas.elevation_m == pytest.approx(-0.149) and policy.floor_guard.stats["plane_remeasured"] == 1
+    # Within stable_height_m the agent is level with the plane: nothing to re-measure.
+    policy, episode, world, _ = forbidden_stairs()
+    _step_terrain(policy, monkeypatch, [], -0.10)
+    policy.floor_guard.observe(at(episode, 0, 2.8, 3.0, z=0.0), world)
+    for step in range(1, 4):
+        policy.floor_guard.observe(at(episode, step, 3.0 + 0.1 * step, 3.0, z=-0.10), world)
+    assert policy.mapping.atlas.elevation_m == pytest.approx(0.0) and policy.floor_guard.stats["plane_remeasured"] == 0
+
+
 def test_no_re_measure_on_a_small_plateau_or_beyond_the_atlas_departure(monkeypatch):
     policy, episode, world, _ = forbidden_stairs()
     atlas = policy.mapping.atlas
@@ -745,3 +1082,81 @@ def test_no_re_measure_on_a_small_plateau_or_beyond_the_atlas_departure(monkeypa
         policy.floor_guard.observe(at(episode, step, 3.0, 3.0, z=-0.35), world)
     assert atlas.elevation_m == pytest.approx(0.0)
     assert atlas.remeasure(0.2) is True and atlas.elevation_m == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("walked_level", [True, False])
+def test_steps_are_the_storey_within_the_atlas_departure_from_a_storey_walked_level_and_the_whole_band_otherwise(
+        monkeypatch, walked_level):
+    """00835/000006 (2026-10-31): a frontier route down a flight's freed treads, 0.59 m off the plane, then a RETREAT.
+
+    The guard offers no step the atlas would call a departure: from a storey
+    walked level the retreat walks the agent back from past ``departure_m``.
+    From a provisional spawn storey a departure is walked and rebased, so the
+    whole band is the storey there.
+    """
+    policy, episode, world, _ = forbidden_stairs()
+    guard, departure = policy.floor_guard, policy.mapping.atlas.params.departure_m
+    monkeypatch.setattr(type(guard), "provisional", property(lambda self: not walked_level))
+    assert departure < guard.step_band_m
+    policy.mapping._anchor = 0.0
+    obs = at(episode, 0, 3.0, 3.0, depth=3.0)
+    guard.observe(obs, world)
+    drops = guard.drops[policy.mapping.floor_id].copy()
+    ys, xs = np.nonzero(drops)
+    half = len(xs) // 2
+    assert half > 0
+    near, far = np.zeros_like(drops), np.zeros_like(drops)
+    near[ys[:half], xs[:half]] = True                                  # 0.05 m inside the departure
+    far[ys[half:], xs[half:]] = True                                   # 0.15 m past it, well inside the band
+    heights = np.where(np.arange(len(xs)) < half, -(departure - 0.05), -(departure + 0.15))
+    _step_terrain(policy, monkeypatch, [world.grid_to_world(x, y) for x, y in zip(xs, ys)], heights)
+    confined = guard.observe(at(episode, 1, 3.0, 3.0, depth=3.0), world)
+    assert guard.step_reach_m == pytest.approx(departure if walked_level else guard.step_band_m)
+    assert (confined.grid[near] == world.values.free).all()
+    far_goal = world.grid_to_world(xs[-1], ys[-1])
+    if walked_level:
+        assert (confined.grid[far] == world.values.occupied).all(), "a drop still: the retreat would undo the step"
+        assert guard.stats["step_cells_withheld"] == int(far.sum())
+        assert guard.stats["step_drop_exempt"] == int(near.sum())
+        assert not guard.goal_allowed(obs, world, far_goal, "frontier")
+    else:
+        assert (confined.grid[far] == world.values.free).all(), "a spawn on a tread: the whole band"
+        assert guard.stats["step_cells_withheld"] == 0
+        assert guard.goal_allowed(obs, world, far_goal, "frontier")
+
+
+@pytest.mark.parametrize("walked_level", [True, False])
+def test_the_stair_mask_is_lifted_from_steps_by_the_same_bound_that_frees_them(monkeypatch, walked_level):
+    """One cut for free cells, drop exemptions and stair exemptions: never a tread free on one count and masked on another."""
+    policy, episode, world, _ = forbidden_stairs()
+    guard, departure = policy.floor_guard, policy.mapping.atlas.params.departure_m
+    monkeypatch.setattr(type(guard), "provisional", property(lambda self: not walked_level))
+    policy.mapping._anchor = 0.0
+    obs = at(episode, 0, 1.0, 3.0)                                      # far from the flight: no walked carve on it
+    stairs = stair_peek_mask(policy, world, obs.pose, carve=False)
+    ys, xs = np.nonzero(stairs)
+    half = len(xs) // 2
+    assert half > 0
+    heights = np.where(np.arange(len(xs)) < half, departure - 0.15, departure + 0.15)
+    _step_terrain(policy, monkeypatch, [world.grid_to_world(x, y) for x, y in zip(xs, ys)], heights)
+    confined = guard.observe(obs, world)
+    near, far = np.zeros_like(stairs), np.zeros_like(stairs)
+    near[ys[:half], xs[:half]] = True
+    far[ys[half:], xs[half:]] = True
+    assert not (confined.grid[near] == world.values.occupied).any(), "steps the storey owns are no staircase"
+    if walked_level:
+        assert guard.stats["step_stair_exempt"] == int(near.sum())
+        assert (confined.grid[far] == world.values.occupied).all(), "past the departure: still the flight"
+    else:
+        assert guard.stats["step_stair_exempt"] == int(stairs.sum())
+        assert not (confined.grid[far] == world.values.occupied).any()
+
+
+def test_the_closing_may_stand_where_the_guard_frees_and_nowhere_further():
+    """The standoff tolerance is the guard's step reach: the band from a provisional spawn storey, ``departure_m`` after."""
+    from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
+    policy, _, _, _ = forbidden_stairs()
+    guard, departure = policy.floor_guard, policy.mapping.atlas.params.departure_m
+    assert not guard.provisional, "a ground-truth storey is a storey"
+    assert TargetApproachPath(policy)._height_tolerance() == pytest.approx(guard.step_reach_m) == pytest.approx(departure)
+    assert departure > 0.41, "00835/000006: the television's nearest view points stand 0.41 m down the treads"

@@ -4,7 +4,12 @@ from __future__ import annotations
 from collections import deque
 import math
 
+from sparx_agency.core.planning.object_search.multifloor.heading_commitment import HeadingCommitment
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+
+
+#: Actions without XY progress before a traversal is given up as stalled (one full scan, 12 turns, and margin).
+STALL_ACTIONS = 30
 
 
 class StairTraversal:
@@ -49,6 +54,9 @@ class StairTraversal:
         self.completion_reason = None
         self.destination_height_m = None
         self.guide_index = 0
+        self.pursuing = False                   # following the guide itself: its points are off the support graph
+        self.exit_height = None                 # the destination plateau's height once confirmed: walk off the flight
+        self.heading = HeadingCommitment(self.policy.episode.action_spec.turn_angle_rad)
         self.policy.mapping.atlas.begin_transition(obs.pose)
 
     def observe(self, obs):
@@ -86,9 +94,14 @@ class StairTraversal:
             destination = abs(xyz[2] - atlas.floors[expected].elevation_m) <= self.params.floor_match_m
         else:
             destination = self.direction * (xyz[2] - self.source_height) >= self.params.min_floor_separation_m
+        avoid = self.portal.get("avoid_floors") or ()
+        if destination and any(abs(xyz[2] - atlas.floors[f].elevation_m) <= self.params.floor_match_m
+                               for f in avoid if f in atlas.floors):
+            destination = False             # a floor this traversal must not end on (the spawn switch's: all it left)
         if supported and destination:
             self.phase = "CONFIRM_DESTINATION"
             self.destination_height_m = xyz[2]
+            self.exit_height = xyz[2]
             self.arrival_allowed = exited
             if exited:
                 self.completion_reason = "stable_platform_and_stair_exit"
@@ -98,7 +111,10 @@ class StairTraversal:
 
     def plan(self, obs):
         elapsed = obs.step - self.started_step
-        stalled = obs.step - self.last_progress_step >= 18
+        # Long enough for the in-place scan below to look all round (12 turns of 30 degrees) and then some: at a
+        # switchback landing the next flight is behind the agent, and 18 actions retreated 00800/000040 from
+        # 0.8 m under the storey before the scan had come round (2026-11-02).
+        stalled = obs.step - self.last_progress_step >= STALL_ACTIONS
         if self.phase == "SAFE_HALT":
             return NavigationCommand.stop_here(info={"kind": self.phase, "reason": self.completion_reason,
                                                      "target_confirmed": False})
@@ -117,8 +133,21 @@ class StairTraversal:
                 return self.plan(obs)
             path = self._retreat_route(obs)
         else:
-            path = self._surface_route(obs)
-        path = self.terrain.steering_path(obs.pose, path, self.policy.episode.action_spec)
+            # On the destination's plateau, off the flight: on along it is through the storey when the stairwell
+            # runs on (``StairTerrain.exit_path``).
+            self.pursuing = False
+            if self.exit_height is not None and abs(obs.pose.z - self.exit_height) > self.params.floor_match_m:
+                self.exit_height = None
+            # Latched, not per action: the level-walk test behind CONFIRM_DESTINATION lapses on a step taken on the
+            # way off, and the flight route took 00820/000053 back down it twice (2026-11-03).
+            if self.exit_height is not None:
+                path = self.terrain.exit_path(obs.pose)     # none: look round on the plateau, never on down the flight
+            else:
+                path = self._surface_route(obs)
+        choose = self.heading.chooser(path[-1]) if path else None
+        straight = self.pursuing and self.retreat_path is None
+        path = self.terrain.steering_path(obs.pose, path, self.policy.episode.action_spec, choose=choose,
+                                          straight=straight)
         if path:
             self.path = path
             self.policy._route, self.policy._goal = path, tuple(path[-1][:2])
@@ -132,11 +161,13 @@ class StairTraversal:
         if self.scans >= 12:
             self.failures += 1
             self.scans = 0
+            self.heading.reset()                # a full round seen: the headings ruled out here get one more look
         return NavigationCommand.hold(final_yaw=obs.pose.yaw + self.policy.episode.action_spec.turn_angle_rad,
                                       info={"kind": self.phase, "portal": self.portal["id"],
                                             "reason": "acquire connected tread support"})
 
     def _surface_route(self, obs):
+        self.pursuing = False
         goal = self.surface_goal
         if goal is not None:
             arrived = math.dist((obs.pose.x, obs.pose.y), goal[:2]) <= 0.35 and abs(obs.pose.z - goal[2]) <= 0.35
@@ -165,6 +196,15 @@ class StairTraversal:
                     if path:
                         self.surface_goal = path[-1]
                         return path
+            ahead = next((point for point in guide[self.guide_index + 1:] if math.dist(xyz, point) >= 0.5), None)
+            if ahead is not None:
+                # No guide point is on the support graph this action -- the tread edges between come and go with
+                # the view -- but the guide is support measured (or walked) before: follow it a safe step at a
+                # time. The continuation's best-looking cell instead walked 00802/000003 (2026-11-02) round a
+                # landing for 30 actions at the foot of the flight its guide climbed.
+                self.surface_goal = None
+                self.pursuing = True
+                return [xyz, tuple(ahead)]
         path = self.terrain.continuation(obs.pose, self.direction, self.source_height,
                                          guide=guide[-1] if guide else None)
         self.surface_goal = path[-1] if path else None
@@ -199,4 +239,5 @@ class StairTraversal:
                 "destination": self.portal.get("destination"), "destination_height_m": self.destination_height_m,
                 "best_rise_m": self.best_rise_m, "started_step": self.started_step,
                 "arrival_allowed": self.arrival_allowed, "completion_reason": self.completion_reason,
-                "retreat_step": self.retreat_step, "failures": self.failures}
+                "retreat_step": self.retreat_step, "failures": self.failures, "heading": self.heading.diagnostics(),
+                "pursuing": self.pursuing, "exit_height_m": self.exit_height}

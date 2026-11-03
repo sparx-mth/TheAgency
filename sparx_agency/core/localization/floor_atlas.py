@@ -89,6 +89,44 @@ class MultiFloorParams:
             floors, once executed, is given at least this long to pay for
             itself; walking onto the stairs by accident still completes the
             climb, and any OTHER staircase is offered at once.
+        confirm_area_m2: The connected level support (the stair terrain's
+            ``plateau_area``) under the agent before a spawn storey walked
+            ``stable_distance_m`` level is CONFIRMED a storey rather than a
+            landing or a tread (since 2026-11-02). Walking alone confirmed a
+            1.7 m2 landing: 00800/000040 stepped 0.35 m across it and onto
+            the first tread (+0.10 m, still level), the step reach fell from
+            the band to ``departure_m``, the flight above was masked, the
+            storey below was a drop, and 460 actions went to escaping a box
+            0.4 x 0.6 m. Of the 2,000 HM3D v1 val episodes 174 start on
+            stairs; ten of the first eleven failures of the stair-start set
+            never left their start height. 5 m2: in the first 45 actions the
+            largest level support six stuck stair starts stood on was
+            2.6-3.4 m2, eight floor starts on the tightest navmesh patches of
+            the split 8.4-25.7 m2 (``runs/stair_spawn/calib``).
+        spawn_leave_after_actions: Stair traversal forbidden: from this action
+            on, a spawn storey still provisional, with a flight seen from it
+            and level support under the agent smaller than
+            ``min_floor_area_m2``, walks the flight to the nearer storey on
+            purpose (``MultiFloorSearch._spawn_departure_due``). 30: the one
+            floor start of 47 probes that met the rest fired at action 20.
+        spawn_departure_attempts: How many such departures one episode may
+            start, each ``spawn_leave_after_actions`` after the last one ended
+            back on the spawn storey's height: a first one bumped back by the
+            treads left 00802/000003 (2026-11-02) bouncing between two treads
+            in the explorer's escape for 400 actions. A storey reached ends
+            them all, so retries never move the agent between storeys.
+        spawn_switch: Stair traversal forbidden: once the storey a stair
+            spawn settled on is searched out, walk back along the flight to
+            the storey at its other end, once (``multifloor/spawn_switch.py``).
+        spawn_switch_min_floor_actions: Actions on the first storey before
+            the switch may fire on its being searched out.
+        spawn_switch_after_actions: Actions on the first storey after which
+            the switch fires without the storey searched out, no target
+            known there: a storey of fourteen rooms kept frontier for the
+            whole episode while the target was at the flight's other end
+            (00800/000038).
+        spawn_switch_min_actions_left: Episode actions that must remain for
+            the switch to fire: the far storey must still be searchable.
     """
 
     enabled: bool = True
@@ -100,6 +138,13 @@ class MultiFloorParams:
     min_floor_area_m2: float = 3.0
     stable_height_m: float = 0.12
     stable_distance_m: float = 0.35
+    confirm_area_m2: float = 5.0
+    spawn_leave_after_actions: int = 30
+    spawn_departure_attempts: int = 3
+    spawn_switch: bool = True
+    spawn_switch_min_floor_actions: int = 60
+    spawn_switch_after_actions: int = 220
+    spawn_switch_min_actions_left: int = 120
     stable_samples: int = 3
     floor_search_actions: int = 140
     transition_actions: int = 120
@@ -128,10 +173,12 @@ class MultiFloorParams:
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError("multifloor.enabled must be boolean")
+        if type(self.spawn_switch) is not bool:
+            raise ValueError("multifloor.spawn_switch must be boolean")
         if self.stair_source not in STAIR_SOURCES:
             raise ValueError("multifloor.stair_source must be one of %s; no silent fallback" % (STAIR_SOURCES,))
         for name in ("departure_m", "floor_match_m", "min_floor_separation_m",
-                     "min_floor_area_m2", "stable_height_m", "stable_distance_m", "max_step_m",
+                     "min_floor_area_m2", "stable_height_m", "stable_distance_m", "confirm_area_m2", "max_step_m",
                      "terrain_radius_m", "stair_min_rise_m", "exit_distance_m", "near_connector_m",
                      "stair_riser_min_m", "stair_min_tread_m", "stair_max_tread_m"):
             value = getattr(self, name)
@@ -143,7 +190,9 @@ class MultiFloorParams:
         for name in ("stable_samples", "floor_search_actions", "transition_actions",
                      "retreat_actions", "retreat_blocked", "portal_cooldown_actions", "max_failures",
                      "commit_failures", "commit_stall_actions", "confirm_actions", "approach_failures",
-                     "arrival_grace_actions", "stair_min_risers"):
+                     "arrival_grace_actions", "stair_min_risers", "spawn_leave_after_actions", "spawn_departure_attempts",
+                     "spawn_switch_min_floor_actions", "spawn_switch_after_actions",
+                     "spawn_switch_min_actions_left"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
         if not self.stair_riser_min_m < self.max_step_m:

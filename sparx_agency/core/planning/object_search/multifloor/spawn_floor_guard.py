@@ -21,6 +21,21 @@ plans on -- rather than in each frontier, opening, peek and route module:
   tighter bar masks the storey itself (Corozal/000142, 2026-10-14, 3,316
   cells); a shallow flight inside the tolerance (Darden/000034's three
   treads at -0.11, -0.18, -0.21 m) is the open item;
+* **a drop along the ray** (since 2026-10-31, :mod:`drop_rays`): a depth ray
+  that lands deeper than the storey's step reach (:attr:`step_reach_m`, and
+  never less than ``drop_m``) ran that deep, without meeting a surface, from
+  where it sank under that line -- the cells it crossed there are drops too,
+  their surface deeper than any step the storey owns. Nothing else measures
+  them: the observed map's free-space rays toward the walls beyond a
+  stairwell carve its treads free, and a level camera never sees treads that
+  close (00835-q3zU7Yy5E5s/000006: a frontier route down a flight whose
+  every cell was free and none a drop, then 18 actions of ``RETREAT``). A
+  sunken floor inside the reach (00878/000035, 0.40 m down) is crossed only
+  at its own height, never below the line. Two more limits: a cell where a
+  depth point ever landed between the drop line and the obstacle band
+  (``surfaced``) is not a crossing drop -- the ray may have run on under the
+  slab beyond the stairwell, and that floor is the storey -- and a camera
+  under the storey plane (down a flight by accident) draws no crossing;
 * a goal is refused when its cell is masked, or when the storey the agent
   stands on is further than ``floor_plane_bound_m`` from the spawn plane
   (``Z_spawn +/- 0.5 m``) -- then nothing on it is a destination;
@@ -53,11 +68,25 @@ plans on -- rather than in each frontier, opening, peek and route module:
   step up, a raised dais or a sunken living room was a wall or a drop, and a
   spawn on a tread a box. Support the stair terrain can WALK to from the
   agent (``StairTerrain.step_surfaces``: risers of at most ``max_step_m``,
-  clear to body height) within the band of the plane is kept per floor, is
-  free on the planning grid, is never a drop, and within the atlas's
-  ``departure_m`` -- the whole band from a provisional spawn storey -- is
-  never a stair mask. The GT-oracle sweep of 2026-10-28 solved 14 % of the
-  single-storey episodes whose shortest path changes height by 0.25-1.0 m.
+  clear to body height) within the band of the plane is kept per floor, and
+  the part of it within :attr:`SpawnFloorGuard.step_reach_m` of the plane --
+  the whole band from a provisional spawn storey, the atlas's
+  ``departure_m`` from a storey walked level -- is free on the planning
+  grid, never a drop, never a stair mask, and where the closing's standoffs
+  may lie. One bound for all four, and the atlas's own: from a storey walked
+  level, support further off than ``departure_m`` is where the atlas starts
+  a transition and the trail retreat walks the agent back, so it is not
+  offered (00835/000006 on the first cut, which freed the whole band: a
+  frontier route down a flight's treads toward a frontier 1.7 m below, 0.59 m
+  off the plane in one stride, then 18 actions of ``RETREAT``). Nothing
+  reachable is withheld by it: on habitat-sim's recomputed navmesh no
+  single-storey HM3D v1 val episode that starts on a level of floor size
+  (1,495 of 1,586) has a shortest path more than 0.45 m off the start
+  height, and every one whose goal lies 0.45-0.8 m off (20) starts on a
+  tread, a landing or a ramp -- the provisional spawn storey, whose
+  departure is walked as a traversal and rebased, not retreated from. The
+  GT-oracle sweep of 2026-10-28 solved 14 % of the single-storey episodes
+  whose shortest path changes height by 0.25-1.0 m.
   When the agent has stood level on such a plane of floor size, off the
   storey plane by more than a step but inside ``departure_m`` (where the
   atlas starts no transition), the atlas re-measures the storey there
@@ -92,22 +121,27 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from sparx_agency.core.planning.environment import OccupancyGrid2D
-from sparx_agency.core.planning.objnav.camera_geometry import backproject_depth
+from sparx_agency.core.planning.objnav.camera_geometry import backproject_depth, camera_position_world
+from sparx_agency.core.planning.object_search.multifloor.drop_rays import cells_crossed_below
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask, walked_exemption
 
 #: Refusal events kept for the recording; the counters are complete.
 MAX_EVENTS = 50
 #: Actions a settled plateau inside the separation rule may stay "in transition" before it is adopted.
 HALF_LEVEL_ACTIONS = 30
-#: Consecutive actions within this height of each other, off the plane by more than ``REMEASURE_MIN_OFFSET_M``, that
-#: make the agent "standing level" on another plane for a re-measure.
+#: Consecutive actions within this height of each other, off the plane by more than the atlas's ``stable_height_m``
+#: (the height that is still "level" with it), that make the agent "standing level" on another plane for a re-measure.
+#: The floor was a fixed 0.15 m until 2026-11-02: 00843/000083 spawned 0.149 m above its storey, stepped down onto it
+#: and stood there unconfirmed -- not level with the plane (more than 0.12 m off), not off it enough to re-measure.
 REMEASURE_SAMPLES = 3
 REMEASURE_LEVEL_M = 0.05
-REMEASURE_MIN_OFFSET_M = 0.15
 #: Consecutive actions at one height (within the atlas's ``stable_height_m``) that make a plateau of a spot the
 #: agent cannot translate on -- the atlas's own test wants ``stable_distance_m`` of walking, and the map is frozen
 #: while the transition stands (since 2026-10-28).
 STALLED_SAMPLES = 8
+#: Height above the storey plane where the observed map's obstacle band starts (``ObservedMap.update``'s ``z_min``):
+#: a depth point between the drop line and it is a surface the storey may stand on.
+OBSTACLE_BAND_M = 0.15
 
 
 class SpawnFloorGuard:
@@ -124,7 +158,9 @@ class SpawnFloorGuard:
         self.drop_m: float = settings.step_down_m
         self.spawn_z: Optional[float] = None
         self.spawn_floor: Optional[int] = None  # the atlas floor the spawn plane belongs to (rebased with it)
-        self.drops: Dict[int, np.ndarray] = {}
+        self.drops: Dict[int, np.ndarray] = {}         # floor id -> cells a depth point landed in below the drop line
+        self.crossed: Dict[int, np.ndarray] = {}       # floor id -> cells such a ray crossed below the step reach
+        self.surfaced: Dict[int, np.ndarray] = {}      # floor id -> landed above the drop line, under the obstacle band
         self.step_band_m: float = float(settings.step_surface_band_m)
         self.steps: Dict[int, np.ndarray] = {}     # floor id -> walkable step support heights (NaN: none)
         self._level_heights: List[float] = []
@@ -132,10 +168,10 @@ class SpawnFloorGuard:
         self.off_plane: bool = False
         self.half_levels: set = set()          # atlas floor ids adopted as half-levels of the spawn storey
         self.events: List[dict] = []
-        self.stats = {"goals_refused": 0, "drop_cells": 0, "stair_cells": 0, "off_plane_actions": 0,
+        self.stats = {"goals_refused": 0, "drop_cells": 0, "drop_cells_crossed": 0, "stair_cells": 0, "off_plane_actions": 0,
                       "half_levels_adopted": 0, "walked_exempt_cells": 0, "rebased": 0, "stalled_adoptions": 0,
-                      "stalled_returns": 0, "step_cells": 0, "step_cells_freed": 0, "step_drop_exempt": 0,
-                      "step_stair_exempt": 0, "plane_remeasured": 0}
+                      "stalled_returns": 0, "step_cells": 0, "step_cells_freed": 0, "step_cells_withheld": 0,
+                      "step_drop_exempt": 0, "step_stair_exempt": 0, "plane_remeasured": 0}
         self._transition_heights: List[float] = []   # the pose height on every action of the transition in force
         self.stair_margins_m = {}               # portal id -> capsule margin drawn, metres (``adaptive_capsule``)
 
@@ -155,10 +191,18 @@ class SpawnFloorGuard:
         self._adopt_half_level(obs)
         self._follow_step_plane(obs)
         self._track_plane(obs)
-        drops = self._drops_for(self.policy.mapping.floor_id, world)
-        self._mark_drops(obs, world, drops)
+        floor_id = self.policy.mapping.floor_id
+        landed = self._layer(self.drops, floor_id, world)
+        crossed = self._layer(self.crossed, floor_id, world)
+        surfaced = self._layer(self.surfaced, floor_id, world)
+        self._mark_drops(obs, world, landed, crossed, surfaced)
+        # A crossing is a drop only where no surface above the drop line was ever measured: a ray that sank into a
+        # stairwell can run on under the floor slab beyond it, and that floor is the storey.
+        crossed_only = crossed & ~surfaced & ~landed
+        drops = landed | crossed_only
         steps = self._step_surfaces(world)
-        walkable = np.isfinite(steps)
+        walkable = self._walkable(steps)
+        self.stats["step_cells_withheld"] = int(np.isfinite(steps).sum()) - int(walkable.sum())
         self.stats["step_drop_exempt"] = int((drops & walkable).sum())
         mask = drops & ~walkable
         margins = {}
@@ -166,14 +210,8 @@ class SpawnFloorGuard:
                   if getattr(self.policy, "building", None) is not None else None)
         self.stair_margins_m = margins
         if stairs is not None:
-            plane = getattr(self.policy.mapping, "_anchor", None)
-            if plane is not None and walkable.any():
-                band = self.step_band_m if self.provisional else float(self.policy.mapping.atlas.params.departure_m)
-                with np.errstate(invalid="ignore"):
-                    exempt = walkable & (np.abs(steps - float(plane)) <= band)
-                self.stats["step_stair_exempt"] = int((stairs & exempt).sum())
-                stairs = stairs & ~exempt
-            mask |= stairs
+            self.stats["step_stair_exempt"] = int((stairs & walkable).sum())
+            mask |= stairs & ~walkable
         exempt = 0
         if mask.any():
             # Where the agent stands or has stood is passable, whatever the depth said about it
@@ -181,7 +219,8 @@ class SpawnFloorGuard:
             walked = walked_exemption(self.policy, world, obs.pose)
             exempt = int((mask & walked).sum())
             mask &= ~walked
-        self.stats["drop_cells"] = int(drops.sum())
+        self.stats["drop_cells"] = int(landed.sum())
+        self.stats["drop_cells_crossed"] = int(crossed_only.sum())
         self.stats["stair_cells"] = 0 if stairs is None else int(stairs.sum())
         self.stats["walked_exempt_cells"] = exempt
         self.mask = mask if mask.any() else None
@@ -225,6 +264,21 @@ class SpawnFloorGuard:
         building = getattr(self.policy, "building", None)
         return building is not None and building.ground_truth is None and not building.storey_confirmed
 
+    @property
+    def step_reach_m(self) -> float:
+        """How far off the storey plane walkable step support is still the storey (see the module docstring).
+
+        The whole ``step_surface_band_m`` from a provisional spawn storey: a
+        departure from it is the agent leaving the flight it spawned on,
+        walked as a traversal to the storey it settles on. The atlas's
+        ``departure_m`` from a storey walked level: past it the atlas starts a
+        transition and the trail retreat walks the agent back, so the guard
+        never offers what the retreat would undo.
+        """
+        if self.provisional:
+            return self.step_band_m
+        return min(self.step_band_m, float(self.policy.mapping.atlas.params.departure_m))
+
     def rebase(self, obs, floor, height, reason, after_actions=None):
         """Make ``height`` -- the storey the agent settled on from a provisional spawn storey -- the spawn plane."""
         offset = float(height) - float(self.spawn_z) if self.spawn_z is not None else 0.0
@@ -266,11 +320,35 @@ class SpawnFloorGuard:
             height = self._stalled_plateau(obs, atlas)
             if height is None:
                 return
+        match_m = float(self.policy.settings.multifloor.floor_match_m)
+        known = [f for f in atlas.floors.values() if abs(f.elevation_m - float(height)) <= match_m]
+        building = getattr(self.policy, "building", None)
+        if building is not None and getattr(building.switch, "state", None) == "traverse":
+            # The spawn switch arrives by its own rule (``spawn_switch.accept_arrival``) or retreats: every floor
+            # known when it set off is one it left, and settling on the spawn's own tread on the way past took
+            # 00843/000022 back to the height it started at (v3, 2026-11-02).
+            return
+        if known:
+            # The plateau IS a floor the atlas knows -- the source of a traversal that never took a tread. Adopting
+            # it made a second "floor" 0.01-0.12 m from the first (00802/000056, 00814/000004, 00800/000086,
+            # 2026-11-02); after the half-level wait the transition settles back on that floor instead.
+            if atlas.transition_ticks >= HALF_LEVEL_ACTIONS:
+                floor = min(known, key=lambda f: abs(f.elevation_m - float(height)))
+                atlas.settle(obs.pose, float(floor.elevation_m))
+                self._transition_heights = []
+                self._record({"action": obs.step, "event": "transition_settled_on_known_floor", "floor_id": int(floor.id),
+                              "height_m": round(float(height), 3), "after_actions": int(HALF_LEVEL_ACTIONS)})
+            return
         provisional = self.provisional
-        if atlas.transition_ticks < HALF_LEVEL_ACTIONS:
-            if (not provisional or atlas.plateau_observer is None
-                    or atlas.plateau_observer(obs.pose) < float(self.policy.settings.multifloor.min_floor_area_m2)):
-                return
+        floor_size = (atlas.plateau_observer is not None
+                      and atlas.plateau_observer(obs.pose) >= float(self.policy.settings.multifloor.min_floor_area_m2))
+        if atlas.transition_ticks < HALF_LEVEL_ACTIONS and not (provisional and floor_size):
+            return
+        if provisional and atlas.plateau_observer is not None and not floor_size:
+            # From a stair spawn a plateau smaller than a floor is a landing, however long the agent stands on it:
+            # adopted as the spawn storey it armed the switch, which walked 00843/000022 back down to its spawn
+            # tread (v3, 2026-11-02). The traversal finishes, or retreats, on its own terms.
+            return
         separation = float(self.policy.settings.multifloor.min_floor_separation_m)
         if abs(float(height) - self.spawn_z) >= separation:
             return                                  # another storey: confined, as the protocol says
@@ -355,6 +433,19 @@ class SpawnFloorGuard:
         self.stats["step_cells"] = int(np.isfinite(heights).sum())
         return heights
 
+    def _walkable(self, steps) -> np.ndarray:
+        """The step cells that are this storey: support within :attr:`step_reach_m` of the plane in force.
+
+        The whole band is kept (``_step_surfaces``) and cut here, against the
+        plane as it stands now: a re-measured plane, or a provisional storey
+        confirmed by walking it, moves the cut without forgetting the terrain.
+        """
+        plane = getattr(self.policy.mapping, "_anchor", None)
+        if plane is None:
+            return np.zeros(steps.shape, dtype=bool)
+        with np.errstate(invalid="ignore"):
+            return np.isfinite(steps) & (np.abs(steps - float(plane)) <= self.step_reach_m)
+
     def _follow_step_plane(self, obs):
         """Re-measure the storey on the plane the agent stands level on, a step or more off it but inside ``departure_m``.
 
@@ -373,7 +464,7 @@ class SpawnFloorGuard:
             return
         plane = float(atlas.elevation_m)
         offset = float(obs.pose.z) - plane
-        if not REMEASURE_MIN_OFFSET_M <= abs(offset) <= float(atlas.params.departure_m):
+        if not float(atlas.params.stable_height_m) < abs(offset) <= float(atlas.params.departure_m):
             self._level_heights = []
             return
         self._level_heights = (self._level_heights + [float(obs.pose.z)])[-REMEASURE_SAMPLES:]
@@ -388,38 +479,69 @@ class SpawnFloorGuard:
         if not atlas.remeasure(height):
             return
         mapping._anchor = height
-        self.drops.pop(int(mapping.floor_id), None)
+        for layer in (self.drops, self.crossed, self.surfaced):
+            layer.pop(int(mapping.floor_id), None)
         if provisional and self.spawn_floor == int(mapping.floor_id):
             self.spawn_z = height
+            building = getattr(self.policy, "building", None)
+            if building is not None and building.flights_seen_from_spawn:
+                # A step off a flight onto the floor: the flight's other end is the switch's storey (spawn_switch.py).
+                building.switch.settled(obs, int(mapping.floor_id), plane, height, "remeasure")
         self._level_heights = []
         self.stats["plane_remeasured"] += 1
         self._record({"action": obs.step, "event": "storey_plane_remeasured", "floor_id": int(mapping.floor_id),
                       "height_m": round(height, 3), "offset_m": round(height - plane, 3),
                       "plateau_m2": round(area, 2), "spawn_plane_moved": bool(provisional)})
 
-    def _drops_for(self, floor_id, world) -> np.ndarray:
-        drops = self.drops.get(floor_id)
-        if drops is None or drops.shape != world.grid.shape:
-            drops = np.zeros(world.grid.shape, dtype=bool)
-            self.drops[floor_id] = drops
-        return drops
+    @staticmethod
+    def _layer(layers, floor_id, world) -> np.ndarray:
+        layer = layers.get(floor_id)
+        if layer is None or layer.shape != world.grid.shape:
+            layer = np.zeros(world.grid.shape, dtype=bool)
+            layers[floor_id] = layer
+        return layer
 
-    def _mark_drops(self, obs, world, drops):
+    def _mark_drops(self, obs, world, landed, crossed, surfaced):
+        """This frame's depth: where points land below the drop line, the cells the rays of those landing below the
+        step reach crossed below it, and where points land above the drop line but below the obstacle band (a
+        surface the storey may stand on)."""
         plane = getattr(self.policy.mapping, "_anchor", None)
         if plane is None:
             return
+        band = float(plane) + OBSTACLE_BAND_M
         if self.policy.mapping.floor_id in self.half_levels and self.spawn_z is not None:
             plane = min(float(plane), self.spawn_z)   # the storey below an adopted half-level is not a drop
         points = backproject_depth(obs.depth_m, obs.camera, obs.pose, self.policy.settings.depth_stride)
         if not len(points):
             return
-        below = points[points[:, 2] < float(plane) - self.drop_m]
+        line = float(plane) - self.drop_m
+        origin, shape = (world.origin_x, world.origin_y), world.grid.shape
+        low = points[(points[:, 2] >= line) & (points[:, 2] < band)]
+        if len(low):
+            xs, ys = self._cells(low, world)
+            surfaced[ys, xs] = True
+        below = points[points[:, 2] < line]
         if not len(below):
             return
-        xs = np.floor((below[:, 0] - world.origin_x) / world.resolution).astype(int)
-        ys = np.floor((below[:, 1] - world.origin_y) / world.resolution).astype(int)
+        xs, ys = self._cells(below, world)
+        landed[ys, xs] = True
+        camera = camera_position_world(obs.pose, obs.camera)
+        if camera[2] <= float(plane):
+            return                                  # a ray from under the storey's floor may run on under it
+        # Crossed below the step reach, the surface under a cell is deeper than any step the storey owns: never
+        # walkable support (a sunken floor 0.4 m down, 00878/000035, is crossed only at its height, never below it).
+        deep = float(plane) - max(self.drop_m, self.step_reach_m)
+        sunk = below[below[:, 2] < deep]
+        if len(sunk):
+            xs, ys = cells_crossed_below(camera, sunk, deep, origin, world.resolution, shape)
+            crossed[ys, xs] = True
+
+    @staticmethod
+    def _cells(points, world):
+        xs = np.floor((points[:, 0] - world.origin_x) / world.resolution).astype(int)
+        ys = np.floor((points[:, 1] - world.origin_y) / world.resolution).astype(int)
         inside = (xs >= 0) & (xs < world.width) & (ys >= 0) & (ys < world.height)
-        drops[ys[inside], xs[inside]] = True
+        return xs[inside], ys[inside]
 
     def _refuse(self, obs, goal, kind, reason) -> bool:
         self.stats["goals_refused"] += 1
