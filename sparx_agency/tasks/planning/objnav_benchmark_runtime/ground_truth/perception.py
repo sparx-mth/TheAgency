@@ -39,7 +39,6 @@ import numpy as np
 from sparx_agency.core.common.math.bbox import BBox
 from sparx_agency.core.planning.object_search.interfaces import Detection
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.hm3d_categories import table_sha256
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.semantic_frame import (
     instance_extents, instance_mask)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.source import GroundTruthSource
@@ -75,10 +74,10 @@ class GroundTruthDetector:
 
     def health(self) -> Dict[str, object]:
         """The identity the factory pins and records, shaped like the detection service's."""
-        return {"model": "habitat-sim semantic sensor (HM3D-Semantics annotations)",
+        return {"model": "habitat-sim semantic sensor (%s)" % self.source.categories.annotations,
                 "device": "simulator", "classes": list(self.vocabulary),
                 "metadata": {"backend": GROUND_TRUTH_BACKEND,
-                             "checkpoint_sha256": table_sha256(),
+                             "checkpoint_sha256": self.source.categories.sha256(),
                              "detector_config": {"conf_thresh": 0.0, "min_pixels": self.min_pixels,
                                                  "label_table": self.source.label_mapper.name}}}
 
@@ -129,7 +128,8 @@ class GroundTruthSegmenter:
     def health(self) -> Dict[str, object]:
         """The identity the factory records, shaped like the segmentation service's."""
         return {"model": "habitat-sim semantic sensor (instance masks)", "device": "simulator",
-                "metadata": {"backend": GROUND_TRUTH_BACKEND, "checkpoint_sha256": table_sha256(),
+                "metadata": {"backend": GROUND_TRUTH_BACKEND,
+                             "checkpoint_sha256": self.detector.source.categories.sha256(),
                              "segmenter_config": {"mask": "exact instance pixels", "min_pixels": self.detector.min_pixels}}}
 
     def segment(self, rgb: np.ndarray, boxes_xyxy: Sequence[BBox]) -> List[np.ndarray]:

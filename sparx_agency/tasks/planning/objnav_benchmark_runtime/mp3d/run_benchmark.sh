@@ -19,6 +19,12 @@
 #   mp3d/run_benchmark.sh --preflight                       # data + services + configuration check, no episode
 #   mp3d/run_benchmark.sh --status runs/mp3d_v1_val_X       # the live progress of a campaign (or of one scene's directory)
 #   mp3d/run_benchmark.sh --agent falcon-yolo --smoke       # the FALCON + YOLO + closing baseline (no LLM)
+#   mp3d/run_benchmark.sh --perception ground-truth --jobs 6
+#                                                           # the perception UPPER BOUND: habitat-sim's semantic sensor in place of
+#                                                           # YOLO-World and SAM (boxes, labels, instance masks from the .house
+#                                                           # annotations, goals by mpcat40 class: ground_truth/mp3d_categories.py),
+#                                                           # the method otherwise unchanged; output runs/gt_oracle_mp3d_2195ep_<stamp>;
+#                                                           # non-publishable. No detector or segmenter is started.
 #
 # The whole split runs as mp3d/campaign.py: one mp3d.run process per scene, each writing its own complete results
 # directory under the output root, then one aggregate (campaign_summary.json) over the scenes that finished. A scene
@@ -50,7 +56,7 @@
 #                        1536; --jobs max sizes at 1000 unless set). Measure it on an MP3D scene with nvidia-smi.
 set -euo pipefail
 
-usage() { sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,7 +88,8 @@ while [[ $# -gt 0 ]]; do
     --version) VERSION="$2"; shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
     --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
-    --perception) PERCEPTION="$2"; shift 2 ;;                  # service only on MP3D (the semantic-sensor oracle has no mpcat40 table yet)
+    --perception) PERCEPTION="$2"; shift 2 ;;                  # service (default) or ground-truth: benchmark_services.sh PERCEPTION
+    --ground-truth-min-pixels) GT_MIN_PIXELS="$2"; shift 2 ;;  # the oracle's resolution floor (benchmark_services.sh GT_MIN_PIXELS)
     --scene) SCENE="$2"; shift 2 ;;                            # one scene, run directly by mp3d.run
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do SCENES+=("$1"); shift; done ;;   # a subset of the campaign's scenes
     --resume-accepting-changes) ACCEPT=("$1"); shift; while [[ $# -gt 0 && "$1" != --* ]]; do ACCEPT+=("$1"); shift; done ;;
@@ -121,10 +128,12 @@ die() { say "ERROR: $*" >&2; exit 1; }
 case "$VERSION" in v1) SCENE_ROOT=mp3d; PUBLISHED_SCENES=11; PUBLISHED_EPISODES=2195 ;; *) die "--version must be v1 (the one published MP3D ObjectNav dataset)" ;; esac
 MP3D_EPISODES_DIR="${MP3D_EPISODES_DIR:-$DATA/objectnav/mp3d/$VERSION/$SPLIT}"
 [[ -x "$HAB_PY" ]] || die "Habitat interpreter not found at $HAB_PY (set HAB_PY; see mp3d/README.md section 1)"
-[[ "$PERCEPTION" == service ]] || die "--perception must be service on MP3D: the semantic-sensor oracle has no mpcat40 -> goal table here yet"
-[[ -x "$DETECT_PY" ]] || die "detector interpreter not found at $DETECT_PY (set DETECT_PY; see mp3d/README.md section 1)"
-[[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
-[[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS)"
+[[ "$PERCEPTION" == service || "$PERCEPTION" == ground-truth ]] || die "--perception must be service or ground-truth"
+if [[ "$PERCEPTION" == service ]]; then
+  [[ -x "$DETECT_PY" ]] || die "detector interpreter not found at $DETECT_PY (set DETECT_PY; see mp3d/README.md section 1)"
+  [[ -f "$YOLO_WEIGHTS" ]] || die "no YOLO-World weights at $YOLO_WEIGHTS (set YOLO_WEIGHTS or MODELS)"
+  [[ "$SEGMENTATION" == 0 || -f "$SAM_WEIGHTS" ]] || die "SEGMENTATION=1 but no SAM weights at $SAM_WEIGHTS (set SAM_WEIGHTS)"
+fi
 # -- the data: the public episodes are fetched when absent; the licensed scenes are checked and named when absent ------
 if [[ ! -f "$MP3D_EPISODES_DIR/$SPLIT.json.gz" ]]; then
   if [[ "$MP3D_EPISODES_DIR" == "$DATA/objectnav/mp3d/$VERSION/$SPLIT" ]]; then
@@ -136,6 +145,11 @@ if [[ ! -f "$MP3D_EPISODES_DIR/$SPLIT.json.gz" ]]; then
   fi
 fi
 [[ -d "$MP3D_SCENES_DIR/$SCENE_ROOT" ]] || die "no Matterport3D scenes at $MP3D_SCENES_DIR/$SCENE_ROOT (set MP3D_SCENES_DIR to habitat-lab's scene_datasets/; the scenes are licensed -- $HAB_PY -m $ASSETS_MODULE --instructions)"
+if [[ "$PERCEPTION" == ground-truth ]]; then
+  # The publisher's scene dataset config registers each _semantic.ply to its .glb (809 bytes, public); fetched once.
+  "$HAB_PY" -m "$ASSETS_MODULE" --version "$VERSION" --scenes-dir "$MP3D_SCENES_DIR" --fetch-semantic-config \
+    || die "could not install mp3d.scene_dataset_config.json under $MP3D_SCENES_DIR/$SCENE_ROOT (mp3d/README.md, ground-truth perception)"
+fi
 if [[ "$SPLIT" == val ]]; then
   "$HAB_PY" -m "$ASSETS_MODULE" --version "$VERSION" --episodes-dir "$MP3D_EPISODES_DIR" --scenes-dir "$MP3D_SCENES_DIR" --check > /tmp/mp3d_assets_check.$$ \
     || { "$HAB_PY" -c 'import json,sys; r=json.load(open(sys.argv[1])); [print("  " + p) for p in r["problems"]]' /tmp/mp3d_assets_check.$$; rm -f /tmp/mp3d_assets_check.$$; die "the MP3D $SPLIT installation is incomplete (above); $HAB_PY -m $ASSETS_MODULE --instructions"; }
@@ -165,7 +179,13 @@ if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   TAG="${CATEGORY:+${CATEGORY}_}"
   [[ "$AGENT" != rpt ]] && TAG="${AGENT}_${TAG}"
-  if [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/mp3d_${VERSION}_${SCENE}_${TAG}${STAMP}"
+  if [[ "$PERCEPTION" == ground-truth ]]; then
+    # The oracle's directories say what they are at a glance, and the full split by its episode count.
+    if [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/gt_oracle_mp3d_${VERSION}_${SCENE}_${TAG}${STAMP}"
+    elif [[ "$SMOKE" == 1 ]]; then OUTPUT="$RUNS_ROOT/gt_oracle_mp3d_${VERSION}_${SPLIT}_smoke_${TAG}${STAMP}"
+    elif [[ -n "$LIMIT" || ${#SCENES[@]} -gt 0 || -n "$CATEGORY" || "$SPLIT" != val ]]; then OUTPUT="$RUNS_ROOT/gt_oracle_mp3d_${VERSION}_${SPLIT}_${TAG}${LIMIT:+${LIMIT}per-scene_}${STAMP}"
+    else OUTPUT="$RUNS_ROOT/gt_oracle_mp3d_${PUBLISHED_EPISODES}ep_${STAMP}"; fi
+  elif [[ -n "$SCENE" ]]; then OUTPUT="$RUNS_ROOT/mp3d_${VERSION}_${SCENE}_${TAG}${STAMP}"
   elif [[ "$SMOKE" == 1 ]]; then OUTPUT="$RUNS_ROOT/mp3d_${VERSION}_${SPLIT}_smoke_${TAG}${STAMP}"
   elif [[ -n "$LIMIT" ]]; then OUTPUT="$RUNS_ROOT/mp3d_${VERSION}_${SPLIT}_${TAG}${LIMIT}per-scene_${STAMP}"
   else OUTPUT="$RUNS_ROOT/mp3d_${VERSION}_${SPLIT}_${TAG}${STAMP}"; fi
@@ -178,6 +198,7 @@ LOG="$SERVICE_DIR/run.log"
 say "repo $REPO" | tee -a "$LOG"
 say "output $OUTPUT" | tee -a "$LOG"
 say "MP3D $VERSION $SPLIT: episodes $MP3D_EPISODES_DIR, scenes $MP3D_SCENES_DIR/$SCENE_ROOT" | tee -a "$LOG"
+[[ "$PERCEPTION" == ground-truth ]] && say "PERCEPTION UPPER BOUND: ground-truth boxes, labels and instance masks from habitat-sim's semantic sensor; YOLO-World and SAM are bypassed; the method is otherwise unchanged; non-publishable" | tee -a "$LOG"
 git --no-pager rev-parse HEAD > "$SERVICE_DIR/source-commit.txt" 2>/dev/null || true
 git --no-pager diff --no-ext-diff > "$SERVICE_DIR/source-changes.diff" 2>/dev/null || true
 
@@ -188,7 +209,9 @@ objnav_services_up
 # DATA_ARGS name the split (the campaign passes them to its children itself); CHILD_ARGS are the method, the services
 # and the records; VALIDATE_ARGS load a scene, so they join the run but never the mesh-free preflight.
 DATA_ARGS=(--version "$VERSION" --split "$SPLIT" --episodes-dir "$MP3D_EPISODES_DIR" --scenes-dir "$MP3D_SCENES_DIR")
-CHILD_ARGS=(--seed "$SEED" --gpu-device "$GPU_DEVICE" --detector-url "$DETECTOR_URL" --detector-backend yolo_world)
+CHILD_ARGS=(--seed "$SEED" --gpu-device "$GPU_DEVICE")
+if [[ "$PERCEPTION" == ground-truth ]]; then CHILD_ARGS+=("${PERCEPTION_FLAGS[@]}")                      # no detector, no segmenter
+else CHILD_ARGS+=(--detector-url "$DETECTOR_URL" --detector-backend yolo_world); fi
 [[ "$AGENT" == rpt ]] && CHILD_ARGS+=(--explorer frontier)        # as gibson/ and hm3d/: the baseline explores with FALCON only
 [[ "$RECORD" == 1 ]] && CHILD_ARGS+=(--record)
 [[ "$LEAN" == 1 ]] && CHILD_ARGS+=(--lean)
@@ -225,11 +248,19 @@ print("  method: %s | lean records: %s | publishable: %s" % (config["method"]["m
 llm = config["method"].get("llm")
 print("  llm: %s" % ("none (the FALCON + YOLO + closing baseline)" if not llm else
                       "%s (labels) + %s (node oracle) at %s" % (llm["model"], llm["reasoning_model"], llm["base_url"])))
-print("  detector: %s" % config["method"]["detector"]["metadata"].get("backend"))
+if config.get("perception") == "ground-truth":
+    oracle = config["method"]["ground_truth"]
+    print("  perception: GROUND TRUTH -- habitat-sim semantic sensor in place of %s (confidence %.1f, min %d px per instance); "
+          "the run is NOT a benchmark result" % (" and ".join(oracle["bypassed"]), oracle["confidence"], oracle["min_pixels"]))
+else:
+    print("  detector: %s" % config["method"]["detector"]["metadata"].get("backend"))
 print("  renderer: %s" % config.get("renderer", "cuda gpu"))
 segmenter = config["method"].get("segmenter")
-print("  segmentation: %s" % ("ON -- %s on %s at %s" % (segmenter["model"], segmenter["device"], config["method"].get("segmenter_url"))
-                              if segmenter else "off (box depth)"))
+if config.get("perception") == "ground-truth":
+    print("  segmentation: %s" % ("ON -- exact instance masks from the semantic sensor" if segmenter else "off (ground-truth boxes read the box way; policy config)"))
+else:
+    print("  segmentation: %s" % ("ON -- %s on %s at %s" % (segmenter["model"], segmenter["device"], config["method"].get("segmenter_url"))
+                                  if segmenter else "off (box depth)"))
 PY
 if [[ "$PREFLIGHT" == 1 ]]; then say "preflight only: done"; exit 0; fi
 date -u +%FT%TZ > "$SERVICE_DIR/started_utc.txt"

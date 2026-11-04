@@ -23,8 +23,7 @@ from typing import Dict, FrozenSet, Mapping, Optional
 import numpy as np
 
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.hm3d_categories import (
-    PROMPT_CATEGORY, instance_labels, table_sha256, vocabulary_label)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.hm3d_categories import HM3D_TABLE
 
 
 class GroundTruthSource:
@@ -33,10 +32,15 @@ class GroundTruthSource:
     Args:
         label_mapper: The benchmark's label table; its ``vocabulary()`` bounds
             what the oracle may emit.
+        categories: The dataset's category table (``HM3D_TABLE``, the default,
+            or ``mp3d_categories.MP3D_TABLE``): how one scene's annotations
+            become the instances the oracle reports. The only dataset-specific
+            part of the oracle.
     """
 
-    def __init__(self, label_mapper):
+    def __init__(self, label_mapper, categories=HM3D_TABLE):
         self.label_mapper = label_mapper
+        self.categories = categories
         self.vocabulary = tuple(label_mapper.vocabulary())
         self.labels: Dict[int, str] = {}
         self.scene_key: Optional[str] = None
@@ -58,18 +62,9 @@ class GroundTruthSource:
             (the twenty most frequent) -- so a gap in the name table is visible
             in the run directory, not discovered from a score.
         """
-        self.labels = instance_labels(semantic_objects, goal_instances, self.vocabulary)
+        self.labels = self.categories.instance_labels(semantic_objects, goal_instances, self.vocabulary)
         self.scene_key = scene_key
-        unmapped, deferred = Counter(), Counter()
-        for instance, raw in semantic_objects.items():
-            if int(instance) in self.labels:
-                continue
-            word = vocabulary_label(raw)
-            category = PROMPT_CATEGORY.get(word) if word is not None else None
-            if category is not None and category in goal_instances:
-                deferred[category] += 1          # named for a listed goal category, but not one of its goals
-            else:
-                unmapped[str(raw)] += 1
+        deferred, unmapped = self.categories.unlabelled_account(semantic_objects, self.labels, goal_instances)
         self.scene_report = {
             "scene": scene_key,
             "annotated_instances": len(semantic_objects),
@@ -78,7 +73,7 @@ class GroundTruthSource:
             "goal_instances": {category: len(ids) for category, ids in sorted(goal_instances.items())},
             "named_for_a_goal_category_but_not_a_goal": dict(sorted(deferred.items())),
             "unmapped_raw_names": dict(unmapped.most_common(20)),
-            "category_table_sha256": table_sha256(),
+            "category_table_sha256": self.categories.sha256(),
         }
         self._rgb = self._ids = None
         return self.scene_report

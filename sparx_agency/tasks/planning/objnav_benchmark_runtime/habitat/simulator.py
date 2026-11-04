@@ -22,17 +22,21 @@ one declared ground-truth input of the multi-floor search) and
 :attr:`last_collision` (recorder-only). Neither is part of an observation.
 
 **The semantic sensor is opt-in and privileged** (``semantic=True``). It
-renders habitat-sim's per-pixel instance ids from the scene's HM3D-Semantics
-annotation mesh, registered to the depth camera, into :attr:`last_semantic`
-after every :meth:`reset` and :meth:`step`; :meth:`semantic_objects` names
-each instance's raw annotation category. The RGB-D/pose tuple the bridge
-returns is unchanged, so nothing reaches a policy through an observation: the
-ground-truth perception of the benchmark runtime (``ground_truth/``) reads the
-frame beside it and stands in for the detector and the segmenter. Loading the
-annotations needs the publisher's *annotated* scene dataset config
-(``scene_dataset_config``), without which habitat-sim renders every pixel as
-instance 0 and says nothing -- so a scene that loads no semantic objects is
-refused rather than flown blind.
+renders habitat-sim's per-pixel instance ids from the scene's annotation mesh
+(HM3D-Semantics' ``.semantic.glb``, or MP3D's ``_semantic.ply``), registered to
+the depth camera, into :attr:`last_semantic` after every :meth:`reset` and
+:meth:`step`; :meth:`semantic_objects` names each instance's annotation
+category. The RGB-D/pose tuple the bridge returns is unchanged, so nothing
+reaches a policy through an observation: the ground-truth perception of the
+benchmark runtime (``ground_truth/``) reads the frame beside it and stands in
+for the detector and the segmenter. Loading the annotations needs the scene
+dataset config that names them (``scene_dataset_config``), the publisher's in
+both cases: HM3D's annotated config, and MP3D's ``mp3d.scene_dataset_config.json``
+(the sibling ``<scene>.house`` / ``<scene>_semantic.ply``, and the frame that
+registers the semantic mesh to the scene's). Without the right one habitat-sim
+renders instance 0 everywhere, or a misplaced semantic mesh, and says nothing --
+so a scene that loads no semantic objects is refused rather than flown blind,
+and the adapter checks the config exists.
 """
 from __future__ import annotations
 
@@ -139,10 +143,12 @@ class HabitatRGBDSimulator:
         semantic: Render the per-pixel instance-id frame beside RGB-D (see the
             module docstring). Off for a benchmark run; on only for the
             ground-truth perception upper bound.
-        scene_dataset_config: The publisher's annotated scene dataset config
-            (``hm3d_annotated_basis.scene_dataset_config.json``), which tells
-            habitat-sim where each scene's ``.semantic.glb`` / ``.semantic.txt``
-            are. Required with ``semantic=True``.
+        scene_dataset_config: The scene dataset config that names the
+            annotations: HM3D's ``hm3d_annotated_basis.scene_dataset_config.json``
+            (each scene's ``.semantic.glb`` / ``.semantic.txt``), or MP3D's
+            ``mp3d.scene_dataset_config.json`` (the sibling ``.house`` /
+            ``_semantic.ply``). Required with ``semantic=True``; the adapter
+            names it, never this class.
     """
 
     def __init__(self, camera, actions, radius_m, allow_sliding, gpu_device=0, *,
@@ -172,6 +178,7 @@ class HabitatRGBDSimulator:
         self._scene = None
         self._structure = None  # per-scene navmesh storeys and stair connectors
         self._semantic_objects = None  # per-scene {instance id: raw annotation category}
+        self._semantic_names = {}      # per-scene {naming scheme: {instance id: name}}, see semantic_objects()
         self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
         self.last_sensor_alignment = None
         #: Privileged, refreshed every _observe() under ``semantic=True``: the
@@ -233,6 +240,7 @@ class HabitatRGBDSimulator:
                         "measured on it" % scene_path)
             self._scene = str(scene_path)
             self._structure = None
+            self._semantic_names = {}
             self._semantic_objects = self._read_semantic_objects(scene_path) if self.semantic else None
         self._sim.seed(seed)
         raw_position = np.asarray(position, dtype=np.float32)
@@ -275,21 +283,38 @@ class HabitatRGBDSimulator:
             self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
         return self._structure
 
-    def semantic_objects(self):
-        """``{instance id: raw annotation category}`` of the loaded scene, under ``semantic=True``.
+    def semantic_objects(self, naming=None):
+        """``{instance id: annotation category}`` of the loaded scene, under ``semantic=True``.
 
         The ids are the ones :attr:`last_semantic` renders and the ones the
         published episodes' goal rows name as ``object_id``; the category is
-        the annotator's own word (``"armchair"``, ``"tv stand"``), not a
-        detector label -- the mapping into the method's vocabulary is the
-        ground-truth perception's, not the bridge's.
+        the annotation's word (``"armchair"``, ``"tv stand"``), not a detector
+        label -- the mapping into the method's vocabulary is the ground-truth
+        perception's, not the bridge's.
+
+        Args:
+            naming: ``None`` (default) for habitat-sim's default category
+                name -- HM3D's raw name, MP3D's mpcat40 class. A dataset whose
+                categories carry several names passes the scheme it wants to
+                ``category.name()``: MP3D's ``"raw"`` (the ``.house`` file's
+                raw category) or ``"mpcat40"``. Same instance ids either way.
 
         Raises:
             EnvContractError: No scene is loaded, or the sensor is off.
         """
         if self._sim is None or self._semantic_objects is None:
             raise EnvContractError("Simulator not reset with semantic=True; there are no annotations to read")
-        return self._semantic_objects
+        if naming is None:
+            return self._semantic_objects
+        if naming not in self._semantic_names:
+            names = {}
+            for obj in self._sim.semantic_scene.objects or ():
+                if obj is None or int(obj.semantic_id) not in self._semantic_objects:
+                    continue
+                names[int(obj.semantic_id)] = (
+                    str(obj.category.name(naming)).strip().lower() if obj.category is not None else "")
+            self._semantic_names[naming] = names
+        return self._semantic_names[naming]
 
     def _read_semantic_objects(self, scene_path):
         """Read the loaded scene's annotation table, refusing a scene that has none.
@@ -318,7 +343,9 @@ class HabitatRGBDSimulator:
             raise EnvContractError(
                 "habitat-sim loaded no semantic annotations for %s: the scene dataset config (%s) must be the "
                 "publisher's annotated one and the scene's .semantic.glb / .semantic.txt must sit beside the mesh "
-                "(HM3D-Semantics annotations; hm3d.assets --instructions names the download)"
+                "(HM3D-Semantics annotations; hm3d.assets --instructions names the download), or, for MP3D, "
+                "<scene>.house and <scene>_semantic.ply beside <scene>.glb (mp3d_habitat.zip) under "
+                "mp3d.scene_dataset_config.json"
                 % (scene_path, self.scene_dataset_config))
         return objects
 

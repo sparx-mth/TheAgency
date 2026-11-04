@@ -17,12 +17,20 @@ Scenes
     **never** downloads a scene and never handles a credential; it reports
     what is present and what is missing.
 
+Semantic config
+    ``mp3d.scene_dataset_config.json`` (809 bytes, public): the publisher's
+    scene dataset config, which registers each ``_semantic.ply`` to its
+    ``.glb``. Only ``--perception ground-truth`` needs it; this module **can
+    download it** (``--fetch-semantic-config``) and the launcher does so for a
+    ground-truth run.
+
 Where things go (``--data-root``, default ``~/datasets``)::
 
     <root>/objectnav/mp3d/v1/<split>/<split>.json.gz      episodes
     <root>/objectnav/mp3d/v1/<split>/content/<scene>.json.gz
     <root>/scene_datasets/mp3d/<scene>/<scene>.glb         scenes
     <root>/scene_datasets/mp3d/<scene>/<scene>.navmesh
+    <root>/scene_datasets/mp3d/mp3d.scene_dataset_config.json   ground-truth perception only
 """
 from __future__ import annotations
 
@@ -35,7 +43,8 @@ import tempfile
 import urllib.request
 import zipfile
 
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import MP3DDataset
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import (
+    SEMANTIC_SCENE_DATASET_CONFIG, SEMANTIC_SCENE_DATASET_CONFIG_URL, MP3DDataset)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import (
     PROTOCOLS, PUBLISHED_VAL, protocol_for)
 
@@ -227,6 +236,35 @@ def fetch_episodes(data_root, protocol, *, url=None, keep_archive=False, log=pri
     return split_dir
 
 
+def fetch_semantic_config(scenes_root, protocol, *, url=SEMANTIC_SCENE_DATASET_CONFIG_URL, log=print):
+    """Install the publisher's ``mp3d.scene_dataset_config.json`` beside the scenes; idempotent.
+
+    Returns:
+        The installed path, ``<scenes_root>/mp3d/mp3d.scene_dataset_config.json``.
+
+    Raises:
+        FileNotFoundError: The scenes are not installed under ``scenes_root``.
+        RuntimeError: The download is not a scene dataset config with semantic frames.
+    """
+    release = Path(scenes_root).expanduser() / protocol.scene_root_name
+    target = release / SEMANTIC_SCENE_DATASET_CONFIG
+    if target.is_file() and target.stat().st_size > 0:
+        log("semantic config already present: %s" % target)
+        return target
+    if not release.is_dir():
+        raise FileNotFoundError("No MP3D scenes at %s; install %s first" % (release, SCENE_ARCHIVE))
+    log("downloading %s -> %s" % (url, target))
+    with urllib.request.urlopen(url, timeout=60) as response:
+        body = response.read()
+    attributes = json.loads(body.decode("utf-8")).get("stages", {}).get("default_attributes", {})
+    if "semantic_up" not in attributes or "semantic_asset" not in attributes:
+        raise RuntimeError("%s is not the MP3D scene dataset config (no semantic frame in it)" % url)
+    partial = target.with_suffix(".part")
+    partial.write_bytes(body)
+    partial.rename(target)
+    return target
+
+
 def download_instructions(protocol, data_root):
     """What to run (episodes) and what to request (scenes), ready to paste."""
     root = Path(data_root).expanduser()
@@ -244,7 +282,12 @@ def download_instructions(protocol, data_root):
         "mkdir -p %s/scene_datasets" % root,
         "unzip -q %s -d %s/scene_datasets      # -> %s/scene_datasets/mp3d/<scene>/" % (SCENE_ARCHIVE, root, root),
         "",
-        "# ---- 3. Verify before running anything ----",
+        "# ---- 3. Ground-truth perception only: the publisher's semantic config (public; the launcher does this) ----",
+        "python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.assets \\",
+        "  --version %s --data-root %s --fetch-semantic-config" % (version, root),
+        "#   -> %s/scene_datasets/mp3d/%s" % (root, SEMANTIC_SCENE_DATASET_CONFIG),
+        "",
+        "# ---- 4. Verify before running anything ----",
         "python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.assets \\",
         "  --version %s --data-root %s --check" % (version, root),
         "",
@@ -265,6 +308,9 @@ def parser():
     p.add_argument("--check", action="store_true")
     p.add_argument("--fetch-episodes", action="store_true",
                    help="Download and unpack the public episode archive under --data-root (no credentials)")
+    p.add_argument("--fetch-semantic-config", action="store_true",
+                   help="Install the publisher's mp3d.scene_dataset_config.json beside the scenes (public; "
+                        "--perception ground-truth needs it)")
     p.add_argument("--instructions", action="store_true")
     return p
 
@@ -274,7 +320,11 @@ def main(argv=None):
     protocol = protocol_for(args.version).with_split(args.split)
     if args.fetch_episodes:
         fetch_episodes(args.data_root, protocol, log=lambda m: print(m, file=sys.stderr))
-    if args.instructions or not (args.check or args.fetch_episodes):
+    if args.fetch_semantic_config:
+        fetch_semantic_config(args.scenes_dir or scenes_dir(args.data_root), protocol,
+                              log=lambda m: print(m, file=sys.stderr))
+    fetched = args.fetch_episodes or args.fetch_semantic_config
+    if args.instructions or not (args.check or fetched):
         print(download_instructions(protocol, args.data_root))
         if not args.check:
             return 0

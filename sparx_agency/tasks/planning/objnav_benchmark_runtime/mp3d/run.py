@@ -161,7 +161,7 @@ def _runtime(issues):
     return packages
 
 
-def _method(args, protocol):
+def _method(args, protocol, ground_truth=None):
     """Build the search policy and prove its services are the ones recorded.
 
     One builder for every benchmark (``policy_factory.build_policy``). The only
@@ -169,10 +169,52 @@ def _method(args, protocol):
     own agent -- body height and radius -- so every method knob (clearance,
     stop distance, closing, peeks, ...) is ``RPTSettings``' default here
     exactly as it is on Gibson and HM3D. Nothing here came from an MP3D score.
+    ``ground_truth`` is the semantic-frame source under ``--perception
+    ground-truth``, built by :func:`prepare` beside the environment.
     """
     embodiment = {"body_height_m": protocol.agent_height_m,
                   "body_radius_m": protocol.agent_radius_m}
-    return build_policy(args, mp3d_label_mapper(), defaults=embodiment)
+    return build_policy(args, mp3d_label_mapper(), defaults=embodiment, ground_truth=ground_truth)
+
+
+def ground_truth_issues(dataset, episode_ids=None):
+    """Why the ground-truth perception could not run here: the annotation files it needs and lacks.
+
+    habitat-sim renders instance 0 everywhere when a scene's ``.house`` or
+    ``_semantic.ply`` is absent, and misplaces the semantic mesh without the
+    publisher's ``mp3d.scene_dataset_config.json`` -- silently both times -- so
+    the config and every scene's files are checked before a renderer exists.
+
+    The release's ``category_to_mp3d_category_id`` must also be mpcat40.tsv's
+    indices: the oracle labels goal classes by mpcat40 name.
+
+    Returns:
+        A list of complaints, empty when every annotation is present.
+    """
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.mp3d_categories import check_release
+    try:
+        if not dataset.category_to_mp3d_category_id:
+            raise ValueError("the release has no category_to_mp3d_category_id to tie its goals to mpcat40 classes")
+        check_release(dataset.category_to_mp3d_category_id)
+    except ValueError as exc:
+        return [str(exc)]
+    try:
+        dataset.semantic_scene_dataset_config()
+    except (OSError, ValueError) as exc:
+        return [str(exc)]
+    seen, missing = set(), []
+    episodes = (dataset.episodes[i] for i in episode_ids) if episode_ids is not None else dataset.episodes.values()
+    for episode in episodes:
+        if episode.scene_key in seen:
+            continue
+        seen.add(episode.scene_key)
+        try:
+            dataset.semantic_assets(episode)
+        except (OSError, ValueError) as exc:
+            missing.append(str(exc))
+    if not missing:
+        return []
+    return ["%d of %d selected scenes lack their Matterport3D annotations (first: %s)" % (len(missing), len(seen), missing[0])]
 
 
 def _gpu_gate(args):
@@ -215,13 +257,6 @@ def prepare(args):
         issues.append("--save-frames keeps the recorder's frames and so needs --record")
     if args.exclude_unreachable and not args.validate_starts:
         issues.append("--exclude-unreachable needs --validate-starts to find them")
-    if args.perception == PERCEPTION_GROUND_TRUTH:
-        # The semantic-sensor oracle reads an annotation table mapped onto the goal
-        # categories (ground_truth/hm3d_categories.py). MP3D's mpcat40 table has no
-        # such mapping here yet, so the upper bound is refused rather than run blind.
-        issues.append("--perception ground-truth is not available on MP3D: the adapter has no "
-                      "mpcat40 -> goal-category table for the semantic sensor. Run the benchmark "
-                      "with the detector service (--perception service)")
     if args.record:
         try:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import (
@@ -235,6 +270,8 @@ def prepare(args):
         issues.append("Rendering GPU: %s" % exc)
     runtime = _runtime(issues)
     sim_match = runtime.get("habitat-sim") == protocol.reference_habitat_sim_version
+    oracle = args.perception == PERCEPTION_GROUND_TRUTH
+    ground_truth = None
     dataset = env = policy = None
     ids, method, manifest = (), {}, None
     excluded, start_distances = [], {}
@@ -249,17 +286,27 @@ def prepare(args):
                                   full=not subset, scenes=args.scenes,
                                   episodes_per_scene=args.episodes_per_scene)
             manifest = dataset.manifest(hash_scenes=not args.skip_scene_hashes)
-            # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
-            # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
-            env = MP3DEnv(dataset, protocol, args.seed,
-                          -1 if args.software_render else args.gpu_device)
-            pool = episodes_of_category(env.episode_ids(), dataset.episodes, args.category, CATEGORIES)
+            if oracle:
+                # The annotations are checked before a renderer exists: habitat-sim says nothing when they are absent.
+                annotation_issues = ground_truth_issues(dataset)
+                issues.extend("Ground-truth perception: %s" % issue for issue in annotation_issues)
+                if not annotation_issues:
+                    from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.mp3d_categories import MP3D_TABLE
+                    from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.source import GroundTruthSource
+                    ground_truth = GroundTruthSource(mp3d_label_mapper(), MP3D_TABLE)
+            if not oracle or ground_truth is not None:
+                # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
+                # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.
+                env = MP3DEnv(dataset, protocol, args.seed,
+                              -1 if args.software_render else args.gpu_device, ground_truth=ground_truth)
+            pool = episodes_of_category(dataset.episode_ids() if env is None else env.episode_ids(),
+                                        dataset.episodes, args.category, CATEGORIES)
             if args.episode_ids:
                 ids = explicit_episodes(args.episode_ids, pool)
             else:
                 ids = select_episodes(pool, args.limit, args.shards, args.shard_index,
                                       shuffle_seed=args.seed if args.shuffle else None)
-            if args.validate_starts:
+            if args.validate_starts and env is not None:
                 start_distances = env.validate_starts(ids)
                 excluded = list(env.unreachable_episode_ids)
                 if excluded and not args.exclude_unreachable:
@@ -274,7 +321,9 @@ def prepare(args):
         except (OSError, ValueError, KeyError, ImportError) as exc:
             issues.append("Dataset/scorer: %s" % exc)
     try:
-        policy, method = _method(args, protocol)
+        if oracle and ground_truth is None:
+            raise RuntimeError("ground-truth perception has no annotations to read (see the issues above)")
+        policy, method = _method(args, protocol, ground_truth)
         if args.agent in ("rpt", "falcon-yolo"):
             policy.target_projector = getattr(env, "target_projector", None)
             method["target_navmesh_projection"] = policy.target_projector is not None
@@ -336,6 +385,9 @@ def prepare(args):
             if env.navmesh_by_scene:
                 config["navmesh_by_scene"] = dict(sorted(env.navmesh_by_scene.items()))
     config["selected_episode_ids"] = list(ids)
+    if oracle:
+        # Only the oracle's record carries the key, as on HM3D: a service run's config stays what it was.
+        config["perception"] = PERCEPTION_GROUND_TRUTH
     return env, policy, mp3d_label_mapper(), config, issues
 
 

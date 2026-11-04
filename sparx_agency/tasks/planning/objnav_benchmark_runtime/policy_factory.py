@@ -88,7 +88,7 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
     oracle = getattr(args, "perception", PERCEPTION_SERVICE) == PERCEPTION_GROUND_TRUTH
     if oracle and ground_truth is None:
         raise RuntimeError("--perception ground-truth needs an environment that publishes the simulator's semantic "
-                           "frames (the HM3D adapter); this entrypoint has none to offer")
+                           "frames (the HM3D or MP3D adapter); this entrypoint has none to offer")
     if ground_truth is not None and not oracle:
         raise ValueError("a ground-truth source was given but --perception is %r" % (args.perception,))
     if oracle and getattr(args, "segmenter_url", None):
@@ -205,7 +205,7 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
                     ground_truth={"bypassed": ["detector", "segmenter"] if segmenter is not None else ["detector"],
                                   "min_pixels": detector.min_pixels, "confidence": 1.0,
                                   "goal_instances": "the publisher's goal object ids per scene and category",
-                                  "context_labels": "HM3D-Semantics raw names via ground_truth/hm3d_categories.py",
+                                  "context_labels": ground_truth.categories.context_labels,
                                   "category_table_sha256": identities["detector"]["metadata"]["checkpoint_sha256"]})
         if segmenter is not None:
             info.update(segmenter=identities["segmenter"], segmenter_url=None)

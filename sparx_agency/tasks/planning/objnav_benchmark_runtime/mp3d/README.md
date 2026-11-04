@@ -56,6 +56,51 @@ started scenes continued). `--status runs/X` prints the live progress. Run
 `run_benchmark.sh --help` for every option (`--scene`, `--limit`, `--smoke`,
 `--record`, `--category`, `--episode-ids-file`, `--agent falcon-yolo`, ...).
 
+## Ground-truth perception (the upper bound)
+
+```bash
+sparx_agency/tasks/planning/objnav_benchmark_runtime/mp3d/run_benchmark.sh --perception ground-truth --jobs 6
+```
+
+As on HM3D: habitat-sim's semantic sensor answers the detector and segmenter
+contracts (tight boxes, labels, exact instance masks, confidence 1.0; instances
+under 64 px not reported), the method is otherwise unchanged, no detector or SAM
+is started, and the run is **non-publishable**. Output defaults to
+`runs/gt_oracle_mp3d_2195ep_<stamp>`.
+
+**The semantic config is required.** The scenes' `_semantic.ply` and `.glb` are
+in different frames; the publisher's `mp3d.scene_dataset_config.json` registers
+one to the other, and habitat-sim's built-in `"default"` does not (measured
+2026-11-04, habitat-sim 0.2.4: 8 of 418 rendered ids lay on their objects in
+X7HyMhZNoso under `"default"`, 604 of 630 under the config). The launcher installs
+it (`assets.py --fetch-semantic-config`, 809 bytes, public) into
+`$MP3D_SCENES_DIR/mp3d/`, and the preflight refuses a ground-truth run without it.
+It changes nothing a service run sees: navmesh, RGB, depth and poses are
+identical with and without it.
+
+**The label table** (`../ground_truth/mp3d_categories.py`), and where each part
+comes from:
+
+| Part | Source |
+| --- | --- |
+| The 21 goal classes and their mpcat40 ids | `objectnav_mp3d_v1`'s `category_to_mp3d_category_id`, equal to Matterport's `metadata/mpcat40.tsv` (checked at preflight) |
+| Each instance's raw name and mpcat40 class | the scene's `.house` `C`/`O` lines, read by habitat-sim |
+| Which instances are a scene's goals | the episodes' `goals_by_category[...].object_id` (= `.house` object index = rendered id; all 1,316 val goals checked) |
+| Context words (doors, stairs, appliances, ...) | mpcat40 class where it is one word (door, stairs, mirror, curtain), else every raw spelling Matterport's `metadata/category_mapping.tsv` cleans to the word |
+
+Tiers: the publisher's goal ids first (an instance of a goal class the episodes
+do not list is not reported, as on HM3D); then, in a scene with no episodes of a
+class, its instances by mpcat40 name; context words never land on a goal-class
+instance. Object 0 renders as background and is never reported (no val goal is
+object 0).
+
+**What the official classes contain** (raw names of the 1,316 val goals): `table`
+includes desks, side and coffee tables; `chest_of_drawers` is mostly nightstands;
+`cushion` mostly pillows; `stool` includes ottomans; `bed` includes headboards;
+`shower` goals are mostly shower walls and floors; `tv_monitor` (4 goals) includes
+a bulletin board. And unlisted same-class instances are common for `picture`
+(253 against 114 goals) and `cabinet` (37 against 125): they are not reported.
+
 ## 1. Setup & downloads
 
 ### 1.1 Environments
@@ -157,9 +202,10 @@ any selection but the complete split.
   `navmesh` was changed.
 * *"the detector at ... serves another vocabulary"* — a Gibson or HM3D detector
   is on the MP3D port; set `DETECTOR_PORT`.
-* *"--perception must be service on MP3D"* — the semantic-sensor perception
-  upper bound of HM3D needs an annotation→goal table (mpcat40 for MP3D), which
-  this adapter does not have yet.
+* *"Missing .../mp3d.scene_dataset_config.json"* (ground-truth perception) —
+  `assets.py --fetch-semantic-config`; the launcher does it itself.
+* *"... lack their Matterport3D annotations"* — a scene's `.house` or
+  `_semantic.ply` is missing; both ship in `mp3d_habitat.zip`.
 
 ## Protocol reference
 
@@ -173,7 +219,7 @@ evidence and the deviations we name rather than apply.
 | --- | --- |
 | `run_benchmark.sh` | the one-button launcher (data → services → preflight → campaign → reports) |
 | `protocol.py` | every MP3D number, versioned; `MP3D_V1`, `protocol_for` |
-| `dataset.py` | the published release: episodes, goals, scene assets, manifest |
+| `dataset.py` | the published release: episodes (sharded, or val_mini's single file), goals, scene assets, semantic assets and config, manifest |
 | `env.py` | the simulation driver behind `ObjNavEnv`: reset, step, measure, start validation |
 | `run.py` | preflight and evaluation CLI (the shared `run_evaluation`) |
 | `campaign.py` | one process per scene, the aggregate; reuses `hm3d/scene_pool.py` and `hm3d/smoke_plan.py` |
@@ -181,4 +227,5 @@ evidence and the deviations we name rather than apply.
 | `report.py`, `sota.py` | `comparison.md` / `audit.json`, the 0.2 m re-scoring, the transcribed paper rows |
 | `frozen_eval.py` | freeze a configuration, run the published split under it |
 | `smooth_replay.py` | visualization-only smooth replay of a recording |
-| `../tests/test_mp3d*.py` | the adapter without Matterport3D, habitat-sim or a GPU |
+| `../ground_truth/mp3d_categories.py` | the ground-truth perception's MP3D table (mpcat40 goal classes, context words) |
+| `../tests/test_mp3d*.py` | the adapter without Matterport3D, habitat-sim or a GPU (`test_mp3d_ground_truth.py`: the oracle path) |

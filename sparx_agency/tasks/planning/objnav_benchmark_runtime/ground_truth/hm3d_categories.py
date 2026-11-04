@@ -29,6 +29,7 @@ the frozen run configuration so a changed table is a changed experiment.
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 import json
 from typing import Dict, FrozenSet, Mapping, Optional
 
@@ -151,3 +152,59 @@ def instance_labels(semantic_objects: Mapping[int, str],
             continue                      # the publisher has spoken for this category in this scene
         labels[instance] = word
     return labels
+
+
+def unlabelled_account(semantic_objects: Mapping[int, str], labels: Mapping[int, str],
+                       goal_instances: Mapping[str, FrozenSet[int]]):
+    """The instances the oracle will not report, counted for the scene report.
+
+    Returns:
+        ``(deferred, unmapped)``: per goal category, instances named for a
+        category the publisher lists in the scene but not among its goals;
+        and per raw name, the instances the table has no word for.
+    """
+    unmapped, deferred = Counter(), Counter()
+    for instance, raw in semantic_objects.items():
+        if int(instance) in labels:
+            continue
+        word = vocabulary_label(raw)
+        category = PROMPT_CATEGORY.get(word) if word is not None else None
+        if category is not None and category in goal_instances:
+            deferred[category] += 1          # named for a listed goal category, but not one of its goals
+        else:
+            unmapped[str(raw)] += 1
+    return deferred, unmapped
+
+
+class HM3DCategoryTable:
+    """The HM3D-Semantics category table behind the :class:`~.source.GroundTruthSource` seam.
+
+    A category table is what makes the oracle dataset-specific: it turns one
+    scene's annotations and the publisher's goal ids into the instances the
+    oracle reports (``instance_labels``), accounts for the rest
+    (``unlabelled_account``) and names itself for the frozen configuration
+    (``sha256``, ``annotations``, ``context_labels``). MP3D's is
+    :class:`~.mp3d_categories.MP3DCategoryTable`.
+    """
+
+    name = "hm3d"
+    #: What the detector identity says answered (recorded in every run's configuration).
+    annotations = "HM3D-Semantics annotations"
+    #: How the context vocabulary is labelled, for the method record.
+    context_labels = "HM3D-Semantics raw names via ground_truth/hm3d_categories.py"
+
+    @staticmethod
+    def instance_labels(semantic_objects, goal_instances, vocabulary):
+        return instance_labels(semantic_objects, goal_instances, vocabulary)
+
+    @staticmethod
+    def unlabelled_account(semantic_objects, labels, goal_instances):
+        return unlabelled_account(semantic_objects, labels, goal_instances)
+
+    @staticmethod
+    def sha256():
+        return table_sha256()
+
+
+#: The table every HM3D oracle reads; the source's default.
+HM3D_TABLE = HM3DCategoryTable()

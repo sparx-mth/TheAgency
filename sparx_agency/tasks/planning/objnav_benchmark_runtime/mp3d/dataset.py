@@ -10,7 +10,9 @@ Layout, as habitat-lab's ``ObjectNavDatasetV1`` reads it (``objectnav_mp3d_v1.zi
     <episodes_dir>/content/<scene>.json.gz         one scene's episodes and goals
 
 where ``<episodes_dir>`` is the split directory, e.g.
-``.../objectnav/mp3d/v1/val``. A shard whose episodes carry their ``goals``
+``.../objectnav/mp3d/v1/val``. ``val_mini`` ships its episodes and
+``goals_by_category`` in ``<split>.json.gz`` itself, with no ``content/``;
+that file is read as one shard per scene, numbered the same way. A shard whose episodes carry their ``goals``
 inline (the release predates habitat-lab's ``goals_by_category``
 de-duplication, and ``ObjectNavDatasetV1.dedup_goals`` folds them at load) is
 read exactly as one that already has ``goals_by_category``.
@@ -64,6 +66,16 @@ def published_counts(protocol):
 #: to the scenes directory. The MP3D v1 rows do not carry it -- they start
 #: straight at ``mp3d/`` -- but the strip is what habitat-lab does.
 SCENE_PATH_PREFIX = "data/scene_datasets/"
+
+#: The publisher's scene dataset config for the Habitat MP3D release, installed
+#: as ``<scenes_dir>/mp3d/<this name>`` (habitat-sim's DATASETS.md). It is what
+#: registers each scene's ``_semantic.ply`` to its ``.glb``: the meshes are in
+#: different frames (``up``/``front`` against ``semantic_up``/``semantic_front``),
+#: and habitat-sim's built-in ``"default"`` dataset leaves the semantic mesh
+#: misplaced (measured 2026-11-04, habitat-sim 0.2.4: 8 of 418 rendered ids on
+#: their objects in X7HyMhZNoso, against 604 of 630 under this config).
+SEMANTIC_SCENE_DATASET_CONFIG = "mp3d.scene_dataset_config.json"
+SEMANTIC_SCENE_DATASET_CONFIG_URL = "http://dl.fbaipublicfiles.com/habitat/mp3d/config_v1/mp3d.scene_dataset_config.json"
 
 
 def _vector(value, size, name):
@@ -124,6 +136,27 @@ class MP3DEpisode:
 def _read_json_gz(path):
     with gzip.open(path, "rt", encoding="utf-8") as stream:
         return json.load(stream)
+
+
+def _inline_shards(index, index_file):
+    """An index file that carries the episodes itself (val_mini), cut into one shard per scene.
+
+    Returns:
+        ``[(scene, index_file, payload)]`` in first-appearance order; each
+        payload holds that scene's rows, in file order, and its goal lists.
+    """
+    rows_by_scene = {}
+    for row in index["episodes"]:
+        scene = Path(str(row.get("scene_id", ""))).name[:-len(".glb")]
+        rows_by_scene.setdefault(scene, []).append(row)
+    goals = index.get("goals_by_category")
+    shards = []
+    for scene, rows in rows_by_scene.items():
+        payload = {"episodes": rows}
+        if goals is not None:
+            payload["goals_by_category"] = {k: v for k, v in goals.items() if k.startswith(scene + ".glb_")}
+        shards.append((scene, index_file, payload))
+    return shards
 
 
 def _episode(row, index, stem, scene_root_name):
@@ -236,15 +269,22 @@ class MP3DDataset:
         if scene_table is not None and set(scene_table) != set(self.category_to_task_category_id):
             raise ValueError("category_to_task_category_id and category_to_mp3d_category_id "
                              "name different categories")
-        files = sorted((self.episodes_dir / "content").glob("*.json.gz"))
+        #: The release's goal -> mpcat40 class index table; the ground-truth oracle checks it (mp3d_categories).
+        self.category_to_mp3d_category_id = dict(scene_table or {})
+        shards = [(p.name[:-len(".json.gz")], p, None)
+                  for p in sorted((self.episodes_dir / "content").glob("*.json.gz"))]
+        if not shards and index.get("episodes"):
+            # val_mini ships its episodes and goals in <split>.json.gz itself, with no content/.
+            shards = _inline_shards(index, index_file)
         if scenes is not None:
             wanted = {str(s) for s in scenes}
-            files = [p for p in files if p.name[:-len(".json.gz")] in wanted]
-            missing = sorted(wanted - {p.name[:-len(".json.gz")] for p in files})
+            shards = [s for s in shards if s[0] in wanted]
+            missing = sorted(wanted - {s[0] for s in shards})
             if missing:
                 raise FileNotFoundError("No content shard for: %s" % ", ".join(missing))
-        if not files:
+        if not shards:
             raise FileNotFoundError("No content/*.json.gz under %s" % self.episodes_dir)
+        files = shards
         expected = published_counts(protocol)
         if full and not expected:
             raise ValueError(
@@ -260,17 +300,18 @@ class MP3DDataset:
         self.goals: Dict[str, list] = {}
         self.scene_counts: Dict[str, int] = {}
         self._assets = [index_file]
-        for path in files:
-            self._load_shard(path)
+        for stem, path, payload in files:
+            self._load_shard(stem, path, payload)
         if full and expected and len(self.episodes) != expected["episodes"]:
             raise ValueError(
                 "MP3D %s %s is documented as %d episodes; found %d."
                 % (protocol.dataset_version, split, expected["episodes"],
                    len(self.episodes)))
 
-    def _load_shard(self, path):
-        stem = path.name[:-len(".json.gz")]
-        payload = _read_json_gz(path)
+    def _load_shard(self, stem, path, payload=None):
+        """One scene's rows and goals: a ``content/`` file, or ``payload`` cut from an inline index."""
+        if payload is None:
+            payload = _read_json_gz(path)
         rows = payload.get("episodes")
         if not isinstance(rows, list) or not rows:
             raise ValueError("%s holds no episodes" % path)
@@ -280,7 +321,8 @@ class MP3DDataset:
         inline = goals_by_category is None
         if inline:
             goals_by_category = {}
-        self._assets.append(path)
+        if path not in self._assets:
+            self._assets.append(path)
         for index, row in enumerate(rows):
             episode = _episode(row, index, stem, self.protocol.scene_root_name)
             self.scene_counts[episode.scene_key] = index + 1
@@ -333,6 +375,66 @@ class MP3DDataset:
         if glb not in self._assets:
             self._assets.extend((glb, navmesh))
         return glb, navmesh
+
+    def semantic_assets(self, episode):
+        """The scene's annotation files, both checked to exist: ``(<scene>.house, <scene>_semantic.ply)``.
+
+        habitat-sim reads them beside ``<scene>.glb`` for the semantic sensor,
+        and renders instance 0 everywhere without saying so when they are
+        absent -- so the ground-truth perception checks them before a renderer
+        exists. Both ship in ``mp3d_habitat.zip``.
+
+        Raises:
+            FileNotFoundError: Either is missing or empty.
+            ValueError: This dataset was loaded without a scenes directory.
+        """
+        glb, _ = self.scene_assets(episode)
+        stem = glb.name[:-len(".glb")]
+        house, ply = glb.with_name(stem + ".house"), glb.with_name(stem + "_semantic.ply")
+        for path in (house, ply):
+            if not path.is_file() or path.stat().st_size == 0:
+                raise FileNotFoundError("Missing or empty MP3D annotation: %s. mp3d_habitat.zip ships <scene>.house "
+                                        "and <scene>_semantic.ply beside <scene>.glb" % path)
+        return house, ply
+
+    def semantic_scene_dataset_config(self):
+        """The publisher's MP3D scene dataset config, checked to exist (see :data:`SEMANTIC_SCENE_DATASET_CONFIG`).
+
+        Raises:
+            FileNotFoundError: Not installed; the message names the URL and the fetch command.
+            ValueError: This dataset was loaded without a scenes directory.
+        """
+        if self.scenes_dir is None:
+            raise ValueError("This dataset was loaded without scene assets")
+        path = self.scenes_dir / self.protocol.scene_root_name / SEMANTIC_SCENE_DATASET_CONFIG
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(
+                "Missing %s: the semantic sensor needs the publisher's MP3D scene dataset config to register "
+                "<scene>_semantic.ply to <scene>.glb (%s; python -m "
+                "sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.assets --scenes-dir %s "
+                "--fetch-semantic-config)" % (path, SEMANTIC_SCENE_DATASET_CONFIG_URL, self.scenes_dir))
+        return path
+
+    def goal_instances(self, scene_key):
+        """``{category: frozenset(object_id)}``: the instances the publisher counts as goals in a scene.
+
+        Every goal row's ``object_id`` is the scene's ``.house`` object index,
+        the id the semantic sensor renders (``object_name`` is habitat-sim's
+        ``<level>_<region>_<object>`` for the same object). Only categories
+        with loaded episodes in the scene are listed. The same contract as
+        ``HM3DDataset.goal_instances``, over this loader's goal keys.
+
+        Privileged: feeds the ground-truth perception upper bound only, never
+        a method's observation.
+
+        Raises:
+            KeyError: No episode of ``scene_key`` is loaded.
+        """
+        keys = {e.goals_key: e.category for e in self.episodes.values() if e.scene_key == scene_key}
+        if not keys:
+            raise KeyError("No episodes of scene %r are loaded" % (scene_key,))
+        return {category: frozenset(int(row["object_id"]) for row in self.goals[key])
+                for key, category in sorted(keys.items(), key=lambda item: item[1])}
 
     def episode_ids(self):
         """Every loaded episode identity, in publisher order."""

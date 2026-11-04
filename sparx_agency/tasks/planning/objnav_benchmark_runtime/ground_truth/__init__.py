@@ -11,6 +11,8 @@ from spatial-reasoning and navigation error.
 Modules
     ``semantic_frame``   instance boxes and masks from one HxW instance-id frame (numpy only)
     ``hm3d_categories``  HM3D-Semantics raw category names -> the method's detector vocabulary
-    ``source``           the privileged hand-off: per-scene instance labels and the current frame
+    ``mp3d_categories``  Matterport3D ``.house`` names and mpcat40 classes -> the MP3D vocabulary
+    ``source``           the privileged hand-off: per-scene instance labels and the current frame;
+                         the dataset's category table (``HM3D_TABLE`` / ``MP3D_TABLE``) is its one seam
     ``perception``       ``GroundTruthDetector`` / ``GroundTruthSegmenter``, the two contracts
 """
