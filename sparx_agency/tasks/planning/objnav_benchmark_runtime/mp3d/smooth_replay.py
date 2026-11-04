@@ -1,83 +1,103 @@
-"""Visualization-only smooth replay of one recorded MP3D episode.
+"""Visualization-only smooth replay of a finished MP3D recording.
 
-Interpolated frames never enter policy observations, actions or scoring: this
-writes a separate ``smooth_rgb.mp4`` beside the original recording and touches
-nothing else. Run it only after the evaluation has released the GPU.
+The evaluation's own video is the benchmark's: one frame per discrete action,
+0.25 m and 30 degrees at a time, which looks like teleporting because it *is*.
+Changing those observations or actions would change the benchmark, so the
+smoother motion lives here instead -- rendered afterwards, from the recorded
+poses, into a separate ``smooth_rgb.mp4``. It never touches the original
+trajectory, metrics or video, and no interpolated frame was ever shown to the
+policy.
+
+Run it only once the evaluation has released the rendering GPU.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
+import subprocess
 
-import numpy as np
-
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import (
+    HabitatRGBDSimulator)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.replay import render_replay
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import MP3DDataset
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import PROTOCOL
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import protocol_for
 
 
-class SceneRenderer:
-    """Render an arbitrary pose in one scene, with the protocol's camera."""
+def _scene_assets(config, scene_key):
+    """The recorded mesh and navmesh of one scene, from the run's own manifest."""
+    meshes = [Path(row["path"]) for row in (config.get("dataset") or {}).get("files", [])
+              if row["path"].endswith(".glb") and Path(row["path"]).parent.name == scene_key]
+    if len(meshes) != 1:
+        raise ValueError("Cannot identify the exact recorded mesh of scene %r; the "
+                         "run manifest lists %d candidates" % (scene_key, len(meshes)))
+    glb = meshes[0]
+    return glb, glb.with_name(glb.name[:-len(".glb")] + ".navmesh")
 
-    def __init__(self, mesh, navmesh, gpu_device=0):
-        self.simulator = HabitatRGBDSimulator(
-            PROTOCOL.camera(), PROTOCOL.actions(), PROTOCOL.agent_radius_m,
-            PROTOCOL.allow_sliding, gpu_device, height_m=PROTOCOL.agent_height_m)
-        self.mesh, self.navmesh = mesh, navmesh
-        self._ready = False
 
-    def __call__(self, pose):
-        import habitat_sim
-        import quaternion
+def _gpu_is_free():
+    used = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+        text=True)
+    return int(used.strip().splitlines()[0]) <= 512
 
-        position = np.array([-pose.y, pose.z, -pose.x], dtype=np.float32)
-        body = quaternion.from_rotation_vector([0.0, pose.yaw, 0.0])
-        if not self._ready:
-            self.simulator.reset(self.mesh, self.navmesh, position,
-                                 quaternion.as_float_array(body), 0)
-            self._ready = True
-        agent = self.simulator._sim.get_agent(0)
-        # get_state() hands back a fresh copy each call, so the tilt has to be
-        # written into the SAME object that is then set, and sensor states have
-        # to carry their own pose once inference is turned off.
-        state = agent.get_state()
-        state.position = position
-        state.rotation = body
-        # REP-103 pitch is positive downward; a rotation of +a about the
-        # camera's local +x tilts its -z forward axis UP by a, so negate.
-        tilt = quaternion.from_rotation_vector([-pose.camera_pitch, 0.0, 0.0])
-        mount = np.array([0.0, self.simulator.camera.height_m, 0.0], dtype=np.float32)
-        for sensor_state in state.sensor_states.values():
-            sensor_state.position = position + mount
-            sensor_state.rotation = body * tilt
-        agent.set_state(state, reset_sensors=False, infer_sensor_states=False)
-        raw = self.simulator._sim.get_sensor_observations()
-        return np.asarray(raw["rgb"])[..., :3].copy()
 
-    def close(self):
-        self.simulator.close()
+def replay_run(run_dir, *, subframes=4, allow_shared_gpu=False):
+    """Render a smooth replay for every completed recording under ``run_dir``.
+
+    Returns:
+        The paths written. A recording that already has one is skipped and
+        listed, never silently overwritten.
+    """
+    root = Path(run_dir).expanduser()
+    config = json.loads((root / "run.json").read_text())["config"]
+    protocol = protocol_for(config["protocol"]["dataset_version"])
+    if not allow_shared_gpu and not _gpu_is_free():
+        raise RuntimeError("Wait for the evaluation to release its rendering GPU, "
+                           "or pass --allow-shared-gpu")
+    bridge = HabitatRGBDSimulator(
+        protocol.camera(), protocol.actions(), protocol.agent_radius_m,
+        protocol.allow_sliding, height_m=protocol.agent_height_m,
+        navmesh=protocol.navmesh)
+    outputs, already = [], []
+    try:
+        for metrics_file in sorted((root / "recordings").glob("*/metrics.json")):
+            if (metrics_file.parent / "smooth_rgb.mp4").exists():
+                already.append(str(metrics_file.parent))
+                continue
+            row = json.loads(metrics_file.read_text())
+            glb, navmesh = _scene_assets(config, row["scene_id"])
+
+            def render_pose(pose, glb=glb, navmesh=navmesh):
+                # Our ENU pose back into Habitat's +Y-up frame, and a yaw-only
+                # WXYZ quaternion about Habitat's +Y. Camera pitch is not
+                # replayed: a teleport reset restores the sensor to level.
+                position = (-pose.y, pose.z, -pose.x)
+                rotation = (math.cos(pose.yaw / 2), 0.0, math.sin(pose.yaw / 2), 0.0)
+                rgb, _, _ = bridge.reset(glb, navmesh, position, rotation, seed=0)
+                return rgb
+
+            outputs.append(str(render_replay(metrics_file.parent, render_pose,
+                                             subframes=subframes)))
+    finally:
+        bridge.close()
+        (root / "smooth_replay.json").write_text(json.dumps(
+            {"visual_only": True, "subframes": subframes,
+             "policy_observations_changed": False,
+             "original_results_changed": False,
+             "already_rendered": already, "outputs": outputs}, indent=2))
+    return outputs
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("recording", type=Path, help="one recordings/<episode> directory")
-    parser.add_argument("--episodes-dir", required=True)
-    parser.add_argument("--scenes-dir", required=True)
-    parser.add_argument("--gpu-device", type=int, default=0)
+    parser.add_argument("run_dir", type=Path)
     parser.add_argument("--subframes", type=int, default=4)
+    parser.add_argument("--allow-shared-gpu", action="store_true")
     args = parser.parse_args(argv)
-    metrics = json.loads((args.recording / "metrics.json").read_text())
-    scene = metrics["scene_id"]
-    dataset = MP3DDataset(args.episodes_dir, args.scenes_dir, full=False, scene=scene)
-    episode = next(e for e in dataset.episodes.values() if e.scene == scene)
-    renderer = SceneRenderer(*dataset.scene_paths(episode), gpu_device=args.gpu_device)
-    try:
-        output = render_replay(args.recording, renderer, subframes=args.subframes)
-    finally:
-        renderer.close()
-    print("Wrote", output)
+    print(json.dumps(replay_run(args.run_dir, subframes=args.subframes,
+                                allow_shared_gpu=args.allow_shared_gpu), indent=2))
+    return 0
 
 
 if __name__ == "__main__":

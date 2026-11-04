@@ -1,259 +1,373 @@
-"""Read the published MP3D ObjectNav v1 release: episodes and evaluator-only goals.
+"""Read the published MP3D ObjectNav v1 episodes and their evaluator-only goals.
 
-Never pass this object, its rows, or its view points to a SearchPolicy. Only
-local files are read; this loader neither downloads nor generates data, and it
-never regenerates goals, view points or a navmesh.
+Never pass this object, its rows, or its goals to a ``SearchPolicy``: the goal
+view points are exactly the privileged information a zero-shot benchmark
+exists to withhold.
 
-Layout, as habitat-lab's ``ObjectNavDatasetV1`` reads it::
+Layout, as habitat-lab's ``ObjectNavDatasetV1`` reads it (``objectnav_mp3d_v1.zip``)::
 
-    <episodes_dir>/<split>.json.gz        category_to_task_category_id, ...
-    <episodes_dir>/<split>/content/<scene>.json.gz   episodes + goals_by_category
+    <episodes_dir>/<split>.json.gz                 category tables, no episodes
+    <episodes_dir>/content/<scene>.json.gz         one scene's episodes and goals
 
-Episode ids are scene-qualified row indices. habitat-lab renumbers episodes
-from 0 in every content file (``episode.episode_id = str(i)``), so the raw ids
-repeat across a split's scenes and cannot key results on their own; the file's
-own id is kept alongside as metadata.
+where ``<episodes_dir>`` is the split directory, e.g.
+``.../objectnav/mp3d/v1/val``. A shard whose episodes carry their ``goals``
+inline (the release predates habitat-lab's ``goals_by_category``
+de-duplication, and ``ObjectNavDatasetV1.dedup_goals`` folds them at load) is
+read exactly as one that already has ``goals_by_category``.
+
+Three habitat-lab conventions are reproduced rather than guessed at, because
+each would otherwise be an invisible bug:
+
+* ``ObjectNavDatasetV1.from_json`` **renumbers** every episode
+  ``episode_id = str(i)`` within its own content shard, so ids collide across
+  scenes. Ours are scene-qualified (``2azQ1b91cZZ/000042``) and stable.
+* ``start_rotation`` is a quaternion in **XYZW** order. The shared Habitat
+  bridge takes WXYZ, so the order is converted here, once.
+* ``goals_key`` is ``f"{basename(scene_id)}_{object_category}"``
+  (``2azQ1b91cZZ.glb_chair``), the key the goals live under.
+
+Scenes: every row's ``scene_id`` is ``mp3d/<scene>/<scene>.glb`` (optionally
+behind habitat-lab's ``data/scene_datasets/`` prefix, which is stripped), and
+habitat-sim derives the sibling navmesh as ``<scene>.navmesh``. Both files are
+the publisher's; this loader never generates, snaps or downloads anything.
+
+Python 3.8 syntax; numpy only, no simulator import.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import gzip
 import hashlib
 import json
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
-from typing import Dict, Tuple
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
 from sparx_agency.core.planning.objnav.labels.datasets.mp3d import CATEGORIES
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import (
-    PROTOCOL, PUBLISHED_VAL_EPISODES, PUBLISHED_VAL_SCENES,
-)
-
-#: habitat-lab strips this prefix from a serialized ``scene_id``.
-SCENE_PATH_PREFIX = "data/scene_datasets/"
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import PUBLISHED_VAL
 
 
-@dataclass(frozen=True)
-class MP3DEpisode:
-    """Private evaluator/simulator input.
+def published_counts(protocol):
+    """What this protocol's split is documented to contain, or ``{}``.
 
-    Quaternion order is the published XYZW, converted at the simulator edge
-    (habitat-sim's ``quaternion.from_float_array`` wants WXYZ).
+    Only the validation split is a published benchmark. A development run on
+    ``train`` or ``val_mini`` has no count to be complete against, and
+    pretending otherwise is how a subset gets quoted as a split.
     """
+    if protocol.split != "val":
+        return {}
+    return PUBLISHED_VAL.get(protocol.dataset_version, {})
 
-    episode_id: str
-    published_episode_id: str
-    scene: str
-    scene_glb: str
-    category: str
-    goals_key: str
-    start_position: Tuple[float, ...]
-    start_rotation_xyzw: Tuple[float, ...]
-    published_geodesic_m: float
 
-    def start_rotation_wxyz(self) -> Tuple[float, ...]:
-        """The published rotation in habitat-sim's coefficient order."""
-        x, y, z, w = self.start_rotation_xyzw
-        return (w, x, y, z)
+#: habitat-lab strips this prefix from a row's ``scene_id`` before joining it
+#: to the scenes directory. The MP3D v1 rows do not carry it -- they start
+#: straight at ``mp3d/`` -- but the strip is what habitat-lab does.
+SCENE_PATH_PREFIX = "data/scene_datasets/"
 
 
 def _vector(value, size, name):
     array = np.asarray(value, dtype=np.float64)
     if array.shape != (size,) or not np.isfinite(array).all():
-        raise ValueError("%s must contain %d finite numbers" % (name, size))
+        raise ValueError("%s must contain %d finite numbers, got %r"
+                         % (name, size, value))
     return tuple(float(v) for v in array)
 
 
-def _view_points(goals, goals_key):
-    """Every published view-point position of one category, as habitat-lab reads them.
+def xyzw_to_wxyz(rotation):
+    """Reorder a published XYZW start rotation into the WXYZ the bridge wants.
 
-    The evaluator's distance is measured to these, not to the object centres:
-    ``DistanceToGoal`` with ``distance_to: VIEW_POINTS`` collects
-    ``[view_point.agent_state.position for goal in episode.goals
-    for view_point in goal.view_points]``.
+    Raises:
+        ValueError: Not four finite numbers, or not a unit quaternion.
     """
-    points = []
-    for goal in goals:
-        for view in goal.get("view_points") or ():
-            state = view.get("agent_state") or {}
-            points.append(_vector(state.get("position"), 3, "view point position"))
-    if not points:
-        raise ValueError("No published view points for %s" % goals_key)
-    return np.asarray(points, dtype=np.float32)
+    x, y, z, w = _vector(rotation, 4, "start_rotation (XYZW)")
+    if not np.isclose(np.linalg.norm((x, y, z, w)), 1.0, atol=1e-4):
+        raise ValueError("start_rotation must be a unit quaternion, got %r"
+                         % (rotation,))
+    return (w, x, y, z)
+
+
+@dataclass(frozen=True)
+class MP3DEpisode:
+    """One published episode. Private evaluator/simulator input.
+
+    Attributes:
+        episode_id: ``"<scene>/<index within the shard>"``, unique within
+            (benchmark, split) despite habitat-lab's per-shard renumbering.
+        scene_key: The Matterport scene hash, e.g. ``"2azQ1b91cZZ"`` -- the
+            scene's folder name and its shard's name.
+        scene_relative_path: The row's ``scene_id`` with habitat-lab's
+            ``data/scene_datasets/`` prefix stripped (``mp3d/<scene>/<scene>.glb``).
+        goals_key: The ``goals_by_category`` key this episode's goals live under.
+        category: ``object_category``, in the dataset's own spelling.
+        start_position: Habitat-frame ``(x, y, z)``, +Y up.
+        start_rotation_wxyz: The start rotation, already reordered.
+        published_geodesic_m: The row's ``info.geodesic_distance`` -- the
+            publisher's own geodesic from this start to the nearest goal view
+            point, the same quantity as ``l``. A cross-check, never the SPL
+            reference; a disagreement is a defect, not a difference of
+            definition.
+        source_episode_id: The row's own ``episode_id``, kept for provenance.
+    """
+
+    episode_id: str
+    scene_key: str
+    scene_relative_path: str
+    goals_key: str
+    category: str
+    start_position: Tuple[float, float, float]
+    start_rotation_wxyz: Tuple[float, float, float, float]
+    published_geodesic_m: Optional[float]
+    source_episode_id: str
+
+
+def _read_json_gz(path):
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def _episode(row, index, stem, scene_root_name):
+    """One validated row. ``stem`` is the content shard's own scene name."""
+    category = row.get("object_category")
+    if category is None and row.get("goals"):
+        category = (row["goals"][0] or {}).get("object_category")
+    if category not in CATEGORIES:
+        raise ValueError("Unknown MP3D object_category %r; expected one of %r"
+                         % (category, CATEGORIES))
+    scene_id = row.get("scene_id")
+    if not isinstance(scene_id, str) or not scene_id.strip():
+        raise ValueError("Episode row has no scene_id")
+    relative = (scene_id[len(SCENE_PATH_PREFIX):]
+                if scene_id.startswith(SCENE_PATH_PREFIX) else scene_id)
+    parts = Path(relative).parts
+    if Path(relative).is_absolute() or ".." in parts or len(parts) != 3:
+        raise ValueError("Unexpected MP3D scene_id %r; expected "
+                         "<release>/<scene>/<scene>.glb" % (scene_id,))
+    if parts[0] != scene_root_name:
+        raise ValueError(
+            "Episode row points at scene release %r, but this protocol's scenes "
+            "live under %r" % (parts[0], scene_root_name))
+    scene_key = parts[1]
+    if scene_key != stem or Path(relative).name != stem + ".glb":
+        raise ValueError("The %s shard holds an episode of scene %r (%s)"
+                         % (stem, scene_key, relative))
+    geodesic = (row.get("info") or {}).get("geodesic_distance")
+    if geodesic is not None:
+        geodesic = float(geodesic)
+        if not np.isfinite(geodesic) or geodesic < 0:
+            raise ValueError("Published geodesic_distance is not a length: %r" % (geodesic,))
+    return MP3DEpisode(
+        episode_id="%s/%06d" % (scene_key, index),
+        scene_key=scene_key,
+        scene_relative_path=relative,
+        goals_key="%s_%s" % (Path(relative).name, category),
+        category=category,
+        start_position=_vector(row.get("start_position"), 3, "start_position"),
+        start_rotation_wxyz=xyzw_to_wxyz(row.get("start_rotation")),
+        published_geodesic_m=geodesic,
+        source_episode_id=str(row.get("episode_id", index)))
 
 
 class MP3DDataset:
-    """Validated local release; the full split is the default, never a subset.
+    """A validated local MP3D ObjectNav release, episodes and goals together.
 
     Args:
-        episodes_dir: The split directory holding ``content/`` and, beside it
-            or inside it, ``<split>.json.gz`` with the category tables.
-        scenes_dir: ``data/scene_datasets`` -- the parent of ``mp3d/``.
-        full: Require the complete published validation split (11 scenes,
-            2,195 episodes). False is reserved for explicitly labelled
-            smoke/subset runs.
-        scene: Restrict loading to one scene, for a demo. Requires full=False.
+        episodes_dir: The split directory, e.g. ``.../objectnav/mp3d/v1/val``,
+            containing ``val.json.gz`` and ``content/<scene>.json.gz``.
+        scenes_dir: The directory ``data/scene_datasets/`` points at, i.e. the
+            one containing ``mp3d/<scene>/``. ``None`` is allowed only with
+            ``require_scenes=False``.
+        protocol: The :class:`~...mp3d.protocol.MP3DProtocol` being run; its
+            ``split`` names the file to read.
+        full: Require the documented scene and episode counts of the published
+            split. ``False`` is only for an explicitly labelled subset run.
+        scenes: Restrict to these scene hashes (requires ``full=False``).
+        require_scenes: Check that every referenced mesh and navmesh is on
+            disk. Only an episode-level check may turn it off; a run may not.
+        episodes_per_scene: Keep only the first ``N`` rows of each shard. The
+            validation split is 2,195 episodes, but MP3D's **train** split is
+            millions of rows, so a development run has to be bounded to be
+            expressible at all. A prefix is taken, so an episode keeps the
+            identity it would have had in the whole shard.
+
+    Raises:
+        FileNotFoundError: A required episode file or scene asset is missing.
+        ValueError: The release, a row, or a goal fails validation.
     """
 
-    def __init__(self, episodes_dir, scenes_dir, full=True, scene=None):
+    def __init__(self, episodes_dir, scenes_dir, protocol, *, full=True, scenes=None,
+                 require_scenes=True, episodes_per_scene=None):
+        if scenes is not None and full:
+            raise ValueError("Selecting scenes is a subset run; pass full=False")
+        if episodes_per_scene is not None and (type(episodes_per_scene) is not int
+                                               or episodes_per_scene <= 0):
+            raise ValueError("episodes_per_scene must be a positive integer")
+        if episodes_per_scene is not None and full:
+            raise ValueError("Capping episodes per scene is a subset run; pass full=False")
+        self.episodes_per_scene = episodes_per_scene
+        if scenes_dir is None and require_scenes:
+            raise ValueError("A run needs --scenes-dir; only an episode-only "
+                             "check may omit it")
+        self.protocol = protocol
+        self.require_scenes = require_scenes
         self.episodes_dir = Path(episodes_dir).expanduser().resolve()
-        self.scenes_dir = Path(scenes_dir).expanduser().resolve()
-        self.split = PROTOCOL.split
-        self.selected_scene = scene
-        if scene is not None and full:
-            raise ValueError("Select one scene with full=False for a demo")
-        self._assets = []
-        self.category_ids = self._categories()
+        self.scenes_dir = (Path(scenes_dir).expanduser().resolve()
+                           if scenes_dir is not None else None)
+        self.selected_scenes = tuple(scenes) if scenes is not None else None
+        split = protocol.split
+        index_file = self.episodes_dir / ("%s.json.gz" % split)
+        if not index_file.is_file():
+            raise FileNotFoundError(
+                "Missing %s; point --episodes-dir at the split directory that "
+                "holds it and content/ (the objectnav_mp3d_v1 release)" % index_file)
+        index = _read_json_gz(index_file)
+        self.category_to_task_category_id = dict(
+            index.get("category_to_task_category_id") or {})
+        if self.category_to_task_category_id and set(
+                self.category_to_task_category_id) != set(CATEGORIES):
+            missing = sorted(set(CATEGORIES) - set(self.category_to_task_category_id))
+            extra = sorted(set(self.category_to_task_category_id) - set(CATEGORIES))
+            raise ValueError(
+                "Published categories are not the 21 MP3D ObjectNav v1 goals: "
+                "missing %r, unexpected %r. Our label table would score the wrong "
+                "vocabulary." % (missing, extra))
+        scene_table = (index.get("category_to_mp3d_category_id")
+                       or index.get("category_to_scene_annotation_category_id"))
+        if scene_table is not None and set(scene_table) != set(self.category_to_task_category_id):
+            raise ValueError("category_to_task_category_id and category_to_mp3d_category_id "
+                             "name different categories")
         files = sorted((self.episodes_dir / "content").glob("*.json.gz"))
-        if scene is not None:
-            files = [p for p in files if p.name == scene + ".json.gz"]
+        if scenes is not None:
+            wanted = {str(s) for s in scenes}
+            files = [p for p in files if p.name[:-len(".json.gz")] in wanted]
+            missing = sorted(wanted - {p.name[:-len(".json.gz")] for p in files})
+            if missing:
+                raise FileNotFoundError("No content shard for: %s" % ", ".join(missing))
         if not files:
-            raise FileNotFoundError(
-                "No %s content files under %s. Point --episodes-dir at the "
-                "split directory of the extracted objectnav_mp3d_v1 release."
-                % ("scene " + scene if scene else "episode", self.episodes_dir))
+            raise FileNotFoundError("No content/*.json.gz under %s" % self.episodes_dir)
+        expected = published_counts(protocol)
+        if full and not expected:
+            raise ValueError(
+                "Only the val split has published counts to check a complete run "
+                "against; load %r with full=False and label the result a subset."
+                % (protocol.split,))
+        if full and expected and len(files) != expected["scenes"]:
+            raise ValueError(
+                "MP3D %s %s is documented as %d scenes; found %d content shards. "
+                "Provision the whole split, or run a labelled subset."
+                % (protocol.dataset_version, split, expected["scenes"], len(files)))
         self.episodes: Dict[str, MP3DEpisode] = {}
+        self.goals: Dict[str, list] = {}
         self.scene_counts: Dict[str, int] = {}
-        self._view_points: Dict[str, np.ndarray] = {}
-        self._scene_files: Dict[str, Path] = {}
+        self._assets = [index_file]
         for path in files:
-            self._read_scene(path)
-        if full and (len(self.episodes) != PUBLISHED_VAL_EPISODES
-                     or len(self.scene_counts) != PUBLISHED_VAL_SCENES):
+            self._load_shard(path)
+        if full and expected and len(self.episodes) != expected["episodes"]:
             raise ValueError(
-                "A full MP3D %s run needs the published %d episodes in %d "
-                "scenes; this release has %d in %d. Use full=False (a --scene "
-                "or --limit run) to evaluate a labelled subset."
-                % (self.split, PUBLISHED_VAL_EPISODES, PUBLISHED_VAL_SCENES,
-                   len(self.episodes), len(self.scene_counts)))
+                "MP3D %s %s is documented as %d episodes; found %d."
+                % (protocol.dataset_version, split, expected["episodes"],
+                   len(self.episodes)))
 
-    def _categories(self):
-        """The release's own category table, checked against our label table."""
-        candidates = [self.episodes_dir / (self.split + ".json.gz"),
-                      self.episodes_dir.parent / (self.split + ".json.gz"),
-                      self.episodes_dir / (self.episodes_dir.name + ".json.gz")]
-        for path in candidates:
-            if path.is_file():
-                break
-        else:
-            raise FileNotFoundError(
-                "Missing the split's category table (%s.json.gz) beside or "
-                "inside %s" % (self.split, self.episodes_dir))
-        with gzip.open(path, "rt", encoding="utf-8") as stream:
-            payload = json.load(stream)
-        table = payload.get("category_to_task_category_id")
-        scene_table = (payload.get("category_to_mp3d_category_id")
-                       or payload.get("category_to_scene_annotation_category_id"))
-        if not isinstance(table, dict) or not isinstance(scene_table, dict):
-            raise ValueError("%s lacks the ObjectNav category tables" % path)
-        if set(table) != set(CATEGORIES):
-            missing = sorted(set(CATEGORIES) - set(table))
-            extra = sorted(set(table) - set(CATEGORIES))
-            raise ValueError(
-                "This release's goal categories are not MP3D ObjectNav v1's "
-                "21: missing %r, unexpected %r. Our label table would score "
-                "the wrong vocabulary." % (missing, extra))
-        if set(table) != set(scene_table):
-            raise ValueError("category_to_task and category_to_mp3d disagree")
-        self._assets.append(path)
-        return {name: int(index) for name, index in table.items()}
-
-    def _read_scene(self, path):
-        """Parse one content file, keep compact arrays, and drop the raw goals."""
-        with gzip.open(path, "rt", encoding="utf-8") as stream:
-            payload = json.load(stream)
+    def _load_shard(self, path):
+        stem = path.name[:-len(".json.gz")]
+        payload = _read_json_gz(path)
         rows = payload.get("episodes")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("%s holds no episodes" % path)
+        if self.episodes_per_scene is not None:
+            rows = rows[:self.episodes_per_scene]
         goals_by_category = payload.get("goals_by_category")
-        if not isinstance(rows, list) or not rows or not isinstance(goals_by_category, dict):
-            raise ValueError("%s is not an ObjectNav content file" % path)
-        scene = path.name[:-len(".json.gz")]
-        self._scene_files[scene] = path
+        inline = goals_by_category is None
+        if inline:
+            goals_by_category = {}
         self._assets.append(path)
-        glb = None
         for index, row in enumerate(rows):
-            episode = self._episode(row, scene, index)
-            if glb is None:
-                glb = episode.scene_glb
-                for asset in self._scene_assets(glb):
-                    self._assets.append(asset)
-            elif episode.scene_glb != glb:
-                raise ValueError("%s mixes scenes: %r and %r" % (path, glb, episode.scene_glb))
-            if episode.goals_key not in self._view_points:
-                goals = goals_by_category.get(episode.goals_key)
-                if not isinstance(goals, list) or not goals:
-                    raise ValueError("Missing goals for %s" % episode.goals_key)
-                self._view_points[episode.goals_key] = _view_points(goals, episode.goals_key)
+            episode = _episode(row, index, stem, self.protocol.scene_root_name)
+            self.scene_counts[episode.scene_key] = index + 1
+            if inline:
+                # ObjectNavDatasetV1.dedup_goals: the first row's goals stand
+                # for the (scene, category); every later row carries the same.
+                goals_by_category.setdefault(episode.goals_key, row.get("goals") or [])
+            if episode.goals_key not in goals_by_category:
+                raise ValueError("No goals for %s (%s)"
+                                 % (episode.episode_id, episode.goals_key))
+            if episode.episode_id in self.episodes:
+                raise ValueError("Duplicate episode identity %s" % episode.episode_id)
             self.episodes[episode.episode_id] = episode
-        self.scene_counts[scene] = len(rows)
+            if self.require_scenes:
+                # Fail on a missing mesh before the run, never at episode 900.
+                self.scene_assets(episode)
+        for key, goals in goals_by_category.items():
+            if not isinstance(goals, list) or not goals:
+                raise ValueError("Goal list %r in %s is empty" % (key, path))
+            if key in self.goals and self.goals[key] != goals:
+                raise ValueError("Two shards disagree about the goals of %r" % key)
+            self.goals[key] = goals
 
-    def _episode(self, row, scene, index):
-        category = row.get("object_category")
-        if category is None and row.get("goals"):
-            category = row["goals"][0].get("object_category")
-        if category not in CATEGORIES:
-            raise ValueError("Unknown MP3D goal category %r in %s" % (category, scene))
-        scene_id = row.get("scene_id")
-        if not isinstance(scene_id, str) or not scene_id.endswith(".glb"):
-            raise ValueError("Episode %s/%d has no scene mesh" % (scene, index))
-        if scene_id.startswith(SCENE_PATH_PREFIX):
-            scene_id = scene_id[len(SCENE_PATH_PREFIX):]
-        parts = PurePosixPath(scene_id).parts
-        if PurePosixPath(scene_id).is_absolute() or ".." in parts:
-            raise ValueError("Refusing an escaping scene path: %r" % scene_id)
-        rotation = _vector(row.get("start_rotation"), 4, "start_rotation (XYZW)")
-        if not np.isclose(np.linalg.norm(rotation), 1.0, atol=1e-4):
-            raise ValueError("start_rotation must be a unit XYZW quaternion")
-        info = row.get("info") or {}
-        geodesic = info.get("geodesic_distance")
-        geodesic = float(geodesic) if isinstance(geodesic, (int, float)) else float("nan")
-        return MP3DEpisode(
-            episode_id="%s/%06d" % (scene, index),
-            published_episode_id=str(row.get("episode_id", index)),
-            scene=scene, scene_glb=scene_id, category=category,
-            goals_key="%s_%s" % (PurePosixPath(scene_id).name, category),
-            start_position=_vector(row.get("start_position"), 3, "start_position"),
-            start_rotation_xyzw=rotation, published_geodesic_m=geodesic)
+    def goals_for(self, episode):
+        """The evaluator-only goal rows of ``episode``. Never given to a policy."""
+        return self.goals[episode.goals_key]
 
-    def _scene_assets(self, scene_glb):
-        """The mesh and the published navmesh; neither is generated here."""
-        mesh = self.scenes_dir / scene_glb
-        navmesh = mesh.with_suffix(".navmesh")
-        for asset in (mesh, navmesh):
-            if not asset.is_file() or asset.stat().st_size == 0:
+    def scene_assets(self, episode):
+        """The scene mesh and its **published** navmesh, both checked to exist.
+
+        Returns:
+            ``(glb_path, navmesh_path)``: ``mp3d/<scene>/<scene>.glb`` and the
+            sibling ``<scene>.navmesh`` habitat-sim derives from it.
+
+        Note:
+            Whether the *shipped* navmesh is the one actually navigated on is
+            the protocol's ``navmesh`` choice, not this method's. This method
+            only proves the publisher's files are here.
+        """
+        if self.scenes_dir is None:
+            raise ValueError("This dataset was loaded without scene assets")
+        glb = self.scenes_dir / episode.scene_relative_path
+        navmesh = glb.with_name(glb.name[:-len(".glb")] + ".navmesh")
+        for path in (glb, navmesh):
+            if not path.is_file() or path.stat().st_size == 0:
                 raise FileNotFoundError(
-                    "Missing or empty MP3D asset: %s. Matterport3D's habitat "
-                    "task download ships <scene>.glb beside <scene>.navmesh; "
-                    "this evaluator never recomputes a published navmesh."
-                    % asset)
-        return mesh, navmesh
+                    "Missing or empty MP3D asset: %s. Matterport3D's Habitat task "
+                    "download (mp3d_habitat.zip) ships <scene>.glb beside "
+                    "<scene>.navmesh; this loader never generates one." % path)
+        if glb not in self._assets:
+            self._assets.extend((glb, navmesh))
+        return glb, navmesh
 
-    def scene_paths(self, episode):
-        """(mesh, navmesh) for one episode, both checked at load."""
-        mesh = self.scenes_dir / episode.scene_glb
-        return mesh, mesh.with_suffix(".navmesh")
+    def episode_ids(self):
+        """Every loaded episode identity, in publisher order."""
+        return tuple(self.episodes)
 
-    def view_points(self, episode):
-        """Evaluator-only view points of this episode's goal category, in Habitat XYZ."""
-        return self._view_points[episode.goals_key]
+    def manifest(self, *, hash_scenes=True):
+        """Hash the episode files and scene assets for run/resume provenance.
 
-    def manifest(self):
-        """Hash episodes, category tables, meshes and navmeshes for run/resume provenance."""
+        Args:
+            hash_scenes: Hash the meshes and navmeshes too. Leaving it on is
+                the point -- a swapped scene release is otherwise invisible --
+                and costs one pass over a few gigabytes at preflight.
+        """
         files = []
-        for path in self._assets:
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            files.append({"path": str(path), "bytes": path.stat().st_size,
-                          "sha256": digest.hexdigest()})
-        return {"release": "Habitat ObjectNav MP3D v1",
-                "split": self.split,
+        for path in sorted(set(self._assets), key=str):
+            entry = {"path": str(path), "bytes": path.stat().st_size}
+            if hash_scenes or path.suffix == ".gz":
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                        digest.update(chunk)
+                entry["sha256"] = digest.hexdigest()
+            files.append(entry)
+        return {"release": "MP3D ObjectNav %s %s on %s"
+                           % (self.protocol.dataset_version, self.protocol.split,
+                              self.protocol.scene_release),
+                "dataset_version": self.protocol.dataset_version,
+                "split": self.protocol.split,
                 "episode_count": len(self.episodes),
-                "selected_scene": self.selected_scene,
-                "scenes": sorted(self.scene_counts),
-                "scene_counts": dict(self.scene_counts),
-                "category_to_task_category_id": dict(self.category_ids),
-                "view_point_counts": {key: int(len(points))
-                                      for key, points in sorted(self._view_points.items())},
+                "scene_count": len(self.scene_counts),
+                "selected_scenes": list(self.selected_scenes or ()),
+                "episodes_per_scene": self.episodes_per_scene,
+                "scene_counts": dict(sorted(self.scene_counts.items())),
+                "category_to_task_category_id": dict(sorted(
+                    self.category_to_task_category_id.items())),
+                "scene_assets_present": bool(self.require_scenes),
+                "scene_assets_hashed": bool(hash_scenes and self.require_scenes),
                 "files": files}

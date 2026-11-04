@@ -1,7 +1,7 @@
 # The services every benchmark launcher brings up, once: the GPU plan, the renderer, Ollama, the YOLO-World
 # detector started with the benchmark's own vocabulary, the optional Segment Anything service, FFmpeg for
 # recordings, and the cleanup trap that takes them down again. Sourced -- never executed -- by
-# gibson/run_benchmark.sh and hm3d/run_benchmark.sh, so the two launchers cannot drift apart in how the
+# gibson/run_benchmark.sh, hm3d/run_benchmark.sh and mp3d/run_benchmark.sh, so the launchers cannot drift apart in how the
 # method's services are provisioned; what differs per benchmark (episodes, scenes, the run module, the
 # campaign shape) stays in the launcher.
 #

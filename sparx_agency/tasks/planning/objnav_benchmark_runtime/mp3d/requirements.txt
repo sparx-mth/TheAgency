@@ -1,6 +1,7 @@
-# MP3D adapter extras, on top of the shared runtime requirements.txt.
-# habitat-sim is NOT installed from PyPI: use the publisher's conda package in
-# a dedicated environment (this workstation: conda env "habitat", 0.2.4).
-# habitat-lab is deliberately not required; the evaluator is reimplemented
-# against its published definitions so the run needs no task framework.
-numpy-quaternion>=2022.4
+# MP3D adapter extras, on top of ../requirements.txt.
+# Install habitat-sim in its own conda environment (this workstation: conda env
+# "objnav-habitat", habitat-sim 0.2.4); it is not pip-installable into the
+# numpy-only test environment, and nothing here needs habitat-lab: the
+# evaluator is reimplemented against its published definitions.
+habitat-sim==0.2.4
+numpy-quaternion

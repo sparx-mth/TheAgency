@@ -58,12 +58,15 @@ _TABLE = (
 )
 
 #: Prompts that are not goals but tell one MP3D room from another, plus the
-#: door prompts the depth-backed door detector needs.
+#: door prompts the depth-backed door detector needs and the two stair prompts
+#: the stair detector reads (``perception/projection.py`` STAIR_LABELS). None
+#: of them may be a goal word: ``cabinet``, ``desk``, ``shower``, ``bathtub``,
+#: ``stool`` -- context on HM3D -- are goals or goal prompts here.
 CONTEXT_VOCABULARY = (
     "door", "doorway", "open doorway", "door frame",
     "refrigerator", "oven", "microwave", "stove", "dishwasher",
     "washing machine", "bookshelf", "book", "lamp", "mirror",
-    "curtain", "clock", "vase", "cup", "bottle", "rug", "stairs",
+    "curtain", "clock", "vase", "cup", "bottle", "rug", "stairs", "staircase",
     "wardrobe", "computer", "keyboard",
 )
 

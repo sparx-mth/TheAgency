@@ -1,14 +1,20 @@
-"""Auditable MP3D reports and strict shard merging; no simulator/model imports.
+"""Auditable MP3D reports and strict shard merging; no simulator or model imports.
 
-The published rows below are transcribed from the comparison papers, not
-measured here, and each carries the table it was read from. Where two papers
-print different numbers for the same method (VLFM on MP3D), both rows are kept
-under their own sources rather than silently averaged or picked.
+Two tables come out of one run, because two published protocols disagree about
+one number. Ours is scored under habitat-lab's own success radius (0.1 m to the
+nearest goal view point). ApexNav's released configs use 0.2 m, so the same
+episodes are **re-scored** at 0.2 m from the rows already on disk -- no second
+run, no second simulation, and the two numbers cannot drift apart. Re-scoring
+upward can only add successes, never remove them, so the 0.2 m row is an upper
+bound on the 0.1 m row by construction.
+
+Nothing here recomputes a distance or re-reads a dataset: it reads
+``episodes.jsonl``, applies the published arithmetic, and says what it did.
 """
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 
@@ -18,130 +24,167 @@ from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import (
     read_episode_rows, strict_json, write_atomically)
 from sparx_agency.tasks.planning.objnav_benchmark.run_info import read_run_info
-from sparx_agency.tasks.planning.objnav_benchmark.summaries import ReportedResult
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import published_counts
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import (
-    PROTOCOL, PUBLISHED_VAL_EPISODES, PUBLISHED_VAL_SCENES)
-
-SG_NAV = "arXiv:2410.08189v1, Table 1, p.7"
-APEXNAV = "arXiv:2504.14478v1, Table I, p.6"
-
-#: (method, SR %, SPL %, source, note). Both papers state the same MP3D
-#: validation split: 11 scenes, 21 goal categories, 2,195 episodes.
-REPORTED = (
-    ("SemExp", 36.0, 14.4, SG_NAV, "trained ObjectNav policy; not zero-shot"),
-    ("PONI", 31.8, 12.1, SG_NAV, "trained ObjectNav policy; not zero-shot"),
-    ("ZSON", 15.3, 4.8, SG_NAV, "unsupervised pretraining; not zero-shot"),
-    ("CoW", 7.4, 3.7, SG_NAV, "zero-shot"),
-    ("ESC", 28.7, 14.2, SG_NAV, "zero-shot"),
-    ("L3MVN", 34.9, 14.5, SG_NAV, "zero-shot"),
-    ("OpenFMNav", 37.2, 15.7, SG_NAV, "zero-shot"),
-    ("VLFM", 36.2, 15.9, SG_NAV, "zero-shot; ApexNav prints 36.4/17.5 for VLFM"),
-    ("VLFM (ApexNav re-evaluation)", 36.4, 17.5, APEXNAV,
-     "zero-shot; SG-Nav prints 36.2/15.9 for VLFM"),
-    ("VLFM* (shortest-path planner)", 32.5, 15.9, APEXNAV,
-     "PointNav module replaced by a shortest-path planner"),
-    ("SG-Nav-LLaMA", 40.1, 16.0, SG_NAV, "zero-shot"),
-    ("SG-Nav-GPT", 40.2, 16.0, SG_NAV, "zero-shot"),
-    ("ApexNav", 39.2, 17.8, APEXNAV, "zero-shot"),
-)
-
-
-def baselines():
-    """The transcribed rows as :class:`ReportedResult`, percentages divided by 100."""
-    return [ReportedResult(method, PROTOCOL.benchmark, PROTOCOL.split, sr / 100.0,
-                           spl / 100.0, source,
-                           notes="%s. Paper-reported; protocol equivalence not "
-                                 "established here." % note)
-            for method, sr, spl, source, note in REPORTED]
+    APEXNAV_SUCCESS_DISTANCE_M, PUBLISHED_VAL, protocol_for)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.sota import reported_results
 
 
 def _read_run(directory):
+    """The run's configuration and its episode rows, checked to belong together."""
     directory = Path(directory).expanduser()
     config = read_run_info(directory / "run.json")["config"]
-    if config.get("protocol") != asdict(PROTOCOL):
-        raise ValueError("Not an MP3D ObjectNav v1 run: %s" % directory)
+    protocol = config.get("protocol") or {}
+    version = protocol.get("dataset_version")
+    if version not in PUBLISHED_VAL or not str(protocol.get("benchmark", "")).startswith("mp3d"):
+        raise ValueError("Not an MP3D ObjectNav run: %s" % directory)
+    expected = protocol_for(version).with_split(protocol.get("split", "val"))
+    if protocol != asdict(expected):
+        raise ValueError(
+            "%s ran a different MP3D protocol than this module defines; compare "
+            "run.json's protocol block before trusting any number" % directory)
     records = [row for _, row in read_episode_rows(directory / "episodes.jsonl")]
+    if not records:
+        raise ValueError("No episode rows in %s" % directory)
     ids = [row.episode_id for row in records]
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate episode records")
-    if not set(ids).issubset(config["selected_episode_ids"]):
+    selected = config.get("selected_episode_ids") or []
+    if not set(ids).issubset(selected):
         raise ValueError("Records do not belong to the recorded selection")
-    if any((row.benchmark, row.split, row.agent)
-           != (PROTOCOL.benchmark, PROTOCOL.split, config["method"]["method"])
-           for row in records):
+    agent = config["method"]["method"]
+    if any((row.benchmark, row.split) != (expected.benchmark, expected.split)
+           or row.agent != agent for row in records):
         raise ValueError("Record identity disagrees with the run configuration")
-    return config, records
+    return config, expected, records
+
+
+def rescore(records, success_distance_m):
+    """The same episodes under another success radius, from the rows alone.
+
+    Habitat's rule is ``STOP and dT < radius``, strictly less. ``soft_spl`` is
+    untouched: habitat-lab gates it on neither success nor STOP. An agent-error
+    episode stays a failure -- a crash is not made a success by a looser radius.
+    """
+    rescored = []
+    for row in records:
+        distance = row.distance_to_goal_m  # None is habitat's inf
+        success = bool(row.agent_error is None and row.stop_called
+                       and distance is not None
+                       and distance < success_distance_m)
+        l, p = row.shortest_path_m, row.path_length_m
+        ratio = 1.0 if max(l, p) <= 0 else l / max(l, p)
+        rescored.append(replace(row, success=success,
+                                spl=float(success) * ratio))
+    return rescored
+
+
+def _audit(config, protocol, records, summary):
+    """What a reader must know before quoting the number above it."""
+    expected = published_counts(protocol)
+    dataset = config.get("dataset") or {}
+    complete = (bool(expected)
+                and bool(config.get("full_split"))
+                and len(records) == expected["episodes"]
+                and dataset.get("scene_count") == expected["scenes"]
+                and config["method"]["method"] != "diagnostic-stop"
+                and not summary.agent_errors)
+    unreachable = config.get("excluded_unreachable_episode_ids") or []
+    return {
+        "full_split_completed": complete,
+        "split": protocol.split,
+        "published_benchmark_split": bool(expected),
+        "episodes_scored": len(records),
+        "episodes_selected": len(config.get("selected_episode_ids") or []),
+        "episodes_published": expected.get("episodes"),
+        "scenes_published": expected.get("scenes"),
+        "scenes_loaded": dataset.get("scene_count"),
+        "agent_errors": summary.agent_errors,
+        "starts_validated": bool(config.get("starts_validated")),
+        "excluded_unreachable_episodes": len(unreachable),
+        "navmesh": protocol.navmesh,
+        "success_distance_m": protocol.success_distance_m,
+        "scene_assets_hashed": dataset.get("scene_assets_hashed"),
+        "reference_habitat_sim_version_match":
+            config.get("reference_habitat_sim_version_match"),
+        "primary_metrics": ["SR", "SPL", "DTG (geodesic to the nearest goal "
+                            "view point, m)"],
+        "supplementary_metrics": ["SoftSPL", "steps", "wall_s"],
+        "total_wall_s": sum(row.wall_s for row in records),
+        "notes": "SR/SPL/SoftSPL/DTG are means over every scored episode, "
+                 "failures included. DTG is habitat-lab's distance_to_goal. "
+                 "No claim of bit-exact reproduction of any paper's pipeline is made.",
+    }
 
 
 def write_report(directory):
-    """Recompute from episode rows; mark unfinished, subset or diagnostic results."""
+    """Write ``comparison.md`` and ``audit.json`` beside a finished run."""
     directory = Path(directory).expanduser()
-    config, records = _read_run(directory)
+    config, protocol, records = _read_run(directory)
     summary = summarise(records)
-    selected = config["selected_episode_ids"]
-    complete = {row.episode_id for row in records} == set(selected)
-    full = (config.get("full_split") and complete
-            and len(selected) == PUBLISHED_VAL_EPISODES
-            and config["method"]["method"] != "diagnostic-stop")
-    title = ("Full MP3D ObjectNav v1 validation" if full else
+    audit = _audit(config, protocol, records, summary)
+    loose = rescore(records, APEXNAV_SUCCESS_DISTANCE_M)
+    loose_summary = summarise(loose)
+    gained = sum(a.success != b.success for a, b in zip(records, loose))
+    audit["apexnav_radius_extra_successes"] = gained
+    audit["apexnav_radius_success_rate"] = loose_summary.overall.success_rate
+
+    title = ("Full MP3D ObjectNav %s %s validation" % (protocol.dataset_version, protocol.split)
+             if audit["full_split_completed"] else
              "NOT a full benchmark result (subset, incomplete, or diagnostic)")
-    dataset = config.get("dataset") or {}
-    starts = config.get("start_validation")
-    audit = {
-        "full_split_completed": bool(full),
-        "episodes": len(records),
-        "selected_episodes": len(selected),
-        "scenes": len(dataset.get("scene_counts") or {}),
-        "published_scenes": PUBLISHED_VAL_SCENES,
-        "published_episodes": PUBLISHED_VAL_EPISODES,
-        "agent_errors": summary.agent_errors,
-        "reference_sim_version_match": config["reference_sim_version_match"],
-        # None, not 0, when the run skipped the preflight: "not checked" and
-        # "checked and clean" must not read the same in an audit.
-        "unreachable_starts": (None if starts is None
-                               else len(starts.get("unreachable_starts") or [])),
-        "published_geodesic_gaps": (None if starts is None
-                                    else len(starts.get("published_geodesic_gaps") or {})),
-        "starts_preflighted": starts is not None,
-        "primary_metrics": ["SR", "SPL"],
-        "supplementary_metrics": ["DTG (final geodesic distance to a view point, m)",
-                                  "SoftSPL", "steps", "wall_s"],
-        "total_wall_s": sum(row.wall_s for row in records),
-        "notes": "Success is STOP within %.2f m of a published goal view point, "
-                 "as habitat-lab scores ObjectNav. Neither comparison paper "
-                 "publishes per-episode results or its evaluator's hashes, so "
-                 "no direct SOTA claim is asserted." % PROTOCOL.success_distance_m,
-    }
     text = "# %s\n\n" % title
-    text += ("SR and SPL are episode means including failures, and are the two "
-             "metrics every MP3D paper below reports. DTG here is the final "
-             "geodesic distance to the nearest published view point; SoftSPL is "
-             "supplementary. Neither is a published MP3D baseline: the DTG/TF/NM "
-             "columns of arXiv:2508.04678 cover HM3D and Gibson, not MP3D.\n\n")
-    text += comparison_table(summary, baselines())
-    text += ("\n\n**Comparison caveat:** the published rows are reference values "
-             "transcribed from their papers, not paired re-evaluations. TF = "
-             "training-free, NM = non-metric (the columns OSG-Nav uses): our "
-             "method is training-free and metric. Ground-truth pose and depth "
-             "do not mean ground-truth semantics -- detections stay predicted.\n\n")
-    text += "## Audit\n\n" + "\n".join("- **%s:** %s" % item for item in audit.items()) + "\n"
+    text += ("Scored under habitat-lab's own ObjectNav rule: STOP, with the "
+             "geodesic distance to the nearest goal **view point** below "
+             "%.2f m. SR, SPL, SoftSPL and DTG are means over every scored "
+             "episode, failures included.\n\n" % protocol.success_distance_m)
+    if audit["published_benchmark_split"]:
+        text += comparison_table(summary, reported_results(protocol.benchmark, protocol.split))
+    else:
+        text += ("This run is on the **%s** split, which no compared paper "
+                 "reports, so there is no table to put it under. Development "
+                 "numbers belong in an experiment log, not beside a benchmark."
+                 "\n\n" % protocol.split)
+        text += comparison_table(summary, ())
+    text += ("\n\n## The same episodes at ApexNav's 0.2 m success radius\n\n"
+             "ApexNav's released configs loosen the success radius from "
+             "habitat-lab's 0.1 m to 0.2 m, which can only add successes. These "
+             "are the **same %d episodes**, re-scored from the rows on disk -- "
+             "not a second run. %d episode(s) change from failure to success.\n\n"
+             % (len(records), gained))
+    text += comparison_table(
+        loose_summary,
+        reported_results(protocol.benchmark, protocol.split)
+        if audit["published_benchmark_split"] else (),
+        our_label=records[0].agent + " @0.2 m")
+    text += ("\n\n**Comparison caveats.** The published rows are transcribed "
+             "reference values, not paired re-evaluations, and the papers do "
+             "not share one protocol: ApexNav's own results are at a 0.2 m "
+             "success radius against habitat-lab's 0.1 m, SG-Nav's baseline "
+             "rows are quotes from other papers, and the two print different "
+             "numbers for the same baseline (VLFM). Ground-truth pose and depth "
+             "do not mean ground-truth semantics: our detections are predicted. "
+             "Each row's own note says which of these applies to it.\n\n")
+    text += "## Audit\n\n" + "\n".join(
+        "- **%s:** %s" % item for item in audit.items()) + "\n"
     write_atomically(directory / "comparison.md", text)
-    write_atomically(directory / "audit.json", strict_json(audit, "MP3D audit", indent=2))
+    write_atomically(directory / "audit.json",
+                     strict_json(audit, "MP3D audit", indent=2))
     return audit
 
 
 def merge_runs(directories, output):
-    """Merge only complete, disjoint shards of exactly the same experiment."""
+    """Merge only complete, disjoint shards of one identical experiment."""
     runs = [_read_run(directory) for directory in directories]
     if not runs:
         raise ValueError("No shard directories supplied")
-    base = runs[0][0]
-    comparable = ("protocol", "runtime", "source_sha256", "method", "seed",
-                  "reference_sim_version_match", "dataset", "shards", "limit", "scene")
+    base, protocol, _ = runs[0]
+    comparable = ("protocol", "runtime", "method", "seed", "dataset", "shards",
+                  "limit", "scenes", "reference_habitat_sim_version_match",
+                  "excluded_unreachable_episode_ids")
     records, shard_ids = [], set()
-    for config, rows in runs:
+    for config, _, rows in runs:
         if any(config.get(key) != base.get(key) for key in comparable):
-            raise ValueError("Shards disagree on data, protocol, method, source, or runtime")
+            raise ValueError("Shards disagree on data, protocol, method, or runtime")
         if config["limit"] is not None or config["shard_index"] in shard_ids:
             raise ValueError("Limited or duplicate shards cannot form a full evaluation")
         if {r.episode_id for r in rows} != set(config["selected_episode_ids"]):
@@ -152,10 +195,13 @@ def merge_runs(directories, output):
         raise ValueError("Missing shards")
     ids = [r.episode_id for r in records]
     if len(ids) != len(set(ids)):
-        raise ValueError("Shards overlap; every episode must appear exactly once")
-    config = dict(base, selected_episode_ids=sorted(ids), shards=base["shards"],
-                  shard_index=0,
-                  full_split=len(ids) == PUBLISHED_VAL_EPISODES and base.get("full_split"),
+        raise ValueError("Shards overlap; each episode must appear exactly once")
+    published = PUBLISHED_VAL[protocol.dataset_version]["episodes"]
+    merged_full = (len(ids) == published and not base.get("limit")
+                   and not base.get("scenes")
+                   and not base.get("excluded_unreachable_episode_ids"))
+    config = dict(base, selected_episode_ids=sorted(ids), shards=1, shard_index=0,
+                  full_split=merged_full,
                   merged_from=[str(Path(p).resolve()) for p in directories])
     with MetricsLogger(Path(output), config) as logger:
         for row in sorted(records, key=lambda r: r.episode_id):
