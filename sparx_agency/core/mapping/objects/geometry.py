@@ -138,6 +138,70 @@ def robust_bbox_depth(depth_img: np.ndarray, bbox_xyxy: BBox,
     return float(np.percentile(patch[valid], float(percentile)))
 
 
+def robust_mask_depth(depth_img: np.ndarray, mask: np.ndarray,
+                      bbox_xyxy: Optional[BBox] = None,
+                      min_depth_m: float = 0.30, max_depth_m: float = 5.0,
+                      percentile: float = 30.0,
+                      min_valid_px: int = 20) -> Optional[float]:
+    """Robust metric depth of a detection from its own pixels: a low percentile under ``mask``.
+
+    The mask-aware counterpart of :func:`robust_bbox_depth`. That function
+    shrinks the box to shed the rim's background, but a box also admits
+    whatever stands IN FRONT of the object -- a chair before a sofa -- and its
+    pixels are closer than the object's, so the low percentile reads the
+    occluder and the object is "reached" a metre early. With a segmentation
+    mask of the object itself (see
+    :class:`sparx_agency.core.mapping.interfaces.segmentation_model.SegmentationModel`)
+    there is no rim to shed and no occluder to admit: the percentile is taken
+    over the valid depths under the mask, within ``bbox_xyxy`` when given.
+
+    Args:
+        depth_img: ``(H, W)`` float metric depth in meters (optical ``z``).
+            NaN/inf holes are allowed and ignored.
+        mask: ``(H, W)`` boolean (or 0/non-0) mask of the object's pixels, in
+            ``depth_img`` pixels.
+        bbox_xyxy: Optional ``(x1, y1, x2, y2)`` that bounds the read -- the
+            detection's box, so a mask that leaked outside it (SAM following
+            a texture into the wall) cannot carry the read with it.
+        min_depth_m: Reject depths below this (sensor near-clip artifacts).
+        max_depth_m: Reject depths above this (far background).
+        percentile: Percentile of the valid depths to return.
+        min_valid_px: Minimum number of valid masked pixels; fewer means no
+            measurement.
+
+    Returns:
+        Depth in meters, or ``None`` when fewer than ``min_valid_px`` valid
+        pixels lie under the mask (a legitimate "no measurement", not an
+        error).
+
+    Raises:
+        ValueError: If ``depth_img`` is not ``(H, W)`` or ``mask`` has another
+            shape.
+    """
+    depth = np.asarray(depth_img)
+    if depth.ndim != 2:
+        raise ValueError("depth_img must be (H, W), got shape %r"
+                         % (depth.shape,))
+    selected = np.asarray(mask).astype(bool)
+    if selected.shape != depth.shape:
+        raise ValueError("mask shape %r must match depth shape %r"
+                         % (selected.shape, depth.shape))
+    if bbox_xyxy is not None:
+        height, width = depth.shape
+        x1, y1, x2, y2 = (float(v) for v in bbox_xyxy)
+        x0, x1 = int(max(0.0, x1)), int(min(float(width), x2))
+        y0, y1 = int(max(0.0, y1)), int(min(float(height), y2))
+        inside = np.zeros_like(selected)
+        if x1 > x0 and y1 > y0:
+            inside[y0:y1, x0:x1] = True
+        selected &= inside
+    valid = selected & valid_depth_mask(depth, min_depth=float(min_depth_m),
+                                        max_depth=float(max_depth_m))
+    if int(valid.sum()) < int(min_valid_px):
+        return None
+    return float(np.percentile(depth[valid], float(percentile)))
+
+
 def backproject_bbox_to_world(
     bbox_xyxy: BBox,
     depth_m: float,

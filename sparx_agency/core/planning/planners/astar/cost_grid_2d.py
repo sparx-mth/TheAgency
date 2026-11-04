@@ -36,6 +36,15 @@ the pinch physically allows instead of hugging one side.
 UNKNOWN ("gray") cells are a flat ``unknown_cost`` *and* a centring boundary:
 they repel the soft layer like a wall, so a route prefers the middle of the
 known-free band over the gray frontier -- without gray ever becoming lethal.
+
+**The medial-axis layer (``centreline_weight``, since 2026-10-28).** The soft
+band is a gentle slope, and inside a doorway it is nearly flat: an 8-connected
+route saves more by cutting the corner than the band charges, and the ground
+robot clips the jamb. The layer adds a second, steeper slope that applies only
+where the clearance is below ``channel_half_width_m`` -- a passage narrower
+than twice that -- and is zero at that width, so the open floor is untouched
+and the minimum across any doorway or corridor is the ridge of the distance
+transform: its medial axis.
 """
 from __future__ import annotations
 
@@ -135,8 +144,10 @@ def build_cost_fields(
         occupied, confidence, params.lethal_confidence)
 
     # Distances are only ever read inside the shaped band, so bound the transform
-    # to it (the cost layer treats everything beyond as equally open).
-    band = max(params.inflate_radius_m + params.clearance_margin_m, res)
+    # to it (the cost layer treats everything beyond as equally open). The
+    # centreline layer reads clearances up to the channel half-width too.
+    band = max(params.inflate_radius_m + params.clearance_margin_m,
+               params.channel_half_width_m if params.centreline_weight > 0.0 else 0.0, res)
     clearance = clearance_field(confirmed, res, band)
 
     # The soft layer repels from everything the route would rather keep away
@@ -178,6 +189,14 @@ def assemble_cost_grid(
                          / params.clearance_margin_m)
         np.clip(deficit, 0.0, 1.0, out=deficit)
         cost += float(params.clearance_weight) * deficit
+    if params.centreline_weight > 0.0 and params.channel_half_width_m > 0.0:
+        # The medial-axis layer: inside a passage narrower than twice the channel half-width the
+        # cost falls linearly toward the ridge of the distance transform, the one line equidistant
+        # from both walls. Read off the CONFIRMED-obstacle clearance: a doorway is its jambs, and the
+        # gray beyond it must not pull the route off the axis.
+        pinch = 1.0 - fields.clearance / params.channel_half_width_m
+        np.clip(pinch, 0.0, 1.0, out=pinch)
+        cost += float(params.centreline_weight) * pinch
 
     # Flat costs override the shaping (gray is not "near a wall", it is gray);
     # lethal overrides everything.

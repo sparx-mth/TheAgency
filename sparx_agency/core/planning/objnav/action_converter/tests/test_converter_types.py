@@ -42,7 +42,7 @@ def test_converter_params_default_to_two_steps_of_lookahead_and_one_of_tolerance
     """The defaults are the documented ones, which the converter's tests assume."""
     params = ActionConverterParams()
     assert (params.lookahead_m, params.goal_tolerance_m,
-            params.blocked_epsilon_m) == (0.5, 0.25, 0.01)
+            params.blocked_epsilon_m) == (0.5, 0.25, 0.05)
 
 
 @pytest.mark.parametrize("field", ["lookahead_m", "goal_tolerance_m",

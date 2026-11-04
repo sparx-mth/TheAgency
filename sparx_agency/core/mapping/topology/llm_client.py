@@ -13,6 +13,14 @@ Two backends, chosen by the ``LLM_BACKEND`` env var:
     Needs ``LLM_BASE_URL`` (e.g. ``https://api.openai.com/v1``) and,
     if the server requires it, ``LLM_API_KEY``.
 
+ Two models, one client. ``LLM_MODEL`` (default ``qwen2.5:3b-instruct``) serves
+the cheap, frequent calls; ``LLM_REASONING_MODEL`` (default
+``qwen2.5:14b-instruct``, with ``LLM_REASONING_TIMEOUT_S``,
+``LLM_REASONING_MAX_TOKENS`` and ``LLM_REASONING_NUM_CTX``) serves the one
+judgement per loop point that the search cannot afford to get wrong -- see
+:attr:`LLMConfig.reasoning_model`. Callers select it with
+``chat_json(..., reasoning=True)``.
+
 The client keeps one ``requests.Session`` per instance, forces JSON
 output when possible (Ollama ``format: json`` / OpenAI
 ``response_format: json_object``), and retries once with a short
@@ -38,9 +46,18 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
+
+from sparx_agency.core.mapping.topology.llm_answer_cache import request_key
+
+#: A prompt Ollama evaluated at fewer tokens than one per this many characters was cut. English prompts of
+#: the node oracle run at 3.7-4.0 characters per token under the Qwen tokenizer; the 2026-10-28 sweep's
+#: silently truncated oracle prompt read 7.8 (16,015 characters as 2,050 tokens in a 4,096 window).
+TRUNCATION_CHARS_PER_TOKEN = 6.0
+#: Below this many prompt characters the template's own tokens dominate and the ratio says nothing.
+TRUNCATION_MIN_CHARS = 2000
 
 
 def _seed_from_env(raw: str) -> Optional[int]:
@@ -61,13 +78,15 @@ class LLMConfig:
     Attributes:
         backend: ``"ollama"``, ``"openai"`` or ``"openai-compat"``.
         base_url: Server root URL (no trailing slash).
-        model: Model name understood by the backend.
+        model: Model name understood by the backend -- the DEFAULT model, for
+            the cheap, frequent calls (room-type classification, target-name
+            matching).
         api_key: Bearer token for OpenAI-compatible servers ("" = none).
         temperature: Default sampling temperature. 0.0, not 0.2: an
             "optimal" visit order that changes when the scene graph did not
             is not auditable, and a search nobody can replay from a recording
             is a search nobody can debug.
-        timeout_s: Per-request timeout in seconds.
+        timeout_s: Per-request timeout in seconds, for the default model.
         seed: Sampling seed sent to backends that accept one. None sends no
             seed at all. With temperature 0 this is belt and braces, but
             Ollama's greedy decode is not bit-stable across keep-alive
@@ -81,6 +100,49 @@ class LLMConfig:
         max_tokens: Cap on the reply. A small model that falls into repeating
             a JSON fragment otherwise runs until ``timeout_s``, producing the
             same silent uniform-fallback tick.
+        reasoning_model: The model for the REASONING call -- the search
+            oracle that values every node of the search (rooms and stairs)
+            from the whole state of the map. That judgement is where a small
+            model fails (a 3B double-counts search effort into semantics and
+            cannot weigh a staircase against an unknown room), and the search
+            makes it only at loop points, so a larger and slower model is
+            affordable here. ``qwen2.5:14b-instruct`` by default: ~9 GB at
+            Q4, which fits beside Habitat in the 30 GB of the development
+            laptop and answers a dozen-node prompt in about a minute on its
+            CPU; ``qwen2.5:32b-instruct`` (~20 GB, several minutes) where the
+            RAM allows, or a hosted model through the OpenAI-compatible
+            backend. A model named here must be provisioned: the runtime's
+            health check looks for it and refuses to run without it, rather
+            than falling back to the small model unannounced.
+        reasoning_timeout_s: Timeout for that call. Generous by default: the
+            search waits for its answer rather than running on a guess, and
+            a 14B model on a CPU takes a minute or two per call.
+        reasoning_max_tokens: Reply cap for that call. A dozen nodes with a
+            reason each is ~600 tokens; models that think aloud need room.
+        reasoning_num_ctx: Context window requested for that call (Ollama
+            ``num_ctx``). The node prompt is ~1.5K tokens plus the reply;
+            Ollama truncates a request that outgrows its window from the
+            FRONT, which would silently drop the system prompt's rules, so
+            the window is asked for explicitly rather than left to the
+            server's default.
+        num_ctx: Context window requested for the DEFAULT route (Ollama
+            ``num_ctx``). None sends none, and the server's own default
+            applies -- unless the reasoning model IS the default model, in
+            which case :meth:`__post_init__` sets it to
+            ``reasoning_num_ctx``. Ollama keys a loaded model by its context:
+            two routes to one model with two windows make every call of the
+            rarer one wait for a reload that a busy runner never grants. The
+            2026-10-28 GT sweep (qwen2.5:3b in both roles, labels at the
+            server's 4,096, the oracle at 8,192, 20 workers) answered zero
+            oracle calls in 2,000 episodes: each hung to its timeout, and
+            once 512 hung in the server's queue every one was an HTTP 503.
+        num_gpu: Ollama ``num_gpu`` per request: how many layers the server
+            may place on the GPU. None leaves it to the server (every layer
+            that fits); ``-1`` asks for all of them, ``0`` keeps inference
+            on the CPU even on a server that has a card. The Gibson
+            runtime's GPU placement plan (``gibson/gpu_plan.py``) sets it
+            through ``LLM_NUM_GPU`` so the LLM -- the slowest process by an
+            order of magnitude -- is the first to get the card.
     """
 
     backend: str = "ollama"
@@ -92,6 +154,20 @@ class LLMConfig:
     seed: Optional[int] = 0
     keep_alive: str = "30m"
     max_tokens: int = 768
+    reasoning_model: str = "qwen2.5:14b-instruct"
+    reasoning_timeout_s: float = 600.0
+    reasoning_max_tokens: int = 2048
+    reasoning_num_ctx: int = 8192
+    num_gpu: Optional[int] = None
+    num_ctx: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not str(self.reasoning_model).strip():
+            self.reasoning_model = self.model
+        if self.num_ctx is None and self.reasoning_model == self.model:
+            self.num_ctx = int(self.reasoning_num_ctx)      # one model, one window: see ``num_ctx``
+        if self.num_gpu is not None and (isinstance(self.num_gpu, bool) or int(self.num_gpu) < -1):
+            raise ValueError("num_gpu must be None, -1 (all layers) or a non-negative layer count")
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -110,7 +186,17 @@ class LLMConfig:
             seed=_seed_from_env(get("LLM_SEED", "0")),
             keep_alive=get("LLM_KEEP_ALIVE", "30m"),
             max_tokens=int(get("LLM_MAX_TOKENS", "768")),
+            reasoning_model=get("LLM_REASONING_MODEL", "qwen2.5:14b-instruct"),
+            reasoning_timeout_s=float(get("LLM_REASONING_TIMEOUT_S", "600")),
+            reasoning_max_tokens=int(get("LLM_REASONING_MAX_TOKENS", "2048")),
+            reasoning_num_ctx=int(get("LLM_REASONING_NUM_CTX", "8192")),
+            num_gpu=int(get("LLM_NUM_GPU", "").strip()) if get("LLM_NUM_GPU", "").strip() else None,
+            num_ctx=int(get("LLM_NUM_CTX", "").strip()) if get("LLM_NUM_CTX", "").strip() else None,
         )
+
+    def models(self) -> Tuple[str, ...]:
+        """Every model this config names, deduplicated -- what a health check must find provisioned."""
+        return tuple(dict.fromkeys((self.model, self.reasoning_model)))
 
 
 # ---------------------------------------------------------------------
@@ -129,9 +215,17 @@ class LLMClient:
     text for logging.
     """
 
-    def __init__(self, cfg: Optional[LLMConfig] = None):
+    def __init__(self, cfg: Optional[LLMConfig] = None, answers=None):
+        """Args:
+            cfg: The connection settings; read from the environment when None.
+            answers: An :class:`~sparx_agency.core.mapping.topology.llm_answer_cache.LLMAnswerStore`
+                that answers a request it holds and records every answer used, or None.
+        """
         self.cfg = cfg or LLMConfig.from_env()
         self.sess = requests.Session()
+        self.answers = answers
+        self.exclusive = None       # an ExclusiveColdStart (llm_exclusive.py): one request at a time, model reloaded
+        self.last_reply: Dict[str, Any] = {}
 
     # -- Public --------------------------------------------------------
     @classmethod
@@ -140,26 +234,62 @@ class LLMClient:
         return cls(LLMConfig.from_env())
 
     def chat_json(self, system: str, user: str,
-                  temperature: Optional[float] = None) -> Dict[str, Any]:
+                  temperature: Optional[float] = None,
+                  reasoning: bool = False) -> Dict[str, Any]:
         """Send system+user prompt, return the parsed JSON dict.
+
+        Args:
+            system: The system prompt.
+            user: The user prompt.
+            temperature: Sampling temperature; the config's when None.
+            reasoning: Use the config's ``reasoning_model``, with its own
+                timeout and reply cap, instead of the default model. For the
+                one call per loop point that values every node of the search.
 
         Raises:
             ValueError: The model's reply was not rescuable JSON.
             RuntimeError: The HTTP request failed after retry, or the
                 server reply had an unexpected shape.
         """
-        text = self.chat_text(system, user, temperature)
+        text = self.chat_text(system, user, temperature, reasoning=reasoning)
         return _best_effort_json(text)
 
     def chat_text(self, system: str, user: str,
-                  temperature: Optional[float] = None) -> str:
+                  temperature: Optional[float] = None,
+                  reasoning: bool = False) -> str:
         """Send system+user prompt, return the raw reply text."""
         t = self.cfg.temperature if temperature is None else float(temperature)
-        if self.cfg.backend == "ollama":
-            return self._ollama_chat(system, user, t)
-        if self.cfg.backend in ("openai", "openai-compat"):
-            return self._openai_chat(system, user, t)
-        raise ValueError(f"Unknown LLM_BACKEND: {self.cfg.backend!r}")
+        route = _Route(model=self.cfg.reasoning_model if reasoning else self.cfg.model,
+                       timeout_s=self.cfg.reasoning_timeout_s if reasoning else self.cfg.timeout_s,
+                       max_tokens=self.cfg.reasoning_max_tokens if reasoning else self.cfg.max_tokens,
+                       num_ctx=int(self.cfg.reasoning_num_ctx) if reasoning else self.cfg.num_ctx)
+        ollama = self.cfg.backend == "ollama"
+        if not ollama and self.cfg.backend not in ("openai", "openai-compat"):
+            raise ValueError(f"Unknown LLM_BACKEND: {self.cfg.backend!r}")
+        key = entry = None
+        if self.answers is not None:
+            key = request_key(self.cfg.backend, route.model, system, user, t, self.cfg.seed if ollama else None,
+                              route.num_ctx if ollama else None, route.max_tokens, scope=self.answers.scope)
+            entry = {"route": "reasoning" if reasoning else "default", "model": route.model, "system": system,
+                     "user": user}
+            stored = self.answers.get(key)
+            if stored is not None:
+                self.answers.put(key, stored, dict(entry, source="replay"))
+                return stored
+        self.last_reply = {}
+        text = self._ollama_chat(system, user, t, route) if ollama else self._openai_chat(system, user, t, route)
+        if key is not None:
+            self.answers.put(key, text, dict(entry, source="model", reply=dict(self.last_reply)))
+        return text
+
+    def set_answer_scope(self, scope: Optional[str]) -> None:
+        """Key the answer store's entries to ``scope`` (the episode in force) from now on; nothing without a store."""
+        if self.answers is not None:
+            self.answers.scope = scope
+
+    def answer_stats(self) -> Optional[Dict[str, int]]:
+        """The answer store's counters so far (replayed, repeated, asked, recorded), or None without a store."""
+        return None if self.answers is None else dict(self.answers.stats)
 
     def ping(self) -> bool:
         """Return True if the server answers. Never raises."""
@@ -177,14 +307,19 @@ class LLMClient:
             return False
 
     # -- Backends ------------------------------------------------------
-    def _ollama_chat(self, system: str, user: str, temperature: float) -> str:
+    def _ollama_chat(self, system: str, user: str, temperature: float,
+                     route: "_Route") -> str:
         url = f"{self.cfg.base_url}/api/chat"
         options = {"temperature": temperature,
-                   "num_predict": int(self.cfg.max_tokens)}
+                   "num_predict": int(route.max_tokens)}
+        if route.num_ctx is not None:
+            options["num_ctx"] = int(route.num_ctx)
         if self.cfg.seed is not None:
             options["seed"] = int(self.cfg.seed)
+        if self.cfg.num_gpu is not None:
+            options["num_gpu"] = int(self.cfg.num_gpu)
         payload = {
-            "model": self.cfg.model,
+            "model": route.model,
             "stream": False,
             "format": "json",             # ask Ollama to enforce JSON
             "keep_alive": str(self.cfg.keep_alive),
@@ -194,19 +329,30 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
         }
-        r = self._post_with_retry(url, payload)
+        if self.exclusive is not None:
+            with self.exclusive.held():
+                self.exclusive.unload(self.sess, self.cfg.base_url, route.model)
+                r = self._post_with_retry(url, payload, timeout_s=route.timeout_s)
+        else:
+            r = self._post_with_retry(url, payload, timeout_s=route.timeout_s)
         data = r.json()
+        self.last_reply = {k: data.get(k) for k in ("prompt_eval_count", "eval_count", "total_duration",
+                                                     "load_duration", "prompt_eval_duration", "eval_duration")}
         # Ollama's reply: {"message": {"role":"assistant","content":"..."}}
         try:
-            return data["message"]["content"]
+            content = data["message"]["content"]
         except (KeyError, TypeError) as e:
             raise RuntimeError(f"unexpected Ollama reply: {data}") from e
+        _refuse_truncation(data, len(system) + len(user), route.num_ctx)
+        return content
 
-    def _openai_chat(self, system: str, user: str, temperature: float) -> str:
+    def _openai_chat(self, system: str, user: str, temperature: float,
+                     route: "_Route") -> str:
         url = f"{self.cfg.base_url}/chat/completions"
         payload = {
-            "model": self.cfg.model,
+            "model": route.model,
             "temperature": temperature,
+            "max_tokens": int(route.max_tokens),
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
@@ -214,7 +360,8 @@ class LLMClient:
             ],
         }
         r = self._post_with_retry(url, payload,
-                                  extra_headers=self._auth_header())
+                                  extra_headers=self._auth_header(),
+                                  timeout_s=route.timeout_s)
         data = r.json()
         try:
             return data["choices"][0]["message"]["content"]
@@ -229,23 +376,69 @@ class LLMClient:
 
     def _post_with_retry(self, url: str, payload: Dict[str, Any],
                          extra_headers: Optional[Dict[str, str]] = None,
-                         tries: int = 2):
+                         tries: int = 2, timeout_s: Optional[float] = None):
+        """POST ``payload``; a transient transport error is retried once, a timeout never.
+
+        A request that ran into its timeout was not a blip: the model is
+        still generating (or the server is wedged), and a second attempt
+        costs the whole timeout again -- 20 minutes per node-oracle call at
+        the reasoning route's 600 s (review of 2026-10-07). The caller's
+        back-off handles a slow or dead service; here the timeout is final.
+        """
         headers = {"Content-Type": "application/json"}
         if extra_headers:
             headers.update(extra_headers)
+        timeout = self.cfg.timeout_s if timeout_s is None else float(timeout_s)
         last_err: Optional[Exception] = None
         for attempt in range(tries):
             try:
                 r = self.sess.post(url, data=json.dumps(payload),
                                    headers=headers,
-                                   timeout=self.cfg.timeout_s)
+                                   timeout=timeout)
                 r.raise_for_status()
                 return r
+            except requests.Timeout as e:
+                raise RuntimeError(f"LLM request timed out after {timeout:.0f}s (not retried): {e}") from e
             except requests.RequestException as e:
                 last_err = e
                 if attempt + 1 < tries:
                     time.sleep(0.4)
         raise RuntimeError(f"LLM request failed after {tries} tries: {last_err}")
+
+
+def _refuse_truncation(data: Dict[str, Any], prompt_chars: int, num_ctx: Optional[int]) -> None:
+    """Raise when Ollama's counters show the prompt was cut or the window ran out.
+
+    Ollama truncates a prompt that outgrows its window from the FRONT -- the
+    system prompt's rules go first -- and says nothing; a reply to the tail of
+    a prompt is a confident answer to a question nobody asked.
+
+    Raises:
+        RuntimeError: ``prompt_eval_count`` is under one token per
+            :data:`TRUNCATION_CHARS_PER_TOKEN` characters of a prompt of at
+            least :data:`TRUNCATION_MIN_CHARS`, or prompt plus reply filled
+            the requested window.
+    """
+    prompt_tokens = data.get("prompt_eval_count")
+    if not isinstance(prompt_tokens, int):
+        return
+    if prompt_chars >= TRUNCATION_MIN_CHARS and prompt_tokens * TRUNCATION_CHARS_PER_TOKEN < prompt_chars:
+        raise RuntimeError("Ollama truncated the prompt: %d characters evaluated as %d tokens (window %s); "
+                           "raise LLM_REASONING_NUM_CTX / LLM_NUM_CTX" % (prompt_chars, prompt_tokens, num_ctx))
+    reply_tokens = data.get("eval_count")
+    if num_ctx and isinstance(reply_tokens, int) and prompt_tokens + reply_tokens >= int(num_ctx):
+        raise RuntimeError("Ollama filled its %d-token window (%d prompt + %d reply); the reply is cut"
+                           % (int(num_ctx), prompt_tokens, reply_tokens))
+
+
+@dataclass(frozen=True)
+class _Route:
+    """Which model a call goes to, and how long and how wide it may be."""
+
+    model: str
+    timeout_s: float
+    max_tokens: int
+    num_ctx: Optional[int] = None
 
 
 # ---------------------------------------------------------------------

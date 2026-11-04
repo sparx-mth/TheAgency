@@ -42,7 +42,8 @@ def step_info(result: ConversionResult,
         The converter's ``status``, whether the step was ``idle``, the path
         geometry (``segment_index``, ``heading_error_rad``,
         ``distance_to_goal_m``, ``remaining_path_m``, ``cross_track_m``),
-        ``forward_blocked``, and a copy of the command's ``info`` under
+        ``forward_blocked``, ``planned`` (the action came from the command's
+        kinematic plan), and a copy of the command's ``info`` under
         ``"policy"``.
     """
     return {
@@ -54,6 +55,7 @@ def step_info(result: ConversionResult,
         "remaining_path_m": float(result.remaining_path_m),
         "cross_track_m": float(result.cross_track_m),
         "forward_blocked": result.forward_blocked,
+        "planned": result.planned,
         "policy": dict(command.info),
     }
 

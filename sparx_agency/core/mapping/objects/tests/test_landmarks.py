@@ -6,7 +6,110 @@ import pytest
 from sparx_agency.core.mapping.objects.landmarks import (
     ObjectLandmarkMap,
     class_color,
+    disc_iou,
 )
+
+
+class TestClassVoting:
+    def test_a_lone_misidentification_on_a_well_seen_object_does_not_open_a_new_landmark(self):
+        """Five bed frames, then one sofa frame at the same spot: still one bed."""
+        lmap = ObjectLandmarkMap(class_votes=True, nearest_match=True)
+        for step in range(5):
+            lmap.observe("bed", (2.0, 1.0), frame_id=step)
+        lm = lmap.observe("sofa", (2.2, 1.1), frame_id=5)
+        assert len(lmap) == 1 and lm.class_name == "bed"
+        assert lm.votes == {"bed": 5, "sofa": 1} and lm.count == 6
+        assert lmap.confirmed() == [lm] and lmap.relabels == []
+
+    def test_a_majority_of_the_other_class_corrects_the_earlier_misidentification(self):
+        lmap = ObjectLandmarkMap(class_votes=True)
+        lmap.observe("sofa", (0.0, 0.0), frame_id=0)
+        for step in range(1, 4):
+            lm = lmap.observe("bed", (0.1, 0.0), frame_id=step)
+        assert lm.class_name == "bed" and lm.votes == {"sofa": 1, "bed": 3}
+        assert lmap.relabels == [(lm.id, "sofa", "bed", 3)]
+        assert [l.class_name for l in lmap.confirmed()] == ["bed"], "the sofa is gone from the map"
+
+    def test_a_tie_is_not_confirmed_and_keeps_the_current_class(self):
+        lmap = ObjectLandmarkMap(class_votes=True, min_observations=2)
+        lmap.observe("sofa", (0.0, 0.0), frame_id=0)
+        lmap.observe("sofa", (0.0, 0.0), frame_id=1)
+        lm = lmap.observe("bed", (0.0, 0.0), frame_id=2)
+        lm = lmap.observe("bed", (0.0, 0.0), frame_id=3)
+        assert lm.class_name == "sofa" and lmap.confirmed() == []
+        lmap.observe("bed", (0.0, 0.0), frame_id=4)
+        assert lm.class_name == "bed" and lmap.confirmed() == [lm]
+
+    def test_one_frame_votes_once_per_landmark(self):
+        lmap = ObjectLandmarkMap(class_votes=True)
+        lmap.observe("bed", (0.0, 0.0), frame_id=7)
+        lm = lmap.observe("sofa", (0.1, 0.0), frame_id=7)
+        assert lm.votes == {"bed": 1} and lm.count == 1
+
+    def test_footprint_overlap_associates_a_large_object_seen_from_two_sides(self):
+        """Two bed centroids 1.2 m apart (beyond the 0.7 m radius) with 1 m footprints are one bed at IoU 0.15
+        (the 2026-10-04 value); the 0.25 default -- about one radius apart -- needs them within a metre."""
+        lmap = ObjectLandmarkMap(class_votes=True, footprint_iou=0.15)
+        lmap.observe("bed", (0.0, 0.0), frame_id=0, radius_m=1.0)
+        lm = lmap.observe("bed", (1.2, 0.0), frame_id=1, radius_m=1.0)
+        assert len(lmap) == 1 and lm.count == 2 and lm.xy == pytest.approx((0.6, 0.0))
+        assert lm.radius_m == pytest.approx(1.0)
+        strict = ObjectLandmarkMap(class_votes=True)
+        strict.observe("bed", (0.0, 0.0), frame_id=0, radius_m=1.0)
+        assert strict.observe("bed", (1.2, 0.0), frame_id=1, radius_m=1.0).count == 1 and len(strict) == 2
+        assert strict.observe("bed", (0.9, 0.0), frame_id=2, radius_m=1.0).count == 2, "within a radius: one bed"
+
+    def test_small_footprints_apart_are_two_instances(self):
+        lmap = ObjectLandmarkMap(class_votes=True)
+        lmap.observe("cup", (0.0, 0.0), frame_id=0, radius_m=0.1)
+        lmap.observe("cup", (0.9, 0.0), frame_id=1, radius_m=0.1)
+        assert len(lmap) == 2
+
+    def test_match_reports_the_landmark_an_observation_would_fold_into(self):
+        lmap = ObjectLandmarkMap(class_votes=True, nearest_match=True)
+        a = lmap.observe("bed", (0.0, 0.0))
+        b = lmap.observe("chair", (3.0, 0.0))
+        assert lmap.match((0.3, 0.0), class_name="sofa") is a
+        assert lmap.match((3.2, 0.1)) is b
+        assert lmap.match((1.5, 0.0)) is None
+        assert lmap.match((0.3, 0.0), exclude=(a.id,)) is None, "a landmark this frame already fed is skipped"
+
+    def test_without_voting_match_needs_a_class_and_keeps_the_ported_rule(self):
+        lmap = ObjectLandmarkMap()
+        a = lmap.observe("chair", (0.0, 0.0))
+        assert lmap.match((0.1, 0.0), class_name="chair") is a
+        assert lmap.match((0.1, 0.0), class_name="table") is None
+        with pytest.raises(ValueError):
+            lmap.match((0.1, 0.0))
+
+    def test_caller_chosen_landmark_is_honoured(self):
+        lmap = ObjectLandmarkMap(class_votes=True)
+        a = lmap.observe("bed", (0.0, 0.0))
+        lm = lmap.observe("lamp", (5.0, 5.0), landmark=a)
+        assert lm is a and a.votes == {"bed": 1, "lamp": 1} and len(lmap) == 1
+
+    @pytest.mark.parametrize("value", [0.0, 1.5, -0.2])
+    def test_invalid_footprint_iou_raises(self, value):
+        with pytest.raises(ValueError):
+            ObjectLandmarkMap(footprint_iou=value)
+
+
+class TestDiscIoU:
+    def test_identical_discs(self):
+        assert disc_iou((0, 0), 1.0, (0, 0), 1.0) == pytest.approx(1.0)
+
+    def test_disjoint_discs(self):
+        assert disc_iou((0, 0), 1.0, (3, 0), 1.0) == 0.0
+
+    def test_contained_disc(self):
+        assert disc_iou((0, 0), 2.0, (0.5, 0), 1.0) == pytest.approx(0.25)
+
+    def test_half_offset_is_between(self):
+        value = disc_iou((0, 0), 1.0, (1.0, 0), 1.0)
+        assert 0.2 < value < 0.5
+
+    def test_zero_radius_never_overlaps(self):
+        assert disc_iou((0, 0), 0.0, (0, 0), 1.0) == 0.0
 
 
 class TestDedupe:
@@ -45,6 +148,34 @@ class TestDedupe:
         assert len(lmap) == 2
         assert a is not b
         assert a.count == 1 and b.count == 1
+
+    def test_distinct_classes_never_merge_whatever_the_footprint_overlap(self):
+        """The ban (2026-10-07): a cup on a table, a toilet beside a bathtub, a vase on a cabinet are two
+        instances however the discs overlap -- the same spot, the same footprint, still two."""
+        lmap = ObjectLandmarkMap(nearest_match=True)
+        table = lmap.observe("dining table", (0.0, 0.0), frame_id=0, radius_m=1.0)
+        cup = lmap.observe("cup", (0.0, 0.0), frame_id=0, radius_m=0.15)
+        assert cup is not table and len(lmap) == 2
+        toilet = lmap.observe("toilet", (-0.29, -3.62), frame_id=1, radius_m=0.22)
+        tub = lmap.observe("bathtub", (-0.42, -3.10), frame_id=1, radius_m=0.20)
+        assert tub is not toilet and lmap.observe("bathtub", (-0.42, -3.10), frame_id=2, radius_m=0.20) is tub
+        assert toilet.class_name == "toilet" and toilet.votes == {} and lmap.relabels == []
+        assert lmap.match((0.0, 0.0), radius_m=1.0, class_name="cabinet") is None, "no landmark of that class here"
+        assert lmap.match((0.0, 0.0), radius_m=1.0, class_name="dining table") is table
+
+    def test_same_class_instances_are_told_apart_by_size(self):
+        """Two dining chairs 0.3 m apart are two chairs; a bed re-seen from its other side is one bed."""
+        lmap = ObjectLandmarkMap(dedupe_radius_m=0.35, footprint_iou=0.25, nearest_match=True)
+        left = lmap.observe("chair", (0.0, 0.0), frame_id=0, radius_m=0.25)
+        assert lmap.observe("chair", (0.6, 0.0), frame_id=1, radius_m=0.25) is not left, "0.6 m: two chairs (0.70 m merged them)"
+        assert lmap.observe("chair", (0.45, 0.0), frame_id=2, radius_m=0.25) is not left, "0.45 m: still two"
+        assert lmap.observe("chair", (0.2, 0.05), frame_id=3, radius_m=0.25) is left, "re-observation jitter"
+        bed = lmap.observe("bed", (5.0, 0.0), frame_id=0, radius_m=1.0)
+        assert lmap.observe("bed", (5.8, 0.0), frame_id=1, radius_m=0.75) is bed, "the far side of the same bed"
+        assert lmap.observe("bed", (7.2, 0.0), frame_id=2, radius_m=0.75) is not bed, "a second bed two metres on"
+        plain = ObjectLandmarkMap(dedupe_radius_m=0.35)
+        a = plain.observe("chair", (0.0, 0.0))
+        assert plain.observe("chair", (0.5, 0.0)) is not a, "no footprint measured: the radius alone"
 
     def test_merge_returns_the_live_landmark(self):
         lmap = ObjectLandmarkMap()

@@ -74,10 +74,21 @@ def new_run_info(config_text: str, argv: List[str]) -> Dict[str, Any]:
     }
 
 
-def resume_entry(argv: List[str], episodes_done: int) -> Dict[str, Any]:
-    """One resume's entry in ``run.json``: when, by which command, at which revision, after how many episodes."""
+def resume_entry(argv: List[str], episodes_done: int,
+                 config_changes: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """One resume's entry in ``run.json``: when, by which command, at which revision, after how many episodes.
+
+    Args:
+        argv: The resuming command line.
+        episodes_done: Episodes already on disk when it resumed.
+        config_changes: The top-level config keys the resume was explicitly
+            allowed to differ in, each as ``{"recorded": ..., "resumed": ...}``
+            (see ``MetricsLogger``'s ``accept_changes``); empty when the
+            config was presented exactly.
+    """
     return {"utc": utc_now(UTC_FORMAT), "argv": argv, "git": git_revision(),
-            "episodes_done": episodes_done}
+            "episodes_done": episodes_done,
+            "config_changes": dict(config_changes or {})}
 
 
 def read_run_info(path: pathlib.Path) -> Dict[str, Any]:

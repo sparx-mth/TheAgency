@@ -24,6 +24,10 @@ discrete actions; this package is the translation between them.
 
 Scoring, logging and the run loop live in the harness,
 [`tasks/planning/objnav_benchmark`](../../../tasks/planning/objnav_benchmark/).
+The method that plugs into this seam -- the scene graph, the room LLM, RPT\*,
+the target closing -- is [`core/planning/object_search`](../object_search/README.md);
+the simulator and dataset adapters that drive it are
+[`tasks/planning/objnav_benchmark_runtime`](../../../tasks/planning/objnav_benchmark_runtime/README.md).
 
 Python 3.8 syntax, numpy only, no ROS — enforced by `tests/test_python38_contract.py`
 (which also scans every repo module the package pulls in) and
@@ -54,12 +58,45 @@ guarantee.
 discrete action out, assuming perfect execution and re-deciding from the true
 pose every step, so the real simulator's collisions and RoboTHOR's actuation
 noise are corrected rather than accumulated. Each step walks one ladder, in
-order: stop if asked → tilt the camera if asked → rotate toward a lookahead
-point on the path when the heading error exceeds half a turn → step forward
-while that brings the agent closer → face the requested heading at the end.
+order: stop if asked → tilt the camera if asked → the command's own planned
+action, when it carries one and the agent stands where the plan starts → rotate
+toward a lookahead point on the path when the heading error exceeds half a
+turn → step forward while that brings the agent closer → face the requested
+heading at the end.
+
+**A command may carry the actions that walk it** (since 2026-10-28:
+`NavigationCommand.actions` and `plan_pose`). A kinematic planner on the
+benchmark's own step and turn -- `core/planning/planners/lattice` -- emits the
+exact MOVE_FORWARDs and TURNs that walk the path, collision-checked; the policy
+sends the remaining suffix every step from the pose the plan expects, and the
+converter executes the first action verbatim while the agent is there (within
+`plan_position_tolerance_m` / `plan_heading_tolerance_deg`, a centimetre and a
+degree: the simulator executes to the millimetre). The moment it is not -- a
+refused step, a safety veto, a simulator slide -- the ladder below takes over on
+the same waypoints, and the policy, which sees every executed action, re-plans.
+The result is flagged `planned`. The ladder on its own quantises a smooth path
+into turns the path never needed: on a 32 m synthetic route through three 0.8 m
+doorways it spent 184 actions and 53 turns, the plan 148 and 15, with the full
+standoff through every doorway.
+
+**Strict tracking** (`ActionConverterParams.strict_plan_tracking`): for a policy
+that plans every route on the lattice the ladder is only ever the fallback, and
+a fallback that shortcuts a planned turn undoes the plan. Strict, the ladder
+aims one forward step along the path instead of `lookahead_m` -- it turns at
+every kink and never cuts a corner -- the heading hysteresis is off, and a
+command whose plan the agent has left the start of is answered with the turn
+toward the plan's heading before any step (`realign_to_plan`). The policy's
+route memory reads the same aim (`effective_lookahead_m`), so arrival agrees.
 
 How it follows a path, and why:
 
+- **Optional heading hysteresis never narrows the geometric deadband.**
+  `ActionConverterParams.heading_hysteresis_deg` defaults to 0, with a validated
+  range of 0–2 degrees. After forward progress or an opposite turn on an unchanged
+  path, this margin can favor a forward step that reduces distance to the aim
+  over an immediate reversing turn. It never overrides blocked recovery, a new
+  path, pitch, final facing, STOP or downstream safety filters. The ObjectNav
+  runtime enables 1 degree; other callers keep the legacy behavior by default.
 - **Progress only moves forward, and stays on the leg being walked.** It is a
   high-water mark in arc length, kept on the first leg within
   `parallel_offset` (0.134 m for Habitat) of the agent, so a later leg that
@@ -83,10 +120,16 @@ How it follows a path, and why:
   still the policy's decision, taken in advance, and the only way to stop right
   after facing something without an idle turn in between.
 
-A MOVE_FORWARD that does not move the agent is reported (`forward_blocked`, one
-definition, on every result). Until a forward step moves again (or `reset()`),
-the converter aims one step ahead instead of `lookahead_m`, so a corner cut into
-a wall is not simply repeated. It never plans a detour, and it cannot rescue a
+A MOVE_FORWARD that does not advance the agent is reported (`forward_blocked`,
+one definition, on every result). Advance is measured ALONG THE HEADING the step
+was emitted with, against `blocked_epsilon_m` (5 cm, a fifth of a Habitat step):
+a simulator that slides the agent along a wall it walked into
+(`allow_sliding`, the Gibson protocol's default) moves it 4-9 cm sideways per
+step while it gains 1-3 cm forward, and a threshold on total displacement never
+fired -- 463 actions grinding on a stair-well wall in the first recorded
+multi-story campaign. Until a forward step advances again (or `reset()`), the
+converter aims one step ahead instead of `lookahead_m`, so a corner cut into a
+wall is not simply repeated. It never plans a detour, and it cannot rescue a
 path that hugs the navigable boundary: its heading is quantised to half a turn,
 so a zero-clearance route still gets blocked (on the fake building a
 zero-clearance geodesic route livelocked in 15 of 90 episodes; a
@@ -225,8 +268,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest sparx_agency/core/pl
 ## Not in here, on purpose
 
 - **No simulator.** Habitat and AI2-THOR adapters live on their own branches.
-- **No method.** The scene graph, the LLM oracle and RPT\* plug in later as a
-  `SearchPolicy`; this layer only defines the seam.
+- **No method.** The scene graph, the LLM oracle and RPT\* plug in as a
+  `SearchPolicy` from `core/planning/object_search`; this layer only defines
+  the seam, and its numpy-only, Python-3.8 contract does not bind the method.
 - **No scoring.** SPL, SoftSPL and the statistics are in the harness, so that
   every benchmark is scored by one piece of code.
 - **No mapping from depth.** `camera_geometry` defines the frames; building an

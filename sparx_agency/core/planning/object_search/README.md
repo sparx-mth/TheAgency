@@ -1,0 +1,127 @@
+# object_search — the zero-shot object-search method
+
+A `SearchPolicy` for the ObjectNav contract in
+[`core/planning/objnav`](../objnav/README.md): given ground-truth RGB-D and
+pose, find a named object category in an unseen home with a discrete action
+set, and STOP inside the success region. Observed-only mapping, a room graph
+with revisable LLM labels, a node oracle that values every room from the big
+picture, RPT\* for the visit order, frontier or planar-FALCON local exploration,
+A\*/WA\* routes, and a high-priority target closing. Training-free; no
+simulator geometry beyond what the adapter declares.
+
+```text
+ ObjNavEnv (adapter, tasks/)                 RPTSearchPolicy (this package)
+ ─────────────────────────────               ─────────────────────────────────────────────────────────
+ ObjNavObservation ───────────────────────►  perception/   detector boxes → coherent 3-D centroids → landmarks, doors
+                                             world_model/  per-storey log-odds occupancy, sight ledger, stair surfaces
+                                             rooms/        watershed rooms → labels → node oracle → RPT* order → the loop
+                                             exploration/  frontier sweep, glances, peeks, the fallback ladder, escape
+                                             multifloor/   spawn-floor guard (default) or the building coordinator
+                                             closing/      the target takeover: verify, approach, pitch, STOP
+                                             navigation/   the route as the exact actions that walk it (lattice), doorway scrapes, the look-down
+ NavigationCommand ◄──────────────────────  policy.py     one decision per frame, in world coordinates
+```
+
+The policy never names a simulator, a dataset or a wire format. It is built
+with three services -- an object **detector**, an optional box-prompted
+**segmenter** and a **room-reasoning LLM** -- behind the protocols of
+[`interfaces.py`](interfaces.py); the HTTP clients that implement them, the
+Habitat bridge, the Gibson files and the run CLI live in
+[`tasks/planning/objnav_benchmark_runtime`](../../../tasks/planning/objnav_benchmark_runtime/README.md).
+`tests/test_package_boundaries.py` enforces the line.
+
+## Layout
+
+| package | holds |
+|---|---|
+| `policy.py` | `RPTSearchPolicy`: composition, the per-frame decision order, `configuration()` and `episode_info()` |
+| `settings.py` | `RPTSettings`, the one frozen-config record of the method's knobs (`--policy-config` overrides its fields) |
+| `interfaces.py` | `Detection`, the `Detector` / `Segmenter` / `RoomReasoner` protocols, the frame-error classes and the failure contract |
+| `perception/` | `cycle.py` (one synchronous prediction per frame, fusion, target evidence), `projection.py` (box → world centroid with coherent depth), `doors.py`, `target_context.py` (is this candidate plausible where it stands?) |
+| `rooms/` | `scene_graph.py` (observed rooms, doors, labels, the oracle's nodes), `room_search_loop.py` (the loop), `room_scans.py`, `room_vantage.py`, `stair_nodes.py`, `opening_nodes.py`, `house_context.py`, `oracle_retry.py`, `floor_context.py`, `discovery.py` |
+| `world_model/` | the maps the decisions plan on: `observed_map.py` (RGB-D → per-storey occupancy on the core log-odds integrator, keyed by the storey `core/localization/floor_atlas` reports), `sightlines.py`, `stair_terrain.py`, `stair_grid.py`, `peek_stairs.py`, and `map_ledger.py` (since 2026-11-03: every action, how many planning cells changed, by observation or by the guard and by which guard layer -- drops, crossings, stair capsule, step overlay, trail, bump bars -- in or out of the camera's footprint, the frustum taken from the camera's actual transform, pitch included; `method.map_changes` in a recording, out-of-view jumps of 50+ cells as events; a cell changing where the camera is not looking is a map rewritten from something other than observation) |
+| `exploration/` | `exploration_fallback.py`, `escape_probe.py`, `frontier_sweep.py`, `path_glances.py` (since 2026-10-31 geometric glances are off by default -- `RPTSettings.geometric_glances` turns them on -- and a geometric glance is scored on capped rays -- each credited with the first `unknown_run_m` = 1 m of unknown -- so a look through an open door beside the route keeps its value and a look at an unmapped wall loses it: on 232 recorded glances the old promise had r = -0.17 with what the map gained, the capped one r = 0.39), `doorway_peek.py`, `doorway_candidates.py`, `exploration_metrics.py` |
+| `multifloor/` | `spawn_floor_guard.py` (the benchmark default: one storey; since 2026-10-31 the steps, sunken and raised parts of it the stair terrain can walk to within `step_surface_band_m` are free, never drops, and re-measure the storey plane; a drop is also every cell a depth ray crossed below the drop line on its way to it, `drop_rays.py`; since 2026-11-03 a cell's verdict is fixed when the cell is MEASURED: the guard keeps per cell the lowest landing, the lowest ray run through the column and the thresholds in force at that measurement, and nothing re-judges a cell the camera does not see again -- a storey plane re-measured on another level of a split-level house (00878/000000: 14 times in 500 actions) used to re-threshold the whole grid, 270-730 cells out of view each time, a sunken room painted occupied and released by turns; stair capsules are likewise drawn about the plane their portal was placed from, `anchor_z`, from the flight geometry the portal was placed with, `mask_path`, replaced only when a candidate reaches more than half a riser farther along the flight -- never from the terrain candidate's `path`, the route from the agent's own cell that changed with every step and redrew the capsules on 47 of 500 actions -- and with a margin that only narrows over the episode, `capsule_radius_cells`), `multifloor_policy.py` and the stair modules the development protocols enable. A spawn ON the stairs (174 of 2,000 HM3D v1 val starts) keeps its storey provisional until it stands on level support of floor size, walks the flight it saw to the nearer storey on purpose (bounded retries), and may switch once to the flight's other end along the climb the atlas measured when that storey is searched out (`spawn_switch.py`): two storeys at most, never back. `heading_commitment.py` holds the stair steering's heading per standing position, so a view-dependent tread edge cannot turn it back and forth |
+| `closing/` | `target_closing.py` (since 2026-11-03 an inspection that saw nothing from a standoff the map shows obstructed -- something occupied between the agent and the memory, the test a memory STOP already needs -- releases the lock WITHOUT the 2x rejection memory and boxes the spot in instead, `blind_inspection_release`: in the 434-failure re-run every failed inspection was such a blind one, and two of the three ended with the agent at the goal refusing the target it could see), `target_path.py`, `target_backoff.py`, `approach_history.py`, `target_pursuit.py` (a lock released for want of a path is kept and walked back to once a route exists, 2026-10-31) |
+| `falcon/` | the planar FALCON explorer wired to the room search (`local_exploration: "falcon"`) |
+| `route_memory.py` | the committed-route memory: when a planned path is kept, re-used or released |
+| `navigation/` | the narrow-passage layer (2026-10-28): `kinematic_follower.py` (every committed route walked as the action sequence the discrete-action lattice plans, `core/planning/planners/lattice`), `bottlenecks.py` (doorways and corridors read off the clearance field), `scrape_guard.py` (a refused step in a doorway stays off the map), `doorway_look_down.py` (the camera pitched on the approach); see its README |
+| `baselines/` | `falcon_yolo.py`: goal-free FALCON + the same perception and closing, no LLM (`--agent falcon-yolo`) |
+| `tests/` | the package's contract tests: boundaries, a service-free smoke run, the failure contract; see below |
+
+What the method shares with the rest of `core` it imports from there rather
+than keeping a copy: the map vocabulary (`core/planning/environment`), the
+A\*/WA\* planners and the discrete-action lattice (`core/planning/planners`),
+the FALCON port, the RPT\* room solver, frontier ranking and
+room costs (`core/planning/exploration`), the room watershed, registry and node
+oracle (`core/mapping/topology`), the landmark map (`core/mapping/objects`),
+the camera geometry and the action converter (`core/planning/objnav`), the
+storey localiser (`core/localization/floor_atlas`) and the camera-tilt
+controller and servo law (`core/control/camera`: where to *look* is a control
+process beside where to *move*; the two meet in the `NavigationCommand`). Its
+own policy-free pieces went the other way, into the subsystem they belong to:
+box extent and occluders, detection dedup, target evidence and support
+surfaces in `core/mapping/objects`; the fused 3-D target memory in
+`core/mapping/tracking`; the room priors and revisable room labels in
+`core/mapping/topology`.
+
+`world_model/` is mapping by nature and lives here by necessity: its products
+are the planners' map vocabulary (`OccupancyGrid2D` of
+`core/planning/environment`) and its inputs the contract's camera geometry,
+and `core/mapping` imports nothing from `core/planning`. Moving the shared map
+and pose vocabulary down into `core/common/types` would let it move; that is
+a repository-wide change (over a hundred importers) and not this package's.
+
+## The committed-target rule and the cadence
+
+Once the loop has chosen a room and a route to its entry point, the walk is
+committed (`LoopSettings.transit_commitment`, since 2026-10-22): the room may
+be renumbered by the watershed on the way -- merged, split, re-drawn -- and
+the turn follows the place under the new number (`room_rebound`,
+`ObjectSearchSupervisor.rebind`); a new name for the room, or the ledger
+finishing it from outside, waits for the arrival; no classifier call is spent
+in transit. A transit ends only by arrival, a refused or stalled route, the
+follower's wedge, the supervisor's clocks, or the target takeover at the
+policy level. While the committed route is walked the policy rebuilds the
+scene graph's geometry every `RPTSettings.transit_graph_period_steps` actions
+instead of every action (it was most of every decision's wall time), and
+rebuilds it on the action the transit ends; a loop point always reasons over
+geometry refreshed on its own action. Places a transit repeatedly failed to
+reach are remembered by position (`entry_failure`, `unreachable:<n>`
+exclusions) and left alone with a doubling back-off.
+
+## How a component talks to the policy
+
+The sub-components are constructed with the policy and read its shared state
+through it (`self.policy.mapping`, `.episode`, `.route_memory`, `._navigate`):
+one episode-scoped composition root, not a web of injected handles. The
+convention is deliberate and the price is known -- a component is only
+testable through a policy -- so the regression rig builds a real policy with
+fake services on a synthetic map (`tests/fixtures.py` here; the benchmark
+rig's `test_method.setup_policy`). Keep new components on the same pattern
+rather than threading a fourth style through the package.
+
+## Runtime
+
+Python 3.8-compatible syntax, numpy and scipy; no ROS, no torch, and no
+transport of its own -- the detector, segmenter and LLM clients are handed in
+(`core/mapping/topology`'s facade still re-exports its HTTP `LLMClient`, so
+`requests` is in the import closure; the method never calls it). It is not
+imported by the FALCON Noetic container (which has no scipy) and is not part
+of the `core/planning/objnav` import closure, so the contract's numpy-only
+rule does not bind it. Importing the package root loads nothing; import the
+policy by module path.
+
+## Tests
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest sparx_agency/core/planning/object_search -q
+```
+
+The behavioural regression suite of the method -- the room loop, the closing,
+the fallback ladder, several thousand assertions -- is the benchmark runtime's
+rig: `tasks/planning/objnav_benchmark_runtime/tests/` (run it after every
+change here). It lives there because it reasons about the Gibson camera, the
+dashboard renders and the recorded traces, and because a rig belongs beside
+the thing it exercises; the package's own tests check what the rig cannot --
+that the method stays free of the adapter.

@@ -2,7 +2,7 @@
 from sparx_agency.core.common.types import Intrinsics
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction, DiscreteActionSpec
 from sparx_agency.core.planning.objnav.types.camera import CameraSpec
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSettings
+from sparx_agency.core.planning.object_search.policy import RPTSettings
 
 
 def camera():

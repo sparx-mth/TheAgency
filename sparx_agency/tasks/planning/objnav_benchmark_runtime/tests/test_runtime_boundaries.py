@@ -10,16 +10,16 @@ import pytest
 
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator, habitat_pose, metric_depth
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.perception import HttpDetector
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSettings
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.services import VerifiedLLMClient, public_service_url
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
+from sparx_agency.core.planning.object_search.settings import RPTSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.llm import VerifiedLLMClient, public_service_url
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.fixtures import camera, actions
 
 
 def test_runtime_has_no_dataset_specific_imports():
     root = Path(__file__).resolve().parents[1]
     shared = list(root.glob("*.py"))
-    shared += list((root / "methods").rglob("*.py")) + list((root / "habitat").rglob("*.py"))
+    shared += list((root / "services").rglob("*.py")) + list((root / "habitat").rglob("*.py"))
     for path in shared:
         for node in ast.walk(ast.parse(path.read_text())):
             names = ([node.module or ""] if isinstance(node, ast.ImportFrom)
@@ -40,7 +40,7 @@ class Guard(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Guard())
 from sparx_agency.core.planning.planners import WeightedAStarPlanner2D
 from sparx_agency.tasks.planning.objnav_benchmark_runtime import evaluation
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.methods.rpt_policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat import simulator, smoke
 assert not attempts, attempts
 '''
@@ -50,14 +50,24 @@ assert not attempts, attempts
 
 
 def test_robot_geometry_is_required_and_not_derived_from_camera_height():
-    with pytest.raises(TypeError):
-        RPTSettings()
+    # The shared core's RPTSettings carries defaults so both tasks share one
+    # definition; each task's run.py overrides embodiment from its protocol.
+    # Physical inflation can never be relaxed below the body radius.
+    with pytest.raises(ValueError):
+        RPTSettings(body_radius_m=0.3, preferred_clearance_m=0.2)
     with pytest.raises(TypeError):
         HabitatRGBDSimulator(camera(), actions(), 0.2, False)
     bridge = HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=0.7)
     assert bridge.height_m == 0.7 and bridge.camera.height_m == 1.0
     with pytest.raises(ValueError):
         HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=float("nan"))
+
+
+def test_bridge_accepts_depth_hole_policy_alongside_body_height():
+    holes = object()
+    bridge = HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=0.7, depth_holes=holes)
+    assert bridge.depth_holes is holes
+    assert HabitatRGBDSimulator(camera(), actions(), 0.2, False, height_m=0.7).depth_holes is None
 
 
 def test_habitat_pose_and_depth_conversion_use_shared_units():
@@ -109,6 +119,30 @@ def test_llm_readiness_is_requested_model_not_just_live_port():
     payload["models"] = [{"name": "test-model:latest", "digest": "two"}]
     with pytest.raises(ObjNavInternalError, match="changed"):
         client.chat_json("system", "user")
+
+
+def test_the_preflight_probe_asks_the_server_never_the_answer_store(tmp_path):
+    from sparx_agency.core.mapping.topology.llm_answer_cache import LLMAnswerStore
+    from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
+    asked = []
+
+    def post(url, data=None, headers=None, timeout=None):
+        import json
+        payload = json.loads(data)
+        asked.append(payload["messages"][1]["content"])
+        content = '{"ok": true}' if "Return" in asked[-1] else '{"0": {"p": 0.5}, "1": {"p": 0.5}}'
+        return Response({"message": {"content": content}})
+
+    store = LLMAnswerStore(record_dir=tmp_path)
+    raw = LLMClient(LLMConfig(model="m", reasoning_model="m"), answers=store)
+    raw.sess = SimpleNamespace(post=post)
+    try:
+        VerifiedLLMClient(raw).probe()
+    except ObjNavInternalError:
+        pass                                   # the scripted oracle reply need not score; only the routing matters
+    assert asked and raw.answers is store, "the store is reattached after the probe"
+    assert store.stats == {"replayed": 0, "repeated": 0, "asked": 0, "recorded": 0}
+    assert not list(tmp_path.glob("answers-*.jsonl")), "nothing of the probe enters the run's recorded answers"
 
 
 @pytest.mark.parametrize("url", ["http://user:secret@host", "http://host?key=secret", "file:///tmp/model"])

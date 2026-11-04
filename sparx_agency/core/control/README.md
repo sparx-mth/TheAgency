@@ -1,7 +1,10 @@
 # control — from a planned trajectory to an actuator command
 
 The layer below planning and above the autopilot. Pure numpy, ROS-free,
-Python 3.8-clean.
+Python 3.8-clean. Two actuators are driven from here: the **airframe** (the
+chain below) and, in `camera/`, the **camera tilt** of a sensor head -- a
+second, independent control process beside the body's, merged into one
+command at the end.
 
 ## Why this is not `core/planning/trackers/`
 
@@ -203,6 +206,35 @@ The measurement is specific force along the **thrust axis**, not vertical
 acceleration: a tilted aircraft holding altitude is working harder than a level
 one, and using the vertical component would make the estimate a function of how
 hard the aircraft is cornering.
+
+## `camera` — the second actuator
+
+A camera on a tilt mount is its own control problem, separate from where the
+body goes: *where to look* is decided beside *where to move*, and the two meet
+only in the command the platform executes. For a discrete agent (the ObjectNav
+contract in `core/planning/objnav`) the actuator is the LOOK_UP / LOOK_DOWN
+pair; the action converter serialises the pitch request before the body
+action, so each `NavigationCommand` carries both decisions and the simulator
+runs them as two steps. The object-search method (`core/planning/object_search`)
+decides the body's path and asks this branch for the pitch.
+
+- **`pitch_controller.py`** — `CameraController`, the one owner of the pitch
+  request. It arbitrates between the callers that want the camera (the search,
+  the target takeover, a stair traversal), runs the two **inspection sweeps**
+  as transactions -- the stair sweep (a few turns at a steep pitch for the
+  terrain classifier) and the footing sweep (a full circle at a shallow pitch
+  that maps the floor under the camera's blind radius) -- bounds every request
+  to the action spec's pitch limits, and restores the level view. REP-103
+  sign: positive pitch looks down.
+- **`box_pitch_servo.py`** — the image-space servo law behind the takeover's
+  dynamic pitch: where a detection box lands after a tilt or a step toward the
+  object (pinhole rows and angles), and the tilt that keeps it whole and
+  centred -- LOOK_DOWN for a box in the lower region or about to be cut by the
+  bottom edge, LOOK_UP for the upper, nothing in the centre band. Pure
+  functions; the caller owns the settings and the counters.
+
+Tests: `camera/tests/`. The controller's behavioural tests run with the
+method's regression rig (`tasks/planning/objnav_benchmark_runtime/tests/`).
 
 ## Two findings worth keeping
 

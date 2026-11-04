@@ -1,0 +1,444 @@
+"""Multi-story regressions: stable identity, isolated evidence, stairs and scoring."""
+from __future__ import annotations
+
+from dataclasses import replace
+from types import SimpleNamespace
+import math
+import numpy as np
+import pytest
+
+from sparx_agency.core.localization.floor_atlas import FloorAtlas, MultiFloorParams
+from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+from sparx_agency.core.planning.objnav.types.pose import AgentPose
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_distance import MultiFloorDistance
+from sparx_agency.core.planning.object_search.exploration.exploration_metrics import ExplorationMetrics
+from sparx_agency.core.planning.object_search.world_model.observed_map import ObservedMap
+from sparx_agency.core.planning.object_search.world_model.stair_terrain import StairTerrain
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import EpisodeRecorder
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
+
+
+def ascend(atlas, height=2.7, start_x=0.0):
+    for i, z in enumerate(np.arange(0.18, height, 0.18), 1):
+        atlas.update(AgentPose(start_x + i * 0.25, 0, float(z), 0))
+        assert len(atlas.floors) == 1
+    for x in (4.0, 4.25, 4.5):
+        atlas.update(AgentPose(start_x + x, 0, height, 0))
+
+
+def test_treads_and_stationary_turns_never_create_floors():
+    atlas = FloorAtlas()
+    atlas.update(AgentPose(0, 0, 0, 0))
+    for i in range(20):
+        atlas.update(AgentPose(0.25, 0, 1.8, i * 0.1))
+    assert len(atlas.floors) == 1 and atlas.in_transition
+    assert not atlas.connections
+
+
+def test_floor_hysteresis_and_revisit_make_one_bidirectional_edge():
+    atlas = FloorAtlas()
+    atlas.update(AgentPose(0, 0, 0, 0))
+    ascend(atlas)
+    assert atlas.active_id == 1 and len(atlas.floors) == 2
+    assert len(atlas.connections) == 1
+    edge = atlas.connections[0]
+    assert edge.source == 0 and edge.destination == 1 and edge.length_m > 2.7
+    assert atlas.first_hop(0) is edge
+    for i, z in enumerate(np.arange(2.52, 0, -0.18), 1):
+        atlas.update(AgentPose(4.5 - i * 0.25, 0, float(z), math.pi))
+    for x in (0.5, 0.25, 0.0):
+        atlas.update(AgentPose(x, 0, 0, math.pi))
+    assert atlas.active_id == 0 and len(atlas.floors) == 2
+    assert len(atlas.connections) == 1 and edge.traversals == 2
+    assert atlas.floors[0].visits == 2
+
+
+@pytest.mark.parametrize("kwargs", [{"stable_samples": 1}, {"enabled": "yes"},
+                                   {"floor_match_m": 0.9}, {"max_step_m": float("nan")},
+                                   {"floor_search_actions": 0}])
+def test_multifloor_settings_reject_invalid_bounds(kwargs):
+    with pytest.raises(ValueError):
+        MultiFloorParams(**kwargs)
+
+
+def test_per_floor_grids_are_retained_and_not_fused_on_stairs():
+    _, episode = setup_policy()
+    mapping = ObservedMap(size_m=20)
+    original = mapping.update(observation(episode, 0, depth=3))
+    grid = mapping.grid
+    before = grid.get_grid()[1].copy()
+    step = 1
+    for x, z in [(0.25 * i, float(z)) for i, z in enumerate(np.arange(0.18, 2.7, 0.18), 1)] + [(4, 2.7), (4.25, 2.7), (4.5, 2.7)]:
+        obs = replace(observation(episode, step, depth=2), pose=AgentPose(x, 0, z, 0))
+        mapping.update(obs, integrate=False)
+        step += 1
+    assert len(mapping.maps) == 2 and mapping.floor_id == 1
+    assert mapping.maps[0] is grid and mapping.worlds[0] is original
+    np.testing.assert_array_equal(grid.get_grid()[1], before)
+    assert mapping.maps[1] is not grid
+
+
+def test_floor_contexts_keep_target_rejections_and_room_history_isolated():
+    policy, episode = setup_policy()
+    policy.plan(observation(episode, 0))
+    first_graph, first_landmarks = policy.graph, policy.landmarks
+    policy.target_evidence.reject(0, 0)
+    first_evidence = policy.target_evidence
+    policy._floor_time = 45
+    policy._visited_frontiers.append((1, 1))
+    policy.floors.activate(1)
+    assert policy.graph is not first_graph and len(policy.landmarks) == 0
+    assert policy._floor_time == 0 and policy._target_xy is None
+    policy._floor_time = 12
+    policy.floors.activate(0)
+    assert policy.graph is first_graph and policy.landmarks is first_landmarks
+    assert policy.target_evidence is first_evidence
+    assert policy._floor_time == 45 and policy._visited_frontiers == [(1, 1)]
+    assert policy._target_xy is None and policy.route_memory.path is None
+
+
+def test_coverage_return_does_not_count_known_floor_twice():
+    _, episode = setup_policy()
+    mapping = ObservedMap(size_m=20)
+    world = mapping.update(observation(episode, 0, depth=3))
+    metrics = ExplorationMetrics()
+    metrics.observe(observation(episode, 0), world, 0)
+    area = metrics.curve[-1]["observed_m2"]
+    metrics.observe(observation(episode, 1), world, 1)
+    assert metrics.curve[-1]["observed_m2"] == pytest.approx(area * 2)
+    metrics.observe(observation(episode, 2), world, 0)
+    assert metrics.curve[-1]["new_m2"] == 0
+    assert metrics.curve[-1]["observed_m2"] == pytest.approx(area * 2)
+
+
+def terrain_with_surface(height_fn):
+    terrain = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)
+    for x in range(-8, 30):
+        for y in range(-8, 9):
+            z = float(height_fn(x))
+            terrain.samples[(x, y, int(round(z / 0.1)))] = (z, 0, True)
+    terrain._rasterize(AgentPose(0, 0, 0, 0))
+    return terrain
+
+
+def test_measured_treads_are_connected_but_a_cliff_is_not():
+    terrain = terrain_with_surface(lambda x: max(0, x // 4) * 0.18 - 0.05)
+    assert any(c["direction"] == 1 for c in terrain.candidates)
+    assert terrain.permits(AgentPose(0, 0, 0, 0), 0.25)
+    cliff = terrain_with_surface(lambda x: 1.0 if x > 1 else -0.05)
+    assert not cliff.candidates
+    assert not cliff.permits(AgentPose(0, 0, 0, 0), 0.25)
+
+
+def test_a_candidate_flight_needs_a_flights_profile_not_any_climbable_chain():
+    """Corozal/000003 (2026-10-22): a coffee table's shelf and top and the sofa behind it climbed 0.68 m in
+    climbable steps and were placed as a staircase, masking the room's floor; Darden/000000 placed one on a bed.
+    Three tread-sized risers with treads under 0.55 m between them, climbing one way, is a flight; a level
+    walked longer than a tread -- a table top, a seat, a mattress, a landing -- ends the stretch."""
+    from sparx_agency.core.planning.object_search.world_model.stair_terrain import stair_profile
+    params = MultiFloorParams()
+    def path_from(levels):
+        points, x = [], 0.0
+        for z, run in levels:
+            for _ in range(max(1, int(round(run / 0.1)))):
+                points.append((x, 0.0, z)); x += 0.1
+        return points
+    flight = [(0.0, 1.0)] + [(0.17 * k, 0.3) for k in range(1, 7)]
+    assert stair_profile(path_from(flight), 1, params) == (6, pytest.approx(1.02))
+    assert stair_profile(path_from(flight), -1, params) is None, "it climbs; it is no descent"
+    assert stair_profile(path_from([(0.0, 1.0)] + [(-0.17 * k, 0.3) for k in range(1, 5)]), -1, params) == (4, pytest.approx(0.68))
+    coffee_table_and_sofa = [(0.0, 1.5), (0.2, 0.2), (0.45, 0.5), (0.45, 0.6), (0.68, 0.3)]
+    assert stair_profile(path_from(coffee_table_and_sofa), 1, params) is None
+    bed = [(0.0, 2.0), (0.22, 0.15), (0.45, 1.5)]
+    assert stair_profile(path_from(bed), 1, params) is None
+    # The apron of a table seen obliquely: a ramp of single cells, risers of a tread's size with no tread between
+    # them (the Corozal portal survived the first profile this way); a flight of two-cell treads is still a flight.
+    table_edge = [(0.0, 1.0)] + [(0.12 * k, 0.1) for k in range(1, 6)]
+    assert stair_profile(path_from(table_edge), 1, params) is None
+    assert stair_profile(path_from([(0.0, 1.0), (0.12, 0.1), (0.24, 0.1), (0.36, 0.1), (0.45, 0.6), (0.68, 0.3)]), 1, params) is None
+    assert stair_profile(path_from([(0.0, 1.0)] + [(0.17 * k, 0.2) for k in range(1, 6)]), 1, params) == (3, pytest.approx(0.51))
+    assert stair_profile(path_from([(0.0, 1.0), (0.2, 0.3), (0.4, 0.3)]), 1, params) is None, "two risers: a step, not a flight"
+    assert stair_profile(path_from([(0.0, 1.0), (0.16, 0.3), (0.32, 0.3), (0.48, 0.3)]), 1, params) == (3, pytest.approx(0.48))
+    with_landing = [(0.0, 1.0)] + [(0.17 * k, 0.3) for k in range(1, 4)] + [(0.51, 1.2)] + [(0.51 + 0.17 * k, 0.3) for k in range(1, 5)]
+    assert stair_profile(path_from(with_landing), 1, params) is not None, "a landing between two flights is still stairs"
+    # The terrain's own candidates: a staircase of 0.4 m treads is one, the same chain as furniture is not.
+    stairs = terrain_with_surface(lambda x: max(0, x // 4) * 0.18 - 0.05)
+    candidate = next(c for c in stairs.candidates if c["direction"] == 1)
+    assert candidate["risers"] >= 3 and candidate["profile_rise_m"] >= params.stair_min_rise_m
+    def furniture(x):                      # floor, a 0.2 m shelf for 0.2 m, a 0.45 m top for 0.9 m, a 0.68 m back
+        if x < 4: return -0.05
+        if x < 6: return 0.2
+        if x < 15: return 0.45
+        return 0.68
+    assert not terrain_with_surface(furniture).candidates
+    for bad in ({"stair_min_risers": 0}, {"stair_riser_min_m": 0.3}, {"stair_max_tread_m": 0.0}, {"stair_min_tread_m": 0.6}):
+        with pytest.raises(ValueError):
+            MultiFloorParams(**bad)
+
+
+def test_depth_wall_is_not_mistaken_for_stairs():
+    _, episode = setup_policy()
+    terrain = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)
+    points, horizontal = terrain._surfaces(observation(episode, 0, depth=3))
+    assert len(points) > 100 and not horizontal.any()
+    terrain.update(observation(episode, 0, depth=3))
+    assert not terrain.candidates
+
+
+def test_upstairs_xy_overlap_cannot_succeed_downstairs():
+    semantic = np.zeros((7, 80, 80), np.uint8)
+    semantic[0] = 1
+    semantic[1, 20, 20] = 1
+    def find_path(path):
+        path.geodesic_distance = 8.0
+        return True
+    field = MultiFloorDistance(SimpleNamespace(find_path=find_path), [[1, 0, 1]], semantic,
+                               (0, 0), 0, 0, path_factory=SimpleNamespace)
+    assert field.distance((1, 0, 1)) == 0
+    assert field.distance((1, 3, 1)) == 8
+    assert not field.success((1, 3, 1))
+    assert not field.start_uses_sentinel((1, 3, 1))
+
+
+def test_a_split_level_reference_floor_scores_a_goal_on_either_of_its_levels():
+    """Klickitat (2026-10-05): chair samples at +0.18 m and -0.41 m; a STOP beside the lower chair was
+    4 cm from the region and read as a failure under a gate on the region's median height."""
+    semantic = np.zeros((7, 80, 80), np.uint8)
+    semantic[0] = 1
+    semantic[1, 20, 20] = semantic[1, 60, 60] = 1
+    def find_path(path):
+        path.geodesic_distance = 8.0
+        return True
+    goals = [[1.0, 0.18, 1.0]] * 3 + [[3.0, -0.41, 3.0]] * 2          # the median level is the upper one
+    field = MultiFloorDistance(SimpleNamespace(find_path=find_path), goals, semantic, (0, 0), 0, 0.18,
+                               path_factory=SimpleNamespace)
+    assert field.success((1.0, 0.2, 1.0)), "on the median level"
+    assert field.success((3.0, -0.4, 3.0)), "on the lower level, beside its own goal samples"
+    assert field.distance((3.0, -0.4, 3.0)) == 0.0
+    assert not field.success((3.0, 2.3, 3.0)), "a storey above: XY overlap never counts"
+    assert not field.success((1.0, 1.0, 1.0)), "0.8 m above the upper level is no level of this floor"
+
+
+def test_protocol_is_separate_and_permits_bounded_camera_inspection():
+    assert MULTIFLOOR_PROTOCOL.path_length_dimension == "3d"
+    assert MULTIFLOOR_PROTOCOL.max_steps == 500
+    assert MULTIFLOOR_PROTOCOL.split != "val"
+    assert MULTIFLOOR_PROTOCOL.actions().allows(DiscreteAction.LOOK_DOWN)
+    assert "incomplete" in MULTIFLOOR_PROTOCOL.goal_definition
+
+
+def test_unselected_recording_does_not_touch_frames_or_policy(tmp_path):
+    policy, episode = setup_policy()
+    recorder = EpisodeRecorder(tmp_path, policy, selected_episode_ids={"another/episode"})
+    recorder.begin(episode, observation(episode, 0), {})
+    recorder.decision(None, None, None)
+    recorder.after_step(None, None, True)
+    recorder.complete(None)
+    assert not list(tmp_path.iterdir())
+
+
+def test_near_field_support_uses_observed_free_space_on_matching_floor_only():
+    from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+    terrain = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)
+    for x in range(8, 30):
+        for y in range(-6, 7):
+            z = max(0, (x - 8) // 4) * 0.18 - 0.05
+            terrain.samples[(x, y, int(round(z / 0.1)))] = (z, 0, True)
+    terrain._rasterize(AgentPose(0, 0, 0, 0))
+    assert not terrain.candidates  # unobserved blind gap is not carved free
+    grid = np.full((80, 80), -1, np.int8)
+    grid[32:48, 38:50] = 0
+    terrain._floor_world = OccupancyGrid2D(grid, OccupancyGrid2DParams(0.1, -4, -4),
+                                         values=OccupancyValues(free=0, occupied=100, unknown=-1))
+    terrain._floor_height = 0.0
+    terrain._rasterize(AgentPose(0, 0, 0, 0))
+    assert any(c["direction"] == 1 for c in terrain.candidates)
+    terrain._rasterize(AgentPose(0, 0, 3.0, 0))
+    assert not terrain.candidates  # same XY, other floor: cannot reuse support
+
+
+def test_stair_steering_uses_safe_discrete_heading_and_converter_moves():
+    from sparx_agency.core.planning.objnav.action_converter.converter import DiscreteActionConverter
+    from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+    terrain = terrain_with_surface(lambda x: max(0, x // 4) * 0.18 - 0.05)
+    pose = AgentPose(0, 0, 0, 0)
+    actions = MULTIFLOOR_PROTOCOL.actions()
+    path = terrain.steering_path(pose, [(0, 0, 0), (2.0, 0, 0.85)], actions)
+    assert len(path) == 2 and math.dist(path[0][:2], path[1][:2]) == pytest.approx(actions.forward_step_m + terrain.resolution)
+    result = DiscreteActionConverter(actions).step(pose, NavigationCommand.follow(path))
+    assert result.action == DiscreteAction.MOVE_FORWARD
+    assert terrain.permits(pose, actions.forward_step_m)
+
+
+def test_a_guide_point_off_the_support_graph_is_still_followed_a_safe_step_at_a_time():
+    """00802/000003 (2026-11-02): two actions into a departure no point of the flight's guide was on the support
+    graph -- tread edges come and go with the view -- and the continuation walked the agent round the landing. Scored
+    by the straight line to the guide point, the step is still taken, and still never over a cliff."""
+    terrain = terrain_with_surface(lambda x: max(0, x // 4) * 0.18 - 0.05)
+    pose = AgentPose(0, 0, 0, math.radians(90))
+    actions = MULTIFLOOR_PROTOCOL.actions()
+    off_graph = [(0, 0, 0), (2.5, 3.0, 0.85)]                       # beyond the measured strip: no route to it
+    assert terrain.steering_options(pose, off_graph, actions) == []
+    options = terrain.steering_options(pose, off_graph, actions, straight=True)
+    best = max(options, key=lambda o: o[:2])
+    assert 0.0 < best[2] < math.pi / 2, "toward the guide point, from facing away"
+    path = terrain.steering_path(pose, off_graph, actions, straight=True)
+    assert path[1] == best[3] and all(terrain.permits(replace(pose, yaw=o[2]), actions.forward_step_m) for o in options)
+    cliff = terrain_with_surface(lambda x: 1.0 if x > 1 else -0.05)
+    assert not [o for o in cliff.steering_options(AgentPose(0, 0, 0, 0), off_graph, actions, straight=True)
+                if abs(o[2]) < math.radians(15)], "no straight step over the cliff edge"
+
+
+def test_a_traversal_steps_onto_measured_treads_the_storey_map_calls_occupied():
+    """00802/000003 (2026-11-02): a stair spawn's storey is a tread, the storey map records the flight rising off it
+    as occupied, and that borrowed occupancy walled off the first treads the departure walked to. While a traversal
+    steers, a cell with measured support of its own is not vetoed by borrowed occupancy -- by what it sensed
+    above that support it still is -- and the plateau tests keep the conservative mask."""
+    from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+
+    def built(traversing, sensed_wall=False):
+        terrain = terrain_with_surface(lambda x: -0.05)
+        data = np.zeros((40, 60), np.int8)
+        data[:, 33:36] = 100                                        # x 0.3-0.6 m: the flight, as the storey map has it
+        terrain._floor_world = OccupancyGrid2D(data, OccupancyGrid2DParams(0.1, -3.0, -2.0, "world"),
+                                               values=OccupancyValues(free=0, occupied=100, unknown=-1))
+        terrain._floor_height, terrain.traversing = 0.0, traversing
+        if sensed_wall:
+            for y in range(-8, 9):
+                terrain.samples[(4, y, 6)] = (0.6, 0, False)       # a real wall 0.65 m above the support at x 0.4 m
+        terrain._rasterize(AgentPose(0, 0, 0, 0))
+        return terrain
+
+    pose, step = AgentPose(0, 0, 0, 0), 0.6
+    searching = built(False)
+    assert not searching.permits(pose, step), "outside a traversal the storey map still vetoes"
+    traversing = built(True)
+    assert traversing.permits(pose, step) and traversing.plateau_area(pose) == pytest.approx(searching.plateau_area(pose))
+    assert not built(True, sensed_wall=True).permits(pose, step), "what the terrain sensed still blocks"
+
+
+def test_on_the_destination_plateau_the_exit_route_leads_off_the_flight_not_on_down_it():
+    """00820/000053 (v4, 2026-11-02): the switch stood on the storey it was looking for, the stairwell ran on down,
+    and its route down the next flight took it 2.5 m past the storey. The exit route crosses the level support the
+    agent stands on to the cell farthest from the stairs; it never steps down."""
+    terrain = terrain_with_surface(lambda x: 0.0 if x <= 10 else -0.17 * (x - 10))   # a storey, then a flight down
+    pose = AgentPose(0.95, 0, 0, 0)                                                  # at the head of the flight
+    terrain._rasterize(pose)
+    path = terrain.exit_path(pose)
+    assert path, "a level route off the flight"
+    assert path[-1][0] < 0.0 and all(abs(p[2]) <= terrain.params.stable_height_m for p in path)
+    assert 1.05 - path[-1][0] >= 1.05 - pose.x + terrain.params.exit_distance_m, "an exit distance farther from the flight"
+    level = terrain_with_surface(lambda x: 0.0)
+    assert level.exit_path(AgentPose(0, 0, 0, 0)) == [], "nothing of another height: nothing to walk clear of"
+
+
+def test_campaign_jobs_select_one_explorer_without_doubling_episodes():
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.distinct_buildings import jobs_for
+    assert jobs_for(["A", "B"], ["frontier"]) == [("frontier", "A"), ("frontier", "B")]
+    with pytest.raises(ValueError):
+        jobs_for(["A"], ["frontier", "frontier"])
+
+
+def test_development_runner_import_and_first_recording_cli():
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run_development import parser
+    args = parser().parse_args(["--manifest", "episodes.json", "--scene", "A", "--output", "results",
+                               "--explorer", "frontier", "--detector-url", "http://localhost:18095",
+                               "--detector-backend", "yolo_world", "--record-first", "--limit", "1"])
+    assert args.record_first and args.limit == 1
+
+
+def test_yolo_only_is_the_default_detector_pipeline_everywhere():
+    """YOLO-World only; Grounding DINO / BLIP-2 stay selectable but must be asked for."""
+    import json
+    from pathlib import Path
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import compare_explorers, distinct_buildings, run, run_development
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import DEFAULT_DETECTOR_BACKEND, detector_flags
+    assert DEFAULT_DETECTOR_BACKEND == "yolo_world"
+    development = run_development.parser().parse_args(["--manifest", "e.json", "--scene", "A", "--output", "r",
+                                                       "--explorer", "frontier", "--detector-url", "http://localhost:18095"])
+    assert development.detector_backend == "yolo_world"
+    assert detector_flags(development)[-2:] == ["--detector-backend", "yolo_world"], "frozen jobs name it explicitly"
+    assert run.parser().parse_args([]).detector_backend == "yolo_world"
+    hybrid = run.parser().parse_args(["--detector-backend", "hybrid"])
+    assert hybrid.detector_backend == "hybrid", "the VLM modes remain an explicit choice"
+    service = json.loads((Path(distinct_buildings.__file__).resolve().parents[4] / "tasks" / "mapping" / "scene_graph"
+                          / "serve" / "configs" / "gibson_perception.json").read_text())
+    assert service["backend"] == "yolo_world"
+    assert compare_explorers is not None
+
+
+def test_observed_underfoot_height_handles_smoothed_navmesh_offset(monkeypatch):
+    terrain = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)
+    points = np.array([(x, y, -0.30) for x in np.arange(-0.3, 1.5, 0.03)
+                       for y in np.arange(-0.5, 0.5, 0.03)])
+    monkeypatch.setattr(terrain, "_surfaces", lambda obs: (points, np.ones(len(points), bool)))
+    pose = AgentPose(0, 0, 0, 0)
+    terrain.update(SimpleNamespace(pose=pose, step=0))
+    assert terrain._foot_height == pytest.approx(-0.30)
+    assert terrain.permits(pose, 0.25)
+    assert terrain.params.max_step_m == 0.24
+
+
+def test_small_stair_landing_is_not_promoted_to_a_floor():
+    atlas = FloorAtlas()
+    atlas.update(AgentPose(0, 0, 0, 0), plateau_area_m2=8.0)
+    for i in range(8):
+        atlas.update(AgentPose(i * 0.25, 0, 1.6, 0), plateau_area_m2=1.0)
+    assert atlas.in_transition and len(atlas.floors) == 1
+    for i in range(3):
+        atlas.update(AgentPose(2.0 + i * 0.25, 0, 2.7, 0), plateau_area_m2=8.0)
+    assert atlas.active_id == 1 and len(atlas.floors) == 2
+    assert atlas.elevation_m == pytest.approx(2.7)
+
+
+@pytest.mark.parametrize("plane_z,pitch,is_support", [(0.0, math.pi / 6, True), (1.8, -math.pi / 6, False)])
+def test_surface_orientation_rejects_ceiling_undersides(plane_z, pitch, is_support):
+    from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
+    _, episode = setup_policy()
+    pose = AgentPose(0, 0, 0, 0, camera_pitch=pitch)
+    k = episode.camera.intrinsics
+    yy, xx = np.indices((k.height, k.width))
+    rays = np.stack(((xx - k.cx) / k.fx, (yy - k.cy) / k.fy, np.ones_like(xx)), axis=-1)
+    transform = world_T_camera_optical(pose, episode.camera)
+    rays = rays @ transform[:3, :3].T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        depth = ((plane_z - transform[2, 3]) / rays[..., 2]).astype(np.float32)
+    depth[depth <= 0] = np.nan
+    obs = replace(observation(episode, 0), pose=pose, depth_m=depth)
+    _, horizontal = StairTerrain(MultiFloorParams(), 0.1, 0.18, 0.88)._surfaces(obs)
+    assert bool(horizontal.any()) == is_support
+
+
+def test_tread_above_old_floor_samples_is_not_projected_underneath():
+    terrain = terrain_with_surface(lambda x: max(0, x // 4) * 0.18 - 0.05)
+    for x in range(4, 25):
+        for y in range(-6, 7):
+            terrain.samples[(x, y, -1)] = (-0.10, 0, True)
+    terrain._rasterize(AgentPose(0, 0, 0, 0))
+    x, y = terrain.world.world_to_grid(1.25, 0.05)
+    assert terrain.heights[y, x] > 0.4
+    assert any(c["direction"] == 1 for c in terrain.candidates)
+
+
+def test_vertical_navmesh_correction_is_bounded_and_not_a_val_protocol_change():
+    from sparx_agency.core.planning.objnav.errors import EnvContractError
+    from sparx_agency.tasks.planning.objnav_benchmark.kinematics import check_motion
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
+    before = AgentPose(0, 0, 0, 0)
+    corrected = AgentPose(0.25, 0, 0.269, 0)
+    check_motion(DiscreteAction.MOVE_FORWARD, before, corrected, MULTIFLOOR_PROTOCOL.actions(), MULTIFLOOR_PROTOCOL.kinematics())
+    for dz in (0.305, 0.52):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0, dz, 0), MULTIFLOOR_PROTOCOL.actions(), MULTIFLOOR_PROTOCOL.kinematics())
+    assert MULTIFLOOR_PROTOCOL.max_native_vertical_m == 0.60
+    # Since 2026-10-07 the val protocol's own climb bound is 0.60 m too: the shipped navmeshes step up
+    # to 0.50 m on one stride inside the evaluated storey (treads, split levels), and the 0.20 m bound
+    # refused real episodes -- and, through the runner, the run. The scoring is untouched.
+    check_motion(DiscreteAction.MOVE_FORWARD, before, corrected, PROTOCOL.actions(), PROTOCOL.kinematics())
+    assert PROTOCOL.kinematics().climb_m == 0.60 and PROTOCOL.kinematics().settle_m == 0.30
+    with pytest.raises(EnvContractError):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0, 0.7, 0), PROTOCOL.actions(), PROTOCOL.kinematics())
+    with pytest.raises(EnvContractError):
+        check_motion(DiscreteAction.MOVE_FORWARD, before, AgentPose(0.25, 0, 1.0, 0), MULTIFLOOR_PROTOCOL.actions(), MULTIFLOOR_PROTOCOL.kinematics())
+
+

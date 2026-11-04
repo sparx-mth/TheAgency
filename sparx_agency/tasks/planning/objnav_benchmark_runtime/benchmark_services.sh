@@ -1,0 +1,314 @@
+# The services every benchmark launcher brings up, once: the GPU plan, the renderer, Ollama, the YOLO-World
+# detector started with the benchmark's own vocabulary, the optional Segment Anything service, FFmpeg for
+# recordings, and the cleanup trap that takes them down again. Sourced -- never executed -- by
+# gibson/run_benchmark.sh and hm3d/run_benchmark.sh, so the two launchers cannot drift apart in how the
+# method's services are provisioned; what differs per benchmark (episodes, scenes, the run module, the
+# campaign shape) stays in the launcher.
+#
+# Two entry points:
+#
+#   objnav_services_defaults      before the command line is parsed: the environment defaults for the
+#                                 interpreters, the weights, the ports, Ollama and the LLM, the GPU plan.
+#                                 Every value is ${VAR:-default}; a launcher may set its own before or after.
+#   objnav_services_up            after the command line is parsed and SERVICE_DIR/LOG/AGENT/RECORD/RUN_MODULE
+#                                 are known: GPU plan -> renderer -> Ollama -> detector -> segmenter -> FFmpeg,
+#                                 and the EXIT trap. Afterwards the launcher reads DETECTOR_URL, SEGMENTER_FLAGS,
+#                                 PERCEPTION_FLAGS, RENDER_WRAP, RENDER_FLAGS, GPU_DEVICE and ALLOW_SHARED_GPU (both
+#                                 possibly changed by the plan) and OBJNAV_{LLM,YOLO,HABITAT}_DEVICE.
+#                                 Under PERCEPTION=ground-truth no detector or segmenter is started (DETECTOR_URL is
+#                                 empty) and PERCEPTION_FLAGS carries --perception ground-truth for the children.
+#
+# The launcher provides: HAB_PY DETECT_PY RUN_MODULE SERVICE_DIR LOG AGENT RECORD, and say()/die().
+# RUN_MODULE is the benchmark's run CLI (its --print-vocabulary names the detector's classes, in the order
+# the policy's label table pins).
+#
+# A launcher that runs several benchmark processes against these services (gibson/run_benchmark.sh --parallel N)
+# sets HABITAT_RENDERERS=N before objnav_services_up so the GPU plan budgets one renderer per process, and may
+# define objnav_launcher_cleanup(): the EXIT trap calls it before the services go down, so the processes are
+# stopped first and never run against a dead detector (every such episode would be recorded as an agent error).
+# GPU_PLAN_REPLAY=<gpu_plan.json> starts the services from a recorded plan instead of planning again: the plan
+# is part of the frozen run configuration, and a resume that re-planned would be refused for its changed MiB.
+
+objnav_services_defaults() {
+  HAB_PY="${HAB_PY:-$HOME/miniconda3/envs/habitat/bin/python}"
+  DETECT_PY="${DETECT_PY:-$HOME/.venvs/objnav-detector/bin/python}"
+  DATA="${DATA:-$HOME/datasets}"
+  MODELS="${MODELS:-$HOME/models/objnav}"
+  YOLO_WEIGHTS="${YOLO_WEIGHTS:-$MODELS/yolov8x-worldv2.pt}"
+  DETECTOR_HOST="${DETECTOR_HOST:-127.0.0.1}"
+  DETECTOR_PORT="${DETECTOR_PORT:-18095}"
+  DETECTOR_THREADS="${DETECTOR_THREADS:-4}"
+  # The segmentation experiment (2026-10-12): SEGMENTATION=1 starts the box-prompted Segment Anything service
+  # beside the detector and runs the policy with its `segmentation` setting on; 0 (the default) is the box pipeline.
+  SEGMENTATION="${SEGMENTATION:-0}"
+  # PERCEPTION=ground-truth (2026-10-26): no detector and no segmenter at all -- the children read habitat-sim's
+  # semantic sensor in place of both (hm3d.run --perception ground-truth, the method's upper bound under ideal
+  # perception, non-publishable). YOLO and SAM are neither started nor budgeted; the LLM is provisioned as usual.
+  # GT_MIN_PIXELS forwards --ground-truth-min-pixels (the oracle's declared resolution floor; the module default when empty).
+  PERCEPTION="${PERCEPTION:-service}"
+  GT_MIN_PIXELS="${GT_MIN_PIXELS:-}"
+  SAM_WEIGHTS="${SAM_WEIGHTS:-$MODELS/mobile_sam.pt}"
+  SEGMENTER_PORT="${SEGMENTER_PORT:-18096}"
+  SEGMENTER_DEVICE="${SEGMENTER_DEVICE:-cpu}"        # cpu: ~0.3 s per frame with target boxes (MobileSAM, 4 threads)
+  SEGMENTER_THREADS="${SEGMENTER_THREADS:-4}"
+  # Ollama: "docker" starts/stops the named container, "native" runs `ollama serve`, "external" only checks it.
+  OLLAMA_MODE="${OLLAMA_MODE:-docker}"
+  OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-ollama-scene-graph}"
+  OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$MODELS/ollama}"
+  # Request slots of the native server: one serialises every LLM call; a parallel run (gibson --parallel N, hm3d
+  # --jobs N) raises it so the processes' node-oracle calls are batched on the card instead of queued. Each slot
+  # beyond the first costs its own KV cache (gpu_plan.py LLM_SLOT_FACTOR), so the plan reads it too.
+  OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
+  # The context the native server loads a model with when a request names none. The node oracle asks for its own
+  # (LLM_REASONING_NUM_CTX); the room-label calls do not, and without this they load qwen2.5:3b-instruct at the
+  # model's 32k -- 2.3 GB of KV cache per slot for prompts of a few hundred tokens (measured 2026-10-22).
+  OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
+  # Habitat renderers on the card at once: one per benchmark process (--parallel N / --jobs N set it; the GPU plan reads it).
+  HABITAT_RENDERERS="${HABITAT_RENDERERS:-1}"
+  # A recorded gpu_plan.json to start the services from instead of planning again (a resume; see the header).
+  GPU_PLAN_REPLAY="${GPU_PLAN_REPLAY:-}"
+  export LLM_BACKEND="${LLM_BACKEND:-ollama}"
+  export LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:11434}"
+  export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b-instruct}"
+  export LLM_REASONING_MODEL="${LLM_REASONING_MODEL:-qwen2.5:14b-instruct}"
+  export LLM_TIMEOUT_S="${LLM_TIMEOUT_S:-120}" LLM_SEED="${LLM_SEED:-17}" LLM_TEMPERATURE="${LLM_TEMPERATURE:-0}"
+  export LLM_KEEP_ALIVE="${LLM_KEEP_ALIVE:-30m}" LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-768}"
+  export LLM_REASONING_TIMEOUT_S="${LLM_REASONING_TIMEOUT_S:-900}" LLM_REASONING_MAX_TOKENS="${LLM_REASONING_MAX_TOKENS:-1536}"
+  export LLM_REASONING_NUM_CTX="${LLM_REASONING_NUM_CTX:-8192}"
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" HABITAT_SIM_LOG="${HABITAT_SIM_LOG:-quiet}" MAGNUM_LOG="${MAGNUM_LOG:-quiet}"
+  SEED="${SEED:-17}"
+  GPU_DEVICE="${GPU_DEVICE:-0}"
+  ALLOW_SHARED_GPU="${ALLOW_SHARED_GPU:-0}"
+  # auto: gpu_plan.py decides each process's device from the free VRAM; off: CPU services, Habitat on the GPU.
+  GPU_PLAN="${GPU_PLAN:-auto}"
+  # gpu (default): habitat renders on the CUDA GPU. software: Mesa's llvmpipe, with /dev/dri hidden from the run in an
+  # unprivileged user namespace so that Mesa's software device is the only EGL device (the Gibson 16384^2 texture does
+  # not fit an iGPU, and habitat picks EGL device 0) -- for a box whose NVIDIA EGL is unusable, e.g. after a driver
+  # upgrade until the reboot that loads the matching kernel module (2026-10-12). ~30 ms a frame; recorded in run.json.
+  HABITAT_RENDER="${HABITAT_RENDER:-gpu}"
+  CLIP_WEIGHTS="${CLIP_WEIGHTS:-$MODELS/clip/ViT-B-32.pt}"
+  RUNS_ROOT="${RUNS_ROOT:-$REPO/runs}"
+}
+
+objnav_services_up() {
+  [[ -n "${RUN_MODULE:-}" ]] || die "benchmark_services.sh: the launcher must set RUN_MODULE before objnav_services_up"
+  [[ -n "${SERVICE_DIR:-}" && -n "${LOG:-}" ]] || die "benchmark_services.sh: the launcher must set SERVICE_DIR and LOG before objnav_services_up"
+
+  # -- the GPU: who gets the card (LLM, then YOLO, then Habitat; the rest on the CPU) -------------------------
+  if [[ "$AGENT" == falcon-yolo ]]; then
+    # The baseline runs no LLM: the card goes to YOLO and Habitat, and the plan needs no Ollama manifest.
+    export GPU_PLAN_LLM="${GPU_PLAN_LLM:-cpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
+  fi
+  case "$PERCEPTION" in
+    service) ;;
+    ground-truth)
+      # No detector process exists: nothing of YOLO's goes on the card or into the budget.
+      export GPU_PLAN_YOLO="${GPU_PLAN_YOLO:-cpu}" YOLO_VRAM_MIB="${YOLO_VRAM_MIB:-0}"
+      [[ "$SEGMENTATION" == 0 ]] || die "PERCEPTION=ground-truth reads its masks from the simulator; SEGMENTATION=1 contradicts it" ;;
+    *) die "PERCEPTION must be service or ground-truth" ;;
+  esac
+  # An LLM already answering at LLM_BASE_URL is resident: its VRAM is already in nvidia-smi's "used", so the plan
+  # must neither budget it again nor re-place it. Left to itself the plan would read the full card as "no room for
+  # the LLM" and export LLM_NUM_GPU=0 -- and every child would then ask the SHARED server for num_gpu=0, reloading
+  # both models on the CPU for every run using it, a live campaign included (found 2026-10-26 planning the
+  # ground-truth run beside the running v1 sweep).
+  LLM_RESIDENT=0
+  if [[ "$AGENT" != falcon-yolo ]] && curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
+    LLM_RESIDENT=1
+    export GPU_PLAN_LLM="${GPU_PLAN_LLM:-gpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
+  fi
+  if [[ "$GPU_PLAN" == "auto" ]]; then
+    export OLLAMA_MODELS_DIR OLLAMA_NUM_PARALLEL HABITAT_RENDERERS
+    if [[ -n "$GPU_PLAN_REPLAY" ]]; then
+      [[ -f "$GPU_PLAN_REPLAY" ]] || die "GPU_PLAN_REPLAY names no recorded plan at $GPU_PLAN_REPLAY"
+      PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
+                   --replay "$GPU_PLAN_REPLAY" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
+        || die "gpu_plan.py could not replay $GPU_PLAN_REPLAY"
+      say "GPU plan replayed from $GPU_PLAN_REPLAY (a resume keeps the devices the run was frozen with)" | tee -a "$LOG"
+    else
+      PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
+                   --gpu-device "$GPU_DEVICE" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
+        || die "gpu_plan.py could not place the processes (nvidia-smi? Ollama manifests under $OLLAMA_MODELS_DIR? set LLM_VRAM_MIB)"
+    fi
+    OPERATOR_SHARED_GPU="$ALLOW_SHARED_GPU"
+    eval "$PLAN_ENV"                      # sets ALLOW_SHARED_GPU=1 when more than one process (or a desktop) holds the card
+    [[ "$OPERATOR_SHARED_GPU" == 1 ]] && ALLOW_SHARED_GPU=1
+    if [[ "$LLM_RESIDENT" == 1 ]]; then
+      export LLM_NUM_GPU=""                # the resident server keeps the placement it was started with
+      say "LLM already resident at $LLM_BASE_URL: budgeted as placed (its VRAM is in 'used'); requests leave its device alone" | tee -a "$LOG"
+    fi
+    export OBJNAV_GPU_PLAN_JSON="$SERVICE_DIR/gpu_plan.json"
+    say "GPU plan: LLM=$OBJNAV_LLM_DEVICE  YOLO=$OBJNAV_YOLO_DEVICE  Habitat=$OBJNAV_HABITAT_DEVICE  (gpu_plan.json; GPU_PLAN=off for CPU services)" | tee -a "$LOG"
+    "$HAB_PY" - "$SERVICE_DIR/gpu_plan.json" <<'PY' | tee -a "$LOG"
+import json, sys
+plan = json.load(open(sys.argv[1]))
+print("  %s: %d MiB total, %d used, %d free after a %d MiB reserve" % (plan["gpu_name"], plan["total_mib"], plan["used_mib"], plan["free_mib"], plan["reserve_mib"]))
+for item in plan["placements"]:
+    print("  %-8s %-11s %s" % (item["component"], item["device"], item["reason"]))
+for warning in plan["warnings"]:
+    print("  WARNING: " + warning)
+PY
+    GPU_DEVICE="$HABITAT_GPU_DEVICE"
+    [[ "$HABITAT_SOFTWARE_RENDER" == 1 ]] && HABITAT_RENDER=software
+  else
+    OBJNAV_LLM_DEVICE=cpu OBJNAV_YOLO_DEVICE=cpu OBJNAV_HABITAT_DEVICE=gpu
+    OLLAMA_CUDA_VISIBLE_DEVICES=-1 DETECTOR_DEVICE=cpu DETECTOR_CUDA_VISIBLE_DEVICES=""
+    export LLM_NUM_GPU=""
+    say "GPU plan off: CPU services, Habitat on GPU $GPU_DEVICE" | tee -a "$LOG"
+  fi
+
+  # -- the renderer -------------------------------------------------------------------------------
+  RENDER_WRAP=() RENDER_FLAGS=()
+  case "$HABITAT_RENDER" in
+    gpu) ;;
+    software)
+      unshare -rm true 2>/dev/null || die "HABITAT_RENDER=software needs unprivileged user namespaces (unshare -rm) to hide /dev/dri from Mesa"
+      RENDER_WRAP=(unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _)
+      RENDER_FLAGS=(--software-render)
+      # NVIDIA's EGL opens /dev/nvidia*, not /dev/dri: with its vendor library installed, hiding /dev/dri still left
+      # it EGL device 0, and a "software" run took ~0.5-1.4 GB of the card (2026-10-31). GLVND loads Mesa alone then.
+      MESA_EGL_VENDOR="${MESA_EGL_VENDOR:-/usr/share/glvnd/egl_vendor.d/50_mesa.json}"
+      [[ -f "$MESA_EGL_VENDOR" ]] && export __EGL_VENDOR_LIBRARY_FILENAMES="$MESA_EGL_VENDOR"
+      say "renderer: Mesa llvmpipe (software), /dev/dri hidden from the run; the GPU gate is skipped" | tee -a "$LOG" ;;
+    *) die "HABITAT_RENDER must be gpu or software" ;;
+  esac
+
+  # -- services ----------------------------------------------------------------------------------
+  STARTED_OLLAMA=0 DETECTOR_PID="" SEGMENTER_PID="" OLLAMA_PID=""
+  trap objnav_services_cleanup EXIT
+  trap 'exit 130' INT TERM
+
+  if [[ "$AGENT" == falcon-yolo ]]; then
+    say "LLM: none (--agent falcon-yolo: goal-free FALCON + YOLO + the same closing; Ollama is neither started nor checked)" | tee -a "$LOG"
+  else
+  say "LLM: $OLLAMA_MODE at $LLM_BASE_URL ($LLM_MODEL for room labels, $LLM_REASONING_MODEL for the node oracle)" | tee -a "$LOG"
+  if ! curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
+    case "$OLLAMA_MODE" in
+      docker) docker start "$OLLAMA_CONTAINER" > /dev/null || die "docker start $OLLAMA_CONTAINER failed"; STARTED_OLLAMA=1 ;;
+      native) command -v ollama > /dev/null || die "ollama not on PATH (OLLAMA_MODE=native)"
+              mkdir -p "$OLLAMA_MODELS_DIR"
+              if [[ "$OLLAMA_CUDA_VISIBLE_DEVICES" == -1 ]]; then say "starting ollama on the CPU ($OLLAMA_NUM_PARALLEL request slot(s), default context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"
+              else say "starting ollama on GPU $OLLAMA_CUDA_VISIBLE_DEVICES ($OLLAMA_NUM_PARALLEL request slot(s), default context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"; fi
+              CUDA_VISIBLE_DEVICES="$OLLAMA_CUDA_VISIBLE_DEVICES" OLLAMA_HOST="${LLM_BASE_URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" \
+                OLLAMA_NUM_PARALLEL="$OLLAMA_NUM_PARALLEL" OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" \
+                OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
+              OLLAMA_PID=$!; STARTED_OLLAMA=1 ;;
+      external) die "no LLM service answers at $LLM_BASE_URL (OLLAMA_MODE=external: start it yourself)" ;;
+      *) die "OLLAMA_MODE must be docker, native or external" ;;
+    esac
+    objnav_wait_for_url "$LLM_BASE_URL/api/tags" 120 "Ollama"
+  elif [[ "$OBJNAV_LLM_DEVICE" != cpu ]]; then
+    say "NOTE: an Ollama already answers at $LLM_BASE_URL; the plan's LLM device ($OBJNAV_LLM_DEVICE) only holds if that server sees the card" | tee -a "$LOG"
+  fi
+  if [[ "$OLLAMA_MODE" == docker && "$STARTED_OLLAMA" == 1 && "$OBJNAV_LLM_DEVICE" != cpu ]]; then
+    say "NOTE: the $OLLAMA_CONTAINER container's GPU access was fixed when it was created; the plan's LLM device is advisory in docker mode" | tee -a "$LOG"
+  fi
+  for model in "$LLM_MODEL" "$LLM_REASONING_MODEL"; do
+    if ! objnav_ollama_has "$model"; then
+      say "pulling $model (first time only; several GB)" | tee -a "$LOG"
+      case "$OLLAMA_MODE" in
+        docker) docker exec "$OLLAMA_CONTAINER" ollama pull "$model" ;;
+        native) OLLAMA_HOST="${LLM_BASE_URL#http://}" ollama pull "$model" ;;
+        *) die "$model is not provisioned on $LLM_BASE_URL" ;;
+      esac
+    fi
+  done
+  fi
+
+  DETECTOR_URL="http://$DETECTOR_HOST:$DETECTOR_PORT"
+  VOCAB="$(OMP_NUM_THREADS=2 "$HAB_PY" -m "$RUN_MODULE" --print-vocabulary 2>/dev/null | tail -1)"
+  [[ -n "$VOCAB" ]] || die "$RUN_MODULE --print-vocabulary printed nothing (does $HAB_PY import the repo?)"
+  printf '%s\n' "$VOCAB" > "$SERVICE_DIR/vocabulary.txt"
+  PERCEPTION_FLAGS=()
+  SEGMENTER_FLAGS=()
+  if [[ "$PERCEPTION" == ground-truth ]]; then
+    # The children read the simulator's semantic sensor in place of the detector AND the segmenter: nothing to
+    # start, nothing to pin. The vocabulary file still says which words the oracle may emit.
+    DETECTOR_URL=""
+    PERCEPTION_FLAGS=(--perception ground-truth)
+    [[ -n "$GT_MIN_PIXELS" ]] && PERCEPTION_FLAGS+=(--ground-truth-min-pixels "$GT_MIN_PIXELS")
+    say "perception: GROUND TRUTH -- habitat-sim's semantic sensor stands in for YOLO-World and SAM (no detector or segmenter started; the run is non-publishable)" | tee -a "$LOG"
+  else
+  if curl -fsS --max-time 5 "$DETECTOR_URL/health" > /dev/null 2>&1; then
+    # A detector is pinned to its class list in that order (HttpDetector refuses another), so one started for
+    # another benchmark's table -- Gibson's and HM3D's share the words but not the order -- cannot be reused.
+    SERVED="$(curl -fsS --max-time 10 "$DETECTOR_URL/health" | "$HAB_PY" -c 'import json,sys; print(",".join(json.load(sys.stdin)["classes"]))')"
+    [[ "$SERVED" == "$VOCAB" ]] || die "the detector at $DETECTOR_URL serves another vocabulary ($SERVED); set DETECTOR_PORT to start one with this benchmark's table, or stop it"
+    say "detector already up at $DETECTOR_URL with this benchmark's vocabulary (left running)" | tee -a "$LOG"
+  else
+    DETECTOR_ARGS=(--backend yolo_world --model "$YOLO_WEIGHTS" --device "$DETECTOR_DEVICE" --host "$DETECTOR_HOST" --port "$DETECTOR_PORT"
+                   --conf 0.05 --torch-threads "$DETECTOR_THREADS" --classes "$VOCAB")
+    [[ -f "$CLIP_WEIGHTS" ]] && DETECTOR_ARGS+=(--clip-model "$CLIP_WEIGHTS")     # the local text encoder: no download on the card
+    # The service keeps the same >512 MiB occupancy gate as the run; the plan has already accounted for who holds the card.
+    [[ "$DETECTOR_DEVICE" == cuda* && "$ALLOW_SHARED_GPU" == 1 ]] && DETECTOR_ARGS+=(--allow-shared-gpu)
+    say "starting the YOLO-World detector on $DETECTOR_DEVICE at $DETECTOR_URL" | tee -a "$LOG"
+    CUDA_VISIBLE_DEVICES="$DETECTOR_CUDA_VISIBLE_DEVICES" "$DETECT_PY" -u -m sparx_agency.tasks.mapping.scene_graph.serve.detection_server \
+      "${DETECTOR_ARGS[@]}" > "$SERVICE_DIR/detector.log" 2>&1 &
+    DETECTOR_PID=$!
+    objnav_wait_for_url "$DETECTOR_URL/health" 300 "the detector"
+  fi
+
+  # -- the segmentation service (SEGMENTATION=1): Segment Anything prompted with the target's boxes ---------------
+  if [[ "$SEGMENTATION" == 1 ]]; then
+    SEGMENTER_URL="http://$DETECTOR_HOST:$SEGMENTER_PORT"
+    if curl -fsS --max-time 5 "$SEGMENTER_URL/health" > /dev/null 2>&1; then
+      say "segmenter already up at $SEGMENTER_URL (left running)" | tee -a "$LOG"
+    else
+      SEGMENTER_ARGS=(--model "$SAM_WEIGHTS" --device "$SEGMENTER_DEVICE" --host "$DETECTOR_HOST" --port "$SEGMENTER_PORT"
+                      --torch-threads "$SEGMENTER_THREADS")
+      [[ "$SEGMENTER_DEVICE" == cuda* && "$ALLOW_SHARED_GPU" == 1 ]] && SEGMENTER_ARGS+=(--allow-shared-gpu)
+      SEGMENTER_CUDA=""; [[ "$SEGMENTER_DEVICE" == cuda* ]] && SEGMENTER_CUDA="${SEGMENTER_DEVICE#cuda:}"
+      say "starting the Segment Anything service ($(basename "$SAM_WEIGHTS")) on $SEGMENTER_DEVICE at $SEGMENTER_URL" | tee -a "$LOG"
+      CUDA_VISIBLE_DEVICES="$SEGMENTER_CUDA" "$DETECT_PY" -u -m sparx_agency.tasks.mapping.scene_graph.serve.segmentation_server \
+        "${SEGMENTER_ARGS[@]}" > "$SERVICE_DIR/segmenter.log" 2>&1 &
+      SEGMENTER_PID=$!
+      objnav_wait_for_url "$SEGMENTER_URL/health" 300 "the segmenter"
+    fi
+    SEGMENTER_FLAGS=(--segmentation --segmenter-url "$SEGMENTER_URL" --segmenter-model "$(basename "$SAM_WEIGHTS")")
+    say "segmentation ON: the target's depth is read on its SAM mask (policy setting segmentation=true)" | tee -a "$LOG"
+  fi
+  fi   # PERCEPTION=service
+
+  # -- FFmpeg for --record: PATH, then any imageio-ffmpeg binary an environment on this machine ships ------
+  if [[ "$RECORD" == 1 && -z "${IMAGEIO_FFMPEG_EXE:-}" ]] && ! command -v ffmpeg > /dev/null 2>&1; then
+    FOUND="$("$DETECT_PY" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())' 2>/dev/null || true)"
+    if [[ -z "$FOUND" || ! -x "$FOUND" ]]; then
+      FOUND="$(ls -1 "$HOME"/miniconda3/envs/*/lib/python3.*/site-packages/imageio_ffmpeg/binaries/ffmpeg-* 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -n "$FOUND" && -x "$FOUND" ]]; then
+      export IMAGEIO_FFMPEG_EXE="$FOUND"
+      say "ffmpeg for the recordings: $FOUND" | tee -a "$LOG"
+    else
+      die "--record needs FFmpeg: apt install ffmpeg, or set IMAGEIO_FFMPEG_EXE to an encoder with libx264"
+    fi
+  fi
+}
+
+objnav_services_cleanup() {
+  code=$?
+  trap - EXIT
+  # The launcher's own processes first (a parallel run's shards): they must not outlive the detector they call.
+  if declare -F objnav_launcher_cleanup > /dev/null; then objnav_launcher_cleanup || true; fi
+  if [[ -n "$DETECTOR_PID" ]]; then kill -TERM "$DETECTOR_PID" 2>/dev/null || true; wait "$DETECTOR_PID" 2>/dev/null || true; fi
+  if [[ -n "$SEGMENTER_PID" ]]; then kill -TERM "$SEGMENTER_PID" 2>/dev/null || true; wait "$SEGMENTER_PID" 2>/dev/null || true; fi
+  if [[ "$STARTED_OLLAMA" == 1 ]]; then
+    case "$OLLAMA_MODE" in
+      docker) docker stop --timeout 15 "$OLLAMA_CONTAINER" > /dev/null 2>&1 || true ;;
+      native) if [[ -n "$OLLAMA_PID" ]]; then kill -TERM "$OLLAMA_PID" 2>/dev/null || true; wait "$OLLAMA_PID" 2>/dev/null || true; fi ;;
+    esac
+  fi
+  date -u +%FT%TZ > "$SERVICE_DIR/finished_utc.txt"
+  printf '%s\n' "$code" > "$SERVICE_DIR/exit_code.txt"
+  say "exit $code (log: $LOG)"
+  exit "$code"
+}
+
+objnav_wait_for_url() {   # url, seconds, label
+  local url="$1" seconds="$2" label="$3" waited=0
+  until curl -fsS --max-time 5 "$url" > /dev/null 2>&1; do
+    sleep 2; waited=$((waited + 2))
+    [[ $waited -lt $seconds ]] || die "$label did not answer at $url within ${seconds}s"
+  done
+}
+
+objnav_ollama_has() { curl -fsS --max-time 10 "$LLM_BASE_URL/api/tags" | "$HAB_PY" -c "import json,sys; sys.exit(0 if '$1' in [m['name'] for m in json.load(sys.stdin)['models']] else 1)"; }

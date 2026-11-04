@@ -1,0 +1,389 @@
+"""The per-scene campaign, and the two ways it could lie about what it ran.
+
+A campaign is an orchestrator, so its failure modes are not arithmetic: they are
+saying a sweep succeeded when most of it crashed, and calling a handful of smoke
+episodes a complete benchmark. Both would be read off ``campaign_summary.json``
+and the exit status by whatever runs it next.
+
+No simulator and no scene meshes: every child process is a fake, and the episode
+rows are written by the harness's own logger.
+"""
+from __future__ import annotations
+
+import json
+import types
+
+import pytest
+
+from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
+from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d import campaign, run
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import PUBLISHED_VAL
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import HM3D_V2
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_hm3d_report import (
+    record, run_config)
+
+SCENES = ("00800-TEEsavR23oF", "00802-wcojb4TFT35")
+
+EPISODES = "~/datasets/objectnav/hm3d/v2/val"
+
+
+def write_scene(root, scene, episodes, *, finish=True):
+    """One child's results directory, as ``run.py`` would leave it."""
+    rows = [record("%s/%06d" % (scene, index), scene=scene, distance=0.05)
+            for index in range(episodes)]
+    directory = root / scene
+    config = run_config(rows, full_split=False, scene_count=1)
+    with MetricsLogger(directory, config, argv=["pytest"]) as logger:
+        for row in rows:
+            logger.log(row)
+        if finish:
+            logger.finish(summarise(rows))
+    if not finish:
+        (directory / "summary.json").unlink(missing_ok=True)
+    return directory
+
+
+def fake_runner(returncodes):
+    """A child process that records its command and returns a scripted status."""
+    seen = []
+
+    def runner(command):
+        seen.append(command)
+        return types.SimpleNamespace(returncode=returncodes[len(seen) - 1])
+
+    runner.seen = seen
+    return runner
+
+
+# -- the child commands ----------------------------------------------------
+
+def test_every_child_command_is_one_run_py_actually_accepts():
+    """The campaign builds argv by hand, so nothing but round-tripping it
+    through ``run.py``'s own parser proves a flag was not renamed underneath."""
+    command = campaign.scene_command(SCENES[0], "/tmp/out", version="v2",
+                                     split="train", episodes_dir="E",
+                                     scenes_dir="S", limit=3,
+                                     extra=["--episodes-per-scene", "2"])
+    parsed = run.parser().parse_args(command[command.index("--version"):])
+    assert parsed.version == "v2" and parsed.split == "train"
+    assert parsed.scenes == [SCENES[0]] and parsed.limit == 3
+    assert parsed.episodes_per_scene == 2 and str(parsed.output) == "/tmp/out"
+
+
+def test_the_split_reaches_the_children_and_the_scene_listing(tmp_path):
+    """A development campaign reads its scene list from the development split's
+    own episode files, so the split cannot be left to the pass-through args."""
+    runner = fake_runner([0, 0])
+    campaign.run_campaign(tmp_path, version="v2", split="train",
+                          episodes_dir="E", scenes_dir="S", limit=1,
+                          scenes=list(SCENES), runner=runner)
+    for command in runner.seen:
+        assert command[command.index("--split") + 1] == "train"
+    assert json.loads((tmp_path / "campaign.json").read_text())["split"] == "train"
+
+
+@pytest.mark.skipif(not (__import__("pathlib").Path(EPISODES).expanduser()
+                         / "val.json.gz").is_file(),
+                    reason="the published v2 validation episodes are not installed")
+def test_listing_scenes_neither_parses_the_whole_split_nor_demands_a_complete_one():
+    """Listing 145 train scene names by parsing seven million rows would cost a
+    hundred seconds and several gigabytes, and asking the loader to certify a
+    complete split would fail outright on any split but ``val``."""
+    keys = campaign.scene_keys(EPISODES, HM3D_V2)
+    assert len(keys) == PUBLISHED_VAL["v2"]["scenes"]
+    assert all(key[:5].isdigit() and "-" in key for key in keys)
+    # A development split lists its scenes just as readily.
+    assert campaign.scene_keys(EPISODES, HM3D_V2.with_split("val")) == keys
+
+
+# -- what the aggregate is allowed to call complete ------------------------
+
+def test_a_scene_that_produced_one_episode_does_not_make_a_split_complete(tmp_path):
+    """Every scene reporting a row is not every episode having been run. A smoke
+    sweep, or a campaign where each scene died after one episode, would
+    otherwise be written out as a complete benchmark with a headline SR."""
+    for scene in SCENES:
+        write_scene(tmp_path, scene, 1)
+    report = campaign.aggregate(tmp_path, episodes_dir=EPISODES, version="v2")
+    assert report["episodes"] == 2
+    assert report["complete"] is False
+    assert report["episodes_published"] == PUBLISHED_VAL["v2"]["episodes"]
+    assert report["scenes_published"] == PUBLISHED_VAL["v2"]["scenes"]
+
+
+def test_an_unfinished_scene_is_named_rather_than_averaged_away(tmp_path):
+    """A scene killed mid-run still has rows; counting them silently would put a
+    partial scene's score into the total with nothing saying so."""
+    write_scene(tmp_path, SCENES[0], 2)
+    write_scene(tmp_path, SCENES[1], 1, finish=False)
+    report = campaign.aggregate(tmp_path, episodes_dir=EPISODES, version="v2")
+    assert report["scenes_unfinished"] == [SCENES[1]]
+    assert report["complete"] is False
+    assert report["episodes"] == 3
+
+
+def test_a_scene_with_no_rows_is_reported_missing_not_dropped(tmp_path):
+    """A child that died before its first episode leaves an empty directory;
+    leaving it out of the denominator would flatter every average."""
+    write_scene(tmp_path, SCENES[0], 2)
+    (tmp_path / SCENES[1]).mkdir()
+    report = campaign.aggregate(tmp_path, episodes_dir=EPISODES, version="v2")
+    assert report["scenes_without_rows"] == [SCENES[1]]
+    assert report["scenes_with_rows"] == 1
+    assert report["complete"] is False
+
+
+def test_nothing_at_all_aggregates_to_nothing(tmp_path):
+    """An aborted sweep must not produce a summary file to be misread later."""
+    assert campaign.aggregate(tmp_path, episodes_dir=EPISODES, version="v2") is None
+    assert not (tmp_path / "campaign_summary.json").exists()
+
+
+# -- the exit status -------------------------------------------------------
+
+def test_a_sweep_whose_scenes_crashed_does_not_exit_zero(tmp_path):
+    """Whatever runs the campaign next reads the exit status, and a smoke run
+    with ``--limit`` used to suppress every failure it had just printed.
+
+    The crashed child here leaves no directory at all, which a scan of the
+    results tree cannot see -- only the campaign manifest records that the
+    scene was ever asked for.
+    """
+    def runner(command):
+        scene = command[command.index("--scenes") + 1]
+        if scene == SCENES[0]:
+            write_scene(tmp_path, scene, 1)
+            return types.SimpleNamespace(returncode=0)
+        return types.SimpleNamespace(returncode=1)  # died before writing anything
+
+    campaign.run_campaign(tmp_path, version="v2", episodes_dir=EPISODES,
+                          scenes_dir="S", limit=1, scenes=list(SCENES),
+                          runner=runner)
+    status = campaign.main([str(tmp_path), "--aggregate-only", "--version", "v2",
+                            "--episodes-dir", EPISODES, "--scenes-dir", "S"])
+    assert status == 1
+    report = json.loads((tmp_path / "campaign_summary.json").read_text())
+    assert report["scenes_without_rows"] == [SCENES[1]]
+    assert report["complete"] is False
+
+
+def test_a_deliberate_subset_that_worked_exits_zero(tmp_path, monkeypatch):
+    """A one-scene campaign is complete for what it asked for; failing it would
+    make the exit status useless for exactly the runs people do most."""
+    write_scene(tmp_path, SCENES[0], 1)
+    monkeypatch.setattr(campaign, "run_campaign",
+                        lambda *a, **k: [{"scene": SCENES[0], "returncode": 0,
+                                          "status": "ran", "output": "x"}])
+    status = campaign.main([str(tmp_path), "--version", "v2",
+                            "--episodes-dir", EPISODES, "--scenes-dir", "S",
+                            "--scenes", SCENES[0], "--limit", "1"])
+    assert status == 0
+
+
+# -- the geodesic self-test ------------------------------------------------
+
+def test_shortest_paths_that_disagree_with_the_publisher_stop_the_run():
+    """``info.geodesic_distance`` is the same quantity as l, so a disagreement
+    is the wrong navmesh, not a difference of definition -- and every SPL would
+    be wrong with it. It has to be an issue, not a number in the manifest."""
+    good = {"episodes": 100, "within_1mm": 100, "median_abs_m": 0.0,
+            "max_abs_m": 1e-9}
+    assert run.geodesic_agreement_issue(good) is None
+    assert run.geodesic_agreement_issue(None) is None
+
+    bad = {"episodes": 100, "within_1mm": 3, "median_abs_m": 0.41,
+           "max_abs_m": 2.2}
+    complaint = run.geodesic_agreement_issue(bad)
+    assert complaint is not None
+    assert "3 of 100" in complaint and "navmesh" in complaint
+    assert run.geodesic_agreement_issue(bad, allow=True) is None
+
+
+def test_a_few_starts_may_sit_exactly_on_a_view_point():
+    """Float32 and navmesh snapping put a start that is already on a view point
+    a hair away from the publisher's zero, so the gate is not 100%."""
+    nearly = {"episodes": 1000, "within_1mm": 995, "median_abs_m": 0.0,
+              "max_abs_m": 4e-3}
+    assert run.geodesic_agreement_issue(nearly) is None
+    assert run.GEODESIC_AGREEMENT_FRACTION < 1.0
+
+
+def test_a_small_scene_may_miss_a_handful_of_starts_by_less_than_a_stride():
+    """v1 val runs 99 starts per scene, where 99% admits none: the 2026-10-22 sweep refused five of its twenty
+    scenes at this gate -- 98, 98, 98, 97 and 96 of 99 within a millimetre, the median at 3 micrometres, the worst
+    0.016-0.090 m -- and five scenes had to be re-run by hand with --allow-geodesic-mismatch. Up to three starts
+    a hair off a view point pass; a fourth, or one a stride off, is still the wrong-navmesh complaint."""
+    for within, worst in ((98, 0.054), (98, 0.090), (97, 0.016), (96, 0.090)):
+        sweep = {"episodes": 99, "within_1mm": within, "median_abs_m": 3.4e-6, "max_abs_m": worst}
+        assert run.geodesic_agreement_issue(sweep) is None, (within, worst)
+    assert run.GEODESIC_AGREEMENT_MIN_MISSES == 3 and run.GEODESIC_MISS_MAX_M == 0.25
+    four = {"episodes": 99, "within_1mm": 95, "median_abs_m": 3.4e-6, "max_abs_m": 0.09}
+    complaint = run.geodesic_agreement_issue(four)
+    assert complaint is not None and "95 of 99" in complaint and "3 starts" in complaint and "0.25 m" in complaint
+    far = {"episodes": 99, "within_1mm": 98, "median_abs_m": 3.4e-6, "max_abs_m": 0.26}
+    assert run.geodesic_agreement_issue(far) is not None, "one start a stride from where the publisher measured it"
+    assert run.geodesic_agreement_issue(far, allow=True) is None
+    # The fraction still governs a split-sized set: ten misses of a thousand pass, eleven do not.
+    assert run.geodesic_agreement_issue({"episodes": 1000, "within_1mm": 990, "median_abs_m": 0.0, "max_abs_m": 0.5}) is None
+    assert run.geodesic_agreement_issue({"episodes": 1000, "within_1mm": 989, "median_abs_m": 0.0, "max_abs_m": 0.09}) is not None
+
+
+# -- scenes at once (--jobs) -------------------------------------------------
+
+def test_concurrent_scenes_overlap_and_log_beside_not_inside_the_scene_directories(tmp_path):
+    """Three scenes with two jobs must have two children alive at once, and each
+    child's console must land in a file at the root: a subdirectory there would
+    be read by the aggregate as a scene without rows."""
+    import threading
+    import time
+
+    scenes = ("00800-TEEsavR23oF", "00802-wcojb4TFT35", "00803-k1cupFYWXJ6")
+    live, peak, guard = [0], [0], threading.Lock()
+
+    def runner(command, stdout=None, stderr=None):
+        assert stdout is not None, "a concurrent child must not write to the shared console"
+        scene = command[command.index("--scenes") + 1]
+        stdout.write("child %s\n" % scene)
+        with guard:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.2)
+        write_scene(tmp_path, scene, 1)
+        with guard:
+            live[0] -= 1
+        return types.SimpleNamespace(returncode=0 if scene != scenes[1] else 3)
+
+    results = campaign.run_campaign(tmp_path, version="v2", episodes_dir="E",
+                                    scenes_dir="S", limit=1, scenes=list(scenes),
+                                    runner=runner, jobs=2)
+    assert peak[0] == 2
+    assert [r["scene"] for r in results] == list(scenes)
+    assert [r["returncode"] for r in results] == [0, 3, 0]
+    for scene in scenes:
+        log = tmp_path / ("%s.console.log" % scene)
+        assert log.read_text() == "child %s\n" % scene
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_dir()) == sorted(scenes)
+    assert json.loads((tmp_path / "campaign.json").read_text())["jobs"] == 2
+
+
+def test_concurrent_resume_skips_finished_scenes_and_resumes_started_ones(tmp_path):
+    """--resume means the same thing whether scenes run one at a time or not."""
+    write_scene(tmp_path, SCENES[0], 1)
+    write_scene(tmp_path, SCENES[1], 1, finish=False)
+    seen = []
+
+    def runner(command, stdout=None, stderr=None):
+        seen.append(command)
+        return types.SimpleNamespace(returncode=0)
+
+    results = campaign.run_campaign(tmp_path, version="v2", episodes_dir="E",
+                                    scenes_dir="S", scenes=list(SCENES),
+                                    runner=runner, resume=True, jobs=4)
+    assert results[0]["status"] == "already finished"
+    assert len(seen) == 1 and "--resume" in seen[0]
+    assert seen[0][seen[0].index("--scenes") + 1] == SCENES[1]
+
+
+def test_a_resume_acceptance_reaches_only_the_scenes_that_continue(tmp_path):
+    """The 2026-10-22 v1 sweep lost two scenes mid-way to the kinematic self-check; finishing them under the
+    corrected tolerance is a resume whose frozen config differs in that check and in the source hash, which
+    ``run.py`` admits only when told (``--resume-accepting-changes``) and only with ``--resume``. The launcher
+    forwards the flag to every child, so the campaign must hand it to the scene that continues and withhold it
+    from a scene that starts afresh -- that child would refuse to start otherwise -- and refuse it on a fresh root."""
+    third = "00803-k1cupFYWXJ6"
+    write_scene(tmp_path, SCENES[0], 1)                                   # finished: skipped
+    write_scene(tmp_path, SCENES[1], 1, finish=False)                     # started: resumed with the acceptance
+    seen = []
+
+    def runner(command, stdout=None, stderr=None):
+        seen.append(command)
+        return types.SimpleNamespace(returncode=0)
+
+    extra = ["--lean", "--resume-accepting-changes", "kinematics", "evaluation", "source_sha256", "--validate-starts"]
+    campaign.run_campaign(tmp_path, version="v2", episodes_dir="E", scenes_dir="S",
+                          scenes=list(SCENES) + [third], runner=runner, resume=True, jobs=2, extra=extra)
+    by_scene = {command[command.index("--scenes") + 1]: command for command in seen}
+    assert set(by_scene) == {SCENES[1], third}
+    continued, fresh = by_scene[SCENES[1]], by_scene[third]
+    assert "--resume" in continued and "--resume-accepting-changes" in continued
+    assert continued[continued.index("--resume-accepting-changes") + 1:continued.index("--resume-accepting-changes") + 4] == \
+        ["kinematics", "evaluation", "source_sha256"]
+    assert "--lean" in continued and "--validate-starts" in continued
+    assert "--resume" not in fresh and "--resume-accepting-changes" not in fresh and "kinematics" not in fresh
+    assert "--lean" in fresh and "--validate-starts" in fresh
+    # Each child's command is one run.py accepts: the continued one resumes with the acceptance, the fresh one without.
+    assert run.parser().parse_args(continued[continued.index("--version"):]).resume_accepting_changes == \
+        ["kinematics", "evaluation", "source_sha256"]
+    assert run.parser().parse_args(fresh[fresh.index("--version"):]).resume_accepting_changes == ()
+    assert campaign.split_resume_acceptance(["--lean"]) == (["--lean"], [])
+    with pytest.raises(ValueError, match="resume"):
+        campaign.run_campaign(tmp_path / "fresh", version="v2", episodes_dir="E", scenes_dir="S",
+                              scenes=list(SCENES), runner=runner, extra=["--resume-accepting-changes", "kinematics"])
+    # And run.py itself refuses the acceptance without a resume, and an unknown key.
+    with pytest.raises(SystemExit):
+        run.parser().parse_args(["--version", "v1", "--resume-accepting-changes", "policy"])
+    assert set(run.RESUMABLE_CONFIG_CHANGES) == {"kinematics", "evaluation", "source_sha256", "gpu_plan"}
+
+
+def test_jobs_below_one_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        campaign.run_campaign(tmp_path, version="v2", episodes_dir="E", scenes_dir="S",
+                              scenes=list(SCENES), runner=fake_runner([0, 0]), jobs=0)
+
+
+def test_jobs_reaches_the_campaign_from_its_command_line(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_campaign(*args, **kwargs):
+        seen.update(kwargs)
+        return []
+    monkeypatch.setattr(campaign, "run_campaign", fake_run_campaign)
+    write_scene(tmp_path, SCENES[0], 1)
+    campaign.main([str(tmp_path), "--version", "v2", "--episodes-dir", EPISODES,
+                   "--scenes-dir", "S", "--jobs", "5"])
+    assert seen["jobs"] == 5
+
+
+def test_an_explicit_episode_list_runs_only_its_scenes_with_only_its_episodes(tmp_path, monkeypatch):
+    """A re-run of chosen cases: each scene's process gets exactly that scene's ids, in the order given."""
+    monkeypatch.setattr(campaign, "scene_keys", lambda *a, **k: list(SCENES))
+    runner = fake_runner([0, 0])
+    ids = ["%s/000007" % SCENES[1], "%s/000002" % SCENES[0], "%s/000001" % SCENES[1]]
+    campaign.run_campaign(tmp_path, version="v2", episodes_dir="E", scenes_dir="S", episode_ids=ids, runner=runner)
+    plans = {command[command.index("--scenes") + 1]: command[command.index("--episode-ids") + 1:]
+             for command in runner.seen}
+    assert list(plans) == [SCENES[1], SCENES[0]]
+    assert plans[SCENES[1]][:2] == ["%s/000007" % SCENES[1], "%s/000001" % SCENES[1]]
+    assert plans[SCENES[0]][:1] == ["%s/000002" % SCENES[0]]
+
+
+def test_an_episode_list_refuses_unknown_scenes_repeats_and_a_limit():
+    with pytest.raises(ValueError, match="scene of this split"):
+        campaign.episode_plan(["nowhere/000001"], SCENES)
+    with pytest.raises(ValueError, match="twice"):
+        campaign.episode_plan(["%s/000001" % SCENES[0]] * 2, SCENES)
+    with pytest.raises(ValueError, match="names its own scenes"):
+        campaign.run_campaign("/tmp/x", version="v2", episodes_dir="E", scenes_dir="S", limit=1,
+                              episode_ids=["%s/000001" % SCENES[0]])
+
+
+def _row(queries=0, reuses=0, failures=0):
+    return types.SimpleNamespace(episode_id="s/000001", agent_info={"policy": {
+        "llm_queries": queries, "oracle_reuses": reuses,
+        "exploration_fallback": {"stats": {"room_llm_failures": failures}}}})
+
+
+def test_a_run_whose_oracle_never_answers_stops_and_one_answer_resets_the_count():
+    live = {}
+    run.oracle_alive(live, _row(failures=4), limit=3)
+    run.oracle_alive(live, _row(), limit=3)                    # no failure, no answer: an episode that ended early
+    run.oracle_alive(live, _row(failures=1), limit=3)
+    assert live["oracle_dead"] == 2
+    run.oracle_alive(live, _row(reuses=1, failures=2), limit=3)
+    assert live["oracle_dead"] == 0
+    for _ in range(2):
+        run.oracle_alive(live, _row(failures=5), limit=3)
+    with pytest.raises(RuntimeError, match="answered nothing in 3 episodes"):
+        run.oracle_alive(live, _row(failures=5), limit=3)
+    run.oracle_alive({}, _row(failures=5), limit=0)            # disabled

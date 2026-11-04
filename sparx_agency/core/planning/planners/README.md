@@ -23,11 +23,14 @@ planners/
 │   ├── algorithm.py
 │   ├── params.py               # BITStarParams
 │   └── planner.py
-└── informed_rrtstar/           # Informed RRT* (3D only)
-    ├── __init__.py
-    ├── algorithm.py
-    ├── params.py               # InformedRRTStarParams
-    └── planner.py
+├── informed_rrtstar/           # Informed RRT* (3D only)
+│   ├── __init__.py
+│   ├── algorithm.py
+│   ├── params.py               # InformedRRTStarParams
+│   └── planner.py
+├── astar/                      # grid A*, the weighted 2D planner (clearance + centreline layers), 3D voxel A*
+└── lattice/                    # Hybrid A* on the discrete-action lattice (x, y, heading): the executable action
+                                # sequence that walks a 2D route; see lattice/README.md
 
 # Interface types come from:
 # sparx_agency/core/planning/interfaces/

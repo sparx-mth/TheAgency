@@ -17,12 +17,16 @@ Every refusal here stops a quiet corruption of the numbers. One logger at a
 time writes a directory: a resume of a run that is still going would append
 its episodes a second time. A fresh run creates ``episodes.jsonl``
 exclusively, so it never overwrites results. A resume must present exactly
-the recorded config, or it would append a second experiment to the first, and
-it touches ``run.json`` only once it logs or finishes, so a resume refused
-before its first episode leaves a finished run looking finished. What the
-rows may hold -- each episode once, one experiment, a summary of exactly them
--- is ``run_records.py``'s; how a file is written and read back (strict JSON,
-atomic replacement, a bad line reported with its number), ``results_io.py``'s.
+the recorded config, or it would append a second experiment to the first --
+unless the caller names, explicitly, the top-level keys it may differ in
+(``accept_changes``), in which case what differed is written into the
+resume's entry in ``run.json`` for the report to disclose, and the recorded
+config stays the run's. It touches ``run.json`` only once it logs or
+finishes, so a resume refused before its first episode leaves a finished run
+looking finished. What the rows may hold -- each episode once, one
+experiment, a summary of exactly them -- is ``run_records.py``'s; how a file
+is written and read back (strict JSON, atomic replacement, a bad line
+reported with its number), ``results_io.py``'s.
 
 Python 3.8 syntax, standard library only.
 """
@@ -86,25 +90,34 @@ class MetricsLogger:
 
     def __init__(self, run_dir: pathlib.Path, config: Mapping[str, Any], *,
                  resume: bool = False,
-                 argv: Optional[Sequence[str]] = None) -> None:
+                 argv: Optional[Sequence[str]] = None,
+                 accept_changes: Sequence[str] = ()) -> None:
         """Open a results directory, fresh or resumed, and take its lock.
 
         Args:
             run_dir: The run's directory (see ``results_io.default_run_dir``),
                 created when fresh.
             config: The full run configuration, strict JSON. A resume must
-                pass exactly the recorded one.
+                pass exactly the recorded one, except in ``accept_changes``.
             resume: Reopen a directory an earlier run left behind.
             argv: The command line to record; defaults to ``sys.argv``.
+            accept_changes: Top-level config keys a resume may differ in --
+                provenance or a self-check tolerance, never anything that
+                decides or scores an episode; the caller is responsible for
+                that judgement. What differed is recorded in the resume's
+                ``run.json`` entry (``config_changes``); the recorded config
+                stays the run's. Only meaningful with ``resume=True``.
 
         Raises:
             TypeError: If ``config`` is not a mapping.
-            HarnessError: If ``resume`` is not a bool or ``argv`` is not a
-                sequence of strings.
+            HarnessError: If ``resume`` is not a bool, ``argv`` is not a
+                sequence of strings, or ``accept_changes`` is not a sequence
+                of strings or is given without ``resume``.
             ResultsError: If ``config`` is not strict JSON; if a fresh run
                 finds ``episodes.jsonl`` already there; if another logger is
-                writing the directory; if a resume finds no run, a different
-                config, or a malformed, truncated or repeated line.
+                writing the directory; if a resume finds no run, a config
+                that differs outside ``accept_changes``, or a malformed,
+                truncated or repeated line.
         """
         if not isinstance(resume, bool):
             raise HarnessError(
@@ -113,8 +126,16 @@ class MetricsLogger:
         if not isinstance(config, collections.abc.Mapping):
             raise TypeError("config must be a mapping, got %s"
                             % type(config).__name__)
+        if (isinstance(accept_changes, str)
+                or not isinstance(accept_changes, collections.abc.Sequence)
+                or not all(isinstance(key, str) for key in accept_changes)):
+            raise HarnessError("accept_changes must be a sequence of config keys, got %r" % (accept_changes,))
+        if accept_changes and not resume:
+            raise HarnessError("accept_changes only means something with resume=True; "
+                               "a fresh run has no recorded config to differ from")
         self._config_text = strict_json(dict(config), "the run config")
         self._argv = argv_list(argv)
+        self._accept_changes = frozenset(accept_changes)
         self._run_dir = pathlib.Path(run_dir).expanduser()
         self._rows = RunRecords(self.episodes_path)
         self._info: Dict[str, Any] = {}
@@ -284,13 +305,22 @@ class MetricsLogger:
         self._lock = RunLock(self._run_dir / self.LOCK_FILE)
         self._info = read_run_info(run_path)
         recorded = self._info["config"]
+        changes = {}  # type: Dict[str, Any]
         if strict_json(recorded, "the recorded config") != self._config_text:
-            raise ResultsError(
-                "cannot resume %s with a different config (%s differ): "
-                "resuming with a different config would mix two experiments "
-                "in one file; start a fresh run in a new directory"
-                % (self._run_dir, ", ".join(differing_keys(
-                    recorded, json.loads(self._config_text)))))
+            presented = json.loads(self._config_text)
+            differing = differing_keys(recorded, presented)
+            refused = [key for key in differing if key not in self._accept_changes]
+            if refused or not isinstance(recorded, dict):
+                raise ResultsError(
+                    "cannot resume %s with a different config (%s differ%s): "
+                    "resuming with a different config would mix two experiments "
+                    "in one file; start a fresh run in a new directory"
+                    % (self._run_dir, ", ".join(differing),
+                       "; accepted: %s" % ", ".join(sorted(self._accept_changes & set(differing)))
+                       if self._accept_changes & set(differing) else ""))
+            # Every difference was named in advance: continue, and say so in run.json.
+            changes = {key: {"recorded": recorded.get(key), "resumed": presented.get(key)}
+                       for key in differing}
         for number, record in read_episode_rows(self.episodes_path):
             self._rows.add(record, "%s line %d" % (self.episodes_path, number))
-        self._pending_resume = resume_entry(self._argv, len(self._rows.records))
+        self._pending_resume = resume_entry(self._argv, len(self._rows.records), config_changes=changes)

@@ -10,6 +10,12 @@ is not installed in the FALCON adapter container).
 The public names still resolve on first access, so
 ``from sparx_agency.core.localization import AprilTagLocalizationProvider``
 continues to work for code that actually needs a provider.
+
+``floor_atlas`` (standard library only) is the storey localiser: which floor
+of a building a pose is on, from its height alone -- discovery ids, hysteresis
+against stair treads and thresholds, and the measured stair edges between the
+floors it has stood on. Import it by module path; the object-search method keys
+its per-storey maps by the floor id it returns.
 """
 from .base import BaseLocalizationProvider, LocalizationEstimate
 

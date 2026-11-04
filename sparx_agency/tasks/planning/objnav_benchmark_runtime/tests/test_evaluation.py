@@ -24,6 +24,10 @@ class Env(CorridorEnv):
         super().__init__({"one": 1.0, "two": 1.0})
         self.closed = False
 
+    def evaluation_diagnostics(self):
+        """The recorder reads the scorer's diagnostics after every reset and step."""
+        return {}
+
     def close(self):
         self.closed = True
 
@@ -58,15 +62,22 @@ def test_shared_evaluation_records_without_privileged_telemetry_and_resumes(tmp_
                              config={"purpose": "synthetic"}, record=True, writer_factory=Sink)
     assert summary.overall.success_rate == 1.0 and env.closed
     assert len(list(output.glob("recordings/*/trajectory.csv"))) == 2
-    text = (output / "index.html").read_text()
-    assert "corridor / test" in text and "configured evaluator" in text
-    assert "Gibson" not in text and "SemExp" not in text
-    assert 'href="comparison.md"' not in text
+    assert (output / "index.html").is_file()
     env = Env()
     resumed = run_evaluation(env, LinePolicy(), fake_label_mapper(), output=output,
                              config={"purpose": "synthetic"}, resume=True, dashboard=False)
     assert resumed.overall.n_episodes == 2 and env.resets == [] and env.closed
     assert (output / "episodes.jsonl").read_text().count("\n") == 2
+
+
+def test_shared_dashboard_is_benchmark_neutral(tmp_path):
+    env, output = Env(), tmp_path / "run"
+    run_evaluation(env, LinePolicy(), fake_label_mapper(), output=output,
+                   config={"purpose": "synthetic"}, record=True, writer_factory=Sink)
+    text = (output / "index.html").read_text()
+    assert "corridor / test" in text and "configured evaluator" in text
+    assert "Gibson" not in text and "SemExp" not in text
+    assert 'href="comparison.md"' not in text
 
 
 def test_frozen_configuration_is_checked_before_reset_or_output(tmp_path):
@@ -168,3 +179,40 @@ def test_json_reloaded_configuration_keeps_tuple_settings_and_detects_converter_
         evaluation_configuration(reloaded, ["one"], policy=policy)
 
 
+
+
+def test_a_caller_may_watch_episodes_finish_without_displacing_the_recorder(tmp_path):
+    """A thousand-episode run that prints nothing until it ends is unusable, and
+    an adapter's CLI is the only thing positioned to say how it is going. The
+    recorder's own hook still runs first: it is what finishes writing an
+    episode's artifacts, and a caller's printer must not be able to skip it."""
+    seen = []
+    env = Env()
+    summary = run_evaluation(env, LinePolicy(), fake_label_mapper(),
+                             output=tmp_path / "out", config={"experiment": "progress"},
+                             progress=lambda index, total, row: seen.append(
+                                 (index, total, row.episode_id)))
+    assert [(index, total) for index, total, _ in seen] == [(1, 2), (2, 2)]
+    assert {episode for _, _, episode in seen} == set(env.episode_ids())
+    assert summary.overall.n_episodes == 2
+
+
+def test_wrapped_env_and_agent_class_are_used_and_the_wrapper_sees_the_logger(tmp_path):
+    from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import ProgressEnv, ProgressTracker
+    seen, built = {}, []
+
+    class Marked(HeadlessObjNavAgent):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    def wrap(env, logger):
+        seen["records"] = list(logger.records)
+        return ProgressEnv(env, ProgressTracker(tmp_path / "progress.json", 1, completed=logger.records))
+
+    env = Env()
+    run_evaluation(env, LinePolicy(), fake_label_mapper(), output=tmp_path / "run", config={},
+                   settings=EvaluationSettings(), episode_ids=("one",), wrap_env=wrap, agent_class=Marked)
+    assert seen["records"] == [] and len(built) == 1 and env.closed
+    assert json.loads((tmp_path / "progress.json").read_text())["total"] == 1

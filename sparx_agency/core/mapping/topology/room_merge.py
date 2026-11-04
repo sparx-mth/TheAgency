@@ -105,6 +105,7 @@ def merge_basins_by_dynamics(
     dt: np.ndarray,
     min_dynamics_m: float,
     barrier_mask: Optional[np.ndarray] = None,
+    basin_sides: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Merge adjacent basins whose dynamics fall below a threshold.
 
@@ -125,6 +126,15 @@ def merge_basins_by_dynamics(
             basins is a hard boundary — the door carve. A pair sharing
             any barrier cell is never merged. ``None`` means pure
             geometry.
+        basin_sides: Optional ``(n_labels + 1,)`` int array naming the
+            SIDE each basin lies on — the connected component of the
+            carved floodable mask it was flooded in. Two basins on
+            different sides are never merged, whatever their border
+            cells say; two on the same side may. This is the barrier a
+            door cut sized to its doorway needs: the carve's protrusion
+            into the rooms is not a wall, so basins of one room beside
+            the door still merge, while the cut itself still parts the
+            two rooms. ``None`` leaves the mask as the only barrier.
 
     Returns:
         (H, W) int32 label image with merged basins carrying a single
@@ -151,6 +161,12 @@ def merge_basins_by_dynamics(
     pairs, saddles, barred = _basin_borders(labels, dt, barrier_mask, n)
     if not len(pairs):
         return labels.astype(np.int32, copy=False)
+    if basin_sides is not None:
+        sides = np.asarray(basin_sides)
+        if sides.shape != (n + 1,):
+            raise ValueError("basin_sides %r must have one entry per label, (%d,)"
+                             % (sides.shape, n + 1))
+        barred = barred | (sides[pairs[:, 0]] != sides[pairs[:, 1]])
 
     graph = _BasinGraph(pairs, saddles, barred, _basin_peaks(labels, dt, n))
     _contract(graph, float(min_dynamics_m))

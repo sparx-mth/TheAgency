@@ -17,6 +17,7 @@ from sparx_agency.core.mapping.objects.geometry import (
     backproject_bbox_to_world,
     rescale_bbox_between_intrinsics,
     robust_bbox_depth,
+    robust_mask_depth,
 )
 
 DEPTH_K = (320.0, 320.0, 320.0, 240.0)   # fx, fy, cx, cy
@@ -200,3 +201,63 @@ class TestRobustBboxDepth:
     def test_non_2d_depth_raises(self):
         with pytest.raises(ValueError):
             robust_bbox_depth(np.ones((4, 4, 3), dtype=np.float32), self.BBOX)
+
+
+class TestRobustMaskDepth:
+    """The depth read from the object's own pixels, not the box's."""
+
+    # The box of a sofa at 3 m with a chair at 1 m standing in front of its
+    # right half: the chair fills 60 % of the shrunken box, so the box read
+    # is the chair's.
+    BBOX = (100.0, 200.0, 500.0, 400.0)
+
+    @staticmethod
+    def _scene():
+        depth = np.full((480, 640), np.nan, dtype=np.float32)
+        depth[200:400, 100:500] = 3.0            # the sofa over the whole box
+        depth[150:480, 260:500] = 1.0            # the chair in front, spilling out of the box
+        mask = np.zeros((480, 640), dtype=bool)
+        mask[200:400, 100:500] = True
+        mask[150:480, 260:500] = False           # SAM leaves the occluder out
+        return depth, mask
+
+    def test_the_box_reads_the_occluder_and_the_mask_reads_the_object(self):
+        depth, mask = self._scene()
+        assert robust_bbox_depth(depth, self.BBOX) == pytest.approx(1.0)
+        assert robust_mask_depth(depth, mask, self.BBOX) == pytest.approx(3.0)
+
+    def test_the_box_bounds_a_mask_that_leaked(self):
+        depth, mask = self._scene()
+        mask[0:150, 0:640] = True                # the mask ran into the ceiling at 0.5 m ...
+        depth[0:150, 0:640] = 0.5
+        assert robust_mask_depth(depth, mask, self.BBOX) == pytest.approx(3.0)      # ... outside the box
+        assert robust_mask_depth(depth, mask) == pytest.approx(0.5)                 # unbounded, it carries the read
+
+    def test_holes_and_range_are_ignored_like_the_box_read(self):
+        depth, mask = self._scene()
+        depth[210, 110] = np.nan
+        depth[211, 111] = np.inf
+        depth[212, 112] = 0.1                    # nearer than min_depth_m
+        depth[213, 113] = 6.0                    # farther than max_depth_m
+        assert robust_mask_depth(depth, mask, self.BBOX) == pytest.approx(3.0)
+
+    def test_too_few_masked_pixels_is_no_measurement(self):
+        depth, _ = self._scene()
+        mask = np.zeros_like(depth, dtype=bool)
+        mask[300, 150:169] = True                # 19 pixels
+        assert robust_mask_depth(depth, mask, self.BBOX) is None
+        mask[300, 169] = True                    # 20
+        assert robust_mask_depth(depth, mask, self.BBOX) == pytest.approx(3.0)
+        assert robust_mask_depth(depth, np.zeros_like(mask), self.BBOX) is None
+
+    def test_a_box_outside_the_frame_or_empty_is_no_measurement(self):
+        depth, mask = self._scene()
+        assert robust_mask_depth(depth, mask, (700.0, 500.0, 800.0, 600.0)) is None
+        assert robust_mask_depth(depth, mask, (300.0, 300.0, 300.0, 300.0)) is None
+
+    def test_shape_mismatch_and_non_2d_depth_raise(self):
+        depth, mask = self._scene()
+        with pytest.raises(ValueError):
+            robust_mask_depth(depth, mask[:-1], self.BBOX)
+        with pytest.raises(ValueError):
+            robust_mask_depth(np.ones((4, 4, 3), dtype=np.float32), np.ones((4, 4, 3), dtype=bool))

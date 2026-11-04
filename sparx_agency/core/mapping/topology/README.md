@@ -33,7 +33,10 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   by merging adjacent basins whose *dynamics* — the clearance lost from
   the shallower peak down to the saddle between them — fall below a
   threshold. Union-find on a region adjacency graph built in one pass;
-  a door border is a hard barrier and never merges.
+  a door border is a hard barrier and never merges (a door snapped to a
+  choke is a barrier by the carved mask's sides instead -- and, since
+  2026-10-05, falls back to the plain barring disk when its disk does
+  not actually sever the floor).
 - `room_adjacency.py` — `room_adjacency()`: which rooms genuinely touch,
   and `iter_label_borders()`, the single border scan both it and
   `room_merge` use. This is the room-to-room edge rule for the scene
@@ -44,6 +47,12 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   (`door_room_pairs`), frontier cluster counting
   (`count_frontier_clusters`), room-at-cell majority-vote lookup
   (`room_at_cell`), and the golden-ratio room color (`room_color`).
+- `frontier_split.py` — the cut shared by `count_frontier_clusters` and
+  the planning side's goal maker (`core/planning/exploration/room_costs.py`
+  `frontier_clusters`): a frontier component that wraps round a block of
+  unknown is one cluster per side of the block (`frontier_sides`,
+  `split_by_side`), so an unmapped room seen along three sides has a way
+  in from each; an arc bulging into the open unknown stays whole.
 
 **Graph-based (MORE, untested in flight).** The Werby et al. (2025)
 implementation operating on a Voronoi navigation graph:
@@ -75,13 +84,97 @@ decides whether to keep a stale label — nothing is cached on failure.
 
 - `llm_client.py` — Ollama / OpenAI-compatible HTTP client, plus
   `coerce_bool()` (never `bool()`: a small model answers with the word
-  quoted, and `bool("false")` is True).
+  quoted, and `bool("false")` is True). Two optional attachments, both off
+  unless a run names them:
+  - `llm_answer_cache.py` — `LLMAnswerStore`, answers keyed on the exact
+    request (backend, model, both prompts, temperature, seed, window, reply
+    cap, format) within the episode in force (the policy sets the store's
+    `scope` at each reset: two episodes asking one question get their own
+    answers, and a replay gives each episode its own). A run records every
+    answer it uses (`LLM_ANSWERS_RECORD=<dir>`, one JSON-lines shard per
+    process, prompts included) and can replay another run's
+    (`LLM_ANSWERS_REPLAY=<dir>[:...]`); a question asked again within an
+    episode gets its first answer. Two runs that
+    ask the same questions then get the same answers, whatever the server
+    would have said: on 2026-10-31 the temperature-0, seeded 3B answered the
+    same prompts differently by request order (`LESSONS.md`). The episode row
+    counts `llm_answers` (`replayed` / `repeated` / `asked` / `recorded`).
+  - `llm_exclusive.py` — `ExclusiveColdStart` (`LLM_EXCLUSIVE=1`): one
+    request at a time across processes (a host-wide file lock), each on a
+    freshly loaded model (unloaded, `/api/ps` checked, then asked). The only
+    mode measured to make Ollama's answer depend on the request alone: a
+    one-token flush or a per-request tag did not, because the server keeps
+    the state of many earlier prompts. 6.4 s a call against 3.5 s.
 - `room_classifier.py` — object list → room type via LLM.
   Legacy callers still cache by class set. Online callers can request
   `min_classes`, `count_sensitive=True` and `classify(..., refresh=True)` to
-  revise a label after more objects are observed or a region is resegmented.
+  revise a label after more objects are observed or a region is resegmented,
+  and `cached(classes)` to read a verdict already held for exactly that
+  evidence before deciding whether a call is worth buying.
   Refresh failures propagate without replacing the previous cache entry.
-- `search_oracle.py` — per-room target probabilities.
+- `search_oracle.py` — per-room target probabilities. The model is asked
+  only when the prompt it would be shown has changed (room ids, labels,
+  observed classes, area); `searched_s` and `frontier_clusters` are
+  applied in code, so a query over an unchanged map re-scores the kept
+  reply against the fresh effort numbers instead of spending a call
+  (`OracleResult.reused`, `SearchOracle.reuses`). A reply that fell back
+  to uniform is never kept.
+- `search_node_oracle.py` — the successor of `search_oracle` for the
+  room-search loop, written for a capable model (the runtime routes it to
+  `LLMConfig.reasoning_model`, a 14B instruct model). One call per loop
+  point over every NODE the search could go to next -- **every room of the
+  storey**, finished ones included, each with its type (or `unknown`;
+  `kitchen?` when named from a single kind of object), size, frontier
+  left, `status=` (`never_entered` / `entered` / `scanned(<how>, <ago>)`),
+  time searched, objects seen; each opening with the room it opens from
+  and what was glimpsed through it; and, in the multi-storey development
+  protocol only, each staircase -- asking for the probability that going
+  there NEXT finds the target. **LLM-first since 2026-10-07:** the user
+  prompt carries a HOUSE line (every room type found with its status, the
+  rooms still unidentified, the openings not looked into, whether
+  unexplored frontier is reachable, and `actions used about N of 500`),
+  and the system prompt asks for three written steps before the numbers --
+  `home` (where the target lives: a toilet in a bathroom or an en-suite
+  reached through a bedroom; a television in a living room, then a
+  bedroom, rarely a kitchen, never a bathroom), `house` (one kitchen, one
+  living room, one to four bedrooms, one to three bathrooms: what the rooms
+  found say about the rest), `stage` (early: the unexplored first; late:
+  the detector may have missed the target in a scanned room of the right
+  type) -- plus a `pass` verdict (`first` / `second`) the loop reads to
+  decide whether scanned rooms are offered again. It forbids reasoning
+  about distance, which RPT* charges. Code keeps only the contract:
+  parse, drop invented ids, give an omitted node a small share, clamp
+  below 1, refuse a reply with no usable node, reuse the reply when the
+  prompt is byte-identical (effort and budget numbers are shown in coarse
+  steps for that). The three arithmetic floors (`unexplored_floor`,
+  `unexplored_elsewhere`, `home_floor`) are knobs, **off by default**; the
+  storey/stairs rules (`home_here`) are a `STAIRS_SUPPLEMENT` appended only
+  when a staircase is a node. `LLMClient.chat_json` takes `reasoning=True`
+  to select the reasoning model, its timeout, its reply cap and its
+  context window (`LLM_REASONING_MODEL`, default `qwen2.5:14b-instruct`;
+  `LLM_REASONING_TIMEOUT_S`; `LLM_REASONING_MAX_TOKENS`;
+  `LLM_REASONING_NUM_CTX` -- asked for explicitly because Ollama truncates
+  an outgrown window from the front, which would drop the system prompt);
+  a request that runs into its timeout is not retried. When one model
+  serves both routes the default route asks for the same window
+  (`LLMConfig.num_ctx`, `LLM_NUM_CTX`): Ollama keys a loaded model by its
+  window, and under load the oracle's reload never came -- the GT sweep of
+  2026-10-28 got no oracle answer in 2,000 episodes (`LESSONS.md`). A reply
+  whose `prompt_eval_count` shows the prompt was cut, or whose prompt and
+  reply filled the window, raises (`_refuse_truncation`).
+  `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
+  five single-storey scenarios against the live model and checks the
+  judgement, not just the schema.
+- `room_priors.py` — where a target category cannot be: the room types a
+  search need not enter for it (`IMPLAUSIBLE_ROOMS`, exclusions not
+  permissions; `unknown` never excluded), the home objects that keep a room a
+  node whatever its label (`HOME_OBJECTS`), and the signature objects that
+  make a one-object label strong (`SIGNATURE_OBJECTS`). Pure tables and
+  predicates for the object-search method and its room labels.
+- `revisable_room_labels.py` — `RevisableRoomLabels`, evidence-gated labels
+  around `RoomTypeClassifier`: one confirmed landmark is enough to label, the
+  label carries a strength (`weak` from one class of evidence, `strong` from
+  two classes or a signature object), and a new kind of object revises it.
 - `target_matcher.py` — target-name matching: exact → cache → LLM →
   token-overlap fallback. The fallback rung is not implemented here: it
   delegates to `core/common/label_match.py`, which is the same rule the

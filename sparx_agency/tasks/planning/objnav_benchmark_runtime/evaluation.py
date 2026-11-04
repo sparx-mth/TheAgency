@@ -51,9 +51,10 @@ def evaluation_configuration(config, episode_ids, settings=None, *, policy):
 
 
 def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
-                   episode_ids=None, resume=False, frozen_lock=None,
+                   episode_ids=None, resume=False, accept_changes=(), frozen_lock=None,
                    expected_episode_ids=None, record=False, video_fps=6,
-                   writer_factory=None, dashboard=True, progress=None):
+                   writer_factory=None, save_frames=False, dashboard=True, progress=None,
+                   wrap_env=None, agent_class=HeadlessObjNavAgent):
     """Run the exact prepared policy, optionally locked/recorded, and close the env.
 
     Adapters own data loading, published episode identities, model provisioning,
@@ -62,6 +63,15 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
     against THIS execution configuration before output creation or environment
     reset, never only against an earlier preflight.
 
+    ``accept_changes`` names the top-level frozen-config keys a ``resume`` may
+    differ in from the recorded run (:class:`MetricsLogger`); the adapter
+    restricts them to provenance and self-checks, and the logger writes what
+    differed into ``run.json``.
+
+    ``wrap_env(env, logger)`` may return a pass-through wrapper (live progress, say) applied
+    beneath the recorder; ``agent_class`` swaps the headless agent for a variant with the
+    same constructor (the lean-record one). Neither can change what the policy sees.
+
     Extra evaluator telemetry is recorder-only and optional. The policy sees
     only ObjNavObservation. Recording preserves the converter settings used by
     route commitment; wrappers do not silently construct a different controller.
@@ -69,6 +79,8 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
     An optional ``progress(index, total, row)`` is called after each scored
     episode, for an adapter's console line. It receives the recorded row the
     logger wrote, never evaluator telemetry the policy may not see.
+    ``save_frames`` (with ``record``) also keeps every dashboard frame as a JPEG
+    still beside the video; see :class:`EpisodeRecorder`.
     """
     options = settings or EvaluationSettings()
     recorder = None
@@ -85,7 +97,9 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
         params = HeadlessAgentParams(converter=converter)
         output = Path(output).expanduser()
         # MetricsLogger claims the output/resume lock before any video is written.
-        with MetricsLogger(output, prepared, resume=resume) as logger:
+        with MetricsLogger(output, prepared, resume=resume, accept_changes=tuple(accept_changes)) as logger:
+            if wrap_env is not None:
+                active_env = wrap_env(env, logger)
             if record:
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_live_page
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import (
@@ -93,15 +107,23 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                 )
                 write_live_page(output)
                 recorder = EpisodeRecorder(output, policy, fps=video_fps,
-                                           writer_factory=writer_factory or VideoSink)
+                                           writer_factory=writer_factory or VideoSink,
+                                           save_frames=save_frames)
                 probe = PolicyProbe(policy)
-                agent = RecordingAgent(HeadlessObjNavAgent(probe, label_mapper, params, name=policy.name),
+                agent = RecordingAgent(agent_class(probe, label_mapper, params, name=policy.name),
                                        probe, recorder)
-                active_env = RecordingEnv(env, recorder)
+                active_env = RecordingEnv(active_env, recorder)
             else:
-                agent = HeadlessObjNavAgent(policy, label_mapper, params, name=policy.name)
+                agent = agent_class(policy, label_mapper, params, name=policy.name)
 
             def on_episode(index, total, row):
+                """The recorder's own hook, and the caller's, in that order.
+
+                An adapter's CLI is the only thing that can tell a person how a
+                thousand-episode run is going, so the caller gets a hook too --
+                but it never displaces the recorder's, which finishes writing
+                the episode's artifacts.
+                """
                 if recorder is not None:
                     recorder.complete(row)
                 if progress is not None:

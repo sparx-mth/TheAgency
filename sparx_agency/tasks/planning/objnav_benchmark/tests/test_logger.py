@@ -179,6 +179,43 @@ def test_a_resume_with_a_different_config_is_refused_and_names_the_difference(tm
         resume(first, changed)
 
 
+def test_a_resume_may_differ_only_in_the_keys_it_names_in_advance_and_run_json_says_what_differed(tmp_path):
+    """The 1,000-episode Gibson run of 2026-10-08 died at episode 919 on a self-check tolerance; finishing
+    it meant resuming under a changed tolerance and a changed source hash -- provenance and a check that
+    only refuses, never anything that decides or scores. That must be explicit, bounded to the named keys,
+    and written down: the recorded config stays the run's and the resume's entry carries the deltas."""
+    first = logged(tmp_path, "ep1")
+    first.close()
+    changed = dict(CONFIG, kinematics={"settle_xy_m": 0.05}, source_sha256="b" * 8)
+    recorded = dict(CONFIG)
+    # Not named: refused, naming every differing key and which of them would have been accepted.
+    with pytest.raises(ResultsError, match=r"\(kinematics, source_sha256 differ; accepted: kinematics\)"):
+        MetricsLogger(first.run_dir, changed, resume=True, accept_changes=("kinematics",))
+    assert run_info(first)["resumes"] == [], "a refused resume leaves run.json alone"
+    # Named: accepted, and recorded once the resume writes.
+    resumed = MetricsLogger(first.run_dir, changed, resume=True, argv=["objnav", "--resume", "--accept"],
+                            accept_changes=("kinematics", "source_sha256", "gpu_plan"))
+    assert resumed.completed_episode_ids() == frozenset({"ep1"})
+    resumed.log(record("ep2"))
+    info = run_info(first)
+    assert info["config"] == recorded, "the run's config is the recorded one, not the resume's"
+    assert len(info["resumes"]) == 1 and info["resumes"][0]["episodes_done"] == 1
+    assert info["resumes"][0]["config_changes"] == {
+        "kinematics": {"recorded": None, "resumed": {"settle_xy_m": 0.05}},
+        "source_sha256": {"recorded": None, "resumed": "bbbbbbbb"}}
+    resumed.close()
+    # A resume presenting the config exactly records no changes, even with keys named.
+    exact = MetricsLogger(first.run_dir, CONFIG, resume=True, accept_changes=("kinematics",))
+    exact.log(record("ep3"))
+    assert run_info(first)["resumes"][1]["config_changes"] == {}
+    exact.close()
+    # The knob is validated: a sequence of key names, and only with resume=True.
+    with pytest.raises(HarnessError, match="accept_changes"):
+        MetricsLogger(tmp_path / "other", CONFIG, accept_changes=("kinematics",))
+    with pytest.raises(HarnessError, match="accept_changes"):
+        MetricsLogger(first.run_dir, CONFIG, resume=True, accept_changes="kinematics")
+
+
 def test_a_resume_compares_the_config_as_json_exactly(tmp_path):
     """``True == 1`` in Python, but they are different experiments; a tuple and a list are the same JSON."""
     first = fresh(tmp_path, config={"flag": True, "size": (64, 48)})
