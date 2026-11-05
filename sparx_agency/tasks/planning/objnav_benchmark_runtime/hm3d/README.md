@@ -366,7 +366,12 @@ EOF
 ```
 
 Embodiment (`body_height_m` 0.88, `body_radius_m` 0.18) is always taken from
-the HM3D agent and cannot be tuned away; `preferred_clearance_m` (0.30),
+the HM3D agent and cannot be tuned away, and the closing's STOP overshoot is off
+under this benchmark's view-point evaluator (`target_closing.stop_overshoot_steps`
+and `stop_overshoot_max_steps` 0, `run.method_defaults`: the step toward the
+object that walks Gibson's footprint margin leaves HM3D's view points -- on 70
+recorded STOPs it never helped and took 00891/000006 from 0.02 m to 0.16 m);
+`preferred_clearance_m` (0.30),
 `min_clearance_m` (0.25: the tightest standoff a route relaxes to -- HM3D moves
 the agent without sliding, so a 0.4 m gap the body radius admits on the grid is
 a wall to it) and `stop_distance_m` (1.0) are method choices and are recorded. Anything tuned on

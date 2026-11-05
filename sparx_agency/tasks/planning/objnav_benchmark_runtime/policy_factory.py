@@ -65,7 +65,9 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
             its ``vocabulary()`` is what the detector service must have been started with, in that order.
         defaults: ``RPTSettings`` fields an entrypoint sets below the policy
             config -- the multi-storey development protocol lifts
-            ``allow_stair_traversal``, whose benchmark default is False.
+            ``allow_stair_traversal``, whose benchmark default is False. A
+            nested group (``target_closing``) merges field by field with the
+            config's own: the config overrides the fields it names, no more.
         ground_truth: With ``--perception ground-truth``, the
             :class:`~...ground_truth.source.GroundTruthSource` the adapter's
             environment publishes semantic frames to. Required then, refused
@@ -118,7 +120,13 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         # The exact instance masks are what the oracle adds over boxes; a policy config saying
         # segmentation=false is honoured (ground-truth boxes read the old way), never silently flipped.
         overrides.setdefault("segmentation", True)
-    settings = RPTSettings(**dict(defaults or {}, **dict(overrides, seed=args.seed)))
+    merged = dict(defaults or {})
+    for key, value in dict(overrides, seed=args.seed).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = dict(merged[key], **value)      # the config's keys over the entrypoint's, field by field
+        else:
+            merged[key] = value
+    settings = RPTSettings(**merged)
     config = client = answers = exclusive = None
     services = []
     if not baseline:

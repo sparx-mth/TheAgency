@@ -206,21 +206,42 @@ def _runtime(issues):
     return packages
 
 
+def method_defaults(protocol):
+    """The ``RPTSettings`` fields this entrypoint sets below ``--policy-config``: the benchmark's own facts.
+
+    The agent -- body height and radius -- and what its evaluator measures to.
+    The closing's STOP overshoot (``TargetClosingSettings.stop_overshoot_*``)
+    walks the margin between a near-edge reading and Gibson's FOOTPRINT
+    evaluator; HM3D scores the geodesic distance to the goal's VIEW POINTS --
+    navigable spots within a metre of the object from which it is seen -- with
+    a 0.1 m success radius (``distance_to``), so a decided STOP already stands
+    on them and a step nearer the object can leave them. On the 70 recorded
+    STOPs of 2026-10-28 to 2026-11-05 the step never brought a frame from
+    outside 0.1 m to inside it, moved the agent farther from the view points
+    in 18 (by 2-14 cm) and nearer in 2, and walked 00891-cvZr5TUy5C5/000006
+    from 0.02 m to 0.16 m against the toilet: a success into a failure. Under
+    the view-point evaluator the STOP is taken on the deciding frame. Every
+    other method knob (clearance, stop distance, closing, peeks, ...) is
+    ``RPTSettings``' default here exactly as it is on Gibson; nothing here
+    came from an HM3D validation score.
+    """
+    defaults = {"body_height_m": protocol.agent_height_m,
+                "body_radius_m": protocol.agent_radius_m}
+    if protocol.distance_to == "view_points":
+        defaults["target_closing"] = {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0}
+    return defaults
+
+
 def _method(args, protocol, ground_truth=None):
     """Build the search policy and prove its services are the ones recorded.
 
-    One builder for every benchmark (``policy_factory.build_policy``). The
-    only defaults this entrypoint sets below ``--policy-config`` are the
-    benchmark's own agent -- body height and radius -- so every method knob
-    (clearance, stop distance, closing, peeks, ...) is ``RPTSettings``'
-    default here exactly as it is on Gibson. Nothing here came from an HM3D
-    validation score. ``ground_truth`` is the semantic-frame source under
-    ``--perception ground-truth``, built by :func:`prepare` beside the
-    environment that publishes to it.
+    One builder for every benchmark (``policy_factory.build_policy``); the
+    defaults below ``--policy-config`` are :func:`method_defaults`.
+    ``ground_truth`` is the semantic-frame source under ``--perception
+    ground-truth``, built by :func:`prepare` beside the environment that
+    publishes to it.
     """
-    embodiment = {"body_height_m": protocol.agent_height_m,
-                  "body_radius_m": protocol.agent_radius_m}
-    return build_policy(args, hm3d_label_mapper(), defaults=embodiment, ground_truth=ground_truth)
+    return build_policy(args, hm3d_label_mapper(), defaults=method_defaults(protocol), ground_truth=ground_truth)
 
 
 def ground_truth_issues(dataset, episode_ids=None):

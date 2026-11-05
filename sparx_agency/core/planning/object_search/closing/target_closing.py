@@ -345,7 +345,10 @@ class TargetClosingSettings:
     # step the converter reports blocked ends the overshoot at once, and
     # ``stop_overshoot_max_actions`` bounds the whole stage, turns included (the three turns a
     # quarter-turn error can take, plus the steps). ``stop_overshoot_max_steps`` 0 restores the
-    # STOP on the deciding frame; 1 is one step and never a second.
+    # STOP on the deciding frame; 1 is one step and never a second. The HM3D entrypoint sets both
+    # to 0 (``hm3d.run.method_defaults``, 2026-11-05): its evaluator measures to the goal's VIEW
+    # POINTS with a 0.1 m radius, not to a footprint, and on 70 recorded HM3D STOPs the step never
+    # helped, cost margin in 18 and walked 00891/000006 from 0.02 m to 0.16 m -- out of the region.
     stop_overshoot_steps: int = 1
     stop_overshoot_max_steps: int = 2
     stop_overshoot_within_m: float = 0.90

@@ -22,6 +22,15 @@ future-you, not for a commit log.
   the 0.50 m radius -- "inspection from 0.9 m saw nothing", released. While the lock stands a strong box of the class
   whose near edge measures within the limit plus one step is a sighting (the benchmark counts any instance within
   the range); farther off the cylinder judges as before.
+- **The STOP overshoot is off under the HM3D view-point evaluator** (`hm3d/run.py` `method_defaults`,
+  `target_closing.stop_overshoot_steps` and `stop_overshoot_max_steps` 0 there; `policy_factory.build_policy` merges
+  a nested default group with the policy config's field by field): with the two fixes above the re-run of
+  00891/000006 decided its STOP at 0.02 m from the goal and the overshoot's step toward the toilet -- the margin
+  walk tuned on 2026-10-14 for Gibson's footprint evaluator -- ended blocked against it at 0.16 m, a failure. HM3D
+  scores the geodesic distance to the goal's view points, where the deciding frame already stands: on the 70
+  recorded HM3D STOPs since 2026-10-28 the step never brought a frame from outside 0.1 m to inside it, cost 2-14 cm
+  of margin in 18 and gained it in 2. The Gibson default stands. Disclosed in `hm3d/PROTOCOL_AND_TUNING.md` as the
+  one `run.py` default judged on recorded validation episodes.
 ### Fixed (2026-11-05, afternoon: two more bugs read off the re-run of the ten regressions)
 - **A standoff reached by a detour is the ring's last choice** (`closing/target_path.py`,
   `TargetClosingSettings.standoff_detour_factor` 1.5, `standoff_detour_slack_m` 1.0, `standoff_detours`): the memory

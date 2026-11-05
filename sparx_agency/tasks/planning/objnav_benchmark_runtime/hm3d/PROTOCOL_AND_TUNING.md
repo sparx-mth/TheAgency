@@ -144,8 +144,14 @@ Keep the rest that way deliberately:
   derived from the action quantisation, not from a score), and `stop_distance_m`
   1.0 is where the dataset generator placed the
   goal view points — the method aims for roughly a metre from the object
-  because that is where standing counts. Override them with `--policy-config`
-  and the override is recorded in the run manifest.
+  because that is where standing counts. The one default that is NOT of that
+  kind is disclosed here: `target_closing.stop_overshoot_steps` and
+  `stop_overshoot_max_steps` 0 (2026-11-05). The overshoot walks the margin
+  between a near-edge reading and Gibson's footprint evaluator; this evaluator
+  measures to the view points, where the deciding frame already stands, and the
+  step was judged on recorded validation episodes (70 STOPs: never a help, 18
+  losses of margin, one success walked out to 0.16 m). Override them with
+  `--policy-config` and the override is recorded in the run manifest.
 - Keep an experiment log and report every variant. Do not tune against
   validation and publish only the best number.
 - A configuration lock is a **reproducibility commitment, not proof that
