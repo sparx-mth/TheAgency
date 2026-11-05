@@ -358,7 +358,7 @@ objnav_launcher_cleanup() {
   for pid in "${EXTRA_OLLAMA_PIDS[@]}"; do kill -TERM "$pid" 2> /dev/null || true; wait "$pid" 2> /dev/null || true; done
 }
 # mp3d.run's --version/--split/--episodes-dir/--scenes-dir come from the campaign itself; the rest is passed through after "--".
-say "campaign ($AGENT): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; else echo "every ${CATEGORY:+$CATEGORY }episode of the split ($PUBLISHED_EPISODES over $PUBLISHED_SCENES scenes)"; fi), one process per scene, $JOBS at once; per-scene progress under $OUTPUT/<scene>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
+say "campaign ($AGENT): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; elif [[ "$SPLIT" == val ]]; then echo "every ${CATEGORY:+$CATEGORY }episode of the split ($PUBLISHED_EPISODES over $PUBLISHED_SCENES scenes)"; else echo "every ${CATEGORY:+$CATEGORY }episode of the $SPLIT split"; fi), $(if [[ -n "$SHARD_EPISODES" ]]; then echo "in shards of at most $SHARD_EPISODES episodes"; else echo "one process per scene"; fi), $JOBS at once; progress under $OUTPUT/<scene>/  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
 set +e
 # In the background and waited for, so the EXIT trap can stop it (objnav_launcher_cleanup) when the launcher is killed.
 "${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$CAMPAIGN_MODULE" "${CAMPAIGN_ARGS[@]}" -- "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" "${ACCEPT[@]}" > >(tee -a "$LOG") 2>&1 &
