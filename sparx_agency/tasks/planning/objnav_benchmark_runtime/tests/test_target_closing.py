@@ -1973,6 +1973,79 @@ def test_a_locked_target_with_no_route_on_the_known_floor_is_walked_to_through_t
         TargetClosingSettings(through_unknown_cost=0.5)
 
 
+def test_the_front_arc_through_the_unknown_is_taken_before_a_known_floor_route_round_to_behind_the_target(monkeypatch):
+    """00891/000006 and /000027 (2026-11-05): the toilet seen through the bathroom doorway from 3 m, the doorway's
+    floor still unknown, and the standoff ring's only known-floor route led to the point BEHIND the toilet -- in the
+    next room, 7.5 m round the outside of the bathroom; the agent inspected a wall from 0.9 m and STOPped 6 m from
+    the goal. The front arc is tried with every planner, the unknown included, before any point beside or behind."""
+    from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
+
+    def world_with_a_wall_behind_the_target():
+        # The agent at x = 0 faces the target at x = 2. A wall stands at x = 2.15-2.3 for |y| < 1.5, the floor
+        # between agent and target (x 0.6-2.1, |y| < 1.2) is unknown, and the room behind the wall is known
+        # floor joined to the agent's side round the wall's ends.
+        data = np.zeros((200, 200), np.int8)
+        params = OccupancyGrid2DParams(.1, -10, -10)
+        grid = OccupancyGrid2D(data, params)
+        ux0, uy0 = grid.world_to_grid(0.6, -1.2)
+        ux1, uy1 = grid.world_to_grid(2.1, 1.2)
+        data[uy0:uy1 + 1, ux0:ux1 + 1] = -1
+        wx0, wy0 = grid.world_to_grid(2.15, -1.5)
+        wx1, wy1 = grid.world_to_grid(2.3, 1.5)
+        data[wy0:wy1 + 1, wx0:wx1 + 1] = 100
+        return OccupancyGrid2D(data, params)
+
+    world = world_with_a_wall_behind_the_target()
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    command = p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1
+    goal = p.closing.path.goal_xyz
+    assert command.waypoints and goal is not None and goal[0] < 2.0, "a standoff on the agent's side of the target"
+    assert command.info.get("through_unknown") is True and p.closing.path.through_unknown == 1
+    assert p.closing.path.back_arc == 0 and p.closing.back_arc_standoffs == 0 and not p.closing.path.behind
+    assert p.episode_info()["target_closing"]["back_arc_standoffs"] == 0
+    # The order of the ring before 2026-11-05 -- every offset at the known floor first -- for the record: a point
+    # beside or behind the target, on the long way round the wall.
+    monkeypatch.setattr(TargetApproachPath, "BACK_ARC_FROM_DEG", 181)
+    q, ep2 = setup_policy()
+    freeze_global(monkeypatch, q)
+    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
+    q.plan(observation(ep2, 0, depth=2))
+    old = q.plan(observation(ep2, 1, depth=2))
+    assert q.closing.locked and old.waypoints and q.closing.path.goal_xyz[0] >= 2.0 - 1e-6, "beside or behind the target"
+    assert not old.info.get("through_unknown") and sum(
+        math.dist(a, b) for a, b in zip(old.waypoints, old.waypoints[1:])) > 2.0 * math.dist((0, 0), (2.0, 0.65))
+
+
+def test_a_memory_stop_needs_a_fresh_box_within_the_last_actions_not_one_from_before_an_occluded_approach(monkeypatch):
+    """00891/000006: the toilet last boxed at action 80, a 7 m approach round the outside of the bathroom out of its
+    sight, an inspection of the wall from 0.9 m, and the approach-history STOP at action 120 on a memory 39 actions
+    old. The memory STOP is earned by a path that TRACKED the target: the last fresh box within
+    ``history_stop_max_unseen`` actions; older, the inspection goes on and may release."""
+    p, ep, goal = arrived_at_a_kept_standoff(monkeypatch, approach_history_m=0.5, approach_history_closed_m=0.5)
+    assert p.closing.last_seen == 1
+    command = None
+    for step in range(20, 27):                      # 19-25 actions since the last fresh box
+        command = p.plan(replace(observation(ep, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+        assert p.closing._history_qualifies()
+        assert not command.stop, "no STOP on a memory the approach never refreshed"
+    assert p.closing.history_stops == 0 and p.closing.history_stops_unseen >= 1
+    assert p.episode_info()["target_closing"]["history_stops_unseen"] == p.closing.history_stops_unseen
+    # The bound off: the STOP of before.
+    q, ep2, _ = arrived_at_a_kept_standoff(monkeypatch, approach_history_m=0.5, approach_history_closed_m=0.5,
+                                           history_stop_max_unseen=0)
+    for step in range(20, 27):
+        command = q.plan(replace(observation(ep2, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+        if command.stop:
+            break
+    assert command.stop and q.closing.history_stops == 1 and q.closing.history_stops_unseen == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(history_stop_max_unseen=-1)
+
+
 def test_a_fruitless_sweep_cycle_releases_the_verification_before_its_budget():
     """Wiconisco/000014, actions 231-241: the toilet seen once at 3.2 m, one step toward it, and eleven in-place
     turns at the bearing and one turn to each side -- the step had put the toilet behind a jamb, and the same three

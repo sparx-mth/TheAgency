@@ -413,9 +413,17 @@ class TargetClosingSettings:
     # ``history_stop_after_missing`` consecutive terminal frames without a fresh box the
     # closing completes on the 3-D memory and STOPs -- the one deliberate exception to
     # "no STOP from remembered range alone", earned by the path. 0 path disables it.
+    # The memory STOP is earned by a path that TRACKED the target: the last fresh box must be
+    # at most ``history_stop_max_unseen`` actions old (since 2026-11-05). A box lost at the end
+    # of an approach -- the object under the frame's edge, a detector drop -- is a few actions
+    # old by the time the inspection's turns and the missing frames have passed; 00891/000006
+    # and /000027 walked 7 m round the outside of a bathroom with the toilet out of view for
+    # 36 and 41 actions, inspected the wall from 0.9 m and STOPped on a memory last refined 39
+    # and 45 actions earlier, 6 m of geodesic from the goal. 0 restores the STOP whatever the age.
     approach_history_m: float = 3.0
     approach_history_closed_m: float = 1.0
     history_stop_after_missing: int = 3
+    history_stop_max_unseen: int = 15
     # SUDDEN CLOSE PROXIMITY (``target_backoff.BackoffManeuver``). A candidate first seen
     # within ``sudden_proximity_m`` with no approach history -- the agent turned and there
     # it was -- is not closed on from that single viewpoint. Before the lock the agent
@@ -579,6 +587,8 @@ class TargetClosingSettings:
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
                 raise ValueError("%s must be finite and non-negative" % key)
+        if type(self.history_stop_max_unseen) is not int or self.history_stop_max_unseen < 0:
+            raise ValueError("history_stop_max_unseen must be a non-negative int (0 disables the bound)")
         for key in ("history_stop_after_missing", "backoff_steps", "backoff_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
@@ -692,6 +702,8 @@ class TargetClosing:
         self.dead_band_alignments = 0      # inspection frames read as aligned because a turn back would undo the last turn
         self.through_unknown_routes = 0    # standoff routes planned through unknown cells after the known floor had none
         self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
+        self.back_arc_standoffs = 0        # standoffs taken beside or behind the target, the front arc having no route
+        self.history_stops_unseen = 0      # memory STOPs refused because the last fresh box was too old (``history_stop_max_unseen``)
         self.stale_standoffs_kept = 0      # standoffs a refinement made stale, kept because no ring point had a route
         self.closest_approach_stops = 0    # STOPs from a widened standoff with the fresh range a step outside the limit
         self.occluder_reads = 0            # candidate frames whose box was read around a surface standing in front of the target
@@ -2244,6 +2256,9 @@ class TargetClosing:
         if measured is not None and measured <= limit:
             self.inspection_sighting = obs.step
         history = self._history_qualifies()
+        # A STOP on the memory alone is earned by a path that TRACKED the target: not one that lost it for
+        # the length of the approach (``history_stop_max_unseen``; see the setting).
+        tracked = history and (s.history_stop_max_unseen <= 0 or obs.step - self.last_seen <= s.history_stop_max_unseen)
         support = s.support_surface_resilience and self.inspection_started <= self.support_seen
         self.terminal_missing = 0 if fresh else self.terminal_missing + 1
         info = {"kind": "target_closing", "target_confirmed": True, "persistent_lock": True,
@@ -2302,7 +2317,10 @@ class TargetClosing:
             return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", reason="fresh in-range sighting after a %.1f m approach; alignment not required"
                 % self.history.path_m))
-        if (history and not fresh and distance <= reach
+        if (history and not tracked and not fresh and distance <= reach
+                and self.terminal_missing >= s.history_stop_after_missing):
+            self.history_stops_unseen += 1       # the memory STOP refused: the inspection goes on, and may release
+        if (tracked and not fresh and distance <= reach
                 and self.terminal_missing >= s.history_stop_after_missing and self._memory_in_sight(obs)):
             # The trajectory is complete and the detector has dropped the box for a few
             # frames: the 3-D memory refined over the approach is what we STOP on.
@@ -2341,17 +2359,19 @@ class TargetClosing:
                  and self.last_seen < self.inspection_started and self.inspection_index >= len(views))
         exhausted = obs.step - self.inspection_started >= s.max_reacquire_steps
         if (blank or exhausted) and self.inspection_sighting is None and (history or support):
-            if distance <= reach and (exhausted or history) and self._memory_in_sight(obs):
+            if history and not tracked and distance <= reach:
+                self.history_stops_unseen += 1
+            if distance <= reach and (exhausted or tracked) and (tracked or support) and self._memory_in_sight(obs):
                 # Not "saw nothing": the approach brought us here, or the surface the target
                 # stands on is still measured at the memory's spot. Complete and STOP.
-                if history:
+                if tracked:
                     self.history_stops += 1
                 else:
                     self.support_stops += 1
                 return self._terminal(obs, distance, measured, dict(
                     info, phase="STOP", standoff_reached=self.path.arrived,
                     reason=("approach history: %.1f m walked to this spot; the 3-D memory stands"
-                            % self.history.path_m) if history else
+                            % self.history.path_m) if tracked else
                     "support surface consistent with the 3-D memory at terminal range; inspection budget spent"))
             if history and distance > reach:
                 # Too far for a memory STOP: step closer along the trajectory instead of releasing.
@@ -2718,6 +2738,7 @@ class TargetClosing:
                 "inspection_steps": self.inspection_steps, "dead_band_alignments": self.dead_band_alignments,
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
+                "back_arc_standoffs": self.back_arc_standoffs, "history_stops_unseen": self.history_stops_unseen,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
                 "nearest_routes": self.nearest_routes, "bound_releases": self.bound_releases,
                 "nearest_goal": None if self.nearest_goal is None else [round(v, 2) for v in self.nearest_goal],

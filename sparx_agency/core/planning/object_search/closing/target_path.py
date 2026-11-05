@@ -72,6 +72,9 @@ class TargetApproachPath:
     OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90, 180)
     #: The front arc alone for the widened rings: beside and behind a big object is where its floor is not.
     FRONT_OFFSETS_DEG = (0, 30, -30, 60, -60)
+    #: Offsets of this magnitude and beyond are beside or behind the target: tried, with every planner, only after
+    #: the front arc has been tried with every planner (``_arcs``).
+    BACK_ARC_FROM_DEG = 90
 
     def __init__(self, policy):
         self.policy = policy
@@ -85,13 +88,15 @@ class TargetApproachPath:
         self.widened = False               # the current goal lies beyond the standoff ring: no closer point had a route
         self.widenings = 0                 # standoffs found on a widened ring over this lock
         self.stale_kept = 0                # stale goals kept because no ring point had a route
+        self.behind = False                # the current goal lies beside or behind the target (the back arc)
+        self.back_arc = 0                  # standoffs taken beside or behind the target over this lock
 
     def drop(self):
         """Give up the current standoff so the next :meth:`command` selects one anew, closer to the memory."""
         if self.goal_xyz is not None:
             self.dropped += 1
         self.goal_xyz = self.reference_xyz = None
-        self.arrived = self.widened = False
+        self.arrived = self.widened = self.behind = False
         self.policy.route_memory.clear("standoff_dropped")
         self.policy._route = self.policy._goal = None
 
@@ -109,7 +114,7 @@ class TargetApproachPath:
             else:
                 previous = self.goal_xyz        # a goal carried out of the terminal radius: the ring's fallback
                 self.goal_xyz = None
-                self.arrived = self.widened = False
+                self.arrived = self.widened = self.behind = False
                 p.route_memory.clear("target_refined")
                 p._route = p._goal = None
         if self.goal_xyz is not None:
@@ -123,7 +128,7 @@ class TargetApproachPath:
                 self.arrived = reached
                 return command
             self.goal_xyz = None
-            self.arrived = self.widened = False
+            self.arrived = self.widened = self.behind = False
         tolerance = p.converter_params.goal_tolerance_m
         limit = s.terminal_distance_m - tolerance
         radius = max(p.settings.body_radius_m, limit - world.resolution)
@@ -153,21 +158,32 @@ class TargetApproachPath:
             rings.append((0.5 * (radius + widest), reach, self.FRONT_OFFSETS_DEG))
             rings.append((widest, reach, self.FRONT_OFFSETS_DEG))
         for ring_radius, reach, offsets in rings:
-            for planner in planners:
-                for offset in offsets:
-                    angle = bearing + math.radians(offset)
-                    goal = (target.xyz[0] + ring_radius * math.cos(angle), target.xyz[1] + ring_radius * math.sin(angle), obs.pose.z)
-                    if p.target_projector is not None:
-                        goal = p.target_projector(goal)
-                        if goal is None:
+            # The front arc -- the side the target was seen from -- with every planner, the unknown included,
+            # before any point beside or behind it with any (since 2026-11-05). A toilet, a bed, a television
+            # stands against a wall: the ring point behind it is in the wall or in the next room, and a known-floor
+            # route to it goes round the wall. 00891/000006 and /000027 saw their toilet through the bathroom
+            # doorway from 3 m, found the doorway's floor still unknown, took the point behind the toilet on a
+            # 7.5 m known-floor route round the outside of the bathroom (the front arc through the unknown was
+            # never asked), inspected a wall from 0.9 m, and STOPped on the memory 6 m of geodesic from the goal.
+            for arc in self._arcs(offsets):
+                for planner in planners:
+                    for offset in arc:
+                        angle = bearing + math.radians(offset)
+                        goal = (target.xyz[0] + ring_radius * math.cos(angle), target.xyz[1] + ring_radius * math.sin(angle),
+                                obs.pose.z)
+                        if p.target_projector is not None:
+                            goal = p.target_projector(goal)
+                            if goal is None:
+                                continue
+                        if (abs(goal[2] - obs.pose.z) > self._height_tolerance()
+                                or math.dist(goal[:2], target.xyz[:2]) > reach):
                             continue
-                    if abs(goal[2] - obs.pose.z) > self._height_tolerance() or math.dist(goal[:2], target.xyz[:2]) > reach:
-                        continue
-                    command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
-                    if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
-                        self._adopt(target, obs, goal, widened=ring_radius > radius,
-                                    through_unknown=planner is not None and planner is not squeeze)
-                        return command
+                        command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
+                        if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
+                            self._adopt(target, obs, goal, widened=ring_radius > radius,
+                                        through_unknown=planner is not None and planner is not squeeze,
+                                        behind=abs(offset) >= self.BACK_ARC_FROM_DEG)
+                            return command
         if previous is not None and math.dist(previous[:2], target.xyz[:2]) <= s.terminal_distance_m + tolerance:
             # No ring point has a route, and the goal the refinement made stale -- by centimetres -- had one:
             # arriving at it puts the agent within a step of the terminal range, where the inspection reads
@@ -200,11 +216,21 @@ class TargetApproachPath:
             return max(0.2, float(guard.step_reach_m))
         return 0.2
 
-    def _adopt(self, target, obs, goal, widened, through_unknown):
+    def _arcs(self, offsets):
+        """``offsets`` split into the front arc and the back arc (``BACK_ARC_FROM_DEG``), the empty one left out."""
+        front = tuple(o for o in offsets if abs(o) < self.BACK_ARC_FROM_DEG)
+        back = tuple(o for o in offsets if abs(o) >= self.BACK_ARC_FROM_DEG)
+        return [arc for arc in (front, back) if arc]
+
+    def _adopt(self, target, obs, goal, widened, through_unknown, behind=False):
         """Take ``goal`` as the standoff and record how it was found."""
         p = self.policy
         self.goal_xyz, self.reference_xyz = tuple(goal), tuple(target.xyz)
         self.widened = bool(widened)
+        self.behind = bool(behind)
+        if behind:
+            self.back_arc += 1
+            target.back_arc_standoffs += 1
         self.arrived = p.route_memory.arrived(obs)      # a ring point the agent already stands on
         if self.arrived:
             self.arrivals += 1

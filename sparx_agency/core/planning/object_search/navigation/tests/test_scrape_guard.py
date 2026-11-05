@@ -46,14 +46,55 @@ def test_a_refusal_across_the_doorway_or_far_from_one_is_written_as_before():
 
 
 def test_the_excuse_runs_out_after_scrapes_before_mark_within_the_window():
-    policy, ep, world, route = rig(doorway_scrape={"scrapes_before_mark": 2, "window_actions": 10})
+    policy, ep, world, route = rig(doorway_scrape={"scrapes_before_mark": 2, "window_actions": 10,
+                                                  "closed_memory_actions": 50})
     obs = observe(ep, 5, DOOR_X - 0.4, DOOR_Y, math.radians(20))
     assert policy.scrape_guard.judge(obs, world, route) is not None
     assert policy.scrape_guard.judge(observe(ep, 7, DOOR_X - 0.4, DOOR_Y, math.radians(-20)), world, route) is not None
     assert policy.scrape_guard.judge(observe(ep, 9, DOOR_X - 0.4, DOOR_Y, 0.0), world, route) is None
     assert policy.scrape_guard.stats["exhausted"] == 1 and policy.scrape_guard.stats["written"] == 1
-    assert policy.scrape_guard.judge(observe(ep, 30, DOOR_X - 0.4, DOOR_Y, 0.0), world, route) is not None, \
-        "outside the window the doorway is given the benefit of the doubt again"
+    # The place is closed: outside the window but within the closed memory a refusal there is written at once.
+    assert policy.scrape_guard.judge(observe(ep, 30, DOOR_X - 0.4, DOOR_Y, 0.0), world, route) is None
+    assert policy.scrape_guard.stats["closed"] == 1 and policy.scrape_guard.stats["written"] == 2
+    assert policy.scrape_guard.events[-1]["detail"] == "written: the place was closed at action 9"
+    # Beyond the closed memory the doorway is given the benefit of the doubt again.
+    assert policy.scrape_guard.judge(observe(ep, 60, DOOR_X - 0.4, DOOR_Y, 0.0), world, route) is not None
+    assert policy.scrape_guard.stats["closed"] == 1
+    # Another doorway is another place: its own excuses.
+    policy2, ep2, world2, route2 = rig(doorway_scrape={"scrapes_before_mark": 2, "window_actions": 10})
+    assert policy2.scrape_guard.judge(observe(ep2, 5, DOOR_X - 0.4, DOOR_Y, 0.0), world2, route2) is not None
+    assert policy2.scrape_guard.judge(observe(ep2, 6, DOOR_X - 0.4, DOOR_Y, 0.0), world2, route2) is not None
+    assert policy2.scrape_guard.judge(observe(ep2, 7, DOOR_X - 0.4, DOOR_Y, 0.0), world2, route2) is None
+    assert policy2.scrape_guard.judge(observe(ep2, 8, DOOR_X - 0.4, DOOR_Y + 3.0, 0.0), world2, route2) is None, \
+        "far from the channel: not a scrape at all (no_channel), and no closure applies either"
+    assert policy2.scrape_guard.stats["no_channel"] == 1 and policy2.scrape_guard.stats["closed"] == 0
+
+
+def test_scrapes_are_counted_by_place_across_the_routes_re_planned_after_each_refusal():
+    """00843/000007 (``25a50599d098``, 2026-11-05), actions 117-132: refused at one spot at four headings 90 degrees
+    apart -- a hole in the mesh -- and every refusal excused as the first scrape of a new channel, because each
+    refusal clears the route and the re-planned route's throat fell into another half-metre bucket. The excuses
+    are per place now; a second visit 80 actions later (211-216) found the place closed and wrote the map."""
+    policy, ep, world, _ = rig(doorway_scrape={"scrapes_before_mark": 3, "window_actions": 40,
+                                             "closed_memory_actions": 120})
+    # Routes re-planned from the spot after each refusal: different starts, the same doorway, throats a few
+    # centimetres apart; the refusals from one standing position at successive headings.
+    routes = [planned_route(policy, world, (DOOR_X - 1.2 - 0.3 * i, DOOR_Y + 0.15 * (i - 1)), (DOOR_X + 2.5, DOOR_Y))
+              for i in range(4)]
+    headings = (math.radians(20), math.radians(-20), math.radians(35), math.radians(-35))
+    verdicts = [policy.scrape_guard.judge(observe(ep, 117 + 4 * i, DOOR_X - 0.4, DOOR_Y, headings[i]), world, routes[i])
+                for i in range(4)]
+    assert [v is not None for v in verdicts] == [True, True, True, False], "three excuses at the place, then written"
+    assert [v["excused"] for v in verdicts[:3]] == [1, 2, 3]
+    assert policy.scrape_guard.stats["exhausted"] == 1 and policy.scrape_guard.stats["written"] == 1
+    # The second visit, 80 actions on: the place is closed, the first refusal is written.
+    later = planned_route(policy, world, (DOOR_X - 1.5, DOOR_Y - 0.2), (DOOR_X + 2.5, DOOR_Y))
+    assert policy.scrape_guard.judge(observe(ep, 211, DOOR_X - 0.45, DOOR_Y + 0.05, math.radians(25)), world, later) is None
+    assert policy.scrape_guard.stats["closed"] == 1 and policy.scrape_guard.stats["written"] == 2
+    before = len(policy.mapping._bumps.get(policy.mapping.floor_id, ()))
+    policy._route = later
+    policy.notify_blocked(observe(ep, 213, DOOR_X - 0.45, DOOR_Y + 0.05, math.radians(-25)))
+    assert len(policy.mapping._bumps.get(policy.mapping.floor_id, ())) == before + 1, "the cell ahead is painted"
 
 
 def test_disabled_every_refusal_is_written():

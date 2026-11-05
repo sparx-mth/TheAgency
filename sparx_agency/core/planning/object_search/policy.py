@@ -805,13 +805,15 @@ class RPTSearchPolicy:
         grid[clear] = world.values.free
         return OccupancyGrid2D(grid, world.params, values=world.values)
 
-    def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None):
+    def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None, retire=True):
         planner = self.planner if planner is None else planner
         # A goal nothing reaches is retired from the frontier memory when it IS a frontier (the
         # sweep's and the fallback's goals, a room's frontier entry). Until 2026-10-28 every kind
         # was: the closing's standoff ring alone asked for up to 72 routes per action, and their
         # refusals flushed the hundred-goal memory and hid every frontier within 0.4 m of the ring.
-        retiring = kind == "frontier" or kind.startswith("transit/")
+        # ``retire=False`` when this refusal is not the last word on the goal (the transit asks the
+        # squeeze planner next, ``RoomSearchLoop._navigate_transit``).
+        retiring = retire and (kind == "frontier" or kind.startswith("transit/"))
         if not self.floor_guard.goal_allowed(observation, world, goal, kind):
             if retiring:
                 self._visited_frontiers.append(tuple(goal))

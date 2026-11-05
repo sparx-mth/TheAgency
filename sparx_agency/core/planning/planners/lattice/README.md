@@ -52,7 +52,11 @@ are where the path needs them and its straight runs are straight.
 - **Objective.** Actions, not metres: a benchmark with a step budget charges a
   TURN what it charges a MOVE_FORWARD.
 - **Heuristic and domain.** The route's cost-to-go field, divided by the step
-  and weighted by `heuristic_weight` (1.5). A state outside the corridor
+  and weighted by `heuristic_weight` (1.0 -- plain A* -- since 2026-11-05: at
+  1.5 the first goal popped was the plan that steps first and turns later,
+  because a forward step lowers the cost-to-go and a turn does not; on 741
+  recorded plans that cost 1.2 actions and 0.7 turns per plan, for 3.4 ms
+  instead of 1.4 ms of search). A state outside the corridor
   (`corridor_m`, 0.4 m) is never expanded, and every forward step pays
   `route_offset_cost` (2 actions per metre) for the lateral offset of its end
   point from the route (`route_corridor_fields`), so the plan rides the

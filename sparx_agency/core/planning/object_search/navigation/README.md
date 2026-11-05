@@ -123,10 +123,19 @@ one step ahead of the body (or the body) is within `reach_m` (0.75 m) of a
 channel's throat and the heading is within `max_heading_deg` (40) of its
 axis, the refusal is a scrape: the map is not told, the escape probe and the
 goal-bump ledger are not charged, the route is cleared and re-planned (with
-the refused pose excluded). A channel that refuses `scrapes_before_mark` (3)
+the refused pose excluded). A PLACE that refuses `scrapes_before_mark` (3)
 alignments within `window_actions` (40) is closed after all: the next refusal
-is written as before. Confirmed door landmarks within `door_match_m` of the
-throat are named in the verdict; the geometry decides.
+is written as before, and so is any refusal there for the next
+`closed_memory_actions` (120, the sticky bars' horizon). A place is the
+throat, or the refused step's end point, within `same_place_m` (0.5 m) --
+since 2026-11-05; until then the count was per channel, keyed by the throat
+rounded to half a metre, and because every refusal clears the route and the
+re-plan names a throat a few centimetres over, 00843/000007 was refused at
+one spot at four headings 90 degrees apart (a hole in the mesh, invisible to
+depth), each excused as "scrape 1 of 3" of a new channel, and excused three
+times more when it came back 80 actions later. Confirmed door landmarks
+within `door_match_m` of the throat are named in the verdict; the geometry
+decides.
 
 ## 4. The look-down
 

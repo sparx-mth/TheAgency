@@ -5,6 +5,39 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-11-05, five navigation and planning complaints read off the ten replayed non-stair regressions)
+- **The lattice follower plans with plain A\*** (`planners/lattice/params.py` `heuristic_weight` 1.0, was 1.5;
+  `navigation/settings.py` `KinematicSettings.heuristic_weight`): the weighted search returned the first goal it
+  popped, and because a forward step lowers the route's cost-to-go while a turn does not, it popped the plan that
+  steps first and turns later -- the agent seen walking two steps off a route 16-35 degrees from its heading before
+  turning toward it (a route 35 degrees off walked `F L L F F` where `L F F F` was open). On the 741 recorded plans
+  of the ten episodes: **19.3 actions and 6.4 turns per plan against 20.5 and 7.1**, cheaper on 523 of them, 3.4 ms a
+  plan (40 ms at worst) against 1.4 ms. On a straight route 16 degrees off the heading both orders cost the same
+  actions; the planner then centres its zigzag on the line, which is offset-optimal -- `route_offset_cost` is the
+  knob that trades turns for tracking, not the first heading.
+- **A committed transit entry the floor standoff refuses is asked of the body radius before the room is re-aimed
+  or released** (`rooms/room_search_loop.py` `_navigate_transit`, `transit_squeezed`, the `transit_squeeze`
+  event; `policy._navigate(retire=)`): one jamb cell painted by the doorway look-down drew a 0.5 m way as 0.4 m,
+  the route to R9 1.7 m away was refused, every re-aim behind the same gap too, and 00843/000023 released the room
+  -- and on the same map the bathroom behind it -- as `unreachable`, re-solved the order to the other end of the
+  house, walked 13 actions west, was sent back, and looped 100 actions round the building before it walked through
+  that gap at the floor standoff (actions 479-483). Four of the seven `unreachable` releases in the ten episodes had
+  a route at the body radius. A squeeze route in force is judged by the planner that made it.
+- **Doorway scrapes are counted by place, and a place that ran out of excuses stays closed** (`navigation/
+  scrape_guard.py`; `ScrapeSettings.same_place_m` 0.5, `closed_memory_actions` 120): the count was per channel,
+  keyed by the throat rounded to half a metre, and since every refusal clears the route and the re-plan names a
+  throat a few centimetres over, 00843/000007 was refused at one spot at four headings 90 degrees apart (a hole in
+  the mesh the depth camera sees nothing of, drawn free by the rays through it), each excused as "scrape 1 of 3"
+  of a new channel, came back 80 actions later and was excused three times more: 74 actions and three room
+  selections on the room behind it, 0 of 14 refusals a sticky bar.
+- **The standoff ring tries the front arc with every planner before any point beside or behind the target**
+  (`closing/target_path.py` `BACK_ARC_FROM_DEG`, `back_arc_standoffs`): the toilet seen through the bathroom doorway
+  from 3 m, the doorway's floor still unknown, and the only known-floor route led to the point behind the toilet --
+  in the next room, 7.5 m round the outside of the bathroom -- while the front arc through the unknown was never
+  asked (00891/000006 and /000027). **A STOP on the memory alone needs the last fresh box within
+  `history_stop_max_unseen` = 15 actions** (`TargetClosingSettings`, `history_stops_unseen`): both episodes walked
+  36 and 41 actions with the toilet out of view, inspected the wall from 0.9 m and STOPped on a memory 39 and 45
+  actions old, 6 m of geodesic from the goal.
 ### Fixed (2026-11-01)
 - **The LLM answer store keys answers by episode** (`llm_answer_cache.request_key(scope=)`, `LLMAnswerStore.scope`,
   `LLMClient.set_answer_scope`, set by `RPTSearchPolicy.reset`): the first glance A/B pilot recorded arm A from three

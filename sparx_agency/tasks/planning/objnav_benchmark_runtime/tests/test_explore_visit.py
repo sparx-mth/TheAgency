@@ -365,12 +365,12 @@ def test_a_plan_the_planner_refuses_re_aims_at_the_rooms_next_entry_instead_of_r
     committed = tuple(policy.route_memory.goal)
     navigate = policy._navigate
 
-    def refusing(observation, planning_world, goal, kind, final_yaw=None):
+    def refusing(observation, planning_world, goal, kind, final_yaw=None, **kwargs):
         if tuple(goal) == committed:
             policy.route_memory.clear("test refusal")
             policy._route = policy._goal = None
             return None
-        return navigate(observation, planning_world, goal, kind, final_yaw)
+        return navigate(observation, planning_world, goal, kind, final_yaw, **kwargs)
 
     policy._navigate = refusing
     policy.loop.charge()
@@ -388,6 +388,61 @@ def test_a_plan_the_planner_refuses_re_aims_at_the_rooms_next_entry_instead_of_r
     policy.loop.plan(obs_at(episode, 2, IN_A), world)
     assert policy.loop.stats["plan_failures"] >= 1, "the room, then whatever the re-solved order put next"
     assert [e for e in policy.loop.events if e["event"] == "release"][-1]["verdict"] == "unreachable"
+
+
+# -- 2026-11-05: a committed entry the floor standoff refuses is asked of the body radius before anything else ----
+def narrowed_door(world, free_rows):
+    """The two-room world with its 1.1 m door (rows 25-35 at x 5.5-6.6) closed down to ``free_rows`` cells about y = 3."""
+    from sparx_agency.core.planning.environment import OccupancyGrid2D
+    grid = world.grid.copy()
+    keep = slice(30 - free_rows // 2, 30 - free_rows // 2 + free_rows)
+    grid[25:36, 55:66] = world.values.occupied
+    grid[keep, 55:66] = world.values.free
+    return OccupancyGrid2D(grid, world.params, values=world.values)
+
+
+def test_a_committed_entry_refused_at_the_floor_standoff_is_walked_at_the_body_radius_before_re_aim_or_release():
+    """00843/000023 (``d081e660595d``, 2026-11-05), action 262: one jamb cell painted by the look-down narrowed the way
+    to R9 from 0.5 m to 0.4 m, the floor planner refused the entry 1.7 m away, every re-aim behind the same gap was
+    refused too, and the room -- and the bathroom behind it -- was released ``unreachable``; the agent came back
+    through that gap 220 actions later. The squeeze planner (the body radius as its floor) is asked once more
+    before the re-aim; its route is walked, the committed entry stays the goal and is not retired from the frontier
+    memory, and on the next action the squeeze route is judged at the standoff it was planned at -- kept, not
+    re-derived. A gap the body radius cannot pass either releases the room as before."""
+    policy, episode, world, rooms, _ = explore_policy(order=(1, 0))
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
+    committed = tuple(policy.route_memory.goal)
+    assert committed[0] > 6.6, "room B's entry lies beyond the door"
+    retired_before = len(policy._visited_frontiers)
+    # The next frame draws the door 0.4 m wide: a wall to the floor standoff (0.25 m), a passage to the body (0.18 m).
+    pinched = narrowed_door(world, 4)
+    policy.loop.charge()
+    command = policy.loop.plan(obs_at(episode, 1, IN_A), pinched)
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1, "the room is kept"
+    assert command.waypoints and command.info["kind"] == "transit/1" and command.info.get("squeeze") is True
+    assert tuple(policy.route_memory.goal) == committed, "the same entry, at the body radius -- not a re-aim"
+    assert policy.loop.stats["transit_squeezed"] == 1
+    assert policy.loop.stats["route_reaimed"] == 0 and policy.loop.stats["plan_failures"] == 0
+    assert len(policy._visited_frontiers) == retired_before, "a goal the squeeze reaches is not retired"
+    event = [e for e in policy.loop.events if e["event"] == "transit_squeeze"][-1]
+    assert event["room"] == 1 and tuple(event["goal"]) == tuple(round(v, 2) for v in committed)
+    assert event["standoff"] is not None and event["standoff"] < policy.planner_params.inflate_floor_m
+    # The next action: the squeeze route in force is judged by the planner that made it and kept.
+    policy.loop.charge()
+    command = policy.loop.plan(obs_at(episode, 2, IN_A), pinched)
+    assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1"
+    assert command.info["route"] == "committed_safe_route" and command.info.get("squeeze") is True
+    assert policy.loop.stats["transit_squeezed"] == 1, "not squeezed again: the route was kept"
+    assert tuple(policy.route_memory.goal) == committed
+    # Drawn 0.2 m wide, the door is a wall to the body too (a 0.3 m one still reads 0.2 m of clearance between cell
+    # centres, the squeeze rung's one-cell optimism): the re-aim behind it fails and the room is released.
+    closed = narrowed_door(world, 2)
+    policy.loop.charge()
+    policy.loop.plan(obs_at(episode, 3, IN_A), closed)
+    assert policy.loop.stats["transit_squeezed"] == 1 and policy.loop.stats["plan_failures"] >= 1
+    assert [e for e in policy.loop.events if e["event"] == "release"][-1]["verdict"] == "unreachable"
+    assert len(policy._visited_frontiers) > retired_before, "refused by both planners: retired as before"
 
 
 # -- 2026-10-14: a room gone from the registry for one action does not end its transit -----------------------
@@ -539,7 +594,9 @@ def test_an_unreachable_release_is_remembered_by_place_and_a_repeat_withholds_th
     -- two failed turns at places of one room withhold the room (``unreachable:2``) and the order goes to room A.
     The memory is by position, not by room id, so the partition renumbering the room does not reset it."""
     policy, episode, world, rooms, reasoned = explore_policy(order=(1, 0))
-    monkeypatch.setattr(policy.planner, "plan", lambda request, world_: type("R", (), {"ok": False, "path": None})())
+    refuse = lambda request, world_: type("R", (), {"ok": False, "path": None})()      # noqa: E731
+    monkeypatch.setattr(policy.planner, "plan", refuse)
+    monkeypatch.setattr(policy.squeeze_planner, "plan", refuse)      # the body radius too (the transit's squeeze tier)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.supervisor.history[0][:2] == (1, UNREACHABLE), "every way into room B refused: released"
     failures = [e for e in policy.loop.events if e["event"] == "entry_failure" and e["room"] == 1]
@@ -567,7 +624,8 @@ def test_an_unreachable_release_is_remembered_by_place_and_a_repeat_withholds_th
     assert policy.loop.diagnostics()["entry_failures"][0]["failures"] == 3
     # Off: nothing is remembered.
     policy, episode, world, rooms, _ = explore_policy(order=(1, 0), entry_failure_limit=0)
-    monkeypatch.setattr(policy.planner, "plan", lambda request, world_: type("R", (), {"ok": False, "path": None})())
+    monkeypatch.setattr(policy.planner, "plan", refuse)
+    monkeypatch.setattr(policy.squeeze_planner, "plan", refuse)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.loop._entry_failures == [] and not any(e["event"] == "entry_failure" for e in policy.loop.events)
 

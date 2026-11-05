@@ -43,7 +43,12 @@ class KinematicSettings:
         route_offset_cost: Actions charged per metre the plan strays from
             the route at every step (``LatticePlannerParams.route_offset_cost``).
         heuristic_weight: The lattice search's heuristic weight
-            (``LatticePlannerParams.heuristic_weight``).
+            (``LatticePlannerParams.heuristic_weight``). 1.0, plain A*,
+            since 2026-11-05: at 1.5 the search popped the plan that steps
+            first and turns later (a forward step lowers the cost-to-go, a
+            turn does not) and spent 1.2 actions more per plan on the
+            recordings -- the agent seen walking two steps off a route 16
+            to 35 degrees from its heading before turning toward it.
         max_expansions: Its expansion cap.
         lattice_floor_m: The last standoff the lattice tries, below the
             planner's ``min_clearance_m``, before the route is left to the
@@ -87,7 +92,7 @@ class KinematicSettings:
     turn_action_cost: float = 1.0
     corridor_m: float = 0.4
     route_offset_cost: float = 2.0
-    heuristic_weight: float = 1.5
+    heuristic_weight: float = 1.0
     max_expansions: int = 60000
     lattice_floor_m: float = 0.20
     resync_m: float = 0.10
@@ -135,11 +140,31 @@ class ScrapeSettings:
             doorway, and whatever it hit is written.
         reach_m: How far from the channel's throat (the point one step
             ahead of the body, or the body itself) the refusal must be.
-        scrapes_before_mark: How many scrapes at one channel within
+        scrapes_before_mark: How many scrapes at one PLACE within
             ``window_actions`` are excused before the next refusal is
             written after all: a doorway that refuses every alignment is
-            closed, whatever the map says.
+            closed, whatever the map says. Until 2026-11-05 the count was
+            kept per channel, keyed by the throat rounded to half a metre
+            -- and every refusal clears the route, the re-planned route
+            names a throat a few centimetres over, and the count started
+            again: 00843/000007 was refused at one spot at four headings
+            90 degrees apart (actions 117-132, a hole in the mesh the depth
+            camera sees nothing of), each excused as "scrape 1 of 3" of a
+            new channel, came back and was excused again (211-216), and
+            spent 74 actions and three room selections on the room behind
+            it. The place is the throat or the refused step's end point
+            within ``same_place_m``.
         window_actions: The window of that count.
+        same_place_m: How near two throats, or two refused steps, must be
+            to count as one place. The observed map's own repeat-bump
+            radius.
+        closed_memory_actions: How long a place that ran out of excuses
+            stays closed: a refusal there within this many actions is
+            written at once rather than excused afresh -- the second
+            visit of 00843/000007 above, which found the same spot and
+            was given three new excuses. The horizon of the map's sticky
+            bump bars (``RPTSettings.sticky_bump_actions``, 120); 0 keeps
+            a closed place for the episode.
         door_match_m: A confirmed door landmark within this distance of the
             throat is reported with the scrape (a doorway the detector saw,
             not only one the geometry found); it does not change the verdict.
@@ -150,14 +175,17 @@ class ScrapeSettings:
     reach_m: float = 0.75
     scrapes_before_mark: int = 3
     window_actions: int = 40
+    same_place_m: float = 0.5
+    closed_memory_actions: int = 120
     door_match_m: float = 0.6
 
     def __post_init__(self):
         _check_bool("ScrapeSettings", "enabled", self.enabled)
-        for name in ("max_heading_deg", "reach_m", "door_match_m"):
+        for name in ("max_heading_deg", "reach_m", "door_match_m", "same_place_m"):
             _check_positive("ScrapeSettings", name, getattr(self, name))
         _check_count("ScrapeSettings", "scrapes_before_mark", self.scrapes_before_mark)
         _check_count("ScrapeSettings", "window_actions", self.window_actions)
+        _check_count("ScrapeSettings", "closed_memory_actions", self.closed_memory_actions, allow_zero=True)
         if self.max_heading_deg > 90.0:
             raise ValueError("ScrapeSettings.max_heading_deg beyond 90 would excuse a step across the doorway")
 
