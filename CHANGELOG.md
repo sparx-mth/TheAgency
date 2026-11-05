@@ -6,6 +6,14 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Fixed (2026-11-05, afternoon: two more bugs read off the re-run of the ten regressions)
+- **A standoff reached by a detour is the ring's last choice** (`closing/target_path.py`,
+  `TargetClosingSettings.standoff_detour_factor` 1.5, `standoff_detour_slack_m` 1.0, `standoff_detours`): the memory
+  of 00891/000006 placed half a metre into the bathroom wall, the ring's front-arc point at 60 degrees landed in the
+  wall and the navmesh projection moved it to the room beyond -- a 6.6 m known-floor route for a target 3.4 m away,
+  walked out of sight round the outside of the bathroom to inspect a wall (the front-arc order of the morning could
+  not see it: the projected point counted as front). A route longer than the factor times the range plus the slack
+  is kept as the fallback while the other bearings and planners are asked; the through-unknown route by the doorway
+  wins, and the detour is walked only when nothing else has a route.
 - **A target cut by the frame's edge is looked at, not dropped** (`closing/target_closing.py`
   `TargetClosingSettings.bearing_clipped`, `bearing_clipped_starts`): the border gate drops a sliver at an image edge
   -- its label and depth centroid are unreliable -- and dropped it silently; 00880/000009 walked past its television

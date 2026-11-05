@@ -2060,10 +2060,10 @@ def test_the_front_arc_through_the_unknown_is_taken_before_a_known_floor_route_r
     assert command.info.get("through_unknown") is True and p.closing.path.through_unknown == 1
     assert p.closing.path.back_arc == 0 and p.closing.back_arc_standoffs == 0 and not p.closing.path.behind
     assert p.episode_info()["target_closing"]["back_arc_standoffs"] == 0
-    # The order of the ring before 2026-11-05 -- every offset at the known floor first -- for the record: a point
-    # beside or behind the target, on the long way round the wall.
+    # The order of the ring before 2026-11-05 -- every offset at the known floor first, no detour rule -- for the
+    # record: a point beside or behind the target, on the long way round the wall.
     monkeypatch.setattr(TargetApproachPath, "BACK_ARC_FROM_DEG", 181)
-    q, ep2 = setup_policy()
+    q, ep2 = setup_policy(target_closing={"standoff_detour_factor": 0.0})
     freeze_global(monkeypatch, q)
     monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
     q.plan(observation(ep2, 0, depth=2))
@@ -2071,6 +2071,54 @@ def test_the_front_arc_through_the_unknown_is_taken_before_a_known_floor_route_r
     assert q.closing.locked and old.waypoints and q.closing.path.goal_xyz[0] >= 2.0 - 1e-6, "beside or behind the target"
     assert not old.info.get("through_unknown") and sum(
         math.dist(a, b) for a, b in zip(old.waypoints, old.waypoints[1:])) > 2.0 * math.dist((0, 0), (2.0, 0.65))
+
+
+def test_a_standoff_on_a_detour_long_route_waits_for_the_other_bearings_and_the_unknown(monkeypatch):
+    """00891/000006 re-run (2026-11-05): the memory half a metre into the bathroom wall, the front-arc point at 60
+    degrees landed in the wall and the navmesh projection moved it to the room beyond -- a 6.6 m known-floor route
+    for a target 3.4 m away, walked round the outside of the bathroom. A route longer than ``standoff_detour_factor``
+    times the range plus the slack is the fallback: the other bearings and planners are asked first, and the
+    through-unknown route by the doorway wins; with the rule off the detour is walked as before; with nothing else
+    the detour is taken and counted."""
+    def strip_world():
+        # The agent at x = 0 faces the target at x = 2; a band of unknown floor x 0.6-1.3 for |y| < 3 lies between,
+        # and known floor joins the two sides round the band's ends (a 7 m way round).
+        data = np.zeros((200, 200), np.int8)
+        params = OccupancyGrid2DParams(.1, -10, -10)
+        grid = OccupancyGrid2D(data, params)
+        x0, y0 = grid.world_to_grid(0.6, -3.0)
+        x1, y1 = grid.world_to_grid(1.3, 3.0)
+        data[y0:y1 + 1, x0:x1 + 1] = -1
+        return OccupancyGrid2D(data, params)
+
+    world = strip_world()
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    command = p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and command.waypoints
+    length = sum(math.dist(a, b) for a, b in zip(command.waypoints, command.waypoints[1:]))
+    assert command.info.get("through_unknown") is True and length < 4.0, "through the band, not round it"
+    assert p.closing.path.detours == 0 and p.closing.standoff_detours == 0
+    # The rule off: the first known-floor route, round the band.
+    q, ep2 = setup_policy(target_closing={"standoff_detour_factor": 0.0})
+    freeze_global(monkeypatch, q)
+    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
+    q.plan(observation(ep2, 0, depth=2))
+    old = q.plan(observation(ep2, 1, depth=2))
+    assert not old.info.get("through_unknown") and sum(
+        math.dist(a, b) for a, b in zip(old.waypoints, old.waypoints[1:])) > 6.0
+    # Nothing but the detour (no planning through the unknown): taken, and counted.
+    r, ep3 = setup_policy(target_closing={"through_unknown": False})
+    freeze_global(monkeypatch, r)
+    monkeypatch.setitem(r.mapping.__dict__, "update", lambda *a, **kw: world)
+    r.plan(observation(ep3, 0, depth=2))
+    fallback = r.plan(observation(ep3, 1, depth=2))
+    assert fallback.waypoints and r.closing.path.detours == 1 and r.closing.standoff_detours == 1
+    assert r.episode_info()["target_closing"]["standoff_detours"] == 1
+    with pytest.raises(ValueError):
+        TargetClosingSettings(standoff_detour_factor=-1.0)
 
 
 def test_a_memory_stop_needs_a_fresh_box_within_the_last_actions_not_one_from_before_an_occluded_approach(monkeypatch):

@@ -90,6 +90,7 @@ class TargetApproachPath:
         self.stale_kept = 0                # stale goals kept because no ring point had a route
         self.behind = False                # the current goal lies beside or behind the target (the back arc)
         self.back_arc = 0                  # standoffs taken beside or behind the target over this lock
+        self.detours = 0                   # standoffs taken on a detour-long route, nothing else having one, over this lock
 
     def drop(self):
         """Give up the current standoff so the next :meth:`command` selects one anew, closer to the memory."""
@@ -157,6 +158,13 @@ class TargetApproachPath:
             reach = s.terminal_distance_m + world.resolution
             rings.append((0.5 * (radius + widest), reach, self.FRONT_OFFSETS_DEG))
             rings.append((widest, reach, self.FRONT_OFFSETS_DEG))
+        # A route much longer than the straight line to the target goes round something -- the wall the target
+        # stands against, the point on its far side (since 2026-11-05, ``standoff_detour_factor``; see the setting):
+        # such a point is the fallback, taken only when no other bearing or planner has a route.
+        range_m = math.dist((obs.pose.x, obs.pose.y), target.xyz[:2])
+        allowance = (s.standoff_detour_factor * range_m + s.standoff_detour_slack_m
+                     if s.standoff_detour_factor > 0 else math.inf)
+        detour = None
         for ring_radius, reach, offsets in rings:
             # The front arc -- the side the target was seen from -- with every planner, the unknown included,
             # before any point beside or behind it with any (since 2026-11-05). A toilet, a bed, a television
@@ -180,10 +188,24 @@ class TargetApproachPath:
                             continue
                         command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
                         if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
+                            behind = abs(offset) >= self.BACK_ARC_FROM_DEG
+                            length = self._route_length(obs, command)
+                            if length > allowance:
+                                if detour is None or length < detour[0]:
+                                    detour = (length, ring_radius, planner, goal, behind)
+                                continue
                             self._adopt(target, obs, goal, widened=ring_radius > radius,
-                                        through_unknown=planner is not None and planner is not squeeze,
-                                        behind=abs(offset) >= self.BACK_ARC_FROM_DEG)
+                                        through_unknown=planner is not None and planner is not squeeze, behind=behind)
                             return command
+        if detour is not None:
+            length, ring_radius, planner, goal, behind = detour
+            command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
+            if command is not None:
+                self.detours += 1
+                target.standoff_detours += 1
+                self._adopt(target, obs, goal, widened=ring_radius > radius,
+                            through_unknown=planner is not None and planner is not squeeze, behind=behind)
+                return command
         if previous is not None and math.dist(previous[:2], target.xyz[:2]) <= s.terminal_distance_m + tolerance:
             # No ring point has a route, and the goal the refinement made stale -- by centimetres -- had one:
             # arriving at it puts the agent within a step of the terminal range, where the inspection reads
@@ -215,6 +237,12 @@ class TargetApproachPath:
         if guard is not None and guard.enabled:
             return max(0.2, float(guard.step_reach_m))
         return 0.2
+
+    @staticmethod
+    def _route_length(obs, command):
+        """Metres of the command's route from the agent to its end."""
+        points = [(float(obs.pose.x), float(obs.pose.y))] + [(float(x), float(y)) for x, y in command.waypoints]
+        return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
 
     def _arcs(self, offsets):
         """``offsets`` split into the front arc and the back arc (``BACK_ARC_FROM_DEG``), the empty one left out."""

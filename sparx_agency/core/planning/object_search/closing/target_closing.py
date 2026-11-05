@@ -163,6 +163,17 @@ class TargetClosingSettings:
     # fills in, like any other. ``through_unknown=False`` restores the strict planner alone.
     through_unknown: bool = True
     through_unknown_cost: float = 8.0
+    # A STANDOFF REACHED BY A DETOUR IS THE LAST CHOICE, NOT THE FIRST (since 2026-11-05). The ring takes the
+    # first point with a route, and a route much longer than the straight line to the target goes round
+    # something -- the wall the target stands against, with the point on its far side. 00891-cvZr5TUy5C5/000006:
+    # the memory placed half a metre into the bathroom wall, the ring's front-arc point at 60 degrees landed in the
+    # wall and the navmesh projection moved it to the room beyond; a 6.6 m known-floor route for a target 3.4 m
+    # away, walked out of sight round the outside of the bathroom to inspect a wall. A route longer than
+    # ``standoff_detour_factor`` times the range plus ``standoff_detour_slack_m`` is kept as the fallback while the
+    # other bearings and planners -- the unknown through the doorway among them -- are asked; the shortest detour
+    # is taken only when nothing else has a route. 0 disables the rule.
+    standoff_detour_factor: float = 1.5
+    standoff_detour_slack_m: float = 1.0
     # A box at or above this confidence starts a takeover past the rejection memory
     # of UNVERIFIED and map-contradicted releases and the release cooldown (since
     # 2026-10-07): the memory stops the same far flicker from restarting the
@@ -620,6 +631,10 @@ class TargetClosingSettings:
         if (isinstance(self.through_unknown_cost, bool) or not math.isfinite(self.through_unknown_cost)
                 or self.through_unknown_cost < 1.0):
             raise ValueError("through_unknown_cost must be finite and at least 1 (the cost of open floor)")
+        for key in ("standoff_detour_factor", "standoff_detour_slack_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError("%s must be a non-negative finite number (0 disables the detour rule)" % key)
         if (not isinstance(self.support_surface_classes, (tuple, list)) or not self.support_surface_classes
                 or not all(isinstance(name, str) and name.strip() for name in self.support_surface_classes)):
             raise ValueError("support_surface_classes must be a non-empty sequence of labels")
@@ -713,6 +728,7 @@ class TargetClosing:
         self.through_unknown_routes = 0    # standoff routes planned through unknown cells after the known floor had none
         self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
         self.back_arc_standoffs = 0        # standoffs taken beside or behind the target, the front arc having no route
+        self.standoff_detours = 0          # standoffs taken on a route a detour long, nothing else having a route
         self.history_stops_unseen = 0      # memory STOPs refused because the last fresh box was too old (``history_stop_max_unseen``)
         self.stale_standoffs_kept = 0      # standoffs a refinement made stale, kept because no ring point had a route
         self.closest_approach_stops = 0    # STOPs from a widened standoff with the fresh range a step outside the limit
@@ -2810,6 +2826,7 @@ class TargetClosing:
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
                 "back_arc_standoffs": self.back_arc_standoffs, "history_stops_unseen": self.history_stops_unseen,
+                "standoff_detours": self.standoff_detours,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
                 "nearest_routes": self.nearest_routes, "bound_releases": self.bound_releases,
                 "nearest_goal": None if self.nearest_goal is None else [round(v, 2) for v in self.nearest_goal],
