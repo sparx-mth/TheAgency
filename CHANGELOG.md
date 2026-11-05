@@ -5,6 +5,23 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-11-05, evening: the goal reached and not STOPped on, 00891/000006 re-run)
+- **A centred frame one step outside the limit is the inspection's step to take, not the approach's route**
+  (`closing/target_closing.py`, `step_out_inspections_kept`): actions 167-207 at 0.04 m from the goal. The inspection
+  began on a left-clipped frame that measured 1.046 m against the 1.05 m limit and turned to centre the box; the
+  centred frame measured 1.071 m, the resumption rule ("seen fresh beyond the range: walk, not look") cancelled the
+  inspection and the approach's route to the standoff began with the turn back -- forty-one actions of
+  TURN_LEFT/TURN_RIGHT inside the success region, then the stall release ("went nowhere"). The inspection already
+  owns a fresh range within one forward step of the limit (one MOVE_FORWARD puts the next frame inside it, three
+  steps per inspection); the resumption rule now leaves such a frame to it, and the budget spent hands it back.
+- **A strong box within the terminal range is the locked target, whatever the anchor says**
+  (`TargetClosingSettings.terminal_resighting`, `terminal_resightings`): actions 259-292 at 0.08 m from the goal, the
+  only toilet in the room whole and centred in twenty frames, every one dropped by the association cylinder: it is
+  drawn about the ANCHOR, the first far frame's centroid (the tank through a doorway, the wall's depth mixed in), and
+  the close frames' centroid (the bowl, pitched down) lay 0.41 m across its ray and 0.35 m below it, 3.5 cm outside
+  the 0.50 m radius -- "inspection from 0.9 m saw nothing", released. While the lock stands a strong box of the class
+  whose near edge measures within the limit plus one step is a sighting (the benchmark counts any instance within
+  the range); farther off the cylinder judges as before.
 ### Fixed (2026-11-05, afternoon: two more bugs read off the re-run of the ten regressions)
 - **A standoff reached by a detour is the ring's last choice** (`closing/target_path.py`,
   `TargetClosingSettings.standoff_detour_factor` 1.5, `standoff_detour_slack_m` 1.0, `standoff_detours`): the memory

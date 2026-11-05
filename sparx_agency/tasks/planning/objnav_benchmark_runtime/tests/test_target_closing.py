@@ -1333,14 +1333,14 @@ def test_an_inspection_entered_early_steps_closer_when_the_fresh_range_is_beyond
     p.closing.xyz = (1.6, 0.0, p.closing.xyz[2])                       # the filtered estimate: 0.5 m ahead of the agent at x=1.1
     here = AgentPose(1.1, 0, 0, 0)
     p.detector.detect = lambda rgb: []
-    first = p.plan(replace(observation(ep, 2, depth=1.3), pose=here))
+    first = p.plan(replace(observation(ep, 2, depth=1.4), pose=here))
     assert p.closing.inspection_started == 2 and not first.stop, "the filtered estimate entered the inspection, unseen"
     p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
-    second = p.plan(replace(observation(ep, 3, depth=1.3), pose=here))   # the fresh surface: 1.3 m ahead
+    second = p.plan(replace(observation(ep, 3, depth=1.4), pose=here))   # the fresh surface: 1.4 m ahead, more than a step out
     assert p.closing.inspection_started is None and p.closing.inspection_resumptions == 1
     assert second.waypoints, "the approach resumed: a route toward the target, not another look"
     assert p.closing.active and p.closing.locked and not p.closing.rejected, "nothing was released"
-    third = p.plan(replace(observation(ep, 4, depth=1.3), pose=here))
+    third = p.plan(replace(observation(ep, 4, depth=1.4), pose=here))
     assert p.closing.inspection_started is None and third.waypoints, "and a fresh out-of-range frame does not re-enter it"
 
 
@@ -1541,13 +1541,69 @@ def test_a_resighting_shifted_along_the_line_of_sight_is_the_same_object_and_one
     p.plan(deeper)
     assert p.closing.last_seen == 2, "0.55 m along the ray is the far part of the same object"
     assert p.closing.depth_associations == 1, "... and a sphere of 0.50 m would have dropped it"
-    sideways = replace(near, step=3)
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (517, 200, 597, 280))]   # 0.55 m to the right at 0.9 m
+    sideways = replace(near, step=3, depth_m=np.full(near.depth_m.shape, 1.6, np.float32))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (426, 200, 506, 280))]   # 0.6 m to the right at 1.6 m
     p.plan(sideways)
-    assert p.closing.last_seen == 2, "0.55 m across the ray is another object"
-    assert p.closing.depth_associations == 1
+    assert p.closing.last_seen == 2, "0.6 m across the ray, beyond the terminal reach, is another object"
+    assert p.closing.depth_associations == 1 and p.closing.terminal_resightings == 0
     with pytest.raises(ValueError):
         TargetClosingSettings(association_depth_m=-0.1)
+
+
+def test_a_centred_frame_one_step_outside_the_limit_is_stepped_by_the_inspection_not_resumed(monkeypatch):
+    """00891-cvZr5TUy5C5/000006 re-run, actions 167-207: the inspection began on a left-clipped frame measuring
+    1.046 m and turned to centre the box; the centred frame measured 1.071 m against the 1.05 m limit, the
+    resumption rule handed it back to the approach, whose route began with the turn back -- forty-one actions of
+    TURN_LEFT/TURN_RIGHT inside the success region, then the stall release. A centred frame within one forward
+    step of the limit is the inspection's step rule's: one MOVE_FORWARD, and the next frame STOPs."""
+    p, ep, near = locked_at_two_metres(monkeypatch)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (40, 25, 300, 404))]          # off-centre, 1.0 m: in range
+    first = p.plan(replace(near, depth_m=np.full(near.depth_m.shape, 1.0, np.float32)))
+    assert p.closing.phase == "INSPECT" and p.closing.inspection_sighting == 2 and not first.stop and not first.waypoints
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]        # centred, 1.07 m: a step out
+    second = p.plan(replace(near, step=3, depth_m=np.full(near.depth_m.shape, 1.07, np.float32)))
+    assert p.closing.inspection_started == 2 and p.closing.inspection_resumptions == 0, "the inspection was not cancelled"
+    assert p.closing.step_out_inspections_kept == 1 and p.closing.inspection_stepped == 1
+    assert "inspect_step" in second.info and second.waypoints and not second.stop
+    assert DiscreteActionConverter(ep.action_spec).step(AgentPose(1.1, 0, 0, 0), second).action == DiscreteAction.MOVE_FORWARD
+    third = p.plan(replace(near, step=4, depth_m=np.full(near.depth_m.shape, 0.82, np.float32), pose=AgentPose(1.35, 0, 0, 0)))
+    assert third.stop and third.info["reason"] == "fresh terminal target confirmation" and third.info["measured_m"] <= 1.05
+    assert p.closing.diagnostics()["step_out_inspections_kept"] == 1
+    # The step rule's budget bounds it: with no steps left the resumption owns the frame as before.
+    q, ep2, near2 = locked_at_two_metres(monkeypatch, inspection_max_steps=0)
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (40, 25, 300, 404))]
+    q.plan(replace(near2, depth_m=np.full(near2.depth_m.shape, 1.0, np.float32)))
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    q.plan(replace(near2, step=3, depth_m=np.full(near2.depth_m.shape, 1.07, np.float32)))
+    assert q.closing.inspection_started is None and q.closing.inspection_resumptions == 1 and q.closing.step_out_inspections_kept == 0
+
+
+def test_a_strong_box_within_the_terminal_range_counts_while_locked_though_outside_the_anchors_cylinder(monkeypatch):
+    """00891-cvZr5TUy5C5/000006 re-run, actions 259-292: locked, 0.94 m from the only toilet in the room, the toilet
+    whole and centred in twenty frames, every frame's centroid 0.41 m across the anchor's ray and 0.35 m below it
+    (the anchor: the tank, read from afar through the doorway; the frame: the bowl, pitched down) -- 3.5 cm outside
+    the 0.50 m cylinder; 'inspection from 0.9 m saw nothing', released. The benchmark counts any instance of the
+    class within the terminal range: a strong box measured within a step of it is a sighting of the locked target."""
+    p, ep, near = locked_at_two_metres(monkeypatch)                      # the anchor (2.0, 0, 0.88); the agent at (1.1, 0)
+    low_right = [DetectionWire("chair", .9, (449, 344, 529, 424))]      # 0.41 m right of the ray, 0.35 m below it, at 0.94 m
+    p.detector.detect = lambda rgb: low_right
+    p.plan(replace(near, depth_m=np.full(near.depth_m.shape, 0.94, np.float32)))
+    assert p.closing.last_seen == 2 and p.closing.terminal_resightings == 1, "counted: inside the terminal range"
+    assert p.closing.depth_associations == 0 and p.closing.active and p.closing.locked and p.closing.phase == "INSPECT"
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 344, 360, 424))]        # faced: centred, still low
+    command = p.plan(replace(near, step=3, depth_m=np.full(near.depth_m.shape, 0.94, np.float32)))
+    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert p.closing.diagnostics()["terminal_resightings"] == 1
+    # The same frame, the exemption off: dropped as another object, as before.
+    q, ep2, near2 = locked_at_two_metres(monkeypatch, terminal_resighting=False)
+    q.detector.detect = lambda rgb: low_right
+    q.plan(replace(near2, depth_m=np.full(near2.depth_m.shape, 0.94, np.float32)))
+    assert q.closing.last_seen == 1 and q.closing.terminal_resightings == 0
+    # ... and a box of the class 1.6 m off is not the locked target's sighting merely for being strong.
+    r, ep3, near3 = locked_at_two_metres(monkeypatch)
+    r.detector.detect = lambda rgb: [DetectionWire("chair", .9, (449, 344, 529, 424))]
+    r.plan(replace(near3, depth_m=np.full(near3.depth_m.shape, 1.6, np.float32)))
+    assert r.closing.last_seen == 1 and r.closing.terminal_resightings == 0
 
 
 def low_target_locked(monkeypatch, **closing):
@@ -1895,8 +1951,8 @@ def test_a_fresh_range_still_too_far_from_an_arrived_standoff_drops_it_for_a_clo
     p, ep, goal = arrived_at_a_kept_standoff(monkeypatch)
     p.plan(replace(observation(ep, 2, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
     assert p.closing.phase == "INSPECT" and p.closing.path.arrived
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # the box, 1.3 m off
-    command = p.plan(replace(observation(ep, 3, depth=1.3), pose=AgentPose(1.15, 0, 0, 0)))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # the box, 1.4 m off: beyond a step
+    command = p.plan(replace(observation(ep, 3, depth=1.4), pose=AgentPose(1.15, 0, 0, 0)))
     assert p.closing.inspection_resumptions == 1 and p.closing.path.dropped == 1 and not p.closing.path.arrived
     assert p.closing.path.goal_xyz is not None and p.closing.path.goal_xyz != goal, "a closer standoff was selected"
     assert math.dist(p.closing.path.goal_xyz[:2], p.closing.xyz[:2]) < math.dist(goal[:2], p.closing.xyz[:2])

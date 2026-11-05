@@ -174,6 +174,18 @@ class TargetClosingSettings:
     # is taken only when nothing else has a route. 0 disables the rule.
     standoff_detour_factor: float = 1.5
     standoff_detour_slack_m: float = 1.0
+    # A LOCKED TARGET SEEN FROM WITHIN THE TERMINAL RANGE IS THE TARGET, WHATEVER THE ANCHOR SAYS (since
+    # 2026-11-05). The association cylinder keeps a re-sighting of the candidate apart from another object of
+    # the class; it is drawn about the ANCHOR -- the first frame's centroid, read from afar -- and a toilet's
+    # centroid moves half a metre between the far frame (the tank, through a doorway, the wall's depth mixed
+    # in) and the close one (the bowl, pitched down). 00891-cvZr5TUy5C5/000006 re-run: locked, 0.9 m from
+    # the only toilet in the room, inside the success region, the toilet whole and centred in twenty frames,
+    # every one dropped 3.5 cm outside the cylinder; the inspection "saw nothing" and released. The
+    # benchmark counts any instance of the class within the terminal range, so a strong box whose near
+    # edge measures within ``terminal_distance_m + range_tolerance_m`` plus one forward step is a sighting of
+    # the target while the lock stands, associated or not (``terminal_resightings`` counts them). False
+    # restores the drop.
+    terminal_resighting: bool = True
     # A box at or above this confidence starts a takeover past the rejection memory
     # of UNVERIFIED and map-contradicted releases and the release cooldown (since
     # 2026-10-07): the memory stops the same far flicker from restarting the
@@ -614,7 +626,7 @@ class TargetClosingSettings:
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
         for key in ("backoff", "support_surface_resilience", "through_unknown", "closest_approach_stop",
-                    "release_on_bound"):
+                    "release_on_bound", "terminal_resighting"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
         if type(self.nearest_approaches) is not int or self.nearest_approaches < 0:
@@ -729,6 +741,8 @@ class TargetClosing:
         self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
         self.back_arc_standoffs = 0        # standoffs taken beside or behind the target, the front arc having no route
         self.standoff_detours = 0          # standoffs taken on a route a detour long, nothing else having a route
+        self.terminal_resightings = 0      # locked frames counted inside the terminal range though outside the anchor's cylinder
+        self.step_out_inspections_kept = 0 # inspections kept on a centred frame a step outside the limit (the step rule's)
         self.history_stops_unseen = 0      # memory STOPs refused because the last fresh box was too old (``history_stop_max_unseen``)
         self.stale_standoffs_kept = 0      # standoffs a refinement made stale, kept because no ring point had a route
         self.closest_approach_stops = 0    # STOPs from a widened standoff with the fresh range a step outside the limit
@@ -976,7 +990,9 @@ class TargetClosing:
             if not obs.pose.z - 0.3 <= xyz[2] <= obs.pose.z + 2.2:
                 continue
             if self.anchor is not None and not associated:
-                continue
+                if not self._terminal_resighting(strong, rows[-1]):
+                    continue
+                self.terminal_resightings += 1
             if not strong:
                 self.weak_resightings += 1
             if rows[-1].get("occluder_depth_m") is not None:
@@ -1009,6 +1025,22 @@ class TargetClosing:
         if inside and math.dist(self.anchor, xyz) > radius:
             self.depth_associations += 1
         return inside
+
+    def _terminal_resighting(self, strong, row):
+        """A strong box of the class, the lock standing, whose near edge measures within a step of the terminal range.
+
+        The target for the benchmark's purposes whichever instance it is
+        (``terminal_resighting``): counted as a sighting although the anchor's
+        association cylinder refused it.
+        """
+        s = self.settings
+        if not (s.terminal_resighting and self.locked and strong and self.policy.mapping.floor_id == self.floor_id):
+            return False
+        near = row.get("range_near_m")
+        if near is None:
+            return False
+        reach = s.terminal_distance_m + s.range_tolerance_m + float(self.policy.episode.action_spec.forward_step_m)
+        return float(near) <= reach
 
     def _on_anchor_bearing(self, obs, box):
         """Whether ``box`` (a frame's ``xyxy``) lies within one turn of the bearing to the active candidate's anchor.
@@ -1970,7 +2002,18 @@ class TargetClosing:
             return (s.closest_approach_stop and self.path.arrived and self.path.widened and measured is not None
                     and measured <= limit + p.episode.action_spec.forward_step_m)
 
-        if (self.inspection_started is not None and out_of_range and not nearly()
+        # A centred frame a STEP outside the limit belongs to the inspection's own step rule (``_inspect``: one
+        # MOVE_FORWARD puts the next frame inside the terminal range), not to the approach (since 2026-11-05).
+        # 00891-cvZr5TUy5C5/000006 re-run, actions 167-207: the inspection began on a left-clipped frame that
+        # measured 1.046 m and turned to centre the box; the centred frame measured 1.071 m against the 1.05 m
+        # limit, the rule below handed the frame back to the approach, whose route's first action was the turn
+        # back; forty-one actions of TURN_LEFT/TURN_RIGHT inside the success region, then the stall release.
+        a_step_out = (measured is not None and limit < measured <= limit + p.episode.action_spec.forward_step_m
+                      and self.inspection_stepped < s.inspection_max_steps)      # the step rule's own budget
+        if (self.inspection_started is not None and out_of_range and not nearly() and a_step_out
+                and (self.inspection_sighting is None or self._centred(obs))):
+            self.step_out_inspections_kept += 1
+        if (self.inspection_started is not None and out_of_range and not nearly() and not a_step_out
                 and (self.inspection_sighting is None or self._centred(obs))):
             # Seen fresh from here but the measured surface lies beyond the terminal range:
             # the filtered estimate entered the inspection early (an older, nearer reading
@@ -2826,7 +2869,8 @@ class TargetClosing:
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
                 "back_arc_standoffs": self.back_arc_standoffs, "history_stops_unseen": self.history_stops_unseen,
-                "standoff_detours": self.standoff_detours,
+                "standoff_detours": self.standoff_detours, "terminal_resightings": self.terminal_resightings,
+                "step_out_inspections_kept": self.step_out_inspections_kept,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
                 "nearest_routes": self.nearest_routes, "bound_releases": self.bound_releases,
                 "nearest_goal": None if self.nearest_goal is None else [round(v, 2) for v in self.nearest_goal],
