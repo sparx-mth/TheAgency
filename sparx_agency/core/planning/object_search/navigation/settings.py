@@ -202,10 +202,35 @@ class LookDownSettings:
     exact where it matters, and the plan through it is re-derived on that
     map before the body commits to a heading.
 
+    Every look-down costs two actions (LOOK_DOWN, LOOK_UP) and, while the
+    pitch is held, the top of the view: a wall-mounted target is cut by the
+    frame's upper edge (00880/000009, 2026-11-05: the television in nine
+    pitched frames, never whole). On the 214 look-downs of twenty recorded
+    HM3D episodes (the 2026-11-05 review) they were 7 % of all actions;
+    69 were released before the agent reached the channel because the route
+    changed first (requested from a median 1.7 m to the throat, against
+    1.1 m for those that did reach it), 49 were at channels at least 0.9 m
+    wide, 50 within a metre of a throat already looked down at -- and the
+    plan through the channel changed on the refreshed map in 21 % of them,
+    the same share whatever the width or the unknown floor about the throat.
+
     Attributes:
         enabled: Whether the look-down applies.
         approach_m: How far before the channel's entry, along the route,
-            the pitch is requested.
+            the pitch is requested. 0.9 m since 2026-11-05 (1.5 before):
+            three or four steps out, the pitched frame and the re-plan still
+            two steps before the entry, and a route that changes meanwhile
+            has wasted less -- the early releases above were requested from
+            beyond this.
+        max_width_m: A channel at least this wide is not looked down at
+            (since 2026-11-05). A 0.36 m body with 30-degree headings has
+            a quarter of a metre to spare each side of a 0.9 m passage; the
+            look-down is for the doorway drawn 0.6-0.8 m wide, whose jambs
+            a cell's error closes.
+        done_radius_m: A throat within this of one already looked down at
+            is the same doorway, looked at (since 2026-11-05): a route
+            re-planned a few times around a doorway names its throat up to
+            a metre apart, and each name bought another two actions.
         exit_margin_m: How far past the channel's exit the pitch is held.
         pitch_deg: The downward pitch, degrees (REP-103, positive down).
         max_hold_actions: After this many actions with the pitch held for
@@ -214,14 +239,16 @@ class LookDownSettings:
     """
 
     enabled: bool = True
-    approach_m: float = 1.5
+    approach_m: float = 0.9
+    max_width_m: float = 0.9
+    done_radius_m: float = 1.0
     exit_margin_m: float = 0.5
     pitch_deg: float = 30.0
     max_hold_actions: int = 30
 
     def __post_init__(self):
         _check_bool("LookDownSettings", "enabled", self.enabled)
-        for name in ("approach_m", "exit_margin_m", "pitch_deg"):
+        for name in ("approach_m", "exit_margin_m", "pitch_deg", "max_width_m", "done_radius_m"):
             _check_positive("LookDownSettings", name, getattr(self, name))
         _check_count("LookDownSettings", "max_hold_actions", self.max_hold_actions)
         if self.pitch_deg > 60.0:

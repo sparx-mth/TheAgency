@@ -141,17 +141,25 @@ decides.
 
 Under the search owner, on a walk of the search's own (not the takeover's
 approach, not a stair transaction, not a scan or a glance), when the route's
-next channel entry is within `approach_m` (1.5 m) along the route and the
-agent faces its throat, the camera is asked for `pitch_deg` (30: the floor
-from half a metre out in the bottom of the image, the room still in the top)
-and holds it to `exit_margin_m` past the channel's exit, at most
+next channel entry is within `approach_m` (0.9 m since 2026-11-05; 1.5 m
+before) along the route, the channel is narrower than `max_width_m` (0.9 m)
+and the agent faces its throat, the camera is asked for `pitch_deg` (30: the
+floor from half a metre out in the bottom of the image, the room still in
+the top) and holds it to `exit_margin_m` past the channel's exit, at most
 `max_hold_actions`. The first frame taken at that pitch drops the follower's
 plan, so the entry is re-planned on the refreshed map -- the pre-entry
 correction. A released channel is never asked for again (two LOOKs per
-doorway, once), a walk interrupted by a hold survives two steps before the
-request is released, and channels are matched by throat (within 0.6 m): the
-smoke run of 2026-10-28 spent 178 of 500 actions on LOOKs before those three
-rules.
+doorway, once; a throat within `done_radius_m`, 1.0 m, of one looked at is
+the same doorway), a walk interrupted by a hold survives two steps before
+the request is released, and a channel in force is matched by throat (within
+0.6 m): the smoke run of 2026-10-28 spent 178 of 500 actions on LOOKs before
+those rules. The 2026-11-05 review of twenty recorded episodes found the
+look-downs 7 % of all actions, a third of them released before the agent
+reached the channel (requested from 1.7 m, the route changed first), a
+quarter at channels a metre wide, a quarter repeats within a metre of a
+throat already looked at -- and the plan through the channel changed on the
+refreshed map in 21 % of them, the same share whatever the width or the
+unknown floor; hence the three bounds above.
 
 ## Tests
 

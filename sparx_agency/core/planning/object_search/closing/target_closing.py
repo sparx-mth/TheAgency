@@ -105,7 +105,17 @@ class TargetClosingSettings:
     # distance is in range by then and one still depthless is unmeasurable or not where the bearing pointed;
     # ``bearing_near_box_frac`` ends it when the box fills that share of the frame's height without depth --
     # the object is within arm's reach and cannot be positioned, and no blind STOP is taken on it.
+    # A strong box of the class CUT BY THE FRAME'S EDGE begins the bearing approach too (``bearing_clipped``,
+    # since 2026-11-05). The border gate drops a sliver at an image edge -- its label and depth centroid are
+    # unreliable -- and until now dropped it silently: 00880-Nfvxx8J5NCo/000009 walked past its television in
+    # ten consecutive frames (actions 327-337), the box cut by the TOP edge for nine of them because the doorway
+    # look-down held the camera 30 degrees down, then by the left edge as the agent walked by, and never turned
+    # its head. The re-look is the bearing approach's first actions: the camera levelled (or tilted toward the
+    # cut edge) and the body faced to the box's bearing, so the next frame shows the object whole and the
+    # ordinary start -- a projection, or a whole depthless box -- is judged on it; the bearing's bounds, its
+    # two-frame persistence rule and its retry memory apply unchanged. False restores the silent drop.
     bearing_start: bool = True
+    bearing_clipped: bool = True
     bearing_max_actions: int = 16
     bearing_lost_frames: int = 3
     bearing_retry_m: float = 1.5
@@ -477,8 +487,8 @@ class TargetClosingSettings:
         if (isinstance(self.track_confidence, bool) or not math.isfinite(self.track_confidence)
                 or not 0 < self.track_confidence <= self.confidence):
             raise ValueError("track_confidence must be in (0, confidence]")
-        if type(self.bearing_start) is not bool:
-            raise ValueError("bearing_start must be a bool")
+        if type(self.bearing_start) is not bool or type(self.bearing_clipped) is not bool:
+            raise ValueError("bearing_start and bearing_clipped must be bools")
         for key in ("bearing_max_actions", "bearing_lost_frames"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
@@ -713,6 +723,8 @@ class TargetClosing:
         self.bearing_resolved = 0          # ... of which a frame with depth turned into a verification
         self.bearing_abandoned = 0         # ... and those given up: lost, out of actions, or not moving
         self.bearing_refusals = 0          # depthless boxes refused a bearing approach: cooldown, boxed in, or a spot already tried
+        self.bearing_clipped_starts = 0    # bearing approaches begun on a strong box cut by the frame's edge (the re-look)
+        self._clipped_strong = []          # this frame's strong boxes of the class cut by the frame's edge (not locked)
         self.bearing_failures = []         # (robot xy, floor id, action) per bearing approach given up
         self._depthless = []               # this frame's strong, whole boxes of the class with no usable depth
         self._in_frame = []                # this frame's whole boxes of the class at the threshold in force
@@ -871,14 +883,18 @@ class TargetClosing:
         if any(d.conf >= s.confidence for d in boxes) and (not self.strong_box_steps or self.strong_box_steps[-1] != obs.step):
             self.strong_box_steps.append(int(obs.step))          # clipped or not: the class was in the frame
             del self.strong_box_steps[:-2 * s.backoff_persistence_window]
+        self._in_frame = list(boxes)               # every box of the class at the threshold, for the bearing's tracking
+        self._clipped_strong = []
         if not self.locked:
             kept = [d for d in boxes if not self._clipped(d.xyxy, k)]
             self.border_rejections += sum(1 for d in boxes if d.conf >= s.confidence) - sum(
                 1 for d in kept if d.conf >= s.confidence)
+            # A strong sliver at the frame's edge is a sighting, not a candidate: the bearing re-look faces it
+            # (``bearing_clipped``); its label and depth are judged on the whole box the next frame shows.
+            self._clipped_strong = [d for d in boxes if d.conf >= s.confidence and d not in kept]
             boxes = kept
         projected, kept, glimpses = [], [], []
         self._depthless = []
-        self._in_frame = list(boxes)                                   # whole boxes of the class at the threshold
         for detection in boxes:
             rows = []
             strong = detection.conf >= s.confidence
@@ -1065,7 +1081,7 @@ class TargetClosing:
                 # force it resumed, stale, after the release (turns toward a yaw the
                 # route no longer has).
                 glances.abort(obs, "target_takeover")
-        elif not self.active and self._depthless and s.bearing_start:
+        elif not self.active and s.bearing_start and (self._depthless or (s.bearing_clipped and self._clipped_strong)):
             self._start_bearing(obs)
             return
         if not self.active:
@@ -1206,7 +1222,10 @@ class TargetClosing:
         """
         p, s = self.policy, self.settings
         here = (float(obs.pose.x), float(obs.pose.y))
-        best = max(self._depthless, key=lambda d: d.conf)
+        # A whole depthless box before a clipped one: the clipped box's centre is the centre of what is in frame.
+        candidates = list(self._depthless) + (list(self._clipped_strong) if s.bearing_clipped else [])
+        best = max(candidates, key=lambda d: (d in self._depthless, d.conf))
+        clipped = best not in self._depthless
         cooling = self.released_step is not None and obs.step - self.released_step < s.release_cooldown_actions
         tried = any(floor == p.mapping.floor_id and math.dist(here, spot) <= s.bearing_retry_m
                     for spot, floor, _ in self.bearing_failures)
@@ -1219,10 +1238,13 @@ class TargetClosing:
         self.verification_yaw = float(obs.pose.yaw)
         self.floor_id = p.mapping.floor_id
         self.label = best.cls
+        sides = self._clip_sides(obs, best.xyxy) if clipped else ()
         self.bearing = dict(started=int(obs.step), actions=0, last_seen=int(obs.step), box=tuple(best.xyxy),
                             conf=float(best.conf), yaw=float(normalize_angle(obs.pose.yaw + error)), lost=0,
-                            moves=[], spot=here)
+                            moves=[], spot=here, clipped=list(sides), pitch_deg=self._relook_pitch_deg(obs, sides))
         self.bearing_starts += 1
+        if clipped:
+            self.bearing_clipped_starts += 1
         p.route_memory.clear("target_bearing")
         p._route = p._goal = None
         p.peek.cancel(obs, "target_bearing", restore=False)
@@ -1230,6 +1252,42 @@ class TargetClosing:
         glances = getattr(p, "glances", None)
         if glances is not None and glances.active is not None:
             glances.abort(obs, "target_bearing")
+
+    def _clip_sides(self, obs, box):
+        """The frame edges within ``border_margin_px`` of ``box``: a subset of left, right, top, bottom."""
+        k, m = obs.camera.intrinsics, self.settings.border_margin_px
+        sides = []
+        if box[0] < m:
+            sides.append("left")
+        if box[2] > k.width - m:
+            sides.append("right")
+        if box[1] < m:
+            sides.append("top")
+        if box[3] > k.height - m:
+            sides.append("bottom")
+        return tuple(sides)
+
+    def _relook_pitch_deg(self, obs, sides):
+        """The camera pitch (degrees, positive down) that uncovers a box cut by the top or bottom edge, or None.
+
+        Cut by the top edge under a pitched-down camera (the doorway
+        look-down): the level view. Cut by the top edge at the level view:
+        one tilt up, as far as the camera goes. Cut by the bottom edge alone
+        (and judged a sliver -- the camera's floor cutoff is not): one tilt
+        down. A side cut needs no pitch: the yaw turn uncovers it.
+        """
+        actions = self.policy.episode.action_spec
+        if not actions.has_camera_tilt or not sides:
+            return None
+        current = math.degrees(float(obs.pose.camera_pitch))
+        tilt = float(actions.tilt_angle_deg)
+        if "top" in sides:
+            target = 0.0 if current > 0.5 * tilt else max(float(actions.min_pitch_deg), current - tilt)
+        elif "bottom" in sides:
+            target = min(float(actions.max_pitch_deg), current + tilt)
+        else:
+            return None
+        return None if abs(target - current) < 0.5 * tilt else float(target)
 
     def _track_bearing(self, obs):
         """Keep the bearing approach on this frame's box of the class, or give it up: lost, out of actions, not moving."""
@@ -1290,6 +1348,18 @@ class TargetClosing:
         info = {"kind": "target_closing", "phase": "BEARING", "target_visible": seen, "target_measured": False,
                 "reason": "RGB detection of the target without depth: approaching along its bearing",
                 "bearing_action": b["actions"], "bearing_conf": round(float(b["conf"]), 2)}
+        if b.get("clipped"):
+            info["reason"] = ("RGB detection of the target cut by the frame's %s edge: facing it for a whole view"
+                              % "/".join(b["clipped"]))
+            info["bearing_clipped"] = list(b["clipped"])
+        pitch = b.get("pitch_deg")
+        if pitch is not None:
+            if abs(math.degrees(float(obs.pose.camera_pitch)) - pitch) < 0.5 * float(actions.tilt_angle_deg):
+                b["pitch_deg"] = None                      # the camera is there: the yaw and the steps from here
+            else:
+                return NavigationCommand.hold(camera_pitch=math.radians(pitch),
+                                              final_yaw=normalize_angle(obs.pose.yaw + error),
+                                              info=dict(info, bearing_step="tilt the camera toward the cut edge"))
         if abs(error) > turn + 1e-6:
             return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + error),
                                           info=dict(info, bearing_step="face the detection"))
@@ -2693,6 +2763,7 @@ class TargetClosing:
                 "bearing": None if self.bearing is None else {k: v for k, v in self.bearing.items() if k != "moves"},
                 "bearing_starts": self.bearing_starts, "bearing_resolved": self.bearing_resolved,
                 "bearing_abandoned": self.bearing_abandoned, "bearing_refusals": self.bearing_refusals,
+                "bearing_clipped_starts": self.bearing_clipped_starts,
                 "persistent_lock": self.locked, "visible": self.last_seen == self.processed,
                 "navmesh_goal_xyz": self.path.goal_xyz, "goal_refinements": self.path.refinements,
                 "occluded_path_steps": self.occluded_path_steps, "inspection_started_step": self.inspection_started,

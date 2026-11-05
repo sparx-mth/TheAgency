@@ -5,6 +5,21 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-11-05, afternoon: two more bugs read off the re-run of the ten regressions)
+- **A target cut by the frame's edge is looked at, not dropped** (`closing/target_closing.py`
+  `TargetClosingSettings.bearing_clipped`, `bearing_clipped_starts`): the border gate drops a sliver at an image edge
+  -- its label and depth centroid are unreliable -- and dropped it silently; 00880/000009 walked past its television
+  in ten consecutive frames (actions 327-337), the box cut by the TOP edge for nine of them because the doorway
+  look-down held the camera 30 degrees down, then by the left edge as it walked by, and never turned its head. A
+  strong sliver now begins the bearing approach: the camera is tilted toward the cut edge (levelled under the
+  look-down) and the body faced to the box, so the next frame shows the object whole and the ordinary start is
+  judged on it; the bearing's bounds, its two-frame persistence rule and its retry memory apply unchanged.
+- **Fewer look-downs** (`navigation/settings.py` `LookDownSettings.approach_m` 0.9 m, was 1.5; `max_width_m` 0.9 m;
+  `done_radius_m` 1.0 m): on the 214 look-downs of twenty recorded episodes they were 7 % of all actions; 69 were
+  released before the agent reached the channel because the route changed first (requested from a median 1.7 m to
+  the throat, against 1.1 m for those that did reach it), 49 were at channels a metre wide, 50 within a metre of a
+  throat already looked down at -- and the plan through the channel changed on the refreshed map in 21 % of them,
+  the same share whatever the width, the unknown floor about the throat or whether any cell near it changed.
 ### Fixed (2026-11-05, five navigation and planning complaints read off the ten replayed non-stair regressions)
 - **The lattice follower plans with plain A\*** (`planners/lattice/params.py` `heuristic_weight` 1.0, was 1.5;
   `navigation/settings.py` `KinematicSettings.heuristic_weight`): the weighted search returned the first goal it

@@ -121,6 +121,51 @@ def test_the_bearing_approach_faces_the_box_then_steps_and_a_frame_with_depth_st
     assert p.closing.locked and p.closing.count == 2
 
 
+def test_a_strong_box_cut_by_the_frames_edge_begins_a_bearing_re_look_that_faces_it_and_levels_the_camera(monkeypatch):
+    """00880-Nfvxx8J5NCo/000009 (2026-11-05), actions 327-337: the television in ten consecutive frames, cut by the
+    top edge under the doorway look-down's 30-degree pitch and then by the left edge as the agent walked past,
+    every frame border-rejected and dropped without a word. A strong sliver is a sighting: the bearing approach
+    faces it (and levels the camera when the top edge cut it), and the whole box of the next frame is judged
+    as any other -- here it projects, and the verification starts."""
+    # Left edge, level camera (the Gibson spec: no tilt): the first bearing action turns left toward the box.
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (0, 136, 56, 248))]       # 56 x 112 px at x = 0
+    first = p.plan(observation(ep, 0, depth=2.0))
+    assert not p.closing.active and p.closing.border_rejections == 1, "one frame of a sliver: a flicker still"
+    command = p.plan(observation(ep, 1, depth=2.0))
+    assert p.closing.active and p.closing.phase == "BEARING" and p.closing.bearing_clipped_starts == 1
+    assert command.final_yaw is not None and command.final_yaw > 0, "the box is at the left edge: turn left"
+    assert command.info["bearing_clipped"] == ["left"] and "cut by the frame's left edge" in command.info["reason"]
+    assert p.closing.border_rejections == 2 and p.closing.count == 0 and p.closing.xyz is None
+    # Turned: the box is whole, it has depth, the ordinary verification begins on this frame.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (280, 136, 340, 248))]
+    faced = replace(observation(ep, 2, depth=2.0), pose=AgentPose(0.0, 0.0, 0.0, float(command.final_yaw)))
+    p.plan(faced)
+    assert p.closing.phase == "VERIFY" and p.closing.bearing is None and p.closing.bearing_resolved == 1
+    # Top edge under a pitched-down camera (the look-down): the camera is levelled first, then the turn.
+    q, original = setup_policy()
+    ep2 = tilt_episode(q, original)
+    pitched = math.radians(30.0)
+    q.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (211, 0, 312, 22))]      # 101 x 22 px at y = 0
+    q.plan(replace(observation(ep2, 0, depth=2.0), pose=AgentPose(0, 0, 0, 0, camera_pitch=pitched)))
+    command = q.plan(replace(observation(ep2, 1, depth=2.0), pose=AgentPose(0, 0, 0, 0, camera_pitch=pitched)))
+    assert q.closing.active and q.closing.phase == "BEARING" and q.closing.bearing["clipped"] == ["top"]
+    assert command.info["bearing_step"] == "tilt the camera toward the cut edge"
+    assert command.camera_pitch is not None and abs(command.camera_pitch) < 1e-6, "the level view"
+    # Levelled: the box stands whole in the frame and projects; the verification begins.
+    q.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (280, 136, 340, 248))]
+    q.plan(replace(observation(ep2, 2, depth=2.0), pose=AgentPose(0, 0, 0, 0, camera_pitch=0.0)))
+    assert q.closing.phase == "VERIFY" and q.closing.bearing_resolved == 1
+    # Off: the sliver is dropped as before.
+    r, ep3 = setup_policy(target_closing={"bearing_clipped": False})
+    r.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (0, 136, 56, 248))]
+    for step in range(3):
+        r.plan(observation(ep3, step, depth=2.0))
+    assert not r.closing.active and r.closing.bearing_clipped_starts == 0 and r.closing.border_rejections == 3
+    with pytest.raises(ValueError):
+        TargetClosingSettings(bearing_clipped="yes")
+
+
 def test_a_bearing_approach_is_given_up_when_the_box_is_lost_or_the_actions_run_out_and_not_retried_from_the_spot():
     p, ep = setup_policy()
     p.plan(observation(ep, 0, depth=float("nan")))
@@ -454,12 +499,20 @@ def test_invalid_closing_settings(kwargs):
 
 @pytest.mark.parametrize("box", [(0, 269, 84, 479), (300, 0, 360, 80), (560, 200, 640, 280), (300, 440, 340, 480)])
 def test_border_clipped_box_does_not_start_takeover(box):
-    """The Ranchester sofa: an 84 px sliver on the left/bottom edge of a bed."""
+    """The Ranchester sofa: an 84 px sliver on the left/bottom edge of a bed. No verification and no lock start on
+    it; since 2026-11-05 the second consecutive frame of the sliver begins the bearing RE-LOOK (``bearing_clipped``)
+    -- the agent faces the cut edge for a whole view -- which is still no takeover: nothing is placed or counted."""
     p, ep = setup_policy()
     p.detector.detect = lambda rgb: [DetectionWire("chair", .87, box)]
     p.plan(observation(ep, 0, depth=3))
     assert not p.closing.active and p.closing.border_rejections >= 1
-    assert p.plan(observation(ep, 1, depth=3)) is not None and not p.closing.active
+    command = p.plan(observation(ep, 1, depth=3))
+    assert command is not None and not p.closing.locked and p.closing.count == 0 and p.closing.xyz is None
+    assert p.closing.phase == "BEARING" and p.closing.bearing_clipped_starts == 1, "the re-look, not a takeover"
+    off, ep_off = setup_policy(target_closing={"bearing_clipped": False})
+    off.detector.detect = lambda rgb: [DetectionWire("chair", .87, box)]
+    off.plan(observation(ep_off, 0, depth=3))
+    assert off.plan(observation(ep_off, 1, depth=3)) is not None and not off.closing.active
 
 
 def test_locked_target_tolerates_border_spill(monkeypatch):
