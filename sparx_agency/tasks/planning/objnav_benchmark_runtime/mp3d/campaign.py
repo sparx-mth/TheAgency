@@ -16,6 +16,12 @@ This is an orchestrator, not a second evaluator: the scoring, the logging and
 the protocol all stay in ``run.py`` and the shared harness. The concurrency
 (``scene_pool``) and the smoke cover (``smoke_plan``) are the HM3D campaign's,
 reused verbatim: neither knows which dataset it is planning.
+
+``--shard-episodes N`` cuts every scene into shards of at most N episodes, each
+its own process, so no scene becomes the campaign's tail; the shards run on a
+VRAM-gated pool whose size can be changed while it runs, over one or several
+LLM servers, and each scene is merged as soon as its shards finish
+(``sharded_campaign.py``). The aggregate is the same either way.
 """
 from __future__ import annotations
 
@@ -23,7 +29,9 @@ import argparse
 import csv
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 
@@ -39,7 +47,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.smoke_plan import
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import (
     CATEGORIES, MP3DDataset, published_counts)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import (
-    PROTOCOLS, protocol_for)
+    APEXNAV_SUCCESS_DISTANCE_M, PROTOCOLS, protocol_for)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.report import rescore
 
 RUN_MODULE = "sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.run"
 
@@ -219,6 +228,10 @@ def aggregate(root, *, episodes_dir=None, version=None, split="val"):
                     and len(per_scene) == expected_scenes == published["scenes"]
                     and len(records) == published["episodes"]
                     and all(scene["finished"] for scene in per_scene))
+    # ApexNav's 0.2 m radius over the same rows (report.rescore: it can only add successes), and the
+    # goal categories over every scene: the two breakdowns the papers' MP3D tables are read against.
+    loose = rescore(records, APEXNAV_SUCCESS_DISTANCE_M)
+    loose_overall = summarise(loose).overall
     report = {"episodes": len(records), "scenes_with_rows": len(per_scene),
               "scenes_expected": expected_scenes,
               "episodes_published": published.get("episodes"),
@@ -229,7 +242,11 @@ def aggregate(root, *, episodes_dir=None, version=None, split="val"):
               "scenes_unfinished": [s["scene"] for s in per_scene
                                     if not s["finished"]],
               "complete": complete,
-              "overall": asdict(summary.overall), "by_scene": per_scene}
+              "overall": asdict(summary.overall), "by_scene": per_scene,
+              "by_category": [asdict(group) for group in summary.by_category],
+              "apexnav_radius": {"success_distance_m": APEXNAV_SUCCESS_DISTANCE_M,
+                                 "success_rate": loose_overall.success_rate, "spl": loose_overall.spl,
+                                 "extra_successes": sum(a.success != b.success for a, b in zip(records, loose))}}
     write_atomically(root / "campaign_summary.json",
                      strict_json(report, "MP3D campaign summary", indent=2))
     with (root / "campaign_metrics.csv").open("w", newline="") as stream:
@@ -257,13 +274,43 @@ def main(argv=None):
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
     parser.add_argument("--jobs", type=int, default=1,
-                        help="Scenes run at once; above 1 each child logs to <root>/<scene>.console.log")
+                        help="Scenes run at once; above 1 each child logs to <root>/<scene>.console.log. "
+                             "With --shard-episodes: shards at once, unless --jobs-file says otherwise")
+    sharding = parser.add_argument_group("sharded campaign (--shard-episodes)")
+    sharding.add_argument("--shard-episodes", type=int,
+                          help="Cut every scene into shards of at most N episodes, one process each "
+                               "(<root>/<scene>/shard_<k>/), merged per scene when its shards finish")
+    sharding.add_argument("--jobs-file", type=Path,
+                          help="A file whose integer overrides --jobs while the campaign runs; 0 drains it")
+    sharding.add_argument("--llm-urls", nargs="+", default=(),
+                          help="LLM servers to deal the shards over (a started shard keeps its own)")
+    sharding.add_argument("--vram-cap", type=float, default=0.88,
+                          help="Start a shard only while used VRAM + one renderer stays under this share of the card")
+    sharding.add_argument("--renderer-mib", type=int, default=int(os.environ.get("HABITAT_VRAM_MIB") or 1400),
+                          help="One renderer's VRAM budget for the start gate (default HABITAT_VRAM_MIB, else 1400)")
     # Anything after a bare "--" is passed through to every child run.py.
     args, extra = parser.parse_known_args(argv)
     if extra[:1] == ["--"]:
         extra = extra[1:]
     failed = []
-    if not args.aggregate_only:
+    if not args.aggregate_only and args.shard_episodes:
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.shard_pool import VramGate
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.sharded_campaign import (
+            option_value, run_sharded_campaign)
+        if args.limit is not None or args.smoke or args.episode_ids_file:
+            parser.error("--shard-episodes runs every episode of the selected scenes; it takes no "
+                         "--limit, --smoke or --episode-ids-file")
+        # A terminated campaign stops its shards first (the pool's finally), instead of leaving them
+        # running against services the launcher is about to take down.
+        signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+        gate = VramGate(args.renderer_mib, args.vram_cap, gpu_device=int(option_value(extra, "--gpu-device") or 0))
+        results = run_sharded_campaign(args.root, version=args.version, split=args.split,
+                                       episodes_dir=args.episodes_dir, scenes_dir=args.scenes_dir,
+                                       shard_episodes=args.shard_episodes, scenes=args.scenes, extra=extra,
+                                       resume=args.resume, jobs=args.jobs, jobs_file=args.jobs_file,
+                                       llm_urls=args.llm_urls, gate=gate)
+        failed = [r["scene"] for r in results if r["returncode"] != 0]
+    elif not args.aggregate_only:
         results = run_campaign(args.root, version=args.version, split=args.split,
                                episodes_dir=args.episodes_dir,
                                scenes_dir=args.scenes_dir, limit=args.limit,
@@ -272,14 +319,15 @@ def main(argv=None):
                                episode_ids=json.loads(args.episode_ids_file.read_text())
                                if args.episode_ids_file else None)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
-        if failed:
-            print("Scenes that did not exit cleanly: %s" % ", ".join(failed))
+    if failed:
+        print("Scenes that did not exit cleanly%s: %s"
+              % (" or are not merged" if args.shard_episodes else "", ", ".join(failed)))
     report = aggregate(args.root, episodes_dir=args.episodes_dir,
                        version=args.version, split=args.split)
     if report is None:
         print("No scene produced any episode rows")
         return 1
-    print(json.dumps({k: v for k, v in report.items() if k != "by_scene"}, indent=2))
+    print(json.dumps({k: v for k, v in report.items() if k not in ("by_scene", "by_category")}, indent=2))
     return 0 if not failed and not report["scenes_without_rows"] else 1
 
 

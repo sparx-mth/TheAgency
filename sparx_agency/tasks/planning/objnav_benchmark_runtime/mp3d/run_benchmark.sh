@@ -25,10 +25,17 @@
 #                                                           # annotations, goals by mpcat40 class: ground_truth/mp3d_categories.py),
 #                                                           # the method otherwise unchanged; output runs/gt_oracle_mp3d_2195ep_<stamp>;
 #                                                           # non-publishable. No detector or segmenter is started.
+#   mp3d/run_benchmark.sh --shard-episodes 10 --jobs 14 --llm-servers 3 --jobs-file runs/X_support/jobs
+#                                                           # every scene cut into shards of <=10 episodes (one process each, no scene
+#                                                           # becomes the tail), at most 14 at once (the jobs file overrides it live;
+#                                                           # 0 drains), a shard starting only while VRAM stays under VRAM_CAP (0.88)
+#                                                           # with HABITAT_VRAM_MIB to spare, dealt over 3 native Ollama servers on
+#                                                           # consecutive ports from LLM_BASE_URL's
 #
-# The whole split runs as mp3d/campaign.py: one mp3d.run process per scene, each writing its own complete results
-# directory under the output root, then one aggregate (campaign_summary.json) over the scenes that finished. A scene
-# that dies costs one scene, and --output <root> resumes the rest. --scene runs mp3d.run directly.
+# The whole split runs as mp3d/campaign.py: one mp3d.run process per scene (or per shard, --shard-episodes), each
+# writing its own complete results directory under the output root, then one aggregate (campaign_summary.json) over
+# the scenes that finished. A scene that dies costs one scene, and --output <root> resumes the rest. --scene runs
+# mp3d.run directly.
 #
 # The protocol is habitat-lab's objectnav_mp3d (mp3d/protocol.py, every number transcribed): 500 actions, 0.25 m /
 # 30 degree actions, 640x480 RGB-D at HFOV 79 degrees and 0.88 m, depth 0.5-5.0 m, agent 0.18 m / 0.88 m, no sliding,
@@ -53,10 +60,11 @@
 #   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; --jobs N defaults it to ceil(N/2) (and budgets N
 #                        renderers in the GPU plan) unless set here; each slot is its own KV cache          default 1
 #   HABITAT_VRAM_MIB     one habitat-sim renderer's VRAM, for the GPU plan and --jobs max (gpu_plan.py's default is
-#                        1536; --jobs max sizes at 1000 unless set). Measure it on an MP3D scene with nvidia-smi.
+#                        1536; --jobs max sizes at 1000 unless set) and the sharded pool's start gate (1400 unset).
+#   VRAM_CAP             the share of the card a sharded campaign fills to before it stops starting shards   default 0.88
 set -euo pipefail
 
-usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,64p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,8 +91,12 @@ POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool
 
 # -- the command line -----------------------------------------------------------------------
 EPISODE_FILE="" VERSION="v1" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=()
+SHARD_EPISODES="" JOBS_FILE="" LLM_SERVERS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --shard-episodes) SHARD_EPISODES="$2"; shift 2 ;;         # campaign: shards of at most N episodes, one process each
+    --jobs-file) JOBS_FILE="$2"; shift 2 ;;                    # campaign: a file whose integer overrides --jobs live
+    --llm-servers) LLM_SERVERS="$2"; shift 2 ;;                # sharded campaign: native Ollama servers to deal shards over
     --version) VERSION="$2"; shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
     --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
@@ -109,14 +121,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -n "$STATUS" ]]; then
-  # A campaign root holds one directory per scene; a scene (or a --scene run) holds progress.json itself.
+  # A campaign root holds one directory per scene; a scene (or a --scene run) holds progress.json itself;
+  # a sharded campaign's root holds shard_plan.json, and campaign_status folds its shards into one screen.
   if [[ -f "$STATUS/progress.json" ]]; then exec "$HAB_PY" -m "$PROGRESS_MODULE" "$STATUS"; fi
-  FOUND=0
-  for scene_dir in "$STATUS"/*/; do
-    [[ -f "$scene_dir/progress.json" ]] || continue
-    FOUND=1; printf '%s: ' "$(basename "$scene_dir")"; "$HAB_PY" -m "$PROGRESS_MODULE" "$scene_dir" || true
-  done
-  [[ "$FOUND" == 1 ]] || echo "no progress.json under $STATUS yet"
+  if [[ -f "$STATUS/shard_plan.json" ]]; then
+    STATUS_ROOT="$(realpath "$STATUS")"
+    (cd "$REPO" && "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.campaign_status "$STATUS_ROOT")
+  else
+    FOUND=0
+    for scene_dir in "$STATUS"/*/; do
+      [[ -f "$scene_dir/progress.json" ]] || continue
+      FOUND=1; printf '%s: ' "$(basename "$scene_dir")"; "$HAB_PY" -m "$PROGRESS_MODULE" "$scene_dir" || true
+    done
+    [[ "$FOUND" == 1 ]] || echo "no progress.json under $STATUS yet"
+  fi
   [[ -f "$STATUS/campaign_summary.json" ]] && "$HAB_PY" -c 'import json,sys; r=json.load(open(sys.argv[1])); o=r["overall"]; print("campaign: %d episodes in %d scene(s)%s | SR %.3f SPL %.3f SoftSPL %.3f | complete split: %s" % (r["episodes"], r["scenes_with_rows"], " (%d without rows)" % len(r["scenes_without_rows"]) if r["scenes_without_rows"] else "", o["success_rate"], o["spl"], o["soft_spl"], r["complete"]))' "$STATUS/campaign_summary.json"
   exit 0
 fi
@@ -169,6 +187,13 @@ if [[ "$JOBS" == max ]]; then
 fi
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer or max"
 [[ "$JOBS" == 1 || -z "$SCENE" ]] || die "--jobs runs scenes of a campaign at once; a --scene run is one process"
+[[ -z "$SHARD_EPISODES" || "$SHARD_EPISODES" =~ ^[1-9][0-9]*$ ]] || die "--shard-episodes must be a positive integer"
+[[ -z "$SHARD_EPISODES" || ( -z "$SCENE" && "$SMOKE" == 0 && -z "$LIMIT" && -z "$EPISODE_FILE" ) ]] \
+  || die "--shard-episodes runs every episode of the campaign's scenes: no --scene, --smoke, --limit or --episode-ids-file"
+[[ "$LLM_SERVERS" =~ ^[1-9][0-9]*$ ]] || die "--llm-servers must be a positive integer"
+[[ "$LLM_SERVERS" == 1 || ( -n "$SHARD_EPISODES" && "$OLLAMA_MODE" == native ) ]] \
+  || die "--llm-servers N deals shards over native servers the launcher starts: it needs --shard-episodes and OLLAMA_MODE=native"
+[[ -z "$JOBS_FILE" || -n "$SHARD_EPISODES" ]] || die "--jobs-file sizes a sharded campaign's pool: it needs --shard-episodes"
 if [[ "$JOBS" -gt 1 ]]; then
   # As hm3d/run_benchmark.sh: the GPU plan budgets one renderer per child, and the native Ollama gets ceil(N/2)
   # request slots unless the operator named a number (the node oracle is about a third of a child's wall time).
@@ -292,11 +317,55 @@ if [[ -f "$OUTPUT/campaign.json" ]] || ls -d "$OUTPUT"/*/ > /dev/null 2>&1; then
   say "resuming: $OUTPUT already holds scenes (finished ones are kept, started ones continue)" | tee -a "$LOG"
   CAMPAIGN_ARGS+=(--resume)
 fi
+EXTRA_OLLAMA_PIDS=() CAMPAIGN_PID=""
+if [[ -n "$SHARD_EPISODES" ]]; then
+  CAMPAIGN_ARGS+=(--shard-episodes "$SHARD_EPISODES" --vram-cap "${VRAM_CAP:-0.88}" --renderer-mib "${HABITAT_VRAM_MIB:-1400}")
+  [[ -n "$JOBS_FILE" ]] && CAMPAIGN_ARGS+=(--jobs-file "$JOBS_FILE")
+  # The node oracle's requests queue per server (the 2026-11-05 measurement: about 0.7 requests/s each, whatever the
+  # slot count), so the shards are dealt over LLM_SERVERS native servers on consecutive ports, each started like the
+  # first one and stopped with the launcher. Every server is warmed with the run's own context window, so its memory
+  # is on the card before the pool's VRAM gate judges the first shard.
+  LLM_URLS=("$LLM_BASE_URL")
+  LLM_HOST_PORT="${LLM_BASE_URL#http://}"
+  for (( k = 1; k < LLM_SERVERS; k++ )); do
+    PORT=$(( ${LLM_HOST_PORT##*:} + k )) URL="http://${LLM_HOST_PORT%:*}:$(( ${LLM_HOST_PORT##*:} + k ))"
+    if curl -fsS --max-time 5 "$URL/api/tags" > /dev/null 2>&1; then
+      say "LLM server $URL already answers (left running)" | tee -a "$LOG"
+    else
+      say "starting ollama $((k + 1)) of $LLM_SERVERS at $URL ($OLLAMA_NUM_PARALLEL request slot(s), default context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"
+      CUDA_VISIBLE_DEVICES="$OLLAMA_CUDA_VISIBLE_DEVICES" OLLAMA_HOST="${URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" \
+        OLLAMA_NUM_PARALLEL="$OLLAMA_NUM_PARALLEL" OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" \
+        OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama_$PORT.log" 2>&1 &
+      EXTRA_OLLAMA_PIDS+=($!)
+      objnav_wait_for_url "$URL/api/tags" 120 "Ollama at $URL"
+    fi
+    LLM_URLS+=("$URL")
+  done
+  CAMPAIGN_ARGS+=(--llm-urls "${LLM_URLS[@]}")
+  if [[ "$AGENT" != falcon-yolo && "$LLM_MODEL" == "$LLM_REASONING_MODEL" ]]; then
+    for URL in "${LLM_URLS[@]}"; do
+      curl -fsS --max-time 300 "$URL/api/chat" -d "{\"model\": \"$LLM_MODEL\", \"stream\": false, \"keep_alive\": \"$LLM_KEEP_ALIVE\", \"messages\": [{\"role\": \"user\", \"content\": \"Reply OK.\"}], \"options\": {\"num_ctx\": ${LLM_NUM_CTX:-$LLM_REASONING_NUM_CTX}, \"num_predict\": 2}}" > /dev/null \
+        || die "the LLM server at $URL did not answer a warm-up request"
+    done
+    say "LLM servers warm: ${LLM_URLS[*]} ($LLM_MODEL at a ${LLM_NUM_CTX:-$LLM_REASONING_NUM_CTX}-token window)" | tee -a "$LOG"
+  fi
+fi
+# The EXIT trap (benchmark_services.sh) calls this before the services go down: the campaign stops its shards first.
+objnav_launcher_cleanup() {
+  if [[ -n "$CAMPAIGN_PID" ]] && kill -0 "$CAMPAIGN_PID" 2> /dev/null; then
+    kill -TERM "$CAMPAIGN_PID" 2> /dev/null || true; wait "$CAMPAIGN_PID" 2> /dev/null || true
+  fi
+  for pid in "${EXTRA_OLLAMA_PIDS[@]}"; do kill -TERM "$pid" 2> /dev/null || true; wait "$pid" 2> /dev/null || true; done
+}
 # mp3d.run's --version/--split/--episodes-dir/--scenes-dir come from the campaign itself; the rest is passed through after "--".
 say "campaign ($AGENT): $(if [[ "$SMOKE" == 1 ]]; then echo "the smoke cover, one episode per scene"; elif [[ -n "$LIMIT" ]]; then echo "$LIMIT ${CATEGORY:+$CATEGORY }episode(s) per scene"; else echo "every ${CATEGORY:+$CATEGORY }episode of the split ($PUBLISHED_EPISODES over $PUBLISHED_SCENES scenes)"; fi), one process per scene, $JOBS at once; per-scene progress under $OUTPUT/<scene>/progress.json  (watch: $0 --status $OUTPUT)" | tee -a "$LOG"
 set +e
-"${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$CAMPAIGN_MODULE" "${CAMPAIGN_ARGS[@]}" -- "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" "${ACCEPT[@]}" 2>&1 | tee -a "$LOG"
-RUN_CODE=${PIPESTATUS[0]}
+# In the background and waited for, so the EXIT trap can stop it (objnav_launcher_cleanup) when the launcher is killed.
+"${RENDER_WRAP[@]}" "$HAB_PY" -u -m "$CAMPAIGN_MODULE" "${CAMPAIGN_ARGS[@]}" -- "${CHILD_ARGS[@]}" "${VALIDATE_ARGS[@]}" "${ACCEPT[@]}" > >(tee -a "$LOG") 2>&1 &
+CAMPAIGN_PID=$!
+wait "$CAMPAIGN_PID"
+RUN_CODE=$?
+CAMPAIGN_PID=""
 set -e
 [[ "$RUN_CODE" == 0 ]] || die "the campaign exited with $RUN_CODE (see $LOG and $OUTPUT/<scene>/run.json); rerun the same command with --output $OUTPUT to resume the unfinished scenes"
 say "results: $OUTPUT/campaign_summary.json (the split's SR/SPL/SoftSPL and whether it is complete), campaign_metrics.csv (per scene), <scene>/comparison.md (vs published)${RECORD:+, <scene>/recordings/}"

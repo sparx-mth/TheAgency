@@ -160,8 +160,49 @@ mp3d/run_benchmark.sh --status runs/mp3d_v1_val_<stamp>
 
 The result is `runs/mp3d_v1_val_<stamp>/campaign_summary.json`: SR, SPL,
 SoftSPL and DTG over every scored episode, `complete: true` only for the whole
-split, and `campaign_metrics.csv` per scene. Each scene's `comparison.md`
-puts our row under the papers' rows at both success radii.
+split, `campaign_metrics.csv` per scene, and in the summary the split per goal
+category (`by_category`) and the same rows re-scored at ApexNav's 0.2 m
+(`apexnav_radius`). Each scene's `comparison.md` puts our row under the papers'
+rows at both success radii.
+
+### Sharded: no scene becomes the tail, and the LLM is spread over servers
+
+One process per scene makes the campaign as long as its slowest scene. With
+`--shard-episodes N` every scene is cut into shards of at most N episodes
+(`mp3d.run --shards K --shard-index k`: the publisher's order strided, nothing
+dropped or repeated), each its own process writing `<root>/<scene>/shard_<k>/`;
+when a scene's shards have all finished, `report.merge_runs` writes the scene's
+own directory from them, so the aggregate is unchanged.
+
+```bash
+S=runs/gt_oracle_mp3d_2195ep_X_support; mkdir -p $S; echo 14 > $S/jobs
+OLLAMA_MODE=native LLM_BASE_URL=http://127.0.0.1:11435 OLLAMA_NUM_PARALLEL=4 HABITAT_VRAM_MIB=1400 \
+LLM_ANSWERS_RECORD=$PWD/$S/llm_answers \
+mp3d/run_benchmark.sh --perception ground-truth --shard-episodes 10 --jobs 14 --jobs-file $S/jobs \
+    --llm-servers 3 --output runs/gt_oracle_mp3d_2195ep_X
+mp3d/run_benchmark.sh --status runs/gt_oracle_mp3d_2195ep_X     # one screen: done/total, SR/SPL, throughput, ETA, per scene
+```
+
+* **The pool** (`shard_pool.py`) starts a shard only while the card's used VRAM
+  plus `HABITAT_VRAM_MIB` (and that again for every shard started in the last
+  two minutes) stays under `VRAM_CAP` (0.88), 20 s apart. VRAM never pauses or
+  stops running work. The number at once is `--jobs`, overridden live by the
+  integer in `--jobs-file`; lowering it lets running shards finish, `0` drains
+  the pool for a resume under new settings.
+* **The LLM servers.** One Ollama server answers about 0.7-0.8 requests/s
+  whatever its slot count: measured 2026-11-05 on 120 recorded objnav prompts
+  (Ollama 0.21.1, qwen2.5:3b, 8,192 context): 1 server x 4 slots 0.81/s, x 16
+  slots 0.71/s, 2 servers x 8 slots 1.32/s. The time goes to a per-request
+  server-side cost of about 1.4 s, not to the GPU. So `--llm-servers N` starts N native servers on
+  consecutive ports from `LLM_BASE_URL`'s, warms each at the run's context
+  window, and deals the shards over them (a started shard keeps the server its
+  `run.json` froze). The merge compares the method without the server's
+  address; the merged `run.json` lists every address under `llm_base_urls`.
+* **Record the LLM answers outside the root** (`LLM_ANSWERS_RECORD`): the
+  aggregate reads every subdirectory of the root as a scene, so a store inside
+  it makes the summary `complete: false`.
+* `--output <root>` resumes: merged scenes and finished shards are kept, started
+  shards continue (`--resume`), the rest start.
 
 ### Freeze, then evaluate (for a number you intend to publish)
 
@@ -223,6 +264,10 @@ evidence and the deviations we name rather than apply.
 | `env.py` | the simulation driver behind `ObjNavEnv`: reset, step, measure, start validation |
 | `run.py` | preflight and evaluation CLI (the shared `run_evaluation`) |
 | `campaign.py` | one process per scene, the aggregate; reuses `hm3d/scene_pool.py` and `hm3d/smoke_plan.py` |
+| `sharded_campaign.py` | `--shard-episodes`: every scene as shards on the pool, each scene merged when its shards finish |
+| `shard_plan.py` | the shards (interleaved across scenes), their LLM servers, the plan file, the per-scene merge |
+| `shard_pool.py` | the VRAM-gated pool with a live worker cap; VRAM only ever delays a start |
+| `campaign_status.py` | `--status` of a sharded root: done/total, SR/SPL, shards running, throughput and ETA, per scene |
 | `assets.py` | installation check, public episode fetch, scene instructions |
 | `report.py`, `sota.py` | `comparison.md` / `audit.json`, the 0.2 m re-scoring, the transcribed paper rows |
 | `frozen_eval.py` | freeze a configuration, run the published split under it |

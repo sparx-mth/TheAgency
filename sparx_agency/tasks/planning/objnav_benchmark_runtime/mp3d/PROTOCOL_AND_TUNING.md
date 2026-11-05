@@ -92,11 +92,12 @@ success rule or the distances; each is a deliberate, recorded choice.
    `MP3DProtocol.reference_habitat_sim_version` records; every run writes
    `reference_habitat_sim_version_match` into its configuration, and the audit
    repeats it.
-4. **Semantic sensor.** The published config lists a `SEMANTIC_SENSOR`. We do
-   not instantiate it: the method must not see ground-truth semantics, and no
-   baseline in the comparison tables uses it either. (HM3D's `--perception
-   ground-truth` upper bound is not offered here: it needs an annotation→goal
-   table, mpcat40 for MP3D, which this adapter does not carry.)
+4. **Semantic sensor.** The published config lists a `SEMANTIC_SENSOR`. A
+   service run does not instantiate it: the method must not see ground-truth
+   semantics, and no baseline in the comparison tables uses it either. The
+   `--perception ground-truth` upper bound does (640x480, HFOV 79, at 0.88 m,
+   as published), through the mpcat40 goal table
+   `../ground_truth/mp3d_categories.py`; such a run is non-publishable.
 5. **Method parameters are not protocol.** Body height and radius come from the
    protocol; every other knob (clearance, stop distance, closing, peeks, the
    explorer) is `RPTSettings`' default, exactly as on Gibson and HM3D. The

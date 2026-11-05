@@ -172,18 +172,37 @@ def write_report(directory):
     return audit
 
 
+def _method_identity(method):
+    """The method block as the experiment it names: without the LLM server's address.
+
+    A sharded campaign may deal its shards over several Ollama servers. The
+    address says where an answer came from, not what produced it -- the model
+    digests (``llm_identity``), every request option and the prompts all stay
+    compared -- so two shards that differ only in it are one experiment.
+    """
+    method = dict(method or {})
+    if isinstance(method.get("llm"), dict):
+        method["llm"] = {key: value for key, value in method["llm"].items() if key != "base_url"}
+    return method
+
+
 def merge_runs(directories, output):
-    """Merge only complete, disjoint shards of one identical experiment."""
+    """Merge only complete, disjoint shards of one identical experiment.
+
+    The shards may have used different LLM servers (:func:`_method_identity`);
+    the merged ``run.json`` lists them all under ``llm_base_urls``.
+    """
     runs = [_read_run(directory) for directory in directories]
     if not runs:
         raise ValueError("No shard directories supplied")
     base, protocol, _ = runs[0]
-    comparable = ("protocol", "runtime", "method", "seed", "dataset", "shards",
+    comparable = ("protocol", "runtime", "seed", "dataset", "shards",
                   "limit", "scenes", "reference_habitat_sim_version_match",
                   "excluded_unreachable_episode_ids")
     records, shard_ids = [], set()
     for config, _, rows in runs:
-        if any(config.get(key) != base.get(key) for key in comparable):
+        if (any(config.get(key) != base.get(key) for key in comparable)
+                or _method_identity(config.get("method")) != _method_identity(base.get("method"))):
             raise ValueError("Shards disagree on data, protocol, method, or runtime")
         if config["limit"] is not None or config["shard_index"] in shard_ids:
             raise ValueError("Limited or duplicate shards cannot form a full evaluation")
@@ -203,6 +222,9 @@ def merge_runs(directories, output):
     config = dict(base, selected_episode_ids=sorted(ids), shards=1, shard_index=0,
                   full_split=merged_full,
                   merged_from=[str(Path(p).resolve()) for p in directories])
+    urls = sorted({((c.get("method") or {}).get("llm") or {}).get("base_url") for c, _, _ in runs} - {None})
+    if urls:
+        config["llm_base_urls"] = urls
     with MetricsLogger(Path(output), config) as logger:
         for row in sorted(records, key=lambda r: r.episode_id):
             logger.log(row)
