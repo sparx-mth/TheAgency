@@ -5,6 +5,20 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-05/06, MP3D v1 val under ground-truth perception, measured)
+- **A sharded MP3D campaign** (`objnav_benchmark_runtime/mp3d/campaign.py --shard-episodes N`, `shard_plan.py`,
+  `shard_pool.py`, `sharded_campaign.py`, `campaign_status.py`, `run_benchmark.sh --llm-servers N` / `--status`):
+  - Every scene is cut into shards, so no scene becomes the tail.
+  - Fresh shards are dealt over several native Ollama servers, because one server answers 0.7-0.8 requests/s
+    whatever its slot count.
+  - A shard starts only while used VRAM plus one renderer's 1,400 MiB stays under 88 % of the card, and running
+    work is never paused for VRAM.
+  - A merged scene reads like an unsharded one.
+- **The full objectnav_mp3d_v1 val split under ground-truth perception, 2,195 episodes in 11 scenes**
+  (`runs/gt_oracle_mp3d_2195ep_20261105T141854Z`, `docs/progress/entries/043-mp3d-gt-oracle-val.md`):
+  - **SR 52.1 %, SPL 23.6 %**; at ApexNav's 0.2 m, 53.3 % / 24.2 %. DTG 4.42 m, agent errors 0.
+  - The 388 episodes (17.7 %) with no goal on the start storey score SR 7.0 %, against 61.8 % for the rest, because
+    stair traversal stays off by default.
 ### Fixed (2026-11-01)
 - **The LLM answer store keys answers by episode** (`llm_answer_cache.request_key(scope=)`, `LLMAnswerStore.scope`,
   `LLMClient.set_answer_scope`, set by `RPTSearchPolicy.reset`): the first glance A/B pilot recorded arm A from three
