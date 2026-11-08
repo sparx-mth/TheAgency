@@ -1,6 +1,6 @@
 # ObjectNav open-YOLO failure analysis (2026-11-08)
 
-Status: interim. The room-label replay (qwen2.5:3b) and the VLM object-listing test are still running; their results are not in this note.
+Status: interim. Includes the room-label replay (qwen2.5:3b) and the VLM object-listing test (qwen3-vl:8b); both are small, unverified experiments (no ground-truth room labels yet).
 Raw traces, review pages and scripts are kept locally (HM3D frames are not committed: Matterport license).
 
 ## Question
@@ -33,9 +33,25 @@ Visual review of the frame at each spot (not checked against ground truth):
 - Label mix over 112 room states: hallway 27, bedroom 26, unknown 12, office 9, bathroom 9, storage closet 7, laundry 7, living room 5, foyer 5, dining room 3, kitchen 2.
 - Not yet measured: how many labels are wrong and from which cause (false-positive landmark / wrong room / wrong label from a correct list). Needs a human review of the room cards.
 
-## In progress
-1. Replay of 230 distinct room-label prompts with qwen2.5:3b: unchanged (noise), no cabinet, no oven/refrigerator, merged duplicates, combinations.
-2. VLM (qwen3-vl:8b) listing distinctive objects from frames taken inside each room, added to the list MORE receives, then the label replay.
+## Room-label replay (qwen2.5:3b, temperature 0, 230 distinct prompts from the 20 landmark-logged episodes)
+Label changed versus the traced label:
+| change to the object list | rooms changed |
+|---|---|
+| none (same prompt again; noise floor) | 11 of 230 (5%) |
+| drop cabinet | 46 (20%) |
+| drop oven and refrigerator | 35 (15%) |
+| drop cabinet, oven and refrigerator | 62 (27%) |
+| merge same-class landmarks within 0.9 m | 21 (9%) |
+| merge duplicates and drop the three | 72 (31%) |
+The object list moves the label substantially: rooms whose only evidence is cabinets flip (storage_closet -> hallway 11 times, kitchen -> dining_room/laundry_room). Merging duplicates alone changes little (9%, 4 points above noise).
+The replay shows sensitivity, not correctness: which version is right needs human judgement of the rooms. Replay does not model the classifier's cache or later re-queries.
+
+## VLM object-listing test (qwen3-vl:8b on the frames saved while the agent stood inside each room)
+Prompt: list the large furniture and fixtures clearly visible that help tell the room type; names are added to the list the label model receives.
+- 78 of 112 rooms had saved frames inside the room; the VLM returned objects for 27 of them (the rest returned nothing within 1,500 output tokens, as a thinking model; not investigated further).
+- For the 27 rooms with objects added the label changed in 15 (56%); for the 85 rooms with none added it changed in 5 (6%, noise).
+- Changes that look right on reading the list: a living room labelled office (list had sofa x2, tv, desk, chair; VLM added ceiling fan, coffee table, fireplace, rug), empty "hallway" rooms to laundry_room (washer, dryer), foyer to bathroom (bathtub, shower, toilet), hallway to kitchen (sink, kitchen cabinets). Questionable: bathroom to bedroom, hallway to office with bed+desk+tv (frames chosen by agent position can include a neighbouring room).
+- Not verified against ground truth. Frames are 320x240 and chosen by agent position inside the room outline.
 
 ## Next
-Review the room cards and tally errors by cause; ground-truth check of the real-looking sofa spots (Nadav); decide whether to add discriminative classes (rug, fireplace, nightstand, ceiling fan, ...) to the detector vocabulary after the VLM-list test; per-category thresholds and vetoes once ground-truth boxes exist.
+Review the room cards and tally errors by cause; ground-truth check of the real-looking sofa spots (Nadav); review the changed rooms to decide whether the VLM-added objects improve labels, then decide whether to feed VLM object names to MORE or add discriminative classes (rug, fireplace, nightstand, ceiling fan, ...) to the detector vocabulary; per-category thresholds and vetoes once ground-truth boxes exist.
