@@ -5,6 +5,54 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-10, MP3D single storey: a fixed set, a deterministic baseline, the flat-p ablation, and the single-storey fixes -- docs/progress/entries/046)
+- **A fixed single-storey evaluation set and its launcher** (`mp3d/single_storey_set.py`, `mp3d/sets/single_storey_flat_v1.json`:
+  180 same-storey episodes in 8 flat houses, the split-level scenes excluded, seeded; `mp3d/run_single_storey.sh <name>`
+  runs a campaign on it from a FROZEN rsync of the source tree with a shared, episode-scoped LLM answer store, so a
+  re-run of unchanged code is bit-identical -- 14/14 episodes, 0 live calls -- and two runs part only where a change
+  asks something new; `REPLAY=` serves earlier stores read-only). `single_storey_report.py` pairs the arms (SR, SPL,
+  per-category, bootstrap dSR, McNemar, flips); `single_storey_failures.py` tags each failure's mechanism from its
+  recording and the published goals, separates the ground-truth sensor's phantom ids from the method's failures, and
+  reads a near-miss STOP against the goal's `.house` box (beside / in the band / far).
+- **The flat-p ablation** (`LoopSettings.flat_p`, `SearchNodeOracle.flat`, `source="flat"` through the runtime): every
+  node at p 0.15 instead of the model's number. SR 59.4 % against the baseline's 62.8 % (dSR -3.3 pts [-6.7, +0.0],
+  p 0.11, 131/180 episodes identical): the 3B oracle's probabilities are worth about three points on this set.
+- **`--policy-config` reaches the room-search loop and the labeller** (`RPTSettings.room_search`, `room_labels`:
+  JSON objects of `LoopSettings` / `RoomLabelSettings` overrides), and the stall watchdog kills a scene worker that
+  has not written for `--stall-minutes` (30) and records exit -9 for the resume (`scene_pool.run_concurrently`).
+- **`llm_answer_cache --resolve-conflicts <dir> [--keep earliest|latest]`** repairs a store two concurrent runs
+  recorded the same key into with different answers (the loader refuses such a store).
+### Fixed (2026-11-10, the single-storey failures the recordings explain)
+- **A refusal is excused as a doorway scrape only in a channel a confirmed door landmark names**
+  (`ScrapeSettings.doorways_only`): the geometry-only channel test treated every squeeze of the route between
+  furniture as a doorway, excused the refusals that would have mapped the furniture, and 2azQ1b91cZZ/000058 released
+  a table in plain view 3 m away as "went nowhere" and lost it 26 more times. Two wedged episodes of the baseline
+  succeed; none regress.
+- **A `dining_room` verdict on fewer than `dining_min_chairs` (3) chairs reads `unknown`, and an empty passage-like
+  room is `hallway` by rule without a classifier call** (`RoomLabelSettings.dining_min_chairs`, `shape_rule`,
+  `shape_rule_confidence`): the benchmark's `table` is any table, and the model had made 225 dining rooms of desks,
+  side tables and coffee tables (32 episodes ended with two or more); 257 calls were on rooms with nothing in them,
+  answered hallway / foyer / storage / unknown at random. Calls 2,753 -> 2,000; the exploration order reshuffles
+  (+5/-7 flips, net 0 on the method's own failures).
+- **The STOP overshoot stands closer under a raised target** (`TargetClosingSettings.elevation_overshoot`,
+  `elevation_min_m` 0.30, `stop_overshoot_elevated_max_steps` 3): the within-radius test reads the memory's planar
+  range lifted by the target's lowest measured point above the base. MP3D's view points of an object raised 0.3 m or
+  more reach 0.84 m from its box (median over the set's 242 raised goals) against 1.02 m for one on the floor,
+  because the generator keeps only the candidates the object shows from. Two near-misses succeed, none regress.
+- **The standoff of a raised, mounted target is in front of it** (`frontal_standoff`, `frontal_wall_radius_m` 0.8;
+  `closing/wall_normal.py`, `target_path._ring_bearing`): the ring started from the agent's own bearing, so a picture
+  first seen at a grazing angle was approached and STOPped on from beside it -- inside the 1 m band but 0.1-0.5 m from
+  every view point, which for a thin wall object lie within 0.26 m of its width (8 of the baseline's 9 near-misses
+  stood beside their object, 45-70 degrees off its normal). The ring now starts toward the free cells around a memory
+  that has something occupied within 0.3 m of it; a raised object with floor all round keeps the old ring. The
+  pursuit's walk-back remembers the lock's lowest point and uses the same rule.
+- **The ground-truth detector's on-object filter is ON by default** (`--ground-truth-on-object-m` 0.25;
+  `GroundTruthDetector`, `GroundTruthSource.publish(depth, pose, camera)`, `HabitatRGBDSimulator.semantic_boxes`):
+  a rendered pixel counts as an instance's only where the frame's depth puts it on the instance's annotated box, so
+  the ids MP3D's semantic mesh leaks through walls and stair risers (32 of the baseline's 67 failures: 23 slivers under
+  10 cm tall, 9 whole boxes) are not reported. Perception layer only, the user's decision; nothing in the navigation
+  reads it.
+
 ### Fixed (2026-11-09, the MP3D run's graph and oracle bookkeeping, and the oracle's priors for every MP3D category)
 - **The node oracle is briefed with a WHERE IT LIVES line for every target category**
   (`room_priors.TARGET_HOMES`, `target_home_line`, `SearchContext.target_home`): the 3B model had no prior for the

@@ -130,6 +130,28 @@ def test_missing_llm_is_not_silently_run_as_uniform():
         policy.graph.update(world, [], policy.target)
 
 
+def test_the_flat_oracle_ablation_reaches_the_graph_through_the_policy_config_and_asks_no_model():
+    """``{"room_search": {"flat_p": 0.15}}``: every room at 0.15, no reasoning call, the run flies (source ``flat``)."""
+    from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+    policy, _ = setup_policy(room_search={"flat_p": 0.15})
+    assert policy.loop_settings.flat_p == 0.15 and policy.graph.oracle.flat_p == 0.15
+    assert policy.configuration()["node_oracle"]["flat_p"] == 0.15
+    data = np.full((100, 100), -1, np.int8)
+    data[20:80, 20:80] = 0
+    world = OccupancyGrid2D(data, OccupancyGrid2DParams(0.1, -5, -5),
+                            values=OccupancyValues(free=0, occupied=100, unknown=-1))
+    policy.graph.update(world, [], policy.target)
+    policy.graph.reason(world, policy.target, 5, here_xy=(0.0, 0.0))
+    oracle = policy.graph.last_reasoning["oracle"]
+    assert oracle["source"] == "flat" and policy.llm_client.reasoning_calls == 0
+    assert policy.graph.probs and all(p == pytest.approx(0.15) for p in policy.graph.probs.values())
+    assert setup_policy()[0].loop_settings.flat_p is None, "the default asks the model"
+    with pytest.raises(ValueError, match="flat_p"):
+        setup_policy(room_search={"flat_p": 1.0})
+    with pytest.raises(ValueError, match="room_search"):
+        RPTSettings(room_search=["flat_p"])
+
+
 @pytest.mark.parametrize("kwargs", [{"graph_period_steps": 0}, {"depth_stride": -1},
                                     {"map_size_m": float("nan")}, {"stop_distance_m": 0}])
 def test_invalid_method_settings_refused(kwargs):

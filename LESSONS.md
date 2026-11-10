@@ -11,6 +11,61 @@ Format per entry:
 
 ---
 
+## 2026-11-10 — Nine near-miss STOPs read as "the evaluator measures 1 m from the base in 3-D"; the generator's source said otherwise, and the fix changed shape
+
+**Symptom:** the MP3D single-storey baseline had nine STOPs within a metre of a goal's view point that scored 0, seven
+of them on raised targets (pictures, a wall cabinet, a towel). Measured from the published view points to the
+objects' `.house` boxes, the farthest view point of a goal stood 1.00 m from its box at the median, and for raised
+objects the planar reach was shorter -- so the first reading was a 3-D rule: "a view point lies within 1 m of the box
+measured from the agent's base", fix the STOP to stand closer under a raised object. The overshoot fix built on it
+turned two of the nine around and lost none.
+
+**Root cause:** the rule is not 3-D. The dataset generator (`habitat/datasets/object_nav/create/object_nav_generator.py`
+in the habitat-lab forks that kept it) lays a grid at the object's CENTRE HEIGHT, keeps a candidate within 1 m of the
+object's OBB in that plane (a planar test, whatever the object's height), drops it vertically onto the navmesh, and
+keeps it only if the object's pixels show from there with the camera turned to its centre at three pitches. The
+shorter reach of raised objects is the pixel test pruning the far candidates (the camera at 0.88 m must look up at
+them), and the same test is why a thin picture's view points stay within 0.26 m of its width along the wall (median
+over 78 pictures; 0.6-0.9 m for every other category): a 2 cm thick object shows nothing from beside itself. Eight of
+the nine near-misses stood BESIDE their object, 45-70 degrees off its normal, inside the 1 m band -- the standoff ring
+starts from the agent's own bearing, so a grazing first sighting bought a grazing standoff. The 3-D reading was a
+coincidence of the data that happened to point the same way as the pixel test for the two cases it fixed.
+
+**Fix / workaround:** read the generator before reading the data's silhouette; `single_storey_failures.py` now reads a
+near-miss against the goal's `.house` box with the generator's own distance (`beside` / `in_band` / `far`). The fix
+that matches the mechanism is the frontal standoff (`closing/wall_normal.py`, `frontal_standoff`); the overshoot's lift
+stays, under the right explanation (the comment in `target_closing.py` was corrected).
+
+**Don't:** fit a "wall normal" to the occupied cells around a picture's memory: pictures hang above sideboards, sofas
+and vanities, which the map draws as blobs beside the wall, and a line fit returned nothing on all three target
+recordings. The direction toward the free cells around the memory is what every mounting has in common.
+
+---
+
+## 2026-11-10 — Two campaigns sharing one LLM answer store ran the same scene at once, and every later process refused the store
+
+**Symptom:** the flat-p ablation (`runs/ss_flat_p`), launched into the single-storey study's shared answer store while
+the baseline's stalled scene was being resumed, had five of its eight scenes exit at preflight within a second:
+`LLM answer shards disagree on key c4b7acf1...` (`single_storey_v1_llm_answers/answers-LP-Boston-17093-776839.jsonl`).
+
+**Root cause:** the store is keyed by episode, so two runs of DIFFERENT episodes never collide -- but both runs held
+QUCTc6BB5sX at the same time. The flat-p worker loaded the store at its start, two minutes before the baseline's
+worker recorded a room-label answer for QUCTc6BB5sX/000193; 50 minutes later the flat-p worker asked the identical
+question live (its copy of the store did not have it), the warm server answered with another reasoning sentence,
+and both shards held the key. Every process that opened the store afterwards did what it should: refuse a store with
+two answers to one question.
+
+**Fix / workaround:** `python -m sparx_agency.core.mapping.topology.llm_answer_cache --resolve-conflicts <dir>` keeps
+the earliest recorded answer of every twice-answered key (the first run's) and moves the rest to
+`conflicts-<stamp>.jsonl.removed`; the campaigns resumed. Then: never start a second run on a shared store while a
+first one may still run the same episodes -- wait for it, or give the second run its own `LLM_ANSWERS_RECORD` with the
+first's directory as `LLM_ANSWERS_REPLAY`.
+
+**Don't:** read "scoped by episode" as "safe to share concurrently". A process reads the store once, at its start;
+anything another process records afterwards is invisible to it until it asks the server itself.
+
+---
+
 ## 2026-11-09 — An MP3D scene worker that loses its main thread is never reaped, and the campaign waits on it for ever
 
 **Symptom:** `runs/baseline21` and `runs/fixed15` (MP3D v1 val, ground-truth perception, GPU renderer, `--record`): the
@@ -27,8 +82,10 @@ exits, so the pool's slot is held until someone kills it; the earlier baseline's
 
 **Fix / workaround:** `kill -9 <pid>` the half-dead worker (and its orphaned `ffmpeg`): the campaign thread's wait
 returns (`exit -9`), the next scene starts, and `--output <same root>` resumes the scene afterwards. The episode may
-die again at another step (it did once). Not yet fixed in the harness; a watchdog on `steps.jsonl` / `progress.json`
-mtime in `run_concurrently` would end such a worker itself.
+die again at another step (it did once). Since 2026-11-10 the pool does this itself: `scene_pool.run_concurrently`
+(`mp3d/campaign.py --stall-minutes`, default 30) kills a child's whole session when its `live.json` / `progress.json`
+/ `episodes.jsonl` / console log have not changed for that long, records exit -9, and the next scene starts; the
+threshold is longer than the reasoning model's 900 s call timeout so a slow oracle answer is never read as a death.
 
 **Don't:** Don't read `<defunct>` as "exited, waiting to be reaped" before checking `/proc/<pid>/task`: with live
 threads under a dead leader `waitpid` has nothing to collect, and the usual "the parent forgot to wait" theory sends

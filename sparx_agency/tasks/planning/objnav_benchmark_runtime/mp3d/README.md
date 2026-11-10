@@ -204,6 +204,65 @@ mp3d/run_benchmark.sh --status runs/gt_oracle_mp3d_2195ep_X     # one screen: do
 * `--output <root>` resumes: merged scenes and finished shards are kept, started
   shards continue (`--resume`), the rest start.
 
+### The fixed single-storey set (the study of 2026-11-10)
+
+The method's single-storey potential is measured on one fixed list of episodes,
+re-run after every change, from a frozen copy of the source:
+
+```bash
+mp3d/run_single_storey.sh baseline --jobs 3                      # the current code, every LLM answer recorded
+mp3d/run_single_storey.sh flat_p --policy-config mp3d/sets/policy_flat_p.json   # the oracle ablation on the same episodes
+# a later arm records into its own store and REPLAYs the earlier ones (two concurrent runs must not share a record dir)
+STORE=$PWD/runs/ss_fix_closing_llm_answers REPLAY=$PWD/runs/single_storey_v1_llm_answers \
+    mp3d/run_single_storey.sh fix_closing --policy-config mp3d/sets/policy_fix_closing.json --jobs 2
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.single_storey_report \
+    baseline=runs/ss_baseline flat-p=runs/ss_flat_p                # SR, SPL, per-category SR, paired flips
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.single_storey_failures runs/ss_baseline
+```
+
+The per-fix arms of the 2026-11-10 study are the configs under `sets/`:
+`policy_fixes_off.json` turns every single-storey fix off (the baseline's
+behaviour under today's perception), `policy_fix_{closing,wedge,dining,shape}.json`
+turn one on at a time; no config is every fix on.
+
+* **The set** is `sets/single_storey_flat_v1.json`: 180 same-storey episodes
+  drawn (seed 17, uniform) from the 1,281 val episodes that start on a storey,
+  whose nearest goal view point lies on it within 0.2 m of the start's height,
+  whose shortest path never climbs or drops 0.2 m, and whose scene is not
+  split-level (x8F5xyUWy9e, X7HyMhZNoso, EU6Fwq7SyZv are out). `single_storey_set.py`
+  regenerates it from the shipped level survey `sets/mp3d_val_levels.csv`
+  (`hm3d/episode_levels.py` over MP3D val); the `.meta.json` beside it holds the
+  rules and the per-scene / per-category counts. Change it only on purpose:
+  every comparison made on it depends on its being the same list.
+* **`run_single_storey.sh <name>`** rsyncs the tracked source into
+  `~/GIT/TheAgency_snapshots/<name>/` once and runs the launcher from there (a
+  scene child imports the repository at its own start, so a campaign that runs
+  for hours while the tree is edited would mix two methods), with ground-truth
+  perception, `--record`, the resident Ollama, and **one LLM answer store for
+  every run of the study** (`runs/single_storey_v1_llm_answers`,
+  `LLM_ANSWERS_RECORD`): a question an episode has already had answered gets the
+  same answer in every later run, so two runs part only where a change makes
+  them ask something new. `--resume` continues an interrupted campaign;
+  `--policy-config` passes a JSON of `RPTSettings` overrides.
+* **`--stall-minutes N`** (campaign, default 30): a scene child whose
+  `live.json` / `progress.json` / `episodes.jsonl` / console log stop changing
+  for that long is killed with its session and recorded as exit -9 -- a worker
+  that lost its main thread keeps its CUDA threads and never exits
+  (`LESSONS.md` 2026-11-09); `--output <root>` then resumes the scene.
+* **`single_storey_report.py`** tabulates every campaign named against the
+  first (SR, SPL, SoftSPL, DTG, steps, STOP / limit, wrong STOPs within 1 m,
+  the paired dSR and dSPL with bootstrap intervals, the exact McNemar p, the
+  flips) and the per-category and per-scene SR side by side, over the episodes
+  all of them ran. **`single_storey_failures.py`** reads each failure's
+  recording and the published goals: the STOP's reason, the agent against the
+  view points, every lock's first box and memory, a first mechanism tag, with
+  the ground-truth sensor's phantom ids (`gt_phantom_*`) counted apart from the
+  method's failures; a near-miss STOP is also read against the goal's `.house`
+  box (`--scene-dir`): the generator's own distance, how far beside the
+  object's width the agent stands and how far off its normal -- `beside`,
+  `in_band` or `far`. `--locks` dumps every lock with its visible extent (the
+  sliver data); the labeller tally covers every episode.
+
 ### Freeze, then evaluate (for a number you intend to publish)
 
 ```bash
@@ -263,7 +322,7 @@ evidence and the deviations we name rather than apply.
 | `dataset.py` | the published release: episodes (sharded, or val_mini's single file), goals, scene assets, semantic assets and config, manifest |
 | `env.py` | the simulation driver behind `ObjNavEnv`: reset, step, measure, start validation |
 | `run.py` | preflight and evaluation CLI (the shared `run_evaluation`) |
-| `campaign.py` | one process per scene, the aggregate; reuses `hm3d/scene_pool.py` and `hm3d/smoke_plan.py` |
+| `campaign.py` | one process per scene, the aggregate, the stall watchdog (`--stall-minutes`); reuses `hm3d/scene_pool.py` and `hm3d/smoke_plan.py` |
 | `sharded_campaign.py` | `--shard-episodes`: every scene as shards on the pool, each scene merged when its shards finish |
 | `shard_plan.py` | the shards (interleaved across scenes), their LLM servers, the plan file, the per-scene merge |
 | `shard_pool.py` | the VRAM-gated pool with a live worker cap; VRAM only ever delays a start |
@@ -271,6 +330,9 @@ evidence and the deviations we name rather than apply.
 | `assets.py` | installation check, public episode fetch, scene instructions |
 | `report.py`, `sota.py` | `comparison.md` / `audit.json`, the 0.2 m re-scoring, the transcribed paper rows |
 | `frozen_eval.py` | freeze a configuration, run the published split under it |
+| `single_storey_set.py`, `sets/` | the fixed single-storey evaluation set (180 same-storey episodes in the flat houses) and the level survey it is drawn from |
+| `run_single_storey.sh` | a campaign on that set from a frozen source snapshot, one LLM answer store for the whole study |
+| `single_storey_report.py`, `single_storey_failures.py` | baseline-versus-steps table (paired); per-failure mechanism from the recordings, the lock / sliver data, the labeller tally |
 | `smooth_replay.py` | visualization-only smooth replay of a recording |
 | `../ground_truth/mp3d_categories.py` | the ground-truth perception's MP3D table (mpcat40 goal classes, context words) |
 | `../tests/test_mp3d*.py` | the adapter without Matterport3D, habitat-sim or a GPU (`test_mp3d_ground_truth.py`: the oracle path) |

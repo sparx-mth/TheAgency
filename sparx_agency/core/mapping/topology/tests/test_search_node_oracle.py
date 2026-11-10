@@ -4,8 +4,9 @@ from __future__ import annotations
 import pytest
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    HOME_FLOOR, OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, STAIRS,
-    STAIRS_SUPPLEMENT, SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, SearchContext, SearchNode, SearchNodeOracle,
+    HOME_FLOOR, OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, SOURCE_FLAT,
+    SOURCE_LLM, STAIRS, STAIRS_SUPPLEMENT, SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, USABLE_SOURCES,
+    SearchContext, SearchNode, SearchNodeOracle,
     budget_line, coarse_seconds, floor_unexplored, format_exits, format_node, format_prompt, normalise, parse_home_here,
     parse_pass, parse_reply, system_prompt)
 
@@ -269,6 +270,22 @@ def test_model_trouble_degrades_to_a_uniform_the_caller_can_refuse():
     result = junk.probabilities("bed", NODES)
     assert result.source == "uniform_fallback" and result.raw_reply == {"rooms": []}
     assert junk.probabilities("bed", NODES).source == "uniform_fallback", "a failed reply is never kept"
+
+
+def test_the_flat_ablation_reads_every_node_at_one_probability_and_never_asks_the_model():
+    """``flat_p``: what the search does without the oracle -- RPT* over travel cost alone -- measured on the same code."""
+    client = Scripted({"nodes": [{"id": 0, "p": 90}, {"id": 1, "p": 5}]})
+    oracle = SearchNodeOracle(client, flat_p=0.15)
+    result = oracle.probabilities("bed", NODES, SearchContext(HOUSE))
+    assert result.source == SOURCE_FLAT and SOURCE_FLAT in USABLE_SOURCES and "uniform_fallback" not in USABLE_SOURCES
+    assert result.probs == {n.id: pytest.approx(0.15) for n in NODES} and result.spread == 0.0
+    assert client.calls == 0 and oracle.queries == 0, "no call, so no answer to record or replay"
+    assert result.pass_verdict is None and result.reading == {} and result.raw_reply is None
+    assert result.elsewhere == pytest.approx(0.85 ** len(NODES)) and result.p_present == pytest.approx(1.0 - 0.85 ** len(NODES))
+    assert SearchNodeOracle(client).probabilities("bed", [KITCHEN]).source == SOURCE_LLM, "None asks the model"
+    for bad in (0.0, 1.0, -0.1, float("nan"), True):
+        with pytest.raises(ValueError, match="flat_p"):
+            SearchNodeOracle(client, flat_p=bad)
 
 
 def test_search_node_refuses_an_unknown_kind():

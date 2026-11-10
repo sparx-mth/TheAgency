@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, SearchNodeOracle, system_prompt)
+    HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, USABLE_SOURCES, SearchNodeOracle, system_prompt)
 
 
 class RepairingNodeOracle(SearchNodeOracle):
@@ -15,15 +15,15 @@ class RepairingNodeOracle(SearchNodeOracle):
     """
 
     def __init__(self, client, unexplored_floor=UNEXPLORED_FLOOR, unexplored_elsewhere=UNEXPLORED_ELSEWHERE,
-                 home_floor=HOME_FLOOR):
+                 home_floor=HOME_FLOOR, flat_p=None):
         super().__init__(client, unexplored_floor=unexplored_floor, unexplored_elsewhere=unexplored_elsewhere,
-                         home_floor=home_floor)
+                         home_floor=home_floor, flat_p=flat_p)
         self.repair_attempts = 0
         self.repair_successes = 0
 
     def probabilities(self, target, nodes, context=None):
         result = super().probabilities(target, nodes, context)
-        if result.source == "llm":
+        if result.source in USABLE_SOURCES:
             return result
         self.repair_attempts += 1
         user = self.prompt(target, nodes, context)

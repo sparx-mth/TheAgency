@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 
+from sparx_agency.core.planning.object_search.closing.wall_normal import wall_normal
+
 
 class TargetApproachPath:
     """Own the projected footpoint while the existing route memory owns A*.
@@ -66,12 +68,24 @@ class TargetApproachPath:
     ring point that has a route; when none has, the stale goal is kept
     while it lies within the terminal radius plus the tolerance
     (``stale_kept``).
+
+    **The ring of a raised target starts from the wall's normal** (since
+    2026-11-10, ``TargetClosingSettings.frontal_standoff``). The ring's
+    first bearing is the agent's own, so a picture first seen at a grazing
+    angle was approached and STOPped on from beside it, where the evaluator
+    has no view point (``wall_normal.py`` has the cases). For a target
+    raised ``elevation_min_m`` or more that the map shows mounted on
+    something, the ring starts from the direction into the room -- toward
+    the free floor around the memory -- and leaves out the bearing into the
+    wall (``frontal``, counted on the closing as ``frontal_standoffs``).
     """
 
     #: The bearings tried about the memory, from the agent's side round to behind it.
     OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90, 180)
     #: The front arc alone for the widened rings: beside and behind a big object is where its floor is not.
     FRONT_OFFSETS_DEG = (0, 30, -30, 60, -60)
+    #: About a wall's normal: everything but the bearing into the wall.
+    WALL_OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90)
 
     def __init__(self, policy):
         self.policy = policy
@@ -85,13 +99,14 @@ class TargetApproachPath:
         self.widened = False               # the current goal lies beyond the standoff ring: no closer point had a route
         self.widenings = 0                 # standoffs found on a widened ring over this lock
         self.stale_kept = 0                # stale goals kept because no ring point had a route
+        self.frontal = False               # the current goal's ring started from the wall's normal (``frontal_standoff``)
 
     def drop(self):
         """Give up the current standoff so the next :meth:`command` selects one anew, closer to the memory."""
         if self.goal_xyz is not None:
             self.dropped += 1
         self.goal_xyz = self.reference_xyz = None
-        self.arrived = self.widened = False
+        self.arrived = self.widened = self.frontal = False
         self.policy.route_memory.clear("standoff_dropped")
         self.policy._route = self.policy._goal = None
 
@@ -109,7 +124,7 @@ class TargetApproachPath:
             else:
                 previous = self.goal_xyz        # a goal carried out of the terminal radius: the ring's fallback
                 self.goal_xyz = None
-                self.arrived = self.widened = False
+                self.arrived = self.widened = self.frontal = False
                 p.route_memory.clear("target_refined")
                 p._route = p._goal = None
         if self.goal_xyz is not None:
@@ -123,11 +138,11 @@ class TargetApproachPath:
                 self.arrived = reached
                 return command
             self.goal_xyz = None
-            self.arrived = self.widened = False
+            self.arrived = self.widened = self.frontal = False
         tolerance = p.converter_params.goal_tolerance_m
         limit = s.terminal_distance_m - tolerance
         radius = max(p.settings.body_radius_m, limit - world.resolution)
-        bearing = math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0])
+        bearing, offsets = self._ring_bearing(target, obs, world)
         planners = [None]
         squeeze = getattr(p, "squeeze_planner", None)
         if squeeze is not None and squeeze.params.inflate_floor_m < p.planner_params.inflate_floor_m:
@@ -146,7 +161,7 @@ class TargetApproachPath:
         # route, wider rings in the front arc out to the terminal radius (since 2026-10-15): a goal there is
         # reached within the tolerance up to a forward step outside the terminal range, which the inspection
         # closes with a step (``TargetClosing._inspect``) and STOPs on when it cannot (``closest_approach``).
-        rings = [(radius, limit, self.OFFSETS_DEG)]
+        rings = [(radius, limit, offsets)]
         widest = s.terminal_distance_m - world.resolution
         if widest > radius + world.resolution:
             reach = s.terminal_distance_m + world.resolution
@@ -176,9 +191,27 @@ class TargetApproachPath:
             if command is not None:
                 self.stale_kept += 1
                 target.stale_standoffs_kept += 1
+                self.frontal = False                 # the old goal, from whatever ring found it
                 self._adopt(target, obs, previous, widened=True, through_unknown=False)
                 return command
         return None
+
+    def _ring_bearing(self, target, obs, world):
+        """The bearing the standoff ring starts from and the offsets tried about it.
+
+        The agent's own bearing from the memory, as always -- except for a
+        raised target mounted on something (``frontal_standoff``), whose
+        ring starts from the direction into the room, so the standoff is in
+        front of the object as its view points are (``wall_normal.py``).
+        """
+        s = target.settings
+        if s.frontal_standoff and target.elevation_above_base(obs) > 0.0:
+            normal = wall_normal(world, target.xyz[:2], radius_m=s.frontal_wall_radius_m)
+            if normal is not None:
+                self.frontal = True
+                return math.atan2(normal[1], normal[0]), self.WALL_OFFSETS_DEG
+        self.frontal = False
+        return math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0]), self.OFFSETS_DEG
 
     def _height_tolerance(self):
         """How far a projected standoff may lie above or below the agent: a step's height, or the storey's step reach.
@@ -208,6 +241,8 @@ class TargetApproachPath:
         self.arrived = p.route_memory.arrived(obs)      # a ring point the agent already stands on
         if self.arrived:
             self.arrivals += 1
+        if self.frontal:
+            target.frontal_standoffs += 1
         if widened:
             self.widenings += 1
             target.widened_standoffs += 1

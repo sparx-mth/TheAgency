@@ -12,7 +12,7 @@ from sparx_agency.core.mapping.topology.room_registry import RoomRegistry
 from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters, link_doors, door_room_pairs
 from sparx_agency.core.mapping.topology.room_watershed import (
     choke_fields, segment_rooms_watershed, sightline_dips, trail_thresholds, WatershedRoomParams)
-from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, SearchNode, SearchNodeOracle
+from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, USABLE_SOURCES, SearchNode, SearchNodeOracle
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
 from sparx_agency.core.planning.exploration.object_search_supervisor import RoomFacts
@@ -618,7 +618,7 @@ class ObservedSceneGraph:
             result = self.oracle.probabilities(target.query, nodes, context)
         except Exception as exc:
             raise ObjNavInternalError("Room LLM failed: %s" % exc) from exc
-        if result.source != "llm" or not all(math.isfinite(p) and 0 <= p <= 1 for p in result.probs.values()):
+        if result.source not in USABLE_SOURCES or not all(math.isfinite(p) and 0 <= p <= 1 for p in result.probs.values()):
             raise ObjNavInternalError("Room oracle failed; refusing a uniform fallback run")
         if result.reused:
             self.oracle_reuses += 1

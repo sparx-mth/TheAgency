@@ -74,6 +74,18 @@ def habitat_pose(position, body_rotation, camera_rotation) -> AgentPose:
                                 math.hypot(camera_forward[0], camera_forward[2])))
 
 
+def enu_box(center, half_sizes):
+    """A Habitat Y-up axis-aligned box as the method's ENU one: ``((x, y, z) centre, (x, y, z) half sizes)``.
+
+    The same mapping as :func:`habitat_pose`'s translation -- ENU ``x`` is
+    Habitat ``-z``, ENU ``y`` is Habitat ``-x``, ENU ``z`` is Habitat ``y`` --
+    so the half sizes permute the same way (a box is symmetric about its
+    centre: the signs drop).
+    """
+    return ((-float(center[2]), -float(center[0]), float(center[1])),
+            (float(half_sizes[2]), float(half_sizes[0]), float(half_sizes[1])))
+
+
 def habitat_position(pose):
     """The exact inverse of :func:`habitat_pose`'s translation: ENU -> Habitat XYZ.
 
@@ -315,6 +327,37 @@ class HabitatRGBDSimulator:
                     str(obj.category.name(naming)).strip().lower() if obj.category is not None else "")
             self._semantic_names[naming] = names
         return self._semantic_names[naming]
+
+    def semantic_boxes(self):
+        """``{instance id: (center xyz, half sizes xyz)}`` of every annotated instance, in habitat-sim's Y-up world frame.
+
+        The axis-aligned box habitat-sim's semantic scene holds for each
+        object (``SemanticObject.aabb``): what the ground-truth perception's
+        on-object filter judges a rendered pixel against. Empty when the
+        scene carries no boxes.
+
+        Raises:
+            EnvContractError: No scene is loaded, or the sensor is off.
+        """
+        if self._sim is None or self._semantic_objects is None:
+            raise EnvContractError("Simulator not reset with semantic=True; there are no annotations to read")
+        boxes = {}
+        for obj in getattr(self._sim.semantic_scene, "objects", ()) or ():
+            if obj is None:
+                continue
+            try:
+                instance = int(obj.semantic_id)
+            except (AttributeError, TypeError, ValueError):
+                instance = int(str(obj.id).rsplit("_", 1)[-1])
+            aabb = getattr(obj, "aabb", None)
+            if instance not in self._semantic_objects or aabb is None:
+                continue
+            center = np.asarray(aabb.center, dtype=np.float64)
+            sizes = np.asarray(aabb.sizes, dtype=np.float64)
+            if center.shape != (3,) or sizes.shape != (3,) or not np.all(np.isfinite(center)) or not np.all(np.isfinite(sizes)):
+                continue
+            boxes[instance] = (tuple(float(v) for v in center), tuple(float(abs(v)) / 2.0 for v in sizes))
+        return boxes
 
     def _read_semantic_objects(self, scene_path):
         """Read the loaded scene's annotation table, refusing a scene that has none.

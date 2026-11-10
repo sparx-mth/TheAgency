@@ -173,7 +173,7 @@ def test_the_detector_reports_every_labelled_instance_once_at_confidence_one_wit
         ("chair", 1.0, (1.0, 1.0, 4.0, 3.0)), ("couch", 1.0, (4.0, 3.0, 8.0, 6.0)), ("door", 1.0, (0.0, 0.0, 1.0, 6.0))]
     assert all(d.cls in VOCABULARY for d in detections)
     assert detector.last_diagnostics == {"mode": GROUND_TRUTH_BACKEND, "visible_instances": 4, "reported": 3,
-                                         "below_min_pixels": 0}
+                                         "below_min_pixels": 0, "off_object": 0, "trimmed_to_object": 0}
     assert detector.last_detections == tuple(detections) and detector.last_inference_ms is not None
     # The method's own alias folding applies afterwards and leaves the boxes alone.
     folded = deduplicate_detections(detections)
@@ -190,10 +190,57 @@ def test_the_resolution_floor_is_declared_and_applied():
     detector = GroundTruthDetector(source, min_pixels=2)
     assert [d.cls for d in detector.detect(rgb)] == ["chair"]
     assert detector.last_diagnostics["below_min_pixels"] == 1
-    assert detector.health()["metadata"]["detector_config"] == {"conf_thresh": 0.0, "min_pixels": 2, "label_table": "hm3d"}
+    assert detector.health()["metadata"]["detector_config"] == {"conf_thresh": 0.0, "min_pixels": 2, "on_object_m": 0.25,
+                                                                "label_table": "hm3d"}
     assert GroundTruthDetector(source).min_pixels == DEFAULT_MIN_PIXELS
     with pytest.raises(ValueError):
         GroundTruthDetector(source, min_pixels=0)
+
+
+def test_the_on_object_filter_drops_an_instance_painted_where_it_does_not_stand_and_trims_one_partly_off():
+    """MP3D Z6MFQCViBuw (2026-11-10): the semantic sensor painted goal chairs across a staircase wall 3-7 m from
+    the chairs, and the baseline STOPped on them. With ``on_object_m`` a pixel is the instance's only where the
+    depth puts it on the annotation's box; the filter is on by default (0.25 m), off at 0, and judges nothing
+    without a depth frame."""
+    from sparx_agency.core.planning.objnav.camera_intrinsics import intrinsics_from_hfov
+    from sparx_agency.core.planning.objnav.types.camera import CameraSpec
+
+    camera = CameraSpec(intrinsics_from_hfov(8, 6, 90.0), 0.88, 0.1, 10.0)
+    pose = AgentPose(0.0, 0.0, 0.0, 0.0)                                  # looking along +x, camera 0.88 m up
+    # Two instances: a chair whose pixels lie 2 m ahead where its box is (a box wide enough to hold the whole left
+    # strip of the frame), and a "phantom" chair painted on the same wall while its box stands 5 m further on.
+    ids = frame(i2=(0, 2, 3, 5), i7=(5, 2, 8, 5))
+    depth = np.full(ids.shape, 2.0, dtype=np.float32)
+    boxes = {2: ((2.0, 1.0, 0.6), (0.4, 1.5, 0.8)), 7: ((7.0, -1.0, 0.5), (0.4, 0.4, 0.5))}
+    source = GroundTruthSource(MAPPER)
+    source.begin_scene("00800-TEEsavR23oF", {2: "chair", 7: "chair"}, {}, boxes=boxes)
+    assert source.scene_report["instances_with_boxes"] == 2
+    rgb = rgb_for(ids)
+    source.publish(rgb, ids, depth=depth, pose=pose, camera=camera)
+    filtered = GroundTruthDetector(source, min_pixels=1, on_object_m=0.3)
+    detections = filtered.detect(rgb)
+    assert [d.cls for d in detections] == ["chair"] and detections[0].xyxy == (0.0, 2.0, 3.0, 5.0)
+    assert filtered.last_diagnostics["off_object"] == 1 and filtered.off_object_instances == 1
+    assert filtered.health()["metadata"]["detector_config"]["on_object_m"] == 0.3
+    assert GroundTruthDetector(source, min_pixels=1).on_object_m == 0.25, "on by default"
+    plain = GroundTruthDetector(source, min_pixels=1, on_object_m=0.0)
+    assert len(plain.detect(rgb)) == 2, "off: every painted instance is reported"
+    # Partly off: the chair's lower rows read at 2 m (on the box), its upper rows at 6 m (a wall behind, seen through
+    # a leak). The instance is kept on its on-box pixels, its box trimmed, and the segmenter's mask is those pixels.
+    ids = frame(i2=(0, 1, 3, 5))
+    depth = np.full(ids.shape, 2.0, dtype=np.float32)
+    depth[1:3, :] = 6.0
+    source.publish(rgb_for(ids), ids, depth=depth, pose=pose, camera=camera)
+    rgb = rgb_for(ids)
+    detections = filtered.detect(rgb)
+    assert len(detections) == 1 and detections[0].xyxy == (0.0, 3.0, 3.0, 5.0) and filtered.last_diagnostics["trimmed_to_object"] == 1
+    mask = GroundTruthSegmenter(filtered).segment(rgb, [detections[0].xyxy])[0]
+    assert int(mask.sum()) == 6 and mask[3:5, 0:3].all() and not mask[1:3, :].any()
+    # Without a depth frame the filter judges nothing.
+    source.publish(rgb, ids)
+    assert len(filtered.detect(rgb)) == 1 and filtered.last_diagnostics["off_object"] == 0
+    with pytest.raises(ValueError):
+        GroundTruthDetector(source, on_object_m=-1.0)
 
 
 def test_the_identities_are_shaped_like_the_services_and_pinned_to_the_table():

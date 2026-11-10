@@ -5,8 +5,9 @@ import math
 
 import pytest
 
-from sparx_agency.core.planning.object_search.navigation.tests.rig import (DOOR_X, DOOR_Y, doorway_policy,
-                                                                              doorway_world, observe, planned_route)
+from sparx_agency.core.planning.object_search.navigation.tests.rig import (DOOR_X, DOOR_Y, confirm_door,
+                                                                              doorway_policy, doorway_world, observe,
+                                                                              planned_route)
 from sparx_agency.core.planning.objnav.action_converter.converter import DiscreteActionConverter
 from sparx_agency.core.planning.objnav.action_converter.transition import apply_action
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
@@ -63,6 +64,7 @@ def test_an_agent_off_the_plan_gets_a_fresh_plan_from_where_it_is():
 def test_a_refused_step_is_remembered_as_a_pose_and_the_next_plan_turns_first():
     policy, ep = doorway_policy()
     world = doorway_world()
+    confirm_door(policy)                                               # the guard excuses scrapes at a doorway a door names
     start, goal = (DOOR_X - 1.0, DOOR_Y, 0.0), (DOOR_X + 2.5, DOOR_Y)
     route = planned_route(policy, world, start[:2], goal)
     obs, command = follow(policy, ep, world, 1, start, route)

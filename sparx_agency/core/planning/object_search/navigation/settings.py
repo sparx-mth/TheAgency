@@ -142,7 +142,22 @@ class ScrapeSettings:
         window_actions: The window of that count.
         door_match_m: A confirmed door landmark within this distance of the
             throat is reported with the scrape (a doorway the detector saw,
-            not only one the geometry found); it does not change the verdict.
+            not only one the geometry found); with ``doorways_only`` off it
+            does not change the verdict.
+        doorways_only: Excuse a refusal only in a channel a confirmed door
+            landmark names (since 2026-11-10). The guard was written for
+            doorways, but every squeeze of the route under
+            ``channel_half_width_m`` is a channel -- the gap between a dining
+            table and the wall as much as a door -- and in clutter it excused
+            the refusals that would have told the map about the furniture
+            the body was pushing against: 2azQ1b91cZZ/000058 (MP3D, ground
+            truth) refused six MOVE_FORWARDs from one spot at five headings
+            in 20 actions, the first three excused, and the closing released
+            a table in plain view 3 m away as "went nowhere" -- then locked
+            and lost it 26 more times. A refusal in a channel no door names
+            is written at once, and the second one leaves the sticky bar
+            that routes the planner around the wedge. ``False`` restores the
+            geometry-only channel.
     """
 
     enabled: bool = True
@@ -151,9 +166,11 @@ class ScrapeSettings:
     scrapes_before_mark: int = 3
     window_actions: int = 40
     door_match_m: float = 0.6
+    doorways_only: bool = True
 
     def __post_init__(self):
         _check_bool("ScrapeSettings", "enabled", self.enabled)
+        _check_bool("ScrapeSettings", "doorways_only", self.doorways_only)
         for name in ("max_heading_deg", "reach_m", "door_match_m"):
             _check_positive("ScrapeSettings", name, getattr(self, name))
         _check_count("ScrapeSettings", "scrapes_before_mark", self.scrapes_before_mark)

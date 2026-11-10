@@ -173,7 +173,7 @@ def test_an_empty_passage_is_classified_on_its_shape_alone_weakly_and_once_per_g
             return {"label": "living_room", "confidence": 0.8, "reasoning": "objects"}
 
     client = Shaped()
-    tracker = RevisableRoomLabels(client)
+    tracker = RevisableRoomLabels(client, RoomLabelSettings(shape_rule=False))      # the model's verdict, as before 2026-11-10
     corridor = {"area_m2": 7.0, "elongation": 4.0, "doors": 3}
     square = {"area_m2": 12.0, "elongation": 1.1, "doors": 1}
     labels = tracker.update({1: [], 2: [], 3: ["cabinet"]}, 0, facts={1: corridor, 2: square, 3: corridor})
@@ -193,6 +193,57 @@ def test_an_empty_passage_is_classified_on_its_shape_alone_weakly_and_once_per_g
     assert RoomLabelSettings().shape_candidate({"area_m2": 1.0, "elongation": 5.0, "doors": 3}) is False, "a sliver is no room"
     with pytest.raises(ValueError):
         RoomLabelSettings(corridor_elongation=0.0)
+
+
+def test_an_empty_passage_is_a_hallway_by_rule_without_a_call_and_an_object_relabels_it_at_once():
+    """Since 2026-11-10 (``shape_rule``): the room with nothing in it is not a question for the model -- the
+    calls on zero objects were 64 % hallway and otherwise noise, and two runs answered one prompt differently."""
+    class Counting:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, system, user):
+            self.calls.append(user)
+            return {"label": "living_room", "confidence": 0.8, "reasoning": "objects"}
+
+    client = Counting()
+    tracker = RevisableRoomLabels(client)
+    corridor = {"area_m2": 7.0, "elongation": 4.0, "doors": 3}
+    square = {"area_m2": 12.0, "elongation": 1.1, "doors": 1}
+    labels = tracker.update({1: [], 2: []}, 0, facts={1: corridor, 2: square})
+    assert labels[1].label == "hallway" and labels[2].label == "unknown" and client.calls == []
+    assert tracker.shape_ruled == 1 and tracker.queries == 0
+    assert tracker.metadata[1]["strength"] == "weak" and tracker.metadata[1]["shape_only"] and tracker.metadata[1]["trigger"] == "shape"
+    assert labels[1].confidence == RoomLabelSettings().shape_rule_confidence < RoomLabelSettings().strong_confidence
+    assert tracker.update({1: ["sofa"]}, 2, facts={1: corridor})[1].label == "living_room" and len(client.calls) == 1, \
+        "an object in the room is the model's question again, at once"
+    with pytest.raises(ValueError, match="shape_rule_confidence"):
+        RoomLabelSettings(shape_rule_confidence=0.9)
+
+
+def test_a_dining_room_needs_chairs_at_its_table():
+    """Since 2026-11-10 (``dining_min_chairs``): under the benchmark's label table every desk, side table and coffee
+    table is a ``table``, and the 3B model made dining rooms of them; the verdict stands only on three chairs or more."""
+    class Dining:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, system, user):
+            self.calls += 1
+            return {"label": "dining_room", "confidence": 0.85, "reasoning": "a table"}
+
+    client = Dining()
+    tracker = RevisableRoomLabels(client)
+    assert tracker.update({1: ["table"]}, 0)[1].label == "unknown" and tracker.dining_downgrades == 1
+    assert "3 chairs" in tracker.labels[1].reasoning and tracker.labels[1].confidence == 0.85
+    assert tracker.update({2: ["table", "chair"]}, 1)[2].label == "unknown", "a desk and its chair"
+    assert tracker.update({3: ["table", "chair", "chair", "chair", "chair"]}, 2)[3].label == "dining_room"
+    assert tracker.update({4: ["table", "armchair", "chair", "chair"]}, 3)[4].label == "dining_room", "an alias counts as a chair"
+    assert tracker.dining_downgrades == 2 and client.calls == 4
+    legacy = RevisableRoomLabels(Dining(), RoomLabelSettings(dining_min_chairs=0))
+    assert legacy.update({1: ["table"]}, 0)[1].label == "dining_room", "the rule off: the model's word"
+    with pytest.raises(ValueError, match="dining_min_chairs"):
+        RoomLabelSettings(dining_min_chairs=-1)
 
 
 def test_signature_objects_of_two_room_types_in_one_region_make_a_weak_label():

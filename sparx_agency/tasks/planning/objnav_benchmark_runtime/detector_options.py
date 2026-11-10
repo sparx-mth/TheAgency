@@ -42,6 +42,11 @@ def add_perception_options(parser):
     parser.add_argument("--ground-truth-min-pixels", type=int, default=None, metavar="N",
                         help="With --perception ground-truth: an annotated instance covering fewer than N pixels is "
                              "not reported (default 64, an 8x8 patch at 640x480); the oracle's declared resolution floor")
+    parser.add_argument("--ground-truth-on-object-m", type=float, default=None, metavar="M",
+                        help="With --perception ground-truth: a rendered pixel is the instance's only where the depth "
+                             "puts it inside the annotation's own box inflated by M metres; an instance mostly off its "
+                             "box is not reported (the semantic mesh leaks ids through walls). Default 0.25; 0 turns "
+                             "the filter off")
 
 
 def detector_flags(args):
@@ -61,6 +66,8 @@ def perception_flags(args):
         flags += ["--perception", perception]
     if getattr(args, "ground_truth_min_pixels", None) is not None:
         flags += ["--ground-truth-min-pixels", str(args.ground_truth_min_pixels)]
+    if getattr(args, "ground_truth_on_object_m", None) is not None:
+        flags += ["--ground-truth-on-object-m", str(args.ground_truth_on_object_m)]
     return flags
 
 

@@ -7,7 +7,9 @@ from typing import Any, Dict, List
 
 import pytest
 
-from sparx_agency.core.mapping.topology.llm_answer_cache import LLMAnswerStore, request_key
+from pathlib import Path
+
+from sparx_agency.core.mapping.topology.llm_answer_cache import SCHEMA, LLMAnswerStore, request_key
 from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
 from sparx_agency.core.mapping.topology.llm_exclusive import ExclusiveColdStart
 
@@ -203,3 +205,26 @@ def test_the_frozen_description_does_not_change_as_the_run_records(tmp_path):
     before = store.describe()
     _client(['{"a": 1}'], store).chat_json("s", "u")
     assert LLMAnswerStore(record_dir=tmp_path).describe() == before
+
+
+def test_a_record_directory_two_runs_answered_the_same_question_in_is_repaired_by_keeping_the_earliest(tmp_path):
+    """2026-11-10: the baseline's resumed scene and the flat-p ablation of the same scene both asked a question
+    neither had loaded, got two answers, and every process opening the store afterwards refused it."""
+    from sparx_agency.core.mapping.topology.llm_answer_cache import resolve_conflicts
+
+    def line(key, answer, when, scope="s/1"):
+        return json.dumps({"schema": SCHEMA, "key": key, "answer": answer, "scope": scope, "recorded_utc": when,
+                           "route": "label", "system": "s", "user": "u"})
+
+    (tmp_path / "answers-h-1.jsonl").write_text(line("k1", "A", "2026-11-10T09:54:50Z") + "\n" + line("k2", "X", "2026-11-10T09:55:00Z") + "\n")
+    (tmp_path / "answers-h-2.jsonl").write_text(line("k1", "B", "2026-11-10T10:46:41Z") + "\n" + line("k3", "Y", "2026-11-10T10:47:00Z") + "\n")
+    with pytest.raises(ValueError, match="disagree"):
+        LLMAnswerStore(replay_dirs=[tmp_path])
+    report = resolve_conflicts(tmp_path)
+    assert report["conflicting_keys"] == 1 and report["removed"] == 1 and report["kept_from"] == {"k1": "answers-h-1.jsonl"}
+    store = LLMAnswerStore(replay_dirs=[tmp_path])
+    assert store.loaded == 3 and store.get("k1") == "A" and store.get("k3") == "Y"
+    sidecar = tmp_path / Path(report["sidecar"]).name
+    removed = [json.loads(l) for l in sidecar.read_text().splitlines()]
+    assert removed[0]["answer"] == "B" and removed[0]["removed_from"] == "answers-h-2.jsonl"
+    assert resolve_conflicts(tmp_path)["conflicting_keys"] == 0, "a consistent store is left alone"

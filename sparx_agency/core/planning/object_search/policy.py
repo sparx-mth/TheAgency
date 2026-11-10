@@ -89,9 +89,9 @@ class RPTSearchPolicy:
             unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
             start_skip_m=0.0, search_margin_m=s.map_size_m,
             centreline_weight=s.centreline_weight, channel_half_width_m=s.channel_half_width_m)
-        self.loop_settings = LoopSettings()
+        self.loop_settings = LoopSettings(**s.room_search)
         self.supervisor_params = self.loop_settings.supervisor_params(s.seed)
-        self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings()
+        self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings(**s.room_labels)
         self.route_settings, self.target_settings = RouteSettings(), TargetEvidenceSettings()
         self.sweep_settings = SweepSettings()
         self.fallback_settings = FallbackSettings()
@@ -180,6 +180,7 @@ class RPTSearchPolicy:
                                         "home/house/stage and a first|second pass verdict before the numbers (LLM-first, "
                                         "2026-10-07)",
                                 "probability_model": "independent_search_success",
+                                "flat_p": self.loop_settings.flat_p,
                                 "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor,
                                                 "unexplored_elsewhere": self.loop_settings.unexplored_elsewhere,
                                                 "home_floor": self.loop_settings.home_floor},
@@ -913,6 +914,8 @@ class RPTSearchPolicy:
                 "doors": self.doors.diagnostics(), "max_rooms": self.graph.max_rooms,
                 "room_label_queries": self.graph.label_tracker.queries, "room_label_history": list(self.graph.label_tracker.history),
                 "room_labels_held": self.graph.label_tracker.held,
+                "room_labels_dining_downgraded": self.graph.label_tracker.dining_downgrades,
+                "room_labels_shape_ruled": self.graph.label_tracker.shape_ruled,
                 "last_reasoning": self.graph.last_reasoning, "route_commitment": dict(self.route_memory.stats),
                 "plan_calls": self._plan_calls, "duplicates_removed": self._duplicates_removed,
                 "target_evidence": self.target_evidence.diagnostics(), "floor_revisions": self.mapping.floor_revision,

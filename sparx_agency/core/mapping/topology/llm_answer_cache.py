@@ -160,6 +160,55 @@ class LLMAnswerStore:
         return count
 
 
+def resolve_conflicts(directory: Path, keep: str = "earliest") -> Dict[str, Any]:
+    """Make a record directory consistent again: for a key recorded with two answers, keep one line and set the others aside.
+
+    Two runs that share a record directory and run the SAME episode at the
+    same time can both ask a question neither had loaded, get two answers
+    from a nondeterministic server, and each write its own (2026-11-10: the
+    baseline's resumed scene beside the flat-p ablation of the same scene);
+    every process that opens the store afterwards refuses it. The kept
+    answer is the earliest recorded (``keep="earliest"``; the first run's),
+    the others are moved to ``conflicts-<stamp>.jsonl.removed`` beside the
+    shards, which :data:`SHARD_GLOB` does not match. Shards are rewritten
+    without the removed lines.
+
+    Returns:
+        ``{"conflicting_keys", "removed", "kept_from", "sidecar"}``.
+    """
+    directory = Path(directory)
+    entries: Dict[str, List[tuple]] = {}
+    lines_by_shard: Dict[Path, List[Dict[str, Any]]] = {}
+    for shard in sorted(directory.glob(SHARD_GLOB)):
+        rows = list(_read_lines(shard))
+        lines_by_shard[shard] = rows
+        for row in rows:
+            entries.setdefault(row["key"], []).append((row.get("recorded_utc", ""), shard, row))
+    conflicting = {key: rows for key, rows in entries.items() if len({row["answer"] for _, _, row in rows}) > 1}
+    if not conflicting:
+        return {"conflicting_keys": 0, "removed": 0, "kept_from": {}, "sidecar": None}
+    removed, kept_from = [], {}
+    for key, rows in conflicting.items():
+        ordered = sorted(rows, key=lambda item: item[0], reverse=(keep != "earliest"))
+        winner = ordered[0][2]["answer"]
+        kept_from[key] = str(ordered[0][1].name)
+        for _, shard, row in rows:
+            if row["answer"] != winner:
+                removed.append((shard, row))
+    sidecar = directory / ("conflicts-%s.jsonl.removed" % time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+    with sidecar.open("w", encoding="utf-8") as fh:
+        for shard, row in removed:
+            fh.write(json.dumps(dict(row, removed_from=str(shard.name)), ensure_ascii=False) + "\n")
+    dropped = {id(row) for _, row in removed}
+    for shard, rows in lines_by_shard.items():
+        if any(id(row) in dropped for row in rows):
+            with shard.open("w", encoding="utf-8") as fh:
+                for row in rows:
+                    if id(row) not in dropped:
+                        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return {"conflicting_keys": len(conflicting), "removed": len(removed), "kept_from": kept_from, "sidecar": str(sidecar)}
+
+
 def _read_lines(path: Path) -> Iterable[Dict[str, Any]]:
     """The shard's entries; a torn last line (a killed writer) is skipped, any other bad line raises."""
     lines: List[str] = path.read_text(encoding="utf-8").splitlines()
@@ -175,3 +224,18 @@ def _read_lines(path: Path) -> Iterable[Dict[str, Any]]:
         if entry.get("schema") != SCHEMA:
             raise ValueError("LLM answer shard %s holds schema %r, not %r" % (path, entry.get("schema"), SCHEMA))
         yield entry
+
+
+def main(argv=None) -> int:
+    """``python -m ...llm_answer_cache --resolve-conflicts <dir>``: keep the earliest answer of every twice-answered key."""
+    import argparse
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--resolve-conflicts", type=Path, metavar="DIR", required=True)
+    parser.add_argument("--keep", choices=("earliest", "latest"), default="earliest")
+    args = parser.parse_args(argv)
+    print(json.dumps(resolve_conflicts(args.resolve_conflicts, keep=args.keep), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

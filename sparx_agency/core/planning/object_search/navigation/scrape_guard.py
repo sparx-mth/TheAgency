@@ -12,7 +12,11 @@ within ``max_heading_deg`` of its axis, the refusal is a scrape and nothing
 is written; the refused pose goes to the lattice instead, which re-plans the
 entry from another heading or offset. A channel that refuses
 ``scrapes_before_mark`` alignments in ``window_actions`` is closed after all,
-and its next refusal is written as before.
+and its next refusal is written as before. Since 2026-11-10 the channel must
+be a doorway a confirmed door landmark names (``ScrapeSettings.doorways_only``):
+a squeeze between furniture and a wall excused the refusals that would have
+mapped the furniture, and the closing lost a target in plain view to the
+stall clock (2azQ1b91cZZ/000058).
 """
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ class DoorwayScrapeGuard:
         self._counts = {}                       # channel key -> actions of the excused scrapes
         self.events = []
         self.stats = {"refusals": 0, "scrapes": 0, "written": 0, "exhausted": 0, "no_route": 0, "no_channel": 0,
-                      "misaligned": 0}
+                      "misaligned": 0, "no_door": 0}
 
     def judge(self, observation, world, route):
         """The scrape verdict for a refused step from ``observation.pose`` on ``route``, or None to write the map.
@@ -72,6 +76,11 @@ class DoorwayScrapeGuard:
             channels, (pose.x, pose.y), self.settings.reach_m)
         if channel is None:
             self.stats["no_channel"] += 1
+            return None
+        if self.settings.doorways_only and channel.door_id is None:
+            # A squeeze between furniture, not a doorway: what the body hit is written (see the setting).
+            self.stats["no_door"] += 1
+            self._event(observation.step, channel, heading_error(channel, pose.yaw), "written: no door names the channel")
             return None
         error = heading_error(channel, pose.yaw)
         if error > math.radians(self.settings.max_heading_deg):

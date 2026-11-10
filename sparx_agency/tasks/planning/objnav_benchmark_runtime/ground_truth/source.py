@@ -47,13 +47,24 @@ class GroundTruthSource:
         self.scene_report: Dict[str, object] = {}
         self._rgb = None
         self._ids = None
+        #: The frame's depth, pose and camera (``publish``), and the scene's instance boxes (``begin_scene``): what
+        #: the detector's on-object filter judges a rendered pixel against. None when the adapter publishes none.
+        self.depth = None
+        self.pose = None
+        self.camera = None
+        self.boxes: Dict[int, tuple] = {}
         self.frames = 0
         self.frames_without_instances = 0
         self.lookup_misses = 0
 
     def begin_scene(self, scene_key: str, semantic_objects: Mapping[int, str],
-                    goal_instances: Mapping[str, FrozenSet[int]]) -> Dict[str, object]:
+                    goal_instances: Mapping[str, FrozenSet[int]], boxes: Optional[Mapping[int, tuple]] = None) -> Dict[str, object]:
         """Build the scene's ``{instance: vocabulary word}`` table and describe it.
+
+        ``boxes`` is ``{instance: (center xyz, half sizes xyz)}`` in the
+        method's world frame (the recording's ENU), the annotation's own
+        axis-aligned box per instance, for the detector's on-object filter;
+        None or empty leaves the filter nothing to judge against.
 
         Returns:
             A JSON-safe account: how many instances the scene annotates, how
@@ -76,10 +87,13 @@ class GroundTruthSource:
             "category_table_sha256": self.categories.sha256(),
         }
         self._rgb = self._ids = None
+        self.boxes = {int(k): (tuple(float(c) for c in v[0]), tuple(float(h) for h in v[1]))
+                      for k, v in (boxes or {}).items()}
+        self.scene_report["instances_with_boxes"] = len(self.boxes)
         return self.scene_report
 
-    def publish(self, rgb: np.ndarray, ids: np.ndarray) -> None:
-        """Make ``ids`` the frame the oracle answers for ``rgb``."""
+    def publish(self, rgb: np.ndarray, ids: np.ndarray, depth=None, pose=None, camera=None) -> None:
+        """Make ``ids`` the frame the oracle answers for ``rgb``; ``depth``, ``pose`` and ``camera`` ride along for the on-object filter."""
         if self.scene_key is None:
             raise ObjNavInternalError("Ground-truth source has no scene; begin_scene() must precede the first frame")
         ids = np.asarray(ids)
@@ -87,6 +101,7 @@ class GroundTruthSource:
             raise ObjNavInternalError("Ground-truth frame %s does not match the RGB frame %s"
                                       % (ids.shape, np.asarray(rgb).shape[:2]))
         self._rgb, self._ids = rgb, ids
+        self.depth, self.pose, self.camera = depth, pose, camera
         self.frames += 1
         if not ids.any():
             self.frames_without_instances += 1

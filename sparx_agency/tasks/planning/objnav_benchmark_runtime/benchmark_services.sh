@@ -47,6 +47,9 @@ objnav_services_defaults() {
   # GT_MIN_PIXELS forwards --ground-truth-min-pixels (the oracle's declared resolution floor; the module default when empty).
   PERCEPTION="${PERCEPTION:-service}"
   GT_MIN_PIXELS="${GT_MIN_PIXELS:-}"
+  # GT_ON_OBJECT_M forwards --ground-truth-on-object-m (the oracle's on-object filter: a rendered pixel is the instance's
+  # only where the depth puts it on the annotation's box, inflated by this many metres; empty: off).
+  GT_ON_OBJECT_M="${GT_ON_OBJECT_M:-}"
   SAM_WEIGHTS="${SAM_WEIGHTS:-$MODELS/mobile_sam.pt}"
   SEGMENTER_PORT="${SEGMENTER_PORT:-18096}"
   SEGMENTER_DEVICE="${SEGMENTER_DEVICE:-cpu}"        # cpu: ~0.3 s per frame with target boxes (MobileSAM, 4 threads)
@@ -227,6 +230,7 @@ PY
     DETECTOR_URL=""
     PERCEPTION_FLAGS=(--perception ground-truth)
     [[ -n "$GT_MIN_PIXELS" ]] && PERCEPTION_FLAGS+=(--ground-truth-min-pixels "$GT_MIN_PIXELS")
+    [[ -n "$GT_ON_OBJECT_M" ]] && PERCEPTION_FLAGS+=(--ground-truth-on-object-m "$GT_ON_OBJECT_M")
     say "perception: GROUND TRUTH -- habitat-sim's semantic sensor stands in for YOLO-World and SAM (no detector or segmenter started; the run is non-publishable)" | tee -a "$LOG"
   else
   if curl -fsS --max-time 5 "$DETECTOR_URL/health" > /dev/null 2>&1; then

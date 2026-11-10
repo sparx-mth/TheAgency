@@ -99,7 +99,7 @@ def scene_command(scene, output, *, version, episodes_dir, scenes_dir, limit=Non
 
 def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=None,
                  split="val", extra=(), resume=False, runner=subprocess.run, smoke=False,
-                 jobs=1, episode_ids=None):
+                 jobs=1, episode_ids=None, stall_s=0.0):
     """Run each scene in its own process and return what each one did.
 
     Args:
@@ -121,6 +121,10 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
         jobs: Scenes run at once. 1 runs them in order with the child's output
             on this console; more runs them through ``scene_pool``, each
             child's output in ``<root>/<scene>.console.log``.
+        stall_s: With ``jobs`` above 1: kill a scene child whose heartbeat files
+            stop changing for this long and record it as exit -9, so a worker that
+            lost its main thread does not hold the pool (``scene_pool.run_concurrently``);
+            0 waits for every child however long it takes.
 
     Returns:
         One record per scene: its command, its exit status and its directory.
@@ -169,7 +173,7 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
         else:
             pending.append((scene, command))
     if pending:
-        returncodes = run_concurrently(pending, root, int(jobs), runner=runner)
+        returncodes = run_concurrently(pending, root, int(jobs), runner=runner, stall_s=float(stall_s or 0.0))
         results.extend({"scene": scene, "status": "ran", "returncode": returncodes[scene],
                         "output": str(root / scene), "command": command}
                        for scene, command in pending)
@@ -276,6 +280,12 @@ def main(argv=None):
     parser.add_argument("--jobs", type=int, default=1,
                         help="Scenes run at once; above 1 each child logs to <root>/<scene>.console.log. "
                              "With --shard-episodes: shards at once, unless --jobs-file says otherwise")
+    parser.add_argument("--stall-minutes", type=float, default=30.0,
+                        help="With --jobs above 1: kill a scene child whose live.json / progress.json / "
+                             "episodes.jsonl / console log have not changed for this long and record it as exit -9 "
+                             "(a worker that lost its main thread keeps its CUDA threads and never exits; --resume "
+                             "reruns the scene). Longer than LLM_REASONING_TIMEOUT_S so a slow oracle call is not a "
+                             "death; 0 disables")
     sharding = parser.add_argument_group("sharded campaign (--shard-episodes)")
     sharding.add_argument("--shard-episodes", type=int,
                           help="Cut every scene into shards of at most N episodes, one process each "
@@ -314,13 +324,16 @@ def main(argv=None):
         # The runner is read from the module at call time, not bound as the default at import: the tests
         # replace ``campaign.subprocess`` and, bound, ``main`` still spawned a real run.py per scene against
         # the live LLM server (a stray child waiting on a busy Ollama hung the rig, 2026-11-09).
+        if args.stall_minutes < 0:
+            parser.error("--stall-minutes must be zero or positive")
         results = run_campaign(args.root, version=args.version, split=args.split,
                                episodes_dir=args.episodes_dir,
                                scenes_dir=args.scenes_dir, limit=args.limit,
                                scenes=args.scenes, extra=extra, resume=args.resume,
                                smoke=args.smoke, jobs=args.jobs, runner=subprocess.run,
                                episode_ids=json.loads(args.episode_ids_file.read_text())
-                               if args.episode_ids_file else None)
+                               if args.episode_ids_file else None,
+                               stall_s=60.0 * args.stall_minutes)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
     if failed:
         print("Scenes that did not exit cleanly%s: %s"

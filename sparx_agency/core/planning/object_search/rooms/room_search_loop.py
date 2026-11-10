@@ -141,6 +141,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 import math
 import time
+from typing import Optional
 
 import numpy as np
 
@@ -443,6 +444,16 @@ class LoopSettings:
             Allensville toilet run's warm-up spin saw more than half of
             the bathroom's floor through its door and finished it with the
             toilet behind the jamb.
+        flat_p: The oracle ablation. None (the default) asks the model;
+            a probability in (0, 1) reads EVERY node at that value without
+            a call (``search_node_oracle.SearchNodeOracle(flat_p=...)``,
+            ``source='flat'``), so RPT*'s order is the travel cost's alone
+            -- the nearest node first -- and the rest of the search (the
+            labels, the exclusions, the landmark nodes at their fixed
+            probability, the closing) is unchanged. The difference between
+            a run with it and one without is what the oracle contributes.
+            0.15 is the median node probability the 3B oracle wrote over
+            the MP3D re-runs of 2026-11-09 (mean 0.19, spread 0.15).
         supervisor_rounds: Supervisor rounds allowed on one action before the
             loop falls back to the floor-wide frontier. A guard against a
             transition loop nobody has found yet, not a budget: the longest
@@ -546,6 +557,7 @@ class LoopSettings:
     unexplored_floor: float = UNEXPLORED_FLOOR
     unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE
     home_floor: float = HOME_FLOOR
+    flat_p: Optional[float] = None
     supervisor_rounds: int = 5
     confine_routes: bool = True
     entry_frontier: bool = True
@@ -598,6 +610,9 @@ class LoopSettings:
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value < 1:
                 raise ValueError("%s must lie in [0, 1)" % name)
+        if self.flat_p is not None and (isinstance(self.flat_p, bool) or not math.isfinite(self.flat_p)
+                                        or not 0.0 < self.flat_p < 1.0):
+            raise ValueError("flat_p must lie in (0, 1) or be None (the oracle asked)")
         if isinstance(self.scan_seen_fraction, bool) or not math.isfinite(self.scan_seen_fraction) or not 0 < self.scan_seen_fraction <= 1:
             raise ValueError("scan_seen_fraction must lie in (0, 1]")
         if isinstance(self.scan_seen_range_m, bool) or not math.isfinite(self.scan_seen_range_m) or self.scan_seen_range_m < 0:

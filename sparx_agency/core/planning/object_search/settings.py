@@ -156,6 +156,14 @@ class RPTSettings:
         doorway_look_down: The camera pitched on the approach to a
             doorway and the re-plan on what it saw
             (``navigation/doorway_look_down.py``).
+        room_search: Overrides of the room-search loop's settings
+            (``rooms/room_search_loop.LoopSettings`` fields, as a JSON
+            object): the way ``--policy-config`` reaches the loop --
+            ``{"room_search": {"flat_p": 0.15}}`` is the oracle ablation.
+            Empty by default: the loop's own defaults.
+        room_labels: Overrides of the room labeller's settings
+            (``core/mapping/topology/revisable_room_labels.RoomLabelSettings``
+            fields, as a JSON object). Empty by default.
     """
 
     map_size_m: float = 80.0
@@ -243,6 +251,8 @@ class RPTSettings:
     doorway_peek: PeekSettings = field(default_factory=lambda: PeekSettings(enabled=False))
     falcon: FalconParams = field(default_factory=lambda: FalconParams(burst_actions=10))
     multifloor: MultiFloorParams = field(default_factory=MultiFloorParams)
+    room_search: dict = field(default_factory=dict)
+    room_labels: dict = field(default_factory=dict)
 
     def __post_init__(self):
         for key in ("map_size_m", "map_resolution_m", "action_time_s", "stop_distance_m", "body_height_m", "body_radius_m",
@@ -322,3 +332,7 @@ class RPTSettings:
             object.__setattr__(self, "multifloor", MultiFloorParams(**self.multifloor))
         if not isinstance(self.multifloor, MultiFloorParams):
             raise ValueError("multifloor must be MultiFloorParams or parameter overrides")
+        for name in ("room_search", "room_labels"):
+            value = getattr(self, name)
+            if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+                raise ValueError("%s must be a JSON object of setting overrides" % name)

@@ -34,7 +34,7 @@ class FloorContextBank:
         p.graph = ObservedSceneGraph(p.llm_client, label_settings=p.room_label_settings, first_pid=first_pid)
         p.graph.oracle = RepairingNodeOracle(p.llm_client, unexplored_floor=p.loop_settings.unexplored_floor,
                                              unexplored_elsewhere=p.loop_settings.unexplored_elsewhere,
-                                             home_floor=p.loop_settings.home_floor)
+                                             home_floor=p.loop_settings.home_floor, flat_p=p.loop_settings.flat_p)
         # The oracle's ``home`` flag per room: a confirmed home object of THIS target.
         p.graph.home_object = lambda class_name, target=p.target: home_object(target, class_name)
         # The frontier is read with the settled unknown written occupied: what the

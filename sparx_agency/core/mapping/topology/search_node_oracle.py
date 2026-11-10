@@ -111,6 +111,10 @@ PASSES = (PASS_FIRST, PASS_SECOND)
 #: Actions are shown to the model in steps of this many, so the prompt does not change
 #: on every action over an unchanged map.
 BUDGET_STEP = 25
+#: The ``NodeOracleResult.source`` values the runtime flies on: the model's own numbers, or the flat
+#: ablation's (``SearchNodeOracle(flat_p=...)``). ``uniform_fallback`` -- a model that failed -- is refused.
+SOURCE_LLM, SOURCE_FLAT = "llm", "flat"
+USABLE_SOURCES = (SOURCE_LLM, SOURCE_FLAT)
 
 SYSTEM_PROMPT = """You are the reasoning module of a robot searching ONE home for an instance of \
 ONE target object category, within a fixed budget of actions. The robot has partly mapped \
@@ -459,9 +463,10 @@ class NodeOracleResult:
         elsewhere: Legacy field name: product of node failure probabilities,
             NOT a categorical estimate of an undiscovered room.
         p_present: One minus ``elsewhere`` under the independence approximation.
-        source: ``'llm'`` for a usable reply, ``'uniform_fallback'`` when the
-            model failed and a flat distribution was substituted. The runtime
-            refuses to fly on the latter.
+        source: ``'llm'`` for a usable reply, ``'flat'`` for the flat-probability
+            ablation (every node at ``SearchNodeOracle.flat_p``, no model asked),
+            ``'uniform_fallback'`` when the model failed and a flat distribution
+            was substituted. The runtime refuses to fly on the latter.
         reasons: ``{node_id: why}`` in the model's words.
         raw_reply: The parsed reply, for the recording.
         spread: Max minus min of ``probs``; ~0 means the model said nothing.
@@ -841,6 +846,12 @@ class SearchNodeOracle:
         home_floor: The least a node holding a confirmed home object of
             the target (:attr:`SearchNode.home`) is read at; 0 (the
             default) leaves the model's numbers.
+        flat_p: The ablation that measures what the oracle contributes: when
+            given, every node is read at this probability and the model is
+            never asked (``source='flat'``), so RPT* orders the nodes by
+            travel cost alone -- the nearest first -- and nothing else in the
+            search changes (the room labels, the exclusions, the landmarks at
+            their fixed probability). None (the default) asks the model.
 
     Attributes:
         reuses: Queries answered from the kept reply.
@@ -848,20 +859,26 @@ class SearchNodeOracle:
         unexplored_floor: As given.
         unexplored_elsewhere: As given.
         home_floor: As given.
+        flat_p: As given.
     """
 
     def __init__(self, client, unexplored_floor: float = UNEXPLORED_FLOOR,
-                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE, home_floor: float = HOME_FLOOR) -> None:
+                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE, home_floor: float = HOME_FLOOR,
+                 flat_p: Optional[float] = None) -> None:
         for name, value in (("unexplored_floor", unexplored_floor), ("unexplored_elsewhere", unexplored_elsewhere),
                             ("home_floor", home_floor)):
             if not (0.0 <= float(value) < 1.0) or not math.isfinite(float(value)):
                 raise ValueError("%s must lie in [0, 1), got %r" % (name, value))
+        if flat_p is not None and (isinstance(flat_p, bool) or not math.isfinite(float(flat_p))
+                                   or not 0.0 < float(flat_p) < 1.0):
+            raise ValueError("flat_p must lie in (0, 1) or be None, got %r" % (flat_p,))
         self._client = client
         self._last_prompt = None  # type: Optional[str]
         self._last_reply = None   # type: Optional[Dict[str, Any]]
         self.unexplored_floor = float(unexplored_floor)
         self.unexplored_elsewhere = float(unexplored_elsewhere)
         self.home_floor = float(home_floor)
+        self.flat_p = None if flat_p is None else float(flat_p)
         self.reuses = 0
         self.queries = 0
 
@@ -890,6 +907,8 @@ class SearchNodeOracle:
         """
         if not nodes:
             raise ValueError("SearchNodeOracle needs at least one node")
+        if self.flat_p is not None:
+            return self.flat(nodes, self.flat_p)
         user = self.prompt(target, nodes, context)
         if user == self._last_prompt and self._last_reply is not None:
             kept = self.score(self._last_reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
@@ -907,6 +926,15 @@ class SearchNodeOracle:
         return result
 
     # -- internals ------------------------------------------------------------
+    @staticmethod
+    def flat(nodes: Sequence[SearchNode], p: float) -> NodeOracleResult:
+        """The flat ablation's result: every node at ``p``, no model asked, no reading, no verdict."""
+        share = min(float(p), P_CEILING)
+        failure = (1.0 - share) ** len(nodes)
+        return NodeOracleResult(probs={n.id: share for n in nodes}, elsewhere=failure, p_present=1.0 - failure,
+                                source=SOURCE_FLAT, reasons={n.id: "flat ablation" for n in nodes},
+                                raw_reply=None, spread=0.0)
+
     @staticmethod
     def uniform(nodes: Sequence[SearchNode], raw_reply: Optional[Dict[str, Any]]) -> NodeOracleResult:
         share = 1.0 / (len(nodes) + 1)
@@ -931,7 +959,7 @@ class SearchNodeOracle:
         reading = {key: str(reply[key])[:200] for key in ("home", "house", "stage", "pass", "storey", "home_here")
                    if isinstance(reply, dict) and isinstance(reply.get(key), str) and reply[key].strip()}
         return NodeOracleResult(probs=probs, elsewhere=elsewhere, p_present=1.0 - elsewhere,
-                                source="llm", reasons=reasons, raw_reply=reply if isinstance(reply, dict) else None,
+                                source=SOURCE_LLM, reasons=reasons, raw_reply=reply if isinstance(reply, dict) else None,
                                 spread=float(max(values) - min(values)) if values else 0.0, omitted=omitted,
                                 reading=reading, floored=floored, capped=capped, home_here=home_here,
                                 pass_verdict=parse_pass(reply))

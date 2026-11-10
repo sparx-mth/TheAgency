@@ -327,6 +327,38 @@ class TargetClosingSettings:
     stop_overshoot_within_m: float = 0.90
     stop_overshoot_min_range_m: float = 0.45
     stop_overshoot_max_actions: int = 5
+    # THE OVERSHOOT STANDS CLOSER UNDER A RAISED TARGET (since 2026-11-10). The evaluator's view points lie
+    # within 1 m planar of an object's box at the object's own height, and only where the object's pixels
+    # show with the camera turned to it; for an object raised off the floor that second test prunes the far
+    # points, since a camera 0.88 m up must look up at it. MP3D val, the single-storey set's goals: the
+    # farthest view point stands 1.02 m from the box for an object on the floor (median) but 0.84 m for one
+    # whose underside is 0.3 m up or more -- 0.81 m for a picture, 0.72 m for a wall cabinet. So a wall
+    # cabinet whose underside is 0.9 m up, a picture, a towel on its rail, a cushion on a sofa's seat must be
+    # stood under more closely than a chair: 2azQ1b91cZZ/000025 STOPped 0.86 m from its cabinet's centre,
+    # DTG 0.22, SR 0. With ``elevation_overshoot`` the range the ``stop_overshoot_within_m`` test reads is
+    # ``hypot(planar, lowest_m - base)`` -- the memory's planar range lifted by the target's lowest measured
+    # point above the agent's base -- so the steps go on (``stop_overshoot_elevated_max_steps`` of them at
+    # most) until that lifted range is within the radius, or ``stop_overshoot_min_range_m`` stops them. An
+    # object on the floor reads as before. A lowest point under ``elevation_min_m`` above the base is an
+    # object on the floor (a chair whose legs the near-surface component dropped reads its seat at 0.45 m; a
+    # toilet's bowl its base): no lift.
+    elevation_overshoot: bool = True
+    elevation_min_m: float = 0.30
+    stop_overshoot_elevated_max_steps: int = 3
+    # THE STANDOFF OF A RAISED TARGET IS IN FRONT OF IT (since 2026-11-10). The view points of a thin
+    # wall-mounted object stand within its own width along the wall (0.26 m beyond it at the median over the
+    # set's 78 pictures, against 0.6-0.9 m for every other category): a 2 cm picture shows nothing from
+    # beside itself. The standoff ring starts from the agent's bearing (``target_path.TargetPath``), so a
+    # picture first seen at a grazing angle was approached and STOPped on from beside it, within the 1 m band
+    # and 0.1-0.5 m from the nearest view point (2azQ1b91cZZ/000157, QUCTc6BB5sX/000055, zsNo4HB9uLZ/000045:
+    # 0.26-0.38 m beside the width, 60-69 degrees off the wall's normal; every picture success of the run
+    # stood within 0.28 m of the width). With ``frontal_standoff`` the ring of a target raised
+    # ``elevation_min_m`` or more starts from the direction into the room -- toward the free cells within
+    # ``frontal_wall_radius_m`` of a memory that has something occupied within 0.3 m of it (``wall_normal.py``)
+    # -- and leaves out the bearing into the wall; a raised target with free floor all round it, or nothing
+    # under it, keeps the agent's bearing.
+    frontal_standoff: bool = True
+    frontal_wall_radius_m: float = 0.8
     # After a release, no new takeover may START on a far candidate for this
     # many actions: six twelve-step verifications from one spot three metres
     # from the couch (Ranchester attempt 4) were the same failure repeated,
@@ -531,6 +563,18 @@ class TargetClosingSettings:
             raise ValueError("stop_overshoot_steps must be a non-negative int")
         if type(self.stop_overshoot_max_steps) is not int or self.stop_overshoot_max_steps < self.stop_overshoot_steps:
             raise ValueError("stop_overshoot_max_steps must be an int of at least stop_overshoot_steps")
+        if type(self.elevation_overshoot) is not bool:
+            raise ValueError("elevation_overshoot must be a bool")
+        if isinstance(self.elevation_min_m, bool) or not math.isfinite(self.elevation_min_m) or self.elevation_min_m < 0:
+            raise ValueError("elevation_min_m must be finite and non-negative")
+        if (type(self.stop_overshoot_elevated_max_steps) is not int
+                or self.stop_overshoot_elevated_max_steps < self.stop_overshoot_max_steps):
+            raise ValueError("stop_overshoot_elevated_max_steps must be an int of at least stop_overshoot_max_steps")
+        if type(self.frontal_standoff) is not bool:
+            raise ValueError("frontal_standoff must be a bool")
+        if (isinstance(self.frontal_wall_radius_m, bool) or not math.isfinite(self.frontal_wall_radius_m)
+                or self.frontal_wall_radius_m <= 0):
+            raise ValueError("frontal_wall_radius_m must be finite and positive")
         for key in ("stop_overshoot_within_m", "stop_overshoot_min_range_m"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -711,6 +755,8 @@ class TargetClosing:
         self.occluder_reads = 0            # candidate frames whose box was read around a surface standing in front of the target
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
         self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
+        self.elevated_overshoot_steps = 0  # overshoot steps beyond the planar rule's, under a raised target (``elevation_overshoot``)
+        self.frontal_standoffs = 0         # standoff rings started from the wall's normal, not the agent's bearing (``frontal_standoff``)
         self.bearing_starts = 0            # bearing approaches begun on an RGB box without a usable depth
         self.bearing_resolved = 0          # ... of which a frame with depth turned into a verification
         self.bearing_abandoned = 0         # ... and those given up: lost, out of actions, or not moving
@@ -2565,17 +2611,22 @@ class TargetClosing:
         here = (float(obs.pose.x), float(obs.pose.y))
         walked = math.dist(here, o["from_xy"])
         distance = math.dist(here, self.xyz[:2])
+        # The range the overshoot reads: the planar range lifted by the target's height (see ``elevation_overshoot``).
+        elevation = self.elevation_above_base(obs) if s.elevation_overshoot else 0.0
+        lifted = math.hypot(distance, elevation)
+        max_steps = s.stop_overshoot_elevated_max_steps if elevation > 0.0 else s.stop_overshoot_max_steps
         near = None if o["near_m"] is None else o["near_m"] - walked
         bearing = math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
         error = normalize_angle(bearing - obs.pose.yaw)
         ended = None
         if o["blocked"]:
             ended = "a step was blocked"
-        elif o["steps"] >= s.stop_overshoot_max_steps:
+        elif o["steps"] >= max_steps:
             ended = "%d step(s) taken" % o["steps"]
-        elif o["steps"] >= s.stop_overshoot_steps and distance <= s.stop_overshoot_within_m:
-            ended = ("%d step(s) taken and the memory stands %.2f m away, within %.2f m"
-                     % (o["steps"], distance, s.stop_overshoot_within_m))
+        elif o["steps"] >= s.stop_overshoot_steps and lifted <= s.stop_overshoot_within_m:
+            ended = ("%d step(s) taken and the memory stands %.2f m away%s, within %.2f m"
+                     % (o["steps"], distance, "" if elevation <= 0.0 else
+                        " (%.2f m in 3-D, %.2f m up)" % (lifted, elevation), s.stop_overshoot_within_m))
         elif o["actions"] >= s.stop_overshoot_max_actions:
             ended = "%d actions spent" % o["actions"]
         elif distance - step_m < s.stop_overshoot_min_range_m:
@@ -2585,8 +2636,10 @@ class TargetClosing:
         elif abs(error) > math.pi / 2:
             ended = "the memory is %.0f degrees off the heading" % math.degrees(abs(error))
         stage = {"decided_step": o["decided"], "steps": o["steps"], "actions": o["actions"], "blocked": o["blocked"],
-                 "walked_m": round(walked, 3), "memory_m": round(distance, 3),
-                 "near_m": None if near is None else round(near, 3), "ended": ended}
+                 "walked_m": round(walked, 3), "memory_m": round(distance, 3), "elevation_m": round(elevation, 3),
+                 "lifted_m": round(lifted, 3), "near_m": None if near is None else round(near, 3), "ended": ended}
+        if ended is None and o["steps"] >= s.stop_overshoot_max_steps:
+            self.elevated_overshoot_steps += 1       # a step the planar rule would not have taken
         if ended is not None:
             self.phase = "STOP"
             o["ended"] = ended
@@ -2603,9 +2656,28 @@ class TargetClosing:
             info=dict(o["info"], phase=self.phase, target_visible=self.last_seen == obs.step, range_m=distance,
                       stop_overshoot=stage,
                       reason="STOP decided at action %d (%s): step %d of at most %d toward the target before it%s"
-                             % (o["decided"], o["info"].get("reason"), o["steps"] + 1, s.stop_overshoot_max_steps,
+                             % (o["decided"], o["info"].get("reason"), o["steps"] + 1, max_steps,
                                 "" if o["steps"] < s.stop_overshoot_steps else
-                                "; the memory still stands %.2f m away, beyond %.2f m" % (distance, s.stop_overshoot_within_m))))
+                                "; the memory still stands %.2f m away%s, beyond %.2f m"
+                                % (distance, "" if elevation <= 0.0 else " (%.2f m in 3-D, %.2f m up)" % (lifted, elevation),
+                                   s.stop_overshoot_within_m))))
+
+    def elevation_above_base(self, obs, lowest_m=None):
+        """How far the target's lowest measured point stands above the agent's base, metres; 0 for an object on the floor.
+
+        A raised object's view points stand closer to it and, when it is
+        mounted, in front of it (``elevation_overshoot``, ``frontal_standoff``).
+        The lowest point the lock measured (``lowest_m``, world z) is the
+        object's underside as far as the camera saw it -- never lower than
+        the truth, so the lift is never too small. Under ``elevation_min_m``
+        it is an object on the floor. ``lowest_m`` given reads another
+        target's point (the pursuit's remembered one) instead of this lock's.
+        """
+        lowest = self.lowest_m if lowest_m is None else lowest_m
+        if lowest is None:
+            return 0.0
+        elevation = float(lowest) - float(obs.pose.z)
+        return elevation if elevation >= self.settings.elevation_min_m else 0.0
 
     def note_action(self, action):
         """The action the agent took on the closing's command (the policy's ``notify_action``)."""
@@ -2800,6 +2872,8 @@ class TargetClosing:
                 "nearest_goal": None if self.nearest_goal is None else [round(v, 2) for v in self.nearest_goal],
                 "occluder_reads": self.occluder_reads,
                 "overshoot_commands": self.overshoot_commands,
+                "elevated_overshoot_steps": self.elevated_overshoot_steps,
+                "frontal_standoffs": self.frontal_standoffs,
                 "stop_overshoot": None if self.overshoot is None else {
                     key: self.overshoot[key] for key in ("decided", "steps", "actions", "blocked", "ended")},
                 "standoff_arrived": self.path.arrived, "standoff_arrivals": self.path.arrivals,

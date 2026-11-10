@@ -16,6 +16,7 @@ import pytest
 
 from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d import scene_pool
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d import assets, campaign, run
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import MP3D_V1, PUBLISHED_VAL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_mp3d import (
@@ -121,6 +122,95 @@ def test_a_resumed_root_skips_finished_scenes_and_continues_started_ones(tmp_pat
         campaign.run_campaign(tmp_path / "fresh", version="v1", episodes_dir=release.episodes_dir,
                               scenes_dir=release.scenes_dir, runner=fake_runner([0, 0]),
                               extra=["--resume-accepting-changes", "kinematics"])
+
+
+# -- the stall watchdog of the concurrent pool -------------------------------
+
+class FakeChild:
+    """A ``Popen`` look-alike: alive until ``finish`` is called or it is killed."""
+
+    def __init__(self):
+        self.pid = 4242
+        self.returncode = None
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = scene_pool.STALLED_RETURNCODE
+
+    def finish(self, code=0):
+        self.returncode = code
+
+
+def test_a_scene_worker_that_stops_writing_is_killed_and_recorded_as_stalled(tmp_path, monkeypatch):
+    """A worker that lost its main thread never exits; the pool kills it after ``stall_s`` and moves on."""
+    monkeypatch.setattr(scene_pool.time, "sleep", lambda s: None)
+    child = FakeChild()
+    kills = []
+
+    def killpg(pid, sig):
+        kills.append((pid, sig))
+        child.kill()
+
+    monkeypatch.setattr(scene_pool.os, "killpg", killpg)
+    base = __import__("time").time()                 # the console log's real mtime must read as "just now"
+    clock = iter(base + 100.0 * k for k in range(10_000))     # each poll is 100 s later
+    monkeypatch.setattr(scene_pool.time, "time", lambda: next(clock))
+    lines = []
+    codes = scene_pool.run_concurrently([(SCENE, ["run"])], tmp_path, 2, stall_s=250.0, announce=lines.append,
+                                        popen=lambda *a, **k: child)
+    assert codes == {SCENE: scene_pool.STALLED_RETURNCODE}
+    assert kills == [(4242, scene_pool.signal.SIGKILL)]
+    assert any("STALLED" in line for line in lines)
+
+
+def test_a_scene_worker_whose_heartbeat_moves_is_left_alone(tmp_path, monkeypatch):
+    """The heartbeat is the scene directory's live.json / progress.json / episodes.jsonl, or the console log."""
+    monkeypatch.setattr(scene_pool.time, "sleep", lambda s: None)
+    child = FakeChild()
+    monkeypatch.setattr(scene_pool.os, "killpg", lambda pid, sig: pytest.fail("a live worker was killed"))
+    now = [__import__("time").time()]
+    monkeypatch.setattr(scene_pool.time, "time", lambda: now[0])
+    scene_dir = tmp_path / SCENE
+    scene_dir.mkdir()
+    polls = []
+
+    def poll():
+        polls.append(now[0])
+        now[0] += 100.0
+        heartbeat = scene_dir / "live.json"
+        heartbeat.write_text("{}")
+        scene_pool.os.utime(heartbeat, (now[0], now[0]))       # written on every action
+        if len(polls) == 6:
+            child.finish(0)
+        return child.returncode
+
+    child.poll = poll
+    codes = scene_pool.run_concurrently([(SCENE, ["run"])], tmp_path, 2, stall_s=250.0, announce=lambda line: None,
+                                        popen=lambda *a, **k: child)
+    assert codes == {SCENE: 0} and len(polls) == 6
+    assert scene_pool.scene_heartbeat(tmp_path, SCENE) == pytest.approx(now[0])
+    with pytest.raises(ValueError, match="stall_s"):
+        scene_pool.run_concurrently([(SCENE, ["run"])], tmp_path, 2, stall_s=-1.0)
+
+
+def test_the_campaign_forwards_the_stall_minutes_to_the_pool(tmp_path, release, monkeypatch):
+    seen = {}
+
+    def run_concurrently(pending, root, workers, *, runner, stall_s):
+        seen["stall_s"] = stall_s
+        return {scene: 0 for scene, _ in pending}
+
+    monkeypatch.setattr(campaign, "run_concurrently", run_concurrently)
+    campaign.run_campaign(tmp_path / "root", version="v1", episodes_dir=release.episodes_dir,
+                          scenes_dir=release.scenes_dir, runner=fake_runner([0, 0]), jobs=2, stall_s=1800.0)
+    assert seen["stall_s"] == 1800.0
 
 
 # -- what the aggregate is allowed to call complete ------------------------

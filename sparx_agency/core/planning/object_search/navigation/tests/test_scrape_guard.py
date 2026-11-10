@@ -3,15 +3,19 @@ from __future__ import annotations
 
 import math
 
-from sparx_agency.core.planning.object_search.navigation.tests.rig import (DOOR_X, DOOR_Y, doorway_policy,
-                                                                              doorway_world, observe, planned_route)
+from sparx_agency.core.planning.object_search.navigation.tests.rig import (DOOR_X, DOOR_Y, confirm_door,
+                                                                              doorway_policy, doorway_world, observe,
+                                                                              planned_route)
 
 
-def rig(**overrides):
+def rig(door=True, **overrides):
+    """The doorway world with its route; ``door`` confirms a door landmark at the throat (the guard's default needs one)."""
     policy, ep = doorway_policy(**overrides)
     world = doorway_world()
     route = planned_route(policy, world, (DOOR_X - 2.0, DOOR_Y), (DOOR_X + 2.5, DOOR_Y))
     policy.last_world = world
+    if door:
+        confirm_door(policy)
     return policy, ep, world, route
 
 
@@ -54,6 +58,22 @@ def test_the_excuse_runs_out_after_scrapes_before_mark_within_the_window():
     assert policy.scrape_guard.stats["exhausted"] == 1 and policy.scrape_guard.stats["written"] == 1
     assert policy.scrape_guard.judge(observe(ep, 30, DOOR_X - 0.4, DOOR_Y, 0.0), world, route) is not None, \
         "outside the window the doorway is given the benefit of the doubt again"
+
+
+def test_a_squeeze_no_door_names_is_written_at_once_unless_the_guard_is_told_otherwise():
+    """Since 2026-11-10: the gap between furniture and a wall is a channel too, and excusing refusals there kept the
+    map from learning the furniture (2azQ1b91cZZ/000058: six refusals from one spot, the lock released as stalled)."""
+    policy, ep, world, route = rig(door=False)
+    obs = observe(ep, 5, DOOR_X - 0.4, DOOR_Y + 0.1, math.radians(25))
+    assert policy.scrape_guard.judge(obs, world, route) is None and policy.scrape_guard.stats["no_door"] == 1
+    assert policy.scrape_guard.events[-1]["detail"] == "written: no door names the channel"
+    before = written(policy)
+    policy._route = route
+    policy.notify_blocked(obs)
+    assert written(policy) == before + 1, "the furniture the body pushed against is on the map at once"
+    legacy, ep, world, route = rig(door=False, doorway_scrape={"doorways_only": False})
+    assert legacy.scrape_guard.judge(obs, world, route) is not None, "the geometry-only channel, on request"
+    assert legacy.scrape_guard.stats["no_door"] == 0
 
 
 def test_disabled_every_refusal_is_written():

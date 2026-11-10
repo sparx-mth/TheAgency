@@ -90,6 +90,28 @@ class RoomLabelSettings:
             MP3D ground-truth run one room read living_room, dining_room,
             bedroom? and kitchen within 125 actions, and the oracle was
             re-briefed on each. ``False`` restores the immediate relabel.
+        dining_min_chairs: A ``dining_room`` verdict on evidence with fewer
+            than this many chairs is read as ``unknown`` (since 2026-11-10).
+            The classifier's prompt says "a table with chairs and no
+            kitchen fittings is a dining room", and under the benchmark's
+            own label table a ``table`` is any table -- a desk, a side
+            table, a coffee table, a nightstand -- so a 3B model made a
+            dining room of a table alone, of a table with a picture, of a
+            table with one chair: 9 of the first 32 MP3D baseline episodes
+            ended with two or more dining rooms, and the node oracle was
+            briefed with them. A dining room seats people: it has chairs
+            around its table. 0 disables the rule.
+        shape_rule: A room with no classifiable objects that the geometry
+            admits (``shape_only_rooms``) is labelled ``hallway`` BY RULE,
+            weak, at ``shape_rule_confidence``, without a classifier call
+            (since 2026-11-10). The model wrote hallway for 64 % of such
+            rooms and foyer / storage_closet / living_room / unknown for the
+            rest, differently for the same prompt in different runs, and
+            each verdict cost a call on a room with nothing in it. The label
+            is as weak as the model's was and relabels at once when an
+            object appears. ``False`` asks the model as before.
+        shape_rule_confidence: See ``shape_rule``; below ``strong_confidence``
+            by construction.
     """
 
     min_objects: int = 1
@@ -106,16 +128,24 @@ class RoomLabelSettings:
     corridor_doors: int = 2
     shape_min_area_m2: float = 2.0
     relabel_hysteresis: bool = True
+    dining_min_chairs: int = 3
+    shape_rule: bool = True
+    shape_rule_confidence: float = 0.5
 
     def __post_init__(self):
         for name in ("min_objects", "min_classes", "min_evidence_updates", "refresh_steps", "strong_classes",
                      "corridor_doors"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("%s must be a positive integer" % name)
+        if type(self.dining_min_chairs) is not int or self.dining_min_chairs < 0:
+            raise ValueError("dining_min_chairs must be a non-negative integer (0 disables the rule)")
         if not 0.0 <= float(self.strong_confidence) <= 1.0:
             raise ValueError("strong_confidence must lie in [0, 1]")
+        if (isinstance(self.shape_rule_confidence, bool) or not 0.0 <= float(self.shape_rule_confidence) <= 1.0
+                or float(self.shape_rule_confidence) >= float(self.strong_confidence)):
+            raise ValueError("shape_rule_confidence must lie in [0, 1] and below strong_confidence: a rule is a weak label")
         for name in ("signature_objects", "distinctive_required", "generic_evidence_gate", "shape_only_rooms",
-                     "relabel_hysteresis"):
+                     "relabel_hysteresis", "shape_rule"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError("%s must be a bool" % name)
         for name in ("corridor_elongation", "shape_min_area_m2"):
@@ -172,6 +202,8 @@ class RevisableRoomLabels:
         self._pending_since = {}  # pid -> the step that verdict was first held on
         self._label_kinds = {}    # pid -> the kinds of object the room's current label was adopted on
         self.held = 0             # verdicts held back by ``relabel_hysteresis``
+        self.dining_downgrades = 0  # dining_room verdicts read as unknown for want of chairs (``dining_min_chairs``)
+        self.shape_ruled = 0      # rooms labelled hallway by the shape rule, without a call (``shape_rule``)
 
     def update(self, objects, step, partition_changed=False, allow_query=True, facts=None):
         """Record every room's evidence and, when allowed, (re-)classify the ones whose evidence changed.
@@ -245,6 +277,19 @@ class RevisableRoomLabels:
         return self.labels.get(pid)
 
     # -- internals ------------------------------------------------------------
+    def _dining_rule(self, result, signature):
+        """A ``dining_room`` verdict stands only on ``dining_min_chairs`` chairs or more; otherwise ``unknown``."""
+        s = self.settings
+        if not s.dining_min_chairs or result.label != "dining_room":
+            return result
+        chairs = sum(count for name, count in signature if name == "chair")
+        if chairs >= s.dining_min_chairs:
+            return result
+        self.dining_downgrades += 1
+        return RoomLabel("unknown", result.confidence,
+                         "dining_room needs %d chairs at its table, %d seen: a desk, a side table and a coffee table "
+                         "are tables too (rule)" % (s.dining_min_chairs, chairs))
+
     @staticmethod
     def _signature(classes):
         # Prompt aliases must not count as extra kinds of semantic evidence.
@@ -305,7 +350,13 @@ class RevisableRoomLabels:
             # kinds never judged; the periodic refresh alone buys a fresh verdict
             # for evidence the model has seen, once per ``refresh_steps``.
             result = None
-            if changed:
+            if shape_only and s.shape_rule:
+                # Nothing in the room to ask about: a passage-like empty room is a hallway by rule (see the setting).
+                result = RoomLabel("hallway", s.shape_rule_confidence,
+                                   "no objects; a passage by its geometry (rule, no classifier call)")
+                self._last_query[pid] = step
+                self.shape_ruled += 1
+            if result is None and changed:
                 result = self.classifier.cached(classes, facts)
                 if result is None and clue and not shape_only:
                     result = self._kind_cache.get(kinds)
@@ -315,6 +366,7 @@ class RevisableRoomLabels:
                 self._last_query[pid] = step
                 if not shape_only:
                     self._kind_cache[kinds] = result
+            result = self._dining_rule(result, signature)
             self._signatures[pid] = keyed
             self._query_kinds[pid] = kinds
             reason = "shape" if shape_only else "evidence_changed" if changed else "periodic_refresh"

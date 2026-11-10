@@ -2421,6 +2421,27 @@ same inputs' *shape*. The run is `publishable: false`; the operator's manual is
 [the HM3D README, section 3.5](hm3d/README.md). Tests:
 `tests/test_ground_truth_perception.py`.
 
+**The on-object filter (2026-11-10, on by default at 0.25 m).** The semantic mesh is a
+mesh of its own, registered to the render mesh by the publisher's config -- and
+on MP3D not everywhere: on Z6MFQCViBuw the sensor painted goal chairs, curtains
+and vases across the wall of a staircase 3-7 m from where they stand, and the
+single-storey baseline STOPped on such phantoms in 32 of its 67 failures (29 %
+of every lock the closing took stood more than 1.5 m from every goal object of
+its class). `--ground-truth-on-object-m M` (`GT_ON_OBJECT_M` for the launcher)
+keeps a rendered pixel as the instance's only where the frame's depth puts it
+inside the instance's own annotated box inflated by `M` metres, 0.25 unless
+told otherwise and `0` to switch it off (the MP3D
+environment hands the source each frame's depth and pose and the scene's
+boxes, `HabitatRGBDSimulator.semantic_boxes`); an instance with fewer than half
+its depth-read pixels on its box is not reported, one partly off keeps its
+on-box pixels alone, and the segmenter's mask follows. Without a depth frame
+or a box the filter judges nothing (the HM3D environment publishes neither
+yet, so HM3D runs see the raw sensor). It is a change to the oracle's
+definition -- a pixel is the object's only where the object is -- recorded in
+the frozen configuration (`ground_truth.on_object_m`) and the detector
+identity; the oracle stands in for a real detector, and a real detector does
+not see chairs through walls, so GT artefacts are not the method's failures.
+
 ## Models and vocabulary
 
 YOLO-World X-v2 remains the default; pretrained LLMDet Swin-L and explicit S/L

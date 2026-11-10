@@ -1,0 +1,92 @@
+{
+  "rules": {
+    "excluded_scenes": [
+      "x8F5xyUWy9e",
+      "X7HyMhZNoso",
+      "EU6Fwq7SyZv"
+    ],
+    "start_kind": "floor",
+    "goal_on_start_level": true,
+    "max_path_dz_m": 0.2,
+    "max_goal_dz_m": 0.2
+  },
+  "sample": {
+    "n": 180,
+    "seed": 17,
+    "draw": "random.Random(seed).sample over the pool sorted by id"
+  },
+  "levels": {
+    "file": "mp3d_val_levels.csv",
+    "sha256": "570b866f22573c0ce8fe67aeedf896c01e22ee1885a92dc6905299cb2e2533b7"
+  },
+  "pool": {
+    "episodes": 1281,
+    "by_scene": {
+      "2azQ1b91cZZ": 178,
+      "8194nk5LbLH": 60,
+      "QUCTc6BB5sX": 159,
+      "TbHJrupSAjP": 139,
+      "Z6MFQCViBuw": 193,
+      "oLBMNvg9in8": 159,
+      "pLe4wQe7qrG": 195,
+      "zsNo4HB9uLZ": 198
+    },
+    "by_category": {
+      "bathtub": 5,
+      "bed": 24,
+      "cabinet": 118,
+      "chair": 225,
+      "chest_of_drawers": 41,
+      "clothes": 14,
+      "counter": 36,
+      "cushion": 116,
+      "fireplace": 24,
+      "gym_equipment": 7,
+      "picture": 117,
+      "plant": 44,
+      "seating": 62,
+      "shower": 41,
+      "sink": 31,
+      "sofa": 31,
+      "stool": 36,
+      "table": 263,
+      "toilet": 16,
+      "towel": 29,
+      "tv_monitor": 1
+    }
+  },
+  "selected": {
+    "episodes": 180,
+    "by_scene": {
+      "2azQ1b91cZZ": 24,
+      "8194nk5LbLH": 6,
+      "QUCTc6BB5sX": 21,
+      "TbHJrupSAjP": 20,
+      "Z6MFQCViBuw": 29,
+      "oLBMNvg9in8": 21,
+      "pLe4wQe7qrG": 27,
+      "zsNo4HB9uLZ": 32
+    },
+    "by_category": {
+      "bed": 6,
+      "cabinet": 14,
+      "chair": 25,
+      "chest_of_drawers": 8,
+      "clothes": 1,
+      "counter": 4,
+      "cushion": 20,
+      "fireplace": 3,
+      "gym_equipment": 1,
+      "picture": 21,
+      "plant": 7,
+      "seating": 11,
+      "shower": 5,
+      "sink": 2,
+      "sofa": 5,
+      "stool": 3,
+      "table": 37,
+      "toilet": 1,
+      "towel": 6
+    }
+  }
+}

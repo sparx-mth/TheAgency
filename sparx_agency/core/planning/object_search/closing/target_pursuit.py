@@ -94,7 +94,8 @@ class TargetPursuit:
     def remember(self, obs, closing):
         """Keep the target of a lock ``closing`` is about to release for want of a path."""
         if closing.xyz is not None:
-            self.remember_at(obs, closing.xyz, closing.label, closing.floor_id, "no_path")
+            self.remember_at(obs, closing.xyz, closing.label, closing.floor_id, "no_path",
+                             lowest_m=getattr(closing, "lowest_m", None))
 
     def remember_bearing(self, obs, label, yaw, floor_id):
         """Keep a target seen only without depth: on its bearing, just beyond the depth range."""
@@ -102,12 +103,15 @@ class TargetPursuit:
         xyz = (float(obs.pose.x) + reach * math.cos(yaw), float(obs.pose.y) + reach * math.sin(yaw), float(obs.pose.z))
         self.remember_at(obs, xyz, label, floor_id, "bearing")
 
-    def remember_at(self, obs, xyz, label, floor_id, source):
+    def remember_at(self, obs, xyz, label, floor_id, source, lowest_m=None):
+        """Keep a target to walk back to; ``lowest_m`` is the lock's lowest measured point (a raised target's standoff
+        is chosen as the closing would choose it, ``TargetApproachPath``)."""
         if not self.settings.enabled:
             return
         self.targets.append({"xyz": tuple(float(v) for v in xyz), "floor": floor_id, "label": label,
                              "released": int(obs.step), "last_query": int(obs.step), "attempts": 0,
-                             "from_xy": (float(obs.pose.x), float(obs.pose.y)), "source": source})
+                             "from_xy": (float(obs.pose.x), float(obs.pose.y)), "source": source,
+                             "lowest_m": None if lowest_m is None else float(lowest_m)})
         self.stats["remembered"] += 1
         self._log(obs, "remembered", label=label, source=source)
 
@@ -173,9 +177,13 @@ class TargetPursuit:
 
     # -- internals ----------------------------------------------------------------------------------------------
     def _shim(self, entry):
-        """What :class:`TargetApproachPath` reads of a target: its 3-D memory, the closing's settings, three counters."""
-        return SimpleNamespace(xyz=entry["xyz"], settings=self.policy.closing.settings,
-                               stale_standoffs_kept=0, widened_standoffs=0, through_unknown_routes=0)
+        """What :class:`TargetApproachPath` reads of a target: its 3-D memory, the closing's settings, its height
+        above the base (from the lock's lowest point, when the memory kept one), four counters."""
+        closing = self.policy.closing
+        lowest = entry.get("lowest_m")
+        return SimpleNamespace(xyz=entry["xyz"], settings=closing.settings,
+                               elevation_above_base=lambda obs: 0.0 if lowest is None else closing.elevation_above_base(obs, lowest),
+                               stale_standoffs_kept=0, widened_standoffs=0, through_unknown_routes=0, frontal_standoffs=0)
 
     def _unbox(self, entry):
         """A route exists now: the spot the target was released from no longer refuses its takeover."""

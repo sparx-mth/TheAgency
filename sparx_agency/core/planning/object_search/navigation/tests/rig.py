@@ -51,3 +51,15 @@ def planned_route(policy, world, start, goal):
 
 def through_the_door(start=(3.0, 4.2, math.radians(10)), goal=(9.0, 7.5)):
     return start, goal
+
+
+def confirm_door(policy, xy=(DOOR_X, DOOR_Y)):
+    """A confirmed door landmark at ``xy``: observed the required number of times from separated viewpoints."""
+    doors = policy.doors
+    landmark = None
+    for _ in range(doors.settings.min_observations):
+        landmark = doors.landmarks.observe("door", (float(xy[0]), float(xy[1])))
+    doors.separated.add(landmark.id)
+    doors.widths[landmark.id] = 0.8
+    doors.revision += 1
+    return landmark

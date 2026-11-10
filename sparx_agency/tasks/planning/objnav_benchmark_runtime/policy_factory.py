@@ -137,9 +137,11 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
     segmenter = None
     if oracle:
         from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.perception import (
-            DEFAULT_MIN_PIXELS, GroundTruthDetector, GroundTruthSegmenter)
+            DEFAULT_MIN_PIXELS, DEFAULT_ON_OBJECT_M, GroundTruthDetector, GroundTruthSegmenter)
         min_pixels = getattr(args, "ground_truth_min_pixels", None)
-        detector = GroundTruthDetector(ground_truth, DEFAULT_MIN_PIXELS if min_pixels is None else min_pixels)
+        on_object = getattr(args, "ground_truth_on_object_m", None)
+        detector = GroundTruthDetector(ground_truth, DEFAULT_MIN_PIXELS if min_pixels is None else min_pixels,
+                                       on_object_m=DEFAULT_ON_OBJECT_M if on_object is None else on_object)
         services.append(("detector", detector))
         if settings.segmentation:
             segmenter = GroundTruthSegmenter(detector)
@@ -148,6 +150,8 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
         if getattr(args, "ground_truth_min_pixels", None) is not None:
             raise ValueError("--ground-truth-min-pixels is the oracle's; --perception is %r" % (args.perception,))
+        if getattr(args, "ground_truth_on_object_m", None) is not None:
+            raise ValueError("--ground-truth-on-object-m is the oracle's; --perception is %r" % (args.perception,))
         detector = HttpDetector(public_service_url(args.detector_url), label_mapper.vocabulary(),
                                 expected_backend=args.detector_backend,
                                 timeout_s=getattr(args, "detector_timeout_s", 30.0))
@@ -203,7 +207,7 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         info.update(perception=PERCEPTION_GROUND_TRUTH, detector=identities["detector"], detector_url=None,
                     publishable=False,
                     ground_truth={"bypassed": ["detector", "segmenter"] if segmenter is not None else ["detector"],
-                                  "min_pixels": detector.min_pixels, "confidence": 1.0,
+                                  "min_pixels": detector.min_pixels, "on_object_m": detector.on_object_m, "confidence": 1.0,
                                   "goal_instances": "the publisher's goal object ids per scene and category",
                                   "context_labels": ground_truth.categories.context_labels,
                                   "category_table_sha256": identities["detector"]["metadata"]["checkpoint_sha256"]})

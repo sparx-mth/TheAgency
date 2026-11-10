@@ -15,6 +15,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import signal
 import subprocess
 import threading
 import time
@@ -52,7 +53,38 @@ def console_log_path(root, scene):
     return Path(root) / ("%s.console.log" % scene)
 
 
-def run_concurrently(jobs, root, workers, *, runner=subprocess.run, announce=print):
+#: The files a scene child rewrites while it works: ``live.json`` on every action (``--record``),
+#: ``progress.json`` and ``episodes.jsonl`` after every episode, and its console log.
+HEARTBEAT_FILES = ("live.json", "progress.json", "episodes.jsonl")
+#: The exit code a child killed for stalling is recorded under (what ``kill -9`` leaves).
+STALLED_RETURNCODE = -9
+
+
+def scene_heartbeat(root, scene):
+    """When the scene's child last showed life: the newest mtime of its heartbeat files, or None before any exists."""
+    paths = [Path(root) / scene / name for name in HEARTBEAT_FILES] + [console_log_path(root, scene)]
+    stamps = []
+    for path in paths:
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if stamps else None
+
+
+def _kill_tree(process):
+    """SIGKILL the child's whole session (its ffmpeg too), then the child itself if the group is already gone."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def run_concurrently(jobs, root, workers, *, runner=subprocess.run, announce=print, stall_s=0.0,
+                     popen=subprocess.Popen, poll_s=5.0):
     """Run ``(scene, command)`` jobs with at most ``workers`` children alive at once.
 
     Args:
@@ -61,19 +93,55 @@ def run_concurrently(jobs, root, workers, *, runner=subprocess.run, announce=pri
             scene directory.
         workers: The most children alive at once.
         runner: Must behave like ``subprocess.run`` and accept ``stdout`` and
-            ``stderr`` keyword arguments.
+            ``stderr`` keyword arguments. Used when ``stall_s`` is 0.
         announce: Receives one line when a scene starts and one when it ends.
+        stall_s: Above 0, a child whose heartbeat files (:data:`HEARTBEAT_FILES`
+            under its scene directory, and its console log) have not changed for
+            this long -- counted from its launch before the first exists -- is
+            killed with its session and recorded as exit :data:`STALLED_RETURNCODE`,
+            so the pool moves on to the next scene and a ``--resume`` of the root
+            reruns it. An MP3D worker that lost its main thread mid-episode kept
+            its CUDA and encoder threads alive, so ``wait`` never returned and the
+            campaign held its slot for an hour (``LESSONS.md`` 2026-11-09). Longer
+            than the reasoning model's call timeout, so a slow oracle answer is
+            never read as a death. The child is started through ``popen`` (a
+            ``subprocess.Popen`` look-alike) in its own session.
+        poll_s: How often a watched child is polled.
 
     Returns:
         ``{scene: returncode}`` for every job.
     """
     if int(workers) < 1:
         raise ValueError("workers must be at least 1, got %r" % (workers,))
+    if stall_s < 0:
+        raise ValueError("stall_s must be zero or positive, got %r" % (stall_s,))
     scenes = [scene for scene, _ in jobs]
     if len(set(scenes)) != len(scenes):
         raise ValueError("a scene may run only once per campaign: %s" % scenes)
     lock = threading.Lock()
     returncodes = {}
+
+    def watched(scene, command, stream):
+        """Run the child under the stall watchdog; its return code, or :data:`STALLED_RETURNCODE`."""
+        launched = time.time()
+        process = popen(command, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+        while True:
+            code = process.poll()
+            if code is not None:
+                return int(code)
+            heartbeat = scene_heartbeat(root, scene)
+            since = time.time() - (launched if heartbeat is None else max(heartbeat, launched))
+            if since > stall_s:
+                with lock:
+                    announce("[campaign] STALLED %s: nothing written for %.0f s; killing the worker (pid %d)"
+                             % (scene, since, process.pid))
+                _kill_tree(process)
+                try:
+                    process.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    pass
+                return STALLED_RETURNCODE
+            time.sleep(poll_s)
 
     def one(scene, command):
         log_path = console_log_path(root, scene)
@@ -81,8 +149,11 @@ def run_concurrently(jobs, root, workers, *, runner=subprocess.run, announce=pri
         with lock:
             announce("[campaign] start %s (console: %s)" % (scene, log_path))
         with open(log_path, "a") as stream:
-            completed = runner(command, stdout=stream, stderr=subprocess.STDOUT)
-        code = int(getattr(completed, "returncode", 1))
+            if stall_s > 0:
+                code = watched(scene, command, stream)
+            else:
+                completed = runner(command, stdout=stream, stderr=subprocess.STDOUT)
+                code = int(getattr(completed, "returncode", 1))
         with lock:
             returncodes[scene] = code
             announce("[campaign] end   %s exit %d after %.1f h"

@@ -548,6 +548,9 @@ def locked_at_two_metres(monkeypatch, **closing):
     p.plan(observation(ep, 0, depth=2))
     p.plan(observation(ep, 1, depth=2))
     assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1 and abs(p.closing.xyz[1]) < 0.1
+    # The depth-plane fake reads the chair's lowest point at its seat; a chair stands on the floor (the lock
+    # only ever lowers it), so the overshoot's elevation lift stays out of these tests unless one asks for it.
+    p.closing.lowest_m = 0.0
     near = replace(observation(ep, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0))
     return p, ep, near
 
@@ -651,6 +654,105 @@ def test_the_second_overshoot_step_is_taken_when_the_first_leaves_the_memory_bey
     closing.note_action(DiscreteAction.MOVE_FORWARD)
     final = closing._overshoot_step(replace(frame, step=4, pose=AgentPose(1.25, 0, 0, 0)))
     assert final.stop and final.info["stop_overshoot"]["ended"] == "2 step(s) taken" and final.info["stop_overshoot"]["memory_m"] == 0.75
+
+
+def test_a_raised_target_is_stood_under_more_closely_because_its_view_points_stand_closer(monkeypatch):
+    """2azQ1b91cZZ/000025 (MP3D, ground truth): a wall cabinet whose underside is 0.87 m above the floor has its
+    view points within 0.49 m planar of its face (the generator keeps only the candidates the object shows from,
+    and a raised object shows from close by); the planar overshoot ended with the memory at 0.86 m -- DTG 0.22,
+    SR 0. The overshoot reads the memory's range lifted by the target's lowest point above the base (since 2026-11-10)."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1)
+    assert p.plan(frame).waypoints
+    closing = p.closing
+    closing.overshoot = None
+    closing.xyz = (2.0, 0.0, 1.5)
+    closing.lowest_m = 1.0 + frame.pose.z                            # the underside, 1.0 m above the agent's base
+    first = closing._terminal(frame, 1.25, 1.0, {"reason": "test"})
+    assert first.waypoints and first.info["stop_overshoot"]["elevation_m"] == 1.0
+    assert first.info["stop_overshoot"]["lifted_m"] == pytest.approx(math.hypot(1.25, 1.0), abs=1e-3)
+    assert first.info["reason"].endswith("step 1 of at most 3 toward the target before it"), "a raised target buys a third step"
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    second = closing._overshoot_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert second.waypoints and "(1.41 m in 3-D, 1.00 m up), beyond 0.90 m" in second.info["reason"]
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    third = closing._overshoot_step(replace(frame, step=4, pose=AgentPose(1.25, 0, 0, 0)))
+    assert third.waypoints and third.info["stop_overshoot"]["steps"] == 2, "the planar rule would have STOPped at 0.75 m"
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    final = closing._overshoot_step(replace(frame, step=5, pose=AgentPose(1.5, 0, 0, 0)))
+    assert final.stop and final.info["stop_overshoot"]["ended"] == "3 step(s) taken" and final.info["stop_overshoot"]["memory_m"] == 0.5
+    assert closing.elevated_overshoot_steps == 1 and p.episode_info()["target_closing"]["elevated_overshoot_steps"] == 1
+    # On the floor nothing changes: the second step leaves the memory within 0.90 m and the STOP follows.
+    closing.overshoot, closing.lowest_m = None, frame.pose.z
+    assert closing._terminal(frame, 1.25, 1.0, {"reason": "test"}).info["stop_overshoot"]["elevation_m"] == 0.0
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    assert closing._overshoot_step(replace(frame, step=7, pose=AgentPose(1.25, 0, 0, 0))).stop
+    # The minimum range still bounds the steps under a raised target, and the setting restores the planar reading.
+    closing.overshoot, closing.lowest_m = None, 1.0 + frame.pose.z
+    assert closing._terminal(frame, 0.65, 0.5, {"reason": "test"}).waypoints
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    bounded = closing._overshoot_step(replace(frame, step=9, pose=AgentPose(1.6, 0, 0, 0)))
+    assert bounded.stop and bounded.info["stop_overshoot"]["ended"].startswith("the memory would stand 0.1")
+    planar, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1, elevation_overshoot=False)
+    planar.closing.lowest_m = 1.0 + frame.pose.z
+    assert planar.plan(frame).info["stop_overshoot"]["elevation_m"] == 0.0
+    with pytest.raises(ValueError, match="elevated_max_steps"):
+        TargetClosingSettings(stop_overshoot_elevated_max_steps=1)
+
+
+def wall_world(y_m=0.15, x_from=1.0, x_to=3.0):
+    """An empty 20 x 20 m map with one wall line along x at ``y_m`` (its cells' centres), 0.1 m cells, and the
+    far side of the wall unknown, as a mapped wall reads."""
+    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    gy = world.world_to_grid(0.0, y_m)[1]
+    world.grid[gy + 1:, :] = world.values.unknown
+    for gx in range(world.world_to_grid(x_from, 0.0)[0], world.world_to_grid(x_to, 0.0)[0] + 1):
+        world.grid[gy, gx] = world.values.occupied
+    return world
+
+
+def test_a_raised_target_with_a_wall_behind_it_gets_its_standoff_in_front_of_the_wall_not_beside_it(monkeypatch):
+    """2azQ1b91cZZ/000157, QUCTc6BB5sX/000055, zsNo4HB9uLZ/000045 (MP3D, ground truth): pictures first seen at a
+    grazing angle were approached along the agent's own bearing and STOPped on from beside them, where the evaluator
+    has no view point. Here the wall runs along the agent's line of sight, 0.15 m beside the memory: the ring of a
+    raised target starts from the direction into the room (since 2026-11-10), and the standoff stands in front
+    of the picture, out from the wall, instead of a step short of it along the wall."""
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    world = wall_world()
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    frontal = p.plan(observation(ep, 1, depth=2))
+    closing = p.closing
+    assert closing.locked and abs(closing.xyz[0] - 2.0) < 0.1 and abs(closing.xyz[1]) < 0.1
+    # The depth-plane fake reads the target's lowest point at seat height, 0.45 m up: a raised target, and
+    # the lock's standoff is chosen from the wall's normal -- in front of the memory, out from the wall.
+    assert frontal.waypoints and closing.path.frontal and closing.frontal_standoffs == 1
+    goal = closing.path.goal_xyz
+    assert abs(goal[0] - 2.0) < 0.1, "in front of the picture along the wall"
+    assert goal[1] < -0.5, "out from the wall, on the agent's side of it"
+    assert p.episode_info()["target_closing"]["frontal_standoffs"] == 1
+    # On the floor the ring starts from the agent's bearing as before: the points along the wall lie in its
+    # inflation, and the first with a route is the 60-degree offset -- the grazing standoff of the campaign.
+    closing.path.drop()
+    closing.lowest_m = 0.0
+    assert p.plan(observation(ep, 2, depth=2)).waypoints and not closing.path.frontal
+    assert closing.path.goal_xyz[0] < 1.8 and closing.frontal_standoffs == 1
+    # Raised again, but with free floor all round the memory (a plant on a stand mid-room): the agent's bearing.
+    closing.path.drop()
+    closing.lowest_m = 1.2
+    monkeypatch.setitem(p.mapping.__dict__, "update",
+                        lambda *a, **kw: OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10)))
+    assert p.plan(observation(ep, 3, depth=2)).waypoints and not closing.path.frontal and closing.path.goal_xyz[0] < 1.8
+    # With the rule off a raised target against a wall keeps the agent's bearing too.
+    off, ep2 = setup_policy(target_closing={"frontal_standoff": False})
+    freeze_global(monkeypatch, off)
+    monkeypatch.setitem(off.mapping.__dict__, "update", lambda *a, **kw: world)
+    off.plan(observation(ep2, 0, depth=2))
+    assert off.plan(observation(ep2, 1, depth=2)).waypoints and off.closing.locked and not off.closing.path.frontal
+    assert off.closing.frontal_standoffs == 0 and off.closing.path.goal_xyz[0] < 1.8
+    with pytest.raises(ValueError, match="frontal_wall_radius_m"):
+        TargetClosingSettings(frontal_wall_radius_m=0.0)
 
 
 def test_a_single_unconditional_step_never_takes_a_second(monkeypatch):
