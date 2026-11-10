@@ -311,11 +311,14 @@ def main(argv=None):
                                        llm_urls=args.llm_urls, gate=gate)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
     elif not args.aggregate_only:
+        # The runner is read from the module at call time, not bound as the default at import: the tests
+        # replace ``campaign.subprocess`` and, bound, ``main`` still spawned a real run.py per scene against
+        # the live LLM server (a stray child waiting on a busy Ollama hung the rig, 2026-11-09).
         results = run_campaign(args.root, version=args.version, split=args.split,
                                episodes_dir=args.episodes_dir,
                                scenes_dir=args.scenes_dir, limit=args.limit,
                                scenes=args.scenes, extra=extra, resume=args.resume,
-                               smoke=args.smoke, jobs=args.jobs,
+                               smoke=args.smoke, jobs=args.jobs, runner=subprocess.run,
                                episode_ids=json.loads(args.episode_ids_file.read_text())
                                if args.episode_ids_file else None)
         failed = [r["scene"] for r in results if r["returncode"] != 0]

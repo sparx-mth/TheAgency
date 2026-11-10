@@ -164,17 +164,40 @@ decides whether to keep a stale label — nothing is cached on failure.
   reply filled the window, raises (`_refuse_truncation`).
   `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
   five single-storey scenarios against the live model and checks the
-  judgement, not just the schema.
-- `room_priors.py` — where a target category cannot be: the room types a
-  search need not enter for it (`IMPLAUSIBLE_ROOMS`, exclusions not
-  permissions; `unknown` never excluded), the home objects that keep a room a
-  node whatever its label (`HOME_OBJECTS`), and the signature objects that
-  make a one-object label strong (`SIGNATURE_OBJECTS`). Pure tables and
-  predicates for the object-search method and its room labels.
+  judgement, not just the schema. **Since 2026-11-09** the user prompt also
+  carries a WHERE IT LIVES line (`SearchContext.target_home`, written by
+  `room_priors.target_home_line`) so the `home` step starts from a prior
+  for every category of every benchmark rather than from the model's
+  own -- the 3B model of the MP3D ground-truth run had put a table in the
+  bathroom and a stool in the hallway; the HOUSE line's frontier statement
+  is a tri-state (reachable / only slivers / unreachable from here / none)
+  rather than reachable-or-not; and a node under a square metre is shown
+  as `size=under 1m2` rather than rounded to `0m2`.
+- `room_priors.py` — where a target category lives and where it cannot
+  be: the room types a search need not enter for it (`IMPLAUSIBLE_ROOMS`,
+  exclusions not permissions; `unknown` never excluded), the home objects
+  that keep a room a node whatever its label (`HOME_OBJECTS`), the
+  signature objects that make a one-object label strong
+  (`SIGNATURE_OBJECTS`), and, since 2026-11-09, the room types a category
+  is likely and rarely found in (`TARGET_HOMES`, rendered for the oracle
+  by `target_home_line`). The three tables cover every category of the
+  three ObjectNav benchmarks -- the six HM3D ones, the twenty-one MP3D
+  ones (`counter`, `stool`, `gym_equipment`, `picture`, `cushion`...) and
+  the Gibson set -- under the dataset's own names and the detector's
+  accept labels (`target_key`, `_TARGET_ALIASES`; `_ALIASES` is the
+  object-class vocabulary and stays separate). Pure tables and predicates
+  for the object-search method and its room labels.
 - `revisable_room_labels.py` — `RevisableRoomLabels`, evidence-gated labels
   around `RoomTypeClassifier`: one confirmed landmark is enough to label, the
   label carries a strength (`weak` from one class of evidence, `strong` from
   two classes or a signature object), and a new kind of object revises it.
+  Since 2026-11-09 a verdict that differs from the current label without a
+  new kind of evidence -- a count that crossed a bucket, a periodic
+  refresh -- is held (`held` counter, a `held: True` history entry) until
+  the classifier repeats it; the MP3D ground-truth run had rooms swing
+  `bedroom` / `living_room` / `dining_room` three to eight times an episode
+  on the same objects, and every swing re-asked the oracle
+  (`RoomLabelSettings.relabel_hysteresis`, on by default).
 - `target_matcher.py` — target-name matching: exact → cache → LLM →
   token-overlap fallback. The fallback rung is not implemented here: it
   delegates to `core/common/label_match.py`, which is the same rule the

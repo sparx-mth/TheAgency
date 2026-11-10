@@ -8,6 +8,7 @@ from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
 from sparx_agency.core.planning.object_search.exploration.doorway_peek import DoorwayPeek
+from sparx_agency.core.planning.object_search.rooms.discovery import semantic_change
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
@@ -179,14 +180,63 @@ def test_inaccessible_frontiers_are_absent_from_counts_and_display():
 
 
 def test_non_destination_semantic_clue_triggers_reasoning_even_without_peeks(monkeypatch):
+    """A HOME OBJECT of the target seen in a room off the route is a clue the walk is interrupted for; an object that
+    says nothing about the target's room (a sink, for a chair) is not -- since 2026-11-09 the semantic signature
+    holds the rooms on offer, their types and the target's home objects, not every object class (the ground-truth
+    detector credited a new class to some room on nearly every action, and the oracle was asked on consecutive
+    actions about the same nodes: QUCTc6BB5sX/000069, 27 calls in 230 actions)."""
     p, ep, world, _, reasoned = loop_policy(order=(1, 0))
     obs = obs_at(ep, 0, IN_A)
     p.loop.plan(obs, world)
     p._discover(obs, world, p.navigation_cost(world))
-    see(p, {0: ["sink"], 1: []}, 1)
+    see(p, {0: ["sink"], 1: []}, 1)                      # not a home object of a chair: no interruption
     p._discover(obs_at(ep, 1, IN_A), world, p.navigation_cost(world))
-    assert reasoned == [0, 1]
+    assert reasoned == [0]
+    see(p, {0: ["sink", "desk"], 1: []}, 2)              # a desk is where chairs stand: the clue
+    p._discover(obs_at(ep, 2, IN_A), world, p.navigation_cost(world))
+    assert reasoned == [0, 2]
     assert p.supervisor.room_id == 1 and p.supervisor.state == TRANSIT
+
+
+def test_semantic_change_reads_types_and_new_home_kinds_not_room_ids():
+    """The watershed renumbers rooms on consecutive actions; the ids are not the clue (2026-11-09).
+
+    A room on offer in both readings whose type changed, or a home-object kind
+    new to the storey, is semantic -- asked about at once. Ids moving, a room
+    appearing or leaving, a known kind credited to another id (a merge) are
+    geometry, which the loop debounces.
+    """
+    none, desk = frozenset(), frozenset({"desk"})
+    before = (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: none, 1: none})
+    renumbered = (0, (0, 2), {0: "kitchen", 2: "unknown"}, {0: none, 2: none})
+    assert not semantic_change(before, renumbered)
+    assert not semantic_change(before, (0, (0,), {0: "kitchen"}, {0: none}))             # a room left the offer
+    assert semantic_change(before, (0, (0, 1), {0: "bathroom", 1: "unknown"}, {0: none, 1: none}))
+    assert semantic_change(before, (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: none, 1: desk}))
+    with_desk = (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: desk, 1: none})
+    moved = (0, (0, 2), {0: "kitchen", 2: "unknown"}, {0: none, 2: desk})               # the desk's room renumbered
+    assert not semantic_change(with_desk, moved)
+    assert not semantic_change(with_desk, (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: desk, 1: desk}))
+    assert semantic_change(before, (1,) + before[1:])
+
+
+def test_a_sliver_the_exclusions_withhold_at_once_is_no_clue(monkeypatch):
+    """A room appearing on the offer and excluded in the same reconsideration leaves the rooms valued at the last
+    call on offer: no call, whatever the time since (QUCTc6BB5sX/000069 re-run, 2026-11-09: two slivers appeared and
+    were withheld as fragments at action 328, and the oracle was asked again over the same two nodes)."""
+    p, ep, world, _, reasoned = loop_policy(order=(1, 0), reconsider_min_actions=8)
+    p.loop.plan(obs_at(ep, 0, IN_A), world)
+    assert reasoned == [0]
+    p.loop.reconsider(obs_at(ep, 60, IN_A), world, semantic=False)     # geometry; the offer is the one valued at 0
+    assert reasoned == [0] and p.loop.stats["reconsiders_spaced"] == 1
+    assert not p.loop._needs_reason     # a release arms it itself; armed here it bought the call this action in SELECT
+    p.loop._offered_at_call = (0,)                                       # the last call (at 0) valued another offer:
+    p.loop.reconsider(obs_at(ep, 4, IN_A), world, semantic=False)      # moments ago, the renumbering may undo itself
+    assert reasoned == [0] and p.loop.stats["reconsiders_spaced"] == 2
+    p.loop.reconsider(obs_at(ep, 70, IN_A), world, semantic=False)     # 70 actions on, a new offer: asked
+    assert reasoned == [0, 70]
+    p.loop.reconsider(obs_at(ep, 72, IN_A), world, semantic=True)      # a type or a home object: asked at once
+    assert reasoned == [0, 70, 72]
 
 
 def test_peek_without_yaw_progress_is_bounded_and_does_not_claim_a_scan():

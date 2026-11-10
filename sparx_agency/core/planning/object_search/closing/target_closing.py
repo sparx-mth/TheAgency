@@ -129,6 +129,15 @@ class TargetClosingSettings:
     # edge at 1.0505 m against a 1.05 m limit, twenty-four alternating turns at the step
     # limit). At most ``inspection_max_steps`` such steps per inspection.
     inspection_max_steps: int = 3
+    # THE INSPECTION RESUMES THE APPROACH A BOUNDED NUMBER OF TIMES (since 2026-11-09). A fresh range
+    # beyond the limit from inside an inspection hands the action back to the approach -- and from an
+    # ARRIVED standoff drops it for a closer ring. The next selection is the same ring the agent already
+    # stands on, the route to it completes at once, the inspection restarts, the range reads the same:
+    # zsNo4HB9uLZ/000078 looped INSPECT / CLOSE eight times at 1.08-1.12 m from a cushion in view -- each
+    # resumption a turn that moved the box across the frame -- until the pathless clock released the
+    # lock as "no safe path to the target 1.1 m away". After this many resumptions per lock the
+    # inspection runs to its own verdict: the step rule, a STOP on a sighting, or a release.
+    max_inspection_resumptions: int = 3
     # THE CLOSEST REACHABLE APPROACH IS TERMINAL (since 2026-10-15). The standoff ring stands 0.70 m
     # about the 3-D memory -- a point on the object's NEAR surface -- and a big object has no floor
     # there: Collierville/000009's 1.5 m television on its cabinet put every ring point inside the
@@ -591,7 +600,8 @@ class TargetClosingSettings:
         if (isinstance(self.nearest_progress_m, bool) or not math.isfinite(self.nearest_progress_m)
                 or self.nearest_progress_m <= 0):
             raise ValueError("nearest_progress_m must be positive and finite")
-        for key in ("max_verify_approach_steps", "inspection_max_steps", "verify_sweep_max_actions"):
+        for key in ("max_verify_approach_steps", "inspection_max_steps", "verify_sweep_max_actions",
+                    "max_inspection_resumptions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 0:
                 raise ValueError("%s must be a non-negative int" % key)
         for key in ("backoff_persistence_frames", "backoff_persistence_window"):
@@ -694,6 +704,10 @@ class TargetClosing:
         self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
         self.stale_standoffs_kept = 0      # standoffs a refinement made stale, kept because no ring point had a route
         self.closest_approach_stops = 0    # STOPs from a widened standoff with the fresh range a step outside the limit
+        self.arrived_step_out_inspections = 0  # arrived standoffs with the fresh range under a step out, handed to the inspection
+        self.resumption_cap_hits = 0       # inspection frames that would have resumed the approach past ``max_inspection_resumptions``
+        self.clipped_resumptions_withheld = 0  # ... or on a box the frame's side cut, whose range is the visible part's
+        self.resighting_reselections = 0   # frames whose re-sighting was not the first box of the class (``_best_projected``)
         self.occluder_reads = 0            # candidate frames whose box was read around a surface standing in front of the target
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
         self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
@@ -940,6 +954,39 @@ class TargetClosing:
             projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), doubt, rows[-1]))
         return kept, projected, glimpses
 
+    def _best_projected(self, projected, intrinsics=None):
+        """The frame's re-sighting of the candidate among its projected boxes of the class.
+
+        Until 2026-11-09 the choice was the most confident box, and ties went
+        to whichever the detector listed first. With several instances of the
+        class in one frame -- cushions on a sofa, chairs about a table -- and
+        the ground-truth detector's confidence 1.0 on every one, the "fresh
+        box" jumped between instances from frame to frame: the memory was
+        fused from one cushion and the range measured on its neighbour, and
+        the centring turns chased a sliver at the frame's edge while the
+        target stood whole in the middle (zsNo4HB9uLZ/000078, actions 86-99).
+        With a 3-D memory the re-sighting is the projection NEAREST to it;
+        before any memory, the most confident box, then the largest (the
+        nearest, cheapest to verify). A whole box is preferred over a sliver
+        the frame's edge cut (``clipped_box``) at every step of the order.
+        ``resighting_reselections`` counts the frames where this differs from
+        the old choice.
+        """
+        k = intrinsics if intrinsics is not None else self.policy.episode.camera.intrinsics
+        reference = None if self.xyz is None else tuple(float(v) for v in self.xyz[:3])
+
+        def key(item):
+            detection, xyz = item[0], item[1]
+            x1, y1, x2, y2 = detection.xyxy
+            sliver = 1 if self._clipped(detection.xyxy, k) else 0
+            distance = 0.0 if reference is None else math.dist(reference, tuple(float(v) for v in xyz[:3]))
+            return (sliver, distance, -float(detection.conf), -abs((x2 - x1) * (y2 - y1)))
+
+        best = min(projected, key=key)
+        if best is not max(projected, key=lambda item: item[0].conf):
+            self.resighting_reselections += 1
+        return best
+
     def _associated(self, obs, xyz, radius):
         """Whether a projected centroid is a re-sighting of the anchor.
 
@@ -1060,7 +1107,7 @@ class TargetClosing:
             return
         here = (float(obs.pose.x), float(obs.pose.y))
         if projected:
-            detection, xyz, near, doubt, row = max(projected, key=lambda item: item[0].conf)
+            detection, xyz, near, doubt, row = self._best_projected(projected, obs.camera.intrinsics)
             # Consecutive means no frame WITHOUT the candidate in between: a glimpse -- the box in
             # view on the anchor's bearing without a usable depth -- carries the chain (``last_sighting``).
             chained = obs.step == self.last_sighting + 1
@@ -1864,46 +1911,72 @@ class TargetClosing:
         measured = self._fresh_measured(obs)
         limit = s.terminal_distance_m + s.range_tolerance_m
         out_of_range = measured is not None and measured > limit
+        step_m = p.episode.action_spec.forward_step_m
 
         def nearly():
             # An ARRIVED standoff found only beyond the standoff ring (``target_path.widened``: no closer point
             # had a route) with the fresh range within one forward step of the limit: as close as the planner
             # gets. The inspection's step rule, then the closest-approach STOP, own it (since 2026-10-15).
             return (s.closest_approach_stop and self.path.arrived and self.path.widened and measured is not None
-                    and measured <= limit + p.episode.action_spec.forward_step_m)
+                    and measured <= limit + step_m)
 
-        if (self.inspection_started is not None and out_of_range and not nearly()
-                and (self.inspection_sighting is None or self._centred(obs))):
-            # Seen fresh from here but the measured surface lies beyond the terminal range:
-            # the filtered estimate entered the inspection early (an older, nearer reading
-            # averaged in), or an earlier borderline reading registered a sighting the
-            # centred view does not confirm. Standing still would spend the budget on a
-            # target in plain view and release it as "saw nothing" -- or STOP on it from
-            # too far when the budget runs out; step closer.
-            self.inspection_started = None
-            self.inspection_resumptions += 1
-            if self.path.arrived:
-                # The inspection was entered from an arrived standoff: walking its route again
-                # would arrive again. Give it up, and the next selection is a closer ring.
-                self.path.drop()
+        def arrived_a_step_out():
+            # An ARRIVED standoff, widened or not, with the fresh range LESS than one forward step beyond the
+            # limit (since 2026-11-09). The ring is drawn about the memory's centroid and the executor ends within
+            # its tolerance of the ring point, so the near edge of a small object reads 1.05-1.30 m from where
+            # the route completes -- the common case, not the exception. Walking the arrived route again would
+            # arrive again, and its completed plan's idle result is executed as a TURN: zsNo4HB9uLZ/000078 swung
+            # 90 degrees off a cushion 1.08 m away in three such turns. The inspection's own step rule owns the
+            # one MOVE_FORWARD that puts the next frame inside the limit.
+            return self.path.arrived and out_of_range and measured <= limit + step_m
+
+        clipped = self.box is not None and self._clipped(self.box, obs.camera.intrinsics)
+        if self.inspection_started is not None and out_of_range and not nearly() and not arrived_a_step_out():
+            if clipped:
+                # The box is a sliver at the frame's side: its near range is the visible, farther part's,
+                # and the inspection's centring turn comes first (the same cushion read 1.09 m from its
+                # clipped half and 0.72 m whole, two turns apart).
+                self.clipped_resumptions_withheld += 1
+            elif self.inspection_resumptions >= s.max_inspection_resumptions:
+                self.resumption_cap_hits += 1   # the inspection runs to its own verdict (see the setting)
+            elif self.inspection_sighting is None or self._centred(obs):
+                # Seen fresh from here but the measured surface lies beyond the terminal range:
+                # the filtered estimate entered the inspection early (an older, nearer reading
+                # averaged in), or an earlier borderline reading registered a sighting the
+                # centred view does not confirm. Standing still would spend the budget on a
+                # target in plain view and release it as "saw nothing" -- or STOP on it from
+                # too far when the budget runs out; step closer.
+                self.inspection_started = None
+                self.inspection_resumptions += 1
+                if self.path.arrived:
+                    # The inspection was entered from an arrived standoff: walking its route again
+                    # would arrive again. Give it up, and the next selection is a closer ring.
+                    self.path.drop()
         # A fresh sighting whose NEAR EDGE is already inside the terminal radius is terminal
         # evidence wherever the centroid is (since 2026-10-08): the benchmark measures to the
         # object, and a low object without LOOK actions is still in the frame from here where
         # it may not be from the standoff (the Wiconisco toilet at 0.65 m is below the FOV).
         in_range = measured is not None and measured <= limit
-        if self.inspection_started is not None or in_range or (distance <= s.terminal_distance_m and not out_of_range):
+        if self.inspection_started is None and arrived_a_step_out() and not nearly():
+            self.arrived_step_out_inspections += 1
+        if (self.inspection_started is not None or in_range or arrived_a_step_out()
+                or (distance <= s.terminal_distance_m and not out_of_range)):
             return self._inspect_or_release(obs, distance)
         # During transit A* owns heading. A bbox outside the FOV must not replace
         # a collision-qualified path with a centering hold or a reacquisition spin.
         command = self.path.command(self, obs, world)
         if command is None:
             return self._no_path(obs, world, distance)
-        if self.path.arrived and (not out_of_range or nearly()):
+        # ``path.arrived`` is read AFTER the route's own command: the action the route completes on is the
+        # one that sets it, and that action was the spin's first turn (zsNo4HB9uLZ/000078, action 83).
+        if self.path.arrived and (not out_of_range or nearly() or arrived_a_step_out()):
             # The route to the standoff is walked (since 2026-10-11): the executor would report
             # ``arrived`` and the headless agent would spend the idle result on a TURN -- twenty of
             # them at a kept standoff 1.15 m from the memory, inside the success region, until the
             # stall clock released the lock as "went nowhere" (Collierville/000194, /000043). The
             # standoff is where the inspection happens: begin it here.
+            if out_of_range and not nearly() and self.inspection_started is None:
+                self.arrived_step_out_inspections += 1
             self.no_path_steps = 0
             self.pathless_after_footing = 0
             return self._inspect_or_release(obs, distance)
@@ -2719,6 +2792,10 @@ class TargetClosing:
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
+                "arrived_step_out_inspections": self.arrived_step_out_inspections,
+                "resumption_cap_hits": self.resumption_cap_hits,
+                "clipped_resumptions_withheld": self.clipped_resumptions_withheld,
+                "resighting_reselections": self.resighting_reselections,
                 "nearest_routes": self.nearest_routes, "bound_releases": self.bound_releases,
                 "nearest_goal": None if self.nearest_goal is None else [round(v, 2) for v in self.nearest_goal],
                 "occluder_reads": self.occluder_reads,

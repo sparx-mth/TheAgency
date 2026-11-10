@@ -216,10 +216,12 @@ def storey_position(building, elevation_m: float) -> str:
     return "this storey is %d above the lowest and %d below the highest of %d known storeys" % (below, above, n)
 
 
-def search_context(building, policy, contexts: Dict, house: str = "") -> SearchContext:
+def search_context(building, policy, contexts: Dict, house: str = "", target_home: str = "") -> SearchContext:
     """What the prompt says about this home: the HOUSE line, and the storeys when more than one is known.
 
     ``house`` is the big-picture line (:func:`~house_context.house_line`);
+    ``target_home`` is where the target normally lives
+    (:func:`~room_priors.target_home_line`, the ``WHERE IT LIVES`` line);
     the storey lines are kept for the multi-storey development protocol and
     are shown only when another storey is known or a staircase is offered
     (the standard single-storey benchmarks never see them).
@@ -235,5 +237,5 @@ def search_context(building, policy, contexts: Dict, house: str = "") -> SearchC
         if position:
             storey += "; " + position
     others = tuple(summarise_floor(context, other) for other, context in sorted(contexts.items()) if other != floor_id)
-    return SearchContext(house=house or storey, storey=storey, others=others)
+    return SearchContext(house=house or storey, storey=storey, others=others, target_home=target_home)
 

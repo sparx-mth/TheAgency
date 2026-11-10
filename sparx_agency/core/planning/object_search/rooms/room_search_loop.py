@@ -159,8 +159,8 @@ from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ROOM_LLM
 from sparx_agency.core.planning.object_search.rooms.house_context import house_line, scan_words
-from sparx_agency.core.mapping.topology.room_priors import home_object, implausible_room, ruled_out
-from sparx_agency.core.planning.object_search.rooms.room_scans import OUTSIDE_VERDICTS, SCAN_POINT_INSIDE
+from sparx_agency.core.mapping.topology.room_priors import home_object, implausible_room, ruled_out, target_home_line
+from sparx_agency.core.planning.object_search.rooms.room_scans import FRAGMENT, OUTSIDE_VERDICTS, SCAN_POINT_INSIDE
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import (
     LANDMARK, OpeningSettings, detect_openings, is_opening_node, landmark_openings, near_stair_mask,
     opening_options, opening_value_factor, room_exits)
@@ -484,6 +484,27 @@ class LoopSettings:
             frontier and no confirmed door is a fragment of another room
             (the strip behind a bed), finished without a visit
             (:class:`~room_scans.RoomScanLedger`); 0 disables.
+        tiny_room_m2: A room under this area with no live frontier is a
+            fragment even with a door on it (since 2026-11-09; see the
+            ledger), and a home object of the target credited to it does
+            not keep it a node (the ``home_object_kept`` exception is for a
+            room finished by sight from outside, whose jamb may hide the
+            target; a sliver has none): no room is under a square metre.
+            0 disables.
+        reconsider_min_actions: A GEOMETRIC clue -- a room appearing on or
+            leaving the offer, no type or home object changed -- within this
+            many actions of the last oracle call is kept for the next loop
+            point (since 2026-11-09): the watershed renumbering at a boundary
+            splits and merges rooms on consecutive actions, and the oracle
+            was asked each time (``discovery.semantic_signature``). Whatever
+            the time, a geometric clue that leaves the same rooms on offer as
+            at the last call -- a sliver the exclusions withhold at once --
+            waits too. The same window holds the SELECT-state rule that a
+            room without a probability buys a call: moments after a call,
+            beside valued rooms, the new id waits for the next one
+            (``unvalued_waits``). A room's type or a home object of the
+            target new to the storey is asked about at once. 0 disables the
+            time window.
         walkthrough_clearance_m: ``scan`` -- a room whose widest point has
             no more clearance than this (a corridor, a balcony) is finished
             once the agent has stood in it and no live frontier is left:
@@ -532,6 +553,8 @@ class LoopSettings:
     openings: OpeningSettings = field(default_factory=OpeningSettings)
     weak_type_max_openings: int = 1
     fragment_max_m2: float = 3.0
+    tiny_room_m2: float = 1.0
+    reconsider_min_actions: int = 8
     walkthrough_clearance_m: float = 0.9
 
     def __post_init__(self):
@@ -587,7 +610,9 @@ class LoopSettings:
             raise ValueError("openings must be an OpeningSettings (or its dict)")
         if type(self.weak_type_max_openings) is not int or self.weak_type_max_openings < 0:
             raise ValueError("weak_type_max_openings must be a non-negative integer")
-        for name in ("fragment_max_m2", "walkthrough_clearance_m", "explore_min_gain_m2"):
+        if type(self.reconsider_min_actions) is not int or self.reconsider_min_actions < 0:
+            raise ValueError("reconsider_min_actions must be a non-negative integer")
+        for name in ("fragment_max_m2", "tiny_room_m2", "walkthrough_clearance_m", "explore_min_gain_m2"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
                 raise ValueError("%s must be finite and non-negative" % name)
@@ -715,6 +740,7 @@ class RoomSearchLoop:
         self._weak_kept = set()       # pids whose weak type label was not allowed to rule them out (logged once)
         self._home_kept_scans = set()  # pids a sight-from-outside verdict was not allowed to finish (logged once)
         self._last_reason_step = -10 ** 9   # the action of the last oracle call, for the openings' revalue throttle
+        self._offered_at_call = None        # the room ids on offer at the last oracle call (``reconsider``'s spacing)
         self._excluded = {}           # pid -> why the room was not offered at the last SELECT
         self._finished = {}           # pid -> (how, step) for every room the scan ledger has finished, offered or not
         self._reopened = set()        # finished rooms offered again for the GAPs left to walk in them (room-level GAPs)
@@ -768,7 +794,7 @@ class RoomSearchLoop:
                       "second_pass_rounds": 0, "second_pass_forced": 0, "revisits_offered": 0, "revisits_chosen": 0,
                       "unentered_rounds": 0,
                       "revisit_scans": 0, "oracle_calls_skipped": 0,
-                      "reconsiders_deferred": 0,
+                      "reconsiders_deferred": 0, "reconsiders_spaced": 0, "unvalued_waits": 0, "releases_unasked": 0,
                       "confined_actions": 0, "unconfined_actions": 0, "plan_failures": 0,
                       "supervisor_rounds": 0, "rounds_exhausted": 0, "llm_fallbacks": 0}
 
@@ -801,11 +827,21 @@ class RoomSearchLoop:
               and is_opening_node(p.supervisor.room_id) and self._peek["node"] == p.supervisor.room_id):
             self._peek["approach_actions"] += 1
 
-    def reconsider(self, obs, world):
+    def reconsider(self, obs, world, semantic=True):
         """A completed peek or new off-route semantic clue warrants a fresh decision.
 
         Reusing the selected room preserves its local action counter. Switching
         releases it neutrally; no visit cooldown punishes a useful new clue.
+
+        ``semantic`` False marks a clue that is geometry alone -- a room
+        appearing on or leaving the offer (``discovery.semantic_signature``)
+        -- which waits for the loop point when the rooms on offer after the
+        exclusions are the ones valued at the last call (the renumbering
+        undid itself; the new room was a sliver), or when that call was
+        under ``reconsider_min_actions`` ago: the watershed renumbering at a
+        boundary splits and merges rooms on consecutive actions (since
+        2026-11-09). A room's type or a home object of the target is asked
+        about at once.
 
         Under ``scan`` a visit in force is finished first: a room half
         turned-through is not left for another on a clue -- the Ranchester
@@ -821,6 +857,21 @@ class RoomSearchLoop:
             return
         cost = p.navigation_cost(world)
         stairs, openings = self._collect_nodes(obs, world, cost)
+        offered = tuple(pid for pid in sorted(p.graph.registry.rooms) if pid not in self._excluded)
+        since = int(obs.step) - self._last_reason_step
+        if not semantic and self._offered_at_call is not None and (
+                offered == self._offered_at_call
+                or (self.settings.reconsider_min_actions > 0 and since < self.settings.reconsider_min_actions)):
+            # Geometry alone. The rooms on offer are the ones valued at the last call -- the renumbering
+            # undid itself, or the new room was a sliver the exclusions just withheld -- so there is nothing
+            # new to ask about; or the last call was moments ago (``reconsider_min_actions``) and the
+            # renumbering may yet undo itself. Either way the clue waits for the loop point, which values
+            # every node anyway (a release arms ``_needs_reason`` itself; arming it here bought the call on
+            # this very action whenever nothing was in force: QUCTc6BB5sX/000069 re-run, 10 of 18 calls).
+            self.stats["reconsiders_spaced"] += 1
+            self._log(obs, "reconsider_spaced", since=since, same_offer=offered == self._offered_at_call,
+                      offered=[int(pid) for pid in offered])
+            return
         if not self._worth_asking(stairs, openings):
             # Nothing the answer could send the search to (the spawn room finished, no
             # doorway seen yet): the clue is kept for the loop point a node appears at.
@@ -849,7 +900,8 @@ class RoomSearchLoop:
             p.route_memory.clear("semantic_switch")
             p._route = p._goal = None
         self.order, self.order_index = tuple(state.order), 0
-        self._log(obs, "semantic_replan", order=list(self.order), retained=state.completed is None)
+        self._log(obs, "semantic_replan", order=list(self.order), retained=state.completed is None,
+                  clue="semantic" if semantic else "geometry", since=since)
 
     # -- one action ---------------------------------------------------------
     def plan(self, obs, world):
@@ -937,9 +989,18 @@ class RoomSearchLoop:
             self._peek = None
             self.stats["rooms_released"] += 1
             self.stats["loop_points"] += 1
-            self._log(obs, "release", room=room_id, verdict=verdict, local_steps=self.local_steps)
+            # Step 7 -> steps 2-4 on this action -- unless the transit never arrived: a node the agent
+            # could not get to teaches the model nothing about the house (its numbers are independent of
+            # reachability, which RPT* charges), so the re-selection runs on the standing numbers with the
+            # node cooled; asked each time, consecutive unreachable releases bought a call per action
+            # (Z6MFQCViBuw/000154 re-run, 2026-11-09: actions 32, 33, 34, 35). A new room or a changed type
+            # meanwhile is the discovery's and ``_update``'s clue, not the release's.
+            asked = verdict not in (BLOCKED, UNREACHABLE, TRANSIT_TIMEOUT)
+            if not asked:
+                self.stats["releases_unasked"] += 1
+            self._log(obs, "release", room=room_id, verdict=verdict, local_steps=self.local_steps, asked=asked)
             self.room_id = None
-            self._needs_reason = True                       # step 7 -> steps 2-4 on this action
+            self._needs_reason = asked
             # The re-selection reads room masks, frontier counts and exits: over geometry rebuilt on THIS
             # action, whatever cadence the released transit was walked on.
             self._fresh_geometry(obs, world)
@@ -1021,8 +1082,21 @@ class RoomSearchLoop:
             # room-level design -- buys a call at most every ``revalue_actions``
             # (they appear and re-snap with every step the fallback takes).
             stairs, openings = self._collect_nodes(obs, world, cost)
-            unvalued = (any(pid not in p.graph.probs for pid in rooms if pid not in self._excluded)
-                        or any(o.node_id not in p.graph.stair_probs for o in stairs))
+            offered = [pid for pid in rooms if pid not in self._excluded]
+            unvalued_rooms = [pid for pid in offered if pid not in p.graph.probs]
+            unvalued = bool(unvalued_rooms) or any(o.node_id not in p.graph.stair_probs for o in stairs)
+            if (unvalued_rooms and self.settings.reconsider_min_actions > 0
+                    and 0 <= obs.step - self._last_reason_step < self.settings.reconsider_min_actions
+                    and any(pid in p.graph.probs for pid in offered)):
+                # A room without a number moments after a call, beside rooms with one: the watershed's new
+                # id, which on consecutive actions bought a call each (EU6Fwq7SyZv/000118 re-run, 2026-11-09:
+                # calls at 39, 41, 43). The valued rooms carry this selection; it is valued at the next call
+                # (``reconsider_min_actions``). A floor with no valued room is asked at once.
+                unvalued = any(o.node_id not in p.graph.stair_probs for o in stairs)
+                if not self._needs_reason:
+                    self.stats["unvalued_waits"] += 1
+                    self._log(obs, "unvalued_wait", rooms=[int(pid) for pid in unvalued_rooms],
+                              since=int(obs.step - self._last_reason_step))
             new_openings = any(o.node_id not in p.graph.stair_probs for o in openings if o.opening.kind != LANDMARK)
             if self.settings.room_level_gaps:
                 exits_now = self._exits_by_room(self._openings_unfolded)
@@ -1428,7 +1502,12 @@ class RoomSearchLoop:
         # action, not shown to the oracle and kept in the order for one more
         # loop point (Hanson 2026-10-05, action 150). The exclusions read every
         # exit of the storey, folded or not: a room's GAPs are counted on the room.
-        if self.settings.type_prior and callable(getattr(p.graph, "refresh_labels", None)):
+        # Since 2026-11-09 the refresh runs whatever ``type_prior`` says: the HOUSE
+        # line below reads the labels, and the graph's own update inside ``reason``
+        # came after it, so the line said "rooms found: none yet" over a node list
+        # that read ``type=bathroom`` (QUCTc6BB5sX/000069 re-run, action 17). The
+        # classifier spends the same calls either way; only their place moves.
+        if callable(getattr(p.graph, "refresh_labels", None)):
             try:
                 p.graph.refresh_labels(obs.step)
             except Exception as exc:  # the classifier is the room LLM: same back-off, held labels stand
@@ -1436,7 +1515,8 @@ class RoomSearchLoop:
                 self._log(obs, "llm_failure", error="%s: %s" % (type(exc).__name__, exc), retry_step=retry,
                           where="refresh_labels")
                 raise RoomReasoningUnavailable(str(exc)) from exc
-            self._exclusions(obs, world, self._openings_unfolded)
+            if self.settings.type_prior:
+                self._exclusions(obs, world, self._openings_unfolded)
         started = time.monotonic()
         shown = [o for o in openings if o.opening.kind != LANDMARK]        # a target landmark's probability is fixed
         # Every exit that is not a node of its own is its room's attribute: all of them under the
@@ -1446,7 +1526,7 @@ class RoomSearchLoop:
         exits = room_exits(attributed)
         scanned = self._scanned_for_prompt(obs)
         house = house_line(p.graph, scanned, len(shown) + len(attributed), int(obs.step), int(p.episode.max_steps),
-                           frontier_left=self._frontier_left())
+                           frontier_left=self._frontier_state(obs, world))
         # The finished rooms are not nodes (``scanned_to_oracle`` off): they are left off the
         # model's list and read at 0.0 downstream; the HOUSE line still names their types. The
         # room in force, a room re-offered for the GAPs left in it and a room the second pass has
@@ -1458,7 +1538,8 @@ class RoomSearchLoop:
             # model values the home (LLM-first, 2026-10-07).
             p.graph.reason(world, p.target, obs.step,
                            extra_nodes=[o.node for o in stairs] + [o.node for o in shown],
-                           context=search_context(getattr(p, "building", None), p, p.floors.save(), house=house),
+                           context=search_context(getattr(p, "building", None), p, p.floors.save(), house=house,
+                                                  target_home=target_home_line(p.target)),
                            here_xy=(obs.pose.x, obs.pose.y), action_time_s=p.settings.action_time_s,
                            exclude=hidden, scanned=scanned, exits=exits)
         except Exception as exc:  # the room LLM: timeout, bad JSON, refused uniform prior
@@ -1470,6 +1551,7 @@ class RoomSearchLoop:
         p.fallback.note_service_success(ROOM_LLM)
         self._needs_reason = False
         self._last_reason_step = int(obs.step)
+        self._offered_at_call = tuple(pid for pid in sorted(p.graph.registry.rooms) if pid not in self._excluded)
         self._exits_at_call = {pid: gaps.count for pid, gaps in exits.items()}
         self.stats["llm_reasonings"] += 1
         oracle = p.graph.last_reasoning.get("oracle", {})
@@ -1603,11 +1685,19 @@ class RoomSearchLoop:
                 continue
             frontier = self._live_frontier(pid, obs, world)
             how = ledger.status(world, pid, room, frontier=frontier, doored=pid in doored, step=int(obs.step))
-            if how is not None and how != SCAN_POINT_INSIDE and self._home_objects(pid):
+            tiny = (self.settings.tiny_room_m2 > 0
+                    and room.n_cells * world.resolution ** 2 < self.settings.tiny_room_m2)
+            if (how is not None and how != SCAN_POINT_INSIDE and self._home_objects(pid)
+                    and not (how == FRAGMENT and tiny)):
                 # Finished by sight from OUTSIDE -- half its floor seen from the
                 # door -- with a home object of the target standing in it: the
                 # toilet is behind the jamb the sightline never passed. A room
-                # the agent stood in and turned a circle in is finished as before.
+                # the agent stood in and turned a circle in is finished as before;
+                # so is a fragment under ``tiny_room_m2`` with no frontier left,
+                # which has no jamb to hide anything behind -- the table credited
+                # to a 0.66 m2 sliver stands in the dining room beside it, which
+                # is a node of its own (EU6Fwq7SyZv/000118 re-run, 2026-11-09:
+                # the sliver was offered in 19 of 37 calls).
                 if pid not in self._home_kept_scans:
                     self._home_kept_scans.add(pid)
                     self.stats["home_object_kept"] += 1
@@ -1693,6 +1783,27 @@ class RoomSearchLoop:
         if not goals:
             return False
         return any(math.isfinite(float(getattr(goal, "geodesic_m", float("inf")))) for goal in goals)
+
+    def _frontier_state(self, obs, world):
+        """The storey's frontier in the HOUSE line's words: ``reachable``, ``slivers``, ``unreachable`` or ``none``.
+
+        ``reachable``: a frontier worth a walk (:meth:`_significant_frontier_left`)
+        with a route to it. ``slivers``: routes reach frontier, none of it
+        significant (under ``explore`` only; the other visits read the plain
+        frontier). ``unreachable``: no route from here reaches any frontier,
+        but the storey's rooms still show some (``graph.facts``, counted over
+        the whole map; the inventory holds only what is reachable from the
+        agent's free component) -- a boxed-in agent, not a covered home
+        (:func:`~house_context.house_line`). ``none``: no room shows any.
+        """
+        inventory = getattr(self.policy.graph, "frontier_inventory", None)
+        goals = getattr(inventory, "goals", None) if inventory is not None else None
+        reachable = [goal for goal in goals or () if math.isfinite(float(getattr(goal, "geodesic_m", float("inf"))))]
+        if not reachable:
+            facts = getattr(self.policy.graph, "facts", None) or {}
+            anywhere = any(int(getattr(fact, "frontier_clusters", 0) or 0) > 0 for fact in facts.values())
+            return "unreachable" if anywhere else "none"
+        return "reachable" if self._significant_frontier_left(obs, world) else "slivers"
 
     def _significant_frontier_left(self, obs, world):
         """Whether a reachable frontier WORTH a walk is left anywhere: ``explore_min_gain_m2`` of unknown a look from it would reveal.

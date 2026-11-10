@@ -11,6 +11,31 @@ Format per entry:
 
 ---
 
+## 2026-11-09 — An MP3D scene worker that loses its main thread is never reaped, and the campaign waits on it for ever
+
+**Symptom:** `runs/baseline21` and `runs/fixed15` (MP3D v1 val, ground-truth perception, GPU renderer, `--record`): the
+Z6MFQCViBuw worker stopped writing its `steps.jsonl` mid-episode (Z6MFQCViBuw/000005, at step 255 in one run and 307 in
+the other, both during the target closing), its console log never gained a line, and `ps` showed it as `[python]
+<defunct>` -- while `campaign.py` kept the scene "running" (one of its two slots) for an hour. `/var/log/kern.log` was
+written at the exact minute it died (unreadable without sudo).
+
+**Root cause:** The process is NOT dead. Its main thread is gone (state `Z` on the thread-group leader) while 32 other
+threads -- the CUDA driver's, the video encoder's, Python's -- are alive in `futex_wait`, and its `ffmpeg` child still
+names it as parent. `subprocess.run` in `hm3d/scene_pool.run_concurrently` waits for the whole process, which never
+exits, so the pool's slot is held until someone kills it; the earlier baseline's worker from 17:17 was still resident
+(1.5 GB, 33 threads) at 19:15. No traceback, no core, no apport entry.
+
+**Fix / workaround:** `kill -9 <pid>` the half-dead worker (and its orphaned `ffmpeg`): the campaign thread's wait
+returns (`exit -9`), the next scene starts, and `--output <same root>` resumes the scene afterwards. The episode may
+die again at another step (it did once). Not yet fixed in the harness; a watchdog on `steps.jsonl` / `progress.json`
+mtime in `run_concurrently` would end such a worker itself.
+
+**Don't:** Don't read `<defunct>` as "exited, waiting to be reaped" before checking `/proc/<pid>/task`: with live
+threads under a dead leader `waitpid` has nothing to collect, and the usual "the parent forgot to wait" theory sends
+you to the wrong code.
+
+---
+
 ## 2026-11-03 — A standoff behind a wall: "inspection saw nothing" disproved a toilet the agent later stood beside
 
 **Symptom:** 00835-q3zU7Yy5E5s/000027 (`runs/failed_691/f434_mesa`, GT perception). The toilet seen at 4.7 m, locked,

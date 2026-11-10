@@ -22,11 +22,64 @@ the toilet standing a metre from the sink.
 """
 from __future__ import annotations
 
-#: Prompt aliases collapse to one key, as in the room labeller.
+#: Prompt aliases collapse to one key, as in the room labeller. For OBJECT CLASS names (the detector's
+#: labels): a class the home-object and generic-object tables read.
 _ALIASES = {"couch": "sofa", "tv": "television", "tv monitor": "television", "monitor": "television",
             "armchair": "chair", "plant": "potted plant"}
 
-#: Target -> room types it is not worth searching for it.
+#: For TARGET names only (:func:`target_key`): the category, query and accept labels of the MP3D, HM3D and
+#: Gibson label tables, folded onto the table keys below. Kept apart from :data:`_ALIASES`, which canonicalises
+#: object classes: ``coffee table`` is a home object of a sofa in its own right and must not read as ``table``.
+_TARGET_ALIASES = dict(_ALIASES, **{
+    "computer monitor": "television", "tv_monitor": "television", "houseplant": "potted plant",
+    "desk": "table", "dining table": "table", "coffee table": "table", "side table": "table",
+    "painting": "picture", "framed picture": "picture", "wall art": "picture",
+    "kitchen cabinet": "cabinet", "cupboard": "cabinet", "pillow": "cushion", "throw pillow": "cushion",
+    "dresser": "chest of drawers", "drawers": "chest of drawers", "nightstand": "chest of drawers",
+    "chest_of_drawers": "chest of drawers", "bathroom sink": "sink", "kitchen sink": "sink", "washbasin": "sink",
+    "bar stool": "stool", "step stool": "stool", "footstool": "stool", "bath towel": "towel", "hand towel": "towel",
+    "shower stall": "shower", "shower cabin": "shower", "bath tub": "bathtub", "bath": "bathtub",
+    "countertop": "counter", "kitchen counter": "counter", "chimney breast": "fireplace",
+    "gym_equipment": "gym equipment", "exercise equipment": "gym equipment", "treadmill": "gym equipment",
+    "exercise bike": "gym equipment", "weight bench": "gym equipment", "bench": "seating", "church pew": "seating",
+    "pew": "seating", "clothing": "clothes", "laundry": "clothes", "hanging clothes": "clothes"})
+
+#: Target -> the room types it lives in, most likely first, and the types it is rare in -- the prior the
+#: node oracle is briefed with (:func:`target_home_line`), covering every MP3D goal category (the HM3D and
+#: Gibson categories are among them). Until 2026-11-09 only the six HM3D categories had any prior, and
+#: the 3B oracle answered "a table is in the bathroom" and "none of the known rooms are a counter" for
+#: the rest (the MP3D ground-truth run, 14,457 oracle calls).
+TARGET_HOMES = {
+    "chair": (("dining_room", "kitchen", "office", "living_room", "bedroom"), ("bathroom", "hallway")),
+    "table": (("dining_room", "kitchen", "living_room", "office", "bedroom"), ("bathroom", "hallway")),
+    "picture": (("living_room", "hallway", "bedroom", "dining_room", "office", "foyer"),
+                ("bathroom", "storage_closet", "laundry_room")),
+    "cabinet": (("kitchen", "bathroom", "dining_room", "bedroom", "living_room", "laundry_room", "storage_closet"),
+                ("hallway",)),
+    "cushion": (("living_room", "bedroom"), ("kitchen", "bathroom", "hallway")),
+    "sofa": (("living_room", "office", "bedroom"), ("kitchen", "bathroom", "hallway")),
+    "bed": (("bedroom",), ("living_room", "kitchen", "bathroom", "dining_room", "hallway")),
+    "chest of drawers": (("bedroom", "hallway", "living_room"), ("kitchen", "bathroom", "dining_room")),
+    "potted plant": (("living_room", "hallway", "foyer", "dining_room", "kitchen", "balcony"),
+                     ("storage_closet", "laundry_room")),
+    "sink": (("kitchen", "bathroom", "laundry_room"), ("bedroom", "living_room", "dining_room", "hallway")),
+    "toilet": (("bathroom",), ("kitchen", "bedroom", "living_room", "dining_room", "hallway")),
+    "stool": (("kitchen", "bathroom", "living_room", "bedroom"), ("hallway", "storage_closet")),
+    "towel": (("bathroom", "kitchen", "laundry_room", "bedroom"), ("living_room", "dining_room", "hallway")),
+    "television": (("living_room", "bedroom", "office"), ("kitchen", "bathroom", "hallway")),
+    "shower": (("bathroom",), ("kitchen", "bedroom", "living_room", "dining_room", "hallway")),
+    "bathtub": (("bathroom",), ("kitchen", "bedroom", "living_room", "dining_room", "hallway")),
+    "counter": (("kitchen", "bathroom", "laundry_room"), ("bedroom", "living_room", "dining_room", "hallway")),
+    "fireplace": (("living_room", "dining_room", "bedroom", "office"), ("kitchen", "bathroom", "hallway")),
+    "gym equipment": (("office", "bedroom", "garage", "storage_closet", "living_room"),
+                      ("kitchen", "bathroom", "dining_room", "hallway")),
+    "seating": (("living_room", "dining_room", "foyer", "hallway", "kitchen"), ("bathroom", "storage_closet")),
+    "clothes": (("bedroom", "storage_closet", "laundry_room", "bathroom"), ("kitchen", "dining_room", "living_room")),
+}
+
+#: Target -> room types it is not worth searching for it. Only the hard cases: a type that is
+#: implausible but not impossible (a sofa in a dining room, a chair in a hallway) is left to the
+#: oracle, which reads :data:`TARGET_HOMES` instead.
 IMPLAUSIBLE_ROOMS = {
     "sofa": frozenset(("bedroom", "bathroom", "kitchen", "laundry_room", "storage_closet")),
     "bed": frozenset(("kitchen", "bathroom", "living_room", "dining_room", "office", "hallway",
@@ -36,18 +89,54 @@ IMPLAUSIBLE_ROOMS = {
     "television": frozenset(("bathroom", "laundry_room", "storage_closet", "hallway")),
     "chair": frozenset(("bathroom", "laundry_room", "storage_closet")),
     "potted plant": frozenset(("laundry_room", "storage_closet")),
+    "table": frozenset(("bathroom", "laundry_room", "storage_closet")),
+    "picture": frozenset(("laundry_room", "storage_closet", "garage")),
+    "cabinet": frozenset(()),
+    "cushion": frozenset(("bathroom", "kitchen", "laundry_room", "storage_closet", "garage")),
+    "chest of drawers": frozenset(("kitchen", "bathroom", "dining_room", "laundry_room", "garage")),
+    "sink": frozenset(("bedroom", "living_room", "dining_room", "office", "hallway", "foyer")),
+    "stool": frozenset(("laundry_room", "storage_closet")),
+    "towel": frozenset(("living_room", "dining_room", "office", "hallway", "foyer", "storage_closet", "garage")),
+    "shower": frozenset(("kitchen", "bedroom", "living_room", "dining_room", "office", "hallway", "foyer",
+                         "laundry_room", "storage_closet", "garage")),
+    "bathtub": frozenset(("kitchen", "bedroom", "living_room", "dining_room", "office", "hallway", "foyer",
+                          "laundry_room", "storage_closet", "garage")),
+    "counter": frozenset(("bedroom", "living_room", "dining_room", "office", "hallway", "foyer", "storage_closet",
+                          "garage")),
+    "fireplace": frozenset(("kitchen", "bathroom", "laundry_room", "storage_closet", "garage", "hallway")),
+    "gym equipment": frozenset(("kitchen", "bathroom", "dining_room", "laundry_room", "hallway", "foyer")),
+    "seating": frozenset(("bathroom", "laundry_room", "storage_closet")),
+    "clothes": frozenset(("kitchen", "dining_room", "living_room", "office", "hallway", "foyer", "garage")),
 }
 
 
 #: Target -> object classes that mark the room the target lives in. A room holding one
 #: is never ruled out for that target, whatever type its other objects gave it.
 HOME_OBJECTS = {
-    "toilet": frozenset(("sink", "shower", "bathtub", "toilet")),
-    "sofa": frozenset(("television", "sofa", "coffee table")),
-    "bed": frozenset(("bed", "wardrobe", "nightstand", "dresser")),
-    "television": frozenset(("television", "sofa")),
-    "chair": frozenset(("chair", "desk", "dining table")),
+    "toilet": frozenset(("sink", "shower", "bathtub", "toilet", "towel", "mirror")),
+    "sofa": frozenset(("television", "sofa", "coffee table", "cushion", "fireplace", "seating")),
+    "bed": frozenset(("bed", "wardrobe", "nightstand", "dresser", "chest of drawers", "cushion", "clothes")),
+    "television": frozenset(("television", "sofa", "fireplace", "cushion")),
+    "chair": frozenset(("chair", "desk", "dining table", "table", "stool", "seating")),
     "potted plant": frozenset(("potted plant",)),
+    "table": frozenset(("table", "chair", "stool", "seating", "sofa")),
+    "picture": frozenset(("picture",)),
+    "cabinet": frozenset(("cabinet", "counter", "sink", "stove", "oven", "refrigerator", "dishwasher", "microwave",
+                          "mirror", "toilet")),
+    "cushion": frozenset(("cushion", "sofa", "bed", "seating", "chair")),
+    "chest of drawers": frozenset(("chest of drawers", "bed", "wardrobe", "mirror", "lamp")),
+    "sink": frozenset(("sink", "toilet", "shower", "bathtub", "towel", "mirror", "counter", "stove", "oven",
+                       "refrigerator", "dishwasher")),
+    "stool": frozenset(("stool", "counter", "table")),
+    "towel": frozenset(("towel", "sink", "shower", "bathtub", "toilet", "mirror")),
+    "shower": frozenset(("shower", "toilet", "sink", "bathtub", "towel")),
+    "bathtub": frozenset(("bathtub", "toilet", "sink", "shower", "towel")),
+    "counter": frozenset(("counter", "sink", "stove", "oven", "refrigerator", "dishwasher", "microwave", "stool",
+                          "cabinet", "mirror", "toilet")),
+    "fireplace": frozenset(("fireplace", "sofa", "television", "seating")),
+    "gym equipment": frozenset(("gym equipment",)),
+    "seating": frozenset(("seating", "table", "chair", "cushion", "sofa")),
+    "clothes": frozenset(("clothes", "wardrobe", "bed", "washing machine", "chest of drawers", "towel")),
 }
 
 
@@ -140,8 +229,8 @@ def target_key(target):
                 names.append(str(value))
         names.extend(str(v) for v in getattr(target, "accept", ()) or ())
     for name in names:
-        key = _ALIASES.get(name.strip().lower(), name.strip().lower())
-        if key in IMPLAUSIBLE_ROOMS:
+        key = _TARGET_ALIASES.get(name.strip().lower(), name.strip().lower())
+        if key in TARGET_HOMES or key in IMPLAUSIBLE_ROOMS:
             return key
     return None
 
@@ -157,5 +246,28 @@ def implausible_room(target, label):
     key = target_key(target)
     if key is None:
         return False
-    return str(label).strip().lower() in IMPLAUSIBLE_ROOMS[key]
+    return str(label).strip().lower() in IMPLAUSIBLE_ROOMS.get(key, frozenset())
+
+
+def _room_words(labels):
+    """``bedroom, living room`` for a tuple of classifier labels (the underscores read badly in prose)."""
+    return ", ".join(str(label).replace("_", " ") for label in labels)
+
+
+def target_home_line(target):
+    """One prompt line on where ``target`` normally lives, from :data:`TARGET_HOMES`, or an empty string.
+
+    ``bathroom, kitchen, laundry room (most likely first); rare in: bedroom, living room,
+    dining room, hallway`` -- the node oracle's step 1, given rather than guessed, for
+    every category of the three benchmarks; the prompt labels it ``WHERE IT LIVES``.
+    """
+    key = target_key(target)
+    homes = TARGET_HOMES.get(key) if key is not None else None
+    if not homes:
+        return ""
+    likely, rare = homes
+    line = "%s (most likely first)" % _room_words(likely)
+    if rare:
+        line += "; rare in: %s" % _room_words(rare)
+    return line
 

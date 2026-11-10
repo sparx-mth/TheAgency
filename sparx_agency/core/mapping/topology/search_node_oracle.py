@@ -142,7 +142,8 @@ left is offered again for what lies BEHIND them, not for itself). searched= time
 inside. seen= objects confirmed in it. here=yes: the robot stands in it now.
 The HOUSE line is the big picture: every room type found so far (scanned ones included), how \
 many rooms are still unidentified, how many exits (openings) of the whole home are not yet \
-looked into, whether any unexplored frontier is still reachable, and the budget -- actions \
+looked into, whether any unexplored frontier is still reachable -- or only slivers of it, or frontier that no route \
+from here reaches: then the home is NOT covered, the robot is cut off from the rest of it -- and the budget -- actions \
 used of the total. Use ALL of it.
 
 EXITS. What lies behind a room's exits is decided by the HOME, never by the count alone: an \
@@ -166,7 +167,9 @@ family room or an office); a television in a living room, then a bedroom, rarely
 never a bathroom; a chair in a dining room, kitchen, office, bedroom or living room; a potted \
 plant in a living room, hallway, kitchen or balcony; a refrigerator, oven or stove in a \
 kitchen; a bathtub or shower in a bathroom. Small objects that travel (cup, book, bottle) \
-have a home too, only a weaker one.
+have a home too, only a weaker one. When the prompt carries a WHERE IT LIVES line under the \
+TARGET, that line IS step 1 -- the room types it names, in its order, with its rare ones rare: \
+copy it into "home" and reason from it; never replace it with a guess of your own.
 STEP 2 "house": read the home from the rooms found. A typical home has ONE kitchen, ONE \
 living room, ONE dining area, one to four bedrooms, one to three bathrooms (one often \
 en-suite off the main bedroom), a hallway, perhaps an office, a laundry or a garage. If a \
@@ -296,7 +299,7 @@ storey is worth about 10 when home_here is "elsewhere" -- a look into it comes a
 storey the target lives on. Changing storeys costs many actions, but that is NOT your \
 concern: the planner adds travel and climbing cost itself."""
 
-USER_PROMPT_TEMPLATE = """TARGET: {target}
+USER_PROMPT_TEMPLATE = """TARGET: {target}{home}
 
 HOUSE: {house}
 {storeys}
@@ -429,11 +432,17 @@ class SearchContext:
             left, its rank in the building. Shown when a STAIRS node is
             offered or another storey is known.
         others: Multi-storey only: one line per other storey known.
+        target_home: Where the target normally lives, in prompt words
+            (:func:`~room_priors.target_home_line`: ``lives in: bathroom,
+            kitchen (most likely first); rare in: bedroom``); rendered as a
+            ``WHERE IT LIVES`` line under the TARGET, which the system prompt
+            makes step 1. Empty leaves step 1 to the model (since 2026-11-09).
     """
 
     house: str = ""
     storey: str = ""
     others: Tuple[str, ...] = field(default_factory=tuple)
+    target_home: str = ""
 
     @property
     def multi_storey(self) -> bool:
@@ -542,7 +551,8 @@ def format_node(node: SearchNode) -> str:
                           "to space NOT seen yet", "glimpsed through it: %s" % glimpsed])
     names = sorted({str(c).strip().lower() for c in node.objects if str(c).strip()})
     seen = ", ".join(names[:MAX_CLASSES_IN_PROMPT]) if names else "nothing yet"
-    size = "%dm2" % int(round(float(node.area_m2))) if float(node.area_m2) > 0.0 else "unknown size"
+    area = float(node.area_m2)
+    size = "unknown size" if area <= 0.0 else "under 1m2" if area < 1.0 else "%dm2" % int(round(area))
     label = node.label + ("?" if node.tentative and node.label != "unknown" else "")
     parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % size,
              "frontier=%d" % max(0, int(node.frontier_clusters)),
@@ -584,8 +594,9 @@ def format_prompt(target: str, nodes: Sequence[SearchNode], context: Optional[Se
         storeys = STOREY_LINES_TEMPLATE.format(
             storey=context.storey or "the only storey mapped so far",
             others="; ".join(context.others) if context.others else "none known")
+    home = ("\nWHERE IT LIVES: %s" % context.target_home.strip()) if context.target_home.strip() else ""
     return USER_PROMPT_TEMPLATE.format(
-        target=target, house=context.house or "nothing known yet", storeys=storeys,
+        target=target, home=home, house=context.house or "nothing known yet", storeys=storeys,
         n=len(nodes), nodes="\n".join(format_node(n) for n in nodes))
 
 

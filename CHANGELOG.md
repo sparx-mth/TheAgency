@@ -5,6 +5,55 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-11-09, the MP3D run's graph and oracle bookkeeping, and the oracle's priors for every MP3D category)
+- **The node oracle is briefed with a WHERE IT LIVES line for every target category**
+  (`room_priors.TARGET_HOMES`, `target_home_line`, `SearchContext.target_home`): the 3B model had no prior for the
+  fifteen MP3D categories HM3D lacks and wrote "a table is in the bathroom", "a stool in the hallway"; `TARGET_HOMES`,
+  `IMPLAUSIBLE_ROOMS` and `HOME_OBJECTS` now cover all 21 under the dataset's names and the accept labels
+  (`_TARGET_ALIASES`), so `target_context`'s room-conflict penalty is live for those categories too.
+- **A room under `LoopSettings.tiny_room_m2` (1 m2) with no live frontier is a fragment whatever its doors**
+  (`room_scans._status_without_frontier`), and a home object of the target credited to it does not keep it a node
+  (the `home_object_kept` exception is for a room whose jamb may hide the target; a sliver has none): slivers of
+  0.2-0.8 m2 were offered in 40 % of the oracle calls and were the model's first choice in one in eight. A sliver with
+  frontier left stays a node.
+- **The HOUSE line's frontier statement is a tri-state** (`house_context.frontier_state`: reachable / only slivers /
+  unreachable from here / none; the loop's `_frontier_state` reads "unreachable" off the rooms' own frontier counts,
+  since the inventory holds only what the agent's free component reaches): a boxed-in agent had told the model "no
+  unexplored frontier left", and the phrase flipped back in 167 of 266 episodes that used it. The oracle shows a node
+  under a square metre as `size=under 1m2`, and the HOUSE line is built AFTER the labels are refreshed, so it no
+  longer reads "rooms found: none yet" over a node list that says `type=bathroom`.
+- **A mid-walk reconsideration is a clue, not any new object class** (`discovery.semantic_signature`,
+  `semantic_change`): a room on or off the offer, a room's type, a home-object kind new to the storey. Geometry alone
+  -- the watershed renumbering, a merge, a sliver the exclusions withhold at once -- waits for the loop point when the
+  rooms on offer are the ones valued at the last call or that call was under `reconsider_min_actions` (8) ago,
+  without arming the loop point itself (armed, the SELECT state spent the call on the same action). The same window
+  holds SELECT's "a room without a probability buys a call" while a valued room stands (`unvalued_waits`), and a
+  release for `unreachable` / `blocked` / `transit_timeout` re-selects on the standing numbers instead of re-asking
+  (`releases_unasked`): QUCTc6BB5sX/000069 had asked 27 times in 230 actions inside a 5 m patch, on consecutive
+  actions over the same two nodes. `reconsiders_spaced` counts the waits; `semantic_replan` events carry `clue` and
+  `since`.
+- **The room labeller holds a verdict that differs without a new kind of evidence until it repeats, and a verdict on
+  a kind LOST to the partition for `refresh_steps` actions** (`RoomLabelSettings.relabel_hysteresis`, `held`,
+  `room_labels_held` in the episode info; the hold survives the partition changes the watershed makes on most
+  actions): rooms had swung bedroom / living room / dining room up to eight times an episode on the same objects, and
+  a 10 m2 dining room read bathroom for the 40 actions its table stood across a moved boundary; each swing was a
+  semantic clue and an oracle call. A new kind of object relabels at once.
+  `docs/progress/entries/045-mp3d-layer4-and-category-priors.md` for the re-run.
+- **`mp3d/campaign.py main` passes `runner=subprocess.run` at call time**: bound as the default it ignored the tests'
+  monkeypatch, and `test_a_sweep_whose_scenes_crashed_does_not_exit_zero` spawned a real `run.py` against the live
+  Ollama, which hung the rig for 20 minutes while a campaign kept the server busy.
+### Fixed (2026-11-09, the MP3D "seen, not converted" failures: the closing's share, measured on 15)
+- **The target closing's re-sighting is the projection nearest the 3-D memory** (`TargetClosing._best_projected`), a
+  whole box before a sliver, instead of the most confident box: with several instances of the class in one frame at one
+  confidence (the ground-truth detector) the range was measured on the neighbour and the centring turns chased a sliver
+  at the frame's edge (zsNo4HB9uLZ/000078: 211 actions to the STOP, now 48).
+- **An arrived standoff with the fresh range at most one forward step beyond the limit is the inspection's**, whose
+  step rule takes the one MOVE_FORWARD; the arrived route's idle result was executed as a TURN and the lock was lost as
+  "no safe path to the target 1.1 m away". The closest-approach STOP still needs a widened standoff.
+- **The inspection resumes the approach at most `max_inspection_resumptions` (3) times per lock, never on a
+  side-clipped box.** Four new per-episode counters; `docs/progress/entries/044-mp3d-seen-not-converted-closing.md`
+  for the 15-episode re-run and what the recordings say the other mechanisms are (the spawn-floor guard after raised
+  and stair starts, wedges, near-miss standing spots, a STOP from the wrong level, ground-truth slivers).
 ### Added (2026-11-05/06, MP3D v1 val under ground-truth perception, measured)
 - **A sharded MP3D campaign** (`objnav_benchmark_runtime/mp3d/campaign.py --shard-episodes N`, `shard_plan.py`,
   `shard_pool.py`, `sharded_campaign.py`, `campaign_status.py`, `run_benchmark.sh --llm-servers N` / `--status`):

@@ -42,7 +42,13 @@ Four tests say whether a room is finished, in order:
   and no confirmed door on it -- the strip behind a bed, the nook beside
   a wardrobe, that the watershed carved into a room of its own
   (``fragment``, since 2026-10-05). A bathroom is small too, but a
-  bathroom has a door or an unseen boundary; a fragment has neither;
+  bathroom has a door or an unseen boundary; a fragment has neither.
+  Under :attr:`tiny_room_m2` (since 2026-11-09) a doorless boundary is
+  not required: no room is under a square metre, and the door frames the
+  ground-truth detector sees everywhere kept slivers of 0.2-0.8 m2 nodes
+  for whole episodes -- 212 of them offered in 521 oracle calls of the
+  MP3D re-runs, the model's first choice in 65 (a 0.26 m2 "bedroom" with
+  the bed's landmark credited to it, a 0.17 m2 "foyer");
 * with :attr:`explored` on (the loop's ``explore`` visit, since
   2026-10-13), it is **explored**: no live frontier, and the agent has
   stood inside it -- not on its threshold cell but :attr:`explored_inset_m`
@@ -162,13 +168,14 @@ class RoomScanLedger:
     """
 
     def __init__(self, policy, seen_fraction=0.5, fragment_max_m2=3.0, walkthrough_clearance_m=0.9, pose_batch=8,
-                 regrow_factor=1.5, explored=None, explored_inset_m=0.5, seen_range_m=0.0):
+                 regrow_factor=1.5, explored=None, explored_inset_m=0.5, seen_range_m=0.0, tiny_room_m2=1.0):
         if not 0.0 < float(seen_fraction) <= 1.0:
             raise ValueError("seen_fraction must lie in (0, 1], got %r" % (seen_fraction,))
         if isinstance(seen_range_m, bool) or not math.isfinite(float(seen_range_m)) or float(seen_range_m) < 0.0:
             raise ValueError("seen_range_m must be finite and non-negative (0: the camera's depth range), got %r" % (seen_range_m,))
         for name, value in (("fragment_max_m2", fragment_max_m2), ("walkthrough_clearance_m", walkthrough_clearance_m),
-                            ("regrow_factor", regrow_factor), ("explored_inset_m", explored_inset_m)):
+                            ("regrow_factor", regrow_factor), ("explored_inset_m", explored_inset_m),
+                            ("tiny_room_m2", tiny_room_m2)):
             if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError("%s must be finite and non-negative, got %r" % (name, value))
         if 0.0 < float(regrow_factor) < 1.0:
@@ -181,6 +188,7 @@ class RoomScanLedger:
         self.seen_fraction = float(seen_fraction)
         self.seen_range_m = float(seen_range_m)
         self.fragment_max_m2 = float(fragment_max_m2)
+        self.tiny_room_m2 = float(tiny_room_m2)
         self.walkthrough_clearance_m = float(walkthrough_clearance_m)
         self.pose_batch = int(pose_batch)
         self.regrow_factor = float(regrow_factor)
@@ -325,7 +333,7 @@ class RoomScanLedger:
         if self._looked_into(world, pid, room, sight):
             return SEEN_THROUGH
         area = float(room.n_cells) * world.resolution ** 2
-        if self.fragment_max_m2 > 0.0 and area < self.fragment_max_m2 and not doored:
+        if self.fragment_max_m2 > 0.0 and area < self.fragment_max_m2 and (not doored or area < self.tiny_room_m2):
             return FRAGMENT
         if self.explored and sight.stood_in(world, self._interior(world, room.mask)):
             return EXPLORED
@@ -436,6 +444,7 @@ class RoomScanLedger:
     def diagnostics(self):
         floor = getattr(getattr(self.policy, "mapping", None), "floor_id", None)
         return {"seen_fraction": self.seen_fraction, "seen_range_m": self.seen_range_m, "fragment_max_m2": self.fragment_max_m2,
+                "tiny_room_m2": self.tiny_room_m2,
                 "walkthrough_clearance_m": self.walkthrough_clearance_m, "regrow_factor": self.regrow_factor,
                 "explored": self.explored, "explored_inset_m": self.explored_inset_m,
                 "records": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in r.items()} for r in self.records],

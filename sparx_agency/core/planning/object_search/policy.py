@@ -174,14 +174,21 @@ class RPTSearchPolicy:
                                     if self.loop_settings.room_level_gaps else " + its openings"),
                                 "asks": "independent P(searching there finds target), without a fixed action horizon; "
                                         "the model is briefed with the HOUSE line (room types found, rooms unidentified, "
-                                        "openings unlooked, actions used of the budget) and writes home/house/stage and a "
-                                        "first|second pass verdict before the numbers (LLM-first, 2026-10-07)",
+                                        "openings unlooked, the frontier state -- reachable, slivers, unreachable, none -- "
+                                        "actions used of the budget) and, since 2026-11-09, a WHERE IT LIVES line from "
+                                        "room_priors.TARGET_HOMES for every category of the three benchmarks, and writes "
+                                        "home/house/stage and a first|second pass verdict before the numbers (LLM-first, "
+                                        "2026-10-07)",
                                 "probability_model": "independent_search_success",
                                 "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor,
                                                 "unexplored_elsewhere": self.loop_settings.unexplored_elsewhere,
                                                 "home_floor": self.loop_settings.home_floor},
                                 "second_pass": self.loop_settings.second_pass, "type_prior": self.loop_settings.type_prior,
-                                "route": "LLM_REASONING_MODEL", "cadence": "loop points and semantic discovery; unchanged prompts reused"},
+                                "route": "LLM_REASONING_MODEL",
+                                "cadence": "loop points and semantic discovery -- a room on or off the offer, a room's type, a "
+                                           "home object of the target (discovery.semantic_signature, 2026-11-09); geometry alone "
+                                           "within reconsider_min_actions of the last call waits for the loop point; unchanged "
+                                           "prompts reused"},
                 "floor_change_decision": ("RPT* over rooms and stair nodes; a staircase is charged its flight plus "
                                           "%.1f m on every arc; no allowance, no clock; the explicit floor_decision "
                                           "rule is the exploration fallback's last resort"
@@ -278,6 +285,7 @@ class RPTSearchPolicy:
         # it and no live frontier is left (its frontiers were walked until none was).
         self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction,
                                     fragment_max_m2=self.loop_settings.fragment_max_m2,
+                                    tiny_room_m2=self.loop_settings.tiny_room_m2,
                                     walkthrough_clearance_m=self.loop_settings.walkthrough_clearance_m,
                                     seen_range_m=self.loop_settings.scan_seen_range_m)
         # Sticky ids for the floor's openings and the ones already peeked into,
@@ -331,6 +339,7 @@ class RPTSearchPolicy:
         self._notified_step = self._decision_step = -1
         self._decision_command = None
         self._semantic_signature = None
+        self._semantic_signature_step = -1
         self._resume_room = None
 
     def _reset_floor(self):
@@ -903,6 +912,7 @@ class RPTSearchPolicy:
                 "blocked": self._blocked, "goals_retired_by_bumps": self._goals_retired_by_bumps,
                 "doors": self.doors.diagnostics(), "max_rooms": self.graph.max_rooms,
                 "room_label_queries": self.graph.label_tracker.queries, "room_label_history": list(self.graph.label_tracker.history),
+                "room_labels_held": self.graph.label_tracker.held,
                 "last_reasoning": self.graph.last_reasoning, "route_commitment": dict(self.route_memory.stats),
                 "plan_calls": self._plan_calls, "duplicates_removed": self._duplicates_removed,
                 "target_evidence": self.target_evidence.diagnostics(), "floor_revisions": self.mapping.floor_revision,

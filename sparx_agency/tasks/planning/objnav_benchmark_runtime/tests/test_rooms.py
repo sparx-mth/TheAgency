@@ -35,22 +35,72 @@ class ScriptedClassifier:
 
 
 def test_room_labels_wait_then_revise_counts_and_refresh():
-    """The historical three-object gate, as an explicit setting."""
+    """The historical three-object gate, as an explicit setting -- and, since 2026-11-09, a verdict that differs
+    without a new KIND of evidence (the same kinds under new counts, the periodic refresh) is held until it repeats:
+    the scripted model answers living_room once and bedroom ever after, which is the churn of a 3B labeller."""
     client = ScriptedClassifier()
     tracker = RevisableRoomLabels(client, RoomLabelSettings(min_objects=3, min_classes=2, min_evidence_updates=2))
     assert tracker.update({1: ["chair"]}, 0)[1].label == "unknown"
     assert client.calls == 0
     assert tracker.update({1: ["chair", "chair", "bed"]}, 10)[1].label == "living_room"
     assert tracker.metadata[1]["provisional"]
-    # Same kinds, different counts: the original frozenset cache missed this.
-    assert tracker.update({1: ["chair", "bed", "bed"]}, 20)[1].label == "bedroom"
-    assert client.calls == 2
+    # Same kinds, different counts: re-asked (the frozenset cache would have missed it), the new verdict HELD.
+    assert tracker.update({1: ["chair", "bed", "bed"]}, 20)[1].label == "living_room"
+    assert client.calls == 2 and tracker.held == 1 and tracker.metadata[1]["trigger"] == "held"
+    assert tracker.history[-1]["held"] is True and tracker.history[-1]["label"] == "bedroom"
     tracker.update({1: ["chair", "bed", "bed"]}, 30)
     assert client.calls == 2
-    tracker.update({1: ["chair", "bed", "bed"]}, 70)
+    # The periodic refresh repeats the verdict: adopted, and the label is no longer provisional.
+    assert tracker.update({1: ["chair", "bed", "bed"]}, 70)[1].label == "bedroom"
     assert client.calls == 3 and not tracker.metadata[1]["provisional"]
-    assert any(row["previous"] == "living_room" and row["label"] == "bedroom" for row in tracker.history)
+    assert any(row["previous"] == "living_room" and row["label"] == "bedroom" and not row.get("held")
+               for row in tracker.history)
     assert tracker.update({1: ["chair", "bed", "bed"]}, 80, partition_changed=True)[1].label == "unknown"
+
+
+def test_a_new_kind_of_evidence_relabels_at_once_and_the_hysteresis_can_be_switched_off():
+    """A wardrobe beside the bed is new evidence: the label follows it on that update; with ``relabel_hysteresis``
+    off, a counts-only re-ask relabels at once as before 2026-11-09."""
+    client = ScriptedClassifier()
+    tracker = RevisableRoomLabels(client)
+    assert tracker.update({1: ["bed"]}, 0)[1].label == "living_room"
+    assert tracker.update({1: ["bed", "wardrobe"]}, 5)[1].label == "bedroom" and tracker.held == 0
+    client = ScriptedClassifier()
+    legacy = RevisableRoomLabels(client, RoomLabelSettings(relabel_hysteresis=False))
+    assert legacy.update({1: ["bed"]}, 0)[1].label == "living_room"
+    assert legacy.update({1: ["bed", "bed"]}, 5)[1].label == "bedroom" and legacy.held == 0
+    with pytest.raises(ValueError):
+        RoomLabelSettings(relabel_hysteresis=1)
+
+
+def test_a_kind_lost_to_the_partition_holds_the_label_for_a_refresh_and_a_kind_added_relabels_at_once():
+    """EU6Fwq7SyZv/000083 re-run (2026-11-09): a 10 m2 dining room (cabinet, chair, counter, sink, table) read
+    bathroom for the 40 actions the partition credited its table to the neighbour, then dining room again. A room's
+    objects do not leave it: a verdict on a strict subset of the kinds its label was adopted on is held -- through
+    repeats, through the partition changes the watershed makes on most actions -- for ``refresh_steps`` actions;
+    a room that stays smaller that long was split for real and takes the verdict. A kind added relabels at once."""
+    client = ScriptedClassifier()
+    settings = RoomLabelSettings(generic_evidence_gate=False)
+    tracker = RevisableRoomLabels(client, settings)
+    assert tracker.update({1: ["chair", "lamp"]}, 0)[1].label == "living_room"
+    # The lamp stands across the moved boundary (a partition change, as the watershed reports one): held.
+    assert tracker.update({1: ["chair"]}, 10, partition_changed=True)[1].label == "living_room"
+    assert tracker.held == 1 and tracker.history[-1]["held"] and tracker.history[-1]["lost"] == ["lamp"]
+    assert tracker.update({1: ["chair", "chair"]}, 20, partition_changed=True)[1].label == "living_room", \
+        "a repeat on lost kinds within the refresh is no adoption"
+    assert tracker.held == 1, "one held entry per verdict, not per re-ask"
+    # The lamp is credited back: the kinds the label was adopted on, the label stands, nothing pending.
+    assert tracker.update({1: ["chair", "lamp"]}, 30, partition_changed=True)[1].label == "living_room"
+    assert not tracker._pending
+    # Lost again and staying lost past a refresh: the room was split for real, the verdict is taken.
+    assert tracker.update({1: ["chair"]}, 40, partition_changed=True)[1].label == "living_room" and tracker.held == 2
+    assert tracker.update({1: ["chair"]}, 40 + settings.refresh_steps)[1].label == "bedroom"
+    assert tracker.history[-1]["trigger"] == "periodic_refresh" and not tracker.history[-1].get("held")
+    # A kind the label never saw is new evidence: adopted at once.
+    tracker = RevisableRoomLabels(ScriptedClassifier(), settings)
+    assert tracker.update({1: ["chair", "lamp"]}, 0)[1].label == "living_room"
+    assert tracker.update({1: ["chair", "lamp", "bed"]}, 10)[1].label == "bedroom"
+    assert tracker.history[-1]["trigger"] == "evidence_changed" and not tracker.history[-1].get("held")
 
 
 def test_one_confirmed_object_is_a_weak_clue_and_two_classes_a_strong_one():
@@ -187,8 +237,9 @@ def test_a_clue_is_a_new_kind_of_object_and_a_judged_kind_set_is_not_bought_twic
     tracker.query_room(1, 2)
     assert client.calls == 1, "... but the verdict for {bed} is reused, not bought again"
     assert tracker.labels[1].label == "living_room"
-    tracker.update({1: ["bed", "bed", "bed"]}, 3)                # a loop point: count-sensitive, re-asked
-    assert client.calls == 2 and tracker.labels[1].label == "bedroom"
+    tracker.update({1: ["bed", "bed", "bed"]}, 3)                # a loop point: count-sensitive, re-asked ...
+    assert client.calls == 2 and tracker.labels[1].label == "living_room", "... and the differing verdict held"
+    assert tracker.held == 1
     tracker.update({1: ["bed", "bed", "bed"]}, 4, partition_changed=True)
     assert client.calls == 2, "the classifier's own cache answers the identical signature at a loop point too"
 

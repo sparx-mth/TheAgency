@@ -432,8 +432,12 @@ def test_the_stair_exclusion_counts_only_the_masked_cells_on_the_exits_unknown_s
 
 def test_a_new_opening_while_nothing_is_in_force_buys_the_oracle_a_call_at_most_every_revalue_actions():
     """Attempt 8 asked the oracle thirty times in sixty fallback actions, once per door that appeared or
-    re-snapped. A new room or staircase is still valued at once."""
-    policy, episode, world, rooms, reasoned = opening_policy(order=(1, 0), openings=OpeningSettings(revalue_actions=5))
+    re-snapped. A new staircase is still valued at once; a new room too, unless the last call was under
+    ``reconsider_min_actions`` ago while valued rooms stand (since 2026-11-09: the watershed's renumbered ids bought
+    a call on consecutive actions, EU6Fwq7SyZv/000118) -- here the window is set to 0 for the historical contract and
+    the default window is checked at the end."""
+    policy, episode, world, rooms, reasoned = opening_policy(order=(1, 0), openings=OpeningSettings(revalue_actions=5),
+                                                             reconsider_min_actions=0)
     for pid in (0, 1):                                              # both rooms cooling: nothing to choose, the fallback carries
         policy.supervisor.inner._cooling[pid] = 0.0
         policy.supervisor.inner._cooling_verdict[pid] = EXHAUSTED
@@ -455,6 +459,14 @@ def test_a_new_opening_while_nothing_is_in_force_buys_the_oracle_a_call_at_most_
     policy.graph.facts[2] = RoomFacts(2, 1, 0.0, new_room.n_cells)
     policy.loop.plan(obs_at(episode, 6, IN_A), world)
     assert reasoned == [0, 5, 6], "a room the estimate has never seen is valued at once, throttle or no throttle"
+    policy.loop.settings = replace(policy.loop.settings, reconsider_min_actions=8)
+    policy.graph.registry.rooms[3] = TrackedRoom(id=3, mask=rooms[0].mask, n_cells=rooms[0].n_cells, centroid=rooms[0].centroid)
+    policy.graph.options.append(RoomOption(room_id=3, prob=0.0, xy=rooms[0].centroid, label="R3"))
+    policy.graph.facts[3] = RoomFacts(3, 1, 0.0, rooms[0].n_cells)
+    policy.loop.plan(obs_at(episode, 8, IN_A), world)
+    assert reasoned == [0, 5, 6] and policy.loop.stats["unvalued_waits"] == 1, "two actions after a call: waits"
+    policy.loop.plan(obs_at(episode, 14, IN_A), world)
+    assert reasoned == [0, 5, 6, 14], "the window over: valued"
 
 
 # -- the weak-type rule --------------------------------------------------------------

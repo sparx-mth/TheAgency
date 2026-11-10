@@ -27,6 +27,23 @@ def scan_words(how):
     return SCAN_WORDS.get(how, str(how))
 
 
+#: The HOUSE line's words for each frontier state (:func:`house_line`).
+FRONTIER_WORDS = {"reachable": "unexplored frontier still reachable",
+                  "slivers": "only slivers of unexplored frontier left, none worth a walk",
+                  "unreachable": "unexplored frontier left but none reachable from here",
+                  "none": "no unexplored frontier left"}
+
+
+def frontier_state(value):
+    """The frontier state word for ``value``: one of :data:`FRONTIER_WORDS`'s keys, a bool, or None."""
+    if isinstance(value, bool) or value is None:
+        return "reachable" if value else "none"
+    state = str(value).strip().lower()
+    if state not in FRONTIER_WORDS:
+        raise ValueError("unknown frontier state %r; one of %s" % (value, sorted(FRONTIER_WORDS)))
+    return state
+
+
 def house_line(graph, scanned, openings_left, actions_used, budget, frontier_left=None):
     """One line on the home so far, in the prompt's vocabulary.
 
@@ -41,8 +58,17 @@ def house_line(graph, scanned, openings_left, actions_used, budget, frontier_lef
         openings_left: How many openings of the floor are not yet looked into.
         actions_used: The current action.
         budget: The episode's action budget.
-        frontier_left: Whether a reachable unexplored boundary is left
-            anywhere on the storey; None leaves it unsaid.
+        frontier_left: The storey's frontier state: ``"reachable"`` (an
+            unexplored boundary worth a walk is left and a route reaches it),
+            ``"slivers"`` (only insignificant frontier is reachable),
+            ``"unreachable"`` (unexplored boundary exists but no route from
+            here reaches any of it -- the agent is boxed in, the home is NOT
+            covered) or ``"none"``; a bool reads as reachable / none; None
+            leaves it unsaid. Until 2026-11-09 the line was binary and read
+            "no unexplored frontier left" whenever nothing was reachable, so a
+            boxed-in agent told the model the home was covered and the model's
+            stage and pass swung back the moment a cell came free (167 of the
+            266 MP3D episodes that ever read it flipped back).
     """
     rooms = getattr(getattr(graph, "registry", None), "rooms", {}) or {}
     tracker = getattr(graph, "label_tracker", None)
@@ -69,6 +95,6 @@ def house_line(graph, scanned, openings_left, actions_used, budget, frontier_lef
         parts.append("every known room identified")
     parts.append("%d opening%s not yet looked into" % (int(openings_left), "" if int(openings_left) == 1 else "s"))
     if frontier_left is not None:
-        parts.append("unexplored frontier still reachable" if frontier_left else "no unexplored frontier left")
+        parts.append(FRONTIER_WORDS[frontier_state(frontier_left)])
     parts.append(budget_line(actions_used, budget))
     return "; ".join(parts)

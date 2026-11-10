@@ -509,7 +509,9 @@ def test_a_route_that_ends_away_from_a_room_with_no_frontier_left_releases_it_as
     assert policy.supervisor.room_id == 0 and policy.supervisor.state == SEARCH, (
         "the reselect moves on to room A, which the agent already stands in, so it arrives at once")
     assert command.info["kind"] == "frontier" and cell_in(world, rooms[0], policy.route_memory.goal)
-    assert reasoned == [0, 1], "a release is a loop point"
+    assert reasoned == [0] and policy.loop.stats["releases_unasked"] == 1, (
+        "a release is a loop point, but an UNREACHABLE one teaches the model nothing about the house: the "
+        "re-selection runs on the standing numbers with the node cooled (since 2026-11-09)")
 
 
 # -- the knobs --------------------------------------------------------------------
@@ -596,6 +598,38 @@ def test_a_room_that_appears_while_nothing_is_in_force_is_estimated_at_once():
     assert reasoned == [1], "... once; the graph's own probability record stops a repeat"
 
 
+def test_a_room_that_appears_moments_after_a_call_waits_for_the_window_while_valued_rooms_stand():
+    """EU6Fwq7SyZv/000118 re-run (2026-11-09): in SELECT the watershed's new id bought a call on consecutive
+    actions (39, 41, 43). Within ``reconsider_min_actions`` of the last call a room without a number waits while
+    a valued room stands; after the window, or with no valued room at all, it is asked about at once."""
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), reconsider_min_actions=8)
+    for pid in (0, 1):                                          # both rooms cooling under EXHAUSTED
+        policy.supervisor.inner._cooling[pid] = 0.0
+        policy.supervisor.inner._cooling_verdict[pid] = EXHAUSTED
+    policy.graph.probs = {0: 0.6, 1: 0.4}
+    policy.loop._needs_reason = False
+    policy.loop._last_reason_step = 0                           # the oracle was asked on this action
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.supervisor.state == SELECT and reasoned == []
+
+    def appear(pid, step):
+        room = TrackedRoom(id=pid, mask=rooms[0].mask, n_cells=rooms[0].n_cells, centroid=rooms[0].centroid)
+        policy.graph.registry.rooms[pid] = room
+        policy.graph.options.append(RoomOption(room_id=pid, prob=0.0, xy=room.centroid, label="R%d" % pid))
+        policy.graph.facts[pid] = RoomFacts(pid, 1, 0.0, room.n_cells)
+        policy.loop.plan(obs_at(episode, step, IN_A), world)
+
+    appear(2, 3)
+    assert reasoned == [] and policy.loop.stats["unvalued_waits"] == 1, "moments after a call: the new id waits"
+    policy.loop.plan(obs_at(episode, 5, IN_A), world)
+    assert reasoned == [] and policy.loop.stats["unvalued_waits"] == 2
+    policy.loop.plan(obs_at(episode, 8, IN_A), world)
+    assert reasoned == [8], "the window over: valued"
+    policy.graph.probs = {}                                     # no room valued at all
+    appear(3, 10)
+    assert reasoned == [8, 10], "nothing to carry the selection: asked at once"
+
+
 # -- the clue rule: a new kind of object names the room; the oracle values the new fact ----
 class NamingLLM:
     """A classifier that names rooms by their objects. The oracle is the fixture's stub."""
@@ -638,6 +672,20 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
     assert policy.loop.events[-3]["where"] == "transit" and policy.loop.events[-3]["label"] == "bathroom"
     assert not policy.supervisor.is_cooling(1, policy._floor_time), "neutral: not cooled, not charged an attempt"
     assert policy.loop.estimates[1]["label"] == "bathroom" and policy.loop.estimates[1]["objects"] == ["sink"]
+def test_the_house_line_names_the_types_the_node_list_shows():
+    """QUCTc6BB5sX/000069 re-run (2026-11-09), action 17: the HOUSE line read "rooms found: none yet; 6 rooms
+    unidentified" over a node list that read ``type=bathroom`` -- the line was built before the graph's label
+    update inside ``reason``, and the refresh that precedes it ran under ``type_prior`` only."""
+    llm = NamingLLM()
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False)
+    see(policy, {0: ["toilet"], 1: []}, step=0)              # evidence recorded, no call yet
+    assert llm.calls == 0 and policy.graph.label_info(0) is None or policy.graph.label_info(0)["label"] == "unknown"
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert reasoned == [0] and llm.calls == 1, "the labels are read before the HOUSE line, one call"
+    house = policy.reasoned_with[-1]["context"].house
+    assert "bathroom" in house and "none yet" not in house, house
+
+
 def test_the_oracle_decides_what_the_new_name_is_worth():
     """The same clue, with an oracle that gives a bathroom nothing for a chair: the order goes elsewhere."""
     llm = NamingLLM()

@@ -72,6 +72,24 @@ class RoomLabelSettings:
         corridor_elongation: See ``shape_only_rooms``.
         corridor_doors: See ``shape_only_rooms``.
         shape_min_area_m2: See ``shape_only_rooms``.
+        relabel_hysteresis: A verdict that differs from the room's label
+            without a NEW KIND of evidence -- the same kinds under new
+            counts (a second chair), a changed geometry bucket, the periodic
+            refresh -- is held until a second classification repeats it;
+            the held label stands meanwhile (since 2026-11-09). A kind LOST
+            -- the room's objects a strict subset of those its label was
+            adopted on -- is held through repeats for ``refresh_steps``
+            actions from the first held verdict: objects do not leave rooms,
+            the partition's boundary moved and credited the table to the
+            neighbour (EU6Fwq7SyZv/000083 re-run: a 10 m2 dining room read
+            bathroom for the 40 actions its table stood across the line,
+            then dining room again); a room that stays smaller that long
+            was split for real and takes the verdict. A new kind of object
+            is new evidence and relabels at once, as before. The 3B
+            labeller answers near-identical prompts differently: on the
+            MP3D ground-truth run one room read living_room, dining_room,
+            bedroom? and kitchen within 125 actions, and the oracle was
+            re-briefed on each. ``False`` restores the immediate relabel.
     """
 
     min_objects: int = 1
@@ -87,6 +105,7 @@ class RoomLabelSettings:
     corridor_elongation: float = 2.5
     corridor_doors: int = 2
     shape_min_area_m2: float = 2.0
+    relabel_hysteresis: bool = True
 
     def __post_init__(self):
         for name in ("min_objects", "min_classes", "min_evidence_updates", "refresh_steps", "strong_classes",
@@ -95,7 +114,8 @@ class RoomLabelSettings:
                 raise ValueError("%s must be a positive integer" % name)
         if not 0.0 <= float(self.strong_confidence) <= 1.0:
             raise ValueError("strong_confidence must lie in [0, 1]")
-        for name in ("signature_objects", "distinctive_required", "generic_evidence_gate", "shape_only_rooms"):
+        for name in ("signature_objects", "distinctive_required", "generic_evidence_gate", "shape_only_rooms",
+                     "relabel_hysteresis"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError("%s must be a bool" % name)
         for name in ("corridor_elongation", "shape_min_area_m2"):
@@ -148,6 +168,10 @@ class RevisableRoomLabels:
         self._evidence_steps = {}
         self._objects = {}
         self._facts = {}
+        self._pending = {}        # pid -> a differing verdict seen once without new kinds, waiting for a second
+        self._pending_since = {}  # pid -> the step that verdict was first held on
+        self._label_kinds = {}    # pid -> the kinds of object the room's current label was adopted on
+        self.held = 0             # verdicts held back by ``relabel_hysteresis``
 
     def update(self, objects, step, partition_changed=False, allow_query=True, facts=None):
         """Record every room's evidence and, when allowed, (re-)classify the ones whose evidence changed.
@@ -166,11 +190,17 @@ class RevisableRoomLabels:
             self._last_query.clear()
             self._agreement.clear()
             self._evidence_steps.clear()
+            # The label itself survives for a pid that does (below), so what it was adopted on and the verdict
+            # held against it survive with it: the watershed changes the partition on most actions of an MP3D
+            # episode, and cleared here the hysteresis never held (room 3 of EU6Fwq7SyZv/000083, 2026-11-09).
         live = set(objects)
         self._objects = {pid: list(classes) for pid, classes in objects.items()}
         self._facts = {pid: dict(item) for pid, item in (facts or {}).items() if pid in live}
         self.labels = {pid: label for pid, label in self.labels.items() if pid in live}
         self.metadata = {pid: item for pid, item in self.metadata.items() if pid in live}
+        for table in (self._pending, self._pending_since, self._label_kinds):
+            for pid in [pid for pid in table if pid not in live]:
+                del table[pid]
         for pid, classes in objects.items():
             self._update_room(pid, classes, step, allow_query)
         return dict(self.labels)
@@ -259,6 +289,9 @@ class RevisableRoomLabels:
         previous = self.labels.get(pid)
         elapsed = step - self._last_query.get(pid, -s.refresh_steps)
         changed = self._signatures.get(pid) != keyed
+        label_kinds = self._label_kinds.get(pid)
+        added = kinds - label_kinds if label_kinds is not None else kinds     # kinds the label has not seen
+        lost_only = label_kinds is not None and not added and kinds != label_kinds
         if not ready:
             result = RoomLabel("unknown", 0.0, "insufficient stable confirmed-object evidence")
             reason = "evidence_gate"
@@ -284,13 +317,40 @@ class RevisableRoomLabels:
                     self._kind_cache[kinds] = result
             self._signatures[pid] = keyed
             self._query_kinds[pid] = kinds
-            self._agreement[pid] = (self._agreement.get(pid, 0) + 1
-                                    if previous and previous.label == result.label else 1)
             reason = "shape" if shape_only else "evidence_changed" if changed else "periodic_refresh"
+            repeated = False
+            if (s.relabel_hysteresis and previous is not None and previous.label != result.label
+                    and previous.label != "unknown" and not added):
+                # No new kind of evidence, another verdict: held until it repeats -- or, with a kind lost
+                # to the partition, for as long as it stays lost (see the setting).
+                if self._pending.get(pid) != result.label:
+                    self._pending[pid] = result.label
+                    self._pending_since[pid] = int(step)
+                    self.held += 1
+                    self.history.append({"step": int(step), "room_id": int(pid), "previous": previous.label,
+                                         "label": result.label, "trigger": reason, "held": True,
+                                         "lost": sorted(label_kinds - kinds) if lost_only else [],
+                                         "objects": dict(signature)})
+                    result = previous
+                    reason = "held"
+                elif lost_only and step - self._pending_since.get(pid, step) < s.refresh_steps:
+                    result = previous                      # the boundary may wobble back within a refresh
+                    reason = "held"
+                else:
+                    self._pending.pop(pid, None)
+                    self._pending_since.pop(pid, None)
+                    repeated = True                        # the model said it twice: that is its agreement
+            elif previous is None or previous.label == result.label or added:
+                self._pending.pop(pid, None)
+                self._pending_since.pop(pid, None)
+            self._agreement[pid] = (self._agreement.get(pid, 0) + 1
+                                    if previous and previous.label == result.label else 2 if repeated else 1)
         else:
             return
         self.labels[pid] = result
-        if previous is None or previous.label != result.label:
+        if reason != "held":
+            self._label_kinds[pid] = kinds
+        if reason != "held" and (previous is None or previous.label != result.label):
             self.history.append({"step": int(step), "room_id": int(pid),
                                  "previous": previous.label if previous else None,
                                  "label": result.label, "trigger": reason,

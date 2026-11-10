@@ -1836,19 +1836,65 @@ def test_an_arrived_standoff_lets_the_approach_history_stop_within_the_arrival_t
         command = q.plan(replace(observation(ep2, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
     assert not command.stop and q.closing.history_stops == 0
 def test_a_fresh_range_still_too_far_from_an_arrived_standoff_drops_it_for_a_closer_one(monkeypatch):
-    """From the standoff the fresh box measures 1.3 m: the inspection resumes the approach -- and walking the arrived
-    route again would arrive again, so the standoff is dropped and the next selection is a closer ring about the
-    memory: a route with waypoints, not an idle turn."""
+    """From the standoff the fresh box measures 1.6 m -- more than one forward step beyond the limit: the inspection
+    resumes the approach -- and walking the arrived route again would arrive again, so the standoff is dropped and
+    the next selection is a closer ring about the memory: a route with waypoints, not an idle turn."""
     p, ep, goal = arrived_at_a_kept_standoff(monkeypatch)
-    p.plan(replace(observation(ep, 2, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+    p.plan(replace(observation(ep, 2, depth=1.8), pose=AgentPose(1.15, 0, 0, 0)))
     assert p.closing.phase == "INSPECT" and p.closing.path.arrived
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # the box, 1.3 m off
-    command = p.plan(replace(observation(ep, 3, depth=1.3), pose=AgentPose(1.15, 0, 0, 0)))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # the box, 1.6 m off
+    command = p.plan(replace(observation(ep, 3, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
     assert p.closing.inspection_resumptions == 1 and p.closing.path.dropped == 1 and not p.closing.path.arrived
     assert p.closing.path.goal_xyz is not None and p.closing.path.goal_xyz != goal, "a closer standoff was selected"
     assert math.dist(p.closing.path.goal_xyz[:2], p.closing.xyz[:2]) < math.dist(goal[:2], p.closing.xyz[:2])
     assert command.waypoints and p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED"), "the approach walks on"
     assert p.closing.diagnostics()["standoff_dropped"] == 1
+
+
+def test_an_arrived_standoff_with_the_fresh_range_under_a_step_out_is_the_inspections_not_the_routes(monkeypatch):
+    """zsNo4HB9uLZ/000078, actions 83-106 (MP3D, ground-truth perception): the route to the standoff completed with
+    the cushion fresh in view at 1.08 m -- a step beyond the 1.05 m limit, not in range -- and the arrived route's idle
+    result was executed as a TURN, three times, until the box left the frame and the lock was released as 'no safe
+    path to the target 1.1 m away'. An arrived standoff with the fresh range at most one forward step beyond the limit
+    is the inspection's: faced within a turn, its step rule takes the one MOVE_FORWARD that puts the next frame in range,
+    and that frame STOPs."""
+    p, ep, goal = arrived_at_a_kept_standoff(monkeypatch)
+    here = AgentPose(1.15, 0, 0, 0)
+    converter = DiscreteActionConverter(ep.action_spec)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # centred, 1.2 m off
+    command = p.plan(replace(observation(ep, 2, depth=1.2), pose=here))
+    assert p.closing.path.arrived and p.closing.arrived_step_out_inspections == 1, "the arrival handed the action to the inspection"
+    assert p.closing.inspection_started is not None and p.closing.inspection_resumptions == 0 and p.closing.path.dropped == 0
+    assert command.waypoints and "one step" in command.info["inspect_step"], "the step rule, not a route or an idle turn"
+    assert converter.step(here, command).action == DiscreteAction.MOVE_FORWARD
+    stepped = AgentPose(1.40, 0, 0, 0)
+    command = p.plan(replace(observation(ep, 3, depth=0.95), pose=stepped))
+    assert p.closing.phase in ("STOP", "ADVANCE"), "the next frame, in range, is terminal"
+    # Over the resumption cap the inspection runs to its own verdict instead of looping INSPECT / CLOSE.
+    q, ep2, _ = arrived_at_a_kept_standoff(monkeypatch, max_inspection_resumptions=0)
+    q.plan(replace(observation(ep2, 2, depth=1.8), pose=here))
+    assert q.closing.phase == "INSPECT"
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    q.plan(replace(observation(ep2, 3, depth=1.6), pose=here))
+    assert q.closing.inspection_resumptions == 0 and q.closing.resumption_cap_hits == 1 and q.closing.path.dropped == 0
+    assert q.closing.inspection_started is not None, "still the inspection"
+    with pytest.raises(ValueError):
+        TargetClosingSettings(max_inspection_resumptions=-1)
+
+
+def test_the_resighting_is_the_projection_nearest_the_memory_not_the_first_box_of_the_class():
+    """Several instances of the class in one frame at one confidence (the ground-truth detector): the re-sighting
+    is the box whose projection lies nearest the 3-D memory -- not whichever the detector listed first
+    (zsNo4HB9uLZ/000078: the range measured on the neighbouring cushion, the centring turns chasing it)."""
+    p, ep = setup_policy()
+    p.plan(observation(ep, 0, depth=3.5))                               # the anchor 3.5 m ahead, centred
+    assert p.closing.active and p.closing.xyz is not None
+    centred = DetectionWire("chair", 1.0, (280, 200, 360, 280))         # the candidate itself
+    neighbour = DetectionWire("chair", 1.0, (330, 200, 410, 280))       # 50 px right: about 0.4 m off, still associated
+    p.detector.detect = lambda rgb: [neighbour, centred]                # the neighbour listed first
+    p.plan(observation(ep, 1, depth=3.4))
+    assert p.closing.box == centred.xyxy and p.closing.resighting_reselections == 1
+    assert p.closing.locked and p.closing.count == 2
 
 
 # -- the toilet re-run of 2026-10-13: four ways a seen target was not locked or not STOPped on (2026-10-14) ----
@@ -2100,15 +2146,27 @@ def test_from_a_widened_standoff_the_inspection_stops_once_its_steps_are_spent(m
     assert not p.closing.inspection_blocked
     assert command.stop and p.closing.closest_approach_stops == 1 and "steps are spent" in command.info["reason"]
 def test_the_closest_approach_stop_needs_a_widened_standoff_and_can_be_switched_off(monkeypatch):
-    """From a standoff on the ring itself a fresh range beyond the limit is what it always was: a reason to step
-    closer, never a STOP; and the switch restores that for a widened standoff too."""
+    """From a standoff on the ring itself a fresh range a step beyond the limit is stepped toward by the inspection
+    (since 2026-11-09: the arrived route's idle result was a TURN, and zsNo4HB9uLZ/000078 spun off its cushion),
+    and a blocked step there is NOT the closest-approach STOP -- that needs a widened standoff; and the switch
+    restores the no-STOP rule for a widened standoff too."""
     p, ep, frame = arrived_widened_standoff(monkeypatch, widened=False)
     command = p.plan(frame)
-    assert not command.stop and p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED") and p.closing.closest_approach_stops == 0
-    assert p.closing.inspection_started is None, "a standoff on the ring, out of range: no inspection from here"
+    assert not command.stop and p.closing.phase == "INSPECT" and p.closing.closest_approach_stops == 0
+    assert command.waypoints and "one step" in command.info["inspect_step"], "the inspection's step, not an idle turn"
+    assert p.closing.arrived_step_out_inspections == 1 and p.closing.inspection_resumptions == 0
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    blocked = replace(observation(ep, 3, depth=1.2), pose=frame.pose)
+    p.notify_blocked(blocked)
+    command = p.plan(blocked)
+    assert not command.stop and p.closing.closest_approach_stops == 0, "on the ring itself a blocked step is no STOP"
     q, ep, frame = arrived_widened_standoff(monkeypatch, closest_approach_stop=False)
     command = q.plan(frame)
-    assert not command.stop and q.closing.inspection_started is None and q.closing.closest_approach_stops == 0
+    assert not command.stop and command.waypoints and q.closing.closest_approach_stops == 0
+    q.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    blocked = replace(observation(ep, 3, depth=1.2), pose=frame.pose)
+    q.notify_blocked(blocked)
+    assert not q.plan(blocked).stop and q.closing.closest_approach_stops == 0
     with pytest.raises(ValueError):
         TargetClosingSettings(closest_approach_stop=1)
 def test_a_pending_inspection_step_does_not_outlive_its_frame(monkeypatch):

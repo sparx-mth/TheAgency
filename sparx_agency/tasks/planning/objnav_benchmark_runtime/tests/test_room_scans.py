@@ -427,6 +427,40 @@ def test_a_room_holding_a_home_object_of_the_target_is_not_finished_by_sight_fro
         LoopSettings(home_floor=1.0)
 
 
+def test_a_sliver_with_no_frontier_is_a_fragment_whatever_its_doors_and_its_home_object():
+    """MP3D ground-truth run, 2026-11-09: slivers of 0.2-0.8 m2 -- the watershed's cuttings at a doorway --
+    were offered in 40 % of the oracle calls and were its first choice in one call in eight; a door on one kept
+    it a room, and a table credited to one kept it a node for a chair (EU6Fwq7SyZv/000118 re-run: a 0.66 m2
+    "hallway" in 19 of 37 calls). Under ``tiny_room_m2`` such a room is a fragment with no frontier left, door or
+    no door, and the home-object exception -- for a room whose jamb may hide the target -- does not apply."""
+    from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
+    from sparx_agency.core.planning.object_search.rooms.room_scans import FRAGMENT
+    policy, episode, world, rooms, _ = scan_policy(order=(1, 0), llm=NamingLLM())
+    strip = np.zeros(rooms[0].mask.shape, bool)
+    strip[10:14, 10:14] = True                                   # 0.4 m x 0.4 m at 0.1 m: 0.16 m2
+    sliver = TrackedRoom(id=7, mask=strip, n_cells=int(strip.sum()), centroid=(1.2, 1.2))
+    ledger = policy.scans
+    assert ledger.status(world, 7, sliver, frontier=1, doored=True) is None, "frontier left: unfinished"
+    assert ledger.status(world, 7, sliver, frontier=0, doored=True) == FRAGMENT, "a door does not make 0.16 m2 a room"
+    assert ledger.diagnostics()["tiny_room_m2"] == LoopSettings().tiny_room_m2 == 1.0
+    policy.scans.tiny_room_m2 = 0.0
+    assert ledger.status(world, 8, replace(sliver, id=8), frontier=0, doored=True) is None, "0 restores the door rule"
+    # The home-object exception: the table credited to the sliver stands in the room beside it.
+    policy, episode, world, rooms, _ = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["sink"]}, step=0)
+    policy.scans.mark(1, FRAGMENT)
+    policy.loop.settings = replace(policy.loop.settings, tiny_room_m2=1000.0)   # room B counts as a sliver
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert policy.loop._excluded == {1: "scanned:" + FRAGMENT} and policy.loop.stats["home_object_kept"] == 0
+    policy, episode, world, rooms, _ = scan_policy(order=(1, 0), llm=NamingLLM())
+    policy.target = gibson_label_mapper().target_labels("toilet")
+    see(policy, {1: ["sink"]}, step=0)
+    policy.scans.mark(1, FRAGMENT)                                              # a fragment of a room's size
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    assert 1 not in policy.loop._excluded and policy.loop.stats["home_object_kept"] == 1
+
+
 def test_a_room_whose_evidence_rules_it_out_on_this_action_is_excluded_on_this_action():
     """Hanson 2026-10-05, action 150: the bedroom's label became strong at the loop point's own
     re-classification, AFTER the nodes had been chosen; the oracle was shown it and valued it at 0.10
@@ -797,6 +831,25 @@ def test_a_room_finished_from_outside_is_a_node_again_once_the_storey_is_covered
         LoopSettings(revisit_unentered=1)
     with pytest.raises(ValueError):
         LoopSettings(scan_seen_range_m=-1.0)
+
+
+def test_the_frontier_state_tells_a_boxed_in_agent_from_a_covered_storey():
+    """MP3D ground-truth run (entry 043): the HOUSE line read "no unexplored frontier left" whenever nothing was
+    reachable, and flipped back in 167 of the 266 episodes that ever read it -- the agent was boxed in, not done.
+    The inventory holds only the frontier reachable from the agent's free component; the rooms' own counts
+    (``graph.facts``, over the whole map) say whether any is left at all (since 2026-11-09)."""
+    from types import SimpleNamespace
+    policy, episode, world, rooms, _ = scan_policy(order=(1, 0))
+    obs = obs_at(episode, 0, IN_A)
+    policy.graph.frontier_inventory = None                                      # nothing reachable...
+    assert policy.loop._frontier_state(obs, world) == "unreachable", "...but room A shows 1 cluster, room B 2"
+    policy.graph.facts = {pid: RoomFacts(pid, 0, 0.0, room.n_cells) for pid, room in rooms.items()}
+    assert policy.loop._frontier_state(obs, world) == "none"
+    policy.graph.frontier_inventory = SimpleNamespace(goals=(SimpleNamespace(geodesic_m=float("inf")),))
+    policy.graph.facts = {0: RoomFacts(0, 1, 0.0, rooms[0].n_cells)}
+    assert policy.loop._frontier_state(obs, world) == "unreachable", "a goal at infinity is not reachable"
+    policy.graph.frontier_inventory = SimpleNamespace(goals=(SimpleNamespace(geodesic_m=3.0),))
+    assert policy.loop._frontier_state(obs, world) == "reachable"
 
 
 def test_the_house_line_is_the_big_picture_in_the_prompts_words():
