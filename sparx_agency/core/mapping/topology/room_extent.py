@@ -56,6 +56,26 @@ mask -- is keyed by map cell on the storey, never by room id. So a room that
 merges, splits or is renumbered by the watershed keeps correct walls, sizes
 and coverage by construction: the numbers belong to the floor, not the id.
 
+**Precedents** (survey of 2026-11-11, ``paper_survey.md`` in the session
+notes). The fully / partially observed room, with a side still "open", is
+Luperto, Fochetta and Amigoni (AAMAS 2021, arXiv 2004.06967); the solid
+against free boundary curve of a region is Gonzalez-Banos and Latombe (IJRR
+2002); the share of a room's border touching walls as a closedness test is
+Bormann et al.'s room-segmentation survey (ICRA 2016: 75 % / 50 %). The
+per-region observation coverage ``|visible ∩ region| / |region|`` with a
+line-of-sight ray within a range is RATE-Nav (arXiv 2506.02354), whose
+regions are a watershed over a wall map and whose VLM is told the coverage
+crossed 70 %; its formula has no field-of-view wedge and no pitch, both
+added here (:mod:`~sparx_agency.core.planning.object_search.world_model.sightlines`).
+Interior pockets told apart from frontiers leading out by hole filling is
+MoMa-LLM (RA-L 2024, arXiv 2403.08605), whose prompt carries an
+``unexplored area`` token per room. The SemExp-family "explored" channel
+that the ObjectNav baselines inherit marks any cell a depth point landed in
+within 5 m -- no ray, no detector range -- which is why the coverage here
+is a separate record. The upper bound on coverage while the size is a lower
+bound, and the per-side FINAL / LOWER BOUND verdict with the located wall's
+line and distance, have no precedent in the surveyed work.
+
 Python 3.8 syntax; numpy and scipy only.
 """
 from __future__ import annotations
