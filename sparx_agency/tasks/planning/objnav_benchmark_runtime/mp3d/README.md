@@ -223,7 +223,9 @@ STORE=$PWD/runs/ss_fix_closing_llm_answers REPLAY=$PWD/runs/single_storey_v1_llm
 The per-fix arms of the 2026-11-10 study are the configs under `sets/`:
 `policy_fixes_off.json` turns every single-storey fix off (the baseline's
 behaviour under today's perception), `policy_fix_{closing,wedge,dining,shape}.json`
-turn one on at a time; no config is every fix on.
+turn one on at a time; no config is every fix on. The two labeller rules
+(`dining`, `shape`) are off by default since 2026-11-11 -- their configs turn
+them on for a comparison, nothing else does.
 
 * **The set** is `sets/single_storey_flat_v1.json`: 180 same-storey episodes
   drawn (seed 17, uniform) from the 1,281 val episodes that start on a storey,

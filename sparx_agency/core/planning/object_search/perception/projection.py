@@ -24,6 +24,7 @@ from scipy import ndimage
 from sparx_agency.core.mapping.objects.box_extent import footprint_radius_m
 from sparx_agency.core.mapping.objects.box_occluder import depth_band_m, occluder_in_front
 from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth, robust_mask_depth
+from sparx_agency.core.planning.object_search.perception.face_normal import MIN_POINTS as MIN_FACE_POINTS, face_normal
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
 
 #: Detector labels that name a staircase: terrain context for the building coordinator, never an object.
@@ -162,6 +163,18 @@ def _supported_centroid(observation, box, transform, row, mask=None):
     near = float(np.percentile(np.hypot(points[:, 0] - pose.x, points[:, 1] - pose.y), 10))
     row.update(status="projected", xyz=xyz.tolist(), height_range_m=[float(np.min(points[:, 2])), float(np.max(points[:, 2]))],
                radius_m=footprint_radius_m(box, float(depth), k.fx), range_near_m=near)
+    # A standing planar surface -- a picture, a cabinet's front, a shower screen -- has a facing normal the
+    # closing stands in front of (``face_normal.py``). The plane is fitted on EVERY valid depth pixel of the mask
+    # (or of the box's central quarter), not on the near-surface component alone: the front of a sofa's seat or a
+    # chair's backrest is a plane within the depth band, the whole object is not, and the first version read a
+    # normal on 14 of 15 locks (2026-11-10).
+    av, au = np.nonzero(valid[::stride, ::stride])
+    if len(av) >= MIN_FACE_POINTS:
+        ad = patch[av * stride, au * stride]
+        whole = np.stack(((left + au * stride - k.cx) * ad / k.fx, (top + av * stride - k.cy) * ad / k.fy, ad), axis=1)
+        facing = face_normal(whole @ transform[:3, :3].T + transform[:3, 3], (pose.x, pose.y))
+        if facing is not None:
+            row.update(face_normal_xy=[facing[0][0], facing[0][1]], face_thickness_m=round(facing[1], 4))
     return xyz
 
 

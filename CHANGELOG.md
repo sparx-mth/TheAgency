@@ -28,24 +28,42 @@ future-you, not for a commit log.
   furniture as a doorway, excused the refusals that would have mapped the furniture, and 2azQ1b91cZZ/000058 released
   a table in plain view 3 m away as "went nowhere" and lost it 26 more times. Two wedged episodes of the baseline
   succeed; none regress.
-- **A `dining_room` verdict on fewer than `dining_min_chairs` (3) chairs reads `unknown`, and an empty passage-like
-  room is `hallway` by rule without a classifier call** (`RoomLabelSettings.dining_min_chairs`, `shape_rule`,
-  `shape_rule_confidence`): the benchmark's `table` is any table, and the model had made 225 dining rooms of desks,
-  side tables and coffee tables (32 episodes ended with two or more); 257 calls were on rooms with nothing in them,
-  answered hallway / foyer / storage / unknown at random. Calls 2,753 -> 2,000; the exploration order reshuffles
-  (+5/-7 flips, net 0 on the method's own failures).
+- **Two labeller rules, written, measured and turned OFF by default** (`RoomLabelSettings.dining_min_chairs` 0,
+  `shape_rule` False; 3 and True enable them): a `dining_room` verdict on fewer than three chairs read `unknown`
+  (the benchmark's `table` is any table, and the 3B model had made 225 dining rooms of desks, side tables and coffee
+  tables), and an empty passage-like room was `hallway` by rule without a classifier call (257 calls on rooms with
+  nothing in them, answered at random). The briefing got cleaner (dining rooms 225 -> 122, calls -17 %) and the
+  search got no better: +5 / -7 flips together, and alone each trended negative (65.4 % and 67.9 % against gt-base's
+  71.2 % and 73.6 % on the first 52-53 episodes of its arm). A workaround for a 3B model the user is replacing; off.
 - **The STOP overshoot stands closer under a raised target** (`TargetClosingSettings.elevation_overshoot`,
   `elevation_min_m` 0.30, `stop_overshoot_elevated_max_steps` 3): the within-radius test reads the memory's planar
   range lifted by the target's lowest measured point above the base. MP3D's view points of an object raised 0.3 m or
   more reach 0.84 m from its box (median over the set's 242 raised goals) against 1.02 m for one on the floor,
   because the generator keeps only the candidates the object shows from. Two near-misses succeed, none regress.
-- **The standoff of a raised, mounted target is in front of it** (`frontal_standoff`, `frontal_wall_radius_m` 0.8;
-  `closing/wall_normal.py`, `target_path._ring_bearing`): the ring started from the agent's own bearing, so a picture
-  first seen at a grazing angle was approached and STOPped on from beside it -- inside the 1 m band but 0.1-0.5 m from
-  every view point, which for a thin wall object lie within 0.26 m of its width (8 of the baseline's 9 near-misses
-  stood beside their object, 45-70 degrees off its normal). The ring now starts toward the free cells around a memory
-  that has something occupied within 0.3 m of it; a raised object with floor all round keeps the old ring. The
-  pursuit's walk-back remembers the lock's lowest point and uses the same rule.
+- **The standoff of a planar target is in front of it** (`frontal_standoff`, `frontal_off_normal_deg` 35,
+  `frontal_inner_radii_m` (0.65, 0.45), `frontal_max_deferrals` 12; `perception/face_normal.py`,
+  `target_path._ring_bearings`, `TargetClosing._frontal_deferral`): the ring started from the agent's own bearing, so
+  a picture first seen at a grazing angle was approached and STOPped on from beside it -- inside the 1 m band but
+  0.1-0.5 m from every view point, which for a thin wall object lie within 0.26 m of its width (8 of the baseline's 9
+  near-misses stood beside their object, 45-70 degrees off its normal). A sighting whose mask is a standing plane
+  (every depth pixel fitted: spread under 5 cm, normal near horizontal) gives the lock the plane's facing normal (the
+  mean over sightings); the ring is tried about it first, at the standoff radius and then closer, the agent's ring is
+  the fallback, and an in-range frame from more than 35 degrees off the normal walks on to the frontal standoff for at
+  most 12 actions before the STOP rules apply. The pursuit's walk-back remembers the normal. A first version read the
+  "front" off the map's free cells, which point to the explored side and move as the map fills; replaced the same day.
+- **A target glimpsed without depth is one target, and the pursuit's chase is bounded for the episode**
+  (`PursuitSettings.bearing_merge_m` 1.5, `bearing_max_walk_actions` 48, `max_total_walk_actions` 150;
+  `closing/target_pursuit.py`): in Z6MFQCViBuw's atrium house a chair on the far side of the void was seen in RGB
+  without depth again and again, every abandoned bearing approach remembered a new point 6 m along its bearing and
+  each was walked toward for up to 120 actions -- eight single-storey episodes spent 275-453 of 500 actions "walking
+  back to the released chair" (ground truth, filter on). A bearing target near a remembered one of the same label is
+  the same object (its guess updated, its attempts kept), a bearing pursuit walks 48 actions at most, and all the
+  episode's pursuits together 150.
+- **The frontal-standoff rule applies to RAISED planes only** (`frontal_min_elevation_m` 0.6): fitted on every
+  standing plane it fired on 90 of 180 locks -- a table's apron, a chair's backrest, a cushion, a floor cabinet --
+  whose view points are all round, and cost 1,358 actions and 1.7 SPL points over them for +8 / -3 episodes; gated to
+  a lock whose lowest point stands 0.6 m or more above the base it touches 17 locks (12 pictures) for +3 / -1 at no
+  SPL cost.
 - **The ground-truth detector's on-object filter is ON by default** (`--ground-truth-on-object-m` 0.25;
   `GroundTruthDetector`, `GroundTruthSource.publish(depth, pose, camera)`, `HabitatRGBDSimulator.semantic_boxes`):
   a rendered pixel counts as an instance's only where the frame's depth puts it on the instance's annotated box, so

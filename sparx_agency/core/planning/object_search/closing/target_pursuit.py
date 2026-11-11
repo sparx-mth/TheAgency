@@ -30,6 +30,19 @@ way -- around the wall, through the unknown if need be -- until a frame
 measures it. 00853-5cdEh9F2hJL/000065 (2026-10-31) saw its television from
 beyond 5 m three times, walked three steps into a wall each time, and locked
 it with depth at action 487.
+
+**A bearing is a guess, and the guesses are bounded as a whole** (since
+2026-11-11). Z6MFQCViBuw's atrium house showed the other side of the rule:
+chairs on the far side of the void are seen without depth again and again,
+every abandoned bearing approach remembered a NEW point 6 m along its
+bearing, and each was walked toward for up to ``max_walk_actions`` -- eight
+of the single-storey set's episodes spent 275-453 of their 500 actions
+"walking back to the released chair" (MP3D, ground truth, filter on). Since
+then a bearing target within ``bearing_merge_m`` of a remembered one of the
+same label is the same object (its guess is updated, its attempts kept), a
+bearing pursuit walks at most ``bearing_max_walk_actions``, and every
+pursuit of the episode together walks at most ``max_total_walk_actions``:
+the search, not the chase, owns the rest.
 """
 from __future__ import annotations
 
@@ -58,6 +71,14 @@ class PursuitSettings:
             a pursuit without a sighting ends.
         bearing_reach_m: How far beyond the camera's depth range a target
             seen without depth is placed along its bearing.
+        bearing_merge_m: A bearing target placed within this of a remembered
+            bearing target of the same label is that target: its guess is
+            updated, its attempts are kept (one chair glimpsed across a void
+            six times is one chair, not six).
+        bearing_max_walk_actions: Actions one pursuit of a BEARING target may
+            walk -- a guess along a line, not a measured position.
+        max_total_walk_actions: Actions every pursuit of the episode may walk
+            together; spent, released targets are left to the search.
     """
 
     enabled: bool = True
@@ -67,13 +88,19 @@ class PursuitSettings:
     max_walk_actions: int = 120
     arrival_actions: int = 4
     bearing_reach_m: float = 1.0
+    bearing_merge_m: float = 1.5
+    bearing_max_walk_actions: int = 48
+    max_total_walk_actions: int = 150
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError("PursuitSettings.enabled must be a bool")
         if isinstance(self.bearing_reach_m, bool) or not 0.0 <= float(self.bearing_reach_m) < 10.0:
             raise ValueError("PursuitSettings.bearing_reach_m must lie in [0, 10) m")
-        for name in ("retry_actions", "max_age_actions", "max_attempts", "max_walk_actions", "arrival_actions"):
+        if isinstance(self.bearing_merge_m, bool) or not 0.0 <= float(self.bearing_merge_m) < 10.0:
+            raise ValueError("PursuitSettings.bearing_merge_m must lie in [0, 10) m (0: never merge)")
+        for name in ("retry_actions", "max_age_actions", "max_attempts", "max_walk_actions", "arrival_actions",
+                     "bearing_max_walk_actions", "max_total_walk_actions"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError("PursuitSettings.%s must be a positive int, got %r" % (name, value))
@@ -87,7 +114,8 @@ class TargetPursuit:
         self.settings = settings or PursuitSettings()
         self.targets: List[Dict] = []
         self.active: Optional[Dict] = None
-        self.stats = {"remembered": 0, "queries": 0, "started": 0, "arrived": 0, "reacquired": 0, "ended": 0}
+        self.stats = {"remembered": 0, "merged": 0, "queries": 0, "started": 0, "arrived": 0, "reacquired": 0,
+                      "ended": 0, "walked": 0, "budget_spent": 0}
         self.events: List[Dict] = []
 
     # -- what the closing hands over ----------------------------------------------------------------------------
@@ -95,7 +123,8 @@ class TargetPursuit:
         """Keep the target of a lock ``closing`` is about to release for want of a path."""
         if closing.xyz is not None:
             self.remember_at(obs, closing.xyz, closing.label, closing.floor_id, "no_path",
-                             lowest_m=getattr(closing, "lowest_m", None))
+                             lowest_m=getattr(closing, "lowest_m", None),
+                             face_normal_xy=getattr(closing, "face_normal_xy", None))
 
     def remember_bearing(self, obs, label, yaw, floor_id):
         """Keep a target seen only without depth: on its bearing, just beyond the depth range."""
@@ -103,15 +132,27 @@ class TargetPursuit:
         xyz = (float(obs.pose.x) + reach * math.cos(yaw), float(obs.pose.y) + reach * math.sin(yaw), float(obs.pose.z))
         self.remember_at(obs, xyz, label, floor_id, "bearing")
 
-    def remember_at(self, obs, xyz, label, floor_id, source, lowest_m=None):
-        """Keep a target to walk back to; ``lowest_m`` is the lock's lowest measured point (a raised target's standoff
-        is chosen as the closing would choose it, ``TargetApproachPath``)."""
+    def remember_at(self, obs, xyz, label, floor_id, source, lowest_m=None, face_normal_xy=None):
+        """Keep a target to walk back to; ``lowest_m`` and ``face_normal_xy`` are the lock's lowest measured point and
+        facing normal, so its standoff is chosen as the closing would choose it (``TargetApproachPath``)."""
         if not self.settings.enabled:
             return
+        if source == "bearing" and self.settings.bearing_merge_m > 0.0:
+            for entry in self.targets:
+                if (entry["source"] == "bearing" and entry["label"] == label and entry["floor"] == floor_id
+                        and math.dist(entry["xyz"][:2], (float(xyz[0]), float(xyz[1]))) <= self.settings.bearing_merge_m):
+                    # The same object glimpsed again: a fresher guess at where it stands, the same attempts.
+                    entry["xyz"] = tuple(float(v) for v in xyz)
+                    entry["released"] = int(obs.step)
+                    entry["from_xy"] = (float(obs.pose.x), float(obs.pose.y))
+                    self.stats["merged"] += 1
+                    self._log(obs, "merged", label=label, attempts=entry["attempts"])
+                    return
         self.targets.append({"xyz": tuple(float(v) for v in xyz), "floor": floor_id, "label": label,
                              "released": int(obs.step), "last_query": int(obs.step), "attempts": 0,
                              "from_xy": (float(obs.pose.x), float(obs.pose.y)), "source": source,
-                             "lowest_m": None if lowest_m is None else float(lowest_m)})
+                             "lowest_m": None if lowest_m is None else float(lowest_m),
+                             "face_normal_xy": None if face_normal_xy is None else tuple(float(v) for v in face_normal_xy)})
         self.stats["remembered"] += 1
         self._log(obs, "remembered", label=label, source=source)
 
@@ -129,6 +170,11 @@ class TargetPursuit:
             return None
         if self.active is not None:
             return self._continue(obs, world)
+        if self.stats["walked"] >= s.max_total_walk_actions:
+            if not self.stats["budget_spent"]:
+                self.stats["budget_spent"] = 1
+                self._log(obs, "budget_spent", walked=self.stats["walked"])
+            return None                          # the episode's pursuits have walked their share
         step = int(obs.step)
         for entry in reversed(self.targets):
             if (entry["floor"] != p.mapping.floor_id or entry["attempts"] >= s.max_attempts
@@ -158,8 +204,12 @@ class TargetPursuit:
     def _continue(self, obs, world):
         s, a = self.settings, self.active
         entry = a["entry"]
-        if obs.step - a["started"] > s.max_walk_actions:
-            return self._end(obs, "walked %d actions" % s.max_walk_actions)
+        bound = s.bearing_max_walk_actions if entry["source"] == "bearing" else s.max_walk_actions
+        if obs.step - a["started"] > bound:
+            return self._end(obs, "walked %d actions" % bound)
+        if self.stats["walked"] >= s.max_total_walk_actions:
+            return self._end(obs, "the episode's pursuits have walked %d actions" % self.stats["walked"])
+        self.stats["walked"] += 1
         if a["arrived_at"] is not None:
             if obs.step - a["arrived_at"] >= s.arrival_actions:
                 return self._end(obs, "arrived without a sighting")
@@ -180,10 +230,17 @@ class TargetPursuit:
         """What :class:`TargetApproachPath` reads of a target: its 3-D memory, the closing's settings, its height
         above the base (from the lock's lowest point, when the memory kept one), four counters."""
         closing = self.policy.closing
-        lowest = entry.get("lowest_m")
-        return SimpleNamespace(xyz=entry["xyz"], settings=closing.settings,
+        lowest, normal = entry.get("lowest_m"), entry.get("face_normal_xy")
+
+        def frontal_normal(obs):
+            if normal is None or lowest is None or not closing.settings.frontal_standoff:
+                return None
+            return normal if float(lowest) - float(obs.pose.z) >= closing.settings.frontal_min_elevation_m else None
+
+        return SimpleNamespace(xyz=entry["xyz"], settings=closing.settings, face_normal_xy=normal, frontal_normal=frontal_normal,
                                elevation_above_base=lambda obs: 0.0 if lowest is None else closing.elevation_above_base(obs, lowest),
-                               stale_standoffs_kept=0, widened_standoffs=0, through_unknown_routes=0, frontal_standoffs=0)
+                               stale_standoffs_kept=0, widened_standoffs=0, through_unknown_routes=0, frontal_standoffs=0,
+                               frontal_reselections=0)
 
     def _unbox(self, entry):
         """A route exists now: the spot the target was released from no longer refuses its takeover."""

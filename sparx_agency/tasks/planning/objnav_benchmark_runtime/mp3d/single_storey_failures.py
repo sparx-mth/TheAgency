@@ -63,7 +63,7 @@ FX_PX = 320.0 / math.tan(math.radians(79.0) / 2.0)
 #: A near-miss STOP's standing spot against the goal's box (``standing_spot``): ``beside`` when the agent stands
 #: more than BESIDE_M beyond the object's width along its mounting and BESIDE_DEG or more off its normal -- where a
 #: thin wall-mounted object has no view point (its view points reach 0.26 m beyond its width at the median; see
-#: ``closing/wall_normal.py``); ``far`` when the agent stands farther from the box than the goal's farthest view
+#: ``perception/face_normal.py``); ``far`` when the agent stands farther from the box than the goal's farthest view
 #: point; ``in_band`` otherwise -- within the band and in front, yet off every view point (furniture under the
 #: object, an occluded strip, a geodesic detour).
 BESIDE_M = 0.2

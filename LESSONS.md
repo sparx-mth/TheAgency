@@ -33,12 +33,17 @@ coincidence of the data that happened to point the same way as the pixel test fo
 
 **Fix / workaround:** read the generator before reading the data's silhouette; `single_storey_failures.py` now reads a
 near-miss against the goal's `.house` box with the generator's own distance (`beside` / `in_band` / `far`). The fix
-that matches the mechanism is the frontal standoff (`closing/wall_normal.py`, `frontal_standoff`); the overshoot's lift
+that matches the mechanism is the frontal standoff (`perception/face_normal.py`, `frontal_standoff`); the overshoot's lift
 stays, under the right explanation (the comment in `target_closing.py` was corrected).
 
-**Don't:** fit a "wall normal" to the occupied cells around a picture's memory: pictures hang above sideboards, sofas
-and vanities, which the map draws as blobs beside the wall, and a line fit returned nothing on all three target
-recordings. The direction toward the free cells around the memory is what every mounting has in common.
+**Don't:** read the "front" off the map at all. A line fit to the occupied cells around a picture's memory returns
+nothing (pictures hang above sideboards, sofas and vanities, blobs beside the wall); the direction toward the free
+cells around the memory points to the EXPLORED side -- the agent's own, during an approach (zsNo4HB9uLZ/000045 chose
+the identical standoff) -- and moves as the map fills (pLe4wQe7qrG/000152: 31 re-selections in one lock, released as
+"no safe path"; the baseline succeeded). The normal is in the sighting: the depth pixels of a thin object's mask are a
+plane, and a plane fitted on them is right from the first frame and never moves (`perception/face_normal.py`). Fit it
+on the WHOLE mask, not the near-surface component the centroid is measured on: the front of a sofa's seat is a plane
+within the depth band, the sofa is not (14 of the first 15 locks read "planar" the other way).
 
 ---
 
@@ -62,7 +67,9 @@ first one may still run the same episodes -- wait for it, or give the second run
 first's directory as `LLM_ANSWERS_REPLAY`.
 
 **Don't:** read "scoped by episode" as "safe to share concurrently". A process reads the store once, at its start;
-anything another process records afterwards is invisible to it until it asks the server itself.
+anything another process records afterwards is invisible to it until it asks the server itself. The same applies to
+REPLAY: two stores recorded by concurrent runs (gt-base and gt-fixes v1, 2026-11-10) may each hold a different live
+answer to one key, and a third run that replays both is refused at preflight -- replay the stores of one lineage.
 
 ---
 

@@ -1,1 +1,1 @@
-{"target_closing": {"elevation_overshoot": false}, "doorway_scrape": {"doorways_only": false}, "room_labels": {"dining_min_chairs": 3, "shape_rule": false}}
+{"target_closing": {"elevation_overshoot": false, "frontal_standoff": false}, "doorway_scrape": {"doorways_only": false}, "room_labels": {"dining_min_chairs": 3, "shape_rule": false}}

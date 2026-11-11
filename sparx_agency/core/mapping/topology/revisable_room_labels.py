@@ -100,7 +100,12 @@ class RoomLabelSettings:
             table with one chair: 9 of the first 32 MP3D baseline episodes
             ended with two or more dining rooms, and the node oracle was
             briefed with them. A dining room seats people: it has chairs
-            around its table. 0 disables the rule.
+            around its table. 0 disables the rule -- **the default since
+            2026-11-11**: on the fixed single-storey set the rule reshuffled
+            the room order without improving it (with the shape rule, +5 / -6
+            episodes and 1,674 more actions over the 58 that diverged; alone,
+            +1 / -4 on the first 50) and it is a workaround for a 3B model's
+            reading of the prompt, which the user's model change makes moot.
         shape_rule: A room with no classifiable objects that the geometry
             admits (``shape_only_rooms``) is labelled ``hallway`` BY RULE,
             weak, at ``shape_rule_confidence``, without a classifier call
@@ -109,7 +114,9 @@ class RoomLabelSettings:
             rest, differently for the same prompt in different runs, and
             each verdict cost a call on a room with nothing in it. The label
             is as weak as the model's was and relabels at once when an
-            object appears. ``False`` asks the model as before.
+            object appears. ``False`` asks the model as before -- **the
+            default since 2026-11-11**, for the same measurement as
+            ``dining_min_chairs`` (alone, +2 / -4 on the first 49 episodes).
         shape_rule_confidence: See ``shape_rule``; below ``strong_confidence``
             by construction.
     """
@@ -128,8 +135,8 @@ class RoomLabelSettings:
     corridor_doors: int = 2
     shape_min_area_m2: float = 2.0
     relabel_hysteresis: bool = True
-    dining_min_chairs: int = 3
-    shape_rule: bool = True
+    dining_min_chairs: int = 0
+    shape_rule: bool = False
     shape_rule_confidence: float = 0.5
 
     def __post_init__(self):

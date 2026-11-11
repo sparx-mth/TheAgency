@@ -207,7 +207,7 @@ def test_an_empty_passage_is_a_hallway_by_rule_without_a_call_and_an_object_rela
             return {"label": "living_room", "confidence": 0.8, "reasoning": "objects"}
 
     client = Counting()
-    tracker = RevisableRoomLabels(client)
+    tracker = RevisableRoomLabels(client, RoomLabelSettings(shape_rule=True))   # off by default since 2026-11-11
     corridor = {"area_m2": 7.0, "elongation": 4.0, "doors": 3}
     square = {"area_m2": 12.0, "elongation": 1.1, "doors": 1}
     labels = tracker.update({1: [], 2: []}, 0, facts={1: corridor, 2: square})
@@ -217,6 +217,9 @@ def test_an_empty_passage_is_a_hallway_by_rule_without_a_call_and_an_object_rela
     assert labels[1].confidence == RoomLabelSettings().shape_rule_confidence < RoomLabelSettings().strong_confidence
     assert tracker.update({1: ["sofa"]}, 2, facts={1: corridor})[1].label == "living_room" and len(client.calls) == 1, \
         "an object in the room is the model's question again, at once"
+    by_default = RevisableRoomLabels(Counting())
+    assert not by_default.settings.shape_rule and by_default.update({1: []}, 0, facts={1: corridor})[1].label == "living_room", \
+        "the rule is off by default (2026-11-11): the empty passage is the model's question, as before"
     with pytest.raises(ValueError, match="shape_rule_confidence"):
         RoomLabelSettings(shape_rule_confidence=0.9)
 
@@ -233,15 +236,16 @@ def test_a_dining_room_needs_chairs_at_its_table():
             return {"label": "dining_room", "confidence": 0.85, "reasoning": "a table"}
 
     client = Dining()
-    tracker = RevisableRoomLabels(client)
+    tracker = RevisableRoomLabels(client, RoomLabelSettings(dining_min_chairs=3))   # off by default since 2026-11-11
     assert tracker.update({1: ["table"]}, 0)[1].label == "unknown" and tracker.dining_downgrades == 1
     assert "3 chairs" in tracker.labels[1].reasoning and tracker.labels[1].confidence == 0.85
     assert tracker.update({2: ["table", "chair"]}, 1)[2].label == "unknown", "a desk and its chair"
     assert tracker.update({3: ["table", "chair", "chair", "chair", "chair"]}, 2)[3].label == "dining_room"
     assert tracker.update({4: ["table", "armchair", "chair", "chair"]}, 3)[4].label == "dining_room", "an alias counts as a chair"
     assert tracker.dining_downgrades == 2 and client.calls == 4
-    legacy = RevisableRoomLabels(Dining(), RoomLabelSettings(dining_min_chairs=0))
-    assert legacy.update({1: ["table"]}, 0)[1].label == "dining_room", "the rule off: the model's word"
+    legacy = RevisableRoomLabels(Dining())
+    assert legacy.settings.dining_min_chairs == 0 and legacy.update({1: ["table"]}, 0)[1].label == "dining_room", \
+        "the rule is off by default (2026-11-11): the model's word"
     with pytest.raises(ValueError, match="dining_min_chairs"):
         RoomLabelSettings(dining_min_chairs=-1)
 

@@ -90,9 +90,9 @@ living_room 8.
 | where | what | setting |
 |---|---|---|
 | `navigation/scrape_guard.py` | a refusal is excused as a doorway scrape only in a channel a confirmed door landmark names; between furniture it is written on the map at once, and the second one leaves the sticky bar the planner routes around | `ScrapeSettings.doorways_only` (True; False = the geometry-only channel) |
-| `revisable_room_labels.py` | a `dining_room` verdict on fewer than 3 chairs reads `unknown` (a desk, a side table and a coffee table are tables under the benchmark's label); an empty passage-like room is `hallway` by rule, weak, without a classifier call | `RoomLabelSettings.dining_min_chairs` (3; 0 off), `shape_rule` (True), `shape_rule_confidence` (0.5) |
+| `revisable_room_labels.py` | a `dining_room` verdict on fewer than 3 chairs reads `unknown` (a desk, a side table and a coffee table are tables under the benchmark's label); an empty passage-like room is `hallway` by rule, weak, without a classifier call. **Both OFF by default since 2026-11-11** (the user's decision after section 5b: a cleaner briefing, no better search, a workaround for the 3B) | `RoomLabelSettings.dining_min_chairs` (**0**; 3 enables), `shape_rule` (**False**), `shape_rule_confidence` (0.5) |
 | `closing/target_closing.py` | the STOP overshoot reads the memory's planar range lifted by the target's lowest measured point above the base (objects under 0.3 m up read as before), and takes up to 3 steps for a raised target | `TargetClosingSettings.elevation_overshoot` (True), `elevation_min_m` (0.30), `stop_overshoot_elevated_max_steps` (3) |
-| `closing/target_path.py`, `closing/wall_normal.py` | the standoff ring of a raised target mounted on something starts from the direction into the room -- toward the free cells within 0.8 m of a memory with something occupied within 0.3 m of it -- instead of the agent's own bearing, so the standoff is in front of a picture, not beside it; the pursuit's walk-back uses the same rule (the lock's lowest point is remembered) | `frontal_standoff` (True), `frontal_wall_radius_m` (0.8) |
+| `perception/face_normal.py`, `perception/projection.py`, `closing/target_path.py`, `closing/target_closing.py` | a lock whose sightings measure a standing plane (every depth pixel of the mask fitted as a plane: spread under 5 cm along the smallest axis, normal near horizontal -- a picture, a cabinet's front, a shower screen; a chair or a sofa is no plane) keeps the plane's facing normal (the mean over its sightings); its standoff ring is tried about the normal first, at the standoff radius and then at 0.65 and 0.45 m (a plane has nothing in front of it to collide with), and about the agent's bearing only when no frontal point has a route; an in-range sighting from more than 35 degrees off the normal does not STOP while a frontal standoff is still to be walked (at most 12 actions). A first version read the "front" off the map's free cells, which point to the explored side and move as the map fills (`runs/ss_gt_fixes_v1`); replaced | `frontal_standoff` (True), `frontal_off_normal_deg` (35), `frontal_refine_deg` (45), `frontal_max_deferrals` (12), `frontal_inner_radii_m` (0.65, 0.45) |
 | `ground_truth/perception.py`, `source.py`, `mp3d/env.py`, `habitat/simulator.py` | the on-object filter: a rendered pixel is the instance's only where the frame's depth puts it on the instance's annotated box (inflated by M); an instance mostly off its box is not reported. Perception-layer only; nothing in the navigation reads it | `--ground-truth-on-object-m M` / `GT_ON_OBJECT_M` (**0.25 m, ON by default**; 0 off) |
 | `settings.py`, `policy.py` | `--policy-config` reaches the loop and the labeller: `{"room_search": {...}, "room_labels": {...}}` | `RPTSettings.room_search`, `room_labels` |
 | `search_node_oracle.py`, `room_search_loop.py`, `scene_graph.py`, `oracle_retry.py` | the flat-p ablation (`source="flat"`, accepted by the runtime) | `LoopSettings.flat_p` (None) |
@@ -101,7 +101,7 @@ living_room 8.
 
 Tests: 1,963 pass across the runtime, topology, object_search and exploration rigs (one pre-existing `test_monitor`
 failure deselected, unrelated). New: the set (3), the watchdog (3), the flat oracle (2), the scrape guard (1), the
-labeller rules (2), the raised-target overshoot (1), the frontal standoff (1 + 5 on `wall_normal`), the on-object
+labeller rules (2), the raised-target overshoot (1), the frontal standoff (2 + 3 on `face_normal`), the on-object
 filter (1), the store repair (1).
 
 ## 5. The fixed set re-run with the first three fixes (`runs/ss_fixes`: scrape guard, labeller rules, elevation overshoot; same perception as the baseline, filter OFF)
@@ -124,18 +124,58 @@ the first divergence of each pair of recordings names the fix):
   losses are GT phantoms met or avoided on the new route (outside the analysis); the method's own are +3
   (000020 barrier, QUCTc6BB5sX/000017 locks released, TbHJrupSAjP/000040 never seen) and -4 (three never seen
   within 500 actions after long searches that the baseline finished at actions 302-431, one lock released in
-  clutter). 2,753 -> 2,000 classifier calls; `dining_room` adoptions 225 -> 92; shape-only calls 257 -> 0.
+  clutter). Classifier calls 2,753 -> 2,291; `dining_room` adoptions 225 -> 122 (602 verdicts downgraded), episodes
+  ending with two or more dining rooms 32 -> 16; classifier verdicts on rooms with no objects 257 -> 0 (210 rooms
+  labelled hallway by the rule).
 
 The failure census of this run (30 the method's, 34 the sensor's): near-miss 7 (beside 4, in the band 2, far 1),
 barrier 4, other 1, never seen 15, wedged 1, locks released 2. The near-misses are what the fourth fix is for.
 
-## 5b. The arms with the on-object filter ON (identical perception; each fix toggled by `--policy-config`)
+## 5b. The arms with the on-object filter ON (identical perception; the fixes toggled by `--policy-config`)
 
-RESULTS_GT_ARMS
+| arm | method | SR | SPL | dSR vs baseline [95 %] | vs gt-base: dSR [95 %], p, flips, dSPL [95 %] |
+|---|---|---|---|---|---|
+| gt-base | `96cd374c`, every fix off by config | 77.2 % | 32.8 % | +14.4 [+7.8, +21.1], p < 0.001, 33 / 7 | -- |
+| gt-fixes v1 | fixes on; frontal standoff read off the map | 78.3 % | 31.4 % | +15.6 [+8.9, +22.2] | +1.1 [-4.4, +6.1], 0.84, 13 / 11 |
+| gt-fixes v3 | frontal standoff from the sighting's plane, every plane | 77.2 % | 29.9 % | +14.4 [+7.8, +21.1] | +0.0 [-5.0, +5.0], 1.0, 11 / 11, SPL -2.9 [-5.0, -0.9] |
+| gt-fixes v4 | the same, raised planes only | 77.8 % | 30.4 % | +15.0 [+8.3, +21.7] | +0.6 [-4.4, +5.6], 1.0, 12 / 11, SPL -2.5 [-4.6, -0.4] |
+| gt-dining (stopped at 52 episodes) | the dining rule alone | 65.4 % vs gt-base 71.2 % on the same 52 | 25.3 vs 28.1 | -- | +1 / -4, 708 more actions |
+| gt-shape (stopped at 53 episodes) | the shape rule alone | 67.9 % vs 73.6 % on the same 53 | 25.7 vs 28.8 | -- | +2 / -5, 485 more actions |
+| gt-fixes v5 | v4 + the pursuit bounds, the labeller rules OFF | GT_V5 |
+
+**The filter is the result; the fixes are a wash on SR and cost path length.** Per fix, by the first action at which
+each flipped episode's recording parts from gt-base's (v4 arm):
+
+* closing (elevation overshoot, frontal standoff): +3 / -1 -- 2azQ1b91cZZ/000025 (cabinet), TbHJrupSAjP/000156 and
+  zsNo4HB9uLZ/000045 (pictures) stand in front of their object and succeed; zsNo4HB9uLZ/000023's frontal standoff
+  lay beyond a half-wall. 17 locks touched, 14 deferred actions, SPL -0.02 over them.
+* scrape guard: +3 / -2 -- Z6MFQCViBuw/000098 (500 -> 127), QUCTc6BB5sX/000065, 2azQ1b91cZZ/000108 unwedged;
+  Z6MFQCViBuw/000117 and /000183 wedged elsewhere after the written refusals changed their routes.
+* labeller rules: +5 / -6, every one at a transit choice, and the 58 episodes that diverge there walk 1,674 more
+  actions and lose 2.1 SPL-points between them: the whole SPL loss of the arm. The briefing is cleaner (dining rooms
+  242 -> 102, no call on an empty room, calls 3,177 -> 2,508); the search is not better for it. Alone, each rule
+  trended the same way (the two arms above, stopped by the user): **both are off by default since 2026-11-11**, and
+  the labeller is not worked on further -- the model change is the fix for what they addressed.
+
+The v1 and v3 arms are kept as data: v1's map-read "front" pointed to the explored side and churned the standoff
+(pLe4wQe7qrG/000152 re-selected 31 times and was released; 2azQ1b91cZZ/000157 lost its lock when the frontal ring
+had no route and nothing fell back); v3's plane fit on the near-surface component read a plane on 90 of 180 locks
+(a sofa's seat front, a table's apron) and cost 1.7 SPL-points over them. `docs/progress/mp3d-problems-and-fixes.md`
+has the full account.
 
 ## 6. What remains on a single storey (the method's failures, GT artefacts excluded)
 
-REMAINING
+gt-fixes v4, 40 failures of 180, every one the method's (`single_storey_failures.py`; the standing spot of a
+near-miss is read against the goal's `.house` box):
+
+| mechanism | n | reading |
+|---|---|---|
+| never seen in 500 actions | 15 | 7 never within 6 m of a same-level goal (the room order), 3 within 4-6 m, 5 with the goal inside the camera's horizontal field within 4 m on 11-69 frames yet never detected (behind the next room's wall, or outside the pitched camera's vertical field: oLBMNvg9in8/000199's towel 0.75 m beside the path, 71 degrees off the heading) |
+| the bearing-pursuit loop | 8 | all Z6MFQCViBuw (the atrium): chairs across the void seen without depth, a guessed point 6 m along each bearing pursued for up to 120 actions, a new point per glimpse -- 275-453 actions of "walking back to the released chair". Bounded after this arm (`PursuitSettings.bearing_merge_m`, `bearing_max_walk_actions`, `max_total_walk_actions`); measured in v5 |
+| locks released, step limit | 8 | 4 bearing approaches given up on a target never measured; the escape loop (zsNo4HB9uLZ/000153); 2 "no safe path" releases in clutter; a sink locked at action 480 |
+| near-miss STOP | 6 | 3 beside a planar target with no routable floor in front (2azQ1b91cZZ/000157's 0.7 m corridor, QUCTc6BB5sX/000055's vanity, /000163); 3 in front, in the band, off every view point |
+| wedged in clutter | 2 | Z6MFQCViBuw/000090, /000183: 300+ actions closing on a target whose floor the map holds occupied; released at the 160-action bound and re-taken |
+| seen through a barrier | 1 | zsNo4HB9uLZ/000023 |
 
 **Mechanisms that are single episodes, documented and not fixed here:**
 

@@ -12,6 +12,7 @@ from sparx_agency.core.planning.objnav.action_converter.transition import apply_
 from sparx_agency.core.planning.objnav.camera_geometry import project_to_image
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
@@ -711,48 +712,145 @@ def wall_world(y_m=0.15, x_from=1.0, x_to=3.0):
     return world
 
 
-def test_a_raised_target_with_a_wall_behind_it_gets_its_standoff_in_front_of_the_wall_not_beside_it(monkeypatch):
+def grazing_wall(episode, step, offset_m=0.3, pose=AgentPose(0, 0, 0, 0)):
+    """The frame of a wall running along the agent's line of sight, ``offset_m`` to its right (world -y for an agent
+    facing +x): a picture on it is seen edge-on. The depth is the planar depth of the wall plane x_cam = offset_m;
+    the left half sees nothing."""
+    k = episode.camera.intrinsics
+    depth = np.full((k.height, k.width), np.nan, np.float32)
+    u = np.arange(k.width, dtype=np.float32)
+    right = u > k.cx + 1
+    depth[:, right] = (offset_m * k.fx / (u[right] - k.cx))[None, :]
+    depth[~np.isfinite(depth) | (depth > episode.camera.max_depth_m)] = np.nan
+    return ObjNavObservation(np.zeros((k.height, k.width, 3), np.uint8), depth, pose, episode.camera, "chair", step)
+
+
+def test_a_sighting_on_a_standing_plane_records_its_facing_normal():
+    """The projection measures a picture's plane: a wall seen edge-on 0.3 m to the right has its normal pointing
+    left (-y in the world frame of an agent facing +x), toward the camera; a flat frame facing the agent has
+    its normal toward the agent; a deep object has none."""
+    from sparx_agency.core.planning.object_search.perception.projection import observed_objects
+    _, ep = setup_policy()
+    k = ep.camera.intrinsics
+    rows = []
+    box = (int(k.cx) + 60, int(k.cy) - 80, int(k.cx) + 160, int(k.cy) + 80)
+    list(observed_objects(grazing_wall(ep, 0), [DetectionWire("chair", .9, box)], 0.3, rows))
+    assert rows[-1]["status"] == "projected" and rows[-1].get("face_normal_xy") is not None
+    nx, ny = rows[-1]["face_normal_xy"]
+    assert abs(nx) < 0.15 and ny > 0.98, "the wall runs along x on the agent's right (-y); its face points +y, to the agent"
+    rows = []
+    list(observed_objects(observation(ep, 0, depth=2), [DetectionWire("chair", .9, (280, 200, 360, 280))], 0.3, rows))
+    assert rows[-1]["face_normal_xy"][0] < -0.98, "a flat frame at 2 m faces the agent at the origin"
+    rows = []
+    deep = observation(ep, 0, depth=2)
+    # A sofa seen from the front: a vertical back in the upper half of the box and a seat receding 0.4 m below
+    # it -- one connected surface within the depth band (projected) but no plane.
+    deep.depth_m[240:280, 280:360] = np.linspace(2.0, 2.4, 40, dtype=np.float32)[:, None] * np.ones((40, 80), np.float32)
+    list(observed_objects(deep, [DetectionWire("chair", .9, (280, 200, 360, 280))], 0.3, rows))
+    assert rows[-1]["status"] == "projected", rows[-1]["status"]
+    assert "face_normal_xy" not in rows[-1], "a seat and a back are two surfaces, not a plane"
+
+
+def facing(closing, nx, ny, lowest_m=1.2):
+    """Give the lock a facing normal as fifty agreeing sightings would (the fake frames' own normals cannot move it)
+    and a raised underside: a picture at ``lowest_m``, above ``frontal_min_elevation_m``."""
+    closing.face_normal_sum, closing.face_normal_count = [50.0 * nx, 50.0 * ny], 50
+    closing.face_normal_xy = (nx, ny)
+    closing.lowest_m = lowest_m
+
+
+def test_a_planar_target_gets_its_standoff_in_front_of_it_and_a_side_on_stop_waits_for_it(monkeypatch):
     """2azQ1b91cZZ/000157, QUCTc6BB5sX/000055, zsNo4HB9uLZ/000045 (MP3D, ground truth): pictures first seen at a
     grazing angle were approached along the agent's own bearing and STOPped on from beside them, where the evaluator
-    has no view point. Here the wall runs along the agent's line of sight, 0.15 m beside the memory: the ring of a
-    raised target starts from the direction into the room (since 2026-11-10), and the standoff stands in front
-    of the picture, out from the wall, instead of a step short of it along the wall."""
+    has no view point. Here the wall runs along the agent's line of sight, 0.15 m beside the memory, and the lock
+    carries the picture's facing normal (-y): the ring is tried about the normal first (since 2026-11-10), so the
+    standoff stands in front of the picture, out from the wall; an in-range frame from beside it does not STOP
+    while that standoff is to be walked; and when no frontal point has a route the agent's ring is used as before."""
     p, ep = setup_policy()
     freeze_global(monkeypatch, p)
     world = wall_world()
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
     p.plan(observation(ep, 0, depth=2))
-    frontal = p.plan(observation(ep, 1, depth=2))
+    first = p.plan(observation(ep, 1, depth=2))
     closing = p.closing
     assert closing.locked and abs(closing.xyz[0] - 2.0) < 0.1 and abs(closing.xyz[1]) < 0.1
-    # The depth-plane fake reads the target's lowest point at seat height, 0.45 m up: a raised target, and
-    # the lock's standoff is chosen from the wall's normal -- in front of the memory, out from the wall.
-    assert frontal.waypoints and closing.path.frontal and closing.frontal_standoffs == 1
+    # The flat fake frame faces the agent (its normal is the agent's own bearing) with its lowest point 0.78 m up:
+    # a raised plane, whose frontal ring and the agent's ring agree on the point a step short of the memory.
+    assert first.waypoints and closing.face_normal_xy is not None and closing.face_normal_xy[0] < -0.98
+    assert closing.path.frontal and closing.frontal_standoffs == 1 and closing.path.goal_xyz[0] < 1.8
+    # On the floor -- the lowest point at seat height, 0.45 m -- the plane does not count: the agent's ring.
+    closing.path.drop()
+    closing.lowest_m = 0.45
+    assert p.plan(observation(ep, 2, depth=2)).waypoints and not closing.path.frontal and closing.frontal_standoffs == 1
+    # The picture's own plane faces -y and hangs 1.2 m up: re-selected about that normal, the standoff stands in
+    # front of the picture, out from the wall, not a step short of it along the wall.
+    closing.path.drop()
+    facing(closing, 0.0, -1.0)
+    frontal = p.plan(observation(ep, 3, depth=2))
+    assert frontal.waypoints and closing.path.frontal and closing.frontal_standoffs == 2
     goal = closing.path.goal_xyz
     assert abs(goal[0] - 2.0) < 0.1, "in front of the picture along the wall"
     assert goal[1] < -0.5, "out from the wall, on the agent's side of it"
-    assert p.episode_info()["target_closing"]["frontal_standoffs"] == 1
-    # On the floor the ring starts from the agent's bearing as before: the points along the wall lie in its
-    # inflation, and the first with a route is the 60-degree offset -- the grazing standoff of the campaign.
-    closing.path.drop()
-    closing.lowest_m = 0.0
-    assert p.plan(observation(ep, 2, depth=2)).waypoints and not closing.path.frontal
-    assert closing.path.goal_xyz[0] < 1.8 and closing.frontal_standoffs == 1
-    # Raised again, but with free floor all round the memory (a plant on a stand mid-room): the agent's bearing.
-    closing.path.drop()
-    closing.lowest_m = 1.2
-    monkeypatch.setitem(p.mapping.__dict__, "update",
-                        lambda *a, **kw: OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10)))
-    assert p.plan(observation(ep, 3, depth=2)).waypoints and not closing.path.frontal and closing.path.goal_xyz[0] < 1.8
-    # With the rule off a raised target against a wall keeps the agent's bearing too.
-    off, ep2 = setup_policy(target_closing={"frontal_standoff": False})
+    reported = p.episode_info()["target_closing"]["face_normal_xy"]
+    assert reported[1] < -0.99 and abs(reported[0]) < 0.05, "the fifty agreeing sightings outweigh the fake frame's own"
+    # A fresh in-range frame from beside the picture (the agent at x 1.1 on the wall's line, 90 degrees off the
+    # normal) does not STOP: the route to the frontal standoff is walked instead, at most frontal_max_deferrals times.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    beside = replace(observation(ep, 4, depth=0.9), pose=AgentPose(1.1, 0, 0, 0))
+    deferred = p.plan(beside)
+    assert deferred.waypoints and not deferred.stop and deferred.info.get("frontal_deferral") == 1
+    assert "off the target's facing normal" in deferred.info["reason"] and closing.frontal_deferrals == 1
+    for step in range(5, 5 + TargetClosingSettings().frontal_max_deferrals):
+        command = p.plan(replace(beside, step=step))
+        if command.stop or command.info.get("frontal_deferral") is None:
+            break
+    assert closing.lock_deferrals > TargetClosingSettings().frontal_max_deferrals and closing.frontal_deferral_caps == 1
+    assert command.stop or command.info.get("phase") in ("target_inspect", "target_stop", "target_advance"), \
+        "the deferrals spent, the STOP rules apply as before"
+    # In front of the picture (on the normal) an in-range frame STOPs at once, as always.
+    q, ep2 = setup_policy()
+    freeze_global(monkeypatch, q)
+    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
+    q.plan(observation(ep2, 0, depth=2))
+    q.plan(observation(ep2, 1, depth=2))
+    facing(q.closing, 0.0, -1.0)
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    in_front = replace(observation(ep2, 2, depth=0.9), pose=AgentPose(2.0, -0.9, 0, math.pi / 2))
+    assert q.plan(in_front).info.get("frontal_deferral") is None and q.closing.frontal_deferrals == 0
+    # No frontal point has a route (the floor in front of the picture is occupied): the agent's ring as before.
+    r, ep3 = setup_policy()
+    freeze_global(monkeypatch, r)
+    blocked = wall_world()
+    gx0, gy0 = blocked.world_to_grid(1.0, -1.3)
+    gx1, gy1 = blocked.world_to_grid(3.0, -0.2)
+    blocked.grid[gy0:gy1 + 1, gx0:gx1 + 1] = blocked.values.occupied
+    monkeypatch.setitem(r.mapping.__dict__, "update", lambda *a, **kw: blocked)
+    r.plan(observation(ep3, 0, depth=2))
+    r.plan(observation(ep3, 1, depth=2))
+    r.closing.path.drop()
+    facing(r.closing, 0.0, -1.0)
+    fallback = r.plan(observation(ep3, 2, depth=2))
+    assert fallback.waypoints and not r.closing.path.frontal, "no frontal point had a route: the agent's ring"
+    # With the rule off the normal is not even kept, and the ring is the agent's.
+    off, ep4 = setup_policy(target_closing={"frontal_standoff": False})
     freeze_global(monkeypatch, off)
     monkeypatch.setitem(off.mapping.__dict__, "update", lambda *a, **kw: world)
-    off.plan(observation(ep2, 0, depth=2))
-    assert off.plan(observation(ep2, 1, depth=2)).waypoints and off.closing.locked and not off.closing.path.frontal
-    assert off.closing.frontal_standoffs == 0 and off.closing.path.goal_xyz[0] < 1.8
-    with pytest.raises(ValueError, match="frontal_wall_radius_m"):
-        TargetClosingSettings(frontal_wall_radius_m=0.0)
+    off.plan(observation(ep4, 0, depth=2))
+    assert off.plan(observation(ep4, 1, depth=2)).waypoints and off.closing.locked
+    assert off.closing.face_normal_xy is None and not off.closing.path.frontal and off.closing.frontal_standoffs == 0
+    # A plane on the floor -- a cabinet's front at 0.45 m -- keeps the agent's ring even with the normal known.
+    low, ep5 = setup_policy()
+    freeze_global(monkeypatch, low)
+    monkeypatch.setitem(low.mapping.__dict__, "update", lambda *a, **kw: world)
+    low.plan(observation(ep5, 0, depth=2))
+    low.plan(observation(ep5, 1, depth=2))
+    low.closing.path.drop()
+    facing(low.closing, 0.0, -1.0, lowest_m=0.45)
+    assert low.plan(observation(ep5, 2, depth=2)).waypoints and not low.closing.path.frontal
+    with pytest.raises(ValueError, match="frontal_off_normal_deg"):
+        TargetClosingSettings(frontal_off_normal_deg=0.0)
+    with pytest.raises(ValueError, match="frontal_max_deferrals"):
+        TargetClosingSettings(frontal_max_deferrals=-1)
 
 
 def test_a_single_unconditional_step_never_takes_a_second(monkeypatch):
@@ -2219,6 +2317,7 @@ def arrived_widened_standoff(monkeypatch, widened=True, **closing):
     p, ep, _ = locked_at_three_metres(monkeypatch, **closing)
     path = p.closing.path
     path.goal_xyz, path.reference_xyz, path.widened = (2.2, 0.0, 0.0), tuple(p.closing.xyz), widened
+    path.frontal_retry = True        # the hand-set goal stands for one already chosen with the lock's normal known
     p.target_projector = lambda point: None
     p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (124, 25, 516, 404))]
     return p, ep, replace(observation(ep, 2, depth=1.2), pose=AgentPose(2.05, 0, 0, 0))

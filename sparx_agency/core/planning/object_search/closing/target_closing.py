@@ -345,20 +345,39 @@ class TargetClosingSettings:
     elevation_overshoot: bool = True
     elevation_min_m: float = 0.30
     stop_overshoot_elevated_max_steps: int = 3
-    # THE STANDOFF OF A RAISED TARGET IS IN FRONT OF IT (since 2026-11-10). The view points of a thin
+    # THE STANDOFF OF A PLANAR TARGET IS IN FRONT OF IT (since 2026-11-10). The view points of a thin
     # wall-mounted object stand within its own width along the wall (0.26 m beyond it at the median over the
     # set's 78 pictures, against 0.6-0.9 m for every other category): a 2 cm picture shows nothing from
     # beside itself. The standoff ring starts from the agent's bearing (``target_path.TargetPath``), so a
     # picture first seen at a grazing angle was approached and STOPped on from beside it, within the 1 m band
     # and 0.1-0.5 m from the nearest view point (2azQ1b91cZZ/000157, QUCTc6BB5sX/000055, zsNo4HB9uLZ/000045:
     # 0.26-0.38 m beside the width, 60-69 degrees off the wall's normal; every picture success of the run
-    # stood within 0.28 m of the width). With ``frontal_standoff`` the ring of a target raised
-    # ``elevation_min_m`` or more starts from the direction into the room -- toward the free cells within
-    # ``frontal_wall_radius_m`` of a memory that has something occupied within 0.3 m of it (``wall_normal.py``)
-    # -- and leaves out the bearing into the wall; a raised target with free floor all round it, or nothing
-    # under it, keeps the agent's bearing.
+    # stood within 0.28 m of the width). With ``frontal_standoff`` a lock whose sightings measure a STANDING
+    # PLANE (``perception/face_normal.py``: every depth pixel of the mask fitted as a plane, its spread along the
+    # smallest axis under 5 cm, the normal near horizontal -- a picture, a cabinet's front, a shower screen; a
+    # chair or a sofa is no plane)
+    # keeps that plane's normal (``face_normal_xy``: the mean over its sightings' normals, trusted while they
+    # agree; a sighting more than ``frontal_refine_deg`` off the mean is counted as a conflict), its standoff
+    # ring is tried about the normal BEFORE the agent's bearing (``target_path``) -- at the standoff radius and
+    # then at ``frontal_inner_radii_m``, since a plane has nothing in front of it to collide with and a picture in
+    # a 0.7 m corridor has its view points nearer than the ring (2azQ1b91cZZ/000157) -- and an in-range sighting
+    # from more than ``frontal_off_normal_deg`` off the normal does not STOP while a frontal standoff with a route
+    # is still to be walked, at most ``frontal_max_deferrals`` actions, then the STOP rules apply as before. The
+    # angle is read from the memory, which lies on the NEAR part of a grazed object (up to half its width toward
+    # the agent), so the threshold is tighter than the view points' own 50-degree spread. A first version read the
+    # "front" off the map's free cells, which point to the explored side -- the agent's own -- and move as the map
+    # fills; the sighting's plane does neither.
+    # The rule is for RAISED planes -- a picture, a wall cabinet, a towel on its rail, whose underside stands at
+    # least ``frontal_min_elevation_m`` above the base: the mechanism (view points only in front) is theirs, and a
+    # plane standing on the floor -- a cabinet's front, a table's apron, a cushion on a seat, a chair's backrest --
+    # has view points all round and loses only steps to a frontal detour (90 of 180 locks read a plane when the
+    # rule was ungated, 2026-11-10, at -1.7 SPL points over them).
     frontal_standoff: bool = True
-    frontal_wall_radius_m: float = 0.8
+    frontal_min_elevation_m: float = 0.6
+    frontal_off_normal_deg: float = 35.0
+    frontal_refine_deg: float = 45.0
+    frontal_max_deferrals: int = 12
+    frontal_inner_radii_m: tuple = (0.65, 0.45)
     # After a release, no new takeover may START on a far candidate for this
     # many actions: six twelve-step verifications from one spot three metres
     # from the couch (Ranchester attempt 4) were the same failure repeated,
@@ -572,9 +591,20 @@ class TargetClosingSettings:
             raise ValueError("stop_overshoot_elevated_max_steps must be an int of at least stop_overshoot_max_steps")
         if type(self.frontal_standoff) is not bool:
             raise ValueError("frontal_standoff must be a bool")
-        if (isinstance(self.frontal_wall_radius_m, bool) or not math.isfinite(self.frontal_wall_radius_m)
-                or self.frontal_wall_radius_m <= 0):
-            raise ValueError("frontal_wall_radius_m must be finite and positive")
+        for key in ("frontal_off_normal_deg", "frontal_refine_deg"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or not 0.0 < value <= 90.0:
+                raise ValueError("%s must lie in (0, 90] degrees" % key)
+        if type(self.frontal_max_deferrals) is not int or self.frontal_max_deferrals < 0:
+            raise ValueError("frontal_max_deferrals must be a non-negative integer (0: never defer a STOP)")
+        if (isinstance(self.frontal_min_elevation_m, bool) or not math.isfinite(self.frontal_min_elevation_m)
+                or self.frontal_min_elevation_m < 0):
+            raise ValueError("frontal_min_elevation_m must be finite and non-negative (0: every standing plane)")
+        if isinstance(self.frontal_inner_radii_m, list):
+            object.__setattr__(self, "frontal_inner_radii_m", tuple(self.frontal_inner_radii_m))
+        if (not isinstance(self.frontal_inner_radii_m, tuple)
+                or any(isinstance(r, bool) or not math.isfinite(r) or r <= 0 for r in self.frontal_inner_radii_m)):
+            raise ValueError("frontal_inner_radii_m must be a tuple of positive, finite radii (empty: the standoff ring only)")
         for key in ("stop_overshoot_within_m", "stop_overshoot_min_range_m"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -756,7 +786,11 @@ class TargetClosing:
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
         self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
         self.elevated_overshoot_steps = 0  # overshoot steps beyond the planar rule's, under a raised target (``elevation_overshoot``)
-        self.frontal_standoffs = 0         # standoff rings started from the wall's normal, not the agent's bearing (``frontal_standoff``)
+        self.frontal_standoffs = 0         # standoffs chosen about the target's facing normal, not the agent's bearing (``frontal_standoff``)
+        self.frontal_deferrals = 0         # in-range STOPs deferred from beside a planar target for its frontal standoff
+        self.frontal_reselections = 0      # agent-ring standoffs re-selected about a normal that arrived after them
+        self.frontal_deferral_caps = 0     # locks whose deferrals ran out (``frontal_max_deferrals``)
+        self.face_normal_conflicts = 0     # sightings whose plane disagreed with the lock's normal beyond ``frontal_refine_deg``
         self.bearing_starts = 0            # bearing approaches begun on an RGB box without a usable depth
         self.bearing_resolved = 0          # ... of which a frame with depth turned into a verification
         self.bearing_abandoned = 0         # ... and those given up: lost, out of actions, or not moving
@@ -802,6 +836,10 @@ class TargetClosing:
         self.terminal_missing = 0          # consecutive terminal-range frames without a fresh target box
         self.visible_floor_m = None        # the lowest height of the fresh frame's supported points
         self.lowest_m = None               # the lowest height the target's supported points reached over this lock
+        self.face_normal_xy = None         # the planar unit normal of a planar target, toward the room (``frontal_standoff``)
+        self.face_normal_sum = [0.0, 0.0]  # the sightings' normals summed; their mean is ``face_normal_xy`` while they agree
+        self.face_normal_count = 0
+        self.lock_deferrals = 0            # this lock's frontal STOP deferrals (``frontal_max_deferrals``)
         self.top_m = None                  # ... and the highest: the object's measured top, for the below-the-frame test
         self.footprint_m = None            # the anchor frame's footprint half-extent (``perception.footprint_radius_m``)
         self._floor_cut_step = -1          # the last action whose terminal range the memory supplied (counted once)
@@ -1167,6 +1205,7 @@ class TargetClosing:
             if heights:
                 self.lowest_m = float(heights[0]) if self.lowest_m is None else min(self.lowest_m, float(heights[0]))
                 self.top_m = float(heights[1]) if self.top_m is None else max(self.top_m, float(heights[1]))
+            self._note_face_normal(row.get("face_normal_xy"))
             range_m = math.dist(here, xyz[:2])
             if self.anchor is None:
                 # The 3-D memory and the approach ledger start with the takeover; a candidate
@@ -2003,6 +2042,11 @@ class TargetClosing:
         # object, and a low object without LOOK actions is still in the frame from here where
         # it may not be from the standoff (the Wiconisco toilet at 0.65 m is below the FOV).
         in_range = measured is not None and measured <= limit
+        if self.inspection_started is None and (in_range or (distance <= s.terminal_distance_m and not out_of_range)):
+            # Beside a planar target, in range, with its frontal standoff still to walk: not yet (``frontal_standoff``).
+            deferred = self._frontal_deferral(obs, world, distance)
+            if deferred is not None:
+                return deferred
         if self.inspection_started is None and arrived_a_step_out() and not nearly():
             self.arrived_step_out_inspections += 1
         if (self.inspection_started is not None or in_range or arrived_a_step_out()
@@ -2662,6 +2706,84 @@ class TargetClosing:
                                 % (distance, "" if elevation <= 0.0 else " (%.2f m in 3-D, %.2f m up)" % (lifted, elevation),
                                    s.stop_overshoot_within_m))))
 
+    def _note_face_normal(self, normal):
+        """Fold the facing normal a sighting measured into the lock's (``frontal_standoff``).
+
+        The lock's normal is the mean of its sightings' unit normals, trusted
+        while they agree (the mean's length at least half the count: a first
+        sighting whose fit was poor -- a towel folded over its rail, a frame
+        seen through a doorway -- is outvoted by the later ones, and a lock
+        whose sightings disagree has no normal). A sighting more than
+        ``frontal_refine_deg`` off the running mean is counted as a conflict.
+        """
+        s = self.settings
+        if not s.frontal_standoff or normal is None:
+            return
+        nx, ny = float(normal[0]), float(normal[1])
+        if self.face_normal_xy is not None:
+            ox, oy = self.face_normal_xy
+            if math.degrees(abs(normalize_angle(math.atan2(ny, nx) - math.atan2(oy, ox)))) > s.frontal_refine_deg:
+                self.face_normal_conflicts += 1
+        self.face_normal_sum[0] += nx
+        self.face_normal_sum[1] += ny
+        self.face_normal_count += 1
+        length = math.hypot(*self.face_normal_sum)
+        if length >= 0.5 * self.face_normal_count and length > 0.0:
+            self.face_normal_xy = (self.face_normal_sum[0] / length, self.face_normal_sum[1] / length)
+        else:
+            self.face_normal_xy = None
+
+    def frontal_normal(self, obs):
+        """The facing normal the standoff ring and the STOP deferral use, or None: a planar target raised
+        ``frontal_min_elevation_m`` or more above the base (``frontal_standoff``)."""
+        s = self.settings
+        if not s.frontal_standoff or self.face_normal_xy is None or self.lowest_m is None:
+            return None
+        if float(self.lowest_m) - float(obs.pose.z) < s.frontal_min_elevation_m:
+            return None
+        return self.face_normal_xy
+
+    def off_normal_deg(self, obs):
+        """How far off the target's facing normal the agent stands, degrees; None without a normal."""
+        if self.face_normal_xy is None or self.xyz is None:
+            return None
+        to_agent = math.atan2(obs.pose.y - self.xyz[1], obs.pose.x - self.xyz[0])
+        return math.degrees(abs(normalize_angle(to_agent - math.atan2(self.face_normal_xy[1], self.face_normal_xy[0]))))
+
+    def _frontal_deferral(self, obs, world, distance):
+        """The approach command when an in-range frame from beside a planar target should not STOP yet, else None.
+
+        The agent stands more than ``frontal_off_normal_deg`` off the target's
+        facing normal, where a thin object has no view point; the frontal
+        standoff (``target_path``, about the normal) has a route and is not
+        reached; the lock's deferrals (``frontal_max_deferrals``) are not
+        spent. The command is the route's own; the inspection is not entered.
+        """
+        s = self.settings
+        if self.inspection_started is not None or self.frontal_normal(obs) is None:
+            return None
+        off = self.off_normal_deg(obs)
+        if off is None or off <= s.frontal_off_normal_deg:
+            return None
+        if self.lock_deferrals >= s.frontal_max_deferrals:
+            if self.lock_deferrals == s.frontal_max_deferrals:
+                self.frontal_deferral_caps += 1
+                self.lock_deferrals += 1               # counted once per lock
+            return None
+        command = self.path.command(self, obs, world)
+        if command is None or not self.path.frontal or self.path.arrived:
+            return None
+        self.lock_deferrals += 1
+        self.frontal_deferrals += 1
+        visible = self.last_seen == obs.step
+        self.phase = "CLOSE" if visible else "CLOSE_OCCLUDED"
+        return replace(command, camera_pitch=self._approach_pitch(obs, distance),
+                       info=dict(command.info, target_confirmed=True, persistent_lock=True, target_visible=visible,
+                                 range_m=distance, phase=self.phase, frontal_deferral=self.lock_deferrals,
+                                 reason="in range but %.0f degrees off the target's facing normal, where a planar object "
+                                        "has no view point: on to the frontal standoff (%d of %d deferrals)"
+                                        % (off, self.lock_deferrals, s.frontal_max_deferrals)))
+
     def elevation_above_base(self, obs, lowest_m=None):
         """How far the target's lowest measured point stands above the agent's base, metres; 0 for an object on the floor.
 
@@ -2873,7 +2995,10 @@ class TargetClosing:
                 "occluder_reads": self.occluder_reads,
                 "overshoot_commands": self.overshoot_commands,
                 "elevated_overshoot_steps": self.elevated_overshoot_steps,
-                "frontal_standoffs": self.frontal_standoffs,
+                "frontal_standoffs": self.frontal_standoffs, "frontal_deferrals": self.frontal_deferrals,
+                "frontal_reselections": self.frontal_reselections,
+                "frontal_deferral_caps": self.frontal_deferral_caps, "face_normal_conflicts": self.face_normal_conflicts,
+                "face_normal_xy": None if self.face_normal_xy is None else [round(v, 3) for v in self.face_normal_xy],
                 "stop_overshoot": None if self.overshoot is None else {
                     key: self.overshoot[key] for key in ("decided", "steps", "actions", "blocked", "ended")},
                 "standoff_arrived": self.path.arrived, "standoff_arrivals": self.path.arrivals,

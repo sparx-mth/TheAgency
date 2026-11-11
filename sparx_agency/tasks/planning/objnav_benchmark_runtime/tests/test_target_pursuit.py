@@ -101,6 +101,43 @@ def test_a_bearing_approach_stopped_by_a_wall_hands_its_target_over_beyond_the_d
     assert math.dist(entry["xyz"][:2], (AGENT[0] + reach, AGENT[1])) < 1e-6
 
 
+def test_a_chair_glimpsed_across_a_void_six_times_is_one_target_and_the_chase_is_bounded():
+    """Z6MFQCViBuw/000030 and seven more (MP3D, ground truth, 2026-11-11): every abandoned bearing approach
+    remembered a new point 6 m along its bearing and each was walked toward for up to 120 actions -- 446 of 500
+    actions 'walking back to the released chair'. A bearing target near a remembered one is the same object; a
+    bearing pursuit walks at most ``bearing_max_walk_actions``; all pursuits together at most
+    ``max_total_walk_actions``."""
+    import math
+    policy, ep = setup_policy("bed")
+    pursuit = policy.pursuit
+    pursuit.remember_bearing(at(ep, 40), "bed", 0.0, policy.mapping.floor_id)
+    pursuit.remember_bearing(at(ep, 60, xy=(2.0, 2.4)), "bed", 0.05, policy.mapping.floor_id)      # the same bed, glimpsed again
+    assert len(pursuit.targets) == 1 and pursuit.stats["merged"] == 1 and pursuit.targets[0]["released"] == 60
+    pursuit.remember_bearing(at(ep, 70), "bed", math.pi / 2, policy.mapping.floor_id)              # another bearing: another target
+    assert len(pursuit.targets) == 2
+    # A bearing pursuit's walk ends at the bearing bound, well before the 120 actions of a measured target.
+    pursuit.settings = PursuitSettings(bearing_max_walk_actions=5, max_total_walk_actions=12, retry_actions=1)
+    world = room(True)
+    first = pursuit.command(at(ep, 80), world)
+    assert first is not None and pursuit.active is not None
+    step = 81
+    while pursuit.active is not None and step < 200:
+        pursuit.command(at(ep, step), world)
+        step += 1
+    assert pursuit.active is None and step - 81 <= 6, "a bearing pursuit walks bearing_max_walk_actions, then ends"
+    assert pursuit.events[-1]["why"].startswith("walked 5 actions")
+    # The episode's pursuits together walk max_total_walk_actions; then the search owns the rest.
+    while step < 400 and not pursuit.stats["budget_spent"]:
+        pursuit.command(at(ep, step), world)
+        step += 1
+    assert pursuit.stats["budget_spent"] == 1 and pursuit.stats["walked"] <= 12
+    assert pursuit.command(at(ep, step + 10), world) is None and pursuit.active is None
+    with pytest.raises(ValueError, match="bearing_merge_m"):
+        PursuitSettings(bearing_merge_m=-1.0)
+    with pytest.raises(ValueError, match="max_total_walk_actions"):
+        PursuitSettings(max_total_walk_actions=0)
+
+
 def test_a_query_that_finds_no_route_leaves_the_searchs_committed_route_alone():
     policy, ep = setup_policy("bed")
     released(policy, ep)

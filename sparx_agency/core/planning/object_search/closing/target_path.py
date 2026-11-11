@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import math
 
-from sparx_agency.core.planning.object_search.closing.wall_normal import wall_normal
-
 
 class TargetApproachPath:
     """Own the projected footpoint while the existing route memory owns A*.
@@ -69,23 +67,25 @@ class TargetApproachPath:
     while it lies within the terminal radius plus the tolerance
     (``stale_kept``).
 
-    **The ring of a raised target starts from the wall's normal** (since
-    2026-11-10, ``TargetClosingSettings.frontal_standoff``). The ring's
-    first bearing is the agent's own, so a picture first seen at a grazing
+    **The ring of a planar target is tried about its facing normal first**
+    (since 2026-11-10, ``TargetClosingSettings.frontal_standoff``). The
+    ring's bearing is the agent's own, so a picture first seen at a grazing
     angle was approached and STOPped on from beside it, where the evaluator
-    has no view point (``wall_normal.py`` has the cases). For a target
-    raised ``elevation_min_m`` or more that the map shows mounted on
-    something, the ring starts from the direction into the room -- toward
-    the free floor around the memory -- and leaves out the bearing into the
-    wall (``frontal``, counted on the closing as ``frontal_standoffs``).
+    has no view point (``perception/face_normal.py`` has the cases). A lock
+    whose sightings measured a standing plane carries that plane's normal
+    (``TargetClosing.face_normal_xy``); its ring is tried about the normal
+    -- every bearing but the one into the wall -- and, when no such point
+    has a route, about the agent's bearing as before, at each radius in
+    turn. ``frontal`` says which ring the current goal came from (counted on
+    the closing as ``frontal_standoffs``).
     """
 
     #: The bearings tried about the memory, from the agent's side round to behind it.
     OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90, 180)
     #: The front arc alone for the widened rings: beside and behind a big object is where its floor is not.
     FRONT_OFFSETS_DEG = (0, 30, -30, 60, -60)
-    #: About a wall's normal: everything but the bearing into the wall.
-    WALL_OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90)
+    #: About a planar target's facing normal: everything but the bearing into the wall, every 20 degrees.
+    WALL_OFFSETS_DEG = (0, 20, -20, 40, -40, 60, -60, 80, -80)
 
     def __init__(self, policy):
         self.policy = policy
@@ -99,7 +99,8 @@ class TargetApproachPath:
         self.widened = False               # the current goal lies beyond the standoff ring: no closer point had a route
         self.widenings = 0                 # standoffs found on a widened ring over this lock
         self.stale_kept = 0                # stale goals kept because no ring point had a route
-        self.frontal = False               # the current goal's ring started from the wall's normal (``frontal_standoff``)
+        self.frontal = False               # the current goal came from the ring about the facing normal (``frontal_standoff``)
+        self.frontal_retry = False         # the one re-selection made when a normal arrived after an agent-ring goal
 
     def drop(self):
         """Give up the current standoff so the next :meth:`command` selects one anew, closer to the memory."""
@@ -127,6 +128,17 @@ class TargetApproachPath:
                 self.arrived = self.widened = self.frontal = False
                 p.route_memory.clear("target_refined")
                 p._route = p._goal = None
+        if (self.goal_xyz is not None and not self.frontal and not self.frontal_retry
+                and target.frontal_normal(obs) is not None):
+            # The goal came from the agent's ring before the lock had a facing normal (the first sighting's
+            # plane was poor, the mean settled later): re-select ONCE about the normal; the agent's ring is the
+            # fallback and finds the same point again when no frontal point has a route.
+            self.frontal_retry = True
+            target.frontal_reselections += 1
+            self.goal_xyz = None
+            self.arrived = self.widened = False
+            p.route_memory.clear("frontal_reselect")
+            p._route = p._goal = None
         if self.goal_xyz is not None:
             # Do not generate a different bearing-relative endpoint every frame.
             # _navigate still checks collisions, blocked motion and path progress.
@@ -142,7 +154,7 @@ class TargetApproachPath:
         tolerance = p.converter_params.goal_tolerance_m
         limit = s.terminal_distance_m - tolerance
         radius = max(p.settings.body_radius_m, limit - world.resolution)
-        bearing, offsets = self._ring_bearing(target, obs, world)
+        bearings = self._ring_bearings(target, obs)
         planners = [None]
         squeeze = getattr(p, "squeeze_planner", None)
         if squeeze is not None and squeeze.params.inflate_floor_m < p.planner_params.inflate_floor_m:
@@ -161,28 +173,41 @@ class TargetApproachPath:
         # route, wider rings in the front arc out to the terminal radius (since 2026-10-15): a goal there is
         # reached within the tolerance up to a forward step outside the terminal range, which the inspection
         # closes with a step (``TargetClosing._inspect``) and STOPs on when it cannot (``closest_approach``).
-        rings = [(radius, limit, offsets)]
+        # The rings in the order tried: ``which`` names the bearings -- "frontal" (the normal's, planar targets
+        # only), "agent" (the agent's own), "both" (the widened rings' front arc about each).
+        rings = []
+        if bearings[0][0]:
+            # A planar target has nothing in front of it to collide with, and a picture in a 0.7 m corridor has
+            # its view points nearer than the standoff ring: the normal's ring, then closer rings about the
+            # normal, before the agent's ring at the standoff radius.
+            rings.append((radius, limit, "frontal"))
+            rings.extend((r, limit, "frontal") for r in s.frontal_inner_radii_m if r < radius)
+        rings.append((radius, limit, "agent"))
         widest = s.terminal_distance_m - world.resolution
         if widest > radius + world.resolution:
             reach = s.terminal_distance_m + world.resolution
-            rings.append((0.5 * (radius + widest), reach, self.FRONT_OFFSETS_DEG))
-            rings.append((widest, reach, self.FRONT_OFFSETS_DEG))
-        for ring_radius, reach, offsets in rings:
+            rings.append((0.5 * (radius + widest), reach, "both"))
+            rings.append((widest, reach, "both"))
+        for ring_radius, reach, which in rings:
             for planner in planners:
-                for offset in offsets:
-                    angle = bearing + math.radians(offset)
-                    goal = (target.xyz[0] + ring_radius * math.cos(angle), target.xyz[1] + ring_radius * math.sin(angle), obs.pose.z)
-                    if p.target_projector is not None:
-                        goal = p.target_projector(goal)
-                        if goal is None:
-                            continue
-                    if abs(goal[2] - obs.pose.z) > self._height_tolerance() or math.dist(goal[:2], target.xyz[:2]) > reach:
+                for frontal, bearing, offsets in bearings:
+                    if (which == "frontal" and not frontal) or (which == "agent" and frontal):
                         continue
-                    command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
-                    if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
-                        self._adopt(target, obs, goal, widened=ring_radius > radius,
-                                    through_unknown=planner is not None and planner is not squeeze)
-                        return command
+                    for offset in (self.FRONT_OFFSETS_DEG if which == "both" else offsets):
+                        angle = bearing + math.radians(offset)
+                        goal = (target.xyz[0] + ring_radius * math.cos(angle), target.xyz[1] + ring_radius * math.sin(angle), obs.pose.z)
+                        if p.target_projector is not None:
+                            goal = p.target_projector(goal)
+                            if goal is None:
+                                continue
+                        if abs(goal[2] - obs.pose.z) > self._height_tolerance() or math.dist(goal[:2], target.xyz[:2]) > reach:
+                            continue
+                        command = p._navigate(obs, world, goal[:2], "target_closing", planner=planner)
+                        if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
+                            self.frontal = frontal
+                            self._adopt(target, obs, goal, widened=ring_radius > radius,
+                                        through_unknown=planner is not None and planner is not squeeze)
+                            return command
         if previous is not None and math.dist(previous[:2], target.xyz[:2]) <= s.terminal_distance_m + tolerance:
             # No ring point has a route, and the goal the refinement made stale -- by centimetres -- had one:
             # arriving at it puts the agent within a step of the terminal range, where the inspection reads
@@ -196,22 +221,19 @@ class TargetApproachPath:
                 return command
         return None
 
-    def _ring_bearing(self, target, obs, world):
-        """The bearing the standoff ring starts from and the offsets tried about it.
+    def _ring_bearings(self, target, obs):
+        """The bearings the standoff ring is tried about, in order: ``(frontal, bearing, offsets)`` each.
 
-        The agent's own bearing from the memory, as always -- except for a
-        raised target mounted on something (``frontal_standoff``), whose
-        ring starts from the direction into the room, so the standoff is in
-        front of the object as its view points are (``wall_normal.py``).
+        The agent's own bearing from the memory, as always -- preceded, for
+        a raised planar target (``frontal_standoff``, ``TargetClosing.frontal_normal``),
+        by the target's facing normal, so the standoff is in front of the
+        object as its view points are (``perception/face_normal.py``).
         """
-        s = target.settings
-        if s.frontal_standoff and target.elevation_above_base(obs) > 0.0:
-            normal = wall_normal(world, target.xyz[:2], radius_m=s.frontal_wall_radius_m)
-            if normal is not None:
-                self.frontal = True
-                return math.atan2(normal[1], normal[0]), self.WALL_OFFSETS_DEG
-        self.frontal = False
-        return math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0]), self.OFFSETS_DEG
+        agent = (False, math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0]), self.OFFSETS_DEG)
+        normal = target.frontal_normal(obs)
+        if normal is not None:
+            return [(True, math.atan2(normal[1], normal[0]), self.WALL_OFFSETS_DEG), agent]
+        return [agent]
 
     def _height_tolerance(self):
         """How far a projected standoff may lie above or below the agent: a step's height, or the storey's step reach.
