@@ -15,4 +15,12 @@ Modules
     ``source``           the privileged hand-off: per-scene instance labels and the current frame;
                          the dataset's category table (``HM3D_TABLE`` / ``MP3D_TABLE``) is its one seam
     ``perception``       ``GroundTruthDetector`` / ``GroundTruthSegmenter``, the two contracts
+
+The hand-off every adapter makes, whatever the dataset: ``begin_scene`` once
+per scene with the annotations, the publisher's goal ids and the annotations'
+own instance boxes in ENU (``habitat.simulator.semantic_boxes_enu``); ``publish``
+once per frame with the ids and the frame's depth, pose and camera. The boxes
+and the depth are what the detector's on-object filter judges a rendered pixel
+against; an adapter that withholds them gets a detector that reports every
+painted instance and counts each as ``unjudged``.
 """

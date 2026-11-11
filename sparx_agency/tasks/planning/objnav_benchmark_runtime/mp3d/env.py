@@ -65,7 +65,7 @@ from sparx_agency.core.planning.objnav.types.measurement import (
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import (
-    HabitatRGBDSimulator, enu_box, habitat_position)
+    HabitatRGBDSimulator, habitat_position, semantic_boxes_enu)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.mp3d_categories import MP3DAnnotation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.geodesic import (
     ViewPointDistance, view_point_positions)
@@ -226,7 +226,8 @@ class MP3DEnv(ObjNavEnv):
             self._distances = {}
         if self._ground_truth is not None and (reloading or self._ground_truth.scene_key != row.scene_key):
             self._ground_truth.begin_scene(row.scene_key, self._annotations(),
-                                           self._dataset.goal_instances(row.scene_key), boxes=self._semantic_boxes())
+                                           self._dataset.goal_instances(row.scene_key),
+                                           boxes=semantic_boxes_enu(self._simulator))
         self._row = row
         self._steps, self._stopped = 0, False
         self._path_m = self._protocol.path_length_epsilon_m
@@ -267,13 +268,6 @@ class MP3DEnv(ObjNavEnv):
         raw = self._simulator.semantic_objects("raw")
         mpcat40 = self._simulator.semantic_objects("mpcat40")
         return {instance: MP3DAnnotation(raw[instance], mpcat40[instance]) for instance in sorted(raw)}
-
-    def _semantic_boxes(self):
-        """``{instance: (centre, half sizes)}`` in ENU, the annotation's own boxes, for the oracle's on-object filter."""
-        provider = getattr(self._simulator, "semantic_boxes", None)
-        if not callable(provider):
-            return {}
-        return {instance: enu_box(center, half) for instance, (center, half) in provider().items()}
 
     def _observation_from(self, frame):
         rgb, depth, pose = frame

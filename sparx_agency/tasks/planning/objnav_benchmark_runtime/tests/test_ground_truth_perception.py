@@ -172,8 +172,10 @@ def test_the_detector_reports_every_labelled_instance_once_at_confidence_one_wit
     assert [(d.cls, d.conf, d.xyxy) for d in detections] == [
         ("chair", 1.0, (1.0, 1.0, 4.0, 3.0)), ("couch", 1.0, (4.0, 3.0, 8.0, 6.0)), ("door", 1.0, (0.0, 0.0, 1.0, 6.0))]
     assert all(d.cls in VOCABULARY for d in detections)
+    # The filter is on by default and this source published neither depth nor boxes: all three reported instances
+    # are "unjudged", which is the record's word for a hand-off that did not happen.
     assert detector.last_diagnostics == {"mode": GROUND_TRUTH_BACKEND, "visible_instances": 4, "reported": 3,
-                                         "below_min_pixels": 0, "off_object": 0, "trimmed_to_object": 0}
+                                         "below_min_pixels": 0, "off_object": 0, "trimmed_to_object": 0, "unjudged": 3}
     assert detector.last_detections == tuple(detections) and detector.last_inference_ms is not None
     # The method's own alias folding applies afterwards and leaves the boxes alone.
     folded = deduplicate_detections(detections)
@@ -236,11 +238,57 @@ def test_the_on_object_filter_drops_an_instance_painted_where_it_does_not_stand_
     assert len(detections) == 1 and detections[0].xyxy == (0.0, 3.0, 3.0, 5.0) and filtered.last_diagnostics["trimmed_to_object"] == 1
     mask = GroundTruthSegmenter(filtered).segment(rgb, [detections[0].xyxy])[0]
     assert int(mask.sum()) == 6 and mask[3:5, 0:3].all() and not mask[1:3, :].any()
-    # Without a depth frame the filter judges nothing.
+    # Without a depth frame the filter judges nothing -- and says so: the instance is reported as rendered and
+    # counted unjudged, so a scene whose adapter makes no hand-off is visible in every frame's record.
     source.publish(rgb, ids)
     assert len(filtered.detect(rgb)) == 1 and filtered.last_diagnostics["off_object"] == 0
+    assert filtered.last_diagnostics["unjudged"] == 1 and filtered.unjudged_instances == 1
+    # An instance the scene began without a box for is unjudged too; one with a box, beside it, is judged.
+    source.begin_scene("00800-TEEsavR23oF", {2: "chair", 7: "chair"}, {}, boxes={2: boxes[2]})
+    ids = frame(i2=(0, 2, 3, 5), i7=(5, 2, 8, 5))
+    depth = np.full(ids.shape, 2.0, dtype=np.float32)
+    source.publish(rgb_for(ids), ids, depth=depth, pose=pose, camera=camera)
+    assert [d.cls for d in filtered.detect(rgb_for(ids))] == ["chair", "chair"]
+    assert filtered.last_diagnostics["unjudged"] == 1 and filtered.last_diagnostics["off_object"] == 0
+    assert plain.detect(rgb_for(ids)) and plain.last_diagnostics["unjudged"] == 0, "off: nothing is 'unjudged'"
     with pytest.raises(ValueError):
         GroundTruthDetector(source, on_object_m=-1.0)
+
+
+def test_the_bridge_reads_every_annotated_instances_box_and_enu_box_is_habitat_poses_own_mapping():
+    """``HabitatRGBDSimulator.semantic_boxes`` is the dataset-agnostic source of the on-object filter's boxes: one
+    axis-aligned box per annotated instance from habitat-sim's semantic scene, in its Y-up frame, instances without
+    one or outside the annotation table skipped. ``enu_box`` must be ``habitat_pose``'s translation applied to the
+    centre -- a box converted by any other rule would put every instance off itself."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import (
+        HabitatRGBDSimulator, enu_box, habitat_pose, habitat_position, semantic_boxes_enu)
+
+    def obj(instance, name, center=None, sizes=None):
+        aabb = None if center is None else SimpleNamespace(center=center, sizes=sizes)
+        return SimpleNamespace(semantic_id=instance, id="0_0_%d" % instance,
+                               category=SimpleNamespace(name=lambda mapping="", n=name: n), aabb=aabb)
+
+    simulator = HabitatRGBDSimulator(PROTOCOL.camera(), PROTOCOL.actions(), 0.18, False, height_m=0.88,
+                                     semantic=True, scene_dataset_config=ANNOTATED_SCENE_DATASET_CONFIG)
+    simulator._sim = SimpleNamespace(semantic_scene=SimpleNamespace(objects=[
+        obj(0, "wall", (0.0, 0.0, 0.0), (9.0, 3.0, 9.0)),            # id 0: not an instance
+        obj(3, "chair", (1.0, 0.5, -2.0), (0.6, 1.0, -0.8)),         # a negative size is a size
+        obj(4, "bed"),                                                # no box: skipped, the filter cannot judge it
+        obj(5, "plant", (float("nan"), 0.0, 2.0), (1.0, 1.0, 1.0))]))  # a box that is not a number: skipped
+    simulator._semantic_objects = simulator._read_semantic_objects("scene.glb")
+    assert simulator.semantic_objects() == {3: "chair", 4: "bed", 5: "plant"}
+    assert simulator.semantic_boxes() == {3: ((1.0, 0.5, -2.0), (0.3, 0.5, 0.4))}
+    with pytest.raises(EnvContractError):
+        HabitatRGBDSimulator(PROTOCOL.camera(), PROTOCOL.actions(), 0.18, False, height_m=0.88).semantic_boxes()
+    # The shared hand-off converts them, and the conversion is the pose's own.
+    identity = np.eye(3)
+    for center, half in (((1.0, 0.5, -2.0), (0.3, 0.5, 0.4)), ((-3.0, 1.0, 4.0), (0.5, 1.0, 0.1))):
+        pose = habitat_pose(center, identity, identity)
+        enu_center, enu_half = enu_box(center, half)
+        assert enu_center == (pose.x, pose.y, pose.z) and habitat_position(pose) == pytest.approx(center)
+        assert sorted(enu_half) == sorted(half), "a permutation of the half sizes, no sign"
+        assert enu_half == (half[2], half[0], half[1])
+    assert semantic_boxes_enu(simulator) == {3: enu_box((1.0, 0.5, -2.0), (0.3, 0.5, 0.4))}
 
 
 def test_the_identities_are_shaped_like_the_services_and_pinned_to_the_table():
@@ -396,16 +444,26 @@ def test_the_installation_check_reports_the_semantic_half_separately(tmp_path):
 # ── the environment ──────────────────────────────────────────────────────────
 
 class SemanticSimulator(FakeSimulator):
-    """The fake bridge with a semantic sensor: a fixed annotation table and an id frame that moves with the steps."""
+    """The fake bridge with a semantic sensor: a fixed annotation table, the annotations' boxes and an id frame that moves with the steps."""
+
+    #: ``{instance: (centre, half sizes)}`` in habitat-sim's Y-up frame, as ``HabitatRGBDSimulator.semantic_boxes`` returns them.
+    BOXES = {11: ((1.0, 0.5, -2.0), (0.3, 0.5, 0.4)), 12: ((-3.0, 1.0, 4.0), (0.5, 1.0, 0.1))}
 
     def __init__(self, protocol):
         super().__init__(protocol)
         self.last_semantic = None
         self.semantic_queries = 0
+        self.box_queries = 0
 
     def semantic_objects(self):
         self.semantic_queries += 1
         return {goal()["object_id"]: "chair", 11: "chair", 12: "door", 13: "wall"}
+
+    def semantic_boxes(self):
+        self.box_queries += 1
+        boxes = dict(self.BOXES)
+        boxes[goal()["object_id"]] = ((2.0, 0.4, -1.0), (0.4, 0.4, 0.4))
+        return boxes
 
     def _frame(self):
         rgb, depth, pose = super()._frame()
@@ -433,6 +491,42 @@ def test_the_environment_publishes_every_frame_and_builds_the_scene_labels_once(
     diagnostics = env.evaluation_diagnostics()["ground_truth"]
     assert diagnostics["frames"] == 3 and diagnostics["scene_report"]["reported_instances"] == 2
     assert diagnostics["scene_report"]["named_for_a_goal_category_but_not_a_goal"] == {"chair": 1}
+
+
+def test_the_environment_hands_the_on_object_filter_the_boxes_in_enu_and_every_frames_depth_pose_and_camera(tmp_path):
+    """The on-object filter was written on MP3D (the semantic mesh leaks ids through walls), but what it needs
+    is the Habitat bridge's, not a dataset's: the annotations' boxes once per scene, in the method's frame, and
+    the depth, pose and camera beside every id frame. The HM3D adapter published neither until 2026-11-11, so an
+    HM3D oracle run recorded ``on_object_m: 0.25`` while the filter judged nothing. The hand-off is the shared
+    ``semantic_boxes_enu`` and the ``publish`` keywords; the detector's ``unjudged`` count is the witness."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import enu_box, semantic_boxes_enu
+
+    dataset = write_release(tmp_path, PROTOCOL, {SCENE: [row(), row()]})
+    annotate(dataset, SCENE)
+    source = GroundTruthSource(MAPPER)
+    simulator = SemanticSimulator(PROTOCOL)
+    env = HM3DEnv(dataset, PROTOCOL, simulator=simulator, distance_factory=scripted_distances((4.0, 4.0)),
+                  ground_truth=source)
+    _, observation = env.reset("%s/000000" % SCENE)
+    # The boxes: every annotated instance's, converted the way the bridge converts the pose (Y-up -> ENU).
+    assert simulator.box_queries == 1 and source.scene_report["instances_with_boxes"] == 3
+    table = dict(SemanticSimulator.BOXES, **{str(goal()["object_id"]): ((2.0, 0.4, -1.0), (0.4, 0.4, 0.4))})
+    assert source.boxes == {int(k): enu_box(center, half) for k, (center, half) in table.items()}
+    assert source.boxes[12] == enu_box(*SemanticSimulator.BOXES[12]) == ((-4.0, 3.0, 1.0), (0.1, 0.5, 1.0))
+    # The frame: the observation's own depth, pose and camera ride along with the ids, on reset and on every step.
+    assert source.depth is observation.depth_m and source.pose is observation.pose and source.camera == PROTOCOL.camera()
+    assert source.camera is observation.camera
+    observation = env.step(A.MOVE_FORWARD)
+    assert source.depth is observation.depth_m and source.pose is observation.pose and source.frames == 2
+    # The detector, filter on, can judge every instance it reports: nothing goes unjudged for want of a hand-off.
+    detector = GroundTruthDetector(source, min_pixels=1)
+    detector.detect(observation.rgb)
+    assert detector.on_object_m > 0.0 and detector.last_diagnostics["unjudged"] == 0
+    # A second episode of the same scene keeps the boxes without asking the bridge again.
+    env.reset("%s/000001" % SCENE)
+    assert simulator.box_queries == 1 and source.scene_report["instances_with_boxes"] == 3
+    # A bridge without boxes (the plain fake) leaves the filter nothing, which the hand-off reports rather than hides.
+    assert semantic_boxes_enu(FakeSimulator(PROTOCOL)) == {}
 
 
 def test_the_environment_refuses_ground_truth_without_a_semantic_bridge_or_without_the_annotations(tmp_path):

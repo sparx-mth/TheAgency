@@ -332,6 +332,44 @@ def test_jobs_below_one_is_refused(tmp_path):
                               scenes=list(SCENES), runner=fake_runner([0, 0]), jobs=0)
 
 
+def test_the_campaign_forwards_the_stall_minutes_to_the_pool_and_refuses_a_negative_one(tmp_path, monkeypatch):
+    """The stall watchdog lives in ``scene_pool`` (shared) and was reachable from the MP3D campaign alone; a worker
+    that loses its main thread is the harness's failure on any dataset, so the HM3D campaign forwards it too:
+    ``--stall-minutes`` (30 by default) -> ``run_campaign(stall_s=...)`` -> ``run_concurrently(stall_s=...)``."""
+    seen = {}
+
+    def run_concurrently(pending, root, workers, *, runner, stall_s):
+        seen["stall_s"] = stall_s
+        return {scene: 0 for scene, _ in pending}
+
+    monkeypatch.setattr(campaign, "run_concurrently", run_concurrently)
+    campaign.run_campaign(tmp_path / "root", version="v2", episodes_dir="E", scenes_dir="S", scenes=list(SCENES),
+                          runner=fake_runner([0, 0]), jobs=2, stall_s=1800.0)
+    assert seen["stall_s"] == 1800.0
+    campaign.run_campaign(tmp_path / "root2", version="v2", episodes_dir="E", scenes_dir="S", scenes=list(SCENES),
+                          runner=fake_runner([0, 0]), jobs=2)
+    assert seen["stall_s"] == 0.0, "no watchdog unless asked: the direct callers (tests, tools) keep their runner"
+    with pytest.raises(ValueError, match="stall_s"):
+        campaign.run_campaign(tmp_path / "root3", version="v2", episodes_dir="E", scenes_dir="S",
+                              scenes=list(SCENES), runner=fake_runner([0, 0]), jobs=2, stall_s=-1.0)
+    # From the command line: minutes become seconds, the default is 30 minutes, a negative value is refused.
+    forwarded = {}
+
+    def fake_run_campaign(*args, **kwargs):
+        forwarded.update(kwargs)
+        return []
+
+    monkeypatch.setattr(campaign, "run_campaign", fake_run_campaign)
+    monkeypatch.setattr(campaign, "aggregate", lambda *a, **k: None)
+    argv = [str(tmp_path), "--version", "v2", "--episodes-dir", "E", "--scenes-dir", "S", "--jobs", "3"]
+    campaign.main(argv + ["--stall-minutes", "12"])
+    assert forwarded["stall_s"] == 720.0 and forwarded["jobs"] == 3
+    campaign.main(argv)
+    assert forwarded["stall_s"] == 1800.0
+    with pytest.raises(SystemExit):
+        campaign.main(argv + ["--stall-minutes", "-1"])
+
+
 def test_jobs_reaches_the_campaign_from_its_command_line(tmp_path, monkeypatch):
     seen = {}
 

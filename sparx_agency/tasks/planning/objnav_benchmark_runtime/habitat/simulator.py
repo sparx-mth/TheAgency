@@ -86,6 +86,24 @@ def enu_box(center, half_sizes):
             (float(half_sizes[2]), float(half_sizes[0]), float(half_sizes[1])))
 
 
+def semantic_boxes_enu(simulator):
+    """The bridge's annotated instance boxes in the method's ENU frame: ``{instance: (centre, half sizes)}``.
+
+    What a dataset adapter hands ``GroundTruthSource.begin_scene(boxes=...)``
+    for the oracle detector's on-object filter, written once so every adapter
+    (HM3D, MP3D, the next one) converts the frame the same way
+    (:func:`enu_box` over :meth:`HabitatRGBDSimulator.semantic_boxes`). Empty
+    for a bridge without ``semantic_boxes`` (the synthetic ones in tests) or a
+    scene whose annotations carry no boxes -- the filter then judges nothing,
+    which the detector counts (``unjudged``) and the scene report shows
+    (``instances_with_boxes``).
+    """
+    provider = getattr(simulator, "semantic_boxes", None)
+    if not callable(provider):
+        return {}
+    return {instance: enu_box(center, half) for instance, (center, half) in provider().items()}
+
+
 def habitat_position(pose):
     """The exact inverse of :func:`habitat_pose`'s translation: ENU -> Habitat XYZ.
 

@@ -2430,17 +2430,25 @@ of every lock the closing took stood more than 1.5 m from every goal object of
 its class). `--ground-truth-on-object-m M` (`GT_ON_OBJECT_M` for the launcher)
 keeps a rendered pixel as the instance's only where the frame's depth puts it
 inside the instance's own annotated box inflated by `M` metres, 0.25 unless
-told otherwise and `0` to switch it off (the MP3D
-environment hands the source each frame's depth and pose and the scene's
-boxes, `HabitatRGBDSimulator.semantic_boxes`); an instance with fewer than half
+told otherwise and `0` to switch it off; an instance with fewer than half
 its depth-read pixels on its box is not reported, one partly off keeps its
-on-box pixels alone, and the segmenter's mask follows. Without a depth frame
-or a box the filter judges nothing (the HM3D environment publishes neither
-yet, so HM3D runs see the raw sensor). It is a change to the oracle's
-definition -- a pixel is the object's only where the object is -- recorded in
-the frozen configuration (`ground_truth.on_object_m`) and the detector
-identity; the oracle stands in for a real detector, and a real detector does
-not see chairs through walls, so GT artefacts are not the method's failures.
+on-box pixels alone, and the segmenter's mask follows. What the filter reads
+is the Habitat bridge's, not a dataset's, and every Habitat adapter hands it
+over the same way (since 2026-11-11; the HM3D adapter had published neither
+and its oracle runs saw the raw sensor while recording `on_object_m: 0.25`):
+the scene's boxes once per scene through `habitat.simulator.semantic_boxes_enu`
+(`HabitatRGBDSimulator.semantic_boxes`, converted to ENU by the same rule as
+the pose) and each frame's depth, pose and camera beside its ids
+(`GroundTruthSource.publish`). Where it still has nothing to judge an instance
+against -- a frame without depth, a scene whose annotations carry no boxes --
+it reports the instance as rendered and counts it: `unjudged` in the frame's
+detector diagnostics, `instances_with_boxes` in the scene report, so a missing
+hand-off is read off the record, not inferred from a score. It is a change to
+the oracle's definition -- a pixel is the object's only where the object is --
+recorded in the frozen configuration (`ground_truth.on_object_m`) and the
+detector identity; the oracle stands in for a real detector, and a real
+detector does not see chairs through walls, so GT artefacts are not the
+method's failures.
 
 ## Models and vocabulary
 

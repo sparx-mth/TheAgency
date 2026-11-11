@@ -384,6 +384,32 @@ def test_the_type_prior_table_is_exclusions_not_permissions():
     assert target_key("tv") == "television" and target_key("plant") == "potted plant"
 
 
+def test_every_goal_category_of_every_registered_benchmark_has_a_home_the_oracle_is_briefed_with():
+    """The WHERE IT LIVES line was written on MP3D (the 3B oracle had no prior for fifteen of its categories and
+    put a table in the bathroom), but the table is keyed by the method's own target names through the aliases of
+    every label table, not by a dataset: each goal category of each registered benchmark -- HM3D's six, Gibson's
+    six, MP3D's twenty-one, and whichever is registered next -- must resolve to a key with a home, an exclusion
+    list and a home-object set, so the briefing is the same contract on every benchmark and a new table cannot
+    silently leave the oracle to guess again."""
+    from sparx_agency.core.mapping.topology.room_priors import (
+        HOME_OBJECTS, IMPLAUSIBLE_ROOMS, TARGET_HOMES, target_home_line)
+    from sparx_agency.core.planning.objnav.labels.registry import default_label_mapper_registry
+
+    registry = default_label_mapper_registry()
+    assert {"hm3d", "gibson", "mp3d"} <= set(registry.names())
+    for name in registry.names():
+        mapper = registry.create(name)
+        for category in mapper.categories():
+            target = mapper.target_labels(category)
+            key = target_key(target)
+            assert key is not None, "%s/%s has no room-prior key" % (name, category)
+            assert key in TARGET_HOMES and key in IMPLAUSIBLE_ROOMS and key in HOME_OBJECTS, (name, category, key)
+            line = target_home_line(target)
+            assert line and "(most likely first)" in line, (name, category, line)
+            assert target_home_line(category) == line, "the plain category word resolves like the TargetLabels"
+    assert set(TARGET_HOMES) == set(IMPLAUSIBLE_ROOMS) == set(HOME_OBJECTS), "the three tables share one key set"
+
+
 def test_a_room_holding_a_home_object_of_the_target_is_not_finished_by_sight_from_outside():
     """Allensville toilet run, step 26: the warm-up spin at the spawn point saw more than half of the
     bathroom's floor through its door (``seen_from_scan``), finished it with the bathtub inside and the

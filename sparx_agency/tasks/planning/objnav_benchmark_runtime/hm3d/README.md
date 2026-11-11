@@ -548,6 +548,21 @@ What `--perception ground-truth` changes, and only that (`../ground_truth/`,
   the annotations are 100 % by construction; there is no box drift and no label
   noise. The one declared floor is `--ground-truth-min-pixels` (default 64, an
   8×8 patch): a smaller sliver is not reported, as no detector would.
+- **A pixel is the instance's only where the instance is** (the on-object
+  filter, `--ground-truth-on-object-m`, `GT_ON_OBJECT_M`; 0.25 m by default,
+  `0` for the raw sensor). The semantic mesh is a mesh of its own, registered
+  to the render mesh by the publisher's config and not everywhere: on MP3D the
+  sensor painted goal chairs across a staircase wall 3–7 m from the chairs and
+  the method STOPped on the phantoms (`../README.md`, "The on-object filter").
+  `HM3DEnv` hands the source what the filter judges against — the annotations'
+  own axis-aligned boxes once per scene, in ENU
+  (`habitat.simulator.semantic_boxes_enu`), and each frame's depth, pose and
+  camera beside its ids — exactly as the MP3D adapter does; a pixel whose depth
+  puts it off its instance's box (inflated by the tolerance) is not the
+  instance's, an instance mostly off its box is not reported, one partly off
+  keeps its on-box pixels and mask. Where the filter has nothing to judge
+  against it reports the instance as rendered and says so: `unjudged` in the
+  frame's detector diagnostics, `instances_with_boxes` in the scene report.
 - **Labels come from the publisher first.** The episode files list, per scene
   and category, the instance ids that *are* its goals
   (`HM3DDataset.goal_instances`) — exactly what the success radius is measured
@@ -581,7 +596,13 @@ What `--perception ground-truth` changes, and only that (`../ground_truth/`,
 - `--jobs max` sizes the campaign to the machine — one child per scene at most,
   bounded by cores and by free VRAM at `HABITAT_VRAM_MIB` per renderer
   (`scene_pool.max_workers`) — so a run beside another campaign takes what is
-  left and a run on an idle card takes one process per scene.
+  left and a run on an idle card takes one process per scene. Above one job
+  the pool watches each child's `live.json` / `progress.json` /
+  `episodes.jsonl` / console log and kills one that has written nothing for
+  `--stall-minutes` (30; `0` disables), recording exit −9 so `--output <root>`
+  reruns the scene: a worker that lost its main thread keeps its CUDA threads
+  alive and never exits (`LESSONS.md` 2026-11-09), and held an MP3D campaign's
+  slot for an hour before the watchdog existed.
 
 **It needs the HM3D-Semantics annotations**, which a benchmark run does not:
 each scene's `<stem>.semantic.glb` / `<stem>.semantic.txt` beside its mesh and
@@ -749,14 +770,14 @@ issue.
 | `protocol.py` | `HM3DProtocol`, `HM3D_V1`, `HM3D_V2`, the navmesh choice, the named ApexNav radius |
 | `dataset.py` | the published episodes and goals, scene-qualified ids, XYZW→WXYZ, the manifest |
 | `geodesic.py` | habitat-lab's `DistanceToGoal` to view points, on habitat-sim's pathfinder |
-| `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance; under `ground_truth=` it publishes the semantic sensor's frames to the oracle perception |
+| `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance; under `ground_truth=` it publishes the semantic sensor's frames to the oracle perception, with each frame's depth, pose and camera and the scene's instance boxes in ENU for the on-object filter (`habitat.simulator.semantic_boxes_enu`, shared with `mp3d/env.py`) |
 | `assets.py` | what is installed, what is missing, and the commands that would fix it (`--check --semantic` and step 5 for the HM3D-Semantics annotations) |
 | `run_benchmark.sh` | The one-command launcher: services (`../benchmark_services.sh`), preflight, `campaign.py` or a `run.py` scene, the aggregate; `--perception ground-truth`, `--jobs max` |
 | `../ground_truth/` | the perception upper bound: `semantic_frame.py` (boxes/masks from an id frame), `hm3d_categories.py` (raw names → vocabulary, the publisher's goal ids first), `source.py` (the env→oracle hand-off, strict frame identity), `perception.py` (`GroundTruthDetector` / `GroundTruthSegmenter`) |
 | `../tests/hm3d_stand_in_fixture.py` | an HM3D-format `dev_gibson` split on a Gibson mesh, to run this adapter's real path where the HM3D scenes are absent |
 | `run.py` | preflight and the run, on the shared `run_evaluation` (progress, lean rows and diagnostics via its `wrap_env` / `agent_class` hooks); builds the shared `RPTSearchPolicy` from this protocol's agent |
-| `campaign.py` | one child process per scene, then an aggregate over what finished |
-| `scene_pool.py` | `--jobs N`: N scene children at once, each logging to `<root>/<scene>.console.log`; `max_workers` behind `--jobs max` |
+| `campaign.py` | one child process per scene, then an aggregate over what finished; the stall watchdog (`--stall-minutes`, through `scene_pool.run_concurrently`) |
+| `scene_pool.py` | `--jobs N`: N scene children at once, each logging to `<root>/<scene>.console.log`; `max_workers` behind `--jobs max`; `run_concurrently(stall_s=...)` kills a child whose heartbeat files stop changing (shared with the MP3D campaign) |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
 | `sota.py` | the published numbers, with the table each came from |
 | `frozen_eval.py` | freeze an exact configuration, then run the full split under it |

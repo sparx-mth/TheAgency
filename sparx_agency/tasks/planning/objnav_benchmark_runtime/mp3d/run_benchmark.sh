@@ -103,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
     --perception) PERCEPTION="$2"; shift 2 ;;                  # service (default) or ground-truth: benchmark_services.sh PERCEPTION
     --ground-truth-min-pixels) GT_MIN_PIXELS="$2"; shift 2 ;;  # the oracle's resolution floor (benchmark_services.sh GT_MIN_PIXELS)
+    --ground-truth-on-object-m) GT_ON_OBJECT_M="$2"; shift 2 ;; # the oracle's on-object filter (benchmark_services.sh GT_ON_OBJECT_M)
     --scene) SCENE="$2"; shift 2 ;;                            # one scene, run directly by mp3d.run
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do SCENES+=("$1"); shift; done ;;   # a subset of the campaign's scenes
     --resume-accepting-changes) ACCEPT=("$1"); shift; while [[ $# -gt 0 && "$1" != --* ]]; do ACCEPT+=("$1"); shift; done ;;

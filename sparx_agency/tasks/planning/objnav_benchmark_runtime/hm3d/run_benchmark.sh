@@ -12,6 +12,9 @@
 #   hm3d/run_benchmark.sh --category toilet --limit 3       # the published toilet episodes, three per scene
 #   hm3d/run_benchmark.sh --version v1 --episode-ids-file cases.json --record --jobs 2
 #                                                           # exactly the JSON list's <scene>/<index> episodes (a re-run of chosen cases)
+#   hm3d/run_benchmark.sh --version v1 --jobs 4 --stall-minutes 30
+#                                                           # ... and kill a scene child that has written nothing for 30 min (campaign.py; the
+#                                                           # default; --resume reruns it)
 #   hm3d/run_benchmark.sh --output runs/hm3d_v2_val_X       # continue an interrupted campaign there (finished scenes are kept)
 #   hm3d/run_benchmark.sh --output runs/X --resume-accepting-changes kinematics evaluation source_sha256 gpu_plan
 #                                                           # ... after a harness-only fix: the scenes that continue may differ in the self-check and provenance
@@ -49,9 +52,12 @@
 #                        renderers in the GPU plan) unless set here; each slot is its own KV cache          default 1
 #   GT_MIN_PIXELS        with --perception ground-truth: the oracle's resolution floor in pixels (--ground-truth-min-pixels;
 #                        the module default, 64, when empty)
+#   GT_ON_OBJECT_M       with --perception ground-truth: the oracle's on-object filter in metres (--ground-truth-on-object-m;
+#                        a rendered pixel is the instance's only where the depth puts it on the annotation's box, inflated
+#                        by this much; the module default, 0.25, when empty; 0 reports the raw sensor)
 set -euo pipefail
 
-usage() { sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,57p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,7 +76,7 @@ PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
 POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool
 
 # -- the command line -----------------------------------------------------------------------
-EPISODE_FILE="" VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=()
+EPISODE_FILE="" VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=() STALL_MINUTES=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -78,12 +84,14 @@ while [[ $# -gt 0 ]]; do
     --agent) AGENT="$2"; EXTRA+=(--agent "$2"); shift 2 ;;   # rpt (default) or falcon-yolo: the baseline needs no LLM
     --perception) PERCEPTION="$2"; shift 2 ;;                  # service (default) or ground-truth: benchmark_services.sh PERCEPTION
     --ground-truth-min-pixels) GT_MIN_PIXELS="$2"; shift 2 ;;  # the oracle's resolution floor (benchmark_services.sh GT_MIN_PIXELS)
+    --ground-truth-on-object-m) GT_ON_OBJECT_M="$2"; shift 2 ;; # the oracle's on-object filter (benchmark_services.sh GT_ON_OBJECT_M)
     --scene) SCENE="$2"; shift 2 ;;                            # one scene, run directly by hm3d.run
     --scenes) shift; while [[ $# -gt 0 && "$1" != --* ]]; do SCENES+=("$1"); shift; done ;;   # a subset of the campaign's scenes
     --resume-accepting-changes) ACCEPT=("$1"); shift; while [[ $# -gt 0 && "$1" != --* ]]; do ACCEPT+=("$1"); shift; done ;;
                                                            # a resume's alone (hm3d.run refuses it otherwise): never the preflight's
     --limit) LIMIT="$2"; shift 2 ;;                            # episodes (per scene, in the campaign)
     --jobs) JOBS="$2"; shift 2 ;;                              # scenes at once (campaign only); "max" = what the card and the cores hold
+    --stall-minutes) STALL_MINUTES="$2"; shift 2 ;;            # campaign (--jobs > 1): kill a scene child silent for this long (campaign.py)
     --smoke) SMOKE=1; shift ;;
     --episode-ids-file) EPISODE_FILE="$2"; shift 2 ;;          # campaign: a JSON list of <scene>/<index> ids, one process per scene
     --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
@@ -253,6 +261,7 @@ CAMPAIGN_ARGS=("$OUTPUT" --version "$VERSION" --split "$SPLIT" --episodes-dir "$
 CAMPAIGN_ARGS+=(--jobs "$JOBS")
 [[ "$SMOKE" == 1 ]] && CAMPAIGN_ARGS+=(--smoke)
 [[ -n "$EPISODE_FILE" ]] && CAMPAIGN_ARGS+=(--episode-ids-file "$EPISODE_FILE")
+[[ -n "$STALL_MINUTES" ]] && CAMPAIGN_ARGS+=(--stall-minutes "$STALL_MINUTES")
 [[ ${#SCENES[@]} -gt 0 ]] && CAMPAIGN_ARGS+=(--scenes "${SCENES[@]}")
 if [[ -f "$OUTPUT/campaign.json" ]] || ls -d "$OUTPUT"/*/ > /dev/null 2>&1; then
   say "resuming: $OUTPUT already holds scenes (finished ones are kept, started ones continue)" | tee -a "$LOG"

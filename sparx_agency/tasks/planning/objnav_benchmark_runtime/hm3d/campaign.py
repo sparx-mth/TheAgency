@@ -143,7 +143,7 @@ def episode_plan(episode_ids, known_scenes):
 
 def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=None,
                  split="val", extra=(), resume=False, runner=subprocess.run, smoke=False,
-                 jobs=1, episode_ids=None):
+                 jobs=1, episode_ids=None, stall_s=0.0):
     """Run each scene in its own process and return what each one did.
 
     Args:
@@ -171,6 +171,12 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
             on this console; more runs them through ``scene_pool``, each
             child's output in ``<root>/<scene>.console.log``. Children never
             share a scene, so the rows are the same either way.
+        stall_s: With ``jobs`` above 1: kill a scene child whose heartbeat files
+            stop changing for this long and record it as exit -9, so a worker that
+            lost its main thread does not hold the pool (``scene_pool.run_concurrently``;
+            the MP3D campaign of 2026-11-09 held a slot for an hour that way, and
+            nothing about the failure was MP3D's). 0 waits for every child however
+            long it takes.
 
     Returns:
         One record per scene: its command, its exit status and its directory.
@@ -194,6 +200,8 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
                                      "HM3D smoke plan", indent=2))
     if int(jobs) < 1:
         raise ValueError("jobs must be at least 1, got %r" % (jobs,))
+    if float(stall_s) < 0:
+        raise ValueError("stall_s must be zero or positive, got %r" % (stall_s,))
     shared, acceptance = split_resume_acceptance(extra)
     if acceptance and not resume:
         raise ValueError("%s is a resume's: it needs a campaign root that already holds scenes" % RESUME_ACCEPTANCE_FLAG)
@@ -219,7 +227,7 @@ def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=
         else:
             pending.append((scene, command))
     if pending:
-        returncodes = run_concurrently(pending, root, int(jobs), runner=runner)
+        returncodes = run_concurrently(pending, root, int(jobs), runner=runner, stall_s=float(stall_s or 0.0))
         results.extend({"scene": scene, "status": "ran", "returncode": returncodes[scene],
                         "output": str(root / scene), "command": command}
                        for scene, command in pending)
@@ -326,19 +334,28 @@ def main(argv=None):
     parser.add_argument("--aggregate-only", action="store_true")
     parser.add_argument("--jobs", type=int, default=1,
                         help="Scenes run at once; above 1 each child logs to <root>/<scene>.console.log")
+    parser.add_argument("--stall-minutes", type=float, default=30.0,
+                        help="With --jobs above 1: kill a scene child whose live.json / progress.json / "
+                             "episodes.jsonl / console log have not changed for this long and record it as exit -9 "
+                             "(a worker that lost its main thread keeps its CUDA threads and never exits; --resume "
+                             "reruns the scene). Longer than LLM_REASONING_TIMEOUT_S so a slow oracle call is not a "
+                             "death; 0 disables")
     # Anything after a bare "--" is passed through to every child run.py.
     args, extra = parser.parse_known_args(argv)
     if extra[:1] == ["--"]:
         extra = extra[1:]
     failed = []
     if not args.aggregate_only:
+        if args.stall_minutes < 0:
+            parser.error("--stall-minutes must be zero or positive")
         results = run_campaign(args.root, version=args.version, split=args.split,
                                episodes_dir=args.episodes_dir,
                                scenes_dir=args.scenes_dir, limit=args.limit,
                                scenes=args.scenes, extra=extra, resume=args.resume,
                                smoke=args.smoke, jobs=args.jobs,
                                episode_ids=json.loads(args.episode_ids_file.read_text())
-                               if args.episode_ids_file else None)
+                               if args.episode_ids_file else None,
+                               stall_s=60.0 * args.stall_minutes)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
         if failed:
             print("Scenes that did not exit cleanly: %s" % ", ".join(failed))

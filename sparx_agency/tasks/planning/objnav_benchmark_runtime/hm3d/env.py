@@ -37,11 +37,16 @@ the multi-floor search declares as its ground-truth stair source in
 :class:`~...ground_truth.source.GroundTruthSource`) is the one deliberate
 exception, and it still reaches no observation: the simulator renders the
 semantic sensor beside RGB-D, this environment publishes each instance-id
-frame to the source as it builds the observation, and the oracle detector
-and segmenter the policy was built with read it there. The per-scene instance
-labels combine the simulator's annotation table with the publisher's own
-goal instance ids (``HM3DDataset.goal_instances``); the account of each scene
-goes into ``evaluation_diagnostics()``, never into the episode.
+frame to the source as it builds the observation -- with the frame's depth
+and pose and the protocol's camera, and once per scene the annotations' own
+instance boxes in ENU (``habitat.simulator.semantic_boxes_enu``), which the
+oracle detector's on-object filter judges a rendered pixel against -- and the
+oracle detector and segmenter the policy was built with read it there. The
+per-scene instance labels combine the simulator's annotation table with the
+publisher's own goal instance ids (``HM3DDataset.goal_instances``); the
+account of each scene goes into ``evaluation_diagnostics()``, never into the
+episode. The hand-off is the same one ``mp3d/env.py`` makes: what the filter
+needs is the Habitat bridge's, not either dataset's.
 """
 from __future__ import annotations
 
@@ -57,7 +62,7 @@ from sparx_agency.core.planning.objnav.types.measurement import (
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import (
-    HabitatRGBDSimulator)
+    HabitatRGBDSimulator, habitat_position, semantic_boxes_enu)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.geodesic import (
     ViewPointDistance, view_point_positions)
 
@@ -236,7 +241,8 @@ class HM3DEnv(ObjNavEnv):
             self._distances = {}
         if self._ground_truth is not None and (reloading or self._ground_truth.scene_key != row.scene_key):
             self._ground_truth.begin_scene(row.scene_key, self._simulator.semantic_objects(),
-                                           self._dataset.goal_instances(row.scene_key))
+                                           self._dataset.goal_instances(row.scene_key),
+                                           boxes=semantic_boxes_enu(self._simulator))
         self._row = row
         self._steps, self._stopped = 0, False
         self._path_m = self._protocol.path_length_epsilon_m
@@ -283,14 +289,13 @@ class HM3DEnv(ObjNavEnv):
             ids = getattr(self._simulator, "last_semantic", None)
             if ids is None:
                 raise EnvContractError("The simulator rendered no semantic frame for the ground-truth perception")
-            self._ground_truth.publish(rgb, ids)
+            self._ground_truth.publish(rgb, ids, depth=depth, pose=pose, camera=self._camera)
         return ObjNavObservation(rgb, depth, pose, self._camera,
                                  self._episode.target_category, self._steps)
 
     def _habitat_position(self):
         """Our ENU pose back in Habitat's +Y-up frame, for the pathfinder."""
-        pose = self._observation.pose
-        return -pose.y, pose.z, -pose.x
+        return habitat_position(self._observation.pose)
 
     def step(self, action):
         if self._episode is None or self.episode_over or not self._actions.allows(action):

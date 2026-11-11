@@ -5,6 +5,26 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed (2026-11-11, the MP3D work merged into the benchmark infra: the ground-truth fixes reach every Habitat adapter)
+- **The oracle's on-object filter applies on HM3D as on MP3D** (`hm3d/env.py`): the HM3D adapter now hands the
+  `GroundTruthSource` the annotations' instance boxes in ENU once per scene and each frame's depth, pose and camera,
+  as the MP3D adapter did -- until now an HM3D run under `--perception ground-truth` recorded `on_object_m: 0.25`
+  while the filter judged nothing and the method STOPped on whatever the semantic mesh painted. The conversion is
+  written once, `habitat.simulator.semantic_boxes_enu` (both adapters call it; `enu_box` is `habitat_pose`'s own
+  mapping, tested as such), and `HM3DEnv` uses the shared `habitat_position` instead of its own sign flips.
+- **A filter with nothing to judge says so** (`GroundTruthDetector.last_diagnostics["unjudged"]`,
+  `unjudged_instances`): an instance reported as rendered because the frame came without depth, pose or camera or the
+  scene without a box for it is counted in every frame's detector diagnostics (recorded through the perception
+  cycle's `detector_evidence`), beside the scene report's `instances_with_boxes` -- a missing hand-off is read off
+  the record, not inferred from a score. The per-frame rule is unchanged: such an instance is still reported.
+- **The stall watchdog reaches the HM3D campaign** (`hm3d/campaign.py --stall-minutes`, 30 by default, 0 disables;
+  `hm3d/run_benchmark.sh --stall-minutes`): `scene_pool.run_concurrently(stall_s=...)` was shared code that only
+  the MP3D campaign called. A worker that loses its main thread is the harness's failure on any dataset.
+- **Both launchers take `--ground-truth-on-object-m` by name** (`GT_ON_OBJECT_M` in `benchmark_services.sh`), as
+  they took `--ground-truth-min-pixels`; the HM3D launcher documents the knob.
+- **Every goal category of every registered benchmark has a WHERE IT LIVES prior** -- pinned by a test over
+  `default_label_mapper_registry()` (`tests/test_room_scans.py`), so the oracle briefing written for MP3D's fifteen
+  unprimed categories stays a contract on HM3D, Gibson and whatever table is registered next.
 ### Added (2026-11-10, MP3D single storey: a fixed set, a deterministic baseline, the flat-p ablation, and the single-storey fixes -- docs/progress/entries/046)
 - **A fixed single-storey evaluation set and its launcher** (`mp3d/single_storey_set.py`, `mp3d/sets/single_storey_flat_v1.json`:
   180 same-storey episodes in 8 flat houses, the split-level scenes excluded, seeded; `mp3d/run_single_storey.sh <name>`

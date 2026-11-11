@@ -32,6 +32,13 @@ What "ideal" means here, exactly:
   whose pixels mostly lie off its box is not reported; one partly off keeps
   its on-box pixels alone. ON by default (``DEFAULT_ON_OBJECT_M``, 0.25 m)
   since 2026-11-10; ``--ground-truth-on-object-m 0`` restores the raw sensor.
+  The rule is the sensor's, not a dataset's: it reads what the adapter
+  publishes -- the frame's depth, pose and camera, the scene's boxes -- and
+  every Habitat adapter publishes them (``habitat.simulator.semantic_boxes_enu``).
+  Where it has nothing to judge an instance against it reports the instance
+  as rendered and counts it (``unjudged`` in the frame diagnostics), so a
+  hand-off that is missing is visible in the record rather than inferred
+  from a score.
 
 What stays the method's: the alias folding and duplicate suppression
 (``deduplicate_detections``), the confidence gates, the door finder, the
@@ -92,6 +99,10 @@ class GroundTruthDetector:
         self.last_consistent: Dict[int, np.ndarray] = {}
         self.off_object_instances = 0
         self.trimmed_instances = 0
+        #: Instances reported as rendered because the filter, though on, had nothing to judge them against: a frame
+        #: published without depth, pose or camera, or an instance the scene began without a box for. Non-zero on
+        #: every frame of a scene means the adapter is not making the hand-off (``scene_report["instances_with_boxes"]``).
+        self.unjudged_instances = 0
         self.timeout_s = math.inf                   # read by the factory's record; there is no transport
         self.last_detections: Sequence[Detection] = ()
         self.last_diagnostics: Dict[str, object] = {}
@@ -120,7 +131,7 @@ class GroundTruthDetector:
         extents = instance_extents(ids, min_pixels=1)
         labels = self.source.labels
         points = self._world_points(ids) if self.on_object_m > 0.0 else None
-        detections, by_box, below_floor, off_object, trimmed = [], {}, 0, 0, 0
+        detections, by_box, below_floor, off_object, trimmed, unjudged = [], {}, 0, 0, 0, 0
         for instance, extent in extents.items():
             label = labels.get(instance)
             if label is None:
@@ -139,6 +150,8 @@ class GroundTruthDetector:
                         below_floor += 1
                         continue
                 extent = kept
+            elif self.on_object_m > 0.0:
+                unjudged += 1       # the filter is on, but this frame has no depth / pose / camera or this instance no box
             detections.append(Detection(label, 1.0, extent.xyxy))
             by_box[extent.xyxy] = instance
         self._last_ids = ids
@@ -146,10 +159,11 @@ class GroundTruthDetector:
         self.last_detections = tuple(detections)
         self.off_object_instances += off_object
         self.trimmed_instances += trimmed
+        self.unjudged_instances += unjudged
         self.last_inference_ms = (time.monotonic() - started) * 1000.0
         self.last_diagnostics = {"mode": GROUND_TRUTH_BACKEND, "visible_instances": len(extents),
                                  "reported": len(detections), "below_min_pixels": below_floor,
-                                 "off_object": off_object, "trimmed_to_object": trimmed}
+                                 "off_object": off_object, "trimmed_to_object": trimmed, "unjudged": unjudged}
         return detections
 
     def _world_points(self, ids):
