@@ -1,0 +1,1 @@
+chair,armchair,bed,potted plant,toilet,tv,television,monitor,couch,sofa,dining table,oven,sink,refrigerator,book,clock,vase,cup,bottle,door,doorway,open doorway,door frame,cabinet,desk,shower,bathtub,stairs,staircase,toy,rocking horse,stuffed animal,stool,bar stool
