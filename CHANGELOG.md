@@ -20,6 +20,12 @@ future-you, not for a commit log.
   with `--shard-episodes`.
 - **`single_storey_failures.recordings_by_episode` reads a merged scene's `shard_*/recordings/`** (the merge moves
   the rows, not the recordings), so the failure tagging runs on a sharded campaign root as it does on a per-scene one.
+- **`mp3d/storey_report.py`**: one or several campaign roots tabulated overall and on the same-storey against the
+  cross-storey episodes (entry 043's +-0.5 m view-point rule, and the level survey as a second reading), per category
+  and per category by storey, paired against the first arm (bootstrap dSR / dSPL, exact McNemar, flips), with the
+  storey transitions per episode -- the floor atlas's `floor_arrival` events and completed stair traversals from the
+  full records, the settled-level changes of each recorded trajectory, and how many cross-storey episodes ended on
+  the goal's storey. The table of the stairs-off / stairs-on comparison. Tests in `tests/test_mp3d_storey_report.py`.
 - **`objnav_benchmark_runtime/resource_monitor.py`**: `record out.csv --interval 15` samples GPU utilisation, VRAM,
   CPU, RAM, load and the live worker count; `summarize out.csv [--since-utc ..]` gives mean / median / peak of each
   and the share of samples the GPU spent above 80 % -- the utilisation line of a campaign's report, which until now was

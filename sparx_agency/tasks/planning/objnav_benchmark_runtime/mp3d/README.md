@@ -221,6 +221,15 @@ mp3d/run_benchmark.sh --status runs/gt_oracle_mp3d_2195ep_X     # one screen: do
 * **`resource_monitor.py`** (`record out.csv --interval 15`, `summarize out.csv`)
   samples GPU utilisation, VRAM, CPU, RAM, load and the live worker count while
   a campaign runs, for the report's utilisation line.
+* **`storey_report.py`** (`stairs-off=runs/A stairs-on=runs/B`): SR / SPL /
+  DTG overall and on the same-storey against the cross-storey episodes (a goal
+  view point within 0.5 m of the start height, entry 043's rule, and the level
+  survey's `start_level == goal_level` as a second reading), per category and
+  per category by storey, paired against the first arm (bootstrap dSR / dSPL,
+  McNemar, flips), and the storey transitions per episode: the floor atlas's
+  `floor_arrival` events and completed stair traversals from the full records,
+  and the settled-level changes of each recording's trajectory, with how many
+  cross-storey episodes ended on the goal's storey.
 
 ### A 14B in both roles on the 4090 (measured 2026-11-11)
 
