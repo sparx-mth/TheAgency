@@ -53,6 +53,16 @@ future-you, not for a commit log.
   bearing start, fewer look-downs, terminal re-sighting, `history_stop_max_unseen`, nested-default merge in the
   factory; MP3D's tiny-room fragments, frontier tri-state, oracle priors, labeller hysteresis, face-normal standoff,
   bounded pursuit, on-object oracle filter.
+- **Regression check** (2026-11-11, ground-truth perception, qwen2.5:3b for both LLM roles, 4 scenes x 2 episodes
+  per benchmark, each pre-merge branch on its own tree against the merged tree; the merged arm replayed the branch
+  arm's recorded answers and asked live where the prompt had changed). **MP3D** (the single-storey set's first two
+  episodes of 2azQ1b91cZZ, zsNo4HB9uLZ, Z6MFQCViBuw, pLe4wQe7qrG): SR 7/8 -> 7/8, SPL 0.331 -> 0.377, no flips; 79
+  of 197 oracle answers were new questions. **HM3D v1** (the 2026-11-05 regression set: 00843/000000, /000007,
+  /000023, 00853/000017, 00880/000007, /000009, 00891/000006, /000027): SR 6/8 -> 7/8, SPL 0.221 -> 0.398; gained
+  00843/000000 (500 -> 101 actions) and 00880/000009 (the clipped television), lost 00843/000007 (nine rooms searched,
+  the toilet never seen: a search-order difference under live answers -- the `WHERE IT LIVES` line makes every node
+  oracle call a new question, so 279 of 554 answers were live). `instances_with_boxes` equals `annotated_instances`
+  on every HM3D and MP3D scene (351-898): the on-object filter has its boxes on both.
 ### Changed (2026-11-11, the MP3D work merged into the benchmark infra: the ground-truth fixes reach every Habitat adapter)
 - **The oracle's on-object filter applies on HM3D as on MP3D** (`hm3d/env.py`): the HM3D adapter now hands the
   `GroundTruthSource` the annotations' instance boxes in ENU once per scene and each frame's depth, pose and camera,
