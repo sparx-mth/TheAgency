@@ -80,6 +80,41 @@ def test_shared_dashboard_is_benchmark_neutral(tmp_path):
     assert 'href="comparison.md"' not in text
 
 
+def test_a_log_only_recording_writes_every_log_and_renders_nothing(tmp_path):
+    """``record_video=False``: the step log, trajectory, map journal, metrics and live status, no frame at all."""
+    env, output = Env(), tmp_path / "run"
+    sinks = []
+
+    class FailingSink(Sink):
+        def __init__(self, path, fps):
+            sinks.append(path)
+            raise AssertionError("a log-only recording must never open a video sink")
+
+    summary = run_evaluation(env, LinePolicy(), fake_label_mapper(), output=output,
+                             config={"purpose": "synthetic"}, record=True, record_video=False,
+                             writer_factory=FailingSink)
+    assert summary.overall.n_episodes == 2 and env.closed and sinks == []
+    recordings = sorted(output.glob("recordings/*"))
+    assert len(recordings) == 2
+    for directory in recordings:
+        assert (directory / "steps.jsonl").stat().st_size > 0
+        assert (directory / "trajectory.csv").stat().st_size > 0
+        assert (directory / "metrics.json").is_file()
+        meta = json.loads((directory / "episode.json").read_text())
+        assert meta["video"] is False and meta["video_fps"] is None
+        assert not (directory / "video.mp4").exists() and not (directory / "final.jpg").exists()
+        assert not (directory / "frames").exists()
+        first = json.loads((directory / "steps.jsonl").read_text().splitlines()[0])
+        assert {"step", "pose", "decision", "method", "command"} <= set(first)
+    live = json.loads((output / "live.json").read_text())
+    assert live["episode_id"] in ("one", "two") and "target_closing" in live
+    assert not (output / "latest.jpg").exists() and not (output / "index.html").exists()
+    with pytest.raises(ValueError, match="log-only"):
+        run_evaluation(Env(), LinePolicy(), fake_label_mapper(), output=tmp_path / "frames",
+                       config={"purpose": "synthetic"}, record=True, record_video=False, save_frames=True,
+                       writer_factory=FailingSink)
+
+
 def test_frozen_configuration_is_checked_before_reset_or_output(tmp_path):
     env = Env()
     config = evaluation_configuration({"model": "one"}, env.episode_ids(), policy=LinePolicy())

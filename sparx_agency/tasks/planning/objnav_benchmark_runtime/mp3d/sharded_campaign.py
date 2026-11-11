@@ -76,7 +76,7 @@ def done_episodes(root, plan):
 
 
 def run_sharded_campaign(root, *, version, episodes_dir, scenes_dir, shard_episodes, split="val", scenes=None,
-                         extra=(), resume=False, jobs=1, jobs_file=None, llm_urls=(), gate=None,
+                         extra=(), resume=False, jobs=1, jobs_file=None, llm_urls=(), gate=None, stall_s=0.0,
                          popen=subprocess.Popen, sleep=time.sleep, log=print):
     """Run every shard of the split (or of ``scenes``) and merge each finished scene.
 
@@ -89,6 +89,10 @@ def run_sharded_campaign(root, *, version, episodes_dir, scenes_dir, shard_episo
         jobs: Shards at once, unless ``jobs_file`` holds another number (re-read live).
         llm_urls: LLM servers to deal the shards over; empty keeps the environment's.
         gate: The start gate; a :class:`VramGate` at 88 % with 1,400 MiB per renderer by default.
+        stall_s: Above 0, a shard whose ``live.json`` / ``progress.json`` /
+            ``episodes.jsonl`` / console log have not changed for this long is
+            killed and recorded as exit ``shard_pool.STALLED_RETURNCODE``; a
+            resume of the root continues it (``shard_pool.run_pool``).
 
     Returns:
         One record per scene: ``status`` ("merged", "already merged", or why not),
@@ -133,7 +137,7 @@ def run_sharded_campaign(root, *, version, episodes_dir, scenes_dir, shard_episo
                                 scenes_dir=scenes_dir, extra=arguments)
         environment = {"LLM_BASE_URL": urls[job.key]} if job.key in urls else {}
         pool_jobs.append(PoolJob(job.key, command, root / job.scene / ("shard_%d.console.log" % job.index),
-                                 environment))
+                                 environment, directory=output))
     merges = {}
 
     def merge(scene):
@@ -156,13 +160,14 @@ def run_sharded_campaign(root, *, version, episodes_dir, scenes_dir, shard_episo
         with (root / HEARTBEAT_FILE).open("a") as stream:
             stream.write(json.dumps(beat) + "\n")
 
-    log("[campaign] %d shards over %d scenes (%d episodes), %d to run; at most %d at once%s"
+    log("[campaign] %d shards over %d scenes (%d episodes), %d to run; at most %d at once%s%s"
         % (len(plan), len(by_scene), sum(job.episodes for job in plan), len(todo), int(jobs),
-           "; LLM servers " + ", ".join(dict.fromkeys(urls.values())) if urls else ""))
+           "; LLM servers " + ", ".join(dict.fromkeys(urls.values())) if urls else "",
+           "; stall watchdog %.0f min" % (stall_s / 60.0) if stall_s > 0 else "; no stall watchdog"))
     codes, unstarted = run_pool(
         pool_jobs, cap=lambda: read_cap(jobs, jobs_file), gate=gate or VramGate(1400),
         on_exit=lambda job, code: merge(job.key.split("/")[0]) if code == 0 else None,
-        heartbeat=heartbeat, popen=popen, sleep=sleep, log=log)
+        heartbeat=heartbeat, popen=popen, sleep=sleep, log=log, stall_s=stall_s)
     for scene in by_scene:
         merge(scene)
     results = []

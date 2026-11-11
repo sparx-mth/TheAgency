@@ -5,6 +5,30 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-11, the full MP3D val run with the 14B: log-only recordings, the shard watchdog, a resource monitor)
+- **`mp3d.run --record-log-only` / `run_benchmark.sh --record-log-only`** (`recording.EpisodeRecorder(video=False)`,
+  `evaluation.run_evaluation(record_video=)`): every episode's `steps.jsonl`, `trajectory.csv`, map journal and
+  `metrics.json` are written exactly as with a video, and no dashboard frame is rendered or encoded -- no `video.mp4`,
+  stills, `final.jpg`, `latest.jpg` or review page, no FFmpeg. `live.json` still updates on every action (the stall
+  watchdog's heartbeat). The full split's failure mechanisms can now be read from the logs of a run that recorded
+  no video; a video of a chosen episode is re-made by replaying it with its recorded LLM answers.
+- **The stall watchdog covers sharded campaigns** (`shard_pool.run_pool(stall_s=)`, `PoolJob.directory`,
+  `job_heartbeat`, `sharded_campaign.run_sharded_campaign(stall_s=)`; `campaign.py --stall-minutes` now reaches the
+  sharded path, default 30): a shard runs in its own session and one whose `live.json` / `progress.json` /
+  `episodes.jsonl` / console log are silent for the period is killed with its session and recorded as exit -9, so the
+  pool moves on and a resume of the root continues the shard. Before this, `--stall-minutes` was accepted and ignored
+  with `--shard-episodes`.
+- **`single_storey_failures.recordings_by_episode` reads a merged scene's `shard_*/recordings/`** (the merge moves
+  the rows, not the recordings), so the failure tagging runs on a sharded campaign root as it does on a per-scene one.
+- **`objnav_benchmark_runtime/resource_monitor.py`**: `record out.csv --interval 15` samples GPU utilisation, VRAM,
+  CPU, RAM, load and the live worker count; `summarize out.csv [--since-utc ..]` gives mean / median / peak of each
+  and the share of samples the GPU spent above 80 % -- the utilisation line of a campaign's report, which until now was
+  read off a terminal.
+- **Measured for the 14B on the 4090** (`mp3d/README.md`): `qwen2.5:14b-instruct` at 4 slots and 8k context takes
+  15.1 GB; the client's `format: json` caps it at ~0.5 answers/s (0.36 against 0.93 requests/s with and without the
+  format on an idle card at 4 concurrent; 8 slots, 12 workers or a q8_0 KV cache change nothing, the grammar's sampling
+  being CPU work serialised in Ollama's runner), so 7-8 MP3D renderers (270-1,180 MiB each by scene) saturate it at
+  ~110 episodes/h with the card's compute ~40 % busy and its memory full.
 ### Added (2026-11-10, MP3D single storey: a fixed set, a deterministic baseline, the flat-p ablation, and the single-storey fixes -- docs/progress/entries/046)
 - **A fixed single-storey evaluation set and its launcher** (`mp3d/single_storey_set.py`, `mp3d/sets/single_storey_flat_v1.json`:
   180 same-storey episodes in 8 flat houses, the split-level scenes excluded, seeded; `mp3d/run_single_storey.sh <name>`

@@ -203,6 +203,42 @@ mp3d/run_benchmark.sh --status runs/gt_oracle_mp3d_2195ep_X     # one screen: do
   it makes the summary `complete: false`.
 * `--output <root>` resumes: merged scenes and finished shards are kept, started
   shards continue (`--resume`), the rest start.
+* **The stall watchdog runs on shards too** (`--stall-minutes N`, default 30;
+  since 2026-11-11): a shard whose `live.json` / `progress.json` /
+  `episodes.jsonl` / console log have not changed for that long is killed with
+  its session and recorded as exit -9 (`shard_pool.run_pool`); its slot goes to
+  the next shard, its scene stays unmerged, and `--output <root>` continues it
+  from its last finished episode.
+* **`--record-log-only`**: every episode's `steps.jsonl` (pose, action, the
+  method's snapshot and the command of every decision), `trajectory.csv`, map
+  journal and `metrics.json` under `<shard>/recordings/<key>/`, and NO video --
+  no dashboard frame is rendered, no FFmpeg is needed. It is what
+  `single_storey_failures.py` (which also reads a merged scene's `shard_*/`
+  recordings) and `review_recording.py` read; about 33 KB a step, gzip ~9:1. A
+  video of any episode is re-made afterwards by replaying it with its recorded
+  answers. `--full-records` beside it keeps the policy's whole per-episode
+  report (its event logs included) in `episodes.jsonl`, ~100-300 KB a row.
+* **`resource_monitor.py`** (`record out.csv --interval 15`, `summarize out.csv`)
+  samples GPU utilisation, VRAM, CPU, RAM, load and the live worker count while
+  a campaign runs, for the report's utilisation line.
+
+### A 14B in both roles on the 4090 (measured 2026-11-11)
+
+`qwen2.5:14b-instruct` at 4 request slots and an 8,192-token context takes
+15.1 GB (8.1 GB weights, 6.0 GB f16 KV cache, 0.3 GB compute). Unconstrained it
+answers about 0.5 requests/s with 1.2k-token prompts and 400-token answers (203
+tokens/s aggregate at 4 concurrent, 88 tokens/s single-stream), but **the
+client asks Ollama for `format: json`, and the JSON grammar's sampling is CPU
+work serialised in Ollama's runner**: with 150-token answers the same server
+answers 0.93 requests/s without the format and 0.36 with it (33 against 48
+tokens/s per stream plus a fixed cost of some seconds a request); 8 slots give
+0.39. In the campaign the rate was ~29 answers/min (0.5/s) with 7 workers and 4
+slots, with 12 workers and 4 slots, and with the KV cache in q8_0 -- so the LLM
+is saturated by 7-8 renderers, more workers only queue (mean 8.4 requests in
+flight at 12, p50 latency 13 s), and the card's compute stays ~40 % busy while
+its memory is full. One MP3D ground-truth renderer takes 270-1,180 MiB by scene
+(~820 mean), so a 0.90 cap holds 7-8 beside the LLM at Ollama's defaults; the
+campaign runs ~110 episodes/h (~16 answers an episode).
 
 ### The fixed single-storey set (the study of 2026-11-10)
 

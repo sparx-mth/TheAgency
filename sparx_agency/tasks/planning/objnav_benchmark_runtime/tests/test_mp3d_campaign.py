@@ -77,6 +77,31 @@ def test_every_child_command_is_one_run_py_actually_accepts():
     explicit = campaign.scene_command(SCENE, "/tmp/out", version="v1", episodes_dir="E",
                                       scenes_dir="S", episode_ids=[SCENE + "/000003"])
     assert run.parser().parse_args(explicit[explicit.index("--version"):]).episode_ids == [SCENE + "/000003"]
+    logged = campaign.scene_command(SCENE, "/tmp/out", version="v1", episodes_dir="E", scenes_dir="S",
+                                    extra=["--record-log-only"])
+    parsed = run.parser().parse_args(logged[logged.index("--version"):])
+    assert parsed.record_log_only and not parsed.record and not parsed.save_frames
+
+
+def test_the_sharded_campaign_main_passes_the_stall_watchdog_to_the_pool(tmp_path, release, monkeypatch):
+    """``--stall-minutes`` reaches the sharded path as seconds; the unsharded one keeps it as before."""
+    seen = {}
+
+    def fake_sharded(root, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr("sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.sharded_campaign.run_sharded_campaign",
+                        fake_sharded)
+    monkeypatch.setattr(campaign, "aggregate", lambda *a, **k: {"scenes_without_rows": [], "episodes": 0,
+                                                                "by_scene": [], "by_category": []})
+    code = campaign.main([str(tmp_path / "root"), "--episodes-dir", str(release.episodes_dir), "--scenes-dir",
+                          str(release.scenes_dir), "--shard-episodes", "2", "--jobs", "3", "--stall-minutes", "45",
+                          "--", "--lean"])
+    assert code == 0 and seen["stall_s"] == 45 * 60.0 and seen["jobs"] == 3 and seen["extra"] == ["--lean"]
+    with pytest.raises(SystemExit):
+        campaign.main([str(tmp_path / "root"), "--episodes-dir", str(release.episodes_dir), "--scenes-dir",
+                       str(release.scenes_dir), "--shard-episodes", "2", "--stall-minutes", "-1"])
 
 
 def test_the_scenes_come_from_the_split_and_each_runs_in_its_own_process(tmp_path, release):

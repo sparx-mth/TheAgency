@@ -16,18 +16,33 @@ Two rules from the HM3D ground-truth sweep of 2026-11-04 shape this pool:
 
 Each shard's console goes to its own log file; its environment is this
 process's plus the job's own overrides (its LLM server, say).
+
+A third rule, the unsharded campaign's (``hm3d/scene_pool.run_concurrently``,
+``LESSONS.md`` 2026-11-09): **a shard that stops writing is dead, not slow.**
+With ``stall_s`` above 0 every shard runs in its own session and the pool reads
+its heartbeat -- the newest mtime of the files a worker rewrites as it goes
+(:data:`HEARTBEAT_FILES` under the shard's directory, and its console log) --
+on every poll; one silent for ``stall_s`` is killed with its session and
+recorded as exit :data:`STALLED_RETURNCODE`, so its slot goes to the next shard
+and a resume of the root continues it from its last finished episode.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import signal
 import subprocess
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 #: The share of the card the pool fills up to, as the campaign's resource guard caps it.
 DEFAULT_VRAM_CAP = 0.88
+#: The files a shard rewrites while it works: ``live.json`` on every action (``--record``), ``progress.json``
+#: and ``episodes.jsonl`` after every episode. The console log beside them counts too (``PoolJob.log_path``).
+HEARTBEAT_FILES = ("live.json", "progress.json", "episodes.jsonl")
+#: The exit code a shard killed for stalling is recorded under (what ``kill -9`` leaves).
+STALLED_RETURNCODE = -9
 
 
 @dataclass
@@ -39,12 +54,46 @@ class PoolJob:
         command: The argv.
         log_path: Where its stdout and stderr go (appended).
         env: Environment variables set for it on top of this process's.
+        directory: The results directory the process writes (its heartbeat
+            files live there); ``None`` leaves the console log as the only
+            heartbeat.
     """
 
     key: str
     command: List[str]
     log_path: Path
     env: Dict[str, str] = field(default_factory=dict)
+    directory: Optional[Path] = None
+
+
+def job_heartbeat(job):
+    """When the job's process last showed life: the newest mtime of its heartbeat files and its console log, or
+    ``None`` before any exists."""
+    paths = [Path(job.log_path)]
+    if job.directory is not None:
+        paths += [Path(job.directory) / name for name in HEARTBEAT_FILES]
+    stamps = []
+    for path in paths:
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if stamps else None
+
+
+def _kill_session(process):
+    """SIGKILL the process's whole session (its CUDA and encoder threads die with it), else the process itself."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def read_cap(default, path=None):
@@ -119,7 +168,7 @@ class VramGate:
 
 
 def run_pool(jobs, *, cap, gate, on_exit=None, heartbeat=None, heartbeat_s=300.0, popen=subprocess.Popen,
-             poll_s=5.0, sleep=time.sleep, clock=time.monotonic, log=print):
+             poll_s=5.0, sleep=time.sleep, clock=time.monotonic, log=print, stall_s=0.0, wall_clock=time.time):
     """Run ``jobs`` in order, at most ``cap()`` at once, each started only when ``gate.ready()``.
 
     Args:
@@ -129,6 +178,13 @@ def run_pool(jobs, *, cap, gate, on_exit=None, heartbeat=None, heartbeat_s=300.0
         on_exit: ``(job, returncode)``, called as each process ends.
         heartbeat: ``(running, pending)``, called every ``heartbeat_s``.
         popen: Must behave like ``subprocess.Popen``.
+        stall_s: Above 0, the stall watchdog: a job whose heartbeat
+            (:func:`job_heartbeat`, counted from its launch before any file
+            exists) is older than this is killed with its session
+            (``start_new_session=True`` is passed to ``popen``) and recorded as
+            exit :data:`STALLED_RETURNCODE`. Keep it longer than the reasoning
+            model's call timeout, so a slow oracle answer is never read as a death.
+        wall_clock: Wall-clock seconds, the mtimes' clock; injected for tests.
 
     Returns:
         ``(returncodes, unstarted)``: ``{key: returncode}`` of every job that ran,
@@ -138,13 +194,23 @@ def run_pool(jobs, *, cap, gate, on_exit=None, heartbeat=None, heartbeat_s=300.0
     processes are terminated (then killed after 60 s) before it propagates, so
     no shard outlives the services its campaign brought up.
     """
+    if stall_s < 0:
+        raise ValueError("stall_s must be zero or positive, got %r" % (stall_s,))
     pending, running, codes = list(jobs), {}, {}
     waiting_logged = last_beat = None
     try:
         while pending or running:
             for key in list(running):
-                job, process, stream, started = running[key]
+                job, process, stream, started, launched = running[key]
                 code = process.poll()
+                if code is None and stall_s > 0:
+                    last_sign = job_heartbeat(job)
+                    since = wall_clock() - (launched if last_sign is None else max(last_sign, launched))
+                    if since > stall_s:
+                        log("[pool] STALLED %s: nothing written for %.0f s; killing the worker (pid %s)"
+                            % (key, since, getattr(process, "pid", "?")))
+                        _kill_session(process)
+                        code = STALLED_RETURNCODE
                 if code is None:
                     continue
                 stream.close()
@@ -163,10 +229,11 @@ def run_pool(jobs, *, cap, gate, on_exit=None, heartbeat=None, heartbeat_s=300.0
                     job = pending.pop(0)
                     job.log_path.parent.mkdir(parents=True, exist_ok=True)
                     stream = open(str(job.log_path), "a")
+                    options = {"start_new_session": True} if stall_s > 0 else {}
                     process = popen(job.command, stdout=stream, stderr=subprocess.STDOUT,
-                                    env=dict(os.environ, **job.env))
+                                    env=dict(os.environ, **job.env), **options)
                     gate.started()
-                    running[job.key] = (job, process, stream, clock())
+                    running[job.key] = (job, process, stream, clock(), wall_clock())
                     log("[pool] start %s%s (%d running, %d pending, cap %d)"
                         % (job.key, "".join(" %s=%s" % item for item in sorted(job.env.items())),
                            len(running), len(pending), limit))
@@ -189,10 +256,10 @@ def _stop(running, log, grace_s=60.0):
     if not running:
         return
     log("[pool] stopping %d running job(s)" % len(running))
-    for _, process, _, _ in running.values():
+    for _, process, _, _, _ in running.values():
         process.terminate()
     deadline = time.monotonic() + grace_s
-    for _, process, stream, _ in running.values():
+    for _, process, stream, _, _ in running.values():
         try:
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:

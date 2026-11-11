@@ -281,11 +281,11 @@ def main(argv=None):
                         help="Scenes run at once; above 1 each child logs to <root>/<scene>.console.log. "
                              "With --shard-episodes: shards at once, unless --jobs-file says otherwise")
     parser.add_argument("--stall-minutes", type=float, default=30.0,
-                        help="With --jobs above 1: kill a scene child whose live.json / progress.json / "
-                             "episodes.jsonl / console log have not changed for this long and record it as exit -9 "
-                             "(a worker that lost its main thread keeps its CUDA threads and never exits; --resume "
-                             "reruns the scene). Longer than LLM_REASONING_TIMEOUT_S so a slow oracle call is not a "
-                             "death; 0 disables")
+                        help="With --jobs above 1, or --shard-episodes: kill a scene or shard child whose live.json / "
+                             "progress.json / episodes.jsonl / console log have not changed for this long and record "
+                             "it as exit -9 (a worker that lost its main thread keeps its CUDA threads and never "
+                             "exits; --resume reruns the scene or continues the shard). Longer than "
+                             "LLM_REASONING_TIMEOUT_S so a slow oracle call is not a death; 0 disables")
     sharding = parser.add_argument_group("sharded campaign (--shard-episodes)")
     sharding.add_argument("--shard-episodes", type=int,
                           help="Cut every scene into shards of at most N episodes, one process each "
@@ -310,6 +310,8 @@ def main(argv=None):
         if args.limit is not None or args.smoke or args.episode_ids_file:
             parser.error("--shard-episodes runs every episode of the selected scenes; it takes no "
                          "--limit, --smoke or --episode-ids-file")
+        if args.stall_minutes < 0:
+            parser.error("--stall-minutes must be zero or positive")
         # A terminated campaign stops its shards first (the pool's finally), instead of leaving them
         # running against services the launcher is about to take down.
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
@@ -318,7 +320,7 @@ def main(argv=None):
                                        episodes_dir=args.episodes_dir, scenes_dir=args.scenes_dir,
                                        shard_episodes=args.shard_episodes, scenes=args.scenes, extra=extra,
                                        resume=args.resume, jobs=args.jobs, jobs_file=args.jobs_file,
-                                       llm_urls=args.llm_urls, gate=gate)
+                                       llm_urls=args.llm_urls, gate=gate, stall_s=60.0 * args.stall_minutes)
         failed = [r["scene"] for r in results if r["returncode"] != 0]
     elif not args.aggregate_only:
         # The runner is read from the module at call time, not bound as the default at import: the tests

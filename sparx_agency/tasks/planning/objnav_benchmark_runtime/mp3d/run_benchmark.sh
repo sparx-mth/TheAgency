@@ -10,6 +10,10 @@
 #   mp3d/run_benchmark.sh --smoke                           # the minimal cover: one published episode per scene, categories balanced
 #   mp3d/run_benchmark.sh --limit 2 --record                # the first two published episodes of every scene, recorded
 #   mp3d/run_benchmark.sh --limit 2 --record --save-frames  # ... plus every dashboard frame as a JPEG still (frames/)
+#   mp3d/run_benchmark.sh --record-log-only --shard-episodes 10 --jobs 8
+#                                                           # every episode's step log (steps.jsonl: pose, action, the method's
+#                                                           # snapshot per decision), trajectory.csv and map journal, NO video:
+#                                                           # what single_storey_failures.py reads; a video is re-made by replay
 #   mp3d/run_benchmark.sh --category toilet --limit 3       # the published toilet episodes, three per scene
 #   mp3d/run_benchmark.sh --episode-ids-file cases.json --record --jobs 2
 #   mp3d/run_benchmark.sh --episode-ids-file cases.json --jobs 3 --stall-minutes 30   # kill a scene child silent for 30 min
@@ -65,7 +69,7 @@
 #   VRAM_CAP             the share of the card a sharded campaign fills to before it stops starting shards   default 0.88
 set -euo pipefail
 
-usage() { sed -n '2,64p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,7 +95,7 @@ PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
 POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool   # the pool is dataset-agnostic
 
 # -- the command line -----------------------------------------------------------------------
-EPISODE_FILE="" VERSION="v1" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=() STALL_MINUTES=""
+EPISODE_FILE="" VERSION="v1" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 RECORD_LOG=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=() STALL_MINUTES=""
 SHARD_EPISODES="" JOBS_FILE="" LLM_SERVERS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -114,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --stall-minutes) STALL_MINUTES="$2"; shift 2 ;;            # campaign (--jobs > 1): kill a scene child silent for this long (campaign.py)
     --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
     --record) RECORD=1; shift ;;
+    --record-log-only) RECORD_LOG=1; shift ;;                 # every episode's step log, trajectory and map journal; no video, no FFmpeg
     --full-records) LEAN=0; shift ;;
     --preflight) PREFLIGHT=1; shift ;;
     --status) STATUS="$2"; shift 2 ;;
@@ -241,6 +246,7 @@ if [[ "$PERCEPTION" == ground-truth ]]; then CHILD_ARGS+=("${PERCEPTION_FLAGS[@]
 else CHILD_ARGS+=(--detector-url "$DETECTOR_URL" --detector-backend yolo_world); fi
 [[ "$AGENT" == rpt ]] && CHILD_ARGS+=(--explorer frontier)        # as gibson/ and hm3d/: the baseline explores with FALCON only
 [[ "$RECORD" == 1 ]] && CHILD_ARGS+=(--record)
+[[ "$RECORD_LOG" == 1 ]] && CHILD_ARGS+=(--record-log-only)
 [[ "$LEAN" == 1 ]] && CHILD_ARGS+=(--lean)
 [[ "$ALLOW_SHARED_GPU" == 1 ]] && CHILD_ARGS+=(--allow-shared-gpu)
 [[ ${#SEGMENTER_FLAGS[@]} -gt 0 ]] && CHILD_ARGS+=("${SEGMENTER_FLAGS[@]}")
@@ -272,6 +278,10 @@ else:
     print("  the preflight selected %d episode(s) to check the configuration; the campaign runs %s" % (
         len(config["selected_episode_ids"]), "the smoke cover" if sys.argv[2] == "1" else "every scene of the split"))
 print("  method: %s | lean records: %s | publishable: %s" % (config["method"]["method"], config["lean_records"], config["publishable"]))
+rec = config.get("recording") or {}
+print("  recording: %s" % ("off" if not rec.get("enabled") else
+                           "log only (steps.jsonl, trajectory.csv, map journal; no video)" if not rec.get("video", True) else
+                           "video at %s fps%s" % (rec.get("fps"), " + stills" if rec.get("frames") else "")))
 llm = config["method"].get("llm")
 print("  llm: %s" % ("none (the FALCON + YOLO + closing baseline)" if not llm else
                       "%s (labels) + %s (node oracle) at %s" % (llm["model"], llm["reasoning_model"], llm["base_url"])))
