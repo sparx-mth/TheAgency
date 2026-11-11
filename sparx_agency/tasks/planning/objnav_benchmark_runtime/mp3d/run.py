@@ -37,8 +37,8 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
 # The two preflight/run-time guards shared with HM3D: both are habitat-lab's
 # benchmark family's, not either dataset's (the publisher's geodesic is the same
 # quantity as l on both; the node oracle is the method's).
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run import (
-    geodesic_agreement_issue, oracle_alive)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.entrypoint import (
+    geodesic_agreement_issue, method_defaults, oracle_alive)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import CATEGORIES, MP3DDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.env import MP3DEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import (
@@ -164,17 +164,18 @@ def _runtime(issues):
 def _method(args, protocol, ground_truth=None):
     """Build the search policy and prove its services are the ones recorded.
 
-    One builder for every benchmark (``policy_factory.build_policy``). The only
-    defaults this entrypoint sets below ``--policy-config`` are the benchmark's
-    own agent -- body height and radius -- so every method knob (clearance,
-    stop distance, closing, peeks, ...) is ``RPTSettings``' default here
-    exactly as it is on Gibson and HM3D. Nothing here came from an MP3D score.
+    One builder for every benchmark (``policy_factory.build_policy``); the
+    defaults below ``--policy-config`` are the shared Habitat
+    :func:`~...habitat.entrypoint.method_defaults` -- the benchmark's own
+    agent (body height and radius) and, under its view-point evaluator, the
+    planar STOP overshoot off (since the 2026-11-11 merge; HM3D's finding, the
+    same scoring rule here) -- so every other method knob (clearance, stop
+    distance, closing, peeks, ...) is ``RPTSettings``' default here exactly as
+    it is on Gibson and HM3D. Nothing here came from an MP3D score.
     ``ground_truth`` is the semantic-frame source under ``--perception
     ground-truth``, built by :func:`prepare` beside the environment.
     """
-    embodiment = {"body_height_m": protocol.agent_height_m,
-                  "body_radius_m": protocol.agent_radius_m}
-    return build_policy(args, mp3d_label_mapper(), defaults=embodiment, ground_truth=ground_truth)
+    return build_policy(args, mp3d_label_mapper(), defaults=method_defaults(protocol), ground_truth=ground_truth)
 
 
 def ground_truth_issues(dataset, episode_ids=None):

@@ -800,6 +800,7 @@ class RoomSearchLoop:
                       "arrivals": 0, "entry_frontier": 0, "entry_centroid": 0, "entry_vantage": 0, "entry_doorstep": 0,
                       "entry_peek": 0,
                       "entry_reaimed": 0, "entry_lost": 0, "route_reaimed": 0, "room_missing_held": 0,
+                      "transit_squeezed": 0,
                       "rooms_rebound": 0, "relabels_deferred": 0,
                       "entry_failures": 0, "excluded_unreachable": 0,
                       "scans_completed": 0, "scans_in_place": 0, "scan_approach_actions": 0,
@@ -2467,7 +2468,7 @@ class RoomSearchLoop:
         if goal is None:
             self.stats["skipped_in_transit"] += 1
             return None, {"frontier_exhausted": True}
-        command = p._navigate(obs, world, goal, "transit/%s" % state.room_id)     # step 5
+        command = self._navigate_transit(obs, world, state.room_id, goal)     # step 5
         if command is None and p.route_memory.reason != "no_progress":
             # The planner's refusal, not the follower's: a route the agent made no
             # progress on releases the room as before (the room may be re-chosen).
@@ -2476,6 +2477,70 @@ class RoomSearchLoop:
             return command, {}
         self.stats["plan_failures"] += 1
         return None, {"route_failed": True}
+
+    def _navigate_transit(self, obs, world, room_id, goal):
+        """The transit command to ``goal``: the planner's route, or -- when the planner refuses -- the same goal at the body radius.
+
+        The passable map relaxes no further than ``RPTSettings.min_clearance_m``
+        (0.25 m): a 0.5 m gap is a passage, a 0.4 m one a wall. But a gap the
+        map draws 0.4 m wide is drawn so by one cell, and one cell is what a
+        jamb or a sideboard's edge paints or does not paint from one viewpoint
+        to the next. 00843/000023 (2026-11-05), action 262: the route to R9,
+        1.7 m away, was refused when the doorway look-down put one cell on a
+        jamb and narrowed the way from 0.5 m to 0.4 m; the room was released
+        ``unreachable`` -- and with it, on the same map, the bathroom behind
+        it -- the order re-solved toward the other end of the house, and the
+        agent walked a 100-action loop round the building before it came back
+        and walked through that very gap at the floor standoff (actions
+        479-483). Of the seven ``unreachable`` releases in the ten recordings
+        of that review, four had a route at the body radius.
+
+        So before the committed entry is re-aimed or the room released, it is
+        asked once more of ``RPTSearchPolicy.squeeze_planner`` -- the same
+        planner with the body radius as its floor, the exploration fallback's
+        rung 4b and the closing's second tier since 2026-10-25 -- and a route
+        it finds is walked (``transit_squeezed``). While a squeeze route is in
+        force it is judged by the planner that made it, i.e. at the standoff
+        it was planned at: asked of the floor planner it would be "obstructed"
+        and re-derived on every action. Never for the route memory's
+        ``no_progress`` refusal: a route the follower is stuck on releases the
+        room as before. A refused step on the way is the scrape guard's and
+        the bump bars' to judge, as on any route.
+        """
+        p = self.policy
+        kind = "transit/%s" % room_id
+        squeeze = getattr(p, "squeeze_planner", None)
+        if squeeze is None or squeeze.params.inflate_floor_m >= p.planner_params.inflate_floor_m:
+            return p._navigate(obs, world, goal, kind)
+        if self._squeezed_route(kind):
+            return p._navigate(obs, world, goal, kind, planner=squeeze)
+        command = p._navigate(obs, world, goal, kind, retire=False)     # the floor's refusal is not the last word
+        if command is not None:
+            return command
+        if p.route_memory.reason == "no_progress":
+            p._visited_frontiers.append(tuple(goal))                      # retired as ``_navigate`` would: stuck on the route
+            return None
+        command = p._navigate(obs, world, goal, kind, planner=squeeze)    # a refusal here retires the goal as before
+        if command is not None:
+            self.stats["transit_squeezed"] += 1
+            standoff = self._route_standoff()
+            self._log(obs, "transit_squeeze", room=room_id, goal=[round(v, 2) for v in goal],
+                      standoff=None if standoff is None else round(standoff, 2))
+        return command
+
+    def _squeezed_route(self, kind):
+        """Whether the route in force is ``kind``'s and was planned below the planner's floor standoff."""
+        p = self.policy
+        if p.route_memory.path is None or p.route_memory.kind != kind:
+            return False
+        standoff = self._route_standoff()
+        return standoff is not None and standoff < p.planner_params.inflate_floor_m - 1e-9
+
+    def _route_standoff(self):
+        """The standoff the route in force was planned at (its ``inflate_used_m``), or None."""
+        metadata = getattr(self.policy.route_memory.path, "metadata", None) or {}
+        value = metadata.get("inflate_used_m")
+        return None if value is None else float(value)
 
     def _rebind_room(self, obs, world, state, places=None):
         """The turn's state re-bound to the live room that holds the committed place, or None.

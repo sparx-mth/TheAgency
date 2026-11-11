@@ -105,7 +105,17 @@ class TargetClosingSettings:
     # distance is in range by then and one still depthless is unmeasurable or not where the bearing pointed;
     # ``bearing_near_box_frac`` ends it when the box fills that share of the frame's height without depth --
     # the object is within arm's reach and cannot be positioned, and no blind STOP is taken on it.
+    # A strong box of the class CUT BY THE FRAME'S EDGE begins the bearing approach too (``bearing_clipped``,
+    # since 2026-11-05). The border gate drops a sliver at an image edge -- its label and depth centroid are
+    # unreliable -- and until now dropped it silently: 00880-Nfvxx8J5NCo/000009 walked past its television in
+    # ten consecutive frames (actions 327-337), the box cut by the TOP edge for nine of them because the doorway
+    # look-down held the camera 30 degrees down, then by the left edge as the agent walked by, and never turned
+    # its head. The re-look is the bearing approach's first actions: the camera levelled (or tilted toward the
+    # cut edge) and the body faced to the box's bearing, so the next frame shows the object whole and the
+    # ordinary start -- a projection, or a whole depthless box -- is judged on it; the bearing's bounds, its
+    # two-frame persistence rule and its retry memory apply unchanged. False restores the silent drop.
     bearing_start: bool = True
+    bearing_clipped: bool = True
     bearing_max_actions: int = 16
     bearing_lost_frames: int = 3
     bearing_retry_m: float = 1.5
@@ -162,6 +172,29 @@ class TargetClosingSettings:
     # fills in, like any other. ``through_unknown=False`` restores the strict planner alone.
     through_unknown: bool = True
     through_unknown_cost: float = 8.0
+    # A STANDOFF REACHED BY A DETOUR IS THE LAST CHOICE, NOT THE FIRST (since 2026-11-05). The ring takes the
+    # first point with a route, and a route much longer than the straight line to the target goes round
+    # something -- the wall the target stands against, with the point on its far side. 00891-cvZr5TUy5C5/000006:
+    # the memory placed half a metre into the bathroom wall, the ring's front-arc point at 60 degrees landed in the
+    # wall and the navmesh projection moved it to the room beyond; a 6.6 m known-floor route for a target 3.4 m
+    # away, walked out of sight round the outside of the bathroom to inspect a wall. A route longer than
+    # ``standoff_detour_factor`` times the range plus ``standoff_detour_slack_m`` is kept as the fallback while the
+    # other bearings and planners -- the unknown through the doorway among them -- are asked; the shortest detour
+    # is taken only when nothing else has a route. 0 disables the rule.
+    standoff_detour_factor: float = 1.5
+    standoff_detour_slack_m: float = 1.0
+    # A LOCKED TARGET SEEN FROM WITHIN THE TERMINAL RANGE IS THE TARGET, WHATEVER THE ANCHOR SAYS (since
+    # 2026-11-05). The association cylinder keeps a re-sighting of the candidate apart from another object of
+    # the class; it is drawn about the ANCHOR -- the first frame's centroid, read from afar -- and a toilet's
+    # centroid moves half a metre between the far frame (the tank, through a doorway, the wall's depth mixed
+    # in) and the close one (the bowl, pitched down). 00891-cvZr5TUy5C5/000006 re-run: locked, 0.9 m from
+    # the only toilet in the room, inside the success region, the toilet whole and centred in twenty frames,
+    # every one dropped 3.5 cm outside the cylinder; the inspection "saw nothing" and released. The
+    # benchmark counts any instance of the class within the terminal range, so a strong box whose near
+    # edge measures within ``terminal_distance_m + range_tolerance_m`` plus one forward step is a sighting of
+    # the target while the lock stands, associated or not (``terminal_resightings`` counts them). False
+    # restores the drop.
+    terminal_resighting: bool = True
     # A box at or above this confidence starts a takeover past the rejection memory
     # of UNVERIFIED and map-contradicted releases and the release cooldown (since
     # 2026-10-07): the memory stops the same far flicker from restarting the
@@ -321,7 +354,15 @@ class TargetClosingSettings:
     # step the converter reports blocked ends the overshoot at once, and
     # ``stop_overshoot_max_actions`` bounds the whole stage, turns included (the three turns a
     # quarter-turn error can take, plus the steps). ``stop_overshoot_max_steps`` 0 restores the
-    # STOP on the deciding frame; 1 is one step and never a second.
+    # STOP on the deciding frame for an object on the floor (a RAISED one reads its own ceiling,
+    # ``stop_overshoot_elevated_max_steps`` below; both at 0 is the overshoot off for every target);
+    # 1 is one step and never a second. The Habitat entrypoints set the planar pair to 0 under a
+    # VIEW-POINT evaluator (``habitat.entrypoint.method_defaults``, HM3D since 2026-11-05, MP3D
+    # since the 2026-11-11 merge): it measures to the goal's view points with a 0.1 m radius, not to
+    # a footprint, and on 70 recorded HM3D STOPs the step never helped, cost margin in 18 and walked
+    # 00891/000006 from 0.02 m to 0.16 m -- out of the region. A raised target keeps its steps
+    # there (``_terminal`` reads the ceiling that applies): the view points of a raised object stand
+    # closer, so the two findings are one rule.
     stop_overshoot_steps: int = 1
     stop_overshoot_max_steps: int = 2
     stop_overshoot_within_m: float = 0.90
@@ -473,9 +514,17 @@ class TargetClosingSettings:
     # ``history_stop_after_missing`` consecutive terminal frames without a fresh box the
     # closing completes on the 3-D memory and STOPs -- the one deliberate exception to
     # "no STOP from remembered range alone", earned by the path. 0 path disables it.
+    # The memory STOP is earned by a path that TRACKED the target: the last fresh box must be
+    # at most ``history_stop_max_unseen`` actions old (since 2026-11-05). A box lost at the end
+    # of an approach -- the object under the frame's edge, a detector drop -- is a few actions
+    # old by the time the inspection's turns and the missing frames have passed; 00891/000006
+    # and /000027 walked 7 m round the outside of a bathroom with the toilet out of view for
+    # 36 and 41 actions, inspected the wall from 0.9 m and STOPped on a memory last refined 39
+    # and 45 actions earlier, 6 m of geodesic from the goal. 0 restores the STOP whatever the age.
     approach_history_m: float = 3.0
     approach_history_closed_m: float = 1.0
     history_stop_after_missing: int = 3
+    history_stop_max_unseen: int = 15
     # SUDDEN CLOSE PROXIMITY (``target_backoff.BackoffManeuver``). A candidate first seen
     # within ``sudden_proximity_m`` with no approach history -- the agent turned and there
     # it was -- is not closed on from that single viewpoint. Before the lock the agent
@@ -529,8 +578,8 @@ class TargetClosingSettings:
         if (isinstance(self.track_confidence, bool) or not math.isfinite(self.track_confidence)
                 or not 0 < self.track_confidence <= self.confidence):
             raise ValueError("track_confidence must be in (0, confidence]")
-        if type(self.bearing_start) is not bool:
-            raise ValueError("bearing_start must be a bool")
+        if type(self.bearing_start) is not bool or type(self.bearing_clipped) is not bool:
+            raise ValueError("bearing_start and bearing_clipped must be bools")
         for key in ("bearing_max_actions", "bearing_lost_frames"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
@@ -662,11 +711,13 @@ class TargetClosingSettings:
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
                 raise ValueError("%s must be finite and non-negative" % key)
+        if type(self.history_stop_max_unseen) is not int or self.history_stop_max_unseen < 0:
+            raise ValueError("history_stop_max_unseen must be a non-negative int (0 disables the bound)")
         for key in ("history_stop_after_missing", "backoff_steps", "backoff_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
         for key in ("backoff", "support_surface_resilience", "through_unknown", "closest_approach_stop",
-                    "release_on_bound"):
+                    "release_on_bound", "terminal_resighting"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
         if type(self.nearest_approaches) is not int or self.nearest_approaches < 0:
@@ -684,6 +735,10 @@ class TargetClosingSettings:
         if (isinstance(self.through_unknown_cost, bool) or not math.isfinite(self.through_unknown_cost)
                 or self.through_unknown_cost < 1.0):
             raise ValueError("through_unknown_cost must be finite and at least 1 (the cost of open floor)")
+        for key in ("standoff_detour_factor", "standoff_detour_slack_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError("%s must be a non-negative finite number (0 disables the detour rule)" % key)
         if (not isinstance(self.support_surface_classes, (tuple, list)) or not self.support_surface_classes
                 or not all(isinstance(name, str) and name.strip() for name in self.support_surface_classes)):
             raise ValueError("support_surface_classes must be a non-empty sequence of labels")
@@ -776,6 +831,11 @@ class TargetClosing:
         self.dead_band_alignments = 0      # inspection frames read as aligned because a turn back would undo the last turn
         self.through_unknown_routes = 0    # standoff routes planned through unknown cells after the known floor had none
         self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
+        self.back_arc_standoffs = 0        # standoffs taken beside or behind the target, the front arc having no route
+        self.standoff_detours = 0          # standoffs taken on a route a detour long, nothing else having a route
+        self.terminal_resightings = 0      # locked frames counted inside the terminal range though outside the anchor's cylinder
+        self.step_out_inspections_kept = 0 # inspections kept on a centred frame a step outside the limit (the step rule's)
+        self.history_stops_unseen = 0      # memory STOPs refused because the last fresh box was too old (``history_stop_max_unseen``)
         self.stale_standoffs_kept = 0      # standoffs a refinement made stale, kept because no ring point had a route
         self.closest_approach_stops = 0    # STOPs from a widened standoff with the fresh range a step outside the limit
         self.arrived_step_out_inspections = 0  # arrived standoffs with the fresh range under a step out, handed to the inspection
@@ -795,6 +855,8 @@ class TargetClosing:
         self.bearing_resolved = 0          # ... of which a frame with depth turned into a verification
         self.bearing_abandoned = 0         # ... and those given up: lost, out of actions, or not moving
         self.bearing_refusals = 0          # depthless boxes refused a bearing approach: cooldown, boxed in, or a spot already tried
+        self.bearing_clipped_starts = 0    # bearing approaches begun on a strong box cut by the frame's edge (the re-look)
+        self._clipped_strong = []          # this frame's strong boxes of the class cut by the frame's edge (not locked)
         self.bearing_failures = []         # (robot xy, floor id, action) per bearing approach given up
         self._depthless = []               # this frame's strong, whole boxes of the class with no usable depth
         self._in_frame = []                # this frame's whole boxes of the class at the threshold in force
@@ -957,14 +1019,18 @@ class TargetClosing:
         if any(d.conf >= s.confidence for d in boxes) and (not self.strong_box_steps or self.strong_box_steps[-1] != obs.step):
             self.strong_box_steps.append(int(obs.step))          # clipped or not: the class was in the frame
             del self.strong_box_steps[:-2 * s.backoff_persistence_window]
+        self._in_frame = list(boxes)               # every box of the class at the threshold, for the bearing's tracking
+        self._clipped_strong = []
         if not self.locked:
             kept = [d for d in boxes if not self._clipped(d.xyxy, k)]
             self.border_rejections += sum(1 for d in boxes if d.conf >= s.confidence) - sum(
                 1 for d in kept if d.conf >= s.confidence)
+            # A strong sliver at the frame's edge is a sighting, not a candidate: the bearing re-look faces it
+            # (``bearing_clipped``); its label and depth are judged on the whole box the next frame shows.
+            self._clipped_strong = [d for d in boxes if d.conf >= s.confidence and d not in kept]
             boxes = kept
         projected, kept, glimpses = [], [], []
         self._depthless = []
-        self._in_frame = list(boxes)                                   # whole boxes of the class at the threshold
         for detection in boxes:
             rows = []
             strong = detection.conf >= s.confidence
@@ -1030,7 +1096,9 @@ class TargetClosing:
             if not obs.pose.z - 0.3 <= xyz[2] <= obs.pose.z + 2.2:
                 continue
             if self.anchor is not None and not associated:
-                continue
+                if not self._terminal_resighting(strong, rows[-1]):
+                    continue
+                self.terminal_resightings += 1
             if not strong:
                 self.weak_resightings += 1
             if rows[-1].get("occluder_depth_m") is not None:
@@ -1096,6 +1164,22 @@ class TargetClosing:
         if inside and math.dist(self.anchor, xyz) > radius:
             self.depth_associations += 1
         return inside
+
+    def _terminal_resighting(self, strong, row):
+        """A strong box of the class, the lock standing, whose near edge measures within a step of the terminal range.
+
+        The target for the benchmark's purposes whichever instance it is
+        (``terminal_resighting``): counted as a sighting although the anchor's
+        association cylinder refused it.
+        """
+        s = self.settings
+        if not (s.terminal_resighting and self.locked and strong and self.policy.mapping.floor_id == self.floor_id):
+            return False
+        near = row.get("range_near_m")
+        if near is None:
+            return False
+        reach = s.terminal_distance_m + s.range_tolerance_m + float(self.policy.episode.action_spec.forward_step_m)
+        return float(near) <= reach
 
     def _on_anchor_bearing(self, obs, box):
         """Whether ``box`` (a frame's ``xyxy``) lies within one turn of the bearing to the active candidate's anchor.
@@ -1184,7 +1268,7 @@ class TargetClosing:
                 # force it resumed, stale, after the release (turns toward a yaw the
                 # route no longer has).
                 glances.abort(obs, "target_takeover")
-        elif not self.active and self._depthless and s.bearing_start:
+        elif not self.active and s.bearing_start and (self._depthless or (s.bearing_clipped and self._clipped_strong)):
             self._start_bearing(obs)
             return
         if not self.active:
@@ -1326,7 +1410,10 @@ class TargetClosing:
         """
         p, s = self.policy, self.settings
         here = (float(obs.pose.x), float(obs.pose.y))
-        best = max(self._depthless, key=lambda d: d.conf)
+        # A whole depthless box before a clipped one: the clipped box's centre is the centre of what is in frame.
+        candidates = list(self._depthless) + (list(self._clipped_strong) if s.bearing_clipped else [])
+        best = max(candidates, key=lambda d: (d in self._depthless, d.conf))
+        clipped = best not in self._depthless
         cooling = self.released_step is not None and obs.step - self.released_step < s.release_cooldown_actions
         tried = any(floor == p.mapping.floor_id and math.dist(here, spot) <= s.bearing_retry_m
                     for spot, floor, _ in self.bearing_failures)
@@ -1339,10 +1426,13 @@ class TargetClosing:
         self.verification_yaw = float(obs.pose.yaw)
         self.floor_id = p.mapping.floor_id
         self.label = best.cls
+        sides = self._clip_sides(obs, best.xyxy) if clipped else ()
         self.bearing = dict(started=int(obs.step), actions=0, last_seen=int(obs.step), box=tuple(best.xyxy),
                             conf=float(best.conf), yaw=float(normalize_angle(obs.pose.yaw + error)), lost=0,
-                            moves=[], spot=here)
+                            moves=[], spot=here, clipped=list(sides), pitch_deg=self._relook_pitch_deg(obs, sides))
         self.bearing_starts += 1
+        if clipped:
+            self.bearing_clipped_starts += 1
         p.route_memory.clear("target_bearing")
         p._route = p._goal = None
         p.peek.cancel(obs, "target_bearing", restore=False)
@@ -1350,6 +1440,42 @@ class TargetClosing:
         glances = getattr(p, "glances", None)
         if glances is not None and glances.active is not None:
             glances.abort(obs, "target_bearing")
+
+    def _clip_sides(self, obs, box):
+        """The frame edges within ``border_margin_px`` of ``box``: a subset of left, right, top, bottom."""
+        k, m = obs.camera.intrinsics, self.settings.border_margin_px
+        sides = []
+        if box[0] < m:
+            sides.append("left")
+        if box[2] > k.width - m:
+            sides.append("right")
+        if box[1] < m:
+            sides.append("top")
+        if box[3] > k.height - m:
+            sides.append("bottom")
+        return tuple(sides)
+
+    def _relook_pitch_deg(self, obs, sides):
+        """The camera pitch (degrees, positive down) that uncovers a box cut by the top or bottom edge, or None.
+
+        Cut by the top edge under a pitched-down camera (the doorway
+        look-down): the level view. Cut by the top edge at the level view:
+        one tilt up, as far as the camera goes. Cut by the bottom edge alone
+        (and judged a sliver -- the camera's floor cutoff is not): one tilt
+        down. A side cut needs no pitch: the yaw turn uncovers it.
+        """
+        actions = self.policy.episode.action_spec
+        if not actions.has_camera_tilt or not sides:
+            return None
+        current = math.degrees(float(obs.pose.camera_pitch))
+        tilt = float(actions.tilt_angle_deg)
+        if "top" in sides:
+            target = 0.0 if current > 0.5 * tilt else max(float(actions.min_pitch_deg), current - tilt)
+        elif "bottom" in sides:
+            target = min(float(actions.max_pitch_deg), current + tilt)
+        else:
+            return None
+        return None if abs(target - current) < 0.5 * tilt else float(target)
 
     def _track_bearing(self, obs):
         """Keep the bearing approach on this frame's box of the class, or give it up: lost, out of actions, not moving."""
@@ -1410,6 +1536,18 @@ class TargetClosing:
         info = {"kind": "target_closing", "phase": "BEARING", "target_visible": seen, "target_measured": False,
                 "reason": "RGB detection of the target without depth: approaching along its bearing",
                 "bearing_action": b["actions"], "bearing_conf": round(float(b["conf"]), 2)}
+        if b.get("clipped"):
+            info["reason"] = ("RGB detection of the target cut by the frame's %s edge: facing it for a whole view"
+                              % "/".join(b["clipped"]))
+            info["bearing_clipped"] = list(b["clipped"])
+        pitch = b.get("pitch_deg")
+        if pitch is not None:
+            if abs(math.degrees(float(obs.pose.camera_pitch)) - pitch) < 0.5 * float(actions.tilt_angle_deg):
+                b["pitch_deg"] = None                      # the camera is there: the yaw and the steps from here
+            else:
+                return NavigationCommand.hold(camera_pitch=math.radians(pitch),
+                                              final_yaw=normalize_angle(obs.pose.yaw + error),
+                                              info=dict(info, bearing_step="tilt the camera toward the cut edge"))
         if abs(error) > turn + 1e-6:
             return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + error),
                                           info=dict(info, bearing_step="face the detection"))
@@ -2015,9 +2153,22 @@ class TargetClosing:
             # one MOVE_FORWARD that puts the next frame inside the limit.
             return self.path.arrived and out_of_range and measured <= limit + step_m
 
+        # A centred frame a STEP outside the limit belongs to the inspection's own step rule (``_inspect``: one
+        # MOVE_FORWARD puts the next frame inside the terminal range), not to the approach (since 2026-11-05),
+        # arrived or not, while that rule's budget lasts (``inspection_max_steps``); once it is spent the
+        # resumption below takes over -- unless the standoff is ARRIVED, which the rule above keeps whatever the
+        # budget. 00891-cvZr5TUy5C5/000006 re-run, actions 167-207: the inspection began on a left-clipped frame
+        # that measured 1.046 m and turned to centre the box; the centred frame measured 1.071 m against the
+        # 1.05 m limit, the resumption handed the frame back to the approach, whose route's first action was the
+        # turn back; forty-one actions of TURN_LEFT/TURN_RIGHT inside the success region, then the stall release.
+        a_step_out = (out_of_range and measured <= limit + step_m
+                      and self.inspection_stepped < s.inspection_max_steps)      # the step rule's own budget
         clipped = self.box is not None and self._clipped(self.box, obs.camera.intrinsics)
-        if self.inspection_started is not None and out_of_range and not nearly() and not arrived_a_step_out():
-            if clipped:
+        if self.inspection_started is not None and out_of_range and not nearly():
+            if a_step_out or arrived_a_step_out():
+                if self.inspection_sighting is None or self._centred(obs):
+                    self.step_out_inspections_kept += 1     # the frame the resumption would have taken
+            elif clipped:
                 # The box is a sliver at the frame's side: its near range is the visible, farther part's,
                 # and the inspection's centring turn comes first (the same cushion read 1.09 m from its
                 # clipped half and 0.72 m whole, two turns apart).
@@ -2407,6 +2558,9 @@ class TargetClosing:
         if measured is not None and measured <= limit:
             self.inspection_sighting = obs.step
         history = self._history_qualifies()
+        # A STOP on the memory alone is earned by a path that TRACKED the target: not one that lost it for
+        # the length of the approach (``history_stop_max_unseen``; see the setting).
+        tracked = history and (s.history_stop_max_unseen <= 0 or obs.step - self.last_seen <= s.history_stop_max_unseen)
         support = s.support_surface_resilience and self.inspection_started <= self.support_seen
         self.terminal_missing = 0 if fresh else self.terminal_missing + 1
         info = {"kind": "target_closing", "target_confirmed": True, "persistent_lock": True,
@@ -2465,7 +2619,10 @@ class TargetClosing:
             return self._terminal(obs, distance, measured, dict(
                 info, phase="STOP", reason="fresh in-range sighting after a %.1f m approach; alignment not required"
                 % self.history.path_m))
-        if (history and not fresh and distance <= reach
+        if (history and not tracked and not fresh and distance <= reach
+                and self.terminal_missing >= s.history_stop_after_missing):
+            self.history_stops_unseen += 1       # the memory STOP refused: the inspection goes on, and may release
+        if (tracked and not fresh and distance <= reach
                 and self.terminal_missing >= s.history_stop_after_missing and self._memory_in_sight(obs)):
             # The trajectory is complete and the detector has dropped the box for a few
             # frames: the 3-D memory refined over the approach is what we STOP on.
@@ -2504,17 +2661,19 @@ class TargetClosing:
                  and self.last_seen < self.inspection_started and self.inspection_index >= len(views))
         exhausted = obs.step - self.inspection_started >= s.max_reacquire_steps
         if (blank or exhausted) and self.inspection_sighting is None and (history or support):
-            if distance <= reach and (exhausted or history) and self._memory_in_sight(obs):
+            if history and not tracked and distance <= reach:
+                self.history_stops_unseen += 1
+            if distance <= reach and (exhausted or tracked) and (tracked or support) and self._memory_in_sight(obs):
                 # Not "saw nothing": the approach brought us here, or the surface the target
                 # stands on is still measured at the memory's spot. Complete and STOP.
-                if history:
+                if tracked:
                     self.history_stops += 1
                 else:
                     self.support_stops += 1
                 return self._terminal(obs, distance, measured, dict(
                     info, phase="STOP", standoff_reached=self.path.arrived,
                     reason=("approach history: %.1f m walked to this spot; the 3-D memory stands"
-                            % self.history.path_m) if history else
+                            % self.history.path_m) if tracked else
                     "support surface consistent with the 3-D memory at terminal range; inspection budget spent"))
             if history and distance > reach:
                 # Too far for a memory STOP: step closer along the trajectory instead of releasing.
@@ -2637,7 +2796,12 @@ class TargetClosing:
             info: The STOP's diagnostics, ``reason`` included.
         """
         self.phase = "STOP"
-        if self.settings.stop_overshoot_max_steps < 1:
+        # The steps the overshoot may take for THIS target: a raised one has its own ceiling (``elevation_overshoot``),
+        # so an entrypoint that turns the planar overshoot off under a view-point evaluator (``stop_overshoot_max_steps``
+        # 0, HM3D and MP3D) still steps in under a wall cabinet or a picture, whose view points stand closer.
+        elevated = self.settings.elevation_overshoot and self.elevation_above_base(obs) > 0.0
+        max_steps = self.settings.stop_overshoot_elevated_max_steps if elevated else self.settings.stop_overshoot_max_steps
+        if max_steps < 1:
             return NavigationCommand.stop_here(info=info)
         self.overshoot = {"info": dict(info), "decided": int(obs.step), "step": -1,
                           "from_xy": (float(obs.pose.x), float(obs.pose.y)),
@@ -2940,6 +3104,7 @@ class TargetClosing:
                 "bearing": None if self.bearing is None else {k: v for k, v in self.bearing.items() if k != "moves"},
                 "bearing_starts": self.bearing_starts, "bearing_resolved": self.bearing_resolved,
                 "bearing_abandoned": self.bearing_abandoned, "bearing_refusals": self.bearing_refusals,
+                "bearing_clipped_starts": self.bearing_clipped_starts,
                 "persistent_lock": self.locked, "visible": self.last_seen == self.processed,
                 "navmesh_goal_xyz": self.path.goal_xyz, "goal_refinements": self.path.refinements,
                 "occluded_path_steps": self.occluded_path_steps, "inspection_started_step": self.inspection_started,
@@ -2985,6 +3150,9 @@ class TargetClosing:
                 "inspection_steps": self.inspection_steps, "dead_band_alignments": self.dead_band_alignments,
                 "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
+                "back_arc_standoffs": self.back_arc_standoffs, "history_stops_unseen": self.history_stops_unseen,
+                "standoff_detours": self.standoff_detours, "terminal_resightings": self.terminal_resightings,
+                "step_out_inspections_kept": self.step_out_inspections_kept,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
                 "arrived_step_out_inspections": self.arrived_step_out_inspections,
                 "resumption_cap_hits": self.resumption_cap_hits,

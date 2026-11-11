@@ -60,10 +60,17 @@ class LatticePlannerParams:
             bounds a search that found no way through.
         heuristic_weight: Weight on the cost-to-go heuristic. 1.0 is A*;
             above 1 the search is greedier along the route and expands
-            fewer states for a plan at most that factor longer. 1.5 by
-            default: on a 32 m synthetic route through three 0.8 m doorways
-            plain A* passed 40,000 states without a plan, weighted it
-            planned in a few thousand.
+            fewer states for a plan at most that factor longer. 1.0 by
+            default (since 2026-11-05; 1.5 before): the weighted search
+            returns the first goal it pops, and because a forward step
+            lowers the cost-to-go while a turn does not, it pops the plan
+            that steps first and turns later -- on the 741 plans of ten
+            recorded HM3D episodes 1.5 spent 20.5 actions and 7.1 turns per
+            plan against A*'s 19.3 and 6.4, and was dearer on 523 of them
+            (a route 35 degrees off the heading walked ``F L L F F`` where
+            ``L F F F`` was open). The cost-weighted field keeps A* cheap:
+            824 states and 3.4 ms per plan on those recordings, 40 ms at
+            worst, against 83 states and 1.4 ms weighted.
         refused_move_actions: How long a refused MOVE_FORWARD (the simulator
             turned the step down) excludes that pose's forward primitive
             from every later plan, in actions; 0 keeps it for the episode.
@@ -81,7 +88,7 @@ class LatticePlannerParams:
     goal_tolerance_m: float = 0.25
     goal_heading_tolerance_rad: float = math.radians(15.0) + 1e-6
     max_expansions: int = 60000
-    heuristic_weight: float = 1.5
+    heuristic_weight: float = 1.0
     refused_move_actions: int = 120
     refused_move_radius_m: float = 0.15
 

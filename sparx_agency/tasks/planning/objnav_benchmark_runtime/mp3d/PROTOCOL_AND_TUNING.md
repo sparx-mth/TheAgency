@@ -153,3 +153,13 @@ vocabulary (which must not contain a goal word — `cabinet`, `desk`, `shower`,
 `bathtub`, `stool` are context on HM3D and goals or goal prompts here). A
 development run uses `--split train` or `val_mini` with `--episodes-per-scene`,
 is labelled a subset everywhere, and is never averaged into a val number.
+
+One default below `--policy-config` is the protocol's, not the method's, and is
+disclosed here as HM3D's is: the shared `habitat/entrypoint.py::method_defaults`
+sets `target_closing.stop_overshoot_steps` and `stop_overshoot_max_steps` to 0
+under a view-point evaluator (since the 2026-11-11 merge; judged on 70 recorded
+HM3D STOPs, where the planar step toward the object never helped and cost
+margin in 18). A raised target keeps `stop_overshoot_elevated_max_steps` (3),
+the finding of the MP3D single-storey set: its view points stand closer. The
+MP3D numbers recorded before the merge (entries 043-046) were taken with the
+planar overshoot on; see the regression check in the CHANGELOG of 2026-11-11.

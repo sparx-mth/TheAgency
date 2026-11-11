@@ -5,6 +5,36 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed (2026-11-11, the HM3D closing work of 2026-11-05 merged into the infra branch beside the MP3D closing work: one algorithm, the rules combined)
+- **A step-out frame is the inspection's by either side's rule** (`closing/target_closing.py`): HM3D kept the
+  inspection on a centred frame within one forward step of the limit while the step rule's budget lasts, arrived or
+  not (`step_out_inspections_kept`); MP3D kept it from an ARRIVED standoff whatever the budget and added the
+  side-clipped withhold and the resumption cap. Merged: the resumption is skipped when either applies, then the
+  clipped withhold, then the cap, then the resumption as before.
+- **The standoff ring is searched ring, arc, planner, bearing set, offset** (`closing/target_path.py`): MP3D's
+  rings (the facing normal's at the standoff radius and closer, then the agent's, then the widened) each tried HM3D's
+  way -- the front arc with every planner, the unknown included, before any point beside or behind with any -- and a
+  route longer than `standoff_detour_factor` times the range plus the slack remembered as the fallback across every
+  ring, taken only when nothing else has a route (`standoff_detours`; the candidate remembers which ring it came from,
+  so `frontal_standoffs` stays right). The HM3D "old order" regression now turns `frontal_standoff` off too: a flat
+  target's normal ring already puts the front first.
+- **The overshoot reads the ceiling that applies to the target** (`TargetClosing._terminal`): HM3D turned the
+  planar overshoot off under a view-point evaluator (`stop_overshoot_steps`/`stop_overshoot_max_steps` 0: on 70
+  recorded STOPs it never helped), MP3D gave a RAISED target more steps (`stop_overshoot_elevated_max_steps`,
+  `elevation_overshoot`: its view points stand closer). Merged: an object on the floor reads the planar ceiling, a
+  raised one its own, so the view-point defaults no longer silence the elevated steps and both at 0 is the overshoot
+  off for every target. `method_defaults` moved to the shared `habitat/entrypoint.py` and applies to **MP3D too**
+  (its scoring rule is the same); the MP3D numbers recorded before the merge were taken with the planar overshoot on.
+- **The scrape guard excuses a refusal only in a door-named channel, counted by place** (`navigation/scrape_guard.py`):
+  MP3D's `doorways_only` first, then HM3D's place-keyed count (`same_place_m`) and the closed memory
+  (`closed_memory_actions`); the stats carry both `no_door` and `closed`.
+- **`hm3d/run.py`'s shared helpers moved to `habitat/entrypoint.py`** (`method_defaults`, `geodesic_agreement_issue`,
+  `oracle_alive`, the geodesic constants, `RESUMABLE_CONFIG_CHANGES`, `RUNTIME_PACKAGES`); `hm3d/run.py` re-exports
+  them and `mp3d/run.py` imports them there instead of from the HM3D adapter.
+- Everything else of both sides merged without overlap: HM3D's plain-A\* lattice, squeeze-planner transit, clipped
+  bearing start, fewer look-downs, terminal re-sighting, `history_stop_max_unseen`, nested-default merge in the
+  factory; MP3D's tiny-room fragments, frontier tri-state, oracle priors, labeller hysteresis, face-normal standoff,
+  bounded pursuit, on-object oracle filter.
 ### Changed (2026-11-11, the MP3D work merged into the benchmark infra: the ground-truth fixes reach every Habitat adapter)
 - **The oracle's on-object filter applies on HM3D as on MP3D** (`hm3d/env.py`): the HM3D adapter now hands the
   `GroundTruthSource` the annotations' instance boxes in ENU once per scene and each frame's depth, pose and camera,
@@ -154,6 +184,88 @@ future-you, not for a commit log.
   - **SR 52.1 %, SPL 23.6 %**; at ApexNav's 0.2 m, 53.3 % / 24.2 %. DTG 4.42 m, agent errors 0.
   - The 388 episodes (17.7 %) with no goal on the start storey score SR 7.0 %, against 61.8 % for the rest, because
     stair traversal stays off by default.
+### Fixed (2026-11-05, evening: the goal reached and not STOPped on, 00891/000006 re-run)
+- **A centred frame one step outside the limit is the inspection's step to take, not the approach's route**
+  (`closing/target_closing.py`, `step_out_inspections_kept`): actions 167-207 at 0.04 m from the goal. The inspection
+  began on a left-clipped frame that measured 1.046 m against the 1.05 m limit and turned to centre the box; the
+  centred frame measured 1.071 m, the resumption rule ("seen fresh beyond the range: walk, not look") cancelled the
+  inspection and the approach's route to the standoff began with the turn back -- forty-one actions of
+  TURN_LEFT/TURN_RIGHT inside the success region, then the stall release ("went nowhere"). The inspection already
+  owns a fresh range within one forward step of the limit (one MOVE_FORWARD puts the next frame inside it, three
+  steps per inspection); the resumption rule now leaves such a frame to it, and the budget spent hands it back.
+- **A strong box within the terminal range is the locked target, whatever the anchor says**
+  (`TargetClosingSettings.terminal_resighting`, `terminal_resightings`): actions 259-292 at 0.08 m from the goal, the
+  only toilet in the room whole and centred in twenty frames, every one dropped by the association cylinder: it is
+  drawn about the ANCHOR, the first far frame's centroid (the tank through a doorway, the wall's depth mixed in), and
+  the close frames' centroid (the bowl, pitched down) lay 0.41 m across its ray and 0.35 m below it, 3.5 cm outside
+  the 0.50 m radius -- "inspection from 0.9 m saw nothing", released. While the lock stands a strong box of the class
+  whose near edge measures within the limit plus one step is a sighting (the benchmark counts any instance within
+  the range); farther off the cylinder judges as before.
+- **The STOP overshoot is off under the HM3D view-point evaluator** (`hm3d/run.py` `method_defaults`,
+  `target_closing.stop_overshoot_steps` and `stop_overshoot_max_steps` 0 there; `policy_factory.build_policy` merges
+  a nested default group with the policy config's field by field): with the two fixes above the re-run of
+  00891/000006 decided its STOP at 0.02 m from the goal and the overshoot's step toward the toilet -- the margin
+  walk tuned on 2026-10-14 for Gibson's footprint evaluator -- ended blocked against it at 0.16 m, a failure. HM3D
+  scores the geodesic distance to the goal's view points, where the deciding frame already stands: on the 70
+  recorded HM3D STOPs since 2026-10-28 the step never brought a frame from outside 0.1 m to inside it, cost 2-14 cm
+  of margin in 18 and gained it in 2. The Gibson default stands. Disclosed in `hm3d/PROTOCOL_AND_TUNING.md` as the
+  one `run.py` default judged on recorded validation episodes.
+### Fixed (2026-11-05, afternoon: two more bugs read off the re-run of the ten regressions)
+- **A standoff reached by a detour is the ring's last choice** (`closing/target_path.py`,
+  `TargetClosingSettings.standoff_detour_factor` 1.5, `standoff_detour_slack_m` 1.0, `standoff_detours`): the memory
+  of 00891/000006 placed half a metre into the bathroom wall, the ring's front-arc point at 60 degrees landed in the
+  wall and the navmesh projection moved it to the room beyond -- a 6.6 m known-floor route for a target 3.4 m away,
+  walked out of sight round the outside of the bathroom to inspect a wall (the front-arc order of the morning could
+  not see it: the projected point counted as front). A route longer than the factor times the range plus the slack
+  is kept as the fallback while the other bearings and planners are asked; the through-unknown route by the doorway
+  wins, and the detour is walked only when nothing else has a route.
+- **A target cut by the frame's edge is looked at, not dropped** (`closing/target_closing.py`
+  `TargetClosingSettings.bearing_clipped`, `bearing_clipped_starts`): the border gate drops a sliver at an image edge
+  -- its label and depth centroid are unreliable -- and dropped it silently; 00880/000009 walked past its television
+  in ten consecutive frames (actions 327-337), the box cut by the TOP edge for nine of them because the doorway
+  look-down held the camera 30 degrees down, then by the left edge as it walked by, and never turned its head. A
+  strong sliver now begins the bearing approach: the camera is tilted toward the cut edge (levelled under the
+  look-down) and the body faced to the box, so the next frame shows the object whole and the ordinary start is
+  judged on it; the bearing's bounds, its two-frame persistence rule and its retry memory apply unchanged.
+- **Fewer look-downs** (`navigation/settings.py` `LookDownSettings.approach_m` 0.9 m, was 1.5; `max_width_m` 0.9 m;
+  `done_radius_m` 1.0 m): on the 214 look-downs of twenty recorded episodes they were 7 % of all actions; 69 were
+  released before the agent reached the channel because the route changed first (requested from a median 1.7 m to
+  the throat, against 1.1 m for those that did reach it), 49 were at channels a metre wide, 50 within a metre of a
+  throat already looked down at -- and the plan through the channel changed on the refreshed map in 21 % of them,
+  the same share whatever the width, the unknown floor about the throat or whether any cell near it changed.
+### Fixed (2026-11-05, five navigation and planning complaints read off the ten replayed non-stair regressions)
+- **The lattice follower plans with plain A\*** (`planners/lattice/params.py` `heuristic_weight` 1.0, was 1.5;
+  `navigation/settings.py` `KinematicSettings.heuristic_weight`): the weighted search returned the first goal it
+  popped, and because a forward step lowers the route's cost-to-go while a turn does not, it popped the plan that
+  steps first and turns later -- the agent seen walking two steps off a route 16-35 degrees from its heading before
+  turning toward it (a route 35 degrees off walked `F L L F F` where `L F F F` was open). On the 741 recorded plans
+  of the ten episodes: **19.3 actions and 6.4 turns per plan against 20.5 and 7.1**, cheaper on 523 of them, 3.4 ms a
+  plan (40 ms at worst) against 1.4 ms. On a straight route 16 degrees off the heading both orders cost the same
+  actions; the planner then centres its zigzag on the line, which is offset-optimal -- `route_offset_cost` is the
+  knob that trades turns for tracking, not the first heading.
+- **A committed transit entry the floor standoff refuses is asked of the body radius before the room is re-aimed
+  or released** (`rooms/room_search_loop.py` `_navigate_transit`, `transit_squeezed`, the `transit_squeeze`
+  event; `policy._navigate(retire=)`): one jamb cell painted by the doorway look-down drew a 0.5 m way as 0.4 m,
+  the route to R9 1.7 m away was refused, every re-aim behind the same gap too, and 00843/000023 released the room
+  -- and on the same map the bathroom behind it -- as `unreachable`, re-solved the order to the other end of the
+  house, walked 13 actions west, was sent back, and looped 100 actions round the building before it walked through
+  that gap at the floor standoff (actions 479-483). Four of the seven `unreachable` releases in the ten episodes had
+  a route at the body radius. A squeeze route in force is judged by the planner that made it.
+- **Doorway scrapes are counted by place, and a place that ran out of excuses stays closed** (`navigation/
+  scrape_guard.py`; `ScrapeSettings.same_place_m` 0.5, `closed_memory_actions` 120): the count was per channel,
+  keyed by the throat rounded to half a metre, and since every refusal clears the route and the re-plan names a
+  throat a few centimetres over, 00843/000007 was refused at one spot at four headings 90 degrees apart (a hole in
+  the mesh the depth camera sees nothing of, drawn free by the rays through it), each excused as "scrape 1 of 3"
+  of a new channel, came back 80 actions later and was excused three times more: 74 actions and three room
+  selections on the room behind it, 0 of 14 refusals a sticky bar.
+- **The standoff ring tries the front arc with every planner before any point beside or behind the target**
+  (`closing/target_path.py` `BACK_ARC_FROM_DEG`, `back_arc_standoffs`): the toilet seen through the bathroom doorway
+  from 3 m, the doorway's floor still unknown, and the only known-floor route led to the point behind the toilet --
+  in the next room, 7.5 m round the outside of the bathroom -- while the front arc through the unknown was never
+  asked (00891/000006 and /000027). **A STOP on the memory alone needs the last fresh box within
+  `history_stop_max_unseen` = 15 actions** (`TargetClosingSettings`, `history_stops_unseen`): both episodes walked
+  36 and 41 actions with the toilet out of view, inspected the wall from 0.9 m and STOPped on a memory 39 and 45
+  actions old, 6 m of geodesic from the goal.
 ### Fixed (2026-11-01)
 - **The LLM answer store keys answers by episode** (`llm_answer_cache.request_key(scope=)`, `LLMAnswerStore.scope`,
   `LLMClient.set_answer_scope`, set by `RPTSearchPolicy.reset`): the first glance A/B pilot recorded arm A from three

@@ -553,8 +553,9 @@ def test_a_candidate_the_detector_had_been_firing_on_is_not_sudden_and_is_not_ba
     """Collierville/000023 (2026-10-14): 0.95, 0.79, 0.79, 0.76 on four border-cut frames that could not start the
     takeover, then the takeover on the fifth at 0.84 -- "sudden" by the range alone -- a 25-action retreat to a spot
     the jamb hid the toilet from, and a 2 m rejection. A class in the frame on two of the six actions before the
-    takeover is persistent, not sudden: verified where it stands."""
-    p, ep = open_floor_policy(monkeypatch, label="toilet", tilt=True)
+    takeover is persistent, not sudden: verified where it stands. (The bearing re-look of 2026-11-05 would face the
+    cut box on its second frame; it is off here so the border-cut frames are dropped as this rule was written for.)"""
+    p, ep = open_floor_policy(monkeypatch, label="toilet", tilt=True, bearing_clipped=False)
     target = (0.8, 0.0, 0.5)
     pose = AgentPose(0, 0, 0, 0)
     pixels, depths = project_to_image(np.array([target]), ep.camera, pose)

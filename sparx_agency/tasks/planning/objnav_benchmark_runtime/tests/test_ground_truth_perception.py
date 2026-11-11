@@ -576,6 +576,37 @@ def test_the_factory_honours_a_policy_config_that_keeps_the_box_pipeline_and_the
     assert method["ground_truth"]["bypassed"] == ["detector"] and method["ground_truth"]["min_pixels"] == 16
 
 
+def test_the_factory_merges_a_nested_default_group_with_the_configs_own_field_by_field(tmp_path):
+    """The HM3D entrypoint's ``target_closing`` defaults (the overshoot off) survive a policy config that names
+    another closing field; the config's own fields still win."""
+    config = tmp_path / "policy.json"
+    config.write_text(json.dumps({"target_closing": {"terminal_distance_m": 0.9, "stop_overshoot_max_actions": 7}}))
+    defaults = {"body_height_m": 0.88, "body_radius_m": 0.18,
+                "target_closing": {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0, "stop_overshoot_max_actions": 5}}
+    policy, _ = build_policy(arguments(policy_config=config), MAPPER, defaults=defaults, ground_truth=source_with({2: "chair"}))
+    closing = policy.settings.target_closing
+    assert (closing.stop_overshoot_steps, closing.stop_overshoot_max_steps) == (0, 0), "the entrypoint's defaults"
+    assert closing.terminal_distance_m == 0.9 and closing.stop_overshoot_max_actions == 7, "the config's fields"
+    assert defaults["target_closing"]["stop_overshoot_max_actions"] == 5, "the caller's dict is not written into"
+
+
+def test_the_hm3d_method_defaults_turn_the_stop_overshoot_off_under_the_view_point_evaluator():
+    """HM3D scores the distance to the goal's view points with a 0.1 m radius; the overshoot's step toward the
+    object walks Gibson's footprint margin and, on 70 recorded HM3D STOPs, never helped -- it took
+    00891-cvZr5TUy5C5/000006 from 0.02 m to 0.16 m. Off here, untouched for an evaluator that measures otherwise."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import PROTOCOLS
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run import method_defaults
+    from sparx_agency.core.planning.object_search.settings import RPTSettings
+    protocol = PROTOCOLS["v1"]
+    defaults = method_defaults(protocol)
+    assert defaults["body_height_m"] == protocol.agent_height_m and defaults["body_radius_m"] == protocol.agent_radius_m
+    assert defaults["target_closing"] == {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0}
+    closing = RPTSettings(**defaults).target_closing
+    assert closing.stop_overshoot_max_steps == 0 and closing.stop_overshoot_steps == 0, "a valid closing configuration"
+    footprint = SimpleNamespace(agent_height_m=0.88, agent_radius_m=0.18, distance_to="footprint")   # the protocol refuses it; a stand-in
+    assert "target_closing" not in method_defaults(footprint)
+
+
 def test_the_factory_refuses_contradictions():
     source = source_with({2: "chair"})
     with pytest.raises(RuntimeError, match="publishes the simulator's semantic frames"):

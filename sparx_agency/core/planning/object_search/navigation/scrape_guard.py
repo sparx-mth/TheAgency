@@ -10,13 +10,23 @@ around for the rest of the episode. This guard reads the refusal against
 the route's channels (:mod:`.bottlenecks`): inside one, with the heading
 within ``max_heading_deg`` of its axis, the refusal is a scrape and nothing
 is written; the refused pose goes to the lattice instead, which re-plans the
-entry from another heading or offset. A channel that refuses
-``scrapes_before_mark`` alignments in ``window_actions`` is closed after all,
-and its next refusal is written as before. Since 2026-11-10 the channel must
-be a doorway a confirmed door landmark names (``ScrapeSettings.doorways_only``):
-a squeeze between furniture and a wall excused the refusals that would have
+entry from another heading or offset. A place that refuses
+``scrapes_before_mark`` alignments in ``window_actions`` is closed after all:
+its next refusal is written as before, and so is any refusal there for the
+next ``closed_memory_actions``. Since 2026-11-10 the channel must also be a
+doorway a confirmed door landmark names (``ScrapeSettings.doorways_only``): a
+squeeze between furniture and a wall excused the refusals that would have
 mapped the furniture, and the closing lost a target in plain view to the
-stall clock (2azQ1b91cZZ/000058).
+stall clock (2azQ1b91cZZ/000058, MP3D).
+
+The count is by PLACE -- the throat, or the refused step's end point, within
+``same_place_m`` -- not by channel (since 2026-11-05). Every refusal clears
+the route, and the route re-planned from the same spot names a throat a few
+centimetres over: keyed by the throat rounded to half a metre, the count
+started afresh with every re-plan, and 00843/000007 (HM3D) was refused at one
+spot at four headings 90 degrees apart, each excused as the first scrape of a
+new channel -- a hole in the mesh the depth camera sees nothing of, so nothing
+but the refusals could ever close it on the map.
 """
 from __future__ import annotations
 
@@ -39,10 +49,11 @@ class DoorwayScrapeGuard:
 
     def __init__(self, policy, settings):
         self.policy, self.settings = policy, settings
-        self._counts = {}                       # channel key -> actions of the excused scrapes
+        self._scrapes = []                      # (action, throat_xy, refused_xy) of every excused scrape
+        self._closed = []                       # (action, throat_xy, refused_xy) of every place that ran out of excuses
         self.events = []
-        self.stats = {"refusals": 0, "scrapes": 0, "written": 0, "exhausted": 0, "no_route": 0, "no_channel": 0,
-                      "misaligned": 0, "no_door": 0}
+        self.stats = {"refusals": 0, "scrapes": 0, "written": 0, "exhausted": 0, "closed": 0, "no_route": 0,
+                      "no_channel": 0, "misaligned": 0, "no_door": 0}
 
     def judge(self, observation, world, route):
         """The scrape verdict for a refused step from ``observation.pose`` on ``route``, or None to write the map.
@@ -88,19 +99,40 @@ class DoorwayScrapeGuard:
             self._event(observation.step, channel, error, "written: %.0f degrees off the axis" % math.degrees(error))
             return None
         step = int(observation.step)
-        recent = [t for t in self._counts.get(channel.key(), ()) if step - t <= self.settings.window_actions]
+        throat = tuple(channel.throat_xy)
+        self._forget(step)
+        closed = [c for c in self._closed if self._same_place(c, throat, ahead)]
+        if closed:
+            self.stats["closed"] += 1
+            self.stats["written"] += 1
+            self._event(step, channel, error, "written: the place was closed at action %d" % closed[-1][0])
+            return None
+        recent = [s for s in self._scrapes if step - s[0] <= self.settings.window_actions
+                  and self._same_place(s, throat, ahead)]
         if len(recent) >= self.settings.scrapes_before_mark:
+            self._closed.append((step, throat, ahead))
             self.stats["exhausted"] += 1
             self.stats["written"] += 1
             self._event(step, channel, error, "written: %d scrapes excused already" % len(recent))
             return None
-        recent.append(step)
-        self._counts[channel.key()] = recent
+        self._scrapes.append((step, throat, ahead))
         self.stats["scrapes"] += 1
-        verdict = dict(channel.as_dict(), heading_error_deg=round(math.degrees(error), 1), excused=len(recent),
+        verdict = dict(channel.as_dict(), heading_error_deg=round(math.degrees(error), 1), excused=len(recent) + 1,
                        step=step)
-        self._event(step, channel, error, "scrape %d of %d excused" % (len(recent), self.settings.scrapes_before_mark))
+        self._event(step, channel, error, "scrape %d of %d excused" % (len(recent) + 1, self.settings.scrapes_before_mark))
         return verdict
+
+    def _same_place(self, entry, throat, refused):
+        """Whether a remembered scrape or closure is at this place: its throat near this throat, or its refused step near this one."""
+        near = self.settings.same_place_m
+        return math.dist(entry[1], throat) <= near or math.dist(entry[2], refused) <= near
+
+    def _forget(self, step):
+        """Drop the scrapes outside the window and the closures outside their memory (0 keeps them for the episode)."""
+        self._scrapes = [s for s in self._scrapes if step - s[0] <= self.settings.window_actions]
+        horizon = self.settings.closed_memory_actions
+        if horizon > 0:
+            self._closed = [c for c in self._closed if step - c[0] <= horizon]
 
     def _event(self, step, channel, error, detail):
         self.events.append({"step": int(step), "channel": channel.as_dict(),

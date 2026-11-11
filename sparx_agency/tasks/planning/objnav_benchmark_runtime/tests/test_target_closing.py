@@ -122,6 +122,51 @@ def test_the_bearing_approach_faces_the_box_then_steps_and_a_frame_with_depth_st
     assert p.closing.locked and p.closing.count == 2
 
 
+def test_a_strong_box_cut_by_the_frames_edge_begins_a_bearing_re_look_that_faces_it_and_levels_the_camera(monkeypatch):
+    """00880-Nfvxx8J5NCo/000009 (2026-11-05), actions 327-337: the television in ten consecutive frames, cut by the
+    top edge under the doorway look-down's 30-degree pitch and then by the left edge as the agent walked past,
+    every frame border-rejected and dropped without a word. A strong sliver is a sighting: the bearing approach
+    faces it (and levels the camera when the top edge cut it), and the whole box of the next frame is judged
+    as any other -- here it projects, and the verification starts."""
+    # Left edge, level camera (the Gibson spec: no tilt): the first bearing action turns left toward the box.
+    p, ep = setup_policy()
+    p.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (0, 136, 56, 248))]       # 56 x 112 px at x = 0
+    first = p.plan(observation(ep, 0, depth=2.0))
+    assert not p.closing.active and p.closing.border_rejections == 1, "one frame of a sliver: a flicker still"
+    command = p.plan(observation(ep, 1, depth=2.0))
+    assert p.closing.active and p.closing.phase == "BEARING" and p.closing.bearing_clipped_starts == 1
+    assert command.final_yaw is not None and command.final_yaw > 0, "the box is at the left edge: turn left"
+    assert command.info["bearing_clipped"] == ["left"] and "cut by the frame's left edge" in command.info["reason"]
+    assert p.closing.border_rejections == 2 and p.closing.count == 0 and p.closing.xyz is None
+    # Turned: the box is whole, it has depth, the ordinary verification begins on this frame.
+    p.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (280, 136, 340, 248))]
+    faced = replace(observation(ep, 2, depth=2.0), pose=AgentPose(0.0, 0.0, 0.0, float(command.final_yaw)))
+    p.plan(faced)
+    assert p.closing.phase == "VERIFY" and p.closing.bearing is None and p.closing.bearing_resolved == 1
+    # Top edge under a pitched-down camera (the look-down): the camera is levelled first, then the turn.
+    q, original = setup_policy()
+    ep2 = tilt_episode(q, original)
+    pitched = math.radians(30.0)
+    q.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (211, 0, 312, 22))]      # 101 x 22 px at y = 0
+    q.plan(replace(observation(ep2, 0, depth=2.0), pose=AgentPose(0, 0, 0, 0, camera_pitch=pitched)))
+    command = q.plan(replace(observation(ep2, 1, depth=2.0), pose=AgentPose(0, 0, 0, 0, camera_pitch=pitched)))
+    assert q.closing.active and q.closing.phase == "BEARING" and q.closing.bearing["clipped"] == ["top"]
+    assert command.info["bearing_step"] == "tilt the camera toward the cut edge"
+    assert command.camera_pitch is not None and abs(command.camera_pitch) < 1e-6, "the level view"
+    # Levelled: the box stands whole in the frame and projects; the verification begins.
+    q.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (280, 136, 340, 248))]
+    q.plan(replace(observation(ep2, 2, depth=2.0), pose=AgentPose(0, 0, 0, 0, camera_pitch=0.0)))
+    assert q.closing.phase == "VERIFY" and q.closing.bearing_resolved == 1
+    # Off: the sliver is dropped as before.
+    r, ep3 = setup_policy(target_closing={"bearing_clipped": False})
+    r.detector.detect = lambda rgb: [DetectionWire("chair", 1.0, (0, 136, 56, 248))]
+    for step in range(3):
+        r.plan(observation(ep3, step, depth=2.0))
+    assert not r.closing.active and r.closing.bearing_clipped_starts == 0 and r.closing.border_rejections == 3
+    with pytest.raises(ValueError):
+        TargetClosingSettings(bearing_clipped="yes")
+
+
 def test_a_bearing_approach_is_given_up_when_the_box_is_lost_or_the_actions_run_out_and_not_retried_from_the_spot():
     p, ep = setup_policy()
     p.plan(observation(ep, 0, depth=float("nan")))
@@ -455,12 +500,20 @@ def test_invalid_closing_settings(kwargs):
 
 @pytest.mark.parametrize("box", [(0, 269, 84, 479), (300, 0, 360, 80), (560, 200, 640, 280), (300, 440, 340, 480)])
 def test_border_clipped_box_does_not_start_takeover(box):
-    """The Ranchester sofa: an 84 px sliver on the left/bottom edge of a bed."""
+    """The Ranchester sofa: an 84 px sliver on the left/bottom edge of a bed. No verification and no lock start on
+    it; since 2026-11-05 the second consecutive frame of the sliver begins the bearing RE-LOOK (``bearing_clipped``)
+    -- the agent faces the cut edge for a whole view -- which is still no takeover: nothing is placed or counted."""
     p, ep = setup_policy()
     p.detector.detect = lambda rgb: [DetectionWire("chair", .87, box)]
     p.plan(observation(ep, 0, depth=3))
     assert not p.closing.active and p.closing.border_rejections >= 1
-    assert p.plan(observation(ep, 1, depth=3)) is not None and not p.closing.active
+    command = p.plan(observation(ep, 1, depth=3))
+    assert command is not None and not p.closing.locked and p.closing.count == 0 and p.closing.xyz is None
+    assert p.closing.phase == "BEARING" and p.closing.bearing_clipped_starts == 1, "the re-look, not a takeover"
+    off, ep_off = setup_policy(target_closing={"bearing_clipped": False})
+    off.detector.detect = lambda rgb: [DetectionWire("chair", .87, box)]
+    off.plan(observation(ep_off, 0, depth=3))
+    assert off.plan(observation(ep_off, 1, depth=3)) is not None and not off.closing.active
 
 
 def test_locked_target_tolerates_border_spill(monkeypatch):
@@ -701,6 +754,45 @@ def test_a_raised_target_is_stood_under_more_closely_because_its_view_points_sta
         TargetClosingSettings(stop_overshoot_elevated_max_steps=1)
 
 
+def test_under_the_view_point_defaults_a_floor_target_stops_on_the_deciding_frame_and_a_raised_one_still_steps_in(monkeypatch):
+    """Two findings merged on 2026-11-11 into one rule. HM3D (2026-11-05): under a view-point evaluator the planar
+    overshoot never helped on 70 recorded STOPs and walked 00891/000006 out of the region, so the Habitat
+    entrypoints set ``stop_overshoot_steps`` and ``stop_overshoot_max_steps`` to 0. MP3D (2026-11-10): the view
+    points of a RAISED target stand closer (0.84 m against 1.02 m), so the overshoot must step in under a wall
+    cabinet or a picture. ``_terminal`` reads the ceiling that applies: none for an object on the floor, the
+    elevated one for a raised object -- so the HM3D defaults do not silence the MP3D fix, and vice versa."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.entrypoint import method_defaults
+
+    view_points = method_defaults(SimpleNamespace(agent_height_m=0.88, agent_radius_m=0.18, distance_to="view_points"))
+    assert view_points["target_closing"] == {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0}
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=0, stop_overshoot_max_steps=0)
+    assert p.closing.settings.stop_overshoot_elevated_max_steps == 3, "the raised ceiling keeps its default"
+    # A chair on the floor: the STOP is taken on the deciding frame, no step.
+    decided = p.plan(frame)
+    assert decided.stop and p.closing.phase == "STOP" and "stop_overshoot" not in decided.info
+    assert p.closing.overshoot_commands == 0 and p.closing.elevated_overshoot_steps == 0
+    # A wall cabinet 1.0 m up, the memory 1.25 m ahead: the lifted range is 1.60 m, so the steps go on -- up to the
+    # elevated ceiling, or until the lifted range is within 0.90 m or the minimum range stops them.
+    q, ep2, frame2 = decided_at(monkeypatch, x=0.75, depth=0.84, steps=0, stop_overshoot_max_steps=0)
+    assert q.plan(frame2).stop
+    closing = q.closing
+    closing.phase, closing.overshoot = "INSPECT", None
+    closing.xyz = (2.0, 0.0, 1.5)
+    closing.lowest_m = 1.0 + frame2.pose.z
+    first = closing._terminal(frame2, 1.25, 1.0, {"reason": "test"})
+    assert first.waypoints and first.info["stop_overshoot"]["elevation_m"] == 1.0
+    assert "step 1 of at most 3 toward the target before it" in first.info["reason"]
+    assert first.info["reason"].endswith("(1.60 m in 3-D, 1.00 m up), beyond 0.90 m"), "no unconditional step: the lifted range is the reason"
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    second = closing._overshoot_step(replace(frame2, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert second.waypoints and second.info["stop_overshoot"]["steps"] == 1
+    assert closing.elevated_overshoot_steps == 2, "both steps under the raised target are ones the planar rule (0) would not take"
+    # With the elevation rule off, the view-point defaults mean what HM3D measured: no step for any target.
+    r, ep3, frame3 = decided_at(monkeypatch, x=0.75, depth=0.84, steps=0, stop_overshoot_max_steps=0, elevation_overshoot=False)
+    r.closing.lowest_m = 1.0 + frame3.pose.z
+    assert r.plan(frame3).stop and r.closing.overshoot_commands == 0
+
+
 def wall_world(y_m=0.15, x_from=1.0, x_to=3.0):
     """An empty 20 x 20 m map with one wall line along x at ``y_m`` (its cells' centres), 0.1 m cells, and the
     far side of the wall unknown, as a mapped wall reads."""
@@ -922,6 +1014,15 @@ def test_the_overshoot_switched_off_stops_on_the_deciding_frame(monkeypatch):
     p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
     command = p.plan(replace(observation(ep, 2, depth=0.84), pose=AgentPose(0.75, 0, 0, 0)))
     assert command.stop and "stop_overshoot" not in command.info and p.closing.overshoot is None
+    # A RAISED target reads its own ceiling (``stop_overshoot_elevated_max_steps``; the 2026-11-11 merge): the planar
+    # 0 alone leaves it its steps, both at 0 is the overshoot off for every target.
+    q, ep2, near2 = locked_at_two_metres(monkeypatch, stop_overshoot_steps=0, stop_overshoot_max_steps=0,
+                                          stop_overshoot_elevated_max_steps=0)
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    q.closing.lowest_m = 1.0 + near2.pose.z
+    monkeypatch.setattr(q.closing, "elevation_above_base", lambda obs, lowest_m=None: 1.0)
+    command = q.plan(replace(observation(ep2, 2, depth=0.84), pose=AgentPose(0.75, 0, 0, 0)))
+    assert command.stop and "stop_overshoot" not in command.info and q.closing.overshoot is None
 
 
 def test_without_an_unconditional_step_the_overshoot_steps_only_while_the_memory_stands_beyond_0_9_m(monkeypatch):
@@ -1480,14 +1581,14 @@ def test_an_inspection_entered_early_steps_closer_when_the_fresh_range_is_beyond
     p.closing.xyz = (1.6, 0.0, p.closing.xyz[2])                       # the filtered estimate: 0.5 m ahead of the agent at x=1.1
     here = AgentPose(1.1, 0, 0, 0)
     p.detector.detect = lambda rgb: []
-    first = p.plan(replace(observation(ep, 2, depth=1.3), pose=here))
+    first = p.plan(replace(observation(ep, 2, depth=1.4), pose=here))
     assert p.closing.inspection_started == 2 and not first.stop, "the filtered estimate entered the inspection, unseen"
     p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
-    second = p.plan(replace(observation(ep, 3, depth=1.3), pose=here))   # the fresh surface: 1.3 m ahead
+    second = p.plan(replace(observation(ep, 3, depth=1.4), pose=here))   # the fresh surface: 1.4 m ahead, more than a step out
     assert p.closing.inspection_started is None and p.closing.inspection_resumptions == 1
     assert second.waypoints, "the approach resumed: a route toward the target, not another look"
     assert p.closing.active and p.closing.locked and not p.closing.rejected, "nothing was released"
-    third = p.plan(replace(observation(ep, 4, depth=1.3), pose=here))
+    third = p.plan(replace(observation(ep, 4, depth=1.4), pose=here))
     assert p.closing.inspection_started is None and third.waypoints, "and a fresh out-of-range frame does not re-enter it"
 
 
@@ -1688,13 +1789,69 @@ def test_a_resighting_shifted_along_the_line_of_sight_is_the_same_object_and_one
     p.plan(deeper)
     assert p.closing.last_seen == 2, "0.55 m along the ray is the far part of the same object"
     assert p.closing.depth_associations == 1, "... and a sphere of 0.50 m would have dropped it"
-    sideways = replace(near, step=3)
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (517, 200, 597, 280))]   # 0.55 m to the right at 0.9 m
+    sideways = replace(near, step=3, depth_m=np.full(near.depth_m.shape, 1.6, np.float32))
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (426, 200, 506, 280))]   # 0.6 m to the right at 1.6 m
     p.plan(sideways)
-    assert p.closing.last_seen == 2, "0.55 m across the ray is another object"
-    assert p.closing.depth_associations == 1
+    assert p.closing.last_seen == 2, "0.6 m across the ray, beyond the terminal reach, is another object"
+    assert p.closing.depth_associations == 1 and p.closing.terminal_resightings == 0
     with pytest.raises(ValueError):
         TargetClosingSettings(association_depth_m=-0.1)
+
+
+def test_a_centred_frame_one_step_outside_the_limit_is_stepped_by_the_inspection_not_resumed(monkeypatch):
+    """00891-cvZr5TUy5C5/000006 re-run, actions 167-207: the inspection began on a left-clipped frame measuring
+    1.046 m and turned to centre the box; the centred frame measured 1.071 m against the 1.05 m limit, the
+    resumption rule handed it back to the approach, whose route began with the turn back -- forty-one actions of
+    TURN_LEFT/TURN_RIGHT inside the success region, then the stall release. A centred frame within one forward
+    step of the limit is the inspection's step rule's: one MOVE_FORWARD, and the next frame STOPs."""
+    p, ep, near = locked_at_two_metres(monkeypatch)
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (40, 25, 300, 404))]          # off-centre, 1.0 m: in range
+    first = p.plan(replace(near, depth_m=np.full(near.depth_m.shape, 1.0, np.float32)))
+    assert p.closing.phase == "INSPECT" and p.closing.inspection_sighting == 2 and not first.stop and not first.waypoints
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]        # centred, 1.07 m: a step out
+    second = p.plan(replace(near, step=3, depth_m=np.full(near.depth_m.shape, 1.07, np.float32)))
+    assert p.closing.inspection_started == 2 and p.closing.inspection_resumptions == 0, "the inspection was not cancelled"
+    assert p.closing.step_out_inspections_kept == 1 and p.closing.inspection_stepped == 1
+    assert "inspect_step" in second.info and second.waypoints and not second.stop
+    assert DiscreteActionConverter(ep.action_spec).step(AgentPose(1.1, 0, 0, 0), second).action == DiscreteAction.MOVE_FORWARD
+    third = p.plan(replace(near, step=4, depth_m=np.full(near.depth_m.shape, 0.82, np.float32), pose=AgentPose(1.35, 0, 0, 0)))
+    assert third.stop and third.info["reason"] == "fresh terminal target confirmation" and third.info["measured_m"] <= 1.05
+    assert p.closing.diagnostics()["step_out_inspections_kept"] == 1
+    # The step rule's budget bounds it: with no steps left the resumption owns the frame as before.
+    q, ep2, near2 = locked_at_two_metres(monkeypatch, inspection_max_steps=0)
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (40, 25, 300, 404))]
+    q.plan(replace(near2, depth_m=np.full(near2.depth_m.shape, 1.0, np.float32)))
+    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    q.plan(replace(near2, step=3, depth_m=np.full(near2.depth_m.shape, 1.07, np.float32)))
+    assert q.closing.inspection_started is None and q.closing.inspection_resumptions == 1 and q.closing.step_out_inspections_kept == 0
+
+
+def test_a_strong_box_within_the_terminal_range_counts_while_locked_though_outside_the_anchors_cylinder(monkeypatch):
+    """00891-cvZr5TUy5C5/000006 re-run, actions 259-292: locked, 0.94 m from the only toilet in the room, the toilet
+    whole and centred in twenty frames, every frame's centroid 0.41 m across the anchor's ray and 0.35 m below it
+    (the anchor: the tank, read from afar through the doorway; the frame: the bowl, pitched down) -- 3.5 cm outside
+    the 0.50 m cylinder; 'inspection from 0.9 m saw nothing', released. The benchmark counts any instance of the
+    class within the terminal range: a strong box measured within a step of it is a sighting of the locked target."""
+    p, ep, near = locked_at_two_metres(monkeypatch)                      # the anchor (2.0, 0, 0.88); the agent at (1.1, 0)
+    low_right = [DetectionWire("chair", .9, (449, 344, 529, 424))]      # 0.41 m right of the ray, 0.35 m below it, at 0.94 m
+    p.detector.detect = lambda rgb: low_right
+    p.plan(replace(near, depth_m=np.full(near.depth_m.shape, 0.94, np.float32)))
+    assert p.closing.last_seen == 2 and p.closing.terminal_resightings == 1, "counted: inside the terminal range"
+    assert p.closing.depth_associations == 0 and p.closing.active and p.closing.locked and p.closing.phase == "INSPECT"
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 344, 360, 424))]        # faced: centred, still low
+    command = p.plan(replace(near, step=3, depth_m=np.full(near.depth_m.shape, 0.94, np.float32)))
+    assert command.stop and command.info["reason"] == "fresh terminal target confirmation"
+    assert p.closing.diagnostics()["terminal_resightings"] == 1
+    # The same frame, the exemption off: dropped as another object, as before.
+    q, ep2, near2 = locked_at_two_metres(monkeypatch, terminal_resighting=False)
+    q.detector.detect = lambda rgb: low_right
+    q.plan(replace(near2, depth_m=np.full(near2.depth_m.shape, 0.94, np.float32)))
+    assert q.closing.last_seen == 1 and q.closing.terminal_resightings == 0
+    # ... and a box of the class 1.6 m off is not the locked target's sighting merely for being strong.
+    r, ep3, near3 = locked_at_two_metres(monkeypatch)
+    r.detector.detect = lambda rgb: [DetectionWire("chair", .9, (449, 344, 529, 424))]
+    r.plan(replace(near3, depth_m=np.full(near3.depth_m.shape, 1.6, np.float32)))
+    assert r.closing.last_seen == 1 and r.closing.terminal_resightings == 0
 
 
 def low_target_locked(monkeypatch, **closing):
@@ -2042,7 +2199,7 @@ def test_a_fresh_range_still_too_far_from_an_arrived_standoff_drops_it_for_a_clo
     p, ep, goal = arrived_at_a_kept_standoff(monkeypatch)
     p.plan(replace(observation(ep, 2, depth=1.8), pose=AgentPose(1.15, 0, 0, 0)))
     assert p.closing.phase == "INSPECT" and p.closing.path.arrived
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # the box, 1.6 m off
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (280, 200, 360, 280))]       # the box, 1.6 m off: beyond a step
     command = p.plan(replace(observation(ep, 3, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
     assert p.closing.inspection_resumptions == 1 and p.closing.path.dropped == 1 and not p.closing.path.arrived
     assert p.closing.path.goal_xyz is not None and p.closing.path.goal_xyz != goal, "a closer standoff was selected"
@@ -2217,6 +2374,130 @@ def test_a_locked_target_with_no_route_on_the_known_floor_is_walked_to_through_t
     assert q.closing.through_unknown_routes == 0
     with pytest.raises(ValueError):
         TargetClosingSettings(through_unknown_cost=0.5)
+
+
+def test_the_front_arc_through_the_unknown_is_taken_before_a_known_floor_route_round_to_behind_the_target(monkeypatch):
+    """00891/000006 and /000027 (2026-11-05): the toilet seen through the bathroom doorway from 3 m, the doorway's
+    floor still unknown, and the standoff ring's only known-floor route led to the point BEHIND the toilet -- in the
+    next room, 7.5 m round the outside of the bathroom; the agent inspected a wall from 0.9 m and STOPped 6 m from
+    the goal. The front arc is tried with every planner, the unknown included, before any point beside or behind."""
+    from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
+
+    def world_with_a_wall_behind_the_target():
+        # The agent at x = 0 faces the target at x = 2. A wall stands at x = 2.15-2.3 for |y| < 1.5, the floor
+        # between agent and target (x 0.6-2.1, |y| < 1.2) is unknown, and the room behind the wall is known
+        # floor joined to the agent's side round the wall's ends.
+        data = np.zeros((200, 200), np.int8)
+        params = OccupancyGrid2DParams(.1, -10, -10)
+        grid = OccupancyGrid2D(data, params)
+        ux0, uy0 = grid.world_to_grid(0.6, -1.2)
+        ux1, uy1 = grid.world_to_grid(2.1, 1.2)
+        data[uy0:uy1 + 1, ux0:ux1 + 1] = -1
+        wx0, wy0 = grid.world_to_grid(2.15, -1.5)
+        wx1, wy1 = grid.world_to_grid(2.3, 1.5)
+        data[wy0:wy1 + 1, wx0:wx1 + 1] = 100
+        return OccupancyGrid2D(data, params)
+
+    world = world_with_a_wall_behind_the_target()
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    command = p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1
+    goal = p.closing.path.goal_xyz
+    assert command.waypoints and goal is not None and goal[0] < 2.0, "a standoff on the agent's side of the target"
+    assert command.info.get("through_unknown") is True and p.closing.path.through_unknown == 1
+    assert p.closing.path.back_arc == 0 and p.closing.back_arc_standoffs == 0 and not p.closing.path.behind
+    assert p.episode_info()["target_closing"]["back_arc_standoffs"] == 0
+    # The order of the ring before 2026-11-05 -- every offset at the known floor first, no detour rule -- for the
+    # record: a point beside or behind the target, on the long way round the wall. Since the MP3D closing was
+    # merged (2026-11-11) a second rule puts the front first for a target like this one -- its flat depth reads
+    # as a standing plane, so ``frontal_standoff`` tries the normal's ring, the unknown included, before the
+    # agent's -- and the old order needs that rule off too.
+    monkeypatch.setattr(TargetApproachPath, "BACK_ARC_FROM_DEG", 181)
+    q, ep2 = setup_policy(target_closing={"standoff_detour_factor": 0.0, "frontal_standoff": False})
+    freeze_global(monkeypatch, q)
+    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
+    q.plan(observation(ep2, 0, depth=2))
+    old = q.plan(observation(ep2, 1, depth=2))
+    assert q.closing.locked and old.waypoints and q.closing.path.goal_xyz[0] >= 2.0 - 1e-6, "beside or behind the target"
+    assert not old.info.get("through_unknown") and sum(
+        math.dist(a, b) for a, b in zip(old.waypoints, old.waypoints[1:])) > 2.0 * math.dist((0, 0), (2.0, 0.65))
+
+
+def test_a_standoff_on_a_detour_long_route_waits_for_the_other_bearings_and_the_unknown(monkeypatch):
+    """00891/000006 re-run (2026-11-05): the memory half a metre into the bathroom wall, the front-arc point at 60
+    degrees landed in the wall and the navmesh projection moved it to the room beyond -- a 6.6 m known-floor route
+    for a target 3.4 m away, walked round the outside of the bathroom. A route longer than ``standoff_detour_factor``
+    times the range plus the slack is the fallback: the other bearings and planners are asked first, and the
+    through-unknown route by the doorway wins; with the rule off the detour is walked as before; with nothing else
+    the detour is taken and counted."""
+    def strip_world():
+        # The agent at x = 0 faces the target at x = 2; a band of unknown floor x 0.6-1.3 for |y| < 3 lies between,
+        # and known floor joins the two sides round the band's ends (a 7 m way round).
+        data = np.zeros((200, 200), np.int8)
+        params = OccupancyGrid2DParams(.1, -10, -10)
+        grid = OccupancyGrid2D(data, params)
+        x0, y0 = grid.world_to_grid(0.6, -3.0)
+        x1, y1 = grid.world_to_grid(1.3, 3.0)
+        data[y0:y1 + 1, x0:x1 + 1] = -1
+        return OccupancyGrid2D(data, params)
+
+    world = strip_world()
+    p, ep = setup_policy()
+    freeze_global(monkeypatch, p)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    p.plan(observation(ep, 0, depth=2))
+    command = p.plan(observation(ep, 1, depth=2))
+    assert p.closing.locked and command.waypoints
+    length = sum(math.dist(a, b) for a, b in zip(command.waypoints, command.waypoints[1:]))
+    assert command.info.get("through_unknown") is True and length < 4.0, "through the band, not round it"
+    assert p.closing.path.detours == 0 and p.closing.standoff_detours == 0
+    # The rule off: the first known-floor route, round the band.
+    q, ep2 = setup_policy(target_closing={"standoff_detour_factor": 0.0})
+    freeze_global(monkeypatch, q)
+    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
+    q.plan(observation(ep2, 0, depth=2))
+    old = q.plan(observation(ep2, 1, depth=2))
+    assert not old.info.get("through_unknown") and sum(
+        math.dist(a, b) for a, b in zip(old.waypoints, old.waypoints[1:])) > 6.0
+    # Nothing but the detour (no planning through the unknown): taken, and counted.
+    r, ep3 = setup_policy(target_closing={"through_unknown": False})
+    freeze_global(monkeypatch, r)
+    monkeypatch.setitem(r.mapping.__dict__, "update", lambda *a, **kw: world)
+    r.plan(observation(ep3, 0, depth=2))
+    fallback = r.plan(observation(ep3, 1, depth=2))
+    assert fallback.waypoints and r.closing.path.detours == 1 and r.closing.standoff_detours == 1
+    assert r.episode_info()["target_closing"]["standoff_detours"] == 1
+    with pytest.raises(ValueError):
+        TargetClosingSettings(standoff_detour_factor=-1.0)
+
+
+def test_a_memory_stop_needs_a_fresh_box_within_the_last_actions_not_one_from_before_an_occluded_approach(monkeypatch):
+    """00891/000006: the toilet last boxed at action 80, a 7 m approach round the outside of the bathroom out of its
+    sight, an inspection of the wall from 0.9 m, and the approach-history STOP at action 120 on a memory 39 actions
+    old. The memory STOP is earned by a path that TRACKED the target: the last fresh box within
+    ``history_stop_max_unseen`` actions; older, the inspection goes on and may release."""
+    p, ep, goal = arrived_at_a_kept_standoff(monkeypatch, approach_history_m=0.5, approach_history_closed_m=0.5)
+    assert p.closing.last_seen == 1
+    command = None
+    for step in range(20, 27):                      # 19-25 actions since the last fresh box
+        command = p.plan(replace(observation(ep, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+        assert p.closing._history_qualifies()
+        assert not command.stop, "no STOP on a memory the approach never refreshed"
+    assert p.closing.history_stops == 0 and p.closing.history_stops_unseen >= 1
+    assert p.episode_info()["target_closing"]["history_stops_unseen"] == p.closing.history_stops_unseen
+    # The bound off: the STOP of before.
+    q, ep2, _ = arrived_at_a_kept_standoff(monkeypatch, approach_history_m=0.5, approach_history_closed_m=0.5,
+                                           history_stop_max_unseen=0)
+    for step in range(20, 27):
+        command = q.plan(replace(observation(ep2, step, depth=1.6), pose=AgentPose(1.15, 0, 0, 0)))
+        if command.stop:
+            break
+    assert command.stop and q.closing.history_stops == 1 and q.closing.history_stops_unseen == 0
+    with pytest.raises(ValueError):
+        TargetClosingSettings(history_stop_max_unseen=-1)
 
 
 def test_a_fruitless_sweep_cycle_releases_the_verification_before_its_budget():

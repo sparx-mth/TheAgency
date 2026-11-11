@@ -123,26 +123,43 @@ one step ahead of the body (or the body) is within `reach_m` (0.75 m) of a
 channel's throat and the heading is within `max_heading_deg` (40) of its
 axis, the refusal is a scrape: the map is not told, the escape probe and the
 goal-bump ledger are not charged, the route is cleared and re-planned (with
-the refused pose excluded). A channel that refuses `scrapes_before_mark` (3)
+the refused pose excluded). A PLACE that refuses `scrapes_before_mark` (3)
 alignments within `window_actions` (40) is closed after all: the next refusal
-is written as before. Confirmed door landmarks within `door_match_m` of the
-throat are named in the verdict; the geometry decides.
+is written as before, and so is any refusal there for the next
+`closed_memory_actions` (120, the sticky bars' horizon). A place is the
+throat, or the refused step's end point, within `same_place_m` (0.5 m) --
+since 2026-11-05; until then the count was per channel, keyed by the throat
+rounded to half a metre, and because every refusal clears the route and the
+re-plan names a throat a few centimetres over, 00843/000007 was refused at
+one spot at four headings 90 degrees apart (a hole in the mesh, invisible to
+depth), each excused as "scrape 1 of 3" of a new channel, and excused three
+times more when it came back 80 actions later. Confirmed door landmarks
+within `door_match_m` of the throat are named in the verdict; the geometry
+decides.
 
 ## 4. The look-down
 
 Under the search owner, on a walk of the search's own (not the takeover's
 approach, not a stair transaction, not a scan or a glance), when the route's
-next channel entry is within `approach_m` (1.5 m) along the route and the
-agent faces its throat, the camera is asked for `pitch_deg` (30: the floor
-from half a metre out in the bottom of the image, the room still in the top)
-and holds it to `exit_margin_m` past the channel's exit, at most
+next channel entry is within `approach_m` (0.9 m since 2026-11-05; 1.5 m
+before) along the route, the channel is narrower than `max_width_m` (0.9 m)
+and the agent faces its throat, the camera is asked for `pitch_deg` (30: the
+floor from half a metre out in the bottom of the image, the room still in
+the top) and holds it to `exit_margin_m` past the channel's exit, at most
 `max_hold_actions`. The first frame taken at that pitch drops the follower's
 plan, so the entry is re-planned on the refreshed map -- the pre-entry
 correction. A released channel is never asked for again (two LOOKs per
-doorway, once), a walk interrupted by a hold survives two steps before the
-request is released, and channels are matched by throat (within 0.6 m): the
-smoke run of 2026-10-28 spent 178 of 500 actions on LOOKs before those three
-rules.
+doorway, once; a throat within `done_radius_m`, 1.0 m, of one looked at is
+the same doorway), a walk interrupted by a hold survives two steps before
+the request is released, and a channel in force is matched by throat (within
+0.6 m): the smoke run of 2026-10-28 spent 178 of 500 actions on LOOKs before
+those rules. The 2026-11-05 review of twenty recorded episodes found the
+look-downs 7 % of all actions, a third of them released before the agent
+reached the channel (requested from 1.7 m, the route changed first), a
+quarter at channels a metre wide, a quarter repeats within a metre of a
+throat already looked at -- and the plan through the channel changed on the
+refreshed map in 21 % of them, the same share whatever the width or the
+unknown floor; hence the three bounds above.
 
 ## Tests
 

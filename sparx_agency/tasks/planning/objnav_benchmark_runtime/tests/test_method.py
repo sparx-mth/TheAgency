@@ -68,9 +68,11 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     if closing is None or isinstance(closing, dict):
         # The STOP overshoot is its own stage after the decision (``TargetClosing._terminal``): the
         # decision tests read the STOP on the deciding frame, and the overshoot's tests name its knobs.
+        # Both ceilings are off -- the planar one and, since the 2026-11-11 merge read them apart, the
+        # raised target's -- so a fixture whose box happens to read 0.3 m up still STOPs on the frame.
         closing = dict(closing or {})
         if not any(key.startswith("stop_overshoot") for key in closing):
-            closing.update(stop_overshoot_steps=0, stop_overshoot_max_steps=0)
+            closing.update(stop_overshoot_steps=0, stop_overshoot_max_steps=0, stop_overshoot_elevated_max_steps=0)
         overrides["target_closing"] = closing
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",

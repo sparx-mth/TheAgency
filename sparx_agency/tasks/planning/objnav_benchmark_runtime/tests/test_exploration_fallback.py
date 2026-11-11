@@ -73,11 +73,11 @@ def test_a_goal_the_planner_refuses_is_dropped_for_one_it_accepts_not_spun_on():
     real = policy._plan_to
     refused = []
 
-    def near_only(obs, world_, goal):
+    def near_only(obs, world_, goal, planner=None):
         if math.dist((obs.pose.x, obs.pose.y), goal) > 4.0:
             refused.append(goal)
             return None
-        return real(obs, world_, goal)
+        return real(obs, world_, goal, planner=planner)
 
     policy._plan_to = near_only
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
@@ -89,7 +89,7 @@ def test_a_goal_the_planner_refuses_is_dropped_for_one_it_accepts_not_spun_on():
 def test_a_dead_planner_is_one_probing_step_per_action_with_the_reason_recorded_not_an_exception():
     """Every plan refused on open floor: the escape probe's forward step is the move left (before 2026-10-13, a hold)."""
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
-    policy._plan_to = lambda obs, world_, goal: None
+    policy._plan_to = lambda obs, world_, goal, planner=None: None
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert command.info["kind"] == "escape" and command.info["fallback"] == "no room in force"
     assert policy.fallback.stats["escape"] == 1 and policy.fallback.stats["hold"] == 0

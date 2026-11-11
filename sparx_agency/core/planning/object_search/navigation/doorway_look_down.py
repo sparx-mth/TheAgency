@@ -26,8 +26,9 @@ ROUTE_GONE_GRACE_ACTIONS = 2
 #: The agent must be facing the throat to within this angle for the approach to count: a route that begins by
 #: turning round is not approaching the doorway yet.
 APPROACH_HALF_ANGLE_RAD = math.radians(90.0)
-#: Two throats closer than this are the same doorway: a route re-planned every step moves its throat by a few
-#: cells, and a channel matched by an exact key read as a new one every time it crossed a rounding boundary.
+#: Two throats closer than this are the same doorway while a look-down is in force: a route re-planned every step
+#: moves its throat by a few cells, and a channel matched by an exact key read as a new one every time it crossed a
+#: rounding boundary. A doorway already looked down at is matched wider (``LookDownSettings.done_radius_m``).
 SAME_THROAT_M = 0.6
 
 
@@ -93,7 +94,9 @@ class BottleneckLookDown:
                 return self._release("released_hold", step)
             return self.settings.pitch_deg
         for channel in channels:
-            if any(math.dist(channel.throat_xy, done) <= SAME_THROAT_M for done in self._done):
+            if channel.width_m >= self.settings.max_width_m:
+                continue                                # wide enough for the body and its headings: no look
+            if any(math.dist(channel.throat_xy, done) <= self.settings.done_radius_m for done in self._done):
                 continue
             if s_here > channel.exit_s_m + self.settings.exit_margin_m:
                 continue
