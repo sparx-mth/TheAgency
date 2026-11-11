@@ -45,7 +45,7 @@ in SR *and* SPL. Multi-floor (stairs) is a separate, later topic.
 - Laptop-only constraint (RTX 3070, 8 GB): Ollama on the GPU crashed the driver (Xid 13/119/154, hard freeze) together with Habitat. On the laptop everything
   except Habitat runs on CPU. The 4090 should not have this limit, but start with one GPU service at a time and watch `nvidia-smi`.
 
-## Files that are NOT in git (copy `~/tc_sweep/tools/` from the laptop, or ask Daphna to commit them)
+## Experiment scripts (now in git: `sparx_agency/tasks/planning/objnav_benchmark_runtime/analysis_tools/`, labels in its `data/`; copy `data/*.json` to `~/tc_sweep/`)
 `run_train.sh` (phase-A run on train), `pick_train_episodes.py` (seeded single-floor episode picker), `gtbox_extract.py` (HM3D semantic.glb to
 object boxes), `run_tc_vlm.py`, `run_table_variants.py`, `run_cabinet_variants.py`, `run_subtype_all.py`, `run_room_more.py`, `run_room_geometry.py`,
 `build_label_sheet.py`, scoring scripts, `guard.sh` (pauses the run under memory, load or GPU-temperature pressure). Scripts read paths under `~/tc_sweep`

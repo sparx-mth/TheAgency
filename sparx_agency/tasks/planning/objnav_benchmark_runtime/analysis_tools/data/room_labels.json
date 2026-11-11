@@ -1,0 +1,482 @@
+[
+ {
+  "n": 1,
+  "scene": "00009-vLpv2VX547B",
+  "region": 12,
+  "frames": [
+   "00128.jpg",
+   "00093.jpg",
+   "00091.jpg",
+   "00050.jpg"
+  ],
+  "label": "living room"
+ },
+ {
+  "n": 2,
+  "scene": "00422-8wJuSPJ9FXG",
+  "region": 2,
+  "frames": [
+   "00088.jpg",
+   "00091.jpg",
+   "00090.jpg",
+   "00089.jpg"
+  ],
+  "label": "kitchen"
+ },
+ {
+  "n": 3,
+  "scene": "00541-FnDDfrBZPhh",
+  "region": 5,
+  "frames": [
+   "00070.jpg",
+   "00165.jpg",
+   "00071.jpg",
+   "00104.jpg"
+  ],
+  "label": "living room"
+ },
+ {
+  "n": 4,
+  "scene": "00267-gQ3xxshDiCz",
+  "region": 5,
+  "frames": [
+   "00006.jpg",
+   "00007.jpg",
+   "00065.jpg",
+   "00004.jpg"
+  ],
+  "label": "office / study"
+ },
+ {
+  "n": 5,
+  "scene": "00025-ixTj1aTMup2",
+  "region": 10,
+  "frames": [
+   "00077.jpg",
+   "00019.jpg",
+   "00046.jpg",
+   "00028.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 6,
+  "scene": "00099-226REUyJh2K",
+  "region": 3,
+  "frames": [
+   "00065.jpg",
+   "00164.jpg",
+   "00166.jpg",
+   "00167.jpg"
+  ],
+  "label": "dining room"
+ },
+ {
+  "n": 7,
+  "scene": "00250-U3oQjwTuMX8",
+  "region": 10,
+  "frames": [
+   "00124.jpg",
+   "00237.jpg",
+   "00178.jpg",
+   "00207.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 8,
+  "scene": "00099-226REUyJh2K",
+  "region": 4,
+  "frames": [
+   "00200.jpg",
+   "00203.jpg",
+   "00202.jpg",
+   "00201.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 9,
+  "scene": "00141-iigzG1rtanx",
+  "region": 6,
+  "frames": [
+   "00194.jpg",
+   "00195.jpg",
+   "00192.jpg",
+   "00193.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 10,
+  "scene": "00463-URjpCob8MGw",
+  "region": 1,
+  "frames": [
+   "00234.jpg",
+   "00161.jpg",
+   "00059.jpg",
+   "00056.jpg"
+  ],
+  "label": "other"
+ },
+ {
+  "n": 11,
+  "scene": "00141-iigzG1rtanx",
+  "region": 16,
+  "frames": [
+   "00086.jpg",
+   "00233.jpg",
+   "00204.jpg",
+   "00191.jpg"
+  ],
+  "label": "other"
+ },
+ {
+  "n": 12,
+  "scene": "00541-FnDDfrBZPhh",
+  "region": 9,
+  "frames": [
+   "00115.jpg",
+   "00114.jpg",
+   "00113.jpg",
+   "00084.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 13,
+  "scene": "00009-vLpv2VX547B",
+  "region": 11,
+  "frames": [
+   "00030.jpg",
+   "00029.jpg",
+   "00124.jpg",
+   "00127.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 14,
+  "scene": "00463-URjpCob8MGw",
+  "region": 22,
+  "frames": [
+   "00046.jpg",
+   "00020.jpg",
+   "00187.jpg",
+   "00021.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 15,
+  "scene": "00141-iigzG1rtanx",
+  "region": 3,
+  "frames": [
+   "00238.jpg",
+   "00200.jpg",
+   "00237.jpg",
+   "00203.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 16,
+  "scene": "00422-8wJuSPJ9FXG",
+  "region": 1,
+  "frames": [
+   "00031.jpg",
+   "00072.jpg",
+   "00113.jpg",
+   "00066.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 17,
+  "scene": "00669-DNWbUAJYsPy",
+  "region": 1,
+  "frames": [
+   "00032.jpg",
+   "00007.jpg",
+   "00110.jpg",
+   "00009.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 18,
+  "scene": "00025-ixTj1aTMup2",
+  "region": 2,
+  "frames": [
+   "00129.jpg",
+   "00131.jpg",
+   "00128.jpg",
+   "00130.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 19,
+  "scene": "00463-URjpCob8MGw",
+  "region": 12,
+  "frames": [
+   "00083.jpg",
+   "00200.jpg",
+   "00170.jpg",
+   "00017.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 20,
+  "scene": "00463-URjpCob8MGw",
+  "region": 7,
+  "frames": [
+   "00114.jpg",
+   "00076.jpg",
+   "00115.jpg",
+   "00077.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 21,
+  "scene": "00099-226REUyJh2K",
+  "region": 7,
+  "frames": [
+   "00069.jpg",
+   "00020.jpg",
+   "00023.jpg",
+   "00150.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 22,
+  "scene": "00099-226REUyJh2K",
+  "region": 1,
+  "frames": [
+   "00214.jpg",
+   "00213.jpg",
+   "00176.jpg",
+   "00227.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 23,
+  "scene": "00463-URjpCob8MGw",
+  "region": 3,
+  "frames": [
+   "00053.jpg",
+   "00223.jpg",
+   "00222.jpg",
+   "00052.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 24,
+  "scene": "00009-vLpv2VX547B",
+  "region": 4,
+  "frames": [
+   "00171.jpg",
+   "00106.jpg",
+   "00169.jpg",
+   "00104.jpg"
+  ],
+  "label": "bedroom"
+ },
+ {
+  "n": 25,
+  "scene": "00250-U3oQjwTuMX8",
+  "region": 8,
+  "frames": [
+   "00160.jpg",
+   "00070.jpg",
+   "00099.jpg",
+   "00229.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 26,
+  "scene": "00267-gQ3xxshDiCz",
+  "region": 0,
+  "frames": [
+   "00068.jpg",
+   "00071.jpg",
+   "00049.jpg",
+   "00070.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 27,
+  "scene": "00422-8wJuSPJ9FXG",
+  "region": 9,
+  "frames": [
+   "00086.jpg",
+   "00104.jpg",
+   "00105.jpg",
+   "00063.jpg"
+  ],
+  "label": "office / study"
+ },
+ {
+  "n": 28,
+  "scene": "00267-gQ3xxshDiCz",
+  "region": 1,
+  "frames": [
+   "00019.jpg",
+   "00018.jpg",
+   "00016.jpg",
+   "00017.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 29,
+  "scene": "00541-FnDDfrBZPhh",
+  "region": 11,
+  "frames": [
+   "00033.jpg",
+   "00034.jpg",
+   "00163.jpg",
+   "00160.jpg"
+  ],
+  "label": "other"
+ },
+ {
+  "n": 30,
+  "scene": "00267-gQ3xxshDiCz",
+  "region": 6,
+  "frames": [
+   "00008.jpg",
+   "00039.jpg",
+   "00105.jpg",
+   "00038.jpg"
+  ],
+  "label": "dining room"
+ },
+ {
+  "n": 31,
+  "scene": "00141-iigzG1rtanx",
+  "region": 12,
+  "frames": [
+   "00009.jpg",
+   "00147.jpg",
+   "00010.jpg",
+   "00092.jpg"
+  ],
+  "label": "kitchen"
+ },
+ {
+  "n": 32,
+  "scene": "00025-ixTj1aTMup2",
+  "region": 1,
+  "frames": [
+   "00090.jpg",
+   "00089.jpg",
+   "00063.jpg",
+   "00060.jpg"
+  ],
+  "label": "unclear"
+ },
+ {
+  "n": 33,
+  "scene": "00099-226REUyJh2K",
+  "region": 8,
+  "frames": [
+   "00162.jpg",
+   "00072.jpg",
+   "00073.jpg",
+   "00163.jpg"
+  ],
+  "label": "bathroom"
+ },
+ {
+  "n": 34,
+  "scene": "00141-iigzG1rtanx",
+  "region": 9,
+  "frames": [
+   "00016.jpg",
+   "00019.jpg",
+   "00017.jpg",
+   "00018.jpg"
+  ],
+  "label": "bathroom"
+ },
+ {
+  "n": 35,
+  "scene": "00009-vLpv2VX547B",
+  "region": 14,
+  "frames": [
+   "00033.jpg",
+   "00032.jpg",
+   "00066.jpg",
+   "00191.jpg"
+  ],
+  "label": "dining room"
+ },
+ {
+  "n": 36,
+  "scene": "00009-vLpv2VX547B",
+  "region": 10,
+  "frames": [
+   "00040.jpg",
+   "00041.jpg",
+   "00042.jpg",
+   "00043.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 37,
+  "scene": "00025-ixTj1aTMup2",
+  "region": 7,
+  "frames": [
+   "00068.jpg",
+   "00058.jpg",
+   "00059.jpg",
+   "00233.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 38,
+  "scene": "00267-gQ3xxshDiCz",
+  "region": 4,
+  "frames": [
+   "00073.jpg",
+   "00020.jpg",
+   "00086.jpg",
+   "00023.jpg"
+  ],
+  "label": "hallway / corridor"
+ },
+ {
+  "n": 39,
+  "scene": "00025-ixTj1aTMup2",
+  "region": 6,
+  "frames": [
+   "00173.jpg",
+   "00172.jpg",
+   "00174.jpg",
+   "00175.jpg"
+  ],
+  "label": "bathroom"
+ },
+ {
+  "n": 40,
+  "scene": "00541-FnDDfrBZPhh",
+  "region": 8,
+  "frames": [
+   "00078.jpg",
+   "00151.jpg",
+   "00148.jpg",
+   "00005.jpg"
+  ],
+  "label": "kitchen"
+ }
+]
