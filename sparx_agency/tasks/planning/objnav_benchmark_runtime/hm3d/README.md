@@ -670,6 +670,21 @@ reproducible (a question nobody recorded gets the same answer every time) at abo
 nothing else may use the server meanwhile. Run the arms on the same renderer per episode: GPU and software rendering
 part long episodes.
 
+### The fixed comparison set: `sets/hm3d_v1_val_rep200.json`
+
+Two versions of the method are compared on the SAME 200 episodes, not on the 2,000: `hm3d/representative_set.py`
+draws 10 per scene from v1 val (the remainder of an uneven size to the largest scenes), filling the quotas round-robin
+with each scene's least-chosen category so far, at most 4 of one category per scene, a seeded shuffle within each
+scene-category cell (seed 20261111). The shipped set: chair 37, bed 36, toilet 36, tv_monitor 36, sofa 35, plant 20
+(five scenes offer it); 158 same-storey and 42 cross-storey goals (`hm3d_v1_val_rep200.meta.json` lists every episode
+with its storey flag). `tests/test_representative_set.py` fails if the file stops being the rule's output. Run it with
+`--episode-ids-file sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/sets/hm3d_v1_val_rep200.json`; its
+numbers are comparisons between versions, never a benchmark number.
+
+```bash
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.representative_set --version v1 --size 200 --seed 20261111
+```
+
 ### Development split
 
 `--split train --episodes-per-scene N` runs the HM3D training split for
