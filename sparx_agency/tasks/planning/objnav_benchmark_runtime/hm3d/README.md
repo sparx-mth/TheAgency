@@ -685,6 +685,24 @@ numbers are comparisons between versions, never a benchmark number.
 python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.representative_set --version v1 --size 200 --seed 20261111
 ```
 
+### The room-extents A/B: `hm3d/ab_room_extents.sh`
+
+The code before the room size and coverage mechanism (a detached worktree at `95aae785`, made beside this checkout)
+against the code with it, on the fixed set, one arm after the other: ground-truth perception, `qwen2.5:3b-instruct`
+in both LLM roles on an Ollama of its own (port 11436 -- a resident server is never asked, never evicts), temperature
+0, seed 17, `LLM_EXCLUSIVE=1`, the first arm recording its answers and the second replaying them, `--record` on both.
+It refuses to start unless the card holds the 3B and the renderers beside whatever is running (`AB_MIN_FREE_MIB`,
+5,500 by default); `--dry-run` prints the plan and the verdict. Then `ab_room_extents_report.py` writes SR / SPL /
+SoftSPL / DTG per arm with the paired intervals and McNemar, the improved / worse episodes, where each parted (the
+first oracle round whose order differs, both arms' room lines and numbers from the recordings) and the partings
+arm-with made on coverage or size.
+
+```bash
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --dry-run
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --jobs 2          # ~7 h for both arms
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --report-only runs/ab_room_extents_<stamp>
+```
+
 ### Development split
 
 `--split train --episodes-per-scene N` runs the HM3D training split for
