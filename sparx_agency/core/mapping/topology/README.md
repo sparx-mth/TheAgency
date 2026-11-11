@@ -47,6 +47,23 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   (`door_room_pairs`), frontier cluster counting
   (`count_frontier_clusters`), room-at-cell majority-vote lookup
   (`room_at_cell`), and the golden-ratio room color (`room_color`).
+- `room_extent.py` — `room_extents()` (since 2026-11-11): for every room of
+  the live partition, read off the depth-derived map alone, where its walls
+  are (its boundary faces classified by what lies beyond them -- a wall,
+  another room, settled unknown, unseen unknown, floor of no room -- grouped
+  into four sides in the storey's wall frame), its dimensions and footprint
+  area, whether that size is FINAL (every side seen: at most
+  `ExtentParams.open_tolerance` of its faces open onto unseen space in runs
+  wider than a doorway) or a LOWER BOUND (`bounded`, `open_sides`), the
+  agent's distance to each wall when it stands in the room, and how much of
+  its floor the camera has observed from detection range (the sight ledger's
+  per-cell record, `observed_fraction`). Recomputed from the map and the
+  partition on every update and keyed by cell, so a room renumbered, merged
+  or split by the watershed reads right. `size_words` / `seen_words` are the
+  prompt's phrasing of it. Against Matterport's room polygons (90 scenes,
+  1,242 rooms) a scanned room's final size is within 5.5 % of the annotated
+  area at the median and a room first seen from its door never overstates it
+  (`tasks/.../mp3d/room_extent_ground_truth.py`).
 - `frontier_split.py` — the cut shared by `count_frontier_clusters` and
   the planning side's goal maker (`core/planning/exploration/room_costs.py`
   `frontier_clusters`): a frontier component that wraps round a block of
@@ -172,7 +189,13 @@ decides whether to keep a stale label — nothing is cached on failure.
   bathroom and a stool in the hallway; the HOUSE line's frontier statement
   is a tri-state (reachable / only slivers / unreachable from here / none)
   rather than reachable-or-not; and a node under a square metre is shown
-  as `size=under 1m2` rather than rounded to `0m2`.
+  as `size=under 1m2` rather than rounded to `0m2`. **Since 2026-11-11** the
+  room line carries the room extents: `size=12m2 (4x3m, all walls seen)` is
+  final, `size=at least 12m2 (5+ x 3m, 1 wall not seen yet)` a lower bound,
+  and `observed=80% of it` (`... of the mapped part` when a wall is unseen)
+  is the share of the mapped floor the camera has looked at from detection
+  range; the system prompt rules that size and coverage, not the time spent,
+  decide how much of a room is left.
 - `room_priors.py` — where a target category lives and where it cannot
   be: the room types a search need not enter for it (`IMPLAUSIBLE_ROOMS`,
   exclusions not permissions; `unknown` never excluded), the home objects

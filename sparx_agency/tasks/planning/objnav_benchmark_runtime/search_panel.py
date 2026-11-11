@@ -192,6 +192,14 @@ def _rooms(col, search):
             "  [%s]" % excluded[str(room["id"])].split(":")[0] if str(room["id"]) in excluded else ""),
             DIM if str(room["id"]) in excluded else _node_color(room, search))
         detail = []
+        extent = room.get("extent")
+        if extent:
+            # The room's size as the oracle reads it: final or a lower bound, and the observed share of it.
+            detail.append("%s%dm2 %.1fx%.1f %s obs %d%%" % (
+                "" if extent.get("size_status") == "final" else ">=", round(extent.get("area_m2", 0.0)),
+                extent.get("length_m", 0.0), extent.get("width_m", 0.0),
+                "walls 4/4" if extent.get("size_status") == "final" else "walls %d/4" % extent.get("walls_seen", 0),
+                round(100 * extent.get("observed_fraction", 0.0))))
         if room.get("why"):
             detail.append(room["why"])
         if room.get("objects"):

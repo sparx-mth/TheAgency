@@ -11,6 +11,25 @@ Format per entry:
 
 ---
 
+## 2026-11-11 — A room "with all walls seen" that was twelve times bigger three actions later: the sliver through a door, and the floor of no room
+
+- **Symptom** — Replaying 00880-Nfvxx8J5NCo/000009 through the new room extents, room 5 read `0.7m2, all walls seen`
+  at action 62 and `7.9m2, 3 of 4 walls not seen` at action 65, with no merge in between: a final size that was not.
+- **Root cause** — Two rules written for whole rooms, applied to a sliver seen through a doorway. (1) "An unseen run
+  no wider than a doorway, flanked by closed boundary, is an exit in a located wall": the sliver's whole far side was
+  1.0 m wide and flanked by the jambs, so it passed as a door and the side as seen. (2) Boundary faces onto known
+  floor that belongs to no room (`other`: the stub beyond the door before the watershed seeds the room behind it, a
+  runt under `min_room_cells`) were read as closed, and the sliver's two long sides were nothing but that.
+- **Fix / workaround** — A narrow run is a gap only when the side is mostly LOCATED (closed faces at least half of
+  it): a doorway is an opening in a wall that is there. `other` faces are open for the verdict and kept apart in the
+  record. The replay of 52 recordings then showed 2 breaches in 420 rooms declared final; the 321 other growths after
+  a final reading were merges (256), cuts the watershed moved between neighbours (65) and sub-metre fragments (4) --
+  partition changes the reading is right to follow, since it is recomputed from the live partition every update.
+- **Don't** — Do not key the verdict's memory by room id to "stabilise" it: the registry hands a survivor's number to
+  a merged room, and the Ranchester/Allensville histories renumber the same floor three times in a dozen actions.
+  The only state the extents keep is the per-cell observed record (and a one-update hysteresis on a side's verdict);
+  everything else comes off the map of the action, so a renumbered room cannot inherit a wrong size.
+
 ## 2026-11-10 — Nine near-miss STOPs read as "the evaluator measures 1 m from the base in 3-D"; the generator's source said otherwise, and the fix changed shape
 
 **Symptom:** the MP3D single-storey baseline had nine STOPs within a metre of a goal's view point that scored 0, seven

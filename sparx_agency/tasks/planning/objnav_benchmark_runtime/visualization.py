@@ -41,6 +41,7 @@ def search_snapshot(policy):
         estimate = dict(loop.estimates.get(pid, {}))
         info = graph.label_info(pid) or {}
         fact = graph.facts.get(pid)
+        extent = graph.extents.get(pid) if isinstance(getattr(graph, "extents", None), dict) else None
         rooms.append({"id": pid, "kind": "room", "label": estimate.get("label") or info.get("label", "unknown"),
                       "strength": estimate.get("strength", info.get("strength")),
                       "prob": estimate.get("prob", graph.probs.get(pid)),
@@ -50,7 +51,17 @@ def search_snapshot(policy):
                       "last_inside_step": graph.last_inside.get(pid),
                       "objects": graph.objects_in(pid), "distance_m": estimate.get("distance_m"),
                       "entry": estimate.get("entry"), "cooling": pid in cooling,
-                      "centroid": [float(v) for v in room.centroid]})
+                      "centroid": [float(v) for v in room.centroid],
+                      # The room extents (2026-11-11): size status, dimensions, walls seen, coverage, the agent's
+                      # distance to each wall when inside -- what the oracle's size= and observed= are read from.
+                      "extent": None if extent is None else {
+                          "area_m2": round(float(extent.area_m2), 2), "length_m": round(float(extent.length_m), 2),
+                          "width_m": round(float(extent.width_m), 2), "size_status": extent.size_status,
+                          "walls_seen": int(extent.walls_seen), "open_sides": list(extent.open_sides),
+                          "observed_fraction": round(float(extent.observed_fraction), 3),
+                          "open_perimeter_m": round(float(extent.open_perimeter_m), 2),
+                          "wall_distances_m": {k: (None if v is None else round(float(v), 2))
+                                               for k, v in extent.distances().items()}}})
     rooms.sort(key=lambda r: -(r["prob"] or 0.0))
     stairs = []
     for nid, option in sorted(loop._stairs.items()):

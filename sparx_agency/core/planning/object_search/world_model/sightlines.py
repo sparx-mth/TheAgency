@@ -51,6 +51,16 @@ The ledger also keeps every pose the camera stood at on each storey
 looked into (:func:`cone_seen`), independently of the room numbers the
 watershed hands out and takes back.
 
+Since 2026-11-11 it keeps, per storey, the **observed** cells too
+(:meth:`SightLedger.observed_mask`): every free cell the camera has seen
+from within :attr:`SightSettings.detect_range_m` with a clear line of sight,
+at a pitch that put the body of an object standing there in the frame
+(:func:`object_band`, :func:`cone_observed`). It is the record of where the
+detector has had its chance -- not where the agent walked -- and the room
+extents (``core/mapping/topology/room_extent.py``) read each room's share of
+it off the live partition: "seen 80 % of it" on the node line the oracle
+values. Keyed by map cell, so a room the watershed renumbers keeps its coverage.
+
 The far limit is conservative on purpose. The depth image is sampled at
 a stride, and the floor samples thin out with range: at ``depth_stride``
 8 on a 640 x 480 frame from 0.88 m, successive floor rows are 0.09 m
@@ -110,6 +120,22 @@ class SightSettings:
         pose_bin_m: Positions within this of each other are one pose for
             ``min_looks``.
         pose_bin_deg: ... and headings within this.
+        detect_range_m: How far from the camera a free cell counts as
+            OBSERVED -- seen from a distance at which the detector could
+            have picked up an object standing there -- for the per-cell
+            observation record the room extents read
+            (:meth:`SightLedger.observed_mask`, since 2026-11-11). 4 m,
+            the loop's ``scan_seen_range_m``: within the 5 m depth range,
+            and about where a 0.5 m object drops under 50 pixels of a
+            640-pixel, 79-degree frame. Bounded by the camera's depth range.
+        object_band_m: ``(low, high)`` heights above the floor of the body
+            of an object the detector is expected to see -- the seat and
+            back of a chair, the bowl and tank of a toilet, the side of a
+            bed. A cell is observed when some part of that band at its
+            distance falls inside the camera's vertical field of view at
+            the pose's pitch (:func:`object_band`): a camera tilted
+            60 degrees down sees the floor two metres out but no object on
+            it.
     """
 
     enabled: bool = True
@@ -121,6 +147,8 @@ class SightSettings:
     pocket_max_width_m: float = 0.6
     pose_bin_m: float = 0.2
     pose_bin_deg: float = 15.0
+    detect_range_m: float = 4.0
+    object_band_m: Tuple[float, float] = (0.3, 1.0)
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
@@ -128,7 +156,7 @@ class SightSettings:
         for name in ("min_looks", "depth_cells"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError("sight.%s must be a positive integer" % name)
-        for name in ("far_m", "pocket_max_m2", "pose_bin_m", "pose_bin_deg"):
+        for name in ("far_m", "pocket_max_m2", "pose_bin_m", "pose_bin_deg", "detect_range_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError("sight.%s must be positive and finite" % name)
@@ -136,6 +164,10 @@ class SightSettings:
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
                 raise ValueError("sight.%s must be finite and non-negative" % name)
+        band = self.object_band_m
+        if (not isinstance(band, (tuple, list)) or len(band) != 2 or any(isinstance(v, bool) for v in band)
+                or not all(math.isfinite(float(v)) for v in band) or not 0.0 <= float(band[0]) < float(band[1])):
+            raise ValueError("sight.object_band_m must be (low, high) heights with 0 <= low < high, got %r" % (band,))
 
 
 @dataclass
@@ -146,6 +178,7 @@ class _FloorSight:
     last_key: np.ndarray           # int64 -- the pose bin that last counted, so one pose counts once
     poses: List[Tuple[int, float, float, float, float]]   # (step, x, y, yaw, pitch)
     cache: Dict[str, Tuple[int, object]]                  # name -> (step, value), per-step memo
+    observed: np.ndarray           # bool -- free cells the camera has seen from within detection range
 
 
 def floor_band(camera_height_m, pitch_rad, half_vfov_rad, min_depth_m, max_depth_m):
@@ -174,6 +207,83 @@ def floor_band(camera_height_m, pitch_rad, half_vfov_rad, min_depth_m, max_depth
     if not far > near:
         return None
     return near, far
+
+
+def object_band(camera_height_m, pitch_rad, half_vfov_rad, min_depth_m, max_depth_m, z_low_m, z_high_m):
+    """Ground distances ``(near, far)`` at which some of an object's body between ``z_low_m`` and ``z_high_m`` above the floor is in the frame, or None.
+
+    The image's top ray points ``pitch - half_vfov`` below the horizon and
+    its bottom ray ``pitch + half_vfov`` (positive pitch looks down). A
+    point at height ``z`` and ground distance ``d`` has elevation
+    ``atan((z - h) / d)``; the band is in view when its top is not below the
+    bottom ray (a near bound, when the top is under the camera) and its
+    bottom is not above the top ray (a far bound, when the top ray points
+    below the horizon). The sensor's own depth clips bound both, converted
+    to ground distance at this pitch as :func:`floor_band` does.
+    """
+    h = float(camera_height_m)
+    lower = float(pitch_rad) + float(half_vfov_rad)       # the bottom ray's angle below the horizon
+    upper = float(pitch_rad) - float(half_vfov_rad)       # the top ray's angle below the horizon
+    z_low, z_high = float(z_low_m), float(z_high_m)
+    near = 0.0
+    if z_high < h:
+        if lower <= 1e-6:
+            return None                                   # the whole frame is above the band
+        near = (h - z_high) / math.tan(lower)
+    far = math.inf
+    if upper > 1e-6:
+        if z_low >= h:
+            return None                                   # the whole frame is below the band
+        far = (h - z_low) / math.tan(upper)
+    cos_p, sin_p = math.cos(float(pitch_rad)), math.sin(float(pitch_rad))
+    if cos_p > 1e-6:
+        near = max(near, (float(min_depth_m) - h * sin_p) / cos_p)
+        far = min(far, (float(max_depth_m) - h * sin_p) / cos_p)
+    near = max(0.0, near)
+    if not far > near:
+        return None
+    return near, far
+
+
+def cone_observed(world, xy, yaw, half_fov_rad, near_m, far_m, blind_m=0.0):
+    """The FREE cells a camera at ``xy`` facing ``yaw`` has OBSERVED between ``near_m`` and ``far_m``.
+
+    Rays run through free cells and end at the first occupied cell, the
+    map's edge, or -- beyond ``blind_m``, the ground distance from which
+    the camera sees the floor -- the first unknown cell: a cell the depth
+    should have resolved and did not is not a cell anything is seen
+    through, while the unseen floor under the camera's own feet is passed
+    over as :meth:`SightLedger.observe` passes over it. Returns an
+    ``(H, W)`` bool mask.
+    """
+    grid = world.grid
+    h, w = grid.shape
+    seen = np.zeros((h, w), dtype=bool)
+    x, y = float(xy[0]), float(xy[1])
+    if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw)) or not float(far_m) > 0.0:
+        return seen
+    res = float(world.resolution)
+    half = min(math.pi, max(1e-3, float(half_fov_rad)))
+    rays = int(math.ceil(2.0 * half * (float(far_m) / res) / 0.5)) + 1
+    bearings = np.linspace(yaw - half, yaw + half, max(3, rays), endpoint=half < math.pi)
+    step = 0.5 * res
+    ranges = np.arange(step, float(far_m) + step, step, dtype=np.float64)
+    xs = x + np.outer(np.cos(bearings), ranges)
+    ys = y + np.outer(np.sin(bearings), ranges)
+    gx = np.floor((xs - world.origin_x) / res).astype(np.int64)
+    gy = np.floor((ys - world.origin_y) / res).astype(np.int64)
+    inside = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
+    gx_c, gy_c = np.clip(gx, 0, w - 1), np.clip(gy, 0, h - 1)
+    cells = grid[gy_c, gx_c]
+    free = (cells == world.values.free) & inside
+    unknown = (cells == world.values.unknown) & inside
+    blocking = ~free & ~(unknown & (ranges[None, :] < float(blind_m)))
+    any_block = blocking.any(axis=1)
+    first = np.where(any_block, blocking.argmax(axis=1), blocking.shape[1])
+    visible = ((np.arange(blocking.shape[1])[None, :] < first[:, None]) & free
+               & (ranges[None, :] >= float(near_m)))
+    seen[gy_c[visible], gx_c[visible]] = True
+    return seen
 
 
 def cone_seen(world, xy, yaw, half_fov_rad, max_range_m, min_range_m=0.0):
@@ -232,7 +342,7 @@ class SightLedger:
         state = self._floors.get(int(floor_id))
         if state is None or state.looked.shape != tuple(shape):
             state = _FloorSight(looked=np.zeros(shape, dtype=np.uint8), last_key=np.full(shape, -1, dtype=np.int64),
-                                poses=[], cache={})
+                                poses=[], cache={}, observed=np.zeros(shape, dtype=bool))
             self._floors[int(floor_id)] = state
         return state
 
@@ -298,7 +408,9 @@ class SightLedger:
         self.stats["frames"] += 1
         k = camera.intrinsics
         half_vfov = math.atan(0.5 * float(k.height) / float(k.fy))
+        half_fov = math.atan(0.5 * float(k.width) / float(k.fx))
         band = floor_band(float(camera.height_m), pitch, half_vfov, float(camera.min_depth_m), float(camera.max_depth_m))
+        self._observe_cells(state, world, pose, camera, pitch, half_vfov, half_fov, band)
         if band is None:
             self.stats["frames_without_band"] += 1
             return 0
@@ -306,11 +418,40 @@ class SightLedger:
         if far <= near:
             self.stats["frames_without_band"] += 1
             return 0
-        half_fov = math.atan(0.5 * float(k.width) / float(k.fx))
         marked = self._cast(state, world, (pose.x, pose.y), float(pose.yaw), half_fov, near, far,
                             key=self._pose_key(pose.x, pose.y, pose.yaw))
         self.stats["cells_marked"] += marked
         return marked
+
+    def _observe_cells(self, state, world, pose, camera, pitch, half_vfov, half_fov, floor):
+        """Mark the free cells this frame OBSERVED from within detection range (the room extents' coverage)."""
+        s = self.settings
+        # Credited from the camera outward, not from the depth sensor's near clip: an object within half a
+        # metre of the camera fills the colour frame, and the floor there is where the agent stands.
+        band = object_band(float(camera.height_m), pitch, half_vfov, 0.0,
+                           float(camera.max_depth_m), float(s.object_band_m[0]), float(s.object_band_m[1]))
+        if band is None:
+            return 0
+        near, far = band[0], min(band[1], float(s.detect_range_m), float(camera.max_depth_m))
+        if far <= near:
+            return 0
+        # Unknown floor inside the camera's blind radius is passed over, as the look-through cast passes it.
+        blind = far if floor is None else floor[0] + s.near_margin_m
+        seen = cone_observed(world, (pose.x, pose.y), float(pose.yaw), half_fov, near, far, blind_m=blind)
+        fresh = int((seen & ~state.observed).sum())
+        state.observed |= seen
+        self.stats["cells_observed"] = self.stats.get("cells_observed", 0) + fresh
+        return fresh
+
+    def observed_mask(self, world, floor_id=None):
+        """``(H, W)`` bool: the free cells of the storey the camera has seen from within ``detect_range_m``.
+
+        Keyed by map cell, never by room: the room extents read each
+        room's share of it off the live partition, so a room renumbered,
+        merged or split by the watershed keeps its coverage.
+        """
+        state = self._floor(self._floor_id(floor_id), world.grid.shape)
+        return state.observed
 
     def _pose_key(self, x, y, yaw):
         s = self.settings
@@ -442,7 +583,8 @@ class SightLedger:
             out["floors"][str(floor)] = {"poses": len(state.poses),
                                          "looked_cells": int((state.looked > 0).sum()),
                                          "looked_%d+" % self.settings.min_looks:
-                                             int((state.looked >= self.settings.min_looks).sum())}
+                                             int((state.looked >= self.settings.min_looks).sum()),
+                                         "observed_cells": int(state.observed.sum())}
         return out
 
 

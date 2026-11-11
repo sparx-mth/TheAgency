@@ -7,8 +7,8 @@ from sparx_agency.core.mapping.topology.search_node_oracle import (
     HOME_FLOOR, OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, SOURCE_FLAT,
     SOURCE_LLM, STAIRS, STAIRS_SUPPLEMENT, SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, USABLE_SOURCES,
     SearchContext, SearchNode, SearchNodeOracle,
-    budget_line, coarse_seconds, floor_unexplored, format_exits, format_node, format_prompt, normalise, parse_home_here,
-    parse_pass, parse_reply, system_prompt)
+    budget_line, coarse_seconds, floor_unexplored, format_coverage, format_exits, format_node, format_prompt, format_size,
+    normalise, parse_home_here, parse_pass, parse_reply, system_prompt)
 
 
 class Scripted:
@@ -94,14 +94,47 @@ def test_a_rooms_exits_are_attributes_on_its_line_and_the_rule_ties_them_to_the_
                  "Exits of a hallway, a corridor or an unidentified room are valued by what the home still lacks",
                  "offered again for what lies BEHIND them"):
         assert rule in SYSTEM_PROMPT, rule
-    assert "id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)" in SYSTEM_PROMPT, (
-        "the worked example values rooms by their exits")
+    assert ("id=5  ROOM  type=bedroom  size=at least 9m2 (3.5+ x 3m, 1 wall not seen yet)  observed=40% of the mapped "
+            "part  frontier=1  exits=1 (1 doorway)") in SYSTEM_PROMPT, "the worked example values rooms by their exits"
     assert "  OPENING  " not in SYSTEM_PROMPT, "no opening node line in the room-level prompt"
     assert system_prompt([hallway, KITCHEN], SearchContext(HOUSE)) == SYSTEM_PROMPT, "no exit node offered: no supplement"
     # The attributes change the prompt the way any fact does, and an unchanged map keeps it byte-identical.
     assert format_prompt("toilet", [hallway]) != format_prompt("toilet", [SearchNode(7, ROOM, "hallway", frontier_clusters=1,
                                                                                       last_inside_ago_s=4.0)])
     assert format_prompt("toilet", [hallway]) == format_prompt("toilet", [hallway])
+
+
+def test_a_rooms_size_says_whether_its_walls_are_seen_and_how_much_of_it_was_observed():
+    """Room extents (2026-11-11): the size is FINAL only when every wall is located, a LOWER BOUND otherwise, and
+    the line carries how much of the mapped floor the camera has looked at from detection range."""
+    bounded = SearchNode(3, ROOM, "bedroom", area_m2=11.2, footprint_m2=12.6, length_m=4.1, width_m=3.05,
+                         walls_seen=4, bounded=True, observed_fraction=0.87, last_inside_ago_s=5.0)
+    assert format_node(bounded) == ("id=3  ROOM  type=bedroom  size=13m2 (4x3m, all walls seen)  observed=80% of it  "
+                                    "frontier=0  exits=0  status=entered  searched=0s  seen: nothing yet")
+    partial = SearchNode(4, ROOM, "unknown", area_m2=6.0, footprint_m2=6.0, length_m=4.9, width_m=2.4,
+                         length_final=False, width_final=True, walls_seen=3, bounded=False, observed_fraction=0.55)
+    assert format_size(partial) == "at least 6m2 (5+ x 2.5m, 1 wall not seen yet)"
+    assert format_coverage(partial) == "50% of the mapped part"
+    sliver = SearchNode(5, ROOM, "unknown", area_m2=0.3, footprint_m2=0.3, length_m=0.9, width_m=0.3,
+                        length_final=False, width_final=False, walls_seen=1, bounded=False, observed_fraction=0.0)
+    assert format_size(sliver) == "under 1m2 mapped so far (1+ x 0.5+m, 3 of 4 walls not seen yet)"
+    assert format_coverage(sliver) == "0% of the mapped part"
+    # Without the extents (an older rig, a storey before its first frame) the line reads as before.
+    assert format_size(UNKNOWN) == "18m2" and format_coverage(UNKNOWN) is None
+    assert "observed=" not in format_node(UNKNOWN)
+    assert format_size(SearchNode(6, ROOM, "unknown", area_m2=0.4)) == "under 1m2"
+    assert format_size(SearchNode(7, ROOM, "unknown")) == "unknown size"
+    # Coverage is shown in tens rounded down, so a frame that saw three more cells does not change the prompt.
+    a = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, observed_fraction=0.81)])
+    b = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, observed_fraction=0.89)])
+    assert a == b
+    assert a != format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, observed_fraction=0.90)])
+    for rule in ("is FINAL -- the room is that big and no bigger", "is a LOWER BOUND", "observed=",
+                 "NOT where the robot walked", "SIZE AND COVERAGE decide how much of a room is LEFT",
+                 "as good as scanned whatever searched= reads", "takes many actions while much of it is left",
+                 "never read a size of \"at least\" as the room's", "time spent in a room with nothing left of it"):
+        assert rule in SYSTEM_PROMPT, rule
+    assert "size=12m2 (4x3m, all walls seen)  observed=90% of it" in SYSTEM_PROMPT, "the example shows the new fields"
 
 
 def test_the_single_storey_prompt_has_no_storey_lines_and_no_stairs_rules():

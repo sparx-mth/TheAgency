@@ -8,6 +8,7 @@ import numpy as np
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenham
 from sparx_agency.core.mapping.topology.frontier_split import side_min_cells, side_window_cells
 from sparx_agency.core.mapping.topology.room_adjacency import room_adjacency
+from sparx_agency.core.mapping.topology.room_extent import ExtentParams, room_extents
 from sparx_agency.core.mapping.topology.room_registry import RoomRegistry
 from sparx_agency.core.mapping.topology.room_stats import count_frontier_clusters, link_doors, door_room_pairs
 from sparx_agency.core.mapping.topology.room_watershed import (
@@ -148,6 +149,20 @@ class ObservedSceneGraph:
         #: OCCUPIED, so no room counts a boundary toward them and no goal is made of
         #: it. None reads the frontier off the map as it is.
         self.resolved_provider = None
+        #: Optional ``world -> (H, W) bool`` naming the free cells the camera has seen
+        #: from within detection range (:meth:`~sightlines.SightLedger.observed_mask`),
+        #: per storey and per cell. Each room's share of it is its ``seen=`` coverage
+        #: on the node line. None reads every room at 0 % observed.
+        self.observed_provider = None
+        #: ``{pid: RoomExtent}`` from the latest :meth:`update` (``room_extent.room_extents``):
+        #: where each room's walls are, its dimensions, whether its size is final or a
+        #: lower bound, and how much of it the camera has observed. Recomputed from the
+        #: live map and partition on every update, so a renumbered room reads right.
+        self.extents = {}
+        self.extent_params = ExtentParams()
+        #: Whether the latest extents were read with an observation record: without one (no sight ledger, a
+        #: rig that never observed) the nodes' coverage is None and the prompt says nothing of it.
+        self._observed_read = False
 
     def note_pose(self, xy):
         """Remember where the agent stands, for the walked-through thresholds."""
@@ -386,6 +401,7 @@ class ObservedSceneGraph:
             self.refresh_accessibility(world, cost, here_xy, yaw, ranking, preferred_cost, frontier_world=frontier_world)
         self._objects = self._room_objects(world, pid_labels, landmarks)
         self._geometry = self._room_geometry(world, rooms)
+        self.extents = self._room_extents(world, pid_labels, frontier_world, here_xy)
         if not rooms:
             self.label_tracker.update({}, step, changed)
             self.last_reasoning = {}
@@ -493,6 +509,38 @@ class ObservedSceneGraph:
                                    "rooms": sorted({pid - 1 for pair in adjacent for pid in pair}),
                                    "room_pairs": [[a - 1, b - 1] for a, b in adjacent]})
 
+    def _room_extents(self, world, pid_labels, frontier_world, here_xy):
+        """``{pid: RoomExtent}`` -- walls, dimensions, size status and coverage of every room, off the live map.
+
+        The settled unknown (``frontier_world`` has it written OCCUPIED) is
+        closed for the reading as it is for the frontier; the observation
+        record comes from :attr:`observed_provider`.
+        """
+        if not np.any(pid_labels):
+            return {}
+        resolved = None
+        if frontier_world is not world:
+            resolved = (frontier_world.grid == world.values.occupied) & (world.grid == world.values.unknown)
+        observed = None
+        if self.observed_provider is not None:
+            observed = self.observed_provider(world)
+            if observed is not None and np.asarray(observed).shape != world.grid.shape:
+                observed = None
+        self._observed_read = observed is not None
+        values = world.values
+        return room_extents(world.grid, pid_labels, world.resolution, (world.origin_x, world.origin_y),
+                            free_value=values.free, occupied_value=values.occupied, unknown_value=values.unknown,
+                            observed=observed, resolved=resolved, here_xy=here_xy, params=self.extent_params,
+                            previous=self.extents)
+
+    def extent_of(self, pid):
+        """The room's :class:`~room_extent.RoomExtent` from the latest update, or None."""
+        return self.extents.get(pid)
+
+    def extent_records(self):
+        """``{str(pid): RoomExtent.to_record()}`` for the recording: every room's walls, size status and coverage."""
+        return {str(pid): extent.to_record() for pid, extent in sorted(self.extents.items())}
+
     def _room_geometry(self, world, rooms):
         """``{pid: {"area_m2", "elongation", "doors"}}`` -- what the room classifier is told of each room's shape.
 
@@ -574,10 +622,21 @@ class ObservedSceneGraph:
             objects = tuple(self._objects.get(pid, ()))
             finished = scanned.get(pid)
             gaps = exits.get(pid)
+            extent = self.extents.get(pid)
             out.append(SearchNode(
                 id=pid, kind=ROOM, label=labels[pid].label if pid in labels else "unknown",
                 tentative=metadata.get(pid, {}).get("strength") == "weak",
                 area_m2=room.n_cells * world.resolution ** 2,
+                footprint_m2=0.0 if extent is None else float(extent.area_m2),
+                length_m=0.0 if extent is None else float(extent.length_m),
+                width_m=0.0 if extent is None else float(extent.width_m),
+                length_final=True if extent is None else bool(extent.length_final),
+                width_final=True if extent is None else bool(extent.width_final),
+                walls_seen=None if extent is None else int(extent.walls_seen),
+                bounded=None if extent is None else bool(extent.bounded),
+                observed_fraction=(None if extent is None or not self._observed_read
+                                   else float(extent.observed_fraction)),
+                open_perimeter_m=0.0 if extent is None else float(extent.open_perimeter_m),
                 frontier_clusters=0 if fact is None else int(fact.frontier_clusters),
                 searched_s=float(self.searched.get(pid, 0.0)),
                 last_inside_ago_s=None if inside is None else max(0.0, (int(step) - inside) * action_time_s),
@@ -612,7 +671,8 @@ class ObservedSceneGraph:
                                                   "pass_verdict": None},
                                        "doors": self.doors, "nodes": [], "excluded": sorted(int(p) for p in exclude),
                                        "label_history": list(self.label_tracker.history),
-                                       "partition_revision": self.partition_revision}
+                                       "partition_revision": self.partition_revision,
+                                       "extents": self.extent_records()}
                 self.p_present = 0.0
                 return
             result = self.oracle.probabilities(target.query, nodes, context)
@@ -633,4 +693,5 @@ class ObservedSceneGraph:
                                "oracle": asdict(result), "doors": self.doors,
                                "nodes": [asdict(n) for n in nodes], "excluded": sorted(int(p) for p in exclude),
                                "label_history": list(self.label_tracker.history),
-                               "partition_revision": self.partition_revision}
+                               "partition_revision": self.partition_revision,
+                               "extents": self.extent_records()}

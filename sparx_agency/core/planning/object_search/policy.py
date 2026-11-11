@@ -45,6 +45,7 @@ from sparx_agency.core.planning.object_search.rooms.opening_nodes import Opening
 from sparx_agency.core.planning.object_search.exploration.path_glances import GlanceScheduler, GlanceSettings
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
 from sparx_agency.core.planning.object_search.world_model.map_ledger import MapChangeLedger
+from sparx_agency.core.mapping.topology.room_extent import ExtentParams
 from sparx_agency.core.planning.object_search.rooms.room_scans import RoomScanLedger
 from sparx_agency.core.planning.object_search.world_model.sightlines import SightLedger, SightSettings
 from sparx_agency.core.planning.object_search.multifloor.spawn_floor_guard import SpawnFloorGuard
@@ -98,6 +99,9 @@ class RPTSearchPolicy:
         self.escape_settings = EscapeSettings()
         self.glance_settings = GlanceSettings(geometric_enabled=s.geometric_glances)
         self.sight_settings = SightSettings()
+        # The room extents (2026-11-11): where each room's walls are, its size as final or a lower bound,
+        # and how much of it the camera has observed from detection range -- the oracle's size= and observed=.
+        self.extent_params = ExtentParams()
         self.target_projector = None  # optional simulator-local geometry, never goal annotations
 
     def configuration(self):
@@ -120,10 +124,22 @@ class RPTSearchPolicy:
                               rule="unknown looked through from %d poses within %.1f m without a depth return, and "
                                    "enclosed unknown pockets under %.1f m2 that nothing could stand in (inscribed width "
                                    "under %.1f m, or stood on by the agent), are settled: not frontier, not openings, "
-                                   "not glance gain; the planner and the display keep the real map"
+                                   "not glance gain; the planner and the display keep the real map; every free cell "
+                                   "seen within %.1f m with a clear line of sight, at a pitch that puts an object body "
+                                   "%.1f-%.1f m tall in the frame, is OBSERVED (per cell, per storey)"
                                    % (self.sight_settings.min_looks, self.sight_settings.far_m,
-                                      self.sight_settings.pocket_max_m2, self.sight_settings.pocket_max_width_m)
+                                      self.sight_settings.pocket_max_m2, self.sight_settings.pocket_max_width_m,
+                                      self.sight_settings.detect_range_m, self.sight_settings.object_band_m[0],
+                                      self.sight_settings.object_band_m[1])
                               if self.sight_settings.enabled else "none: every unknown cell is an exit"),
+                "room_extents": dict(asdict(self.extent_params),
+                                     rule="every room's boundary faces classified by what lies beyond them (wall, another "
+                                          "room, settled unknown, unseen unknown) and grouped into four sides by outward "
+                                          "normal in the storey's wall frame; a side is seen when at most open_tolerance of "
+                                          "its faces open onto unseen space in runs wider than doorway_max_m; the size is "
+                                          "FINAL with four seen sides, else a lower bound shown as 'at least'; coverage is "
+                                          "the room's share of the observed cells; recomputed from the live map and "
+                                          "partition on every update, keyed by cell, never by room id"),
                 "target_closing": asdict(self.settings.target_closing),
                 "kinematic": dict(asdict(self.settings.kinematic),
                                   rule="every committed route is walked as the action sequence a Hybrid A* over "

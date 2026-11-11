@@ -42,6 +42,12 @@ class FloorContextBank:
         sight = getattr(p, "sight", None)
         if sight is not None:
             p.graph.resolved_provider = sight.resolved
+            # The room extents' coverage: the free cells the camera has seen from within detection
+            # range, per storey and per cell, so a renumbered room keeps its ``observed=`` share.
+            if callable(getattr(sight, "observed_mask", None)):
+                p.graph.observed_provider = sight.observed_mask
+        if getattr(p, "extent_params", None) is not None:
+            p.graph.extent_params = p.extent_params
         p.doors = ObservedDoors(p.door_settings)
         # Classes never merge (since 2026-10-07): a cup on a table, a toilet beside a
         # bathtub, a vase on a cabinet are separate instances whatever their proximity

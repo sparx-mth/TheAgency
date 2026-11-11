@@ -5,6 +5,44 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-11, room extents: where each room's walls are, its size as final or a lower bound, and how much of it the camera has observed)
+- **`core/mapping/topology/room_extent.py`** -- `room_extents()` reads, for every room of the live partition and from
+  the depth-derived map alone, its boundary faces classified by what lies beyond them (a wall, another room, settled
+  unknown, unseen unknown, floor of no room), grouped into four sides in the storey's wall frame (the dominant wall
+  direction from local second moments, so a diagonal wall's staircase is one side); a side is SEEN when at most
+  `open_tolerance` (20 %) of its faces open onto unseen space in runs wider than a doorway (`doorway_max_m` 1.2 m, a
+  jamb at each end, in a side that is mostly located); the room's dimensions along its axes, its footprint area (free
+  cells plus enclosed furniture islands), the line each side stands on and the agent's distance to each when it stands
+  in the room; `bounded` (all four seen: the size is FINAL) or `open_sides` (a LOWER BOUND); and `observed_fraction`,
+  the share of its free cells the camera has seen from within detection range. Recomputed from the live map and
+  partition on every update, keyed by cell, so a room the watershed merges, splits or renumbers reads right.
+- **`SightLedger.observed_mask`** (`world_model/sightlines.py`): per storey and per cell, the free cells seen within
+  `SightSettings.detect_range_m` (4 m, the loop's `scan_seen_range_m`) with a clear line of sight, at a pitch that puts
+  an object body `object_band_m` (0.3-1.0 m) tall in the frame (`object_band`, `cone_observed`); credited from the
+  camera outward, with the blind radius' unknown passed over as the look-through cast passes it. ~0.5 ms a frame.
+- **The oracle's room line** (`search_node_oracle.py`): `size=12m2 (4x3m, all walls seen)` when final,
+  `size=at least 12m2 (5+ x 3m, 1 wall not seen yet)` when not (the `+` marks the dimension cut short; a sliver reads
+  `under 1m2 mapped so far`), and `observed=80% of it` / `observed=60% of the mapped part` in tens rounded down. The
+  system prompt explains both, rules that SIZE AND COVERAGE decide how much of a room is LEFT -- all walls seen and
+  observed 90 %+ without the target is as good as scanned whatever `searched=` reads; a room of "at least" size or
+  observed under 50 % keeps its value after a long `searched=` -- and its worked example shows the new lines.
+  `SearchNode` carries `footprint_m2`, `length_m`, `width_m`, `length_final`, `width_final`, `walls_seen`, `bounded`,
+  `observed_fraction`, `open_perimeter_m`; `last_reasoning["extents"]`, the step snapshot's `extent` per room and
+  `configuration()["room_extents"]` record them. The agent's wall distances are recorded, not shown: the prompt
+  forbids distance reasoning (RPT* charges travel).
+- **`room_extent_replay.py`**: a recording replayed through the mechanism offline (the map journal's maps and
+  partitions, the observed record rebuilt from the recorded poses with the benchmark camera), with checks -- the
+  observed floor conserved across the partition's changes, growth after a FINAL reading classified as a merge, a moved
+  cut, a fragment or a BREACH. Over 52 HM3D recordings (54,196 room-action readings, 1,565 partition changes, 420 rooms
+  declared final): 256 merges, 65 moved cuts, 4 fragments, 2 breaches.
+- **`mp3d/room_extent_ground_truth.py`**: the mechanism against Matterport's `.house` room polygons, the benchmark
+  camera simulated on the true floor plans from the panorama positions. Over the 90 scenes (1,242 rooms of 3 m2 and
+  more): as first seen from the door every room reads a lower bound and none overstates the true area (median 50 % of
+  it mapped); scanned from inside, 91 % read final, area within 5.5 % (median; 11 % p90, always under -- the half cell
+  a wall takes per side) and dimensions within 0.13 m (median; 0.26 m p90) of the annotation; 17 of 1,134 final
+  readings under 80 % of the truth, mostly stairs and metre-wide hallways. The HM3D and MP3D cameras were checked
+  against habitat-lab's `objectnav_hm3d.yaml` / `objectnav_mp3d.yaml` (640x480, 79 degrees, 0.88 m, 0.5-5 m,
+  identical); the mechanism reads the camera off the observation and carries no dataset-specific setting.
 ### Added (2026-11-11, the HM3D v1 val ground-truth run with the 14B in both LLM roles: what it needed to run unattended and be read)
 - **A per-step heartbeat for the stall watchdog** (`progress.ProgressTracker.heartbeat`, `heartbeat.json` beside
   `progress.json`, rewritten at most every 30 s from `ProgressEnv.step`; `scene_pool.HEARTBEAT_FILES` watches it):
