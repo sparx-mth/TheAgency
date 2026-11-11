@@ -5,7 +5,8 @@
 #                           [--arm without|with|both] [--report-only <root>] [-- <extra run.py args>]
 #
 # Arm "without" runs the repository as it stood BEFORE the mechanism (a detached worktree at --without-ref, created
-# under $REPO.worktrees/ab-without-room-extents if missing); arm "with" runs THIS checkout. Both arms:
+# beside this checkout as <main>.worktrees/ab-without-room-extents if missing); arm "with" runs THIS checkout -- the
+# branch feat/objnav-room-extents-nadav, whose name and commit are written into the output as provenance. Both arms:
 #   * the 200 episodes of sets/hm3d_v1_val_rep200.json (--episode-ids-file), HM3D v1 val, one process per scene;
 #   * ground-truth perception (the search alone is under test; no detector or segmenter is started);
 #   * qwen2.5:3b-instruct in BOTH LLM roles, on an Ollama of their own (LLM_BASE_URL port 11436 by default) so the
@@ -114,6 +115,7 @@ if [[ "$ARM" == both || "$ARM" == without ]]; then
 fi
 mkdir -p "$OUTPUT"
 git -C "$REPO" rev-parse HEAD > "$OUTPUT/with_commit.txt"
+git -C "$REPO" branch --show-current > "$OUTPUT/with_branch.txt" || true
 echo "$WITHOUT_REF" > "$OUTPUT/without_ref.txt"
 cp "$SET_FILE" "$OUTPUT/episode_set.json"
 

@@ -1,5 +1,43 @@
 # Handoff — HM3D ObjectNav benchmark
 
+## 2026-11-11 — Room size and coverage in the room node and the oracle prompt; the fixed 200-episode set; the A/B waits for the card
+
+Branch: **`feat/objnav-room-extents-nadav`** (pushed; renamed from the Copilot worktree branch
+`copilot/worktree-2026-11-11T14-45-49`, which is deleted on origin). Base: `0dd7d39c` on
+`feat/objnav-benchmark-infra-nadav` plus the snapshot `95aae785` of that day's uncommitted work. Commits:
+`6739f3d3` (the room extents: walls by side, size FINAL or a LOWER BOUND, the per-cell observed record),
+`acb837bd` (the oracle receives final results only: `covered=` in m2 / share of the whole room / what is left,
+`frontier=… (~N m2 unknown behind them)`, coverage first, time second, no distance, no `here=yes`),
+`991e9be8` (precedents), `25142615` (the fixed set), `52820b45` (the A/B launcher and report).
+
+**What to run next, on the GPU machine, once the 14B ground-truth run (`runs/gt_oracle_2000ep_14b_20261111T114322Z`)
+has finished or the card has ~5.5 GB free:**
+
+```bash
+cd ~/GIT/TheAgency && git fetch --prune origin && git switch feat/objnav-room-extents-nadav
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --dry-run    # plan + resource verdict
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --jobs 2     # both arms (~7 h), then the report
+# later, or again: sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --report-only runs/ab_room_extents_<stamp>
+```
+
+Arm "without" is a detached worktree at `95aae785` (made beside the checkout as `TheAgency.worktrees/ab-without-room-extents`),
+arm "with" the branch; both on `hm3d/sets/hm3d_v1_val_rep200.json` (10 per scene, categories 37/36/36/36/35, plant 20;
+158 same-storey / 42 cross-storey goals), ground-truth perception, `qwen2.5:3b-instruct` in both LLM roles on an
+Ollama of its own (port 11436), temperature 0, seed 17, `LLM_EXCLUSIVE=1`, arm-without recording its answers and
+arm-with replaying them, `--record` on both. The launcher refuses to start below `AB_MIN_FREE_MIB` (5,500) free: on
+2026-11-11 17:20 the card had 1.8 GB free beside the 14B run, so nothing was launched. The report
+(`ab_room_extents_report.py`, `runs/ab_room_extents_<stamp>/ab_report.md`) gives SR / SPL / SoftSPL / DTG per arm with
+paired intervals and McNemar, improved / worse / same, same- vs cross-storey, and for every changed episode the first
+oracle round whose order differs with both arms' room lines and numbers, the coverage-driven partings as examples.
+
+Validation so far is offline: 1,713 tests pass (the 20 failures are the pre-existing skfmm / v2-split ones);
+52 HM3D recordings replayed through the mechanism (`room_extent_replay.py`); the MP3D `.house` room polygons as ground
+truth for the sizes (`mp3d/room_extent_ground_truth.py`: scanned rooms within 5.5 % of the annotated area at the
+median, a room seen from its door never overstated). The literature survey behind the design is in the module docstring
+of `core/mapping/topology/room_extent.py` (RATE-Nav, Luperto 2021, MoMa-LLM, Bormann 2016).
+
+---
+
 ## 2026-10-29 — The ground-truth oracle ran the full v1 val split with the 3B model in both LLM roles
 
 Branch: `feat/objnav-habitat-hm3d-nadav`, tree at `50bbd877`. The HM3D-Semantics v0.1 val annotations are now
