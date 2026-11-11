@@ -13,8 +13,8 @@ from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.dataset import GibsonDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import GibsonEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
-    LEAN_DROP_KEYS, LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker, describe_progress, human_duration,
-    lean_episode_info, shard_progress_files)
+    HEARTBEAT_INTERVAL_S, HEARTBEAT_NAME, LEAN_DROP_KEYS, LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker,
+    describe_progress, human_duration, lean_episode_info, shard_progress_files)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_gibson import (
     LinePolicy, LineSimulator, semantic, write_dataset)  # noqa: F401  (the fixture)
@@ -62,6 +62,32 @@ def test_the_tracker_keeps_running_metrics_per_scene_and_category_and_writes_the
     assert "AGENT ERROR" in tracker.console_line()
     tracker.finish()
     assert json.loads(path.read_text())["finished_utc"] is not None
+
+
+def test_the_tracker_heartbeats_every_half_minute_of_a_running_episode_so_the_stall_watchdog_can_see_it(tmp_path, monkeypatch):
+    """Without ``--record`` a child writes nothing between episodes; the heartbeat is what the pool watches."""
+    import sparx_agency.tasks.planning.objnav_benchmark_runtime.progress as progress_module
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime import scene_pool
+
+    clock = [1000.0]
+    monkeypatch.setattr(progress_module.time, "time", lambda: clock[0])
+    path = tmp_path / "scene" / "progress.json"
+    tracker = ProgressTracker(path, total=2, label="unit")
+    beat = path.with_name(HEARTBEAT_NAME)
+    assert beat.name in scene_pool.HEARTBEAT_FILES, "the pool must watch the file the tracker writes"
+    assert not beat.exists(), "no episode in progress, no heartbeat"
+    tracker.begin("Collierville/000000")
+    first = json.loads(beat.read_text())
+    assert first["episode"]["episode_id"] == "Collierville/000000" and first["steps_this_episode"] == 0
+    clock[0] += 10.0
+    for _ in range(5):
+        tracker.heartbeat()
+    assert json.loads(beat.read_text()) == first, "rewritten at most every HEARTBEAT_INTERVAL_S, however many steps"
+    clock[0] += HEARTBEAT_INTERVAL_S
+    tracker.heartbeat()
+    second = json.loads(beat.read_text())
+    assert second["steps_this_episode"] == 6 and second["utc"] != first["utc"]
+    assert scene_pool.scene_heartbeat(tmp_path, "scene") == pytest.approx(beat.stat().st_mtime)
 
 
 def test_a_resumed_run_is_seeded_with_the_rows_on_disk_but_the_eta_comes_from_this_session(tmp_path):

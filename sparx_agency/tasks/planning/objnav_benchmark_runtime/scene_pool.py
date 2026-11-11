@@ -53,9 +53,10 @@ def console_log_path(root, scene):
     return Path(root) / ("%s.console.log" % scene)
 
 
-#: The files a scene child rewrites while it works: ``live.json`` on every action (``--record``),
+#: The files a scene child rewrites while it works: ``heartbeat.json`` every half-minute of a running episode
+#: (``progress.ProgressTracker.heartbeat``, recording or not), ``live.json`` on every action (``--record``),
 #: ``progress.json`` and ``episodes.jsonl`` after every episode, and its console log.
-HEARTBEAT_FILES = ("live.json", "progress.json", "episodes.jsonl")
+HEARTBEAT_FILES = ("heartbeat.json", "live.json", "progress.json", "episodes.jsonl")
 #: The exit code a child killed for stalling is recorded under (what ``kill -9`` leaves).
 STALLED_RETURNCODE = -9
 

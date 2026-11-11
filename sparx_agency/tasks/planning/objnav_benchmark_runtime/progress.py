@@ -36,6 +36,13 @@ from sparx_agency.tasks.planning.objnav_benchmark.records import EpisodeRecord
 
 UTC = "%Y-%m-%dT%H:%M:%SZ"
 
+#: The file the tracker rewrites while an episode is IN PROGRESS, beside ``progress.json``, so a campaign's stall
+#: watchdog (``scene_pool.HEARTBEAT_FILES``) can tell a long episode from a dead worker without ``--record``: without
+#: a recording nothing else is written between episodes, and an HM3D episode has run over an hour under a loaded LLM.
+HEARTBEAT_NAME = "heartbeat.json"
+#: Seconds between heartbeat rewrites; a step is far more frequent, and one write a half-minute is nothing.
+HEARTBEAT_INTERVAL_S = 30.0
+
 #: The policy diagnostics a lean record keeps whole (all small, all counters or verdicts).
 LEAN_POLICY_KEYS = ("method", "rooms", "max_rooms", "landmarks", "warmup", "llm_queries", "oracle_reuses", "llm_answers",
                     "room_label_queries", "room_labels_held", "room_labels_dining_downgraded", "room_labels_shape_ruled",
@@ -136,6 +143,8 @@ class ProgressTracker:
         self.last = None        # type: Optional[Dict[str, Any]]
         self.finished_utc = None  # type: Optional[str]
         self.resumed_from = len(completed)
+        self._heartbeat_at = 0.0
+        self._heartbeat_steps = 0
         for record in completed:
             self._fold(record)
         self.write()
@@ -145,7 +154,27 @@ class ProgressTracker:
         """An episode started: remembered for the file (and for a reader of a killed run)."""
         scene = episode_id.split("/")[0] if "/" in episode_id else None
         self.current = {"episode_id": episode_id, "scene": scene, "started_utc": _utc(), "started_at": time.time()}
+        self._heartbeat_steps = 0
         self.write()
+        self.heartbeat(force=True)
+
+    def heartbeat(self, force: bool = False) -> None:
+        """Rewrite :data:`HEARTBEAT_NAME` beside the progress file, at most every :data:`HEARTBEAT_INTERVAL_S`.
+
+        Called on every step of the episode in progress (``ProgressEnv.step``). The file's mtime is what the
+        campaign's stall watchdog reads; its content (the episode, its step count so far, the time) is for a
+        person reading a run that looks quiet.
+        """
+        self._heartbeat_steps += 1
+        now = time.time()
+        if not force and now - self._heartbeat_at < HEARTBEAT_INTERVAL_S:
+            return
+        self._heartbeat_at = now
+        current = dict(self.current or {})
+        current.pop("started_at", None)
+        _write_atomically(self.path.with_name(HEARTBEAT_NAME),
+                          json.dumps({"utc": _utc(now), "episode": current or None,
+                                      "steps_this_episode": self._heartbeat_steps - 1}))
 
     # -- after an episode ---------------------------------------------------------
     def update(self, position: int, total: int, record: EpisodeRecord) -> str:
@@ -263,6 +292,7 @@ class ProgressEnv(ObjNavEnv):
         return self.env.reset(episode_id)
 
     def step(self, action):
+        self.tracker.heartbeat()
         return self.env.step(action)
 
     @property
