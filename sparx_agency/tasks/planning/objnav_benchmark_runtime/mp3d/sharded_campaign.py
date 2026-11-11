@@ -20,7 +20,7 @@ import subprocess
 import time
 
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import strict_json, write_atomically
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.campaign import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.campaign_common import (
     RESUME_ACCEPTANCE_FLAG, split_resume_acceptance)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import MP3DDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import protocol_for

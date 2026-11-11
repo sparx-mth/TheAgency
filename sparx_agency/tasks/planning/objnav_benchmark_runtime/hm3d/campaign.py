@@ -32,9 +32,11 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import (
     CATEGORIES, HM3DDataset, published_counts)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
     PROTOCOLS, protocol_for)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.campaign_common import (  # noqa: F401  (re-exported: the MP3D campaign and the tests read them here)
+    RESUME_ACCEPTANCE_FLAG, episode_plan, split_resume_acceptance)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.scene_pool import (
     run_concurrently)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.smoke_plan import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.smoke_plan import (
     cover_plan, describe)
 
 RUN_MODULE = "sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run"
@@ -90,55 +92,6 @@ def scene_command(scene, output, *, version, episodes_dir, scenes_dir, limit=Non
     if limit is not None:
         command += ["--limit", str(limit)]
     return command + list(extra)
-
-
-#: The child flag that only a resuming child may carry (``run.py``: it requires ``--resume``).
-RESUME_ACCEPTANCE_FLAG = "--resume-accepting-changes"
-
-
-def split_resume_acceptance(extra):
-    """``(rest, acceptance)``: the child arguments without ``--resume-accepting-changes KEY...``, and that group.
-
-    The campaign hands ``extra`` to every child unchanged, but the acceptance
-    is a resume's: ``run.py`` refuses it on a fresh scene. So a resumed root
-    gives it to the scenes that continue and withholds it from the ones that
-    start, and the operator writes the launcher's command line once.
-    """
-    rest, acceptance = [], []
-    tokens = list(extra)
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token == RESUME_ACCEPTANCE_FLAG:
-            acceptance.append(token)
-            index += 1
-            while index < len(tokens) and not str(tokens[index]).startswith("--"):
-                acceptance.append(tokens[index])
-                index += 1
-            continue
-        rest.append(token)
-        index += 1
-    return rest, acceptance
-
-
-def episode_plan(episode_ids, known_scenes):
-    """``{scene: [episode id, ...]}`` from a flat list of ``<scene>/<index>`` ids, scenes in order of first appearance.
-
-    Raises:
-        ValueError: An id is malformed, names a scene the split does not hold, or repeats.
-    """
-    known = set(known_scenes)
-    plan, seen = {}, set()
-    for episode_id in episode_ids:
-        text = str(episode_id)
-        scene, sep, index = text.partition("/")
-        if not sep or not index or scene not in known:
-            raise ValueError("episode id %r is not <scene>/<index> of a scene of this split" % text)
-        if text in seen:
-            raise ValueError("episode id %r is listed twice" % text)
-        seen.add(text)
-        plan.setdefault(scene, []).append(text)
-    return plan
 
 
 def run_campaign(root, *, version, episodes_dir, scenes_dir, limit=None, scenes=None,

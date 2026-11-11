@@ -38,11 +38,11 @@ import sys
 from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import (
     read_episode_rows, strict_json, write_atomically)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.campaign import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.campaign_common import (
     RESUME_ACCEPTANCE_FLAG, episode_plan, split_resume_acceptance)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.scene_pool import (
     run_concurrently)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.smoke_plan import (
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.smoke_plan import (
     cover_plan, describe)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import (
     CATEGORIES, MP3DDataset, published_counts)

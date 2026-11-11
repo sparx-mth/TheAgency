@@ -9,7 +9,18 @@ in what they tell the one search algorithm.
 """
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
+import json
+import math
 import os
+import subprocess
+
+from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
+from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
+    LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 
 #: How many validated starts must reproduce the publisher's own geodesic
 #: distance to within a millimetre before the run is allowed to proceed. Not
@@ -144,3 +155,119 @@ def oracle_alive(live, row, limit=None):
         raise RuntimeError("The node oracle answered nothing in %d episodes in a row (the last: %s); the run is no "
                            "longer measuring the method. Fix the LLM service and --resume."
                            % (live["oracle_dead"], getattr(row, "episode_id", "?")))
+
+
+def runtime_record(issues):
+    """Version every package whose behaviour could change a number (``RUNTIME_PACKAGES``); a missing one is an issue."""
+    packages = {}
+    for module, distribution in RUNTIME_PACKAGES:
+        try:
+            loaded = importlib.import_module(module)
+            try:
+                packages[distribution] = importlib.metadata.version(distribution)
+            except importlib.metadata.PackageNotFoundError:
+                packages[distribution] = getattr(loaded, "__version__", "unknown")
+        except (ImportError, OSError) as exc:
+            issues.append("%s unavailable: %s" % (module, exc))
+    return packages
+
+
+def gpu_gate(args):
+    """Refuse to share the rendering GPU with a resident model by accident."""
+    if args.allow_shared_gpu or getattr(args, "software_render", False):
+        return
+    result = subprocess.run(
+        ["nvidia-smi", "--id=%d" % args.gpu_device, "--query-gpu=memory.used",
+         "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
+    if int(result.stdout.strip()) > 512:
+        raise RuntimeError("Rendering GPU is occupied; run the models on CPU or "
+                           "another device, or pass --allow-shared-gpu explicitly")
+
+
+def finite_or_none(value):
+    """A non-finite float as None, for the JSON sidecar; anything else as it is."""
+    return None if isinstance(value, float) and not math.isfinite(value) else value
+
+
+def live_hooks(args, output, scored_env, total, label):
+    """The ``wrap_env`` and per-episode callback that keep ``progress.json`` and the diagnostics sidecar.
+
+    The sidecar holds evaluator-only values and is never injected into observations or ``agent_info``.
+    """
+    live = {}
+
+    def wrap_env(env, logger):
+        live["tracker"] = ProgressTracker(
+            args.progress_file or output / "progress.json", total,
+            completed=logger.records, label=label)
+        return ProgressEnv(env, live["tracker"])
+
+    def progress(index, total_count, row):
+        oracle_alive(live, row)
+        diagnostics = {key: finite_or_none(value)
+                       for key, value in scored_env.evaluation_diagnostics().items()}
+        with (output / "evaluation_diagnostics.jsonl").open("a") as stream:
+            stream.write(json.dumps(dict(diagnostics, episode_id=row.episode_id), allow_nan=False) + "\n")
+        print(live["tracker"].update(index, total_count, row), flush=True)
+
+    return live, wrap_env, progress
+
+
+def run_main(argv, *, benchmark, parser, label_mapper, protocol_for, prepare, write_report,
+             frozen_lock=None, expected_episode_ids=None):
+    """The one ``main`` of every Habitat entrypoint, given the adapter's own parts.
+
+    Args:
+        argv: The command line (None for ``sys.argv``).
+        benchmark: The dataset's short name for the progress label (``"hm3d"``, ``"mp3d"``).
+        parser: The adapter's ``parser()`` factory.
+        label_mapper: The adapter's label-table factory (``--print-vocabulary``).
+        protocol_for: ``version -> protocol`` (the adapter's registry).
+        prepare: The adapter's ``prepare(args)``: ``(env, policy, label_mapper, config, issues)``.
+        write_report: The adapter's ``report.write_report(output)``.
+        frozen_lock, expected_episode_ids: Handed to ``run_evaluation`` unchanged.
+    """
+    args = parser().parse_args(argv)
+    if args.print_vocabulary:
+        print(",".join(label_mapper().vocabulary()))
+        return 0
+    if args.resume and args.output is None:
+        parser().error("--resume requires --output")
+    if args.resume_accepting_changes and not args.resume:
+        parser().error("--resume-accepting-changes requires --resume")
+    protocol = protocol_for(args.version).with_split(args.split)
+    env, policy, mapper, config, issues = prepare(args)
+    closed = False
+    try:
+        if issues:
+            print(json.dumps({"ready": False, "issues": issues}, indent=2))
+            return 1
+        if args.preflight:
+            print(json.dumps({"ready": True, "configuration": config}, indent=2,
+                             default=str))
+            return 0
+        gpu_gate(args)
+        output = args.output or default_run_dir(protocol.benchmark, protocol.split)
+        selected = tuple(config["selected_episode_ids"])
+        total = len(selected)
+
+        scope = ", ".join(part for part in (args.category, *(args.scenes or ())) if part)
+        live, wrap_env, progress = live_hooks(
+            args, output, env, total, "%s %s %s%s" % (
+                benchmark, args.version, protocol.split, " (%s)" % scope if scope else ""))
+        summary = run_evaluation(
+            env, policy, mapper, output=output, config=config,
+            settings=protocol.evaluation_settings(), episode_ids=selected,
+            resume=args.resume, accept_changes=tuple(args.resume_accepting_changes), frozen_lock=frozen_lock,
+            expected_episode_ids=expected_episode_ids, record=args.record,
+            video_fps=args.video_fps, save_frames=args.save_frames, progress=progress, wrap_env=wrap_env,
+            agent_class=LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent)
+        live["tracker"].finish()
+        closed = True  # run_evaluation closes the environment itself
+        write_report(output)
+        print("Results: %s (%d of %d episodes)"
+              % (output, summary.overall.n_episodes, total))
+        return 0
+    finally:
+        if env is not None and not closed:
+            env.close()

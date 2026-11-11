@@ -88,7 +88,7 @@ RUN_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.run
 CAMPAIGN_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.campaign
 ASSETS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.assets
 PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
-POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.scene_pool   # the pool is dataset-agnostic
+POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.scene_pool   # the pool is dataset-agnostic
 
 # -- the command line -----------------------------------------------------------------------
 EPISODE_FILE="" VERSION="v1" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=() STALL_MINUTES=""

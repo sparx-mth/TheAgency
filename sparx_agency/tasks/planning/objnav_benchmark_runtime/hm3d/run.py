@@ -12,33 +12,26 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-import importlib
-import importlib.metadata
 import json
-import math
 import os
 from pathlib import Path
 import subprocess
 
-from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
 from sparx_agency.core.planning.objnav.labels.datasets.hm3d import hm3d_label_mapper
-from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
     PERCEPTION_GROUND_TRUTH, add_detector_options)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import (  # noqa: F401  (StopDiagnostic re-exported for the sibling CLIs)
     AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy)
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
-    LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
     episodes_of_category, explicit_episodes, gpu_plan_record, select_episodes)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.entrypoint import (  # noqa: F401  (re-exported: the sibling CLIs and the tests read them here)
     GEODESIC_AGREEMENT_FRACTION, GEODESIC_AGREEMENT_MIN_MISSES, GEODESIC_MISS_MAX_M, RESUMABLE_CONFIG_CHANGES,
-    RUNTIME_PACKAGES, geodesic_agreement_issue, method_defaults, oracle_alive)
+    RUNTIME_PACKAGES, geodesic_agreement_issue, gpu_gate, method_defaults, oracle_alive, run_main, runtime_record)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.dataset import CATEGORIES, HM3DDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.env import HM3DEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import (
     PROTOCOLS, protocol_for)
+
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
@@ -123,21 +116,6 @@ def parser():
     return p
 
 
-def _runtime(issues):
-    """Version every package whose behaviour could change a number."""
-    packages = {}
-    for module, distribution in RUNTIME_PACKAGES:
-        try:
-            loaded = importlib.import_module(module)
-            try:
-                packages[distribution] = importlib.metadata.version(distribution)
-            except importlib.metadata.PackageNotFoundError:
-                packages[distribution] = getattr(loaded, "__version__", "unknown")
-        except (ImportError, OSError) as exc:
-            issues.append("%s unavailable: %s" % (module, exc))
-    return packages
-
-
 def _method(args, protocol, ground_truth=None):
     """Build the search policy and prove its services are the ones recorded.
 
@@ -193,18 +171,6 @@ def ground_truth_issues(dataset, episode_ids=None):
     return issues
 
 
-def _gpu_gate(args):
-    """Refuse to share the rendering GPU with a resident model by accident."""
-    if args.allow_shared_gpu or getattr(args, "software_render", False):
-        return
-    result = subprocess.run(
-        ["nvidia-smi", "--id=%d" % args.gpu_device, "--query-gpu=memory.used",
-         "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
-    if int(result.stdout.strip()) > 512:
-        raise RuntimeError("Rendering GPU is occupied; run the models on CPU or "
-                           "another device, or pass --allow-shared-gpu explicitly")
-
-
 def prepare(args):
     """Assemble the exact run configuration, and every reason it could not run.
 
@@ -241,10 +207,10 @@ def prepare(args):
         except Exception as exc:
             issues.append("Recording: %s" % exc)
     try:
-        _gpu_gate(args)
+        gpu_gate(args)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         issues.append("Rendering GPU: %s" % exc)
-    runtime = _runtime(issues)
+    runtime = runtime_record(issues)
     sim_match = runtime.get("habitat-sim") == protocol.reference_habitat_sim_version
     oracle = args.perception == PERCEPTION_GROUND_TRUTH
     ground_truth = None
@@ -378,80 +344,12 @@ def prepare(args):
     return env, policy, hm3d_label_mapper(), config, issues
 
 
-def _finite_or_none(value):
-    return None if isinstance(value, float) and not math.isfinite(value) else value
-
-
-def _live_hooks(args, output, scored_env, total, label):
-    """The ``wrap_env`` and per-episode callback that keep ``progress.json`` and the diagnostics sidecar.
-
-    The sidecar holds evaluator-only values and is never injected into observations or ``agent_info``.
-    """
-    live = {}
-
-    def wrap_env(env, logger):
-        live["tracker"] = ProgressTracker(
-            args.progress_file or output / "progress.json", total,
-            completed=logger.records, label=label)
-        return ProgressEnv(env, live["tracker"])
-
-    def progress(index, total_count, row):
-        oracle_alive(live, row)
-        diagnostics = {key: _finite_or_none(value)
-                       for key, value in scored_env.evaluation_diagnostics().items()}
-        with (output / "evaluation_diagnostics.jsonl").open("a") as stream:
-            stream.write(json.dumps(dict(diagnostics, episode_id=row.episode_id), allow_nan=False) + "\n")
-        print(live["tracker"].update(index, total_count, row), flush=True)
-
-    return live, wrap_env, progress
-
-
 def main(argv=None, *, frozen_lock=None, expected_episode_ids=None):
-    args = parser().parse_args(argv)
-    if args.print_vocabulary:
-        print(",".join(hm3d_label_mapper().vocabulary()))
-        return 0
-    if args.resume and args.output is None:
-        parser().error("--resume requires --output")
-    if args.resume_accepting_changes and not args.resume:
-        parser().error("--resume-accepting-changes requires --resume")
-    protocol = protocol_for(args.version).with_split(args.split)
-    env, policy, label_mapper, config, issues = prepare(args)
-    closed = False
-    try:
-        if issues:
-            print(json.dumps({"ready": False, "issues": issues}, indent=2))
-            return 1
-        if args.preflight:
-            print(json.dumps({"ready": True, "configuration": config}, indent=2,
-                             default=str))
-            return 0
-        _gpu_gate(args)
-        output = args.output or default_run_dir(protocol.benchmark, protocol.split)
-        selected = tuple(config["selected_episode_ids"])
-        total = len(selected)
-
-        scope = ", ".join(part for part in (args.category, *(args.scenes or ())) if part)
-        live, wrap_env, progress = _live_hooks(
-            args, output, env, total, "hm3d %s %s%s" % (
-                args.version, protocol.split, " (%s)" % scope if scope else ""))
-        summary = run_evaluation(
-            env, policy, label_mapper, output=output, config=config,
-            settings=protocol.evaluation_settings(), episode_ids=selected,
-            resume=args.resume, accept_changes=tuple(args.resume_accepting_changes), frozen_lock=frozen_lock,
-            expected_episode_ids=expected_episode_ids, record=args.record,
-            video_fps=args.video_fps, save_frames=args.save_frames, progress=progress, wrap_env=wrap_env,
-            agent_class=LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent)
-        live["tracker"].finish()
-        closed = True  # run_evaluation closes the environment itself
-        from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.report import write_report
-        write_report(output)
-        print("Results: %s (%d of %d episodes)"
-              % (output, summary.overall.n_episodes, total))
-        return 0
-    finally:
-        if env is not None and not closed:
-            env.close()
+    """The HM3D entrypoint: the shared Habitat ``run_main`` with this adapter's parser, table, protocols, preflight and report."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.report import write_report
+    return run_main(argv, benchmark="hm3d", parser=parser, label_mapper=hm3d_label_mapper, protocol_for=protocol_for,
+                    prepare=prepare, write_report=write_report, frozen_lock=frozen_lock,
+                    expected_episode_ids=expected_episode_ids)
 
 
 if __name__ == "__main__":

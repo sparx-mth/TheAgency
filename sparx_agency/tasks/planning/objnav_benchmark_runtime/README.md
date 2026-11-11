@@ -784,9 +784,17 @@ the label tables, never the method:
 3. **Scorer and `ObjNavEnv`.** The benchmark's own distance-to-goal and
    success (`gibson/distance.py`) behind the shared environment contract
    (`gibson/env.py`): `reset` returns the episode and its first observation,
-   `step` the next, `measure` the privileged `EpisodeMeasurement`. A Habitat
-   dataset reuses `habitat/simulator.py` as is -- frames, pose, depth clips,
-   collisions and `scene_structure()` are already in the public frame.
+   `step` the next, `measure` the privileged `EpisodeMeasurement`. A
+   **habitat-lab ObjectNav** dataset subclasses `habitat/env.py::HabitatObjNavEnv`
+   instead and writes nothing of this: the episode, the view-point measure
+   (`habitat/geodesic.py`), start validation against the publisher's geodesics,
+   navmesh provenance and the oracle hand-off are the base class's; the
+   subclass names itself (`BENCHMARK`) and, when its annotations carry several
+   names per instance, overrides `_annotations()` (`mp3d/env.py` is 40 lines).
+   Its dataset must offer `semantic_scene_dataset_config()` beside the episode
+   readers. `habitat/simulator.py` is reused as is -- frames, pose, depth
+   clips, collisions, `scene_structure()` and `semantic_boxes()` are already
+   in the public frame.
 4. **Label table.** `core/planning/objnav/labels/datasets/<dataset>.py`, a
    `TableLabelMapper` registered in `labels/registry.py`: the dataset's goal
    names, the detector prompts in a fixed order, and the labels that count.
@@ -796,6 +804,13 @@ the label tables, never the method:
    `objnav_benchmark.runner.run_benchmark` with `MetricsLogger`, the episode
    selection and the frozen configuration from `provenance`
    (`select_episodes`, `episodes_of_category`, `source_fingerprint`, `gpu_plan_record`).
+   A Habitat dataset's `run.py` keeps only its `parser`, `prepare` and
+   `ground_truth_issues`; its `main` is `habitat/entrypoint.py::run_main` with
+   those handed in, and the method's defaults below `--policy-config` are the
+   shared `method_defaults(protocol)` -- the body, and under a view-point
+   evaluator the planar STOP overshoot off -- so no entrypoint tells the one
+   algorithm something another does not. Its campaign reuses `scene_pool.py`,
+   `smoke_plan.py` and `campaign_common.py` from this directory.
 6. **Launcher.** A `run_benchmark.sh` that sources `benchmark_services.sh` for
    the services (`objnav_services_defaults` before its command line,
    `objnav_services_up` after it, with `RUN_MODULE` set to its `run.py`) and
@@ -879,8 +894,12 @@ action converter serialises the LOOK before the body action):
 | `detector_options.py`, `gpu_plan.py`, `provenance.py`, `progress.py` | The perception-service CLI options, the GPU placement plan, the run provenance (source hash, episode selection, GPU plan record) and the live progress / lean records every adapter shares; `gibson/detector_options.py`, `gibson/gpu_plan.py` and `gibson/progress.py` are Gibson's import paths (and CLIs) for them |
 | `evaluation.py` | `run_evaluation`: the shared prepared-environment run loop (frozen-lock check, optional recording, the harness runner) the sibling adapters call. Gibson's `run.py` drives the harness runner itself because it carries the operator features of the 1,000-episode campaign -- resume with accepted config changes, the progress tracker, lean records, the evaluator sidecar, the report; folding those into `run_evaluation` is the one harness unification still open, to be done when the adapter branches merge |
 | `services/http_detector.py`, `services/http_segmenter.py`, `services/llm.py` | The detector and segmenter clients (pinned identity, one POST per frame, the contract's two failure families) and the verified LLM client |
-| `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose; any Habitat dataset |
+| `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose, the semantic sensor and the annotations' boxes (`semantic_boxes_enu`); any Habitat dataset |
+| `habitat/env.py` | `HabitatObjNavEnv`: the habitat-lab ObjectNav episode, measurement, start validation, navmesh provenance and oracle hand-off every dataset adapter subclasses (`hm3d/env.py`, `mp3d/env.py` add their name and annotation naming) |
+| `habitat/geodesic.py` | habitat-lab's `DistanceToGoal` to the goal view points, reproduced against habitat-sim's pathfinder; the one quantity SR, SPL, SoftSPL and DTG are built from |
+| `habitat/entrypoint.py` | What every Habitat `run.py` shares: `method_defaults(protocol)`, `run_main`, the geodesic preflight check, the oracle liveness gate, the runtime record, the GPU gate, the live hooks |
 | `habitat/stair_connectors.py` | Storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
+| `scene_pool.py`, `smoke_plan.py`, `campaign_common.py` | The scene process pool with its stall watchdog and `--jobs max`, the category-balanced smoke cover, and the child-argument and episode-plan rules every dataset's campaign shares |
 | `gibson/protocol.py`, `gibson/dataset.py`, `gibson/distance.py`, `gibson/env.py` | The SemExp v1.1 protocol, the published episodes and evaluator maps, the FMM scorer, the `ObjNavEnv` |
 | `gibson/run.py`, `gibson/frozen_eval.py`, `gibson/run_development.py` | Protocol execution and frozen source/model/data checks |
 | `gibson/gpu_plan.py` | Who gets the one GPU -- LLM, then YOLO-World, then Habitat -- from the free VRAM and explicit footprints; the rest on the CPU; the plan recorded in every run |

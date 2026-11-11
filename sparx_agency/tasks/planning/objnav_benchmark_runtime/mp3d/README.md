@@ -12,7 +12,7 @@ specific to the simulation lives here and only here:
 | Camera: 640×480, HFOV 79°, mounted at 0.88 m, depth 0.5–5.0 m, the depth-hole fill rule | `protocol.py` → `camera()`, `depth_holes()` |
 | Body: 0.18 m radius, 0.88 m height; sliding off; the navmesh the run is scored on | `protocol.py` → `MP3DEnv.__init__` hands them to the shared Habitat bridge |
 | Stopping criterion: STOP within **0.1 m geodesic of a published goal view point** (strict `<`) | `env.py` → `MP3DEnv.measure()` |
-| Step budget 500; `l`, `d0`, `dT`, `p`, SR, SPL, SoftSPL as habitat-lab computes them | `env.py`, with the distance from `../hm3d/geodesic.py` (habitat-lab's measure, shared) |
+| Step budget 500; `l`, `d0`, `dT`, `p`, SR, SPL, SoftSPL as habitat-lab computes them | `env.py`, with the distance from `../habitat/geodesic.py` (habitat-lab's measure, shared) |
 | The published episodes, goals and scene files; the 21-category vocabulary | `dataset.py`; `core/planning/objnav/labels/datasets/mp3d.py` |
 | Kinematic self-check bounds for habitat-sim's recomputed navmesh | `protocol.py` → `kinematics()` |
 
@@ -322,9 +322,9 @@ evidence and the deviations we name rather than apply.
 | `run_benchmark.sh` | the one-button launcher (data → services → preflight → campaign → reports) |
 | `protocol.py` | every MP3D number, versioned; `MP3D_V1`, `protocol_for` |
 | `dataset.py` | the published release: episodes (sharded, or val_mini's single file), goals, scene assets, semantic assets and config, manifest |
-| `env.py` | the simulation driver behind `ObjNavEnv`: reset, step, measure, start validation |
-| `run.py` | preflight and evaluation CLI (the shared `run_evaluation`) |
-| `campaign.py` | one process per scene, the aggregate, the stall watchdog (`--stall-minutes`); reuses `hm3d/scene_pool.py` and `hm3d/smoke_plan.py` |
+| `env.py` | `MP3DEnv`: the shared `../habitat/env.py::HabitatObjNavEnv` (reset, step, measure, start validation, the oracle hand-off) named for MP3D, with the one MP3D override -- an instance is named by both its `.house` category and its mpcat40 class |
+| `run.py` | the MP3D `parser`, `prepare` (preflight) and `ground_truth_issues`; `main` is the shared `../habitat/entrypoint.py::run_main`, and the method's defaults below `--policy-config` the shared `method_defaults(protocol)` |
+| `campaign.py` | one process per scene, the aggregate, the stall watchdog (`--stall-minutes`); reuses `../scene_pool.py`, `../smoke_plan.py` and `../campaign_common.py` |
 | `sharded_campaign.py` | `--shard-episodes`: every scene as shards on the pool, each scene merged when its shards finish |
 | `shard_plan.py` | the shards (interleaved across scenes), their LLM servers, the plan file, the per-scene merge |
 | `shard_pool.py` | the VRAM-gated pool with a live worker cap; VRAM only ever delays a start |

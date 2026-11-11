@@ -1,362 +1,47 @@
 """MP3D episodes and habitat-lab's own ObjectNav metrics behind ObjNavEnv.
 
-This is the **MP3D simulation driver**: the one place the shared search
-algorithm meets Matterport3D. It owns what is specific to the simulation --
-loading the published scene and navmesh through the shared Habitat bridge,
-placing the agent at the published start, executing the protocol's discrete
-actions, and measuring the episode the way habitat-lab's ``objectnav_mp3d``
-task measures it. The algorithm sees only ``ObjNavObservation`` (RGB, metric
-depth, pose, camera, target category, step) and the episode's action spec; it
-never learns which benchmark it is on.
-
-The measurements are habitat-lab's, reimplemented against habitat-sim because
-habitat-lab itself is not installed (``hm3d/geodesic.py`` holds the distance,
-the one quantity all four metrics are built from, and is shared with HM3D
-because it is habitat-lab's measure and not either dataset's):
-
-===========  =========================================================
-``l``        ``DistanceToGoal`` at reset, measured live -- habitat-lab's
-             SPL uses exactly this as ``_start_end_episode_distance``.
-             The row's ``info.geodesic_distance`` is the *same* quantity,
-             so the two agreeing is a check on our navmesh and their
-             disagreeing is a defect; see ``geodesic_agreement()``.
-``d0``       the same number; in Habitat ObjectNav ``d0 == l``.
-``dT``       ``DistanceToGoal`` after the last action.
-``p``        the sum of 3-D displacements between successive agent
-             positions from reset on, as ``SPL._agent_episode_distance``
-             accumulates it.
-success      ``is_stop_called and dT < success_distance`` -- strictly
-             less, and STOP is required.
-===========  =========================================================
-
-``native_metrics`` carries habitat-lab's own arithmetic for those quantities so
-the harness can cross-check our scoring against it. Where habitat-lab's formula
-is undefined (it divides by ``d0`` without guarding it), the key is omitted
-rather than filled with a convention habitat-lab does not have.
-
-Nothing privileged about the *task* reaches the agent: no goal position, no
-geodesic, no target floor. The one thing ``ObjNavEpisode.metadata`` does carry
-is the building's own vertical structure -- storeys and stair connectors read
-from the navmesh in force (``HabitatRGBDSimulator.scene_structure``) -- which
-the multi-floor search declares as its ground-truth stair source. A simulator
-without that reading (the synthetic ones in tests) yields empty metadata.
+The **MP3D adapter's environment**: the shared Habitat environment
+(:class:`~sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.env.HabitatObjNavEnv`,
+which owns the episode, the measurement the way habitat-lab's ``objectnav_mp3d``
+task measures it, start validation, navmesh provenance and the oracle
+hand-off) specialised by what is Matterport3D's alone -- its name, its
+dataset, and how an annotated instance is named. What differs from HM3D is
+entirely in ``mp3d/dataset.py`` (the published release's layout, the
+``.house`` / ``_semantic.ply`` annotation files and the publisher's
+``mp3d.scene_dataset_config.json`` that registers them to the mesh) and
+``ground_truth/mp3d_categories.py`` (the two names each instance carries); the
+algorithm sees only ``ObjNavObservation`` and never learns which benchmark it
+is on.
 
 **The ground-truth perception upper bound** (``ground_truth=`` a
 :class:`~...ground_truth.source.GroundTruthSource` built with
-``mp3d_categories.MP3D_TABLE``) is the one deliberate exception, as on HM3D:
-the bridge renders habitat-sim's semantic sensor beside RGB-D from the scene's
-``.house`` / ``_semantic.ply``, registered to the mesh by the publisher's
-``mp3d.scene_dataset_config.json`` (``MP3DDataset.semantic_scene_dataset_config``), and
-this environment publishes each instance-id frame to the source, never into an
-observation. The source labels the scene from both of each instance's names,
-the raw ``.house`` category and its mpcat40 class, and the publisher's goal ids.
+``mp3d_categories.MP3D_TABLE``) labels the scene from both of each instance's
+names -- the raw ``.house`` category and its mpcat40 class
+(:meth:`MP3DEnv._annotations`) -- and the publisher's goal ids
+(``MP3DDataset.goal_instances``). Loading the annotations needs
+``MP3DDataset.semantic_scene_dataset_config`` installed.
 """
 from __future__ import annotations
 
-import hashlib
-import math
-
-from sparx_agency.core.planning.objnav.errors import EnvContractError
-from sparx_agency.core.planning.objnav.interfaces.env import ObjNavEnv
-from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
-from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
-from sparx_agency.core.planning.objnav.types.measurement import (
-    EpisodeMeasurement, TERMINATION_STEP_LIMIT, TERMINATION_STOP)
-from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
-from sparx_agency.core.planning.objnav.types.pose import AgentPose
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import (
-    HabitatRGBDSimulator, habitat_position, semantic_boxes_enu)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.mp3d_categories import MP3DAnnotation
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.geodesic import (
-    ViewPointDistance, view_point_positions)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.env import HabitatObjNavEnv
 
 
-class MP3DEnv(ObjNavEnv):
+class MP3DEnv(HabitatObjNavEnv):
     """One MP3D ObjectNav split, executed and measured under one protocol.
 
     Args:
         dataset: A loaded :class:`~...mp3d.dataset.MP3DDataset`.
         protocol: The :class:`~...mp3d.protocol.MP3DProtocol` it was loaded for.
-        seed: Run seed. Each episode's simulator seed is derived from it and
-            the episode identity, so an episode is reproducible on its own.
-        gpu_device: Rendering device index.
-        simulator: An injected RGB-D bridge, for tests. Defaults to the shared
-            :class:`HabitatRGBDSimulator` built from the protocol -- the only
-            place the protocol's camera, body, actions, sliding rule, navmesh
-            choice and depth-hole rule are handed to a simulator.
-        excluded_episode_ids: Episodes deliberately dropped because no goal
-            view point is reachable from their start. Passing them is an
-            explicit, recorded decision; ``reset()`` on one still raises.
-        distance_factory: ``(pathfinder, view_points) -> distance provider``.
-            Defaults to :class:`ViewPointDistance`. The seam exists so the
-            success rule, the path accounting and the measurement arithmetic
-            can be tested without habitat-sim.
-        ground_truth: A :class:`~...ground_truth.source.GroundTruthSource` to
-            publish the semantic sensor's frames to (the perception upper
-            bound). ``None``, the default, renders no semantic sensor.
+        seed, gpu_device, simulator, excluded_episode_ids, distance_factory, ground_truth:
+            As :class:`HabitatObjNavEnv`.
     """
 
+    BENCHMARK = "mp3d"
     name = "habitat/mp3d-objectnav"
 
-    def __init__(self, dataset, protocol, seed=0, gpu_device=0, simulator=None,
-                 excluded_episode_ids=(), distance_factory=None, ground_truth=None):
-        self.name = "habitat/mp3d-objectnav-%s" % protocol.dataset_version
-        self._distance_factory = distance_factory or ViewPointDistance
-        self._dataset = dataset
-        self._protocol = protocol
-        self._seed = seed
-        self._camera = protocol.camera()
-        self._actions = protocol.actions()
-        self._simulator = simulator if simulator is not None else HabitatRGBDSimulator(
-            self._camera, self._actions, protocol.agent_radius_m,
-            protocol.allow_sliding, gpu_device, height_m=protocol.agent_height_m,
-            navmesh=protocol.navmesh, depth_holes=protocol.depth_holes(),
-            semantic=ground_truth is not None,
-            scene_dataset_config=dataset.semantic_scene_dataset_config() if ground_truth is not None else None)
-        self._ground_truth = ground_truth
-        if ground_truth is not None and not callable(getattr(self._simulator, "semantic_objects", None)):
-            raise EnvContractError("Ground-truth perception needs a simulator with a semantic sensor "
-                                   "(semantic_objects() and last_semantic)")
-        self._distances = {}
-        self._episode = None
-        self._observation = None
-        self._steps = 0
-        self._stopped = False
-        self.excluded_episode_ids = tuple(excluded_episode_ids)
-        self.unreachable_episode_ids = ()
-        self.navmesh_by_scene = {}
-        self.published_geodesic_agreement = []
-
-    def episode_ids(self):
-        """Every published identity except the explicitly excluded ones."""
-        excluded = set(self.excluded_episode_ids)
-        return tuple(i for i in self._dataset.episode_ids() if i not in excluded)
-
-    @property
-    def target_projector(self):
-        """Optional local NavMesh geometry service, separate from evaluator data.
-
-        The same seam ``GibsonEnv`` and ``HM3DEnv`` expose: the target closing
-        snaps its standoff goal onto the navmesh through it. It carries no
-        goal, no distance and no view point.
-        """
-        return getattr(self._simulator, "project_target", None)
-
-    def _distance_field(self, episode):
-        """The (scene, category) distance, built once per goal set per scene."""
-        key = episode.goals_key
-        if key not in self._distances:
-            points = view_point_positions(self._dataset.goals_for(episode))
-            self._distances[key] = self._distance_factory(
-                self._simulator.pathfinder, points)
-        return self._distances[key]
-
-    def validate_starts(self, episode_ids=None, *, progress=None):
-        """Measure ``l`` for every selected episode, up front, one scene at a time.
-
-        The harness refuses a non-finite shortest path, and a run would stop at
-        that episode on every resume, so an unreachable start must be found
-        before the run rather than during it. This loads each scene once --
-        through the simulator, so the distances come from the same navmesh the
-        episodes are scored on.
-
-        Returns:
-            ``{episode_id: l}`` for every checked episode, ``inf`` included.
-            ``self.unreachable_episode_ids`` holds the non-finite ones.
-        """
-        ids = self.episode_ids() if episode_ids is None else tuple(episode_ids)
-        episodes = [self._dataset.episodes[i] for i in ids]
-        by_scene = {}
-        for episode in episodes:
-            by_scene.setdefault(episode.scene_key, []).append(episode)
-        distances, unreachable = {}, []
-        self.navmesh_by_scene = {}
-        self.published_geodesic_agreement = []
-        for done, (scene_key, rows) in enumerate(sorted(by_scene.items()), start=1):
-            glb, navmesh = self._dataset.scene_assets(rows[0])
-            self._simulator.reset(glb, navmesh, rows[0].start_position,
-                                  rows[0].start_rotation_wxyz, self._seed)
-            self._distances = {}
-            describe = getattr(self._simulator, "navmesh_provenance", None)
-            if describe is not None:
-                self.navmesh_by_scene[scene_key] = describe()
-            for episode in rows:
-                value = self._distance_field(episode).distance(episode.start_position)
-                distances[episode.episode_id] = value
-                if not math.isfinite(value):
-                    unreachable.append(episode.episode_id)
-                elif episode.published_geodesic_m is not None:
-                    self.published_geodesic_agreement.append(
-                        abs(value - episode.published_geodesic_m))
-            if progress is not None:
-                progress(scene_key, done, len(by_scene))
-        self.unreachable_episode_ids = tuple(unreachable)
-        self._episode = None
-        self._observation = None
-        return distances
-
-    def geodesic_agreement(self):
-        """How closely our measured ``l`` reproduces the publisher's own number.
-
-        Returns:
-            ``None`` before :meth:`validate_starts`, otherwise the count, the
-            maximum and the median absolute difference in metres, and how many
-            are within a millimetre.
-        """
-        deltas = sorted(getattr(self, "published_geodesic_agreement", []))
-        if not deltas:
-            return None
-        return {"episodes": len(deltas), "max_abs_m": deltas[-1],
-                "median_abs_m": deltas[len(deltas) // 2],
-                "within_1mm": sum(d <= 1e-3 for d in deltas)}
-
-    def reset(self, episode_id):
-        if episode_id in set(self.excluded_episode_ids):
-            raise EnvContractError(
-                "Episode %r was excluded from this run; it must not be served"
-                % (episode_id,))
-        row = self._dataset.episodes[episode_id]
-        glb, navmesh = self._dataset.scene_assets(row)
-        tag = "%d/%s" % (self._seed, episode_id)
-        seed = int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "big")
-        reloading = self._simulator_scene() != str(glb)
-        frame = self._simulator.reset(glb, navmesh, row.start_position,
-                                      row.start_rotation_wxyz, seed)
-        if reloading:
-            self._distances = {}
-        if self._ground_truth is not None and (reloading or self._ground_truth.scene_key != row.scene_key):
-            self._ground_truth.begin_scene(row.scene_key, self._annotations(),
-                                           self._dataset.goal_instances(row.scene_key),
-                                           boxes=semantic_boxes_enu(self._simulator))
-        self._row = row
-        self._steps, self._stopped = 0, False
-        self._path_m = self._protocol.path_length_epsilon_m
-        self._collisions, self._collision_available = 0, True
-        self._episode = ObjNavEpisode(
-            episode_id, row.scene_key, self._protocol.benchmark, self._protocol.split,
-            row.category, self._camera, self._actions, self._protocol.max_steps,
-            metadata=self._scene_metadata())
-        self._observation = self._observation_from(frame)
-        # Height comes from the navmesh (HabitatRGBDSimulator.reset under
-        # navmesh="agent"), not from index 1 here -- the run is 2.5-D, fixed
-        # once; the (x, z) start must be the publisher's to the sub-millimetre.
-        position = self._habitat_position()
-        published = row.start_position
-        if abs(position[0] - published[0]) > 1e-4 or abs(position[2] - published[2]) > 1e-4:
-            raise EnvContractError(
-                "Simulator changed the published start of %s; the navmesh does "
-                "not match the episodes" % episode_id)
-        self._distance = self._distance_field(row)
-        self._start_dtg = self._distance.distance(row.start_position)
-        if not math.isfinite(self._start_dtg):
-            raise EnvContractError(
-                "No goal view point is reachable from the start of %s, so this "
-                "benchmark cannot measure its shortest path. Run the start "
-                "validation and exclude it explicitly." % episode_id)
-        return self._episode, self._observation
-
-    def _scene_metadata(self):
-        """Non-privileged scene structure for the policy: storeys and stair connectors."""
-        provider = getattr(self._simulator, "scene_structure", None)
-        return dict(provider()) if callable(provider) else {}
-
-    def _simulator_scene(self):
-        return getattr(self._simulator, "_scene", None)
-
     def _annotations(self):
-        """``{instance: MP3DAnnotation(raw, mpcat40)}`` of the loaded scene, for the oracle."""
+        """``{instance: MP3DAnnotation(raw, mpcat40)}`` of the loaded scene: both names each MP3D instance carries, for the oracle's table."""
         raw = self._simulator.semantic_objects("raw")
         mpcat40 = self._simulator.semantic_objects("mpcat40")
         return {instance: MP3DAnnotation(raw[instance], mpcat40[instance]) for instance in sorted(raw)}
-
-    def _observation_from(self, frame):
-        rgb, depth, pose = frame
-        if self._ground_truth is not None:
-            ids = getattr(self._simulator, "last_semantic", None)
-            if ids is None:
-                raise EnvContractError("The simulator rendered no semantic frame for the ground-truth perception")
-            self._ground_truth.publish(rgb, ids, depth=depth, pose=pose, camera=self._camera)
-        return ObjNavObservation(rgb, depth, pose, self._camera,
-                                 self._episode.target_category, self._steps)
-
-    def _habitat_position(self):
-        """Our ENU pose back in Habitat's +Y-up frame, for the pathfinder."""
-        return habitat_position(self._observation.pose)
-
-    def step(self, action):
-        if self._episode is None or self.episode_over or not self._actions.allows(action):
-            raise EnvContractError("Episode not running, or action not allowed")
-        before = self._observation.pose
-        frame = self._simulator.step(action)
-        self._steps += 1
-        self._stopped = action == DiscreteAction.STOP
-        self._observation = self._observation_from(frame)
-        after = self._observation.pose
-        self._path_m += math.sqrt((after.x - before.x) ** 2 + (after.y - before.y) ** 2
-                                  + (after.z - before.z) ** 2)
-        collision = getattr(self._simulator, "last_collision", None)
-        if collision is None:
-            self._collision_available = False
-        else:
-            self._collisions += int(collision)
-        return self._observation
-
-    def pose_confirmed_on_navmesh(self):
-        """Checker-only: is the last pose genuinely on this run's navmesh. Never seen by the policy."""
-        return bool(getattr(self._simulator, "last_pose_on_navmesh", False))
-
-    def placed_pose(self):
-        """Checker-only: where the step filter starts the next body action (see ``HM3DEnv.placed_pose``)."""
-        if self._observation is None:
-            return None
-        placed = getattr(self._simulator, "last_placed_pose", None)
-        return placed if isinstance(placed, AgentPose) else None
-
-    @property
-    def episode_over(self):
-        return self._episode is not None and (
-            self._stopped or self._steps >= self._protocol.max_steps)
-
-    def evaluation_diagnostics(self):
-        """Recorder/evaluator-only values. Never part of an observation."""
-        if self._episode is None:
-            raise EnvContractError("No episode has been reset")
-        diagnostics = {"distance_to_goal_m": self._distance.distance(self._habitat_position()),
-                       "path_length_m": self._path_m,
-                       "shortest_path_m": self._start_dtg,
-                       "success_distance_m": self._protocol.success_distance_m,
-                       "published_geodesic_m": self._row.published_geodesic_m,
-                       "view_points": self._distance.view_point_count,
-                       "collisions": self._collisions if self._collision_available else None,
-                       "depth_holes": dict(getattr(self._simulator, "depth_hole_stats", None) or {})}
-        if self._ground_truth is not None:
-            diagnostics["ground_truth"] = dict(self._ground_truth.diagnostics(),
-                                               scene_report=dict(self._ground_truth.scene_report))
-        return diagnostics
-
-    def measure(self):
-        if not self.episode_over:
-            raise EnvContractError("measure() is only available after episode end")
-        dtg = self._distance.distance(self._habitat_position())
-        success = bool(self._stopped and dtg < self._protocol.success_distance_m)
-        l, p, d0 = self._start_dtg, self._path_m, self._start_dtg
-        native = {"success": float(success)}
-        if max(l, p) > 0:
-            ratio = l / max(l, p)
-            native["spl"] = float(success) * ratio
-            if d0 > 0 and math.isfinite(dtg):
-                native["soft_spl"] = max(0.0, 1.0 - dtg / d0) * ratio
-        native["distance_to_goal"] = dtg
-        return EpisodeMeasurement(
-            success=success, stop_called=self._stopped,
-            termination=TERMINATION_STOP if self._stopped else TERMINATION_STEP_LIMIT,
-            steps=self._steps, shortest_path_m=l, start_distance_to_goal_m=d0,
-            final_distance_to_goal_m=dtg, path_length_m=p, native_metrics=native,
-            info={"published_geodesic_m": self._row.published_geodesic_m,
-                  "source_episode_id": self._row.source_episode_id,
-                  "success_distance_m": self._protocol.success_distance_m,
-                  "view_points": self._distance.view_point_count})
-
-    def close(self):
-        self._distances = {}
-        self._simulator.close()

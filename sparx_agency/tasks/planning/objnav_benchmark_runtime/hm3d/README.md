@@ -776,15 +776,14 @@ issue.
 |---|---|
 | `protocol.py` | `HM3DProtocol`, `HM3D_V1`, `HM3D_V2`, the navmesh choice, the named ApexNav radius |
 | `dataset.py` | the published episodes and goals, scene-qualified ids, XYZW→WXYZ, the manifest |
-| `geodesic.py` | habitat-lab's `DistanceToGoal` to view points, on habitat-sim's pathfinder |
-| `env.py` | `HM3DEnv`: the episode (with navmesh storeys/stairs as its only metadata), the measurement, start validation, navmesh provenance; under `ground_truth=` it publishes the semantic sensor's frames to the oracle perception, with each frame's depth, pose and camera and the scene's instance boxes in ENU for the on-object filter (`habitat.simulator.semantic_boxes_enu`, shared with `mp3d/env.py`) |
+| `env.py` | `HM3DEnv`: the shared `habitat/env.py::HabitatObjNavEnv` (the episode with navmesh storeys/stairs as its only metadata, the measurement, start validation, navmesh provenance, the oracle hand-off of frames, depth, pose, camera and instance boxes) named for HM3D; since 2026-11-11 nothing else is written here |
 | `assets.py` | what is installed, what is missing, and the commands that would fix it (`--check --semantic` and step 5 for the HM3D-Semantics annotations) |
 | `run_benchmark.sh` | The one-command launcher: services (`../benchmark_services.sh`), preflight, `campaign.py` or a `run.py` scene, the aggregate; `--perception ground-truth`, `--jobs max` |
 | `../ground_truth/` | the perception upper bound: `semantic_frame.py` (boxes/masks from an id frame), `hm3d_categories.py` (raw names → vocabulary, the publisher's goal ids first), `source.py` (the env→oracle hand-off, strict frame identity), `perception.py` (`GroundTruthDetector` / `GroundTruthSegmenter`) |
 | `../tests/hm3d_stand_in_fixture.py` | an HM3D-format `dev_gibson` split on a Gibson mesh, to run this adapter's real path where the HM3D scenes are absent |
-| `run.py` | preflight and the run, on the shared `run_evaluation` (progress, lean rows and diagnostics via its `wrap_env` / `agent_class` hooks); builds the shared `RPTSearchPolicy` from this protocol's agent |
-| `campaign.py` | one child process per scene, then an aggregate over what finished; the stall watchdog (`--stall-minutes`, through `scene_pool.run_concurrently`) |
-| `scene_pool.py` | `--jobs N`: N scene children at once, each logging to `<root>/<scene>.console.log`; `max_workers` behind `--jobs max`; `run_concurrently(stall_s=...)` kills a child whose heartbeat files stop changing (shared with the MP3D campaign) |
+| `run.py` | the HM3D `parser`, `prepare` (preflight) and `ground_truth_issues`; `main` is the shared `../habitat/entrypoint.py::run_main`, and the method's defaults below `--policy-config` the shared `method_defaults(protocol)` |
+| `campaign.py` | one child process per scene, then an aggregate over what finished; the stall watchdog (`--stall-minutes`, through `../scene_pool.run_concurrently`); the child-argument and episode-plan rules are `../campaign_common.py` |
+| `scene_pool.py`, `smoke_plan.py`, `geodesic.py` | re-export shims: the pool, the smoke cover and the view-point geodesic moved to `../scene_pool.py`, `../smoke_plan.py` and `../habitat/geodesic.py` on 2026-11-11 (every campaign's and every Habitat dataset's, not HM3D's) |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
 | `sota.py` | the published numbers, with the table each came from |
 | `frozen_eval.py` | freeze an exact configuration, then run the full split under it |

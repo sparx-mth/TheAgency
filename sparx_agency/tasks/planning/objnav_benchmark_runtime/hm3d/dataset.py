@@ -383,6 +383,11 @@ class HM3DDataset:
                 % (path, self.protocol.split, self.protocol.scene_release[len("hm3d-v"):]))
         return path
 
+    def semantic_scene_dataset_config(self):
+        """The scene dataset config the semantic sensor needs -- the Habitat adapter interface's name for
+        :meth:`annotated_scene_dataset_config` (``HabitatObjNavEnv`` asks every dataset for it under this name)."""
+        return self.annotated_scene_dataset_config()
+
     def semantic_assets(self, episode):
         """The scene's HM3D-Semantics annotation mesh and descriptor, both checked to exist.
 

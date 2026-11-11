@@ -5,6 +5,24 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed (2026-11-11, one Habitat adapter base: each dataset adapter holds only what is its own)
+- **`habitat/env.py::HabitatObjNavEnv`** holds the habitat-lab ObjectNav episode, the view-point measurement, start
+  validation against the publisher's geodesics, navmesh provenance and the oracle hand-off (frames, depth, pose,
+  camera, instance boxes) once; `hm3d/env.py` and `mp3d/env.py` subclass it with their `BENCHMARK` name and, for
+  MP3D, the one override -- an instance is named by both its `.house` category and its mpcat40 class
+  (`_annotations`). The two files were ~380 near-identical lines each; they are ~40. The dataset interface the base
+  reads: `episode_ids`, `episodes`, `scene_assets`, `goals_for`, `goal_instances`, `semantic_scene_dataset_config()`
+  (`HM3DDataset` gains that name beside its `annotated_scene_dataset_config`).
+- **`habitat/entrypoint.py`** holds what both `run.py` entrypoints shared below their dataset: `run_main` (the whole
+  `main`, given the adapter's `parser`, label table, protocol registry, `prepare` and report writer),
+  `method_defaults(protocol)`, the geodesic preflight check, the oracle liveness gate, the runtime record, the GPU
+  gate, the live hooks and the frozen-config constants. Each `run.py` keeps its `parser`, `prepare` and
+  `ground_truth_issues`, and re-exports the shared names it always had.
+- **Shared campaign code left the HM3D adapter**: `hm3d/geodesic.py` -> `habitat/geodesic.py` (habitat-lab's
+  measure), `hm3d/scene_pool.py` -> `scene_pool.py`, `hm3d/smoke_plan.py` -> `smoke_plan.py`, and the child-argument
+  and episode-plan rules of `hm3d/campaign.py` -> `campaign_common.py`; the MP3D campaign, shards and launcher import
+  from the shared homes, and `hm3d/` keeps re-export shims so every old import and `python -m` path still works. No
+  module under `mp3d/` or `habitat/` imports from `hm3d/` any more.
 ### Changed (2026-11-11, the HM3D closing work of 2026-11-05 merged into the infra branch beside the MP3D closing work: one algorithm, the rules combined)
 - **A step-out frame is the inspection's by either side's rule** (`closing/target_closing.py`): HM3D kept the
   inspection on a centred frame within one forward step of the limit while the step rule's budget lasts, arrived or

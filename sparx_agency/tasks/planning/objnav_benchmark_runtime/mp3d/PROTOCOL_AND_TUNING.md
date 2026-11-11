@@ -35,7 +35,7 @@ experiment with a different `protocol_id`.
   [view_point.agent_state.position for goal in goals for view_point in
   goal.view_points])` — a single `MultiGoalShortestPath` over every view point
   of every goal of the (scene, category), reused for the episode
-  (`hm3d/geodesic.py`, shared with HM3D because it is habitat-lab's measure).
+  (`habitat/geodesic.py`, shared with HM3D because it is habitat-lab's measure).
 * `p`: the sum of 3-D Euclidean chords between successive agent positions,
   from the reset position, accumulated on **every** action — turns, tilts, a
   blocked MOVE_FORWARD and STOP all add whatever the agent actually moved,
