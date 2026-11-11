@@ -60,7 +60,9 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   per-cell record, `observed_fraction`). Recomputed from the map and the
   partition on every update and keyed by cell, so a room renumbered, merged
   or split by the watershed reads right. `size_words` / `seen_words` are the
-  prompt's phrasing of it. Against Matterport's room polygons (90 scenes,
+  prompt's phrasing of it (``coverage_words``: m2, share of the whole room --
+  an upper bound while a wall is unseen -- and what is left; furniture
+  islands credited from the observed floor around them). Against Matterport's room polygons (90 scenes,
   1,242 rooms) a scanned room's final size is within 5.5 % of the annotated
   area at the median and a room first seen from its door never overstates it
   (`tasks/.../mp3d/room_extent_ground_truth.py`).
@@ -190,12 +192,19 @@ decides whether to keep a stale label — nothing is cached on failure.
   is a tri-state (reachable / only slivers / unreachable from here / none)
   rather than reachable-or-not; and a node under a square metre is shown
   as `size=under 1m2` rather than rounded to `0m2`. **Since 2026-11-11** the
-  room line carries the room extents: `size=12m2 (4x3m, all walls seen)` is
-  final, `size=at least 12m2 (5+ x 3m, 1 wall not seen yet)` a lower bound,
-  and `observed=80% of it` (`... of the mapped part` when a wall is unseen)
-  is the share of the mapped floor the camera has looked at from detection
-  range; the system prompt rules that size and coverage, not the time spent,
-  decide how much of a room is left.
+  room line hands the model final results only, in the node's order: `type=`;
+  `size=12m2 (4x3m, all walls seen)` (final) or `size=at least 12m2 (5+ x 3m,
+  1 wall not seen yet)` (a lower bound); `covered=10m2 (80% of the room, 2m2
+  left)` -- the floor the camera looked at from detection range, as a share
+  of the WHOLE room and as the remainder, the share an upper bound and the
+  remainder a lower bound when the size is (`covered=3m2 (at most 40% of the
+  room, at least 4m2 left)`); `seen:` the objects; `frontier=2 (~30m2 unknown
+  behind them)` with one united figure for the unknown behind the room's
+  frontiers; `exits=2 (1 doorway)`; `status=`; `searched=`. The rules put
+  coverage first (the main fact for what is left; the size says what the
+  remainder can hold; the model judges whether the target fits), time second
+  (coverage overrides `searched=` both ways), and leave distance and the
+  robot's position out (`here=yes` is gone): the planner charges travel.
 - `room_priors.py` — where a target category lives and where it cannot
   be: the room types a search need not enter for it (`IMPLAUSIBLE_ROOMS`,
   exclusions not permissions; `unknown` never excluded), the home objects

@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from sparx_agency.core.mapping.topology.room_extent import (
-    FINAL, LOWER_BOUND, SIDES, ExtentParams, RoomExtent, coarse_fraction, coarse_metres, room_extents, seen_words,
-    side_index, size_words, wall_orientation)
+    FINAL, LOWER_BOUND, SIDES, ExtentParams, RoomExtent, area_words, coarse_fraction, coarse_metres, coverage_words,
+    room_extents, seen_words, side_index, size_words, wall_orientation)
 
 RES = 0.1
 FREE, OCC, UNK = 0, 100, -1
@@ -78,7 +78,8 @@ def test_a_walled_room_has_a_final_size_and_its_true_dimensions():
     assert extent.perimeter_m == pytest.approx(18.0, abs=0.05)
     assert sum(side.wall for side in extent.sides) == sum(side.faces for side in extent.sides), "every face is a wall"
     assert size_words(extent) == "20m2 (5x4m, all walls seen)"
-    assert seen_words(extent) == "0% of it"
+    assert seen_words(extent) == "0m2 (0% of the room, 20m2 left)"
+    assert extent.covered_m2 == 0.0 and extent.left_m2 == pytest.approx(20.0, abs=0.05) and not extent.covered_is_bound
 
 
 def test_a_far_wall_beyond_the_cameras_reach_makes_the_size_a_lower_bound_across_that_axis():
@@ -94,7 +95,8 @@ def test_a_far_wall_beyond_the_cameras_reach_makes_the_size_a_lower_bound_across
     assert not extent.length_final and extent.width_final, "the 5 m axis is cut short, the 4 m one is walled"
     assert extent.closed_fraction == pytest.approx(14.0 / 18.0, abs=0.02)
     assert size_words(extent) == "at least 20m2 (5+ x 4m, 1 wall not seen yet)"
-    assert seen_words(extent) == "0% of the mapped part"
+    assert seen_words(extent) == "0m2 (at most 0% of the room, at least 20m2 left)"
+    assert extent.covered_is_bound, "the share is an upper bound while a wall is unseen"
 
 
 def test_a_doorway_in_a_located_wall_is_an_exit_and_the_wall_counts_as_seen():
@@ -267,8 +269,55 @@ def test_coverage_is_the_rooms_share_of_the_observed_cells_not_of_where_the_agen
     extent = read(grid, labels, observed=observed)[0]
     assert extent.observed_fraction == pytest.approx(0.5)
     assert extent.observed_m2 == pytest.approx(10.0, abs=0.05) and extent.unobserved_m2 == pytest.approx(10.0, abs=0.05)
-    assert seen_words(extent) == "50% of it"
+    assert extent.covered_m2 == pytest.approx(10.0, abs=0.05) and extent.covered_fraction == pytest.approx(0.5)
+    assert extent.left_m2 == pytest.approx(10.0, abs=0.05)
+    assert seen_words(extent) == "10m2 (50% of the room, 10m2 left)"
     assert read(grid, labels)[0].observed_fraction == 0.0, "no record: nothing observed"
+
+
+def test_furniture_islands_are_covered_in_proportion_to_the_observed_floor_around_them():
+    """A bed is seen from the floor beside it: with every cell of floor around it observed the bed is covered whole,
+    so a furnished room looked at from end to end reads covered in full, not 85% for ever."""
+    grid, labels = blank()
+    box(grid, labels, 20, 20, 70, 60)                           # 20 m2 ...
+    grid[30:40, 30:45] = OCC
+    labels[30:40, 30:45] = 0                                     # ... with a 1.5 m2 bed in it
+    observed = np.zeros_like(grid, dtype=bool)
+    observed[20:60, 20:70] = True                                # the whole free floor observed
+    extent = read(grid, labels, observed=observed)[0]
+    assert extent.area_m2 == pytest.approx(20.0, abs=0.05) and extent.observed_m2 == pytest.approx(18.5, abs=0.05)
+    assert extent.covered_m2 == pytest.approx(20.0, abs=0.05) and extent.covered_fraction == pytest.approx(1.0)
+    assert seen_words(extent) == "20m2 (all of it)"
+    # Half the floor observed, the bed's ring with it half: the bed counts half.
+    observed[:] = False
+    observed[20:60, 20:38] = True                                # x up to 3.8 m: the bed spans 3.0-4.5
+    half = read(grid, labels, observed=observed)[0]
+    ring_share = half.covered_m2 - half.observed_m2
+    assert 0.3 < ring_share < 1.2, ring_share                   # part of the 1.5 m2 bed, by its observed ring
+    # An unknown island inside the room (a pocket the camera never resolved) is NOT covered; a settled one is.
+    grid[45:50, 50:55] = UNK
+    labels[45:50, 50:55] = 0
+    observed[:] = True
+    pocket = read(grid, labels, observed=observed)[0]
+    assert pocket.covered_m2 == pytest.approx(20.0 - 0.25, abs=0.05)
+    resolved = np.zeros_like(grid, dtype=bool)
+    resolved[45:50, 50:55] = True
+    settled = read(grid, labels, observed=observed, resolved=resolved)[0]
+    assert settled.covered_m2 == pytest.approx(20.0, abs=0.05)
+
+
+def test_the_coverage_words_hand_the_model_final_results():
+    assert coverage_words(10.4, 0.87, 1.6, bounded=True) == "10m2 (80% of the room, 2m2 left)"
+    assert coverage_words(11.95, 0.996, 0.05, bounded=True) == "12m2 (all of it)"
+    assert coverage_words(0.0, 0.0, 12.0, bounded=True) == "0m2 (0% of the room, 12m2 left)"
+    assert coverage_words(2.6, 0.43, 3.4, bounded=False) == "3m2 (at most 50% of the room, at least 3m2 left)"
+    assert coverage_words(0.3, 1.0, 0.0, bounded=False) == "under 1m2 (all of the mapped part; the unmapped rest is unknown)"
+    assert coverage_words(6.8, 0.97, 0.2, bounded=False) == "7m2 (all of the mapped part; the unmapped rest is unknown)", (
+        "a bound that rounds up to 100% says nothing")
+    assert coverage_words(5.5, 0.88, 0.7, bounded=False) == "6m2 (at most 90% of the room)", "no 'at least under 1m2'"
+    assert coverage_words(10.4, 0.87, 0.6, bounded=True) == "10m2 (80% of the room, under 1m2 left)"
+    assert coverage_words(0.0, 0.0, 7.0, bounded=False) == "0m2 (at most 0% of the room, at least 7m2 left)"
+    assert area_words(0.0) == "0m2" and area_words(0.7) == "under 1m2" and area_words(3.49) == "3m2"
 
 
 def test_the_agents_distance_to_each_wall_is_filled_for_the_room_it_stands_in_only():

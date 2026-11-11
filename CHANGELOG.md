@@ -5,6 +5,31 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed (2026-11-11, what the node oracle receives: final results only, coverage first, time second, no distance)
+- **The room line** (`search_node_oracle.format_node`) now carries, in the node's order, exactly what the room node
+  holds: `type=`; `size=` (final, or `at least X`); `covered=` -- the floor the camera has looked at from within
+  detection range in m2, as a share of the WHOLE room and as what is left, `covered=10m2 (80% of the room, 2m2 left)`
+  -- with the share an UPPER bound (rounded up) and the remainder a LOWER bound when the size is one, `covered=3m2
+  (at most 40% of the room, at least 4m2 left)`, and `all of the mapped part; the unmapped rest is unknown` when a
+  bound would read 100%; `seen:` the objects; `frontier=2 (~30m2 unknown behind them)` -- ONE united figure for the
+  unknown floor the camera's cone reaches from all the room's frontier clusters
+  (`object_search/rooms/frontier_unknown.py`, through the openings' ray caster; the exits' per-exit sum
+  `unseen_m2` stays in the record, no longer in the prompt: two exits onto one unmapped room counted it twice);
+  `exits=2 (1 doorway)`; `status=`; `searched=`. `here=yes` is gone from the line and the prompt: where the robot
+  stands and every distance are the planner's. `SearchNode` gains `covered_fraction`, `covered_m2`, `left_m2`,
+  `unknown_behind_m2` (replacing `observed_fraction`); `RoomExtent` gains `covered_m2`, `covered_fraction`,
+  `left_m2` (furniture islands credited in proportion to the observed floor around them, settled pockets credited
+  whole, unknown pockets not: a fully looked-at furnished room reads `all of it`, not 85 % for ever).
+- **The system prompt** states that every number on a node line is a FINAL result to be read, not recomputed; a
+  `HOW MUCH IS LEFT -- COVERAGE FIRST` rule (coverage is the main fact for what is left, the size says what the
+  remainder can hold, the model judges whether the target fits); `TIME IS SECONDARY` (coverage overrides
+  `searched=` both ways: many actions in a big room at low coverage take nothing from it, a few in a covered room
+  are enough to give it up; never lower a room for its time alone); and distance, travel time and the robot's
+  position are not shown. STEP 4's bullets read `searched=` only beside `covered=`; the worked example shows the
+  new lines.
+- `room_extent_replay.py` records `covered_*`, `left_m2`, `frontiers` and `unknown_behind_m2` per room and action
+  (`frontier_unknown.room_frontier_seeds` stands in for the live inventory offline); the HUD's room detail shows
+  the covered share (`<=` when a bound), the remainder and the unknown behind the frontiers.
 ### Added (2026-11-11, room extents: where each room's walls are, its size as final or a lower bound, and how much of it the camera has observed)
 - **`core/mapping/topology/room_extent.py`** -- `room_extents()` reads, for every room of the live partition and from
   the depth-derived map alone, its boundary faces classified by what lies beyond them (a wall, another room, settled

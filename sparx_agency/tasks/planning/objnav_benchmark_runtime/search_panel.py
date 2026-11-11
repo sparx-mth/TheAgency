@@ -194,12 +194,17 @@ def _rooms(col, search):
         detail = []
         extent = room.get("extent")
         if extent:
-            # The room's size as the oracle reads it: final or a lower bound, and the observed share of it.
-            detail.append("%s%dm2 %.1fx%.1f %s obs %d%%" % (
-                "" if extent.get("size_status") == "final" else ">=", round(extent.get("area_m2", 0.0)),
+            # The room's size and coverage as the oracle reads them: final or a lower bound; the covered share
+            # of the whole room (an upper bound, "<=", when the size is a lower bound) and what is left.
+            bound = extent.get("size_status") != "final"
+            covered = extent.get("covered_fraction", extent.get("observed_fraction", 0.0)) or 0.0
+            detail.append("%s%dm2 %.1fx%.1f %s cov %s%d%% %s%.0fm2 left" % (
+                ">=" if bound else "", round(extent.get("area_m2", 0.0)),
                 extent.get("length_m", 0.0), extent.get("width_m", 0.0),
-                "walls 4/4" if extent.get("size_status") == "final" else "walls %d/4" % extent.get("walls_seen", 0),
-                round(100 * extent.get("observed_fraction", 0.0))))
+                "walls %d/4" % extent.get("walls_seen", 4 if not bound else 0),
+                "<=" if bound else "", round(100 * covered), ">=" if bound else "", extent.get("left_m2", 0.0)))
+            if extent.get("unknown_behind_m2") is not None:
+                detail.append("~%.0fm2 unknown behind frontiers" % extent["unknown_behind_m2"])
         if room.get("why"):
             detail.append(room["why"])
         if room.get("objects"):

@@ -355,6 +355,8 @@ def _summary(extent, mapping, plan, index):
         return None
     return {"area_m2": round(extent.area_m2, 2), "length_m": round(extent.length_m, 2), "width_m": round(extent.width_m, 2),
             "bounded": extent.bounded, "walls_seen": extent.walls_seen, "observed_fraction": round(extent.observed_fraction, 3),
+            "covered_m2": round(extent.covered_m2, 2), "covered_fraction": round(extent.covered_fraction, 3),
+            "left_m2": round(extent.left_m2, 2),
             "truly_all_seen": plan.truth_bounds_known(mapping.known, index)}
 
 
@@ -362,9 +364,10 @@ def format_record(record):
     def part(name, s):
         if s is None:
             return "%s: not mapped" % name
-        return "%s: %s%.1fm2 %.1fx%.1fm walls %d/4 obs %.0f%%%s" % (
+        return "%s: %s%.1fm2 %.1fx%.1fm walls %d/4 cov %s%.0f%%%s" % (
             name, "" if s["bounded"] else ">=", s["area_m2"], s["length_m"], s["width_m"], s["walls_seen"],
-            100 * s["observed_fraction"], "" if s["truly_all_seen"] == s["bounded"] else " [verdict differs from truth]")
+            "" if s["bounded"] else "<=", 100 * s["covered_fraction"],
+            "" if s["truly_all_seen"] == s["bounded"] else " [verdict differs from truth]")
     return "%s L%d R%-2d %-12s truth %5.1fm2 %4.1fx%4.1fm | %s | %s" % (
         record["scene"], record["level"], record["region"], record["label"][:12], record["truth_area_m2"],
         record["truth_length_m"], record["truth_width_m"], part("first", record["first"]), part("scanned", record["scanned"]))

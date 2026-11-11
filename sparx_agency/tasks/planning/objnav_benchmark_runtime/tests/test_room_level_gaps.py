@@ -81,7 +81,12 @@ def test_the_oracle_is_shown_rooms_only_each_with_its_exits_and_no_exit_gets_a_n
     # The real scene graph renders the attributes on the room's line, as the prompt describes them.
     nodes = {n.id: n for n in policy.graph.nodes(world, 0, exits=policy.reasoned_with[0]["exits"])}
     assert nodes[1].kind == ROOM and nodes[1].exits == 2 and nodes[1].doorways == 0 and nodes[1].glimpsed == ()
-    assert "  exits=2 (~1m2 unseen behind them)  " in format_node(nodes[1]) and "  exits=1 (~1m2" in format_node(nodes[0])
+    # Since 2026-11-11 the unknown behind a room's boundaries is ONE united figure on its frontier= brackets --
+    # measured live from the inventory's goals through the same ray caster the exits used -- and the exits=
+    # brackets carry the door frames alone.
+    assert "  frontier=2 (~1m2 unknown behind them)  exits=2  " in format_node(nodes[1]), format_node(nodes[1])
+    assert "  frontier=1 (~1m2 unknown behind it)  exits=1  " in format_node(nodes[0]), format_node(nodes[0])
+    assert policy.graph.unknown_behind and all(v > 0.0 for v in policy.graph.unknown_behind.values())
     assert OPENING not in {n.kind for n in nodes.values()} and "OPENING" not in system_prompt(list(nodes.values()))
     # The frozen configuration says so.
     configuration = policy.configuration()

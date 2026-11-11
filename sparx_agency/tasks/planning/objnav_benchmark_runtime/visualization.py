@@ -59,6 +59,12 @@ def search_snapshot(policy):
                           "width_m": round(float(extent.width_m), 2), "size_status": extent.size_status,
                           "walls_seen": int(extent.walls_seen), "open_sides": list(extent.open_sides),
                           "observed_fraction": round(float(extent.observed_fraction), 3),
+                          "covered_m2": round(float(extent.covered_m2), 2),
+                          "covered_fraction": round(float(extent.covered_fraction), 3),
+                          "covered_is_bound": bool(extent.covered_is_bound),
+                          "left_m2": round(float(extent.left_m2), 2),
+                          "unknown_behind_m2": (None if graph.unknown_behind.get(pid) is None
+                                                else round(float(graph.unknown_behind[pid]), 2)),
                           "open_perimeter_m": round(float(extent.open_perimeter_m), 2),
                           "wall_distances_m": {k: (None if v is None else round(float(v), 2))
                                                for k, v in extent.distances().items()}}})

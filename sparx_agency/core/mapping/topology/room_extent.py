@@ -37,10 +37,18 @@ geometry), for every room of the current partition:
   otherwise its area and the dimension across each unseen side are lower
   bounds, and nothing here presents them as more
   (:attr:`RoomExtent.bounded`, :attr:`RoomExtent.open_sides`);
-* **how much of it has been observed**: the share of its free cells the
-  camera has seen from within detection range with a clear line of sight,
-  as recorded per cell by the sight ledger (``observed``), not the cells the
-  agent walked over.
+* **how much of it has been covered**: the floor the camera has seen from
+  within detection range with a clear line of sight, as recorded per cell by
+  the sight ledger (``observed``) -- not the cells the agent walked over --
+  plus the furniture islands inside the room in proportion to the observed
+  floor around them (a bed is seen from the floor beside it), plus the
+  settled pockets nothing can stand in. In square metres
+  (:attr:`RoomExtent.covered_m2`), as a share of the WHOLE room
+  (:attr:`RoomExtent.covered_fraction`: exact when the size is final, an
+  UPPER bound when it is not -- the true room is at least the mapped
+  footprint), and as what is left (:attr:`RoomExtent.left_m2`: exact, or a
+  lower bound). The observed share of the mapped free floor alone is kept
+  beside it (``observed_fraction``) for the record.
 
 Everything is recomputed from the live map and the live partition on every
 update, and the only accumulated state it reads -- the per-cell observation
@@ -58,7 +66,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 from scipy.ndimage import (binary_dilation, binary_fill_holes, find_objects, gaussian_filter,
-                           label as connected_components, sobel, uniform_filter)
+                           label as connected_components, maximum_filter, sobel, uniform_filter)
 
 #: The four sides of a room, in the room's frame: along its first axis (``+u`` / ``-u``) and its second (``+v`` / ``-v``).
 SIDES = ("+u", "-u", "+v", "-v")
@@ -186,10 +194,19 @@ class RoomExtent:
         perimeter_m: Length of the room's outer boundary (all faces).
         open_perimeter_m: Metres of it open to unseen space in wide runs.
         closed_fraction: ``1 - open_perimeter_m / perimeter_m``.
-        observed_fraction: Share of the room's free cells the camera has seen
-            from within detection range with a clear line of sight (the
-            sight ledger's per-cell record); 0 when no record was given.
+        observed_fraction: Share of the room's mapped free cells the camera
+            has seen from within detection range with a clear line of sight
+            (the sight ledger's per-cell record); 0 when no record was given.
         observed_m2: Those cells' area.
+        covered_m2: The floor COVERED: the observed free cells, the furniture
+            islands the room encloses in proportion to the observed floor
+            around them, and the settled pockets inside it.
+        covered_fraction: ``covered_m2`` over the footprint ``area_m2`` --
+            the share of the WHOLE room covered when the size is final, and
+            an UPPER bound on it when the size is a lower bound (the true
+            room is at least the mapped footprint). In ``[0, 1]``.
+        left_m2: ``area_m2 - covered_m2``: the floor still to be looked at
+            -- exact when bounded, a LOWER bound when not.
         centre: World ``(x, y)`` of the footprint's centroid.
         here: The agent stands in this room (its distances are filled).
         size_status: :data:`FINAL` or :data:`LOWER_BOUND`.
@@ -211,6 +228,9 @@ class RoomExtent:
     closed_fraction: float
     observed_fraction: float
     observed_m2: float
+    covered_m2: float
+    covered_fraction: float
+    left_m2: float
     centre: Tuple[float, float]
     here: bool = False
 
@@ -227,6 +247,11 @@ class RoomExtent:
     def unobserved_m2(self) -> float:
         """The mapped free floor the camera has NOT seen from detection range -- a lower bound on what is left."""
         return max(0.0, self.free_m2 - self.observed_m2)
+
+    @property
+    def covered_is_bound(self) -> bool:
+        """Whether ``covered_fraction`` is an upper bound (the size is a lower bound) rather than the room's share."""
+        return not self.bounded
 
     def side(self, name: str) -> SideExtent:
         for side in self.sides:
@@ -246,9 +271,11 @@ class RoomExtent:
         out["size_status"] = self.size_status
         out["walls_seen"] = self.walls_seen
         out["unobserved_m2"] = round(self.unobserved_m2, 2)
-        for key in ("area_m2", "free_m2", "length_m", "width_m", "perimeter_m", "open_perimeter_m", "observed_m2"):
+        out["covered_is_bound"] = self.covered_is_bound
+        for key in ("area_m2", "free_m2", "length_m", "width_m", "perimeter_m", "open_perimeter_m", "observed_m2",
+                    "covered_m2", "left_m2"):
             out[key] = round(float(out[key]), 2)
-        for key in ("closed_fraction", "observed_fraction"):
+        for key in ("closed_fraction", "observed_fraction", "covered_fraction"):
             out[key] = round(float(out[key]), 3)
         out["orientation_deg"] = round(math.degrees(self.orientation_rad), 1)
         out["centre"] = [round(float(v), 2) for v in self.centre]
@@ -684,17 +711,52 @@ def _room_extent(pid, mask, grid, labels, free, occupied, unknown, settled, obse
         length_final, width_final = width_final, length_final
     n_free = int(mask.sum())
     observed_cells = int((observed & mask).sum()) if observed is not None else 0
+    covered_cells = float(observed_cells) + _covered_islands(mask, holes, occupied, settled,
+                                                             None if observed is None else (observed & mask))
+    n_footprint = int(footprint.sum())
     perimeter_m = perimeter_faces * res
     open_perimeter_m = open_faces_total * res
     return RoomExtent(
-        pid=int(pid), area_m2=float(footprint.sum()) * res * res, free_m2=float(n_free) * res * res,
+        pid=int(pid), area_m2=float(n_footprint) * res * res, free_m2=float(n_free) * res * res,
         length_m=float(length_u), width_m=float(length_v), orientation_rad=float(theta),
         sides=tuple(SideExtent(**side) for side in sides), bounded=bool(bounded), open_sides=tuple(open_sides),
         length_final=bool(length_final), width_final=bool(width_final),
         perimeter_m=float(perimeter_m), open_perimeter_m=float(open_perimeter_m),
         closed_fraction=float(1.0 - open_perimeter_m / perimeter_m) if perimeter_m > 0 else 0.0,
         observed_fraction=float(observed_cells) / n_free if n_free else 0.0,
-        observed_m2=float(observed_cells) * res * res, centre=centre, here=here)
+        observed_m2=float(observed_cells) * res * res,
+        covered_m2=float(covered_cells) * res * res,
+        covered_fraction=min(1.0, float(covered_cells) / n_footprint) if n_footprint else 0.0,
+        left_m2=max(0.0, float(n_footprint - covered_cells)) * res * res,
+        centre=centre, here=here)
+
+
+def _covered_islands(mask, holes, occupied, settled, observed):
+    """How many cells of the islands ``mask`` encloses count as covered.
+
+    A furniture island (OCCUPIED cells the room surrounds) is seen from
+    the floor around it: its cells are credited in proportion to the
+    observed share of the free cells adjacent to it -- a bed with every
+    cell of floor beside it observed is covered whole, one seen from one
+    side half. A settled pocket (unknown nothing can stand in) is covered
+    by definition. Unknown islands the camera never resolved are not.
+    """
+    if not holes.any():
+        return 0.0
+    credited = float((holes & settled).sum())
+    furniture = holes & occupied & ~settled
+    if not furniture.any() or observed is None:
+        return credited
+    comp, n = connected_components(furniture, structure=np.ones((3, 3), dtype=bool))
+    if n == 0:
+        return credited
+    # Each free cell of the room beside an island carries that island's label (the largest, where two touch).
+    ring = maximum_filter(comp, size=3) * mask
+    total = np.bincount(ring.ravel(), minlength=n + 1).astype(float)
+    seen = np.bincount((ring * observed).ravel(), minlength=n + 1).astype(float)
+    sizes = np.bincount(comp.ravel(), minlength=n + 1).astype(float)
+    share = np.where(total[1:] > 0, seen[1:] / np.maximum(total[1:], 1.0), 0.0)
+    return credited + float((sizes[1:] * share).sum())
 
 
 # -- prompt words ------------------------------------------------------------------
@@ -737,14 +799,45 @@ def size_words(extent: Optional[RoomExtent], area_m2: float = 0.0) -> str:
     return "at least %s (%s x %sm, %s)" % (area_text, length, width, walls)
 
 
-def seen_words(extent: Optional[RoomExtent]) -> Optional[str]:
-    """The ``observed=`` value of a room's prompt line: the share of its mapped floor the camera has looked at from detection range.
+def area_words(value: float) -> str:
+    """Square metres for the prompt: ``0m2``, ``under 1m2``, else the nearest whole ``12m2``."""
+    value = float(value)
+    if value < 0.05:
+        return "0m2"
+    if value < 1.0:
+        return "under 1m2"
+    return "%dm2" % int(round(value))
 
-    ``80% of it`` when the room is bounded, ``80% of the mapped part`` when
-    not -- the unmapped rest is not in the denominator and the words say so.
-    None when no record exists.
+
+def coverage_words(covered_m2: float, fraction: float, left_m2: float, bounded: bool) -> str:
+    """The ``covered=`` value of a room's prompt line: the floor the camera has looked at from detection range, as final results.
+
+    Bounded room: ``10m2 (80% of the room, 2m2 left)``, the share rounded
+    DOWN to tens, or ``12m2 (all of it)``. Size a lower bound: the share is
+    an UPPER bound rounded UP, the remainder a LOWER bound -- ``3m2 (at most
+    40% of the room, at least 4m2 left)`` -- or, with everything mapped
+    covered, ``7m2 (all of the mapped part; the unmapped rest is unknown)``.
+    The model is handed the numbers it would otherwise derive.
     """
+    covered = area_words(covered_m2)
+    fraction = max(0.0, min(1.0, float(fraction)))
+    if bounded:
+        if fraction >= 0.995:
+            return "%s (all of it)" % covered
+        percent = int(math.floor(fraction * 10.0 + 1e-9)) * 10
+        left = area_words(left_m2)
+        return "%s (%d%% of the room, %s left)" % (covered, percent, left)
+    percent = min(100, int(math.ceil(fraction * 10.0 - 1e-9)) * 10)
+    if percent >= 100:
+        # "at most 100%" says nothing: what is known is that everything mapped was looked at.
+        return "%s (all of the mapped part; the unmapped rest is unknown)" % covered
+    if float(left_m2) < 1.0:
+        return "%s (at most %d%% of the room)" % (covered, percent)      # "at least under 1m2 left" says nothing
+    return "%s (at most %d%% of the room, at least %s left)" % (covered, percent, area_words(left_m2))
+
+
+def seen_words(extent: Optional[RoomExtent]) -> Optional[str]:
+    """The ``covered=`` value for ``extent`` (:func:`coverage_words`), or None without one."""
     if extent is None:
         return None
-    percent = coarse_fraction(extent.observed_fraction)
-    return "%d%% of %s" % (percent, "it" if extent.bounded else "the mapped part")
+    return coverage_words(extent.covered_m2, extent.covered_fraction, extent.left_m2, extent.bounded)

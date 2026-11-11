@@ -32,6 +32,8 @@ import numpy as np
 
 from sparx_agency.core.mapping.topology.room_extent import ExtentParams, room_extents
 from sparx_agency.core.planning.environment import OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues
+from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_from_camera
+from sparx_agency.core.planning.object_search.rooms.frontier_unknown import room_frontier_seeds, rooms_unknown_behind
 from sparx_agency.core.planning.object_search.world_model.sightlines import (
     SightSettings, cone_observed, floor_band, object_band)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording import MapAtStep, load_json
@@ -139,6 +141,11 @@ def replay(directory, camera=None, every=1, params=None, verbose=False):
         extents = room_extents(grid, labels, maps.resolution, maps.origin, observed=ledger.mask(world, floor_id),
                                resolved=settled, here_xy=(pose["x"], pose["y"]), params=params, previous=previous)
         previous = extents
+        # The unknown behind each room's frontiers, from the map alone (the live inventory is not recorded).
+        seeds = room_frontier_seeds(world, labels, resolved=settled)
+        view = UnknownView(world, cone_from_camera(spec.intrinsics.width, spec.intrinsics.fx, float(spec.max_depth_m)),
+                           resolved=settled)
+        behind = rooms_unknown_behind(view, world, seeds)
         search = (row.get("method") or {}).get("search") or {}
         excluded = {int(k): v for k, v in (search.get("excluded") or {}).items()}
         rooms = {}
@@ -147,14 +154,20 @@ def replay(directory, camera=None, every=1, params=None, verbose=False):
                           "length_m": round(extent.length_m, 2), "width_m": round(extent.width_m, 2),
                           "bounded": extent.bounded, "walls_seen": extent.walls_seen,
                           "open_sides": list(extent.open_sides), "observed_fraction": round(extent.observed_fraction, 3),
-                          "observed_m2": round(extent.observed_m2, 2), "open_perimeter_m": round(extent.open_perimeter_m, 2),
+                          "observed_m2": round(extent.observed_m2, 2),
+                          "covered_m2": round(extent.covered_m2, 2), "covered_fraction": round(extent.covered_fraction, 3),
+                          "left_m2": round(extent.left_m2, 2),
+                          "frontiers": len(seeds.get(pid, ())), "unknown_behind_m2": round(behind.get(pid, 0.0), 2),
+                          "open_perimeter_m": round(extent.open_perimeter_m, 2),
                           "closed_fraction": round(extent.closed_fraction, 3), "here": extent.here,
                           "scanned": excluded.get(pid) if str(excluded.get(pid, "")).startswith("scanned") else None}
         out_steps.append({"step": step, "floor": floor_id, "rooms": rooms, "pids": sorted(rooms)})
         if verbose:
             print("step %3d  rooms %s" % (step, " ".join(
-                "R%d[%s%.0fm2 %d/4 obs%.0f%%]" % (pid, "" if r["bounded"] else ">=", r["area_m2"], r["walls_seen"],
-                                                 100 * r["observed_fraction"]) for pid, r in sorted(rooms.items()))))
+                "R%d[%s%.0fm2 %d/4 cov%s%.0f%% f%d/%.0fm2]" % (
+                    pid, "" if r["bounded"] else ">=", r["area_m2"], r["walls_seen"], "" if r["bounded"] else "<=",
+                    100 * r["covered_fraction"], r["frontiers"], r["unknown_behind_m2"])
+                for pid, r in sorted(rooms.items()))))
     result = {"scene": episode.get("scene"), "episode": episode.get("episode_id"), "target": episode.get("target"),
               "camera": camera_name, "steps": out_steps}
     result["checks"] = checks(out_steps)

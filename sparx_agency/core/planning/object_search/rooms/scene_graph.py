@@ -20,6 +20,7 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import Room
 from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 from sparx_agency.core.planning.object_search.perception.doors import DOOR_LABELS
+from sparx_agency.core.planning.object_search.rooms.frontier_unknown import rooms_unknown_behind
 from sparx_agency.core.mapping.topology.revisable_room_labels import RevisableRoomLabels
 
 #: How far beyond its footprint an object may stand from room floor and still be the room's.
@@ -163,6 +164,12 @@ class ObservedSceneGraph:
         #: Whether the latest extents were read with an observation record: without one (no sight ledger, a
         #: rig that never observed) the nodes' coverage is None and the prompt says nothing of it.
         self._observed_read = False
+        #: Optional ``world -> UnknownView`` (``opening_nodes.unknown_view_for``): the ray caster the unknown
+        #: behind each room's frontiers is measured with. None leaves :attr:`unknown_behind` empty.
+        self.unknown_view_provider = None
+        #: ``{pid: m2}`` -- the unknown floor the camera's cone reaches from the room's frontier clusters, united
+        #: (``frontier_unknown.unknown_behind``), from the latest :meth:`refresh_accessibility`.
+        self.unknown_behind = {}
 
     def note_pose(self, xy):
         """Remember where the agent stands, for the walked-through thresholds."""
@@ -427,6 +434,20 @@ class ObservedSceneGraph:
                                                        frontier_world=None if frontier_world is world else frontier_world)
         self.facts = {pid: replace(fact, frontier_clusters=len(self.frontier_inventory.by_room.get(pid + 1, ())))
                       for pid, fact in self.facts.items()}
+        self.unknown_behind = self._unknown_behind(world)
+
+    def _unknown_behind(self, world):
+        """``{pid: m2}`` -- the unknown floor behind every room's accessible frontier clusters, united per room."""
+        if self.unknown_view_provider is None or self.frontier_inventory is None:
+            return {}
+        seeds = {label - 1: [goal.cell for goal in goals]
+                 for label, goals in self.frontier_inventory.by_room.items() if goals}
+        if not seeds:
+            return {}
+        view = self.unknown_view_provider(world)
+        if view is None:
+            return {}
+        return rooms_unknown_behind(view, world, seeds)
 
     def refresh_labels(self, step):
         """Re-read every room's label from its evidence now, before the nodes are chosen.
@@ -634,8 +655,11 @@ class ObservedSceneGraph:
                 width_final=True if extent is None else bool(extent.width_final),
                 walls_seen=None if extent is None else int(extent.walls_seen),
                 bounded=None if extent is None else bool(extent.bounded),
-                observed_fraction=(None if extent is None or not self._observed_read
-                                   else float(extent.observed_fraction)),
+                covered_fraction=(None if extent is None or not self._observed_read
+                                  else float(extent.covered_fraction)),
+                covered_m2=0.0 if extent is None else float(extent.covered_m2),
+                left_m2=0.0 if extent is None else float(extent.left_m2),
+                unknown_behind_m2=self.unknown_behind.get(pid),
                 open_perimeter_m=0.0 if extent is None else float(extent.open_perimeter_m),
                 frontier_clusters=0 if fact is None else int(fact.frontier_clusters),
                 searched_s=float(self.searched.get(pid, 0.0)),

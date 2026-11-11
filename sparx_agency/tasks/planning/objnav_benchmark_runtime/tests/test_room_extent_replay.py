@@ -90,16 +90,21 @@ def test_the_replay_reads_the_room_as_first_seen_then_scanned_then_split_and_mer
     door = by_step[0][1]
     assert not door["bounded"] and door["walls_seen"] == 3, "the far wall is beyond the first frame"
     assert door["area_m2"] == pytest.approx(10.0, abs=0.2) and door["observed_fraction"] > 0.6
+    assert door["covered_fraction"] == pytest.approx(door["covered_m2"] / door["area_m2"], abs=0.01), (
+        "the covered share is of the mapped footprint: an upper bound while the far wall is unseen")
+    assert door["frontiers"] >= 1 and door["unknown_behind_m2"] > 5.0, "the open side leads into the unmapped half"
     inside = by_step[1][1]
     assert inside["bounded"] and inside["walls_seen"] == 4 and inside["area_m2"] == pytest.approx(20.0, abs=0.2)
     assert by_step[4][1]["observed_fraction"] > by_step[1][1]["observed_fraction"], "the turn in place observes more"
     assert by_step[4][1]["observed_fraction"] >= 0.9, "a full turn in the middle of a 5 x 4 m room sees nearly all of it"
+    assert by_step[4][1]["covered_m2"] + by_step[4][1]["left_m2"] == pytest.approx(by_step[4][1]["area_m2"], abs=0.05)
     assert by_step[4][1]["scanned"] == "scanned:scan_point_inside", "the recorded verdict rides along"
     halves = by_step[5]
     assert set(halves) == {1, 3, 7}
     assert halves[1]["bounded"] and halves[7]["bounded"], "each half is closed by walls and the cut"
     assert halves[1]["observed_m2"] + halves[7]["observed_m2"] == pytest.approx(by_step[4][1]["observed_m2"], abs=0.3), (
         "the coverage belongs to the floor, not the number")
+    assert halves[1]["covered_m2"] + halves[7]["covered_m2"] == pytest.approx(by_step[4][1]["covered_m2"], abs=0.3)
     merged = by_step[6][1]
     assert merged["bounded"] and merged["area_m2"] == pytest.approx(20.0, abs=0.2)
     assert merged["observed_fraction"] == pytest.approx(by_step[4][1]["observed_fraction"], abs=0.02)
@@ -175,20 +180,28 @@ def test_the_policy_reads_the_extents_every_action_and_the_oracle_is_shown_size_
     assert policy.sight.observed_mask(policy.last_world).any(), "the frames observed the floor ahead"
     assert policy.graph.extents, "every update reads the rooms' extents"
     extent = next(iter(policy.graph.extents.values()))
-    assert extent.observed_fraction > 0.0 and extent.free_m2 > 0.0
+    assert extent.observed_fraction > 0.0 and extent.free_m2 > 0.0 and extent.covered_m2 > 0.0
     assert not extent.bounded, "one flat wall ahead: the other walls are not seen"
+    assert policy.graph.unknown_view_provider is not None and policy.graph.unknown_behind, (
+        "the unknown behind the room's frontiers is measured live, through the openings' ray caster")
     nodes = policy.graph.nodes(policy.last_world, 3)
-    assert nodes and nodes[0].bounded is False and nodes[0].observed_fraction is not None
+    assert nodes and nodes[0].bounded is False and nodes[0].covered_fraction is not None
+    assert nodes[0].unknown_behind_m2 is not None and nodes[0].unknown_behind_m2 > 0.0
     assert llm.oracle_prompts, "the loop asked the oracle"
     system, user = llm.oracle_prompts[-1]
-    assert "observed=" in user and ("wall not seen yet" in user or "walls not seen yet" in user), user
-    assert "is a LOWER BOUND" in system and "SIZE AND COVERAGE decide" in system
+    assert "covered=" in user and "unknown behind" in user, user
+    assert "at most" in user or "all of the mapped part" in user, "a lower-bound size: the share is a bound, or all mapped"
+    assert "wall not seen yet" in user or "walls not seen yet" in user, user
+    assert "here=" not in user and "observed=" not in user
+    assert "is a LOWER BOUND" in system and "COVERAGE FIRST" in system and "TIME IS SECONDARY" in system
     record = policy.episode_info()["last_reasoning"]
     assert record["extents"] and all("size_status" in item for item in record["extents"].values())
     assert any(node.get("bounded") is False for node in record["nodes"] if node.get("kind") == "room")
     snapshot = method_snapshot(policy)
     rooms = [room for room in snapshot["search"]["rooms"] if room.get("extent")]
     assert rooms and rooms[0]["extent"]["size_status"] == "lower_bound"
+    assert rooms[0]["extent"]["covered_is_bound"] and rooms[0]["extent"]["unknown_behind_m2"] is not None
+    assert all(node.get("covered_m2", 0.0) >= 0.0 for node in record["nodes"] if node.get("kind") == "room")
     configuration = policy.configuration()
     assert configuration["room_extents"]["doorway_max_m"] == 1.2 and "OBSERVED" in configuration["sight"]["rule"]
     assert configuration["sight"]["detect_range_m"] == 4.0

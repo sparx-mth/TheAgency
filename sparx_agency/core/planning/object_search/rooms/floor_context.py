@@ -5,6 +5,7 @@ from sparx_agency.core.mapping.objects.landmarks import ObjectLandmarkMap
 from sparx_agency.core.planning.exploration.object_search_supervisor import ObjectSearchSupervisor
 from sparx_agency.core.planning.object_search.perception.doors import ObservedDoors
 from sparx_agency.core.mapping.objects.target_evidence import TargetEvidence
+from sparx_agency.core.planning.object_search.rooms.opening_nodes import unknown_view_for
 from sparx_agency.core.planning.object_search.rooms.oracle_retry import RepairingNodeOracle
 from sparx_agency.core.mapping.topology.room_priors import home_object
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import RoomSearchLoop
@@ -48,6 +49,9 @@ class FloorContextBank:
                 p.graph.observed_provider = sight.observed_mask
         if getattr(p, "extent_params", None) is not None:
             p.graph.extent_params = p.extent_params
+        # The unknown behind each room's frontiers: the openings' own ray caster (the camera's cone, the settled
+        # unknown blocking), united over the room's clusters so two exits onto one unmapped room count it once.
+        p.graph.unknown_view_provider = lambda world, p=p: unknown_view_for(p, world)
         p.doors = ObservedDoors(p.door_settings)
         # Classes never merge (since 2026-10-07): a cup on a table, a toilet beside a
         # bathtub, a vase on a cabinet are separate instances whatever their proximity
