@@ -144,6 +144,7 @@ import time
 from typing import Optional
 
 import numpy as np
+from scipy.ndimage import binary_dilation
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.mapping.topology.search_node_oracle import (
@@ -159,6 +160,7 @@ from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_f
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ROOM_LLM
+from sparx_agency.core.planning.object_search.exploration.greedy_look import GreedyLookPlanner, LookSettings
 from sparx_agency.core.planning.object_search.rooms.house_context import house_line, scan_words
 from sparx_agency.core.mapping.topology.room_priors import home_object, implausible_room, ruled_out, target_home_line
 from sparx_agency.core.planning.object_search.rooms.room_scans import FRAGMENT, OUTSIDE_VERDICTS, SCAN_POINT_INSIDE
@@ -168,6 +170,10 @@ from sparx_agency.core.planning.object_search.rooms.opening_nodes import (
 from sparx_agency.core.planning.object_search.rooms.room_vantage import vantage_point
 from sparx_agency.core.planning.object_search.rooms.stair_nodes import (
     is_stair_node, portal_id_of, search_context, stair_node_id, stair_options)
+
+
+#: Most actions the viewpoint explore visit spends stepping inside a room it resolved from its edge.
+STEP_INSIDE_ACTIONS = 12
 
 
 class RoomReasoningUnavailable(Exception):
@@ -233,6 +239,28 @@ class LoopSettings:
             walls were seen round does not, and that pocket is given up
             (the toilet behind the jamb that only a step inside would show
             is the price). 0 restores every admissible frontier.
+        explore_goals: ``explore`` -- WHERE the visit stands to resolve the
+            room's frontiers (since 2026-11-11). ``frontier`` (the default):
+            the frontier cells themselves, best first by the view gain above
+            (:func:`~frontier_ranking.rank_by_view_gain`), walked to one
+            after another. ``viewpoint``: the greedy look planner
+            (:mod:`~sparx_agency.core.planning.object_search.exploration.greedy_look`)
+            scoped to the room -- at every action the choice between a
+            sweep of turns here and a walk to a reachable point of the room
+            (a lattice over its floor, its frontier cells among them) valued
+            by the expected useful area the camera would reveal from it per
+            action, MapEx's viewpoint score with this camera's sensor model;
+            the agent stands where the camera sees the most of what is
+            unknown, not necessarily at the boundary. The frontier
+            population that keeps the room open is unchanged
+            (:meth:`RoomSearchLoop._explore_goals`); when the planner finds
+            nothing worth an action with significant frontier still listed,
+            that frontier is retired for the episode so the room reads
+            finished, as an unreachable frontier is.
+        explore_look: ``explore`` with ``explore_goals: viewpoint`` -- overrides
+            of the planner's :class:`~greedy_look.LookSettings` fields, as a
+            JSON object (``{"detection_range_m": 5.0}`` under ground-truth
+            perception). Empty: its defaults.
         room_missing_grace: Actions a transit keeps walking to its committed
             entry point while the room it was chosen for is missing from the
             registry AND no live room holds the place (since 2026-10-14; the
@@ -528,6 +556,8 @@ class LoopSettings:
     explore_service_steps: int = 12
     explore_frontier_steps: int = 4
     explore_min_gain_m2: float = 1.0
+    explore_goals: str = "frontier"
+    explore_look: dict = field(default_factory=dict)
     failure_cooldown_steps: int = 30
     room_missing_grace: int = 10
     transit_commitment: bool = True
@@ -572,6 +602,11 @@ class LoopSettings:
     def __post_init__(self):
         if self.visit not in ("explore", "scan", "sweep"):
             raise ValueError("visit must be 'explore', 'scan' or 'sweep'; no silent fallback")
+        if self.explore_goals not in ("frontier", "viewpoint"):
+            raise ValueError("explore_goals must be 'frontier' or 'viewpoint'; no silent fallback")
+        if not isinstance(self.explore_look, dict) or not all(isinstance(key, str) for key in self.explore_look):
+            raise ValueError("explore_look must be a JSON object of LookSettings overrides")
+        LookSettings(**self.explore_look)       # raises on an unknown or out-of-range field now, not at the first visit
         for name in ("local_steps", "supervisor_rounds", "scan_visit_steps", "scan_approach_steps",
                      "explore_visit_steps", "explore_service_steps", "explore_frontier_steps"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
@@ -770,6 +805,7 @@ class RoomSearchLoop:
         self._peek_missing = 0        # consecutive actions the peek in force's opening was absent from the inventory
         self._scan = None             # the visit in force under ``scan``: phase, room, approach actions, swept yaw
         self._explore = None          # the visit in force under ``explore``: room, started, goals walked, frontier left
+        self._explore_planner = None  # the viewpoint visit's greedy look planner (``explore_goals: viewpoint``), per visit
         self._opening_cache = None    # (step, options) -- the openings read this action, shared by the HUD and SELECT
         self._folded = set()          # opening node ids folded into an unfinished room's own exploration (logged once)
         self._folded_now = set()      # ... and the ones folded this action, for the HUD
@@ -805,6 +841,7 @@ class RoomSearchLoop:
                       "scans_completed": 0, "scans_in_place": 0, "scan_approach_actions": 0,
                       "scan_unreachable": 0, "excluded_scanned": 0, "excluded_type": 0, "finished_in_transit": 0,
                       "finished_by_rotation": 0, "explore_goals": 0, "explore_visits": 0, "explore_exhausted": 0,
+                      "viewpoint_retired_frontiers": 0, "viewpoint_steps_inside": 0,
                       "openings_folded": 0, "openings_provisional": 0, "rooms_reopened": 0,
                       "second_pass_rounds": 0, "second_pass_forced": 0, "revisits_offered": 0, "revisits_chosen": 0,
                       "unentered_rounds": 0,
@@ -1001,6 +1038,7 @@ class RoomSearchLoop:
             self._room_missing, self._room_missing_pid = 0, None
             self._scan = None
             self._explore = None
+            self._explore_planner = None       # the viewpoint visit's greedy look planner, per visit
             self._peek = None
             self.stats["rooms_released"] += 1
             self.stats["loop_points"] += 1
@@ -1073,6 +1111,7 @@ class RoomSearchLoop:
             self.room_id = state.room_id
             self._scan = None
             self._explore = None
+            self._explore_planner = None
             if not is_opening_node(state.room_id):
                 p.sweep.begin_scan((p.mapping.floor_id, state.room_id))
             self.stats["arrivals"] += 1
@@ -3160,8 +3199,12 @@ class RoomSearchLoop:
         if visit is None or visit["room"] != state.room_id:
             visit = self._explore = dict(room=state.room_id, started=int(obs.step), goals=0, goal=None,
                                          frontier_left=None)
+            self._explore_planner = None
+            if self.settings.explore_goals == "viewpoint":
+                # Kept beside the visit, not in it: the visit dict is written to every step record.
+                self._explore_planner = GreedyLookPlanner(p, LookSettings(**self.settings.explore_look), "viewpoint")
             self.stats["explore_visits"] += 1
-            self._log(obs, "explore_begin", room=state.room_id,
+            self._log(obs, "explore_begin", room=state.room_id, goals=self.settings.explore_goals,
                       frontier=self._live_frontier(state.room_id, obs, world))
         goals = self._explore_goals(obs, world, cost, room)
         visit["frontier_left"] = len(goals)
@@ -3174,6 +3217,16 @@ class RoomSearchLoop:
         # its exits, and the visit goes on to them (its exits: every GAP walked, or the bound).
         if (not (goals and self._gaps_left(state.room_id, obs, world, frontier=len(goals)))
                 and self._finished_by_rotation(obs, world, state.room_id, room, visit["started"])):
+            return None, {"frontier_exhausted": True}
+        if self.settings.explore_goals == "viewpoint":
+            planning_world = self._confined(obs, world, cost, room, state.room_id)[0] if goals else world
+            command = self._viewpoint_step(obs, world, cost, planning_world, state, room, visit, goals)
+            if command is not None:
+                return command, {}
+            self._explore = None
+            self._explore_planner = None
+            self.stats["explore_exhausted"] += 1
+            self.stats["exhausted_releases"] += 1
             return None, {"frontier_exhausted": True}
         if goals:
             planning_world, planning_cost = self._confined(obs, world, cost, room, state.room_id)
@@ -3195,7 +3248,95 @@ class RoomSearchLoop:
         self._log(obs, "explore_complete", room=state.room_id, goals=visit["goals"],
                   actions=int(obs.step) - visit["started"], frontier_left=len(goals))
         self._explore = None
+        self._explore_planner = None
         return None, {"frontier_exhausted": True}
+
+    def _viewpoint_step(self, obs, world, cost, planning_world, state, room, visit, goals):
+        """The viewpoint explore visit's action (``explore_goals: viewpoint``), or None when the room is done with.
+
+        The greedy look planner, scoped to the room's floor (its mask with
+        the sweep's slack, so a threshold cell is in) and offered the room's
+        frontier goals as candidates beside the lattice, within what is left
+        of the visit's bound; its walks are routed on the room-confined map
+        and fall back to the observed one when the confinement walls a point
+        off. When it finds nothing worth an action while significant
+        frontier is still listed, that frontier is retired
+        (``_visited_frontiers``) so the ledger's ``explored`` verdict and the
+        oracle's ``frontier=`` read the room as the visit found it: nothing
+        left worth a step. The visit then ends ``exhausted``.
+        """
+        p = self.policy
+        planner = self._explore_planner
+        remaining = int(self.visit_budget()) - int(self.local_steps)
+        command = None
+        if goals:
+            slack = int(math.ceil(p.sweep.settings.mask_slack_m / float(world.resolution)))
+            within = binary_dilation(np.asarray(room.mask, dtype=bool), iterations=max(1, slack))
+            command = planner.plan(obs, world, cost, remaining, within=within, planning_world=planning_world,
+                                   extra=[tuple(float(v) for v in g.xy) for g in goals])
+            visit["look"] = {"spots": len(planner.spots), "moves": planner.moves,
+                             "goal": None if planner.goal is None else [round(float(v), 2) for v in planner.goal],
+                             "ended": planner.ended, "candidates": planner.stats["candidates"]}
+            if command is not None:
+                goal = None if planner.goal is None else tuple(round(float(v), 2) for v in planner.goal)
+                if goal is not None and goal != visit["goal"]:
+                    visit["goal"], visit["goals"] = goal, visit["goals"] + 1
+                    self.stats["explore_goals"] += 1
+                    self._log(obs, "explore_goal", room=state.room_id, goal=list(goal), frontier_left=len(goals),
+                              viewpoint=True, decision=planner.decisions[-1]["choice"] if planner.decisions else None)
+                return command
+            if planner.ended is not None and planner.ended != "budget":
+                for goal in goals:
+                    p._visited_frontiers.append(tuple(float(v) for v in goal.xy))
+                self.stats["viewpoint_retired_frontiers"] += len(goals)
+                self._log(obs, "viewpoint_retired", room=state.room_id, goals=len(goals), reason=planner.ended)
+        if remaining > 0 and planner.ended != "budget":
+            command = self._step_inside(obs, world, cost, state, room, visit)
+            if command is not None:
+                return command
+        self._log(obs, "explore_complete", room=state.room_id, goals=visit["goals"],
+                  actions=int(obs.step) - visit["started"], frontier_left=len(goals), viewpoint=True,
+                  reason=planner.ended)
+        return None
+
+    def _step_inside(self, obs, world, cost, state, room, visit):
+        """The viewpoint visit's last act when the camera has resolved the room from its edge: a step inside, or None.
+
+        The ledger's ``explored`` verdict wants the agent to have STOOD in
+        the room -- ``explored_inset_m`` in from its edge, where the walls
+        beside its door are in front of the camera rather than behind it
+        -- and a room resolved by looks from its threshold has not been. The
+        walk to the nearest interior cell is short (a step or two past the
+        threshold) and bounded (:attr:`STEP_INSIDE_ACTIONS`); without it the
+        room stayed a node and bought a second visit for the same walk.
+        """
+        p = self.policy
+        ledger, sight = getattr(p, "scans", None), getattr(p, "sight", None)
+        if ledger is None or sight is None or not ledger.explored:
+            return None
+        interior = ledger._interior(world, room.mask)
+        if sight.stood_in(world, interior):
+            return None
+        if visit.get("inside_actions", 0) >= STEP_INSIDE_ACTIONS:
+            return None
+        inventory = p.graph.frontier_inventory
+        distance = getattr(inventory, "distance_m", None)
+        if distance is None or distance.shape != interior.shape:
+            return None
+        ys, xs = np.nonzero(interior & np.isfinite(distance) & np.isfinite(cost) if cost is not None else interior & np.isfinite(distance))
+        if not len(xs):
+            return None
+        i = int(np.argmin(distance[ys, xs]))
+        goal = tuple(float(v) for v in world.grid_to_world(int(xs[i]), int(ys[i])))
+        command = p._navigate(obs, world, goal, "viewpoint")
+        if command is None:
+            return None
+        visit["inside_actions"] = visit.get("inside_actions", 0) + 1
+        if visit.get("inside_actions") == 1:
+            self.stats["viewpoint_steps_inside"] += 1
+            self._log(obs, "viewpoint_step_inside", room=state.room_id, goal=[round(v, 2) for v in goal],
+                      geodesic_m=round(float(distance[ys[i], xs[i]]), 2))
+        return replace(command, info=dict(command.info, kind="viewpoint", choice="step_inside"))
 
     def _finished_by_rotation(self, obs, world, pid, room, since_step):
         """Whether a full rotation completed inside ``room`` since ``since_step`` (a glance on the way) has finished it."""
@@ -3210,6 +3351,7 @@ class RoomSearchLoop:
         self._log(obs, "finished_by_rotation", room=pid, source=record.get("source"), rotation_step=record.get("step"))
         self._scan = None
         self._explore = None
+        self._explore_planner = None
         return True
 
     def _scan_visit(self, obs, world, cost, state, room):
@@ -3402,6 +3544,7 @@ class RoomSearchLoop:
                 "room_level_gaps": self.settings.room_level_gaps,
                 "scan": None if self._scan is None else dict(self._scan),
                 "explore": None if self._explore is None else dict(self._explore),
+                "explore_look": None if self._explore_planner is None else self._explore_planner.diagnostics(),
                 "peek": self.peek_state(),
                 "committed_room": None if self._committed_room is None else int(self._committed_room[0]),
                 "entry_failures": [{"place": [round(v, 2) for v in place], "failures": count, "step": step}

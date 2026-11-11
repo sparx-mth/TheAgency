@@ -619,3 +619,125 @@ def test_the_explore_goals_discount_a_frontier_the_agent_has_spent_many_actions_
     policy.sweep.settings = replace(policy.sweep.settings, ranking=replace(policy.sweep.settings.ranking, visit_weight=0.0))
     policy.loop._visits_cache = None
     assert policy.loop._visits(obs_at(episode, 31, IN_A)) is None, "0 disables"
+
+
+# -- the viewpoint explore visit (2026-11-11): stand where the camera sees the most, not at the boundary ------------
+def reveal_cone(world, xy, yaw, half_fov=math.radians(39.5), range_m=5.0):
+    """What a frame at ``xy`` facing ``yaw`` would map: unknown cells in the cone with a clear line become free floor."""
+    from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
+    gx0, gy0 = world.world_to_grid(*xy)
+    r = int(range_m / world.resolution)
+    h, w = world.grid.shape
+    blocked = world.grid == world.values.occupied
+    for gy in range(max(0, gy0 - r), min(h, gy0 + r + 1)):
+        for gx in range(max(0, gx0 - r), min(w, gx0 + r + 1)):
+            if world.grid[gy, gx] != world.values.unknown or (gx - gx0) ** 2 + (gy - gy0) ** 2 > r * r:
+                continue
+            bearing = math.atan2(gy - gy0, gx - gx0)
+            if abs((bearing - yaw + math.pi) % (2 * math.pi) - math.pi) > half_fov:
+                continue
+            if line_of_sight_clear(blocked, int(gx0), int(gy0), int(gx), int(gy)):
+                world.grid[gy, gx] = world.values.free
+
+
+def walk_with_looks(policy, episode, world, start_step, start_xy, yaw=0.0, max_actions=60):
+    """Like :func:`walk`, for a visit that also turns in place: a hold turns the body and the frame reveals its cone;
+    a route is walked to its end facing its last leg, the frame there revealing that cone."""
+    commands, xy, step = [], start_xy, start_step
+    for _ in range(max_actions):
+        obs = obs_at(episode, step, xy, yaw)
+        policy.sight.observe(obs, world)
+        command = policy.loop.plan(obs, world)
+        commands.append(command)
+        if policy.supervisor.state != SEARCH or policy.loop.room_id is None:
+            return commands, step, xy, yaw
+        policy.loop.charge()
+        if command.waypoints:
+            for point in command.waypoints:
+                policy.sight.observe(obs_at(episode, step, (float(point[0]), float(point[1]))), world)
+            end = command.waypoints[-1]
+            previous = command.waypoints[-2] if len(command.waypoints) > 1 else xy
+            yaw = math.atan2(end[1] - previous[1], end[0] - previous[0]) if math.dist(end, previous) > 1e-6 else yaw
+            xy = (float(end[0]), float(end[1]))
+            policy.route_memory.clear("teleported")
+            policy._route = policy._goal = None
+        elif command.final_yaw is not None:
+            yaw = float(command.final_yaw)
+        reveal_cone(world, xy, yaw)
+        refresh(policy, world, xy, yaw)
+        step += 1
+    raise AssertionError("the visit never ended")
+
+
+def test_loop_settings_name_the_explore_goals_and_check_the_look_overrides():
+    assert LoopSettings().explore_goals == "frontier" and LoopSettings().explore_look == {}
+    assert LoopSettings(explore_goals="viewpoint", explore_look={"detection_range_m": 5.0}).explore_look["detection_range_m"] == 5.0
+    with pytest.raises(ValueError):
+        LoopSettings(explore_goals="vantage")
+    with pytest.raises(ValueError):
+        LoopSettings(explore_goals="viewpoint", explore_look={"detection_range_m": 0.0})
+    with pytest.raises(TypeError):
+        LoopSettings(explore_goals="viewpoint", explore_look={"no_such_knob": 1})
+
+
+def test_the_viewpoint_visit_resolves_the_room_from_where_the_camera_sees_most_and_finishes_it_explored():
+    policy, episode, world, rooms, reasoned = explore_policy(
+        order=(1, 0), explore_goals="viewpoint", explore_look={"detection_range_m": 5.0, "min_rate_m2_per_action": 0.1})
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    entry = policy.route_memory.goal
+    inside = (entry[0] - 0.3, entry[1]) if cell_in(world, rooms[1], (entry[0] - 0.3, entry[1])) else entry
+    reveal_cone(world, inside, 0.0)
+    refresh(policy, world, inside)
+    policy.route_memory.clear("teleported")
+    policy._route = policy._goal = None
+    policy.sight.observe(obs_at(episode, 1, inside), world)
+    first = policy.loop.plan(obs_at(episode, 1, inside), world)
+    assert policy.supervisor.state == SEARCH and policy.loop.room_id == 1
+    visit = policy.loop._explore
+    assert visit is not None and visit["room"] == 1 and policy.loop._explore_planner.kind == "viewpoint"
+    assert first.info["kind"] == "viewpoint" and first.info["choice"] in ("move", "turn_left", "turn_right")
+    begin = next(e for e in policy.loop.events if e["event"] == "explore_begin")
+    assert begin["goals"] == "viewpoint"
+    policy.loop.charge()
+    commands, last, where, yaw = walk_with_looks(policy, episode, world, 2, inside)
+    kinds = {c.info.get("kind") for c in commands[:-1]}
+    assert kinds <= {"viewpoint"}, "every action of the visit is the planner's: %s" % kinds
+    choices = [c.info.get("choice") for c in commands[:-1]]
+    assert "move" in choices or any(ch in ("turn_left", "turn_right") for ch in choices)
+    assert policy.supervisor.history[-1][:2] == (1, EXHAUSTED)
+    complete = [e for e in policy.loop.events if e["event"] == "explore_complete"]
+    assert len(complete) == 1 and complete[0]["frontier_left"] == 0, "the looks resolved every frontier of the room"
+    assert policy.loop.stats["explore_visits"] == 1 and policy.loop.stats["explore_exhausted"] == 1
+    assert policy.loop.stats["viewpoint_retired_frontiers"] == 0, "nothing was given up: the frontier was seen"
+    assert policy.loop._finished[1][0] == EXPLORED, "no live frontier and the agent stood in it"
+    assert policy.loop._excluded == {1: "scanned:" + EXPLORED}
+    assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 0
+    assert policy.scans.records == [], "the explore visit records no scan of its own"
+    assert len(commands) - 1 <= policy.loop.settings.explore_visit_steps
+
+
+def test_the_viewpoint_visit_retires_frontier_it_finds_not_worth_an_action_and_steps_inside_to_finish_the_room():
+    """A min rate nothing clears: the planner ends at once and the listed frontier is retired; the agent, standing
+    on the room's edge, then steps inside so the ledger's ``explored`` verdict can finish the room."""
+    policy, episode, world, rooms, reasoned = explore_policy(
+        order=(1, 0), explore_goals="viewpoint", explore_look={"detection_range_m": 5.0, "min_rate_m2_per_action": 1e6})
+    policy.loop.plan(obs_at(episode, 0, IN_A), world)
+    entry = policy.route_memory.goal
+    inside = (entry[0] - 0.3, entry[1]) if cell_in(world, rooms[1], (entry[0] - 0.3, entry[1])) else entry
+    refresh(policy, world, inside)
+    policy.route_memory.clear("teleported")
+    policy._route = policy._goal = None
+    policy.sight.observe(obs_at(episode, 1, inside), world)
+    before = len(policy._visited_frontiers)
+    first = policy.loop.plan(obs_at(episode, 1, inside), world)
+    assert policy.loop.stats["viewpoint_retired_frontiers"] >= 1 and len(policy._visited_frontiers) > before
+    retired = next(e for e in policy.loop.events if e["event"] == "viewpoint_retired")
+    assert retired["room"] == 1 and retired["reason"] == "nothing worth an action"
+    assert first.info["kind"] == "viewpoint" and first.info["choice"] == "step_inside" and first.waypoints, (
+        "the room was resolved from its edge: the visit's last act is the step inside, not a second visit")
+    assert policy.loop.stats["viewpoint_steps_inside"] == 1
+    policy.loop.charge()
+    commands, last, where, yaw = walk_with_looks(policy, episode, world, 2, inside)
+    assert policy.supervisor.history[-1][:2] == (1, EXHAUSTED)
+    assert policy.loop._finished[1][0] == EXPLORED and commands[-1].info["kind"] == "transit/0"
+    assert cell_in(world, rooms[1], where) and math.dist(where, inside) >= 0.1, "the agent now stands in the room"

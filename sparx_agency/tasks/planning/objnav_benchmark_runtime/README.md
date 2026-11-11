@@ -912,6 +912,39 @@ warm-up is repeated on every storey the agent first sets foot on (the stair
 head is scanned before any room there is chosen). The first global room
 decision waits for its completion.
 
+**The vantage warm-up (2026-11-11, off by default)** is the alternative under
+study: `RPTSettings.warmup = {"mode": "vantage", "budget_steps": X, "max_points": N}`
+(`core/planning/object_search/exploration/vantage_warmup.py`). Within `X`
+actions it makes, at every action, the greedy choice between the next turn
+here and a walk to a reachable standing point the camera would learn more
+from, by **expected useful area per action** -- MapEx's viewpoint score
+(raycast from the candidate, count the unknown it would see, divide by the
+cost; Kim, Ho et al. 2024, arXiv 2409.15590, whose observed-map ablation
+needs no learned map) with this camera's sensor model
+(`core/planning/exploration/viewpoint_gain.py`): the 79-degree cone, rays
+followed to `detection_range_m` (the range the perception in force detects
+an object at -- 3.5 m by default, the method's clear-view limit for a
+landmark; 5 m, the depth range, under ground-truth perception) rather than
+the depth clip, the unknown credited with a survival prior
+(`unknown_free_run_m`, 2 m: a ray that has crossed `d` metres of unknown
+reaches the next cell with probability `exp(-d / 2)`, which is MapEx's
+probabilistic raycast with a constant prior occupancy), and the near floor
+under the camera's horizon in a frame's cone treated as seen. A turn option
+is the best sweep of `k` turns one way from the spot (the next sliver alone
+may show a wall while the two behind it show the room); a walk option is a
+reachable lattice point within `max_travel_m` valued by the better of one
+frame at its best heading or the whole circle, over the forward steps along
+the geodesic, the turn that faces the way, the route's bends and the turns the
+look takes (`core/planning/exploration/viewpoint_candidates.py`; no published
+Habitat method prices its turns). The warm-up ends when no option clears
+`min_rate_m2_per_action` (0.25 m2), and the actions it did not spend are the
+search's; a spot whose circle the frames covered, or whose unswept arc
+promises under `scan_skip_gain_m2`, goes into the scan ledger as the spin's
+spot does. `max_points` 0 is a greedy sweep in place, 1 one vantage point,
+more several. Its actions count against the episode's 500 exactly as the
+spin's ten do. The study that compares it with the spin -- its subset, arms
+and table -- is [mp3d/README.md](mp3d/README.md) "The warm-up study".
+
 **Doorway peeks are OFF by default since 2026-10-04.** Under the scan visit a
 peek -- approach, a half turn from the threshold, the walk back -- costs about
 as much as a room's own scan and finishes nothing (its half turn is not a
@@ -1062,6 +1095,35 @@ refresh.
    revisit is priced as the scan it is). **A full rotation completed inside the
    room since the visit began -- a glance taken on the way -- finishes it
    at once** (`finished_by_rotation`): no circle is turned twice.
+
+   **Where the visit stands is a setting since 2026-11-11**
+   (`LoopSettings.explore_goals`): `frontier`, the default, is the walk above
+   -- the frontier cells themselves, one after another. `viewpoint` runs the
+   greedy look planner (`core/planning/object_search/exploration/greedy_look.py`,
+   the same machine as the vantage warm-up) scoped to the room: at every
+   action the choice between a sweep of turns where the agent stands and a
+   walk to a reachable point of the room's floor -- a half-metre lattice over
+   its mask with the sweep's slack, the frontier cells among the candidates
+   -- valued by the expected useful area the camera would reveal from it per
+   action it costs (the sensor model of `viewpoint_gain.py`: the 79-degree
+   cone, the detection range, the survival prior on the unknown; the cost in
+   forward steps and turns), MapEx's viewpoint selection with a camera. The
+   agent stands where the camera sees the most of what is unknown, not
+   necessarily at the boundary, and may look round from there instead of
+   walking to it. The frontier population that keeps the room open is
+   unchanged (`_explore_goals`); when the planner finds nothing worth
+   `explore_look.min_rate_m2_per_action` while significant frontier is still
+   listed, that frontier is retired for the episode (`viewpoint_retired`) so
+   the ledger's `explored` verdict reads the room as the visit found it, and
+   a room the camera resolved from its edge gets one short walk inside
+   (`viewpoint_step_inside`, at most 12 actions) so the verdict's "stood in
+   it" holds -- without it the room stayed a node and bought a second visit
+   for the same step. Walks are routed on the room-confined map and fall back
+   to the observed one when the confinement walls a point off; the visit's
+   bound, charging and the rotation rule are the frontier walk's.
+   `{"room_search": {"explore_goals": "viewpoint", "explore_look":
+   {"detection_range_m": 5.0}}}` is the local-exploration study's arm under
+   ground-truth perception ([mp3d/README.md](mp3d/README.md)).
 
    Finishing is the **scan ledger's** verdict (`core/planning/object_search/rooms/room_scans.py`): it
    remembers *where* every rotation was completed, not which room id it was

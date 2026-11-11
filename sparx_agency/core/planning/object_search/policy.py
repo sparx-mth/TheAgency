@@ -39,6 +39,7 @@ from sparx_agency.core.planning.object_search.route_memory import CommittedRoute
 from sparx_agency.core.mapping.objects.target_evidence import TargetEvidenceSettings
 from sparx_agency.core.planning.object_search.exploration.escape_probe import EscapeProbe, EscapeSettings
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ExplorationFallback, FallbackSettings
+from sparx_agency.core.planning.object_search.exploration.vantage_warmup import VANTAGE, VantageWarmup
 from sparx_agency.core.planning.object_search.rooms.floor_context import FloorContextBank
 from sparx_agency.core.planning.object_search.exploration.frontier_sweep import FrontierSweep, SweepSettings
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningRegistry
@@ -205,6 +206,16 @@ class RPTSearchPolicy:
                                         if (self.settings.transit_graph_period_steps > self.settings.graph_period_steps
                                             and self.loop_settings.transit_commitment) else ""),
                 "camera_control": asdict(CameraControlSettings()),
+                "warmup": dict(asdict(self.settings.warmup),
+                               rule=("one look-around in place before any room is chosen, as many turns as the camera's "
+                                     "field of view needs to see the circle (bounded by warmup_steps); the spot is a "
+                                     "completed scan" if self.settings.warmup.mode != VANTAGE else
+                                     "within budget_steps actions, at every action the greedy choice between the next turn "
+                                     "here and a walk to a reachable standing point (at most max_points walks) by expected "
+                                     "useful area per action: rays from the candidate within the detection range, the "
+                                     "unknown credited with a survival prior (unknown_free_run_m), the cost in forward "
+                                     "steps and turns; ends early when no option clears min_rate_m2_per_action; a spot "
+                                     "whose circle was covered is a completed scan")),
                 "perception_fusion": "coherent-depth/floor-qualified-v1" + ("/target-masked" if self.settings.segmentation else ""),
                 "segmentation": ({"enabled": True, "scope": "target boxes at or above detection_confidence",
                                   "depth": "robust_mask_depth over the mask within the box; near-surface component, no coherence gate",
@@ -333,9 +344,15 @@ class RPTSearchPolicy:
         self.glances = GlanceScheduler(self, self.glance_settings)
         # One look-around is as many turns as the camera's field of view needs to see the
         # whole circle (ten at 30 degrees with a 79-degree field), bounded by ``warmup_steps``.
+        # Under the vantage warm-up (``warmup.mode``) the bound is its action budget instead, and
+        # the greedy planner may end the warm-up before it (``_warmup_done``).
         self.warmup_turns = min(s.warmup_steps, self.rotation_turns())
+        if s.warmup.mode == VANTAGE:
+            self.warmup_turns = s.warmup.budget_steps
+        self.vantage_warmup = VantageWarmup(self, s.warmup)
         self.warmup_actions = 0
-        self._warmup_pending = True       # the warm-up rotation's scan has not been recorded yet
+        self._warmup_done = False
+        self._warmup_pending = True       # the warm-up's scan has not been recorded yet
         self._action_owner = "search"
         self._notified_step = self._decision_step = -1
         self._decision_command = None
@@ -347,6 +364,10 @@ class RPTSearchPolicy:
         self.floors.new()
         self._route = self._goal = self._target_xy = self._target_id = None
         self.route_memory.clear("floor_reset")
+
+    def warmup_active(self):
+        """Whether the warm-up still owns the next action: actions left in its budget and not ended by its planner."""
+        return self.warmup_actions < self.warmup_turns and not getattr(self, "_warmup_done", False)
 
     def rotation_turns(self):
         """In-place turns one full look-around takes: what the camera's field of view needs to cover the circle.
@@ -506,7 +527,7 @@ class RPTSearchPolicy:
                     self._blocked_since += self.settings.action_time_s
             elif self.hierarchy is None:
                 self.loop.charge()
-        if external and self.warmup_actions < self.warmup_turns:
+        if external and self.warmup_active():
             self.warmup_actions += 1
         if self._action_owner == "doorway_peek":
             self.peek.charge()
@@ -571,7 +592,9 @@ class RPTSearchPolicy:
                     # A storey never stood on: one full rotation at the stair head before any
                     # room is chosen -- the map gets its first rooms, the ledger its first scan.
                     self.warmup_actions = 0
+                    self._warmup_done = False
                     self._warmup_pending = True
+                    self.vantage_warmup.reset()
             else:
                 self._reset_floor()
         self.last_world = world
@@ -905,7 +928,9 @@ class RPTSearchPolicy:
 
     def episode_info(self):
         return {"method": self.name, "rooms": len(self.graph.registry.rooms), "landmarks": len(self.landmarks),
-                "warmup": {"actions": self.warmup_actions, "budget": self.warmup_turns, "bound": self.settings.warmup_steps},
+                "warmup": {"actions": self.warmup_actions, "budget": self.warmup_turns, "bound": self.settings.warmup_steps,
+                           "mode": self.settings.warmup.mode,
+                           "vantage": self.vantage_warmup.diagnostics() if self.settings.warmup.mode == VANTAGE else None},
                 "doorway_peek": self.peek.diagnostics(),
                 "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
                 **self._llm_answer_counts(),

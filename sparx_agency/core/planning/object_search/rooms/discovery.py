@@ -9,6 +9,7 @@ from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.mapping.topology.room_priors import home_object
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import threshold_cells
+from sparx_agency.core.planning.object_search.exploration.vantage_warmup import VANTAGE
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import RoomReasoningUnavailable
 
 SUSPENDED_PHASES = ("warmup", "doorway_peek", "room_return", "discovery_fallback", "glance")
@@ -26,7 +27,12 @@ def discover(p, obs, world, cost):
     the camera's: as many turns as the field of view needs to have seen
     every bearing once (``policy.warmup_turns``, ten at the benchmark's
     30 degrees and 79-degree camera), not the twelve that bring the body
-    back to its start heading.
+    back to its start heading. Under ``RPTSettings.warmup.mode ==
+    "vantage"`` the look-around is the greedy planner of
+    :mod:`~sparx_agency.core.planning.object_search.exploration.vantage_warmup`
+    instead -- turns here or a walk to a better standing point, by expected
+    useful area per action, within its own action budget -- and it records
+    its own completed look-arounds.
     """
     if p.hierarchy is not None:
         p.hierarchy.sync_floor(obs, world)
@@ -35,27 +41,39 @@ def discover(p, obs, world, cost):
         p._action_owner = "doorway_peek"
         return command
     budget = getattr(p, "warmup_turns", p.settings.warmup_steps)
-    if p.warmup_actions < budget:
+    vantage = p.settings.warmup.mode == VANTAGE
+    if p.warmup_active():
         p._action_owner = "warmup"
-        here = (float(obs.pose.x), float(obs.pose.y))
-        anchor = getattr(p, "_warmup_xy", None)
-        if anchor is not None and p.warmup_actions > 0 and math.dist(here, anchor) > 0.5:
-            # A takeover or a stair walk moved the agent mid-rotation: the turns so far
-            # looked at another place. One rotation from one spot, or the ledger's
-            # record lands where only part of the circle was turned.
-            p.warmup_actions = 0
-        if p.warmup_actions == 0:
-            p._warmup_xy = here
-        turn = p.episode.action_spec.turn_angle_rad
-        command = NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + turn), info={"kind": "warmup_scan"})
-        return replace(command, info=dict(command.info, kind="warmup", warmup_step=p.warmup_actions + 1,
-                                          warmup_budget=budget))
+        if vantage:
+            # The greedy look-around (``exploration/vantage_warmup.py``): the next turn here or a walk to a better
+            # standing point, by expected useful area per action; None when nothing is worth another action.
+            command = p.vantage_warmup.plan(obs, world, cost)
+            if command is not None:
+                return command
+            p._action_owner = "search"          # the warm-up ended on this action: the action is the search's
+        else:
+            here = (float(obs.pose.x), float(obs.pose.y))
+            anchor = getattr(p, "_warmup_xy", None)
+            if anchor is not None and p.warmup_actions > 0 and math.dist(here, anchor) > 0.5:
+                # A takeover or a stair walk moved the agent mid-rotation: the turns so far
+                # looked at another place. One rotation from one spot, or the ledger's
+                # record lands where only part of the circle was turned.
+                p.warmup_actions = 0
+            if p.warmup_actions == 0:
+                p._warmup_xy = here
+            turn = p.episode.action_spec.turn_angle_rad
+            command = NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + turn), info={"kind": "warmup_scan"})
+            return replace(command, info=dict(command.info, kind="warmup", warmup_step=p.warmup_actions + 1,
+                                              warmup_budget=budget))
     if getattr(p, "_warmup_pending", False):
         p._warmup_pending = False
-        ledger = getattr(p, "scans", None)
-        if ledger is not None:
-            pid = p.graph.room_at(world, (obs.pose.x, obs.pose.y))
-            ledger.record(obs, p.graph.registry.rooms.get(pid) if pid is not None else None, source="warmup")
+        if vantage:
+            p.vantage_warmup.finish(obs, world)      # its completed look-arounds go into the ledger
+        else:
+            ledger = getattr(p, "scans", None)
+            if ledger is not None:
+                pid = p.graph.room_at(world, (obs.pose.x, obs.pose.y))
+                ledger.record(obs, p.graph.registry.rooms.get(pid) if pid is not None else None, source="warmup")
     signature = semantic_signature(p)
     previous = p._semantic_signature
     loop = getattr(p, "loop", None)

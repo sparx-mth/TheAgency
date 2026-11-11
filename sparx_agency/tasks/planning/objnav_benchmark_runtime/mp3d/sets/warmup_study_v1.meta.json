@@ -1,0 +1,34 @@
+{
+  "baseline_llm_answers_per_episode": 16.6,
+  "baseline_mean_steps": 211.7,
+  "baseline_sr": 0.8205128205128205,
+  "by_scene": {
+    "2azQ1b91cZZ": 5,
+    "8194nk5LbLH": 1,
+    "QUCTc6BB5sX": 4,
+    "TbHJrupSAjP": 3,
+    "Z6MFQCViBuw": 8,
+    "oLBMNvg9in8": 5,
+    "pLe4wQe7qrG": 6,
+    "zsNo4HB9uLZ": 7
+  },
+  "campaign": "/home/user1/GIT/TheAgency/runs/gt_oracle_mp3d_2195ep_14b_20261111T095333Z",
+  "candidates": 39,
+  "categories": [
+    "bed",
+    "cabinet",
+    "chair",
+    "chest_of_drawers",
+    "counter",
+    "cushion",
+    "picture",
+    "shower",
+    "stool",
+    "table",
+    "towel"
+  ],
+  "finished_in_campaign": 390,
+  "n": 39,
+  "seed": 17,
+  "set": "/home/user1/GIT/TheAgency.worktrees/copilot-worktree-2026-11-11T15-21-52-1831/sparx_agency/tasks/planning/objnav_benchmark_runtime/mp3d/sets/single_storey_flat_v1.json"
+}

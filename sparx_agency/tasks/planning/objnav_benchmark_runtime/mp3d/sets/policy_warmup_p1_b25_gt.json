@@ -1,0 +1,1 @@
+{"warmup": {"mode": "vantage", "budget_steps": 25, "max_points": 1, "detection_range_m": 5.0}}

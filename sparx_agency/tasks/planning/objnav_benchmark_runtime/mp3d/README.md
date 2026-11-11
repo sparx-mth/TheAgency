@@ -301,6 +301,91 @@ them on for a comparison, nothing else does.
   `in_band` or `far`. `--locks` dumps every lock with its visible extent (the
   sliver data); the labeller tally covers every episode.
 
+### The warm-up study (2026-11-11)
+
+Does the episode's first look pay for itself better as the ten-turn spin in place
+or as a look that may walk a few steps first? `RPTSettings.warmup.mode == "vantage"`
+(`core/planning/object_search/exploration/vantage_warmup.py`; the runtime README,
+"Episode discovery") is the alternative, and this is how it is measured, with
+little compute beside a running campaign:
+
+```bash
+# the subset: single-storey episodes the ground-truth campaign has already FINISHED, N of them, stratified by scene;
+# the campaign's own rows are the spin arm (same commit, same configuration, same model) and cost nothing
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.warmup_study select \
+    --campaign runs/gt_oracle_mp3d_2195ep_14b_<stamp> --set mp3d/sets/single_storey_flat_v1.json --n 40 --seed 17 \
+    --out mp3d/sets/warmup_study_v1.json
+# one arm: a frozen snapshot of the tree, the campaign's resident 14B at :11435, its answer store replayed, the CPU renderer
+REPLAY=runs/gt_oracle_mp3d_2195ep_14b_<stamp>_support/llm_answers \
+    mp3d/run_warmup_arm.sh p1_b25 --policy-config mp3d/sets/policy_warmup_p1_b25_gt.json --jobs 3
+# the table: the spin (the campaign) against every arm, over the subset
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.warmup_study report \
+    --set mp3d/sets/warmup_study_v1.json spin=runs/gt_oracle_mp3d_2195ep_14b_<stamp> p1_b25=runs/wu_p1_b25 ... \
+    --markdown runs/warmup_study.md
+```
+
+* **The arms** are the configs `sets/policy_warmup_p<points>_b<budget>_gt.json`: `p0_b15` (a greedy sweep in
+  place, never a walk), `p1_b15`, `p1_b25` (one vantage point), `p3_b25`, `p3_b40` (several). `detection_range_m`
+  is 5.0 m in every one because the study runs under ground-truth perception, which detects to the depth range;
+  the setting's default, 3.5 m, is for a detector.
+* **`run_warmup_arm.sh <arm>`** rsyncs the tree into `~/GIT/TheAgency_snapshots/wu_<arm>/` once and runs the
+  launcher from there (`--perception ground-truth --episode-ids-file <subset> --record-log-only --full-records`),
+  with `HABITAT_RENDER=software` -- Mesa's llvmpipe, no VRAM, about a second an action -- so the campaign's
+  renderers and its pool gate are left alone; `REPLAY` serves the campaign's answers to any question it already
+  asked in an episode, `STORE` (default `runs/wu_<arm>_llm_answers`) records the new ones. Each arm's new LLM
+  calls are the one cost the campaign feels.
+* **The local-exploration arm** of the same study (experiment 2) is `sets/policy_explore_viewpoint_gt.json`:
+  `{"room_search": {"explore_goals": "viewpoint", "explore_look": {"detection_range_m": 5.0}}}` -- the explore
+  visit stands where the camera sees the most of the room's unknown instead of walking to its frontier cells
+  (the runtime README, "The room-search loop"); run and tabulated exactly like a warm-up arm.
+* **`warmup_study.py report`** prints SR, SPL, SoftSPL, DTG, steps and the paired statistics against the first
+  arm (`single_storey_report`), then the warm-up's own measures from the records and recordings: actions it took,
+  walks, metres walked, the observed area on its last action and at actions 10 / 20 / 30 / 50, the first action
+  the target's class was in the frame (median; share within 30; share never) and the first takeover. Every
+  number is over the episodes all the arms ran.
+
+### The same study on a laptop, one arm per command (`look_study.sh`)
+
+`warmup_compare.sh` (experiment 1) and `explore_compare.sh` (experiment 2) are `look_study.sh warmup` and
+`look_study.sh explore`: the same fixed subset (`sets/warmup_study_v1.json`), ground-truth perception, one
+3B model in both roles at temperature 0 and seed 17, one arm per command. The **`without` arm** (the method
+as it stands: the ten-turn spin and the frontier walk) is run once and **records every LLM answer**
+(`runs/look_study/llm_answers/without`); every other arm **replays that store** and records only what it asks
+anew, so two arms part only where the change under test acts. `--dry-run` prints the plan -- arm, config,
+episodes by scene, model and server, stores, renderer, workers, a time estimate per arm -- checks the
+interpreter, the data, the Ollama server, the GPU and the disk, and starts nothing; every problem is one line
+naming what is missing and what to do. Each arm runs from a frozen snapshot (`~/GIT/TheAgency_snapshots/ls_<arm>`),
+so the checkout may be edited meanwhile; `--resume` continues an interrupted arm.
+
+```bash
+cd ~/GIT/TheAgency
+M=sparx_agency/tasks/planning/objnav_benchmark_runtime/mp3d
+$M/warmup_compare.sh without --dry-run                 # the plan and the checks; nothing starts
+$M/warmup_compare.sh without --jobs 2                  # the baseline: records the answers (run once, first)
+$M/warmup_compare.sh p1_b25                            # arms in priority order; each is its own command
+$M/warmup_compare.sh p3_b25
+$M/warmup_compare.sh p1_b15
+$M/warmup_compare.sh p3_b40
+$M/warmup_compare.sh p0_b15
+$M/warmup_compare.sh report --explain                  # runs/look_study/warmup_report.md (+ .json)
+$M/explore_compare.sh explore_viewpoint                # experiment 2, its own arms, the same `without`
+$M/explore_compare.sh explore_viewpoint_transparent
+$M/explore_compare.sh report --explain                 # runs/look_study/explore_report.md
+```
+
+The report (`warmup_study.py report`) gives SR, SPL, SoftSPL, DTG and steps per arm with the paired statistics
+against `without` (dSR and dSPL with bootstrap intervals, the exact McNemar p, the success flips, the episodes
+whose SPL got better or worse), the warm-up's measures (actions, walks, metres, the area uncovered at its end and
+at actions 10 / 20 / 30 / 50, the first sight of the target, the first takeover), the explore visits' measures,
+and with `--explain` one line per changed episode: both outcomes, steps, DTG, terminations, warm-ups, first
+sights, LLM answers asked anew, and the action at which the two runs parted with the phase each was in.
+
+Data the laptop needs: the MP3D val episodes (`~/datasets/objectnav/mp3d/v1/val`, fetched by the launcher when
+absent), the eight scenes of the subset under `~/datasets/scene_datasets/mp3d/<scene>/` with `.glb`, `.navmesh`,
+`.house` and `_semantic.ply` (`mp3d_habitat.zip`; the semantic scene-dataset config is fetched), the habitat-sim
+0.2.4 environment (`HAB_PY`) and an Ollama with `qwen2.5:3b-instruct` (pulled by the launcher when absent).
+Set `MP3D_SCENES_DIR` / `MP3D_EPISODES_DIR` / `HAB_PY` / `LLM_BASE_URL` when the laptop's layout differs.
+
 ### Freeze, then evaluate (for a number you intend to publish)
 
 ```bash
@@ -371,6 +456,8 @@ evidence and the deviations we name rather than apply.
 | `single_storey_set.py`, `sets/` | the fixed single-storey evaluation set (180 same-storey episodes in the flat houses) and the level survey it is drawn from |
 | `run_single_storey.sh` | a campaign on that set from a frozen source snapshot, one LLM answer store for the whole study |
 | `single_storey_report.py`, `single_storey_failures.py` | baseline-versus-steps table (paired); per-failure mechanism from the recordings, the lock / sliver data, the labeller tally |
+| `look_study.sh`, `warmup_compare.sh`, `explore_compare.sh`, `look_study.py` | the warm-up and local-exploration comparisons as one arm per command: the plan and dry run (checks, time estimate), the `without` arm recording the LLM answers the others replay, the report |
+| `run_warmup_arm.sh`, `warmup_study.py`, `sets/warmup_study_v1.json`, `sets/policy_warmup_*.json`, `sets/policy_explore_viewpoint*.json` | the warm-up study of 2026-11-11 beside a running campaign: one arm from a frozen snapshot on the CPU renderer; the subset drawn from the campaign's finished episodes; the comparison table with the warm-up's and the explore visits' measures and `--explain`; the arms' configs |
 | `smooth_replay.py` | visualization-only smooth replay of a recording |
 | `../ground_truth/mp3d_categories.py` | the ground-truth perception's MP3D table (mpcat40 goal classes, context words) |
 | `../tests/test_mp3d*.py` | the adapter without Matterport3D, habitat-sim or a GPU (`test_mp3d_ground_truth.py`: the oracle path) |

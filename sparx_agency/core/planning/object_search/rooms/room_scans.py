@@ -211,9 +211,10 @@ class RoomScanLedger:
         return bool(getattr(settings, "exploring", False))
 
     # -- recording ----------------------------------------------------------
-    def record(self, obs, room=None, source="room_scan"):
-        """A full rotation was completed at the agent's position; remember where."""
-        self.records.append(dict(floor=self.policy.mapping.floor_id, xy=(float(obs.pose.x), float(obs.pose.y)),
+    def record(self, obs, room=None, source="room_scan", xy=None):
+        """A full rotation was completed at the agent's position (or at ``xy``, a spot since left); remember where."""
+        where = (float(obs.pose.x), float(obs.pose.y)) if xy is None else (float(xy[0]), float(xy[1]))
+        self.records.append(dict(floor=self.policy.mapping.floor_id, xy=where,
                                  step=int(obs.step), room=None if room is None else int(room.id),
                                  cells=None if room is None else int(room.n_cells), source=source))
         self._cache.clear()

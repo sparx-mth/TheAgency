@@ -84,6 +84,11 @@ class PerceptionCycle:
         self.retractions = []
         #: landmark id -> the pose ``(x, y, yaw)`` of its last counted miss: the next must be a distinct viewpoint.
         self._miss_poses = {}
+        #: The first action a box of the target's class at or above ``detection_confidence`` was in the frame, and the
+        #: first with a coherent 3-D projection of one (``observed_objects``): the "steps until the target is first
+        #: seen" of the warm-up study (2026-11-11), whatever the closing then did with it. None until it happens.
+        self.target_first_seen_step = None
+        self.target_first_placed_step = None
 
     def observe(self, obs):
         """Exactly one synchronous prediction for this RGB/depth/pose tuple.
@@ -127,6 +132,9 @@ class PerceptionCycle:
         p.fallback.note_service_success(DETECTOR)
         self.detector_evidence = deepcopy(getattr(p.detector, "last_diagnostics", {}))
         self.detections = tuple(deduplicate_detections(self.raw))
+        if self.target_first_seen_step is None and any(
+                p.target.accepts(d.cls) and d.conf >= p.settings.detection_confidence for d in self.detections):
+            self.target_first_seen_step = int(obs.step)
         p._duplicates_removed += len(self.raw) - len(self.detections)
         if p.building:
             p.building.semantic_stair_hint = any(d.cls in STAIR_LABELS and d.conf >= p.settings.detection_confidence for d in self.raw)
@@ -191,6 +199,8 @@ class PerceptionCycle:
         for label, xyz in observed_objects(obs, self.detections, p.settings.detection_confidence, self.projections,
                                            masks=self.masks):
             row = self.projections[-1]
+            if self.target_first_placed_step is None and p.target.accepts(label):
+                self.target_first_placed_step = int(obs.step)
             if row.get("occluder_depth_m") is not None:
                 self.counts["occluder_reads"] += 1               # the box read around a surface in front of the object
             if label in DOOR_LABELS or label in STAIR_LABELS:
@@ -369,5 +379,7 @@ class PerceptionCycle:
     def diagnostics(self):
         return {"observation_step": self.step, "counts": dict(self.counts),
                 "projections": list(self.projections), "detector_evidence": self.detector_evidence,
-                "segmenter_evidence": self.segmenter_evidence, "retractions": list(self.retractions)}
+                "segmenter_evidence": self.segmenter_evidence, "retractions": list(self.retractions),
+                "target_first_seen_step": self.target_first_seen_step,
+                "target_first_placed_step": self.target_first_placed_step}
 

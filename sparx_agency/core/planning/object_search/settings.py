@@ -7,6 +7,7 @@ import math
 from sparx_agency.core.planning.exploration.falcon.params import FalconParams
 from sparx_agency.core.localization.floor_atlas import MultiFloorParams
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
+from sparx_agency.core.planning.object_search.exploration.vantage_warmup import WarmupSettings
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
 from sparx_agency.core.planning.object_search.navigation.settings import (KinematicSettings, LookDownSettings,
                                                                            ScrapeSettings)
@@ -50,6 +51,19 @@ class RPTSettings:
             79-degree camera (``RPTSearchPolicy.rotation_turns``) -- never
             more than this; the position is then recorded as a completed
             scan, so the spawn room is finished before the search begins.
+            The bound of the ``"spin"`` warm-up; see ``warmup``.
+        warmup: How the warm-up is taken
+            (``exploration/vantage_warmup.WarmupSettings``): ``mode``
+            ``"spin"`` (the default, the rotation above) or ``"vantage"``
+            -- within ``warmup.budget_steps`` actions, the greedy choice
+            at every action between the next turn here and a walk to a
+            standing point the camera learns more from, by expected useful
+            area per action (MapEx's viewpoint score on the observed map
+            with this camera's sensor model), at most ``warmup.max_points``
+            walks. Its actions count against the episode's budget as the
+            spin's do. ``{"warmup": {"mode": "vantage", "budget_steps": 20,
+            "max_points": 1}}`` in ``--policy-config`` is one arm of the
+            warm-up study of 2026-11-11.
         doorway_peek: The one-shot doorway inspections. OFF by default since
             2026-10-04: under the scan visit a peek -- approach, a half
             turn from the threshold, the walk back -- costs as much as a
@@ -235,6 +249,7 @@ class RPTSettings:
     sticky_bump_actions: int = 120
     local_exploration: str = "frontier"
     warmup_steps: int = 12
+    warmup: WarmupSettings = field(default_factory=WarmupSettings)
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
     step_down_m: float = 0.30
@@ -324,6 +339,10 @@ class RPTSettings:
             object.__setattr__(self, "doorway_peek", PeekSettings(**self.doorway_peek))
         if not isinstance(self.doorway_peek, PeekSettings):
             raise ValueError("doorway_peek must be PeekSettings or parameter overrides")
+        if isinstance(self.warmup, dict):
+            object.__setattr__(self, "warmup", WarmupSettings(**self.warmup))
+        if not isinstance(self.warmup, WarmupSettings):
+            raise ValueError("warmup must be WarmupSettings or parameter overrides")
         if isinstance(self.falcon, dict):
             object.__setattr__(self, "falcon", FalconParams(**dict({"burst_actions": 10}, **self.falcon)))
         if not isinstance(self.falcon, FalconParams):

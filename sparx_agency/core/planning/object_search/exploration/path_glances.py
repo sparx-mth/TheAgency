@@ -407,7 +407,11 @@ class GlanceScheduler:
         p = self.policy
         if getattr(p, "_action_owner", "search") != "search":
             return False                                           # warm-up, a peek, a return leg
-        if getattr(p, "warmup_actions", 0) < getattr(p, "warmup_turns", getattr(p.settings, "warmup_steps", 0)):
+        active = getattr(p, "warmup_active", None)
+        if active is not None:
+            if active():
+                return False
+        elif getattr(p, "warmup_actions", 0) < getattr(p, "warmup_turns", getattr(p.settings, "warmup_steps", 0)):
             return False
         closing = getattr(p, "closing", None)
         if closing is not None and getattr(closing, "active", False):
