@@ -120,13 +120,9 @@ if [[ "$ARM" != without ]]; then
   # Replay every arm's store but this one's: two arms that reach the same map state ask the same question and
   # must get the same answer, whichever ran first -- the server at temperature 0 does not guarantee it
   # (LESSONS.md 2026-10-31; on the main machine two arms with IDENTICAL warm-ups differed by 3 success flips).
-  REPLAY_DIRS=()
-  for dir in "$STORE_ROOT"/*/; do
-    dir="${dir%/}"
-    [[ "$(basename "$dir")" == "$ARM" ]] && continue
-    ls "$dir"/answers-*.jsonl > /dev/null 2>&1 && REPLAY_DIRS+=("$dir")
-  done
-  export LLM_ANSWERS_REPLAY="$(IFS=:; echo "${REPLAY_DIRS[*]}")"
+  # A store that disagrees with the ones taken before it (two arms run at once) is left out, and said so.
+  LLM_ANSWERS_REPLAY="$("$HAB_PY" -m "$PY_STUDY" replay-dirs --store-root "$STORE_ROOT" --arm "$ARM")"
+  export LLM_ANSWERS_REPLAY
 fi
 [[ -n "$CONFIG" ]] && EXTRA+=(--policy-config "$SETS/$CONFIG")
 [[ "$RESUME" == 1 ]] && EXTRA+=(--resume-accepting-changes gpu_plan source_sha256)

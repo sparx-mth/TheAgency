@@ -67,6 +67,30 @@ def say(lines, text):
     lines.append(text)
 
 
+def replay_dirs(store_root: Path, arm: str):
+    """The answer stores a variant arm replays: `without` plus every other arm's, as many as agree with each other.
+
+    A store that holds two answers to one question replays neither
+    (``llm_answer_cache.LLMAnswerStore`` raises), and two arms that ran at the
+    same time -- neither replaying the other -- can disagree on a key the live
+    server answered twice. The stores are added one at a time, `without`
+    first, then the others in name order, and a store that conflicts with
+    those already taken is left out and named. Returns ``(taken, dropped)``.
+    """
+    from sparx_agency.core.mapping.topology.llm_answer_cache import LLMAnswerStore
+    candidates = [d for d in sorted(store_root.glob("*")) if d.is_dir() and d.name != arm and any(d.glob("answers-*.jsonl"))]
+    candidates.sort(key=lambda d: (d.name != "without", d.name))
+    taken, dropped = [], []
+    for directory in candidates:
+        try:
+            LLMAnswerStore(replay_dirs=taken + [directory])
+        except ValueError as exc:
+            dropped.append((directory, str(exc)))
+            continue
+        taken.append(directory)
+    return taken, dropped
+
+
 def check_interpreter(hab_py):
     if not hab_py or not Path(hab_py).is_file():
         return None, "HAB_PY=%r is not a file: point HAB_PY at the habitat-sim 0.2.4 interpreter (~/miniconda3/envs/habitat/bin/python)" % hab_py
@@ -145,6 +169,19 @@ def estimate_hours(episodes, mean_steps, seconds_per_action, jobs, replay):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["replay-dirs"]:
+        # ``look_study.sh`` asks for the colon-separated replay list of an arm (the dropped stores go to stderr).
+        sub_parser = argparse.ArgumentParser()
+        sub_parser.add_argument("replay_dirs")
+        sub_parser.add_argument("--store-root", required=True)
+        sub_parser.add_argument("--arm", required=True)
+        sub_args = sub_parser.parse_args(argv)
+        taken, dropped = replay_dirs(Path(sub_args.store_root), sub_args.arm)
+        for directory, why in dropped:
+            print("WARNING: not replaying %s: %s" % (directory, why), file=sys.stderr)
+        print(os.pathsep.join(str(d) for d in taken))
+        return 0
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--study", required=True, choices=sorted(STUDIES))
     parser.add_argument("--arm", required=True)
@@ -194,9 +231,12 @@ def main(argv=None):
     if args.arm == "without":
         say(lines, "   LLM answers: RECORDED into %s (the store every other arm replays)" % without_store)
     elif args.arm != "report":
-        others = sorted(d.name for d in store_root.glob("*") if d.is_dir() and d.name != args.arm and any(d.glob("answers-*.jsonl")))
+        taken, dropped = replay_dirs(store_root, args.arm) if store_root.is_dir() else ([], [])
         say(lines, "   LLM answers: REPLAYED from the stores of %s; new ones recorded into %s"
-            % (", ".join(others) if others else "(none yet)", store_root / args.arm))
+            % (", ".join(d.name for d in taken) if taken else "(none yet)", store_root / args.arm))
+        for directory, why in dropped:
+            say(lines, "   note: the store of %s is NOT replayed -- it disagrees with the stores taken before it (%s); "
+                       "two arms ran at once without replaying each other" % (directory.name, why.split(" (")[0]))
         if not any(without_store.glob("answers-*.jsonl")):
             problems.append("the `without` arm's answer store %s is empty: run `without` first, so the variants replay its answers"
                             % without_store)
