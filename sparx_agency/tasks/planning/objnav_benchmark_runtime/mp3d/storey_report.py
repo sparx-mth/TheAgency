@@ -11,7 +11,8 @@ report reads one or several campaign roots and tabulates, for every arm and pair
   (``sets/mp3d_val_levels.csv``) is given, by its ``start_level == goal_level`` as a second reading;
 * per category: n, SR / SPL / DTG per arm, and SR per arm on the same- and cross-storey halves;
 * the **storey transitions per episode**: the method's ``floor_arrival`` events (the floor atlas settling on another
-  storey, planned or not) and its completed stair traversals (``completed_transitions`` with a destination), both
+  storey, planned or not) and its completed stair traversals (``completed_transitions`` that arrived: a completion
+  reason and a destination storey; the rest were abandoned mid-way), both
   from the full per-episode report (``--full-records``); and, from each episode's recording (``trajectory.csv``),
   the storey changes the agent's own height shows against the survey's level heights -- the mean per episode, the
   distribution, and for the cross-storey episodes how many ended on the goal's storey and the SR with and without
@@ -98,8 +99,12 @@ def method_transitions(row: dict) -> Optional[dict]:
     if not isinstance(events, list) or not isinstance(completed, list):
         return None
     arrivals = [e for e in events if isinstance(e, dict) and e.get("event") == "floor_arrival"]
+    # A traversal that arrived carries its completion reason and the storey it reached (``observe``); one the
+    # policy abandoned (``_abandon``) is appended with its diagnostics as they stood: no reason, mid-TRAVERSE or
+    # RETREAT. Both are attempts.
     return {"floor_arrivals": len(arrivals),
-            "completed_stair_transitions": sum(1 for c in completed if isinstance(c, dict) and "destination" in c),
+            "completed_stair_transitions": sum(1 for c in completed if isinstance(c, dict) and c.get("completion_reason")
+                                               and c.get("destination") is not None),
             "stair_transition_attempts": len(completed),
             "floor_revisions": int(policy.get("floor_revisions") or 0)}
 

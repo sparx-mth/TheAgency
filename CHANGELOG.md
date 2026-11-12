@@ -5,6 +5,15 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-12, the full MP3D val split with the 14B in both roles under ground truth, stair traversal off -- docs/progress/entries/047)
+- **`runs/gt_oracle_mp3d_2195ep_14b_20261111T095333Z`: SR 65.6 % (CI 63.6-67.6), SPL 29.1 %, DTG 3.82 m over all 2,195
+  episodes** (entry 043's 3B run with none of the fixes of entries 044-046: 52.1 % / 23.6 % / 4.42 m); at ApexNav's
+  0.2 m 66.7 % / 29.7 %. Same storey (1,807 episodes) 77.4 % / 34.3 % / 1.91 m, cross storey (388) 11.1 % / 4.6 % /
+  12.69 m with stair traversal off. 754 failures: 392 step limits after a released lock, 222 never seen (341 of the
+  668 limits are cross-storey), 54 wedged, 44 near-miss STOPs (23 beside the object), 21 through a barrier, 12 the
+  sensor's phantoms. 27.2 h at 80.7 episodes/h, LLM-bound (50,149 answers recorded, 22.8 an episode, all replayable);
+  the card's compute 37 % busy, its memory 85 %. Every episode's step log recorded without video. The stairs-on arm
+  (`gt_oracle_mp3d_2195ep_14b_stairs_20261112T130740Z`, replaying run 1's answers) runs next.
 ### Added (2026-11-11, the full MP3D val run with the 14B: log-only recordings, the shard watchdog, a resource monitor)
 - **`mp3d.run --record-log-only` / `run_benchmark.sh --record-log-only`** (`recording.EpisodeRecorder(video=False)`,
   `evaluation.run_evaluation(record_video=)`): every episode's `steps.jsonl`, `trajectory.csv`, map journal and

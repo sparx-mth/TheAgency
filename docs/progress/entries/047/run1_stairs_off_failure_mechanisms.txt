@@ -1,0 +1,14 @@
+2195 episodes, 754 failures: 742 the method's, 12 the ground-truth sensor's (phantom ids, outside the analysis)
+  gt_phantom_sliver            2   (GT artefact)
+  gt_phantom_id                10   (GT artefact)
+  stop_near_miss               44
+                               beside 23, in_band 19, far 2
+  stop_seen_through_barrier    21
+  stop_other                   9
+  limit_never_seen             222
+  limit_wedged                 54
+  limit_locks_released         392
+
+2azQ1b91cZZ/000014   cabinet          stop_near_miss             STOP  DTG  0.15  steps  83  locks 3  agent->vp 0.13  mem->goal 0.55  mem dz 0.96  first box (53, 111) H 1.072
+                          last lock @35: STOP: fresh in-range sighting after a 6.0 m approach; alignment not required
+                          standing spot: beside -- 0.75 m from the box (its view points reach 1.09), 0.75 m beside its width, 79 deg off its normal, box bottom -0.14 m above the base

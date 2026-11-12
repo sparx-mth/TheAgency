@@ -29,8 +29,9 @@ def episode_row(episode_id, category, *, success, spl, dtg, steps=100, stop=True
     if not lean:
         policy["building"] = {"events": [{"action": 10 * i, "event": "floor_arrival", "source": 0, "destination": 1}
                                          for i in range(arrivals)] + [{"action": 3, "event": "stairs_seen"}],
-                              "completed_transitions": [{"phase": "done", "destination": 1}] * completed
-                              + [{"phase": "deferred"}] * (1 if completed else 0)}
+                              "completed_transitions": [{"phase": "CONFIRM_DESTINATION", "destination": 1,
+                                                         "completion_reason": "stable_platform_and_stair_exit"}] * completed
+                              + [{"phase": "RETREAT", "destination": 1, "completion_reason": None}] * (1 if completed else 0)}
     return {"episode_id": episode_id, "scene_id": SCENE, "target_category": category, "success": success, "spl": spl,
             "soft_spl": spl, "distance_to_goal_m": dtg, "steps": steps, "stop_called": stop, "wall_s": 10.0,
             "agent_info": {"policy": policy}}
