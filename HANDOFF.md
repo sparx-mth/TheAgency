@@ -1,5 +1,41 @@
 # Handoff — HM3D ObjectNav benchmark
 
+## 2026-11-12 — The ground-truth oracle ran the full v1 val split with the 14B model in both LLM roles
+
+Branch: `feat/objnav-habitat-hm3d-nadav`, tree `0dd7d39c` plus the uncommitted harness additions below. Full account:
+`docs/progress/entries/047-hm3d-gt-oracle-14b-val.md`; tables: `runs/gt_oracle_2000ep_14b_20261111T114322Z_support/breakdown.md`.
+
+**What ran.** `runs/gt_oracle_2000ep_14b_20261111T114322Z`: HM3D v1 val, 2,000 episodes / 20 scenes, `--perception
+ground-truth` (on-object filter on, 0.25 m), labeller rules off, `allow_stair_traversal` false (merged, never
+validated on HM3D -- left at the default on purpose), **`qwen2.5:14b-instruct` for both the room labels and the node
+oracle**, `--full-records`, no video, answers recorded to `..._llm_answers` (49,743; any episode replays exactly).
+9 scene workers, Ollama 4 slots, longest scenes first, stall watchdog 30 min. `complete: true`, exit 0, 23 h 59 min.
+
+| SR | SPL | SoftSPL | DTG | same-storey SR / SPL (1,652) | cross-storey SR / SPL (348) |
+|---|---|---|---|---|---|
+| **0.710** (CI 0.689–0.729) | **0.398** (CI 0.384–0.412) | 0.411 | 3.15 m | 0.835 / 0.472 | 0.112 / 0.048 |
+
+581 failures: 307 cross-storey goals (unreachable with stairs off), 160 same-storey targets never seen (toilet 58),
+61 seen and not converted, 36 wedged (tv_monitor 18), 17 scored STOPs (11 near misses). Against the Nov-4 3B run on
+the same episodes (not controlled: the tree moved too): SR 0.711 → 0.710, SPL 0.381 → 0.398.
+
+**Launch lessons.** (1) The 14B and the 3B do not both fit beside 8 renderers at 4 slots: the 14B runner OOMs on a
+lazily loaded CUDA kernel at its first busy request and Ollama then evicts one model for the other on every call --
+measured 14B 15.1 / 16.6 / 18.2 GB at 4 / 5 / 6 slots, 3B 3.5 GB, a GT renderer 740 MiB. (2) GPU compute sat at 39 %
+with the LLM queue never empty: the runner's JSON-grammar sampling pins one CPU core per request (median call 9.0 s
+with the 14B labelling, 3.0 s when the 3B did). (3) Without `--record` nothing was written between episodes, so the
+stall watchdog needed the per-step `heartbeat.json` added here. Re-running `..._support/launch_full_run.sh` resumes
+a root in place; `..._support/status.sh` is the health line.
+
+**Harness additions (uncommitted):** `progress.ProgressTracker.heartbeat` + `scene_pool.HEARTBEAT_FILES`;
+`utilization_log.py` (machine sampler, `--summarise`); `hm3d/campaign_breakdown.py` + `hm3d/sets/hm3d_v1_val_levels.csv`
+(metrics by category and storey, failure mechanisms, LLM health, runtime, utilization); tests, README, CHANGELOG.
+
+**Next:** replay the 160 never-seen same-storey failures (the search, not perception); the 97 seen-not-converted /
+wedged (the closing's standoff and local planner); stair traversal on, on the 348 cross-storey episodes alone first.
+
+---
+
 ## 2026-10-29 — The ground-truth oracle ran the full v1 val split with the 3B model in both LLM roles
 
 Branch: `feat/objnav-habitat-hm3d-nadav`, tree at `50bbd877`. The HM3D-Semantics v0.1 val annotations are now

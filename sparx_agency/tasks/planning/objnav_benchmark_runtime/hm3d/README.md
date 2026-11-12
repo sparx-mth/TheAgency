@@ -526,7 +526,30 @@ Per-episode diagnostics of the algorithm itself — how many rooms were visited,
 in what order, which fell to the fallback and why, how many actions each phase
 took — are in `agent_info` of every `episodes.jsonl` row
 (`room_search_loop.events`, `exploration_fallback.failures`, `building.events`,
-`route_commitment`).
+`route_commitment`). The launcher writes **lean** rows by default (the counters,
+not the event logs: `progress.lean_episode_info`); `--full-records` keeps the
+events, the closing's history, the oracle's last reasoning and the storey
+events, ~75–250 KB an episode — what a failure analysis without video reads.
+
+A whole campaign is read with `campaign_breakdown.py`:
+
+```bash
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.campaign_breakdown runs/X \
+    --launcher-log runs/X_support/launcher.out --utilization runs/X_support/utilization.csv --markdown runs/X_support/breakdown.md
+```
+
+SR / SPL / DTG (each with its interval, through the harness's `group_summary`)
+overall, per category, and for **same-storey against cross-storey** episodes —
+whether the goal's nearest view point stands on the start's storey, from the
+level survey `sets/hm3d_v1_val_levels.csv` (`episode_levels.py` over the agent
+navmesh; 1,652 / 348 of v1 val) — then one **failure-mechanism tag** per failed
+episode from the rows alone (`limit_cross_storey_goal`, `limit_never_seen`,
+`limit_wedged`, `limit_seen_not_converted`, `stop_near_miss`, `stop_far`, …: a
+first reading that says where to point a replay, not a verdict), the last
+closing release reasons, the LLM's health (episodes with no oracle answer,
+room-LLM failures), the building layer's storey events, per-scene runtime and
+the machine's utilization when `../utilization_log.py` sampled it beside the
+run (`--out <support>/utilization.csv --interval 15`, then `--summarise`).
 
 ### 3.5 The perception upper bound: ground-truth boxes and masks from the simulator
 
@@ -604,8 +627,11 @@ What `--perception ground-truth` changes, and only that (`../ground_truth/`,
   bounded by cores and by free VRAM at `HABITAT_VRAM_MIB` per renderer
   (`scene_pool.max_workers`) — so a run beside another campaign takes what is
   left and a run on an idle card takes one process per scene. Above one job
-  the pool watches each child's `live.json` / `progress.json` /
-  `episodes.jsonl` / console log and kills one that has written nothing for
+  the pool watches each child's `heartbeat.json` (rewritten every half-minute
+  of a running episode, recording or not -- a child writes nothing else between
+  episodes without `--record`, and an episode has run over an hour under a
+  loaded LLM) / `live.json` / `progress.json` / `episodes.jsonl` / console log
+  and kills one that has written nothing for
   `--stall-minutes` (30; `0` disables), recording exit −9 so `--output <root>`
   reruns the scene: a worker that lost its main thread keeps its CUDA threads
   alive and never exits (`LESSONS.md` 2026-11-09), and held an MP3D campaign's
@@ -785,6 +811,8 @@ issue.
 | `campaign.py` | one child process per scene, then an aggregate over what finished; the stall watchdog (`--stall-minutes`, through `../scene_pool.run_concurrently`); the child-argument and episode-plan rules are `../campaign_common.py` |
 | `scene_pool.py`, `smoke_plan.py`, `geodesic.py` | re-export shims: the pool, the smoke cover and the view-point geodesic moved to `../scene_pool.py`, `../smoke_plan.py` and `../habitat/geodesic.py` on 2026-11-11 (every campaign's and every Habitat dataset's, not HM3D's) |
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
+| `campaign_breakdown.py` | what a finished campaign is read with: SR / SPL / DTG overall, per category and same- vs cross-storey (the goal's storey against the start's, from `sets/hm3d_v1_val_levels.csv`), one failure-mechanism tag per failed episode from the full records, the LLM's health, per-scene runtime and the `../utilization_log.py` summary |
+| `episode_levels.py`, `sets/hm3d_v1_val_levels.csv` | the level survey of a split (storeys, where each start stands, the nearest goal view point's storey) and the shipped survey of v1 val (1,652 same-storey goals, 348 cross-storey) |
 | `sota.py` | the published numbers, with the table each came from |
 | `frozen_eval.py` | freeze an exact configuration, then run the full split under it |
 | `smooth_replay.py` | visualization-only smooth video, after the fact, never scored |

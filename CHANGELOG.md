@@ -5,6 +5,31 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-11, the HM3D v1 val ground-truth run with the 14B in both LLM roles: what it needed to run unattended and be read)
+- **A per-step heartbeat for the stall watchdog** (`progress.ProgressTracker.heartbeat`, `heartbeat.json` beside
+  `progress.json`, rewritten at most every 30 s from `ProgressEnv.step`; `scene_pool.HEARTBEAT_FILES` watches it):
+  without `--record` a scene child wrote nothing between episodes (`live.json` is the recorder's), so the 30-minute
+  watchdog would have killed any live worker whose episode ran longer -- the Nov-4 run had episodes of 45-66 minutes.
+- **`utilization_log.py`**: the machine sampled every N seconds into a CSV for the life of a campaign (GPU
+  utilisation and VRAM, each GPU process's VRAM, CPU, RAM, disk, load; `campaign_monitor.resources` underneath) and
+  `--summarise` for the means and percentiles a run report quotes.
+- **`hm3d/campaign_breakdown.py`** and the shipped level survey **`hm3d/sets/hm3d_v1_val_levels.csv`** (1,652
+  same-storey goals, 348 cross-storey): SR / SPL / DTG with intervals overall, per category and same- vs cross-storey,
+  one failure-mechanism tag per failed episode from the full records, the last closing releases, the LLM's health,
+  the storey events, per-scene runtime and the utilization summary. Read against the Nov-4 3B run it tags 579 failures:
+  300 cross-storey goals (stairs off), 179 never seen, 60 seen and not converted, 25 wedged, 15 failed STOPs.
+- **Operating findings of the launch** (RTX 4090, 24 GB): a rendering GT worker takes ~740 MiB of VRAM (560 before
+  its first frame); the 14B runner takes 15.1 / 16.6 / 18.2 GB at 4 / 5 / 6 Ollama slots (+1.5 GB a slot at 8,192
+  tokens) and the 3B 3.5 GB at 3-4 slots; with the 3B beside it, 4 slots + 8 renderers left ~450 MiB and the 14B
+  runner died of `CUDA error: out of memory` loading a kernel on its first busy request, after which Ollama evicted
+  one model for the other on every call. The run went out as 14B-only, 4 slots, 9 workers: 22.2 GB steady.
+- **The full HM3D v1 val split under ground-truth perception with `qwen2.5:14b-instruct` in both LLM roles**
+  (`runs/gt_oracle_2000ep_14b_20261111T114322Z`, `docs/progress/entries/047-hm3d-gt-oracle-14b-val.md`): 2,000
+  episodes in 20 scenes, complete, 23 h 59 min, 0 agent errors, 0 stalls, 1 oracle refusal in ~50,000 calls.
+  **SR 71.0 %, SPL 39.8 %, DTG 3.15 m**; same-storey goals (1,652) SR 83.5 % / SPL 47.2 %, cross-storey goals (348)
+  SR 11.2 % / SPL 4.8 % with stair traversal at its default (off). Of 581 failures: 307 cross-storey goals, 160 same-
+  storey targets never seen, 61 seen and not converted, 36 wedged, 17 scored STOPs. GPU memory 86-90 %, GPU compute
+  39 % (the 14B's JSON sampling pins one CPU core per request; median call 9.0 s), 9 workers at 96 % occupancy.
 ### Changed (2026-11-11, one Habitat adapter base: each dataset adapter holds only what is its own)
 - **`habitat/env.py::HabitatObjNavEnv`** holds the habitat-lab ObjectNav episode, the view-point measurement, start
   validation against the publisher's geodesics, navmesh provenance and the oracle hand-off (frames, depth, pose,

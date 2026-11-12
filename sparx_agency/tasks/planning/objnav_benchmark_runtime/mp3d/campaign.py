@@ -281,7 +281,7 @@ def main(argv=None):
                         help="Scenes run at once; above 1 each child logs to <root>/<scene>.console.log. "
                              "With --shard-episodes: shards at once, unless --jobs-file says otherwise")
     parser.add_argument("--stall-minutes", type=float, default=30.0,
-                        help="With --jobs above 1: kill a scene child whose live.json / progress.json / "
+                        help="With --jobs above 1: kill a scene child whose heartbeat.json / live.json / progress.json / "
                              "episodes.jsonl / console log have not changed for this long and record it as exit -9 "
                              "(a worker that lost its main thread keeps its CUDA threads and never exits; --resume "
                              "reruns the scene). Longer than LLM_REASONING_TIMEOUT_S so a slow oracle call is not a "
