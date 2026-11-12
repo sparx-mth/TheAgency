@@ -91,7 +91,9 @@ class LookSettings:
         max_travel_m: How far along the floor a candidate may lie.
         min_rate_m2_per_action: The least expected useful area per action an
             option must promise to be taken; below it the planner ends. 0
-            takes the best option whatever it promises.
+            takes the best option whatever it promises, as long as it
+            promises something: an option of zero expected area is never
+            taken, whatever the floor.
         scan_skip_gain_m2: A spot whose uncovered arc promises no more than
             this is a completed look-around even though the body did not
             turn through it. 1 m2: half of what one turn into open unknown
@@ -227,7 +229,7 @@ class GreedyLookPlanner:
                       best_candidate=None if not candidates else {
                           k: (round(v, 3) if isinstance(v, float) else v)
                           for k, v in max(candidates, key=lambda o: o["rate"]).items()})
-        if best is None or best["rate"] < s.min_rate_m2_per_action:
+        if best is None or best["rate"] <= 0.0 or best["rate"] < s.min_rate_m2_per_action:
             return self._end(obs, world, record, "nothing worth an action", best)
         if best["kind"] == MOVE:
             for option in [o for o in options if o["kind"] == MOVE][:s.plan_attempts]:
@@ -240,7 +242,7 @@ class GreedyLookPlanner:
                     self.decisions.append(record)
                     return command
             best = max((o for o in options if o["kind"] != MOVE), key=lambda o: o["rate"], default=None)
-            if best is None or best["rate"] < s.min_rate_m2_per_action:
+            if best is None or best["rate"] <= 0.0 or best["rate"] < s.min_rate_m2_per_action:
                 return self._end(obs, world, record, "walks refused, no turn worth an action", best)
         record["choice"] = dict(kind=best["kind"], gain=round(best["gain"], 3), rate=round(best["rate"], 3),
                                 turns=best["turns"])

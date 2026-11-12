@@ -36,7 +36,7 @@ from typing import Dict, List, Optional
 #: (``without`` is one arm shared by both studies: the method as it stands, the ten-turn spin and the frontier walk.)
 STUDIES: Dict[str, List[str]] = {
     "warmup": ["without", "p1_b25", "p3_b25", "p1_b15", "p3_b40", "p0_b15"],
-    "explore": ["without", "explore_viewpoint", "explore_viewpoint_transparent"],
+    "explore": ["without", "explore_viewpoint", "explore_viewpoint_norate", "explore_viewpoint_transparent"],
 }
 #: Each arm's policy configuration file under ``mp3d/sets/`` (None: the method's defaults).
 ARM_CONFIGS: Dict[str, Optional[str]] = {
@@ -45,6 +45,7 @@ ARM_CONFIGS: Dict[str, Optional[str]] = {
     "p1_b25": "policy_warmup_p1_b25_gt.json", "p3_b25": "policy_warmup_p3_b25_gt.json",
     "p3_b40": "policy_warmup_p3_b40_gt.json",
     "explore_viewpoint": "policy_explore_viewpoint_gt.json",
+    "explore_viewpoint_norate": "policy_explore_viewpoint_norate_gt.json",
     "explore_viewpoint_transparent": "policy_explore_viewpoint_transparent_gt.json",
 }
 ARM_WORDS: Dict[str, str] = {
@@ -54,7 +55,8 @@ ARM_WORDS: Dict[str, str] = {
     "p1_b25": "vantage warm-up, one vantage point at most, budget 25 actions",
     "p3_b25": "vantage warm-up, up to three vantage points, budget 25 actions",
     "p3_b40": "vantage warm-up, up to three vantage points, budget 40 actions",
-    "explore_viewpoint": "explore visit by viewpoints (greedy look planner in the room; survival prior 2 m)",
+    "explore_viewpoint": "explore visit by viewpoints (greedy look planner in the room; survival prior 2 m; rate floor 0.25 m2/action)",
+    "explore_viewpoint_norate": "explore visit by viewpoints with no rate floor: a frontier is never given up while a look promises anything",
     "explore_viewpoint_transparent": "explore visit by viewpoints with MapEx's transparent unknown (no survival prior)",
 }
 GROUND_TRUTH_FILES = ("{scene}.house", "{scene}_semantic.ply")

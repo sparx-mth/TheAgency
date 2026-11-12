@@ -210,3 +210,12 @@ def test_the_first_sighting_of_the_target_is_recorded_whatever_the_closing_does_
     other, episode = setup_policy("table")
     other.plan(observation(episode, 0))
     assert other.perception.target_first_seen_step is None and other.perception.target_first_placed_step is None
+
+
+def test_a_zero_rate_floor_still_never_spends_an_action_that_promises_nothing():
+    """``min_rate_m2_per_action`` 0 takes the best option whatever it promises -- but an option of zero expected area is
+    not one: in a fully known room the warm-up ends at once instead of turning for nothing until the budget is spent."""
+    p, episode = vantage_policy(known_room(), budget_steps=20, max_points=1, min_rate_m2_per_action=0.0)
+    log, pose = drive(p, episode, AgentPose(0.0, 0.0, 0.0, 0.0))
+    assert log[0]["kind"] != "warmup" and p.warmup_actions == 0 and p._warmup_done
+    assert p.vantage_warmup.diagnostics()["ended"] == "nothing worth an action"
