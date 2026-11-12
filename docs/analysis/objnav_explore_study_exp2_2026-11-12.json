@@ -1,0 +1,4702 @@
+{
+ "arms": [
+  "frontier",
+  "viewpoint",
+  "viewpoint_transparent"
+ ],
+ "by_scene": {
+  "frontier": {
+   "2azQ1b91cZZ": [
+    5,
+    5
+   ],
+   "8194nk5LbLH": [
+    1,
+    1
+   ],
+   "QUCTc6BB5sX": [
+    3,
+    4
+   ],
+   "TbHJrupSAjP": [
+    1,
+    3
+   ],
+   "Z6MFQCViBuw": [
+    4,
+    8
+   ],
+   "oLBMNvg9in8": [
+    5,
+    5
+   ],
+   "pLe4wQe7qrG": [
+    6,
+    6
+   ],
+   "zsNo4HB9uLZ": [
+    7,
+    7
+   ]
+  },
+  "viewpoint": {
+   "2azQ1b91cZZ": [
+    4,
+    5
+   ],
+   "8194nk5LbLH": [
+    1,
+    1
+   ],
+   "QUCTc6BB5sX": [
+    3,
+    4
+   ],
+   "TbHJrupSAjP": [
+    1,
+    3
+   ],
+   "Z6MFQCViBuw": [
+    4,
+    8
+   ],
+   "oLBMNvg9in8": [
+    4,
+    5
+   ],
+   "pLe4wQe7qrG": [
+    6,
+    6
+   ],
+   "zsNo4HB9uLZ": [
+    7,
+    7
+   ]
+  },
+  "viewpoint_transparent": {
+   "2azQ1b91cZZ": [
+    4,
+    5
+   ],
+   "8194nk5LbLH": [
+    1,
+    1
+   ],
+   "QUCTc6BB5sX": [
+    3,
+    4
+   ],
+   "TbHJrupSAjP": [
+    2,
+    3
+   ],
+   "Z6MFQCViBuw": [
+    4,
+    8
+   ],
+   "oLBMNvg9in8": [
+    5,
+    5
+   ],
+   "pLe4wQe7qrG": [
+    6,
+    6
+   ],
+   "zsNo4HB9uLZ": [
+    7,
+    7
+   ]
+  }
+ },
+ "episodes": 39,
+ "explanations": {
+  "viewpoint": [
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: lost: 3 frames without the class in view",
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 81
+    },
+    "dtg_m": [
+     0.04,
+     0.03
+    ],
+    "episode": "2azQ1b91cZZ/000061",
+    "first_lock": [
+     196,
+     97
+    ],
+    "first_seen": [
+     195,
+     96
+    ],
+    "llm_asked": [
+     28,
+     2
+    ],
+    "llm_replayed": [
+     0,
+     10
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.58,
+     0.664
+    ],
+    "steps": [
+     240,
+     158
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "table",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 47
+    },
+    "dtg_m": [
+     0.03,
+     15.77
+    ],
+    "episode": "2azQ1b91cZZ/000142",
+    "first_lock": [
+     458,
+     null
+    ],
+    "first_seen": [
+     457,
+     null
+    ],
+    "llm_asked": [
+     72,
+     63
+    ],
+    "llm_replayed": [
+     0,
+     5
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.199,
+     0.0
+    ],
+    "steps": [
+     498,
+     500
+    ],
+    "success": [
+     true,
+     false
+    ],
+    "target": "counter",
+    "termination": [
+     "stop",
+     "step_limit"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "transit/5",
+     "phase_base": "transit/2",
+     "step": 64
+    },
+    "dtg_m": [
+     0.04,
+     0.05
+    ],
+    "episode": "QUCTc6BB5sX/000061",
+    "first_lock": [
+     139,
+     205
+    ],
+    "first_seen": [
+     138,
+     205
+    ],
+    "llm_asked": [
+     21,
+     24
+    ],
+    "llm_replayed": [
+     0,
+     8
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.462,
+     0.338
+    ],
+    "steps": [
+     161,
+     226
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "towel",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "glance",
+     "step": 36
+    },
+    "dtg_m": [
+     0.04,
+     0.04
+    ],
+    "episode": "QUCTc6BB5sX/000141",
+    "first_lock": [
+     60,
+     41
+    ],
+    "first_seen": [
+     59,
+     40
+    ],
+    "llm_asked": [
+     6,
+     1
+    ],
+    "llm_replayed": [
+     0,
+     2
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.665,
+     0.812
+    ],
+    "steps": [
+     77,
+     63
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "cabinet",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 24
+    },
+    "dtg_m": [
+     0.04,
+     0.03
+    ],
+    "episode": "TbHJrupSAjP/000040",
+    "first_lock": [
+     144,
+     113
+    ],
+    "first_seen": [
+     138,
+     112
+    ],
+    "llm_asked": [
+     9,
+     4
+    ],
+    "llm_replayed": [
+     0,
+     4
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.415,
+     0.481
+    ],
+    "steps": [
+     164,
+     142
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "stool",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 1
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 1
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "glance",
+     "step": 145
+    },
+    "dtg_m": [
+     0.03,
+     16.13
+    ],
+    "episode": "Z6MFQCViBuw/000003",
+    "first_lock": [
+     6,
+     6
+    ],
+    "first_seen": [
+     6,
+     6
+    ],
+    "llm_asked": [
+     22,
+     19
+    ],
+    "llm_replayed": [
+     0,
+     15
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.163,
+     0.0
+    ],
+    "steps": [
+     283,
+     500
+    ],
+    "success": [
+     true,
+     false
+    ],
+    "target": "chest_of_drawers",
+    "termination": [
+     "stop",
+     "step_limit"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: walked 3.0 m toward it without the depth",
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 33
+    },
+    "dtg_m": [
+     39.55,
+     0.04
+    ],
+    "episode": "Z6MFQCViBuw/000120",
+    "first_lock": [
+     null,
+     259
+    ],
+    "first_seen": [
+     null,
+     258
+    ],
+    "llm_asked": [
+     52,
+     18
+    ],
+    "llm_replayed": [
+     0,
+     6
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.0,
+     0.398
+    ],
+    "steps": [
+     500,
+     319
+    ],
+    "success": [
+     false,
+     true
+    ],
+    "target": "bed",
+    "termination": [
+     "step_limit",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: near and unmeasurable: the box fills 42% of the frame without depth",
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: near and unmeasurable: the box fills 44% of the frame without depth",
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 12
+    },
+    "dtg_m": [
+     0.04,
+     0.08
+    ],
+    "episode": "Z6MFQCViBuw/000123",
+    "first_lock": [
+     38,
+     46
+    ],
+    "first_seen": [
+     37,
+     45
+    ],
+    "llm_asked": [
+     7,
+     21
+    ],
+    "llm_replayed": [
+     0,
+     2
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.813,
+     0.239
+    ],
+    "steps": [
+     100,
+     378
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "picture",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 106
+    },
+    "dtg_m": [
+     0.04,
+     4.06
+    ],
+    "episode": "oLBMNvg9in8/000066",
+    "first_lock": [
+     345,
+     null
+    ],
+    "first_seen": [
+     343,
+     null
+    ],
+    "llm_asked": [
+     33,
+     42
+    ],
+    "llm_replayed": [
+     0,
+     9
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.154,
+     0.0
+    ],
+    "steps": [
+     412,
+     500
+    ],
+    "success": [
+     true,
+     false
+    ],
+    "target": "chair",
+    "termination": [
+     "stop",
+     "step_limit"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "transit/3",
+     "step": 18
+    },
+    "dtg_m": [
+     0.04,
+     0.05
+    ],
+    "episode": "oLBMNvg9in8/000086",
+    "first_lock": [
+     58,
+     45
+    ],
+    "first_seen": [
+     57,
+     44
+    ],
+    "llm_asked": [
+     8,
+     4
+    ],
+    "llm_replayed": [
+     0,
+     4
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.305,
+     0.395
+    ],
+    "steps": [
+     93,
+     77
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "picture",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "transit/3",
+     "phase_base": "frontier",
+     "step": 45
+    },
+    "dtg_m": [
+     0.05,
+     0.0
+    ],
+    "episode": "zsNo4HB9uLZ/000022",
+    "first_lock": [
+     333,
+     203
+    ],
+    "first_seen": [
+     332,
+     203
+    ],
+    "llm_asked": [
+     33,
+     10
+    ],
+    "llm_replayed": [
+     0,
+     5
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.15,
+     0.242
+    ],
+    "steps": [
+     373,
+     231
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "bed",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "glance",
+     "step": 68
+    },
+    "dtg_m": [
+     0.03,
+     0.02
+    ],
+    "episode": "zsNo4HB9uLZ/000042",
+    "first_lock": [
+     74,
+     88
+    ],
+    "first_seen": [
+     74,
+     88
+    ],
+    "llm_asked": [
+     5,
+     1
+    ],
+    "llm_replayed": [
+     0,
+     5
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.293,
+     0.142
+    ],
+    "steps": [
+     84,
+     141
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "picture",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "unverified",
+      "releases": 1
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 1
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "peek",
+     "step": 55
+    },
+    "dtg_m": [
+     0.03,
+     0.03
+    ],
+    "episode": "zsNo4HB9uLZ/000101",
+    "first_lock": [
+     33,
+     33
+    ],
+    "first_seen": [
+     33,
+     33
+    ],
+    "llm_asked": [
+     10,
+     7
+    ],
+    "llm_replayed": [
+     0,
+     5
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.543,
+     0.458
+    ],
+    "steps": [
+     95,
+     125
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "cushion",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "glance",
+     "phase_base": "frontier",
+     "step": 96
+    },
+    "dtg_m": [
+     0.04,
+     0.01
+    ],
+    "episode": "zsNo4HB9uLZ/000142",
+    "first_lock": [
+     184,
+     142
+    ],
+    "first_seen": [
+     184,
+     142
+    ],
+    "llm_asked": [
+     17,
+     9
+    ],
+    "llm_replayed": [
+     0,
+     3
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.426,
+     0.589
+    ],
+    "steps": [
+     214,
+     181
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "chest_of_drawers",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   }
+  ],
+  "viewpoint_transparent": [
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: lost: 3 frames without the class in view",
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 81
+    },
+    "dtg_m": [
+     0.04,
+     0.03
+    ],
+    "episode": "2azQ1b91cZZ/000061",
+    "first_lock": [
+     196,
+     97
+    ],
+    "first_seen": [
+     195,
+     96
+    ],
+    "llm_asked": [
+     28,
+     2
+    ],
+    "llm_replayed": [
+     0,
+     10
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.58,
+     0.664
+    ],
+    "steps": [
+     240,
+     158
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "table",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 47
+    },
+    "dtg_m": [
+     0.03,
+     17.04
+    ],
+    "episode": "2azQ1b91cZZ/000142",
+    "first_lock": [
+     458,
+     null
+    ],
+    "first_seen": [
+     457,
+     null
+    ],
+    "llm_asked": [
+     72,
+     125
+    ],
+    "llm_replayed": [
+     0,
+     6
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.199,
+     0.0
+    ],
+    "steps": [
+     498,
+     500
+    ],
+    "success": [
+     true,
+     false
+    ],
+    "target": "counter",
+    "termination": [
+     "stop",
+     "step_limit"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "transit/5",
+     "phase_base": "transit/2",
+     "step": 64
+    },
+    "dtg_m": [
+     0.04,
+     0.05
+    ],
+    "episode": "QUCTc6BB5sX/000061",
+    "first_lock": [
+     139,
+     205
+    ],
+    "first_seen": [
+     138,
+     205
+    ],
+    "llm_asked": [
+     21,
+     24
+    ],
+    "llm_replayed": [
+     0,
+     8
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.462,
+     0.338
+    ],
+    "steps": [
+     161,
+     226
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "towel",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "glance",
+     "step": 36
+    },
+    "dtg_m": [
+     0.04,
+     0.04
+    ],
+    "episode": "QUCTc6BB5sX/000141",
+    "first_lock": [
+     60,
+     41
+    ],
+    "first_seen": [
+     59,
+     40
+    ],
+    "llm_asked": [
+     6,
+     1
+    ],
+    "llm_replayed": [
+     0,
+     2
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.665,
+     0.812
+    ],
+    "steps": [
+     77,
+     63
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "cabinet",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 24
+    },
+    "dtg_m": [
+     0.04,
+     0.04
+    ],
+    "episode": "TbHJrupSAjP/000040",
+    "first_lock": [
+     144,
+     120
+    ],
+    "first_seen": [
+     138,
+     120
+    ],
+    "llm_asked": [
+     9,
+     4
+    ],
+    "llm_replayed": [
+     0,
+     4
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.415,
+     0.476
+    ],
+    "steps": [
+     164,
+     153
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "stool",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "transit/2",
+     "step": 126
+    },
+    "dtg_m": [
+     5.45,
+     0.05
+    ],
+    "episode": "TbHJrupSAjP/000162",
+    "first_lock": [
+     null,
+     328
+    ],
+    "first_seen": [
+     null,
+     328
+    ],
+    "llm_asked": [
+     59,
+     25
+    ],
+    "llm_replayed": [
+     0,
+     25
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.0,
+     0.325
+    ],
+    "steps": [
+     500,
+     348
+    ],
+    "success": [
+     false,
+     true
+    ],
+    "target": "chest_of_drawers",
+    "termination": [
+     "step_limit",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 1
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 1
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "glance",
+     "step": 145
+    },
+    "dtg_m": [
+     0.03,
+     12.6
+    ],
+    "episode": "Z6MFQCViBuw/000003",
+    "first_lock": [
+     6,
+     6
+    ],
+    "first_seen": [
+     6,
+     6
+    ],
+    "llm_asked": [
+     22,
+     22
+    ],
+    "llm_replayed": [
+     0,
+     15
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.163,
+     0.0
+    ],
+    "steps": [
+     283,
+     500
+    ],
+    "success": [
+     true,
+     false
+    ],
+    "target": "chest_of_drawers",
+    "termination": [
+     "stop",
+     "step_limit"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: walked 3.0 m toward it without the depth",
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 33
+    },
+    "dtg_m": [
+     39.55,
+     0.04
+    ],
+    "episode": "Z6MFQCViBuw/000120",
+    "first_lock": [
+     null,
+     259
+    ],
+    "first_seen": [
+     null,
+     258
+    ],
+    "llm_asked": [
+     52,
+     18
+    ],
+    "llm_replayed": [
+     0,
+     6
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.0,
+     0.398
+    ],
+    "steps": [
+     500,
+     319
+    ],
+    "success": [
+     false,
+     true
+    ],
+    "target": "bed",
+    "termination": [
+     "step_limit",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: near and unmeasurable: the box fills 42% of the frame without depth",
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: near and unmeasurable: the box fills 34% of the frame without depth",
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 12
+    },
+    "dtg_m": [
+     0.04,
+     0.04
+    ],
+    "episode": "Z6MFQCViBuw/000123",
+    "first_lock": [
+     38,
+     46
+    ],
+    "first_seen": [
+     37,
+     45
+    ],
+    "llm_asked": [
+     7,
+     28
+    ],
+    "llm_replayed": [
+     0,
+     2
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.813,
+     0.182
+    ],
+    "steps": [
+     100,
+     462
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "picture",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "transit/3",
+     "step": 18
+    },
+    "dtg_m": [
+     0.04,
+     0.05
+    ],
+    "episode": "oLBMNvg9in8/000086",
+    "first_lock": [
+     58,
+     45
+    ],
+    "first_seen": [
+     57,
+     44
+    ],
+    "llm_asked": [
+     8,
+     4
+    ],
+    "llm_replayed": [
+     0,
+     4
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.305,
+     0.395
+    ],
+    "steps": [
+     93,
+     77
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "picture",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: lost: 3 frames without the class in view",
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "frontier",
+     "step": 45
+    },
+    "dtg_m": [
+     0.05,
+     0.03
+    ],
+    "episode": "zsNo4HB9uLZ/000022",
+    "first_lock": [
+     333,
+     62
+    ],
+    "first_seen": [
+     332,
+     61
+    ],
+    "llm_asked": [
+     33,
+     16
+    ],
+    "llm_replayed": [
+     0,
+     7
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.15,
+     0.292
+    ],
+    "steps": [
+     373,
+     196
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "bed",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "glance",
+     "step": 68
+    },
+    "dtg_m": [
+     0.03,
+     0.05
+    ],
+    "episode": "zsNo4HB9uLZ/000042",
+    "first_lock": [
+     74,
+     92
+    ],
+    "first_seen": [
+     74,
+     92
+    ],
+    "llm_asked": [
+     5,
+     1
+    ],
+    "llm_replayed": [
+     0,
+     5
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.293,
+     0.17
+    ],
+    "steps": [
+     84,
+     133
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "picture",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": "unverified",
+      "releases": 1
+     },
+     {
+      "failure": null,
+      "last_release": "bearing approach given up: not moving: three steps toward it went nowhere",
+      "releases": 1
+     }
+    ],
+    "diverged": {
+     "phase_arm": "viewpoint",
+     "phase_base": "peek",
+     "step": 55
+    },
+    "dtg_m": [
+     0.03,
+     0.03
+    ],
+    "episode": "zsNo4HB9uLZ/000101",
+    "first_lock": [
+     33,
+     33
+    ],
+    "first_seen": [
+     33,
+     33
+    ],
+    "llm_asked": [
+     10,
+     7
+    ],
+    "llm_replayed": [
+     0,
+     5
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.543,
+     0.458
+    ],
+    "steps": [
+     95,
+     125
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "cushion",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   },
+   {
+    "closing": [
+     {
+      "failure": null,
+      "last_release": null,
+      "releases": 0
+     },
+     {
+      "failure": null,
+      "last_release": "unverified again",
+      "releases": 2
+     }
+    ],
+    "diverged": {
+     "phase_arm": "glance",
+     "phase_base": "frontier",
+     "step": 96
+    },
+    "dtg_m": [
+     0.04,
+     0.02
+    ],
+    "episode": "zsNo4HB9uLZ/000142",
+    "first_lock": [
+     184,
+     148
+    ],
+    "first_seen": [
+     184,
+     147
+    ],
+    "llm_asked": [
+     17,
+     10
+    ],
+    "llm_replayed": [
+     0,
+     3
+    ],
+    "moves": [
+     0,
+     0
+    ],
+    "spl": [
+     0.426,
+     0.484
+    ],
+    "steps": [
+     214,
+     290
+    ],
+    "success": [
+     true,
+     true
+    ],
+    "target": "chest_of_drawers",
+    "termination": [
+     "stop",
+     "stop"
+    ],
+    "walked_m": [
+     0.0,
+     0.0
+    ],
+    "warmup_actions": [
+     10,
+     10
+    ]
+   }
+  ]
+ },
+ "paired": {
+  "viewpoint": {
+   "mcnemar_p": 0.625,
+   "spl_better": [
+    "2azQ1b91cZZ/000061",
+    "QUCTc6BB5sX/000141",
+    "TbHJrupSAjP/000040",
+    "Z6MFQCViBuw/000120",
+    "oLBMNvg9in8/000086",
+    "zsNo4HB9uLZ/000022",
+    "zsNo4HB9uLZ/000142"
+   ],
+   "spl_ci": [
+    -0.05331647052798508,
+    0.029121346210429146
+   ],
+   "spl_diff": -0.010835814055441532,
+   "spl_worse": [
+    "2azQ1b91cZZ/000142",
+    "QUCTc6BB5sX/000061",
+    "Z6MFQCViBuw/000003",
+    "Z6MFQCViBuw/000123",
+    "oLBMNvg9in8/000023",
+    "oLBMNvg9in8/000066",
+    "zsNo4HB9uLZ/000042",
+    "zsNo4HB9uLZ/000101"
+   ],
+   "sr_ci": [
+    -0.15384615384615385,
+    0.05128205128205128
+   ],
+   "sr_diff": -0.05128205128205128,
+   "to_failure": [
+    "2azQ1b91cZZ/000142",
+    "Z6MFQCViBuw/000003",
+    "oLBMNvg9in8/000066"
+   ],
+   "to_success": [
+    "Z6MFQCViBuw/000120"
+   ]
+  },
+  "viewpoint_transparent": {
+   "mcnemar_p": 1.0,
+   "spl_better": [
+    "2azQ1b91cZZ/000061",
+    "QUCTc6BB5sX/000141",
+    "TbHJrupSAjP/000040",
+    "TbHJrupSAjP/000162",
+    "Z6MFQCViBuw/000120",
+    "oLBMNvg9in8/000086",
+    "zsNo4HB9uLZ/000022",
+    "zsNo4HB9uLZ/000142"
+   ],
+   "spl_ci": [
+    -0.04825198905332832,
+    0.04236236378216881
+   ],
+   "spl_diff": -0.0008518678923041114,
+   "spl_worse": [
+    "2azQ1b91cZZ/000142",
+    "QUCTc6BB5sX/000061",
+    "Z6MFQCViBuw/000003",
+    "Z6MFQCViBuw/000123",
+    "oLBMNvg9in8/000023",
+    "zsNo4HB9uLZ/000042",
+    "zsNo4HB9uLZ/000101"
+   ],
+   "sr_ci": [
+    -0.10256410256410256,
+    0.10256410256410256
+   ],
+   "sr_diff": 0.0,
+   "to_failure": [
+    "2azQ1b91cZZ/000142",
+    "Z6MFQCViBuw/000003"
+   ],
+   "to_success": [
+    "TbHJrupSAjP/000162",
+    "Z6MFQCViBuw/000120"
+   ]
+  }
+ },
+ "per_arm": {
+  "frontier": {
+   "dtg_m": 1.890100106656647,
+   "episodes": 39,
+   "limits": 6,
+   "near_misses_1m": 1,
+   "soft_spl": 0.381953583145452,
+   "spl": 0.3548006166528051,
+   "sr": 0.8205128205128205,
+   "steps": 211.74358974358975,
+   "stops": 33,
+   "wrong_stops": 1
+  },
+  "viewpoint": {
+   "dtg_m": 1.6797451566701802,
+   "episodes": 39,
+   "limits": 8,
+   "near_misses_1m": 1,
+   "soft_spl": 0.3748829392134934,
+   "spl": 0.3439648025973635,
+   "sr": 0.7692307692307693,
+   "steps": 218.05128205128204,
+   "stops": 31,
+   "wrong_stops": 1
+  },
+  "viewpoint_transparent": {
+   "dtg_m": 1.9345795114596303,
+   "episodes": 39,
+   "limits": 6,
+   "near_misses_1m": 1,
+   "soft_spl": 0.37390168555846376,
+   "spl": 0.3539487487605009,
+   "sr": 0.8205128205128205,
+   "steps": 215.3846153846154,
+   "stops": 33,
+   "wrong_stops": 1
+  }
+ },
+ "per_episode": {
+  "frontier": {
+   "2azQ1b91cZZ/000020": {
+    "area_10_m2": 34.55,
+    "area_20_m2": 37.32,
+    "area_30_m2": 38.49,
+    "area_50_m2": 39.44,
+    "area_end_m2": 33.97,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 74,
+    "first_seen": 73,
+    "moves": 0,
+    "spl": 0.35692975648966774,
+    "steps": 206,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000022": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.6493289345289119,
+    "steps": 58,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000041": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.06784490213470924,
+    "steps": 152,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000061": {
+    "area_10_m2": 7.83,
+    "area_20_m2": 7.93,
+    "area_30_m2": 12.87,
+    "area_50_m2": 17.51,
+    "area_end_m2": 7.82,
+    "explore_actions": 44,
+    "explore_gain_m2": 18.87000000000001,
+    "explore_visits": 4,
+    "first_lock": 196,
+    "first_seen": 195,
+    "moves": 0,
+    "spl": 0.5795815103375414,
+    "steps": 240,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000142": {
+    "area_10_m2": 59.0,
+    "area_20_m2": 69.68,
+    "area_30_m2": 77.87,
+    "area_50_m2": 79.27,
+    "area_end_m2": 55.22,
+    "explore_actions": 112,
+    "explore_gain_m2": 37.65,
+    "explore_visits": 7,
+    "first_lock": 458,
+    "first_seen": 457,
+    "moves": 0,
+    "spl": 0.19880755453442034,
+    "steps": 498,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "8194nk5LbLH/000087": {
+    "area_10_m2": 2.09,
+    "area_20_m2": 2.09,
+    "area_30_m2": 2.09,
+    "area_50_m2": 37.86,
+    "area_end_m2": 60.29,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 3,
+    "moves": 0,
+    "spl": 0.2886348035519945,
+    "steps": 270,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000001": {
+    "area_10_m2": 16.6,
+    "area_20_m2": 18.0,
+    "area_30_m2": 18.52,
+    "area_50_m2": 21.35,
+    "area_end_m2": 15.96,
+    "explore_actions": 19,
+    "explore_gain_m2": 4.069999999999999,
+    "explore_visits": 0,
+    "first_lock": 21,
+    "first_seen": 21,
+    "moves": 0,
+    "spl": 0.6670933147885721,
+    "steps": 100,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000061": {
+    "area_10_m2": 25.84,
+    "area_20_m2": 33.72,
+    "area_30_m2": 34.08,
+    "area_50_m2": 36.23,
+    "area_end_m2": 23.77,
+    "explore_actions": 9,
+    "explore_gain_m2": 3.73,
+    "explore_visits": 1,
+    "first_lock": 139,
+    "first_seen": 138,
+    "moves": 0,
+    "spl": 0.461794906100113,
+    "steps": 161,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000122": {
+    "area_10_m2": 32.22,
+    "area_20_m2": 40.75,
+    "area_30_m2": 43.64,
+    "area_50_m2": 53.09,
+    "area_end_m2": 29.97,
+    "explore_actions": 29,
+    "explore_gain_m2": 8.55,
+    "explore_visits": 7,
+    "first_lock": 390,
+    "first_seen": 190,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000141": {
+    "area_10_m2": 16.04,
+    "area_20_m2": 17.39,
+    "area_30_m2": 20.8,
+    "area_50_m2": 43.65,
+    "area_end_m2": 15.7,
+    "explore_actions": 19,
+    "explore_gain_m2": 17.759999999999998,
+    "explore_visits": 1,
+    "first_lock": 60,
+    "first_seen": 59,
+    "moves": 0,
+    "spl": 0.6646676464677884,
+    "steps": 77,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000040": {
+    "area_10_m2": 31.14,
+    "area_20_m2": 42.24,
+    "area_30_m2": 43.65,
+    "area_50_m2": 44.83,
+    "area_end_m2": 29.72,
+    "explore_actions": 41,
+    "explore_gain_m2": 3.2500000000000004,
+    "explore_visits": 2,
+    "first_lock": 144,
+    "first_seen": 138,
+    "moves": 0,
+    "spl": 0.41512729116825686,
+    "steps": 164,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000060": {
+    "area_10_m2": 18.77,
+    "area_20_m2": 19.82,
+    "area_30_m2": 22.81,
+    "area_50_m2": 27.98,
+    "area_end_m2": 17.71,
+    "explore_actions": 220,
+    "explore_gain_m2": 1.7200000000000004,
+    "explore_visits": 3,
+    "first_lock": null,
+    "first_seen": null,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000162": {
+    "area_10_m2": 28.76,
+    "area_20_m2": 38.55,
+    "area_30_m2": 43.84,
+    "area_50_m2": 44.05,
+    "area_end_m2": 27.78,
+    "explore_actions": 79,
+    "explore_gain_m2": 4.899999999999999,
+    "explore_visits": 9,
+    "first_lock": null,
+    "first_seen": null,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000003": {
+    "area_10_m2": 12.01,
+    "area_20_m2": 12.01,
+    "area_30_m2": 12.01,
+    "area_50_m2": 12.01,
+    "area_end_m2": 46.83,
+    "explore_actions": 75,
+    "explore_gain_m2": 37.30999999999998,
+    "explore_visits": 1,
+    "first_lock": 6,
+    "first_seen": 6,
+    "moves": 0,
+    "spl": 0.16288547285539307,
+    "steps": 283,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000060": {
+    "area_10_m2": 38.0,
+    "area_20_m2": 47.92,
+    "area_30_m2": 55.93,
+    "area_50_m2": 59.14,
+    "area_end_m2": 31.71,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 10,
+    "first_seen": 9,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000102": {
+    "area_10_m2": 25.27,
+    "area_20_m2": 41.3,
+    "area_30_m2": 45.97,
+    "area_50_m2": 60.07,
+    "area_end_m2": 42.65,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 9,
+    "first_seen": 8,
+    "moves": 0,
+    "spl": 0.33552912520103995,
+    "steps": 138,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000103": {
+    "area_10_m2": 30.91,
+    "area_20_m2": 42.23,
+    "area_30_m2": 46.64,
+    "area_50_m2": 52.66,
+    "area_end_m2": 36.36,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 1,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.4292958709459599,
+    "steps": 90,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000120": {
+    "area_10_m2": 45.33,
+    "area_20_m2": 49.82,
+    "area_30_m2": 56.91,
+    "area_50_m2": 70.17,
+    "area_end_m2": 42.62,
+    "explore_actions": 209,
+    "explore_gain_m2": 70.17999999999999,
+    "explore_visits": 5,
+    "first_lock": null,
+    "first_seen": null,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000121": {
+    "area_10_m2": 19.06,
+    "area_20_m2": 38.04,
+    "area_30_m2": 38.04,
+    "area_50_m2": 38.04,
+    "area_end_m2": 13.8,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 2,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 50,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 1,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000123": {
+    "area_10_m2": 47.21,
+    "area_20_m2": 54.17,
+    "area_30_m2": 62.48,
+    "area_50_m2": 83.28,
+    "area_end_m2": 44.51,
+    "explore_actions": 35,
+    "explore_gain_m2": 36.44,
+    "explore_visits": 1,
+    "first_lock": 38,
+    "first_seen": 37,
+    "moves": 0,
+    "spl": 0.8130383208843773,
+    "steps": 100,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000183": {
+    "area_10_m2": 17.3,
+    "area_20_m2": 17.3,
+    "area_30_m2": 17.3,
+    "area_50_m2": 17.3,
+    "area_end_m2": 67.63,
+    "explore_actions": 7,
+    "explore_gain_m2": 0.1,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 2,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000023": {
+    "area_10_m2": 27.91,
+    "area_20_m2": 30.47,
+    "area_30_m2": 35.6,
+    "area_50_m2": 38.71,
+    "area_end_m2": 26.83,
+    "explore_actions": 23,
+    "explore_gain_m2": 1.3700000000000003,
+    "explore_visits": 2,
+    "first_lock": 207,
+    "first_seen": 207,
+    "moves": 0,
+    "spl": 0.308816810228962,
+    "steps": 232,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000066": {
+    "area_10_m2": 27.15,
+    "area_20_m2": 30.11,
+    "area_30_m2": 33.6,
+    "area_50_m2": 35.47,
+    "area_end_m2": 25.58,
+    "explore_actions": 11,
+    "explore_gain_m2": 0.21,
+    "explore_visits": 3,
+    "first_lock": 345,
+    "first_seen": 343,
+    "moves": 0,
+    "spl": 0.15429713421432673,
+    "steps": 412,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000086": {
+    "area_10_m2": 18.76,
+    "area_20_m2": 19.27,
+    "area_30_m2": 19.58,
+    "area_50_m2": 27.39,
+    "area_end_m2": 18.57,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 2,
+    "first_lock": 58,
+    "first_seen": 57,
+    "moves": 0,
+    "spl": 0.3049206719950892,
+    "steps": 93,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000126": {
+    "area_10_m2": 28.1,
+    "area_20_m2": 30.72,
+    "area_30_m2": 33.84,
+    "area_50_m2": 33.84,
+    "area_end_m2": 27.05,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 31,
+    "first_seen": 31,
+    "moves": 0,
+    "spl": 0.722361848342593,
+    "steps": 66,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000129": {
+    "area_10_m2": 19.28,
+    "area_20_m2": 22.83,
+    "area_30_m2": 23.13,
+    "area_50_m2": 23.69,
+    "area_end_m2": 18.84,
+    "explore_actions": 60,
+    "explore_gain_m2": 4.37,
+    "explore_visits": 3,
+    "first_lock": 395,
+    "first_seen": 395,
+    "moves": 0,
+    "spl": 0.18498145596763985,
+    "steps": 415,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000000": {
+    "area_10_m2": 33.37,
+    "area_20_m2": 35.39,
+    "area_30_m2": 37.8,
+    "area_50_m2": 42.83,
+    "area_end_m2": 32.54,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 106,
+    "first_seen": 105,
+    "moves": 0,
+    "spl": 0.4794784014701896,
+    "steps": 137,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000023": {
+    "area_10_m2": 36.49,
+    "area_20_m2": 39.19,
+    "area_30_m2": 41.88,
+    "area_50_m2": 46.07,
+    "area_end_m2": 35.52,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 48,
+    "first_seen": 48,
+    "moves": 0,
+    "spl": 0.7462832793646496,
+    "steps": 75,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000061": {
+    "area_10_m2": 5.22,
+    "area_20_m2": 5.22,
+    "area_30_m2": 5.22,
+    "area_50_m2": 5.22,
+    "area_end_m2": 5.07,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 4,
+    "first_seen": 3,
+    "moves": 0,
+    "spl": 0.20530760710684134,
+    "steps": 80,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 4,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000083": {
+    "area_10_m2": 8.56,
+    "area_20_m2": 8.56,
+    "area_30_m2": 8.56,
+    "area_50_m2": 8.56,
+    "area_end_m2": 3.32,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 6,
+    "first_seen": 5,
+    "moves": 0,
+    "spl": 0.7760724905291925,
+    "steps": 17,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 6,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000102": {
+    "area_10_m2": 7.37,
+    "area_20_m2": 7.37,
+    "area_30_m2": 7.37,
+    "area_50_m2": 7.37,
+    "area_end_m2": 7.08,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 5,
+    "first_seen": 4,
+    "moves": 0,
+    "spl": 0.1739019282738826,
+    "steps": 68,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 5,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000140": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.6953290479962558,
+    "steps": 12,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000022": {
+    "area_10_m2": 56.65,
+    "area_20_m2": 63.06,
+    "area_30_m2": 67.74,
+    "area_50_m2": 83.57,
+    "area_end_m2": 54.85,
+    "explore_actions": 128,
+    "explore_gain_m2": 15.099999999999994,
+    "explore_visits": 4,
+    "first_lock": 333,
+    "first_seen": 332,
+    "moves": 0,
+    "spl": 0.14968479945433408,
+    "steps": 373,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000042": {
+    "area_10_m2": 3.88,
+    "area_20_m2": 8.0,
+    "area_30_m2": 13.88,
+    "area_50_m2": 14.72,
+    "area_end_m2": 3.87,
+    "explore_actions": 11,
+    "explore_gain_m2": 1.1600000000000001,
+    "explore_visits": 1,
+    "first_lock": 74,
+    "first_seen": 74,
+    "moves": 0,
+    "spl": 0.2926467100797764,
+    "steps": 84,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000061": {
+    "area_10_m2": 18.86,
+    "area_20_m2": 21.16,
+    "area_30_m2": 22.12,
+    "area_50_m2": 23.97,
+    "area_end_m2": 17.66,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 64,
+    "first_seen": 64,
+    "moves": 0,
+    "spl": 0.7182531618865032,
+    "steps": 113,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000080": {
+    "area_10_m2": 8.6,
+    "area_20_m2": 9.4,
+    "area_30_m2": 11.99,
+    "area_50_m2": 16.98,
+    "area_end_m2": 8.42,
+    "explore_actions": 14,
+    "explore_gain_m2": 2.9099999999999997,
+    "explore_visits": 1,
+    "first_lock": 71,
+    "first_seen": 71,
+    "moves": 0,
+    "spl": 0.652812172549681,
+    "steps": 96,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000100": {
+    "area_10_m2": 30.77,
+    "area_20_m2": 30.77,
+    "area_30_m2": 30.77,
+    "area_50_m2": 30.77,
+    "area_end_m2": 28.32,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 8,
+    "first_seen": 7,
+    "moves": 0,
+    "spl": 0.21282798947461773,
+    "steps": 89,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000101": {
+    "area_10_m2": 15.4,
+    "area_20_m2": 16.88,
+    "area_30_m2": 22.46,
+    "area_50_m2": 35.82,
+    "area_end_m2": 14.6,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 33,
+    "first_seen": 33,
+    "moves": 0,
+    "spl": 0.543177407158186,
+    "steps": 95,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000142": {
+    "area_10_m2": 25.9,
+    "area_20_m2": 26.22,
+    "area_30_m2": 26.58,
+    "area_50_m2": 26.71,
+    "area_end_m2": 25.26,
+    "explore_actions": 23,
+    "explore_gain_m2": 6.890000000000001,
+    "explore_visits": 2,
+    "first_lock": 184,
+    "first_seen": 184,
+    "moves": 0,
+    "spl": 0.425511723377933,
+    "steps": 214,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   }
+  },
+  "viewpoint": {
+   "2azQ1b91cZZ/000020": {
+    "area_10_m2": 34.55,
+    "area_20_m2": 37.32,
+    "area_30_m2": 38.49,
+    "area_50_m2": 39.44,
+    "area_end_m2": 33.97,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 74,
+    "first_seen": 73,
+    "moves": 0,
+    "spl": 0.35692975648966774,
+    "steps": 206,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000022": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.6493289345289119,
+    "steps": 58,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000041": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.06784490213470924,
+    "steps": 152,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000061": {
+    "area_10_m2": 7.83,
+    "area_20_m2": 7.93,
+    "area_30_m2": 12.87,
+    "area_50_m2": 17.51,
+    "area_end_m2": 7.82,
+    "explore_actions": 21,
+    "explore_gain_m2": 11.339999999999998,
+    "explore_visits": 2,
+    "first_lock": 97,
+    "first_seen": 96,
+    "moves": 0,
+    "spl": 0.6644456754752165,
+    "steps": 158,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000142": {
+    "area_10_m2": 59.01,
+    "area_20_m2": 69.69,
+    "area_30_m2": 77.89,
+    "area_50_m2": 79.24,
+    "area_end_m2": 55.23,
+    "explore_actions": 93,
+    "explore_gain_m2": 0.7300000000000002,
+    "explore_visits": 3,
+    "first_lock": null,
+    "first_seen": null,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 2,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "8194nk5LbLH/000087": {
+    "area_10_m2": 2.09,
+    "area_20_m2": 2.09,
+    "area_30_m2": 2.09,
+    "area_50_m2": 37.86,
+    "area_end_m2": 60.31,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 3,
+    "moves": 0,
+    "spl": 0.2886348035519945,
+    "steps": 270,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000001": {
+    "area_10_m2": 16.6,
+    "area_20_m2": 18.0,
+    "area_30_m2": 18.52,
+    "area_50_m2": 21.35,
+    "area_end_m2": 15.96,
+    "explore_actions": 19,
+    "explore_gain_m2": 4.06,
+    "explore_visits": 0,
+    "first_lock": 21,
+    "first_seen": 21,
+    "moves": 0,
+    "spl": 0.6670933147885721,
+    "steps": 100,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000061": {
+    "area_10_m2": 25.84,
+    "area_20_m2": 33.74,
+    "area_30_m2": 34.1,
+    "area_50_m2": 36.25,
+    "area_end_m2": 23.77,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 205,
+    "first_seen": 205,
+    "moves": 0,
+    "spl": 0.3384247764134136,
+    "steps": 226,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000122": {
+    "area_10_m2": 32.22,
+    "area_20_m2": 40.74,
+    "area_30_m2": 43.63,
+    "area_50_m2": 53.08,
+    "area_end_m2": 29.97,
+    "explore_actions": 50,
+    "explore_gain_m2": 13.649999999999997,
+    "explore_visits": 7,
+    "first_lock": 215,
+    "first_seen": 214,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 2,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000141": {
+    "area_10_m2": 16.04,
+    "area_20_m2": 17.39,
+    "area_30_m2": 20.8,
+    "area_50_m2": 37.15,
+    "area_end_m2": 15.7,
+    "explore_actions": 5,
+    "explore_gain_m2": 9.769999999999998,
+    "explore_visits": 1,
+    "first_lock": 41,
+    "first_seen": 40,
+    "moves": 0,
+    "spl": 0.8116739393164576,
+    "steps": 63,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000040": {
+    "area_10_m2": 31.13,
+    "area_20_m2": 42.24,
+    "area_30_m2": 45.91,
+    "area_50_m2": 47.2,
+    "area_end_m2": 29.72,
+    "explore_actions": 43,
+    "explore_gain_m2": 6.039999999999998,
+    "explore_visits": 1,
+    "first_lock": 113,
+    "first_seen": 112,
+    "moves": 0,
+    "spl": 0.48110795643630855,
+    "steps": 142,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000060": {
+    "area_10_m2": 18.77,
+    "area_20_m2": 19.82,
+    "area_30_m2": 22.81,
+    "area_50_m2": 27.98,
+    "area_end_m2": 17.71,
+    "explore_actions": 229,
+    "explore_gain_m2": 3.0100000000000007,
+    "explore_visits": 2,
+    "first_lock": 484,
+    "first_seen": 480,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000162": {
+    "area_10_m2": 28.76,
+    "area_20_m2": 38.54,
+    "area_30_m2": 43.84,
+    "area_50_m2": 44.05,
+    "area_end_m2": 27.78,
+    "explore_actions": 79,
+    "explore_gain_m2": 10.54,
+    "explore_visits": 8,
+    "first_lock": null,
+    "first_seen": null,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 1,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000003": {
+    "area_10_m2": 12.01,
+    "area_20_m2": 12.01,
+    "area_30_m2": 12.01,
+    "area_50_m2": 12.01,
+    "area_end_m2": 46.82,
+    "explore_actions": 95,
+    "explore_gain_m2": 55.469999999999985,
+    "explore_visits": 2,
+    "first_lock": 6,
+    "first_seen": 6,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 4,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000060": {
+    "area_10_m2": 38.0,
+    "area_20_m2": 47.92,
+    "area_30_m2": 55.92,
+    "area_50_m2": 59.15,
+    "area_end_m2": 31.71,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 10,
+    "first_seen": 9,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000102": {
+    "area_10_m2": 25.27,
+    "area_20_m2": 41.31,
+    "area_30_m2": 45.98,
+    "area_50_m2": 60.08,
+    "area_end_m2": 42.66,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 9,
+    "first_seen": 8,
+    "moves": 0,
+    "spl": 0.33552912520103995,
+    "steps": 138,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000103": {
+    "area_10_m2": 30.95,
+    "area_20_m2": 42.27,
+    "area_30_m2": 46.69,
+    "area_50_m2": 52.67,
+    "area_end_m2": 36.4,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 1,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.4292958709459599,
+    "steps": 90,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000120": {
+    "area_10_m2": 45.33,
+    "area_20_m2": 49.82,
+    "area_30_m2": 56.9,
+    "area_50_m2": 71.46,
+    "area_end_m2": 42.62,
+    "explore_actions": 83,
+    "explore_gain_m2": 38.980000000000025,
+    "explore_visits": 3,
+    "first_lock": 259,
+    "first_seen": 258,
+    "moves": 0,
+    "spl": 0.39841817308641575,
+    "steps": 319,
+    "success": true,
+    "viewpoint_retired": 1,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000121": {
+    "area_10_m2": 19.03,
+    "area_20_m2": 38.04,
+    "area_30_m2": 38.04,
+    "area_50_m2": 38.04,
+    "area_end_m2": 13.81,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 2,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 50,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 1,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000123": {
+    "area_10_m2": 47.24,
+    "area_20_m2": 58.6,
+    "area_30_m2": 64.16,
+    "area_50_m2": 77.08,
+    "area_end_m2": 44.54,
+    "explore_actions": 127,
+    "explore_gain_m2": 55.160000000000004,
+    "explore_visits": 4,
+    "first_lock": 46,
+    "first_seen": 45,
+    "moves": 0,
+    "spl": 0.23860455551864715,
+    "steps": 378,
+    "success": true,
+    "viewpoint_retired": 11,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000183": {
+    "area_10_m2": 17.3,
+    "area_20_m2": 17.3,
+    "area_30_m2": 17.3,
+    "area_50_m2": 17.3,
+    "area_end_m2": 67.62,
+    "explore_actions": 7,
+    "explore_gain_m2": 0.1,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 2,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000023": {
+    "area_10_m2": 27.9,
+    "area_20_m2": 30.47,
+    "area_30_m2": 35.6,
+    "area_50_m2": 38.7,
+    "area_end_m2": 26.82,
+    "explore_actions": 11,
+    "explore_gain_m2": 0.8500000000000001,
+    "explore_visits": 1,
+    "first_lock": 146,
+    "first_seen": 146,
+    "moves": 0,
+    "spl": 0.2912966844434135,
+    "steps": 233,
+    "success": true,
+    "viewpoint_retired": 3,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000066": {
+    "area_10_m2": 27.15,
+    "area_20_m2": 30.11,
+    "area_30_m2": 33.6,
+    "area_50_m2": 35.47,
+    "area_end_m2": 25.58,
+    "explore_actions": 139,
+    "explore_gain_m2": 5.519999999999999,
+    "explore_visits": 4,
+    "first_lock": null,
+    "first_seen": null,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 1,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000086": {
+    "area_10_m2": 18.76,
+    "area_20_m2": 19.39,
+    "area_30_m2": 20.54,
+    "area_50_m2": 24.24,
+    "area_end_m2": 18.57,
+    "explore_actions": 12,
+    "explore_gain_m2": 0.52,
+    "explore_visits": 1,
+    "first_lock": 45,
+    "first_seen": 44,
+    "moves": 0,
+    "spl": 0.39511749940857877,
+    "steps": 77,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000126": {
+    "area_10_m2": 28.1,
+    "area_20_m2": 30.72,
+    "area_30_m2": 33.83,
+    "area_50_m2": 33.83,
+    "area_end_m2": 27.05,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 31,
+    "first_seen": 31,
+    "moves": 0,
+    "spl": 0.722361848342593,
+    "steps": 66,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000129": {
+    "area_10_m2": 19.28,
+    "area_20_m2": 22.83,
+    "area_30_m2": 23.13,
+    "area_50_m2": 23.69,
+    "area_end_m2": 18.84,
+    "explore_actions": 69,
+    "explore_gain_m2": 4.079999999999999,
+    "explore_visits": 2,
+    "first_lock": 385,
+    "first_seen": 385,
+    "moves": 0,
+    "spl": 0.1872629664056723,
+    "steps": 413,
+    "success": true,
+    "viewpoint_retired": 2,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000000": {
+    "area_10_m2": 33.37,
+    "area_20_m2": 35.39,
+    "area_30_m2": 37.8,
+    "area_50_m2": 42.83,
+    "area_end_m2": 32.54,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 106,
+    "first_seen": 105,
+    "moves": 0,
+    "spl": 0.4794784014701896,
+    "steps": 137,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000023": {
+    "area_10_m2": 36.49,
+    "area_20_m2": 39.19,
+    "area_30_m2": 41.88,
+    "area_50_m2": 46.07,
+    "area_end_m2": 35.52,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 48,
+    "first_seen": 48,
+    "moves": 0,
+    "spl": 0.7462832793646496,
+    "steps": 75,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000061": {
+    "area_10_m2": 5.22,
+    "area_20_m2": 5.22,
+    "area_30_m2": 5.22,
+    "area_50_m2": 5.22,
+    "area_end_m2": 5.07,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 4,
+    "first_seen": 3,
+    "moves": 0,
+    "spl": 0.20530760710684134,
+    "steps": 80,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 4,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000083": {
+    "area_10_m2": 8.56,
+    "area_20_m2": 8.56,
+    "area_30_m2": 8.56,
+    "area_50_m2": 8.56,
+    "area_end_m2": 3.32,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 6,
+    "first_seen": 5,
+    "moves": 0,
+    "spl": 0.7760724905291925,
+    "steps": 17,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 6,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000102": {
+    "area_10_m2": 7.37,
+    "area_20_m2": 7.37,
+    "area_30_m2": 7.37,
+    "area_50_m2": 7.37,
+    "area_end_m2": 7.08,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 5,
+    "first_seen": 4,
+    "moves": 0,
+    "spl": 0.1739019282738826,
+    "steps": 68,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 5,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000140": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.6953290479962558,
+    "steps": 12,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000022": {
+    "area_10_m2": 56.65,
+    "area_20_m2": 63.06,
+    "area_30_m2": 67.74,
+    "area_50_m2": 83.15,
+    "area_end_m2": 54.83,
+    "explore_actions": 32,
+    "explore_gain_m2": 12.47,
+    "explore_visits": 2,
+    "first_lock": 203,
+    "first_seen": 203,
+    "moves": 0,
+    "spl": 0.24202429745824158,
+    "steps": 231,
+    "success": true,
+    "viewpoint_retired": 9,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000042": {
+    "area_10_m2": 3.88,
+    "area_20_m2": 8.01,
+    "area_30_m2": 13.88,
+    "area_50_m2": 14.73,
+    "area_end_m2": 3.87,
+    "explore_actions": 27,
+    "explore_gain_m2": 1.4400000000000002,
+    "explore_visits": 1,
+    "first_lock": 88,
+    "first_seen": 88,
+    "moves": 0,
+    "spl": 0.14174799019931106,
+    "steps": 141,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000061": {
+    "area_10_m2": 18.85,
+    "area_20_m2": 21.16,
+    "area_30_m2": 22.12,
+    "area_50_m2": 23.97,
+    "area_end_m2": 17.65,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 64,
+    "first_seen": 64,
+    "moves": 0,
+    "spl": 0.7182531618865032,
+    "steps": 113,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000080": {
+    "area_10_m2": 8.6,
+    "area_20_m2": 9.4,
+    "area_30_m2": 11.99,
+    "area_50_m2": 16.98,
+    "area_end_m2": 8.42,
+    "explore_actions": 14,
+    "explore_gain_m2": 2.9099999999999997,
+    "explore_visits": 1,
+    "first_lock": 71,
+    "first_seen": 71,
+    "moves": 0,
+    "spl": 0.652812172549681,
+    "steps": 96,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000100": {
+    "area_10_m2": 30.77,
+    "area_20_m2": 30.77,
+    "area_30_m2": 30.77,
+    "area_50_m2": 30.77,
+    "area_end_m2": 28.32,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 8,
+    "first_seen": 7,
+    "moves": 0,
+    "spl": 0.21282798947461773,
+    "steps": 89,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000101": {
+    "area_10_m2": 15.39,
+    "area_20_m2": 16.87,
+    "area_30_m2": 22.45,
+    "area_50_m2": 35.8,
+    "area_end_m2": 14.59,
+    "explore_actions": 8,
+    "explore_gain_m2": 0.7800000000000001,
+    "explore_visits": 1,
+    "first_lock": 33,
+    "first_seen": 33,
+    "moves": 0,
+    "spl": 0.45832371881428247,
+    "steps": 125,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000142": {
+    "area_10_m2": 25.9,
+    "area_20_m2": 26.22,
+    "area_30_m2": 26.58,
+    "area_50_m2": 26.71,
+    "area_end_m2": 25.26,
+    "explore_actions": 15,
+    "explore_gain_m2": 7.32,
+    "explore_visits": 2,
+    "first_lock": 142,
+    "first_seen": 142,
+    "moves": 0,
+    "spl": 0.588894433685959,
+    "steps": 181,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   }
+  },
+  "viewpoint_transparent": {
+   "2azQ1b91cZZ/000020": {
+    "area_10_m2": 34.55,
+    "area_20_m2": 37.32,
+    "area_30_m2": 38.49,
+    "area_50_m2": 39.44,
+    "area_end_m2": 33.97,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 74,
+    "first_seen": 73,
+    "moves": 0,
+    "spl": 0.35692975648966774,
+    "steps": 206,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000022": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.6493289345289119,
+    "steps": 58,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000041": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.06784490213470924,
+    "steps": 152,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000061": {
+    "area_10_m2": 7.83,
+    "area_20_m2": 7.93,
+    "area_30_m2": 12.87,
+    "area_50_m2": 17.51,
+    "area_end_m2": 7.82,
+    "explore_actions": 21,
+    "explore_gain_m2": 11.339999999999998,
+    "explore_visits": 2,
+    "first_lock": 97,
+    "first_seen": 96,
+    "moves": 0,
+    "spl": 0.6644456754752165,
+    "steps": 158,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "2azQ1b91cZZ/000142": {
+    "area_10_m2": 59.01,
+    "area_20_m2": 69.69,
+    "area_30_m2": 77.89,
+    "area_50_m2": 79.24,
+    "area_end_m2": 55.23,
+    "explore_actions": 276,
+    "explore_gain_m2": 3.209999999999999,
+    "explore_visits": 6,
+    "first_lock": null,
+    "first_seen": null,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "8194nk5LbLH/000087": {
+    "area_10_m2": 2.09,
+    "area_20_m2": 2.09,
+    "area_30_m2": 2.09,
+    "area_50_m2": 37.86,
+    "area_end_m2": 60.31,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 3,
+    "moves": 0,
+    "spl": 0.2886348035519945,
+    "steps": 270,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000001": {
+    "area_10_m2": 16.6,
+    "area_20_m2": 18.0,
+    "area_30_m2": 18.52,
+    "area_50_m2": 21.35,
+    "area_end_m2": 15.96,
+    "explore_actions": 19,
+    "explore_gain_m2": 4.06,
+    "explore_visits": 0,
+    "first_lock": 21,
+    "first_seen": 21,
+    "moves": 0,
+    "spl": 0.6670933147885721,
+    "steps": 100,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000061": {
+    "area_10_m2": 25.84,
+    "area_20_m2": 33.74,
+    "area_30_m2": 34.1,
+    "area_50_m2": 36.25,
+    "area_end_m2": 23.77,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 205,
+    "first_seen": 205,
+    "moves": 0,
+    "spl": 0.3384247764134136,
+    "steps": 226,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000122": {
+    "area_10_m2": 32.22,
+    "area_20_m2": 40.74,
+    "area_30_m2": 43.63,
+    "area_50_m2": 53.08,
+    "area_end_m2": 29.97,
+    "explore_actions": 141,
+    "explore_gain_m2": 44.679999999999986,
+    "explore_visits": 6,
+    "first_lock": 265,
+    "first_seen": 229,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 3,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "QUCTc6BB5sX/000141": {
+    "area_10_m2": 16.04,
+    "area_20_m2": 17.39,
+    "area_30_m2": 20.8,
+    "area_50_m2": 37.15,
+    "area_end_m2": 15.7,
+    "explore_actions": 5,
+    "explore_gain_m2": 9.769999999999998,
+    "explore_visits": 1,
+    "first_lock": 41,
+    "first_seen": 40,
+    "moves": 0,
+    "spl": 0.8116739393164576,
+    "steps": 63,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000040": {
+    "area_10_m2": 31.13,
+    "area_20_m2": 42.24,
+    "area_30_m2": 45.91,
+    "area_50_m2": 47.63,
+    "area_end_m2": 29.72,
+    "explore_actions": 38,
+    "explore_gain_m2": 5.879999999999998,
+    "explore_visits": 1,
+    "first_lock": 120,
+    "first_seen": 120,
+    "moves": 0,
+    "spl": 0.47550836635230737,
+    "steps": 153,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000060": {
+    "area_10_m2": 18.77,
+    "area_20_m2": 19.82,
+    "area_30_m2": 22.81,
+    "area_50_m2": 27.98,
+    "area_end_m2": 17.71,
+    "explore_actions": 249,
+    "explore_gain_m2": 7.550000000000001,
+    "explore_visits": 3,
+    "first_lock": 488,
+    "first_seen": 487,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "TbHJrupSAjP/000162": {
+    "area_10_m2": 28.76,
+    "area_20_m2": 38.54,
+    "area_30_m2": 43.84,
+    "area_50_m2": 44.05,
+    "area_end_m2": 27.78,
+    "explore_actions": 74,
+    "explore_gain_m2": 13.36,
+    "explore_visits": 7,
+    "first_lock": 328,
+    "first_seen": 328,
+    "moves": 0,
+    "spl": 0.32531489965531474,
+    "steps": 348,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 2,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000003": {
+    "area_10_m2": 12.01,
+    "area_20_m2": 12.01,
+    "area_30_m2": 12.01,
+    "area_50_m2": 12.01,
+    "area_end_m2": 46.82,
+    "explore_actions": 130,
+    "explore_gain_m2": 39.300000000000004,
+    "explore_visits": 3,
+    "first_lock": 6,
+    "first_seen": 6,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 3,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000060": {
+    "area_10_m2": 38.0,
+    "area_20_m2": 47.92,
+    "area_30_m2": 55.92,
+    "area_50_m2": 59.15,
+    "area_end_m2": 31.71,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 10,
+    "first_seen": 9,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000102": {
+    "area_10_m2": 25.27,
+    "area_20_m2": 41.31,
+    "area_30_m2": 45.98,
+    "area_50_m2": 60.08,
+    "area_end_m2": 42.66,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 9,
+    "first_seen": 8,
+    "moves": 0,
+    "spl": 0.33552912520103995,
+    "steps": 138,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000103": {
+    "area_10_m2": 30.95,
+    "area_20_m2": 42.27,
+    "area_30_m2": 46.69,
+    "area_50_m2": 52.67,
+    "area_end_m2": 36.4,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 1,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.4292958709459599,
+    "steps": 90,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000120": {
+    "area_10_m2": 45.33,
+    "area_20_m2": 49.82,
+    "area_30_m2": 56.9,
+    "area_50_m2": 71.46,
+    "area_end_m2": 42.62,
+    "explore_actions": 83,
+    "explore_gain_m2": 38.980000000000025,
+    "explore_visits": 3,
+    "first_lock": 259,
+    "first_seen": 258,
+    "moves": 0,
+    "spl": 0.39841817308641575,
+    "steps": 319,
+    "success": true,
+    "viewpoint_retired": 1,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000121": {
+    "area_10_m2": 19.03,
+    "area_20_m2": 38.04,
+    "area_30_m2": 38.04,
+    "area_50_m2": 38.04,
+    "area_end_m2": 13.81,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 2,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 50,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 1,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000123": {
+    "area_10_m2": 47.24,
+    "area_20_m2": 58.6,
+    "area_30_m2": 64.16,
+    "area_50_m2": 77.08,
+    "area_end_m2": 44.54,
+    "explore_actions": 144,
+    "explore_gain_m2": 43.459999999999994,
+    "explore_visits": 4,
+    "first_lock": 46,
+    "first_seen": 45,
+    "moves": 0,
+    "spl": 0.18221572787729182,
+    "steps": 462,
+    "success": true,
+    "viewpoint_retired": 6,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "Z6MFQCViBuw/000183": {
+    "area_10_m2": 17.3,
+    "area_20_m2": 17.3,
+    "area_30_m2": 17.3,
+    "area_50_m2": 17.3,
+    "area_end_m2": 67.62,
+    "explore_actions": 7,
+    "explore_gain_m2": 0.1,
+    "explore_visits": 0,
+    "first_lock": 3,
+    "first_seen": 2,
+    "moves": 0,
+    "spl": 0.0,
+    "steps": 500,
+    "success": false,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000023": {
+    "area_10_m2": 27.9,
+    "area_20_m2": 30.47,
+    "area_30_m2": 35.6,
+    "area_50_m2": 38.7,
+    "area_end_m2": 26.82,
+    "explore_actions": 11,
+    "explore_gain_m2": 0.8500000000000001,
+    "explore_visits": 1,
+    "first_lock": 146,
+    "first_seen": 146,
+    "moves": 0,
+    "spl": 0.2912966844434135,
+    "steps": 233,
+    "success": true,
+    "viewpoint_retired": 3,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000066": {
+    "area_10_m2": 27.15,
+    "area_20_m2": 30.11,
+    "area_30_m2": 33.6,
+    "area_50_m2": 35.47,
+    "area_end_m2": 25.58,
+    "explore_actions": 99,
+    "explore_gain_m2": 12.559999999999997,
+    "explore_visits": 4,
+    "first_lock": 363,
+    "first_seen": 363,
+    "moves": 0,
+    "spl": 0.15336791622431017,
+    "steps": 387,
+    "success": true,
+    "viewpoint_retired": 2,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000086": {
+    "area_10_m2": 18.76,
+    "area_20_m2": 19.39,
+    "area_30_m2": 20.54,
+    "area_50_m2": 24.24,
+    "area_end_m2": 18.57,
+    "explore_actions": 12,
+    "explore_gain_m2": 0.52,
+    "explore_visits": 1,
+    "first_lock": 45,
+    "first_seen": 44,
+    "moves": 0,
+    "spl": 0.39511749940857877,
+    "steps": 77,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000126": {
+    "area_10_m2": 28.1,
+    "area_20_m2": 30.72,
+    "area_30_m2": 33.83,
+    "area_50_m2": 33.83,
+    "area_end_m2": 27.05,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 31,
+    "first_seen": 31,
+    "moves": 0,
+    "spl": 0.722361848342593,
+    "steps": 66,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "oLBMNvg9in8/000129": {
+    "area_10_m2": 19.28,
+    "area_20_m2": 22.83,
+    "area_30_m2": 23.13,
+    "area_50_m2": 23.69,
+    "area_end_m2": 18.84,
+    "explore_actions": 73,
+    "explore_gain_m2": 4.809999999999999,
+    "explore_visits": 2,
+    "first_lock": 385,
+    "first_seen": 385,
+    "moves": 0,
+    "spl": 0.1872629664056723,
+    "steps": 413,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000000": {
+    "area_10_m2": 33.37,
+    "area_20_m2": 35.39,
+    "area_30_m2": 37.8,
+    "area_50_m2": 42.83,
+    "area_end_m2": 32.54,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 1,
+    "first_lock": 106,
+    "first_seen": 105,
+    "moves": 0,
+    "spl": 0.4794784014701896,
+    "steps": 137,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000023": {
+    "area_10_m2": 36.49,
+    "area_20_m2": 39.19,
+    "area_30_m2": 41.88,
+    "area_50_m2": 46.07,
+    "area_end_m2": 35.52,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 48,
+    "first_seen": 48,
+    "moves": 0,
+    "spl": 0.7462832793646496,
+    "steps": 75,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000061": {
+    "area_10_m2": 5.22,
+    "area_20_m2": 5.22,
+    "area_30_m2": 5.22,
+    "area_50_m2": 5.22,
+    "area_end_m2": 5.07,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 4,
+    "first_seen": 3,
+    "moves": 0,
+    "spl": 0.20530760710684134,
+    "steps": 80,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 4,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000083": {
+    "area_10_m2": 8.56,
+    "area_20_m2": 8.56,
+    "area_30_m2": 8.56,
+    "area_50_m2": 8.56,
+    "area_end_m2": 3.32,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 6,
+    "first_seen": 5,
+    "moves": 0,
+    "spl": 0.7760724905291925,
+    "steps": 17,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 6,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000102": {
+    "area_10_m2": 7.37,
+    "area_20_m2": 7.37,
+    "area_30_m2": 7.37,
+    "area_50_m2": 7.37,
+    "area_end_m2": 7.08,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 5,
+    "first_seen": 4,
+    "moves": 0,
+    "spl": 0.1739019282738826,
+    "steps": 68,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 5,
+    "warmup_mode": "spin"
+   },
+   "pLe4wQe7qrG/000140": {
+    "area_10_m2": null,
+    "area_20_m2": null,
+    "area_30_m2": null,
+    "area_50_m2": null,
+    "area_end_m2": null,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 0,
+    "first_seen": 0,
+    "moves": 0,
+    "spl": 0.6953290479962558,
+    "steps": 12,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 0,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000022": {
+    "area_10_m2": 56.65,
+    "area_20_m2": 63.06,
+    "area_30_m2": 67.74,
+    "area_50_m2": 82.32,
+    "area_end_m2": 54.83,
+    "explore_actions": 2,
+    "explore_gain_m2": 4.550000000000001,
+    "explore_visits": 1,
+    "first_lock": 62,
+    "first_seen": 61,
+    "moves": 0,
+    "spl": 0.2919102747163616,
+    "steps": 196,
+    "success": true,
+    "viewpoint_retired": 9,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000042": {
+    "area_10_m2": 3.88,
+    "area_20_m2": 8.01,
+    "area_30_m2": 13.88,
+    "area_50_m2": 14.73,
+    "area_end_m2": 3.87,
+    "explore_actions": 31,
+    "explore_gain_m2": 1.6300000000000001,
+    "explore_visits": 1,
+    "first_lock": 92,
+    "first_seen": 92,
+    "moves": 0,
+    "spl": 0.169747113882098,
+    "steps": 133,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000061": {
+    "area_10_m2": 18.85,
+    "area_20_m2": 21.16,
+    "area_30_m2": 22.12,
+    "area_50_m2": 23.97,
+    "area_end_m2": 17.65,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 64,
+    "first_seen": 64,
+    "moves": 0,
+    "spl": 0.7182531618865032,
+    "steps": 113,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000080": {
+    "area_10_m2": 8.6,
+    "area_20_m2": 9.4,
+    "area_30_m2": 11.99,
+    "area_50_m2": 16.98,
+    "area_end_m2": 8.42,
+    "explore_actions": 14,
+    "explore_gain_m2": 2.9099999999999997,
+    "explore_visits": 1,
+    "first_lock": 71,
+    "first_seen": 71,
+    "moves": 0,
+    "spl": 0.652812172549681,
+    "steps": 96,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000100": {
+    "area_10_m2": 30.77,
+    "area_20_m2": 30.77,
+    "area_30_m2": 30.77,
+    "area_50_m2": 30.77,
+    "area_end_m2": 28.32,
+    "explore_actions": 0,
+    "explore_gain_m2": 0,
+    "explore_visits": 0,
+    "first_lock": 8,
+    "first_seen": 7,
+    "moves": 0,
+    "spl": 0.21282798947461773,
+    "steps": 89,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 8,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000101": {
+    "area_10_m2": 15.39,
+    "area_20_m2": 16.87,
+    "area_30_m2": 22.45,
+    "area_50_m2": 35.8,
+    "area_end_m2": 14.59,
+    "explore_actions": 8,
+    "explore_gain_m2": 0.7800000000000001,
+    "explore_visits": 1,
+    "first_lock": 33,
+    "first_seen": 33,
+    "moves": 0,
+    "spl": 0.45832371881428247,
+    "steps": 125,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 1,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   },
+   "zsNo4HB9uLZ/000142": {
+    "area_10_m2": 25.9,
+    "area_20_m2": 26.22,
+    "area_30_m2": 26.58,
+    "area_50_m2": 26.71,
+    "area_end_m2": 25.26,
+    "explore_actions": 17,
+    "explore_gain_m2": 5.47,
+    "explore_visits": 2,
+    "first_lock": 148,
+    "first_seen": 147,
+    "moves": 0,
+    "spl": 0.4836888349531431,
+    "steps": 290,
+    "success": true,
+    "viewpoint_retired": 0,
+    "viewpoint_steps_inside": 0,
+    "walked_m": 0.0,
+    "warmup_actions": 10,
+    "warmup_mode": "spin"
+   }
+  }
+ },
+ "sizes": {
+  "frontier": 39,
+  "viewpoint": 39,
+  "viewpoint_transparent": 39
+ },
+ "warmup": {
+  "frontier": {
+   "area_10_m2": 24.45,
+   "area_20_m2": 28.74722222222222,
+   "area_30_m2": 31.557222222222215,
+   "area_50_m2": 37.21166666666666,
+   "area_end_m2": 27.70555555555556,
+   "explore_actions": 29.94871794871795,
+   "explore_gain_per_action": 0.23676369863013697,
+   "explore_visits": 1.5897435897435896,
+   "first_lock_median": 43.0,
+   "first_seen_median": 42.5,
+   "first_seen_within": 0.38461538461538464,
+   "moves": 0.0,
+   "never_locked": 0.07692307692307687,
+   "never_seen": 0.07692307692307687,
+   "viewpoint_retired": 0.0,
+   "viewpoint_steps_inside": 0.0,
+   "walked_m": 0.0,
+   "warmup_actions": 8.461538461538462
+  },
+  "viewpoint": {
+   "area_10_m2": 24.450277777777774,
+   "area_20_m2": 28.87527777777778,
+   "area_30_m2": 31.694722222222214,
+   "area_50_m2": 36.86083333333333,
+   "area_end_m2": 27.706944444444446,
+   "explore_actions": 30.205128205128204,
+   "explore_gain_per_action": 0.20775891341256367,
+   "explore_visits": 1.3076923076923077,
+   "first_lock_median": 43.0,
+   "first_seen_median": 42.0,
+   "first_seen_within": 0.38461538461538464,
+   "moves": 0.0,
+   "never_locked": 0.07692307692307687,
+   "never_seen": 0.07692307692307687,
+   "viewpoint_retired": 0.9230769230769231,
+   "viewpoint_steps_inside": 0.15384615384615385,
+   "walked_m": 0.0,
+   "warmup_actions": 8.461538461538462
+  },
+  "viewpoint_transparent": {
+   "area_10_m2": 24.450277777777774,
+   "area_20_m2": 28.87527777777778,
+   "area_30_m2": 31.694722222222214,
+   "area_50_m2": 36.84972222222222,
+   "area_end_m2": 27.706944444444446,
+   "explore_actions": 37.282051282051285,
+   "explore_gain_per_action": 0.17590784044016505,
+   "explore_visits": 1.358974358974359,
+   "first_lock_median": 45.5,
+   "first_seen_median": 44.5,
+   "first_seen_within": 0.38461538461538464,
+   "moves": 0.0,
+   "never_locked": 0.02564102564102566,
+   "never_seen": 0.02564102564102566,
+   "viewpoint_retired": 0.6923076923076923,
+   "viewpoint_steps_inside": 0.20512820512820512,
+   "walked_m": 0.0,
+   "warmup_actions": 8.461538461538462
+  }
+ }
+}
