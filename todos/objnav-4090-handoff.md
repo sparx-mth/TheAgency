@@ -57,6 +57,27 @@ and `~/datasets_v01`. Hand labels: `~/tc_sweep/room_labels.json` (40 train rooms
 - Phase A on the laptop (running when this was written): 50 seeded single-floor train episodes, 10 scenes, output `~/trace_train_a`, ~7 min per episode on CPU LLM.
   Rerun it on the 4090 with the same ids (`~/tc_sweep/train_episodes.json`) for comparability.
 
+## Phase A result on the laptop (HM3D v1 train, 10 scenes, 50 seeded single-floor episodes, YOLO-World CPU, qwen2.5:3b CPU)
+Outputs: `~/trace_train_a` (laptop; archived to OneDrive), triage in `~/tc_sweep/triage_train_a.json`. Success rule of that run: 0.1 m to a goal view point.
+- **SR 62% (31/50), SPL 0.268** (SPL of successes 0.43; ASCENT has SPL/SR 0.51). By category: bed 12/16, toilet 11/15, chair 6/7, sofa 1/5, tv 1/4, plant 0/3.
+- With a 1 m rule SR would be about 68% (34/50): 3 episodes stopped 0.1-0.3 m from the goal. Run both rules before comparing to the papers.
+- 19 failures: 10 timeouts, 9 wrong stops (5 within 3 m of a real goal, 3 farther, 1 real object not in the goal set).
+- **8 of the 10 timeouts saw the target** (box >= 0.3 in 10-53 frames). With GT: 4 of them were within 1.5 m of a real goal (00025/010760 plant, 00025/013033 plant,
+  00422/030802 toilet, 00267/045672 sofa) and the closing released the candidate ("unverified", "inspection saw nothing in any view", "no safe path", "occluded").
+  Daphna looked at the frames: the boxes are on the real, clearly visible targets. 2 more were real but blocked/stalled (00099/036901 tv, 00141/021959 toilet),
+  1 detector miss at 0.8 m (00250/044207 toilet), 1 search failure (00099/020525 bed).
+- Upper bound if those 4 had succeeded: about +8 points. Conclusion: the dominant single-floor failure is **verification/closing rejecting real targets**, not false positives.
+  (On the 20 val episodes the picture was the opposite; two scenes and 6 upper-floor starts made them unrepresentative.)
+- `trace_tools` saves frames at 320x240 but the boxes in `trace.jsonl` are in 640x480: scale boxes by 0.5 when drawing.
+
+## Next step that was proposed (not approved yet)
+1. Diagnostic only: log per verification frame why the candidate was not locked (phase, confidence, consecutive coherent frames, `context_check` `suspect`, depth coherence),
+   in `trace_tools/trace_run.py`'s Tracer (no change to the method). Rerun the 4 episodes above and classify the cause. Hypotheses: (A) `context_check` fed by a wrong MORE room label,
+   (B) incoherent/insufficient depth on small objects, (C) `max_verify_steps=12` too short, (D) the 1 m rejection memory.
+2. Fix according to the cause, in a general way (no per-class thresholds), test first. A VLM (full frame + red box) as an accept signal for a close, clear candidate is the idea to test.
+3. Measure paired on the same 50 episodes, then on 100-150 on the 4090, split into "real close target" vs other.
+Daphna continues this on the 4090 PC at the office.
+
 ## Todos, in order
 1. **Baseline on train, single-floor only** (phase A): SR, SPL, then failure triage with GT as in `todos/` session: wrong stop vs timeout; for wrong stops,
    is a same-kind object within 3 m, is it in the goal set (`goals_by_category` object ids), is it the goal but farther than the success radius.
