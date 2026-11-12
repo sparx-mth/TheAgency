@@ -620,7 +620,7 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
     chosen straight back, uncooled. The historical rule, behind ``transit_commitment=False`` since 2026-10-22:
     under the committed-target rule the clue waits for the arrival (``test_explore_visit``)."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm,
                                                           transit_commitment=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1
@@ -641,7 +641,7 @@ def test_a_room_re_identified_on_the_way_in_ends_its_turn_and_the_order_is_re_so
 def test_the_oracle_decides_what_the_new_name_is_worth():
     """The same clue, with an oracle that gives a bathroom nothing for a chair: the order goes elsewhere."""
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm,
                                                           transit_commitment=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     def oracle(world_, target, step, extra_nodes=(), context=None, here_xy=None, action_time_s=1.0, exclude=(),
@@ -660,7 +660,7 @@ def test_the_oracle_decides_what_the_new_name_is_worth():
         policy.loop.plan(obs_at(episode, step, IN_A), world)
     assert policy.supervisor.room_id == 0 and llm.calls == 1, "the bathroom is not chosen again, and not re-asked"
 def test_a_room_in_force_re_identified_by_a_new_kind_of_object_ends_its_turn_on_that_action():
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=NamingLLM(), type_prior=False)
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=NamingLLM())
     in_room(policy, episode, world)                             # sweeping room B
     policy.loop.charge()
     see(policy, {1: ["sink"]}, step=2)
@@ -676,7 +676,7 @@ def test_a_room_in_force_re_identified_by_a_new_kind_of_object_ends_its_turn_on_
     assert TRAVERSED not in policy.supervisor_params.cooldown_verdicts and EXHAUSTED in policy.supervisor_params.cooldown_verdicts
 def test_a_second_object_of_a_kind_already_seen_is_not_a_clue():
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm,
                                                           transit_commitment=False)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     see(policy, {1: ["toilet"]}, step=1)
@@ -692,7 +692,7 @@ def test_a_second_object_of_a_kind_already_seen_is_not_a_clue():
     assert policy.graph.label_info(1)["strength"] == "strong"
 def test_a_room_llm_in_back_off_leaves_the_name_standing_and_the_turn_running():
     llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm, type_prior=False,
+    policy, episode, world, rooms, reasoned = loop_policy(order=(1, 0), llm=llm,
                                                           transit_commitment=False)
     obs = obs_at(episode, 0, IN_A)
     policy.loop.plan(obs, world)

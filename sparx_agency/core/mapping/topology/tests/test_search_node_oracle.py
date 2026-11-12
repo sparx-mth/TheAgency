@@ -63,12 +63,21 @@ def test_the_prompt_lists_every_node_in_the_format_the_system_prompt_explains():
                                  "searched 2min; 1 room with frontier left)  the robot came up these stairs 10s ago "
                                  "(arrived_by=yes)")
     for rule in ("type=unknown", "never_entered", "scanned(<how>, <ago>)", "NEVER use distance", "do NOT make them sum to 100",
-                 "independent", 'STEP 1 "home"', 'STEP 2 "house"', 'STEP 3 "stage"', "never copy its numbers",
-                 "en-suite", "ONE kitchen, ONE living room", "MISSED the target", '"pass":"first|second"',
+                 "independent", 'STEP 1 "home"', 'STEP 2 "house"', 'STEP 3 "stage"', "never copy it",
+                 "MISSED the target", '"pass":"first|second"',
                  "merged two rooms", "never write a room off for its size", "exits=", "EXITS."):
         assert rule in SYSTEM_PROMPT, rule
     assert "no television fits" not in SYSTEM_PROMPT and "no toilet fits" not in SYSTEM_PROMPT, (
         "the example taught a 3B model to write 'no <target> fits' on every small unknown room (Hanson 2026-10-04)")
+
+
+HAND_WRITTEN_KNOWLEDGE = ("Typical homes", "typical home has", "en-suite", "3-8 m2", "toilets are not in kitchens", "a toilet in a bathroom",
+                          "a bed in a bedroom", "ONE kitchen")
+
+
+def test_the_system_prompt_carries_no_hand_written_knowledge_about_rooms_and_objects():
+    """The model brings its own knowledge of homes; the prompt only explains the task and the format."""
+    assert [phrase for phrase in HAND_WRITTEN_KNOWLEDGE if phrase in SYSTEM_PROMPT] == []
 
 
 def test_a_rooms_exits_are_attributes_on_its_line_and_the_rule_ties_them_to_the_rooms_type():
@@ -89,12 +98,11 @@ def test_a_rooms_exits_are_attributes_on_its_line_and_the_rule_ties_them_to_the_
     assert "unexplored floor the camera could reach beyond them" in SYSTEM_PROMPT
     assert "glimpsed through its exits" not in format_node(SearchNode(7, ROOM, "hallway", exits=1)), "nothing glimpsed: unsaid"
     for rule in ("exits= the doorways and gaps at its edge", "NOT nodes of their own", "glimpsed through its exits",
-                 "Exits RAISE a room ONLY when its type fits the target", "three gaps off a living room",
+                 "Exits RAISE a room ONLY when its type fits the target", "Exits of a room whose type does NOT fit the target do NOT raise it",
                  "Exits of a hallway, a corridor or an unidentified room are valued by what the home still lacks",
                  "offered again for what lies BEHIND them"):
         assert rule in SYSTEM_PROMPT, rule
-    assert "id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)" in SYSTEM_PROMPT, (
-        "the worked example values rooms by their exits")
+    assert "exits=<n> (<k> doorway)" in SYSTEM_PROMPT, "the format example shows the exits attribute"
     assert "  OPENING  " not in SYSTEM_PROMPT, "no opening node line in the room-level prompt"
     assert system_prompt([hallway, KITCHEN], SearchContext(HOUSE)) == SYSTEM_PROMPT, "no exit node offered: no supplement"
     # The attributes change the prompt the way any fact does, and an unchanged map keeps it byte-identical.
@@ -296,8 +304,8 @@ def test_the_pass_verdict_is_read_from_the_words_a_model_drifts_to():
     second = SearchNodeOracle.score({"pass": "second", "nodes": [{"id": 0, "p": 30}]}, [KITCHEN])
     assert second.pass_verdict == PASS_SECOND and second.reading["pass"] == "second"
     assert SearchNodeOracle.score({"nodes": [{"id": 0, "p": 30}]}, [KITCHEN]).pass_verdict is None
-    assert '"pass":"first"' in SYSTEM_PROMPT and 'the pass would be "second"' in SYSTEM_PROMPT, (
-        "the worked example shows a first pass and says what turns it into a second")
+    assert '"pass":"first"' in SYSTEM_PROMPT and 'else "second"' in SYSTEM_PROMPT, (
+        "the format example shows a first pass and STEP 3 says when it turns into a second")
 
 
 # -- the optional floors: off by default, the 3B era's arithmetic on request ----------------

@@ -1148,9 +1148,7 @@ def test_the_inspection_pitch_follows_the_targets_height_not_its_label(monkeypat
 def test_a_fresh_centred_in_range_sighting_stops_at_whatever_pitch_it_came(monkeypatch):
     """The Hanson toilet projected at 60 degrees down where its height predicted 30: twenty actions of
     LOOK_UP / LOOK_DOWN after a fresh, centred sighting at 0.91 m, until the budget STOPped."""
-    # The synthetic toilet of this fixture stands at camera height, which the context check would
-    # doubt (tested in test_target_context); the pitch mechanics are the point here.
-    p, original = setup_policy(target_closing={"context_check": False})
+    p, original = setup_policy()
     ep = replace(tilt_episode(p, original), target_category="toilet")
     p.reset(ep, gibson_label_mapper().target_labels("toilet"))
     freeze_global(monkeypatch, p)
@@ -1199,7 +1197,7 @@ def test_a_fresh_off_centre_sighting_at_another_pitch_is_centred_not_tilted_away
     first move is the TURN. Since 2026-10-11 the centred, bottom-cut box then earns ONE centring
     LOOK_DOWN toward it before the STOP; this synthetic detector shows nothing once pitched, and the
     STOP is taken on the previous frame's evidence the very next action -- never a sweep."""
-    p, original = setup_policy(target_closing={"context_check": False})      # an eye-level synthetic toilet, see above
+    p, original = setup_policy()
     ep = replace(tilt_episode(p, original), target_category="toilet")
     p.reset(ep, gibson_label_mapper().target_labels("toilet"))
     freeze_global(monkeypatch, p)
@@ -1358,7 +1356,7 @@ def test_the_blocked_clock_survives_collision_jitter():
     assert p._blocked_since is None, "a step clears the clock"
 
 
-# -- the review of 2026-10-07: bounded re-takeovers, blind frames, the suspect's step, the locked frame ----
+# -- the review of 2026-10-07: bounded re-takeovers, blind frames, the locked frame ----
 def test_a_near_candidate_released_from_this_spot_is_not_taken_over_again_until_the_agent_moves():
     """Twelve takeovers of one chair 1.5 m away in eighty actions, from one spot: a close view is new
     evidence from a NEW spot, the same evidence from the spot it was released at."""
@@ -1409,21 +1407,12 @@ def test_a_detector_frame_in_back_off_is_no_evidence_and_pauses_the_closing_cloc
     assert not q.closing.active and q.closing.blind_frames == 0
 
 
-def test_a_suspect_candidate_may_step_inside_the_terminal_range_to_earn_its_second_viewpoint():
-    """A suspect lock needs two viewpoints 0.30 m apart; VERIFY only stepped while more than 1.25 m
-    away, so a suspect first seen at 1.2 m held, turned and released for ever (52 frames held)."""
+def test_the_closing_settings_carry_no_context_check_and_a_candidate_locks_on_its_second_frame():
+    assert not [name for name in vars(TargetClosingSettings()) if name.startswith("context_")]
     p, ep = setup_policy()
     p.plan(observation(ep, 0, depth=1.2))
-    assert p.closing.active and not p.closing.locked
-    p.closing.suspect = "room:kitchen"
-    command = p.plan(observation(ep, 1, depth=1.2))
-    assert not p.closing.locked, "two frames from one spot do not lock a suspect"
-    assert command.waypoints and command.info.get("verify_step") == "towards the candidate", "a step, not a hold"
-    assert command.info.get("suspect") == "room:kitchen"
-    plain, ep2 = setup_policy()
-    plain.plan(observation(ep2, 0, depth=1.2))
-    plain.plan(observation(ep2, 1, depth=1.2))
-    assert plain.closing.locked, "an unsuspected candidate locks on its second frame"
+    p.plan(observation(ep, 1, depth=1.2))
+    assert p.closing.locked and not hasattr(p.closing, "suspect")
 
 
 def test_a_locked_target_without_a_path_is_kept_in_frame_rather_than_turned_away_from(monkeypatch):

@@ -29,7 +29,7 @@ class ScriptedClassifier:
     def chat_json(self, system, user):
         self.calls += 1
         if any(name in user for name in self.bedroom_for):
-            return {"label": "bedroom", "confidence": 0.9, "reasoning": "a signature object"}
+            return {"label": "bedroom", "confidence": 0.9, "reasoning": "scripted bedroom"}
         return {"label": "living_room" if self.calls == 1 else "bedroom",
                 "confidence": 0.8, "reasoning": "current observed objects"}
 
@@ -66,46 +66,29 @@ def test_one_confirmed_object_is_a_weak_clue_and_two_classes_a_strong_one():
     assert tracker.history[-1]["previous"] == "living_room" and tracker.history[-1]["label"] == "bedroom"
 
 
-def test_a_strong_label_needs_a_distinctive_kind_and_one_signature_object_is_enough():
-    """Ranchester couch, 2026-10-05: a cabinet and a potted plant made an upstairs room a strong
-    'living_room' at 0.95 and put a living room on the storey summary the node oracle reads."""
-    client = ScriptedClassifier()
-    tracker = RevisableRoomLabels(client, RoomLabelSettings(generic_evidence_gate=False))
+def test_no_object_kind_counts_for_more_than_another_in_a_labels_strength():
+    """One kind of object, whichever it is, gives a weak label even when the model is confident; two kinds, whichever, a strong one."""
+    for kind in ("bed", "cabinet", "sofa", "toilet"):
+        tracker = RevisableRoomLabels(ScriptedClassifier(bedroom_for=(kind,)))
+        tracker.update({1: [kind]}, 0)
+        assert tracker.metadata[1]["strength"] == "weak", kind
+    tracker = RevisableRoomLabels(ScriptedClassifier())
     tracker.update({1: ["cabinet", "potted plant"]}, 0)
-    assert tracker.metadata[1]["strength"] == "weak", "two generic kinds describe no room"
-    tracker.update({1: ["cabinet", "potted plant", "sofa"]}, 5)
-    assert tracker.metadata[1]["strength"] == "strong", "a sofa is distinctive"
-    counted = RevisableRoomLabels(ScriptedClassifier(),
-                                  RoomLabelSettings(distinctive_required=False, generic_evidence_gate=False))
-    counted.update({1: ["cabinet", "potted plant"]}, 0)
-    assert counted.metadata[1]["strength"] == "strong", "the former rule, one knob away"
-    # One signature object (a bed) with the model agreeing is strong on its own; a cabinet is not.
-    signed = RevisableRoomLabels(ScriptedClassifier(bedroom_for=("bed",)), RoomLabelSettings(generic_evidence_gate=False))
-    signed.update({1: ["bed"]}, 0)
-    assert signed.metadata[1]["strength"] == "strong" and signed.metadata[1]["signature"]
-    signed.update({2: ["cabinet"]}, 0)
-    assert signed.metadata[2]["strength"] == "weak" and not signed.metadata[2]["signature"]
-    with pytest.raises(ValueError):
-        RoomLabelSettings(distinctive_required="yes")
+    assert tracker.metadata[1]["strength"] == "strong"
 
 
-def test_generic_only_evidence_is_not_classified():
-    """Ranchester couch, 2026-10-05, action 34: one cabinet made a 'kitchen' at 0.9 on the upper storey,
-    and the storey summary showed the node oracle a kitchen found. Generic objects alone stay unknown
-    without a model call; one distinctive object beside them buys the call."""
+def test_every_object_kind_is_evidence_so_a_cabinet_alone_is_classified():
     client = ScriptedClassifier()
     tracker = RevisableRoomLabels(client)
     labels = tracker.update({1: ["cabinet"], 2: ["cabinet", "potted plant", "book"]}, 0)
-    assert labels[1].label == "unknown" and labels[2].label == "unknown"
-    assert client.calls == 0, "the model is not asked about generic furniture alone"
-    assert tracker.metadata[1]["trigger"] == "evidence_gate"
-    assert not tracker.pending(1), "nothing to re-ask about either"
-    labels = tracker.update({1: ["cabinet", "sofa"]}, 5)
-    assert labels[1].label != "unknown" and client.calls == 1, "a distinctive kind makes the room classifiable"
-    asked = RevisableRoomLabels(ScriptedClassifier(), RoomLabelSettings(generic_evidence_gate=False))
-    assert asked.update({1: ["cabinet"]}, 0)[1].label != "unknown", "the former behaviour, one knob away"
-    with pytest.raises(ValueError):
-        RoomLabelSettings(generic_evidence_gate="no")
+    assert labels[1].label != "unknown" and labels[2].label != "unknown" and client.calls == 2
+    assert not tracker.pending(1)
+
+
+def test_the_removed_label_strength_settings_are_rejected():
+    for knob in ("signature_objects", "distinctive_required", "generic_evidence_gate"):
+        with pytest.raises(TypeError):
+            RoomLabelSettings(**{knob: False})
 
 
 def test_an_empty_passage_is_classified_on_its_shape_alone_weakly_and_once_per_geometry():
@@ -128,7 +111,7 @@ def test_an_empty_passage_is_classified_on_its_shape_alone_weakly_and_once_per_g
     square = {"area_m2": 12.0, "elongation": 1.1, "doors": 1}
     labels = tracker.update({1: [], 2: [], 3: ["cabinet"]}, 0, facts={1: corridor, 2: square, 3: corridor})
     assert labels[1].label == "hallway" and labels[2].label == "unknown", "the passage is named, the square room waits"
-    assert labels[3].label == "hallway", "generic furniture alone does not stop the shape question"
+    assert labels[3].label == "hallway", "a cabinet is classified on its objects with the geometry beside them"
     assert len(client.calls) == 2 and "doorways opening off it: 3" in client.calls[0]
     assert tracker.metadata[1]["strength"] == "weak" and tracker.metadata[1]["provisional"] and tracker.metadata[1]["shape_only"]
     assert tracker.metadata[1]["trigger"] == "shape"
@@ -143,18 +126,6 @@ def test_an_empty_passage_is_classified_on_its_shape_alone_weakly_and_once_per_g
     assert RoomLabelSettings().shape_candidate({"area_m2": 1.0, "elongation": 5.0, "doors": 3}) is False, "a sliver is no room"
     with pytest.raises(ValueError):
         RoomLabelSettings(corridor_elongation=0.0)
-
-
-def test_signature_objects_of_two_room_types_in_one_region_make_a_weak_label():
-    """Darden/000000 (2026-10-21): a region with two ``bed`` (a dining table, misread) beside an oven and a
-    refrigerator was a STRONG bedroom. Signature objects of two types mean a merged region or a detector error:
-    whatever the model picks is weak and provisional, so the type prior never rules the region out on it."""
-    tracker = RevisableRoomLabels(ScriptedClassifier(bedroom_for=("bed",)))
-    tracker.update({1: ["bed", "bed", "oven", "refrigerator", "cabinet"]}, 0)
-    item = tracker.metadata[1]
-    assert item["label"] == "bedroom" and item["strength"] == "weak" and item["provisional"] and item["conflicting_signatures"]
-    tracker.update({2: ["bed", "cabinet"]}, 0)
-    assert tracker.metadata[2]["strength"] == "strong" and not tracker.metadata[2]["conflicting_signatures"]
 
 
 def test_pending_evidence_is_classified_on_request_for_one_room_only():

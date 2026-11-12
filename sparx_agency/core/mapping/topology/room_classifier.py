@@ -55,14 +55,7 @@ floor area, its shape and how many doorways open off it. Based ONLY on that
 and common sense about residential layouts, output one room label.
 Observations are incomplete and may contain false detections: a single
 detection of one kind of object is a clue, not a proof, and a detector
-confuses a dining table or a sofa with a bed, a cabinet with a refrigerator.
-Prefer distinctive room-function evidence over generic furniture. A home has
-rooms with few objects of their own: a long narrow space with several doorways
-and nothing in it is a hallway or corridor; a small space at the entrance is a
-foyer; a table with chairs and no kitchen fittings is a dining room; a desk is
-an office or study; a washing machine or dryer is a laundry or utility room;
-shelves or a tiny windowless space is a closet, pantry or storage; an outdoor
-floor with garden furniture is a balcony or patio. Use unknown when evidence is
+confuses one kind of furniture with another. Use unknown when evidence is
 insufficient or contradictory. Do not invent unobserved objects. Reassess the
 current evidence rather than assuming an earlier room label was correct.
 

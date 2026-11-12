@@ -10,7 +10,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import (
     method_snapshot, render_dashboard, search_snapshot)
 def test_the_snapshot_carries_rooms_stairs_order_next_node_objects_and_the_oracles_split():
     # The relabel in transit is the historical rule (``transit_commitment=False``); the panel is what is under test.
-    policy, episode, world, rooms, _ = stair_policy(order=(1, STAIRS, 0), stair_prob=0.3, type_prior=False,
+    policy, episode, world, rooms, _ = stair_policy(order=(1, STAIRS, 0), stair_prob=0.3,
                                                     transit_commitment=False)
     policy.graph.label_tracker.classifier._client = NamingLLM()
     policy.last_world = world

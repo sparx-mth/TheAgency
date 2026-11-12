@@ -1,7 +1,7 @@
 """One row per step of what the target closing sees and decides, for the verification diagnosis. Read-only."""
 import math
 
-COUNTERS = ("border_rejections", "context_rejections", "glimpse_steps", "verify_pauses", "weak_resightings", "releases",
+COUNTERS = ("border_rejections", "glimpse_steps", "verify_pauses", "weak_resightings", "releases",
             "memory_sight_refusals", "inspection_steps", "inspection_releases", "support_holds", "history_holds")
 
 
@@ -31,7 +31,7 @@ def closing_row(policy, observation):
     distance = None if closing.xyz is None else round(math.dist(here, closing.xyz[:2]), 2)
     candidate_xy = None if closing.xyz is None else [round(float(closing.xyz[0]), 2), round(float(closing.xyz[1]), 2)]
     return {"step": int(observation.step), "phase": closing.phase, "active": closing.active, "locked": closing.locked,
-            "count": closing.count, "suspect": closing.suspect, "best_conf": round(float(closing.best_conf), 3),
+            "count": closing.count, "best_conf": round(float(closing.best_conf), 3),
             "candidate_distance_m": distance, "candidate_xy": candidate_xy, "candidate_room": room_of(policy, closing.xyz),
             "agent_room": room_of(policy, here), "last_release": closing.last_release,
             "counters": {name: getattr(closing, name) for name in COUNTERS}, "target_boxes": target_boxes(policy, observation)}

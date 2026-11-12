@@ -146,17 +146,15 @@ def test_a_deep_object_seen_whole_passes_on_the_mask_path_where_the_coherence_ga
 def test_without_segmentation_the_closing_stops_on_the_occluder_and_with_it_the_approach_goes_on():
     """The regression itself: two frames of the chair's box at depth 0.7 (the occluder's) STOP the
     box pipeline inside the terminal range; the mask pipeline reads 3 m, locks the same two frames and
-    keeps closing. The context check is off on both sides: at 3 m the synthetic chair's measured top
-    is a doubtful height for its class, which is that check's business, not this test's."""
-    closing = {"context_check": False}
-    p, ep = setup_policy(target_closing=closing)
+    keeps closing."""
+    p, ep = setup_policy()
     p.plan(scene(ep, 0))
     assert p.plan(scene(ep, 1)).stop and p.closing.locked
     assert p.closing.observed_near_m == pytest.approx(OCCLUDER_M, abs=0.05)
     assert p.settings.segmentation is False and p.perception.masks is None
 
     seg = FakeSegmenter()
-    q, ep = setup_policy(segmentation=True, segmenter=seg, target_closing=closing)
+    q, ep = setup_policy(segmentation=True, segmenter=seg)
     first = q.plan(scene(ep, 0))
     assert not first.stop and q.closing.active
     second = q.plan(scene(ep, 1))
@@ -228,7 +226,7 @@ def test_the_flag_is_strict_and_needs_a_segmenter():
 def test_the_recording_tints_the_targets_mask_and_draws_nothing_for_a_box_without_one():
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import method_snapshot, render_dashboard
     seg = FakeSegmenter()
-    p, ep = setup_policy(segmentation=True, segmenter=seg, target_closing={"context_check": False})
+    p, ep = setup_policy(segmentation=True, segmenter=seg)
     obs = scene(ep, 0)
     command = p.plan(obs)
     frame = render_dashboard(p, obs, [(0, 0)], {"action": "MOVE_FORWARD", "info": command.info}, ep.episode_id, method_snapshot(p))

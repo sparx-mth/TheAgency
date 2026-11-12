@@ -230,3 +230,9 @@ def test_a_label_written_in_prose_is_read_as_the_sets_label():
         assert RoomTypeClassifier(client).classify(["sofa", "television"]).label == "living_room", spelled
     client = FakeClient([{"label": "ballroom", "confidence": 0.8, "reasoning": "?"}])
     assert RoomTypeClassifier(client).classify(["sofa", "television"]).label == "unknown"
+
+
+def test_the_classifier_prompt_carries_no_hand_written_object_to_room_rules():
+    from sparx_agency.core.mapping.topology.room_classifier import SYSTEM_PROMPT_TEMPLATE
+    rules = ("a desk is an office", "a washing machine or dryer", "no kitchen fittings", "garden furniture", "long narrow space")
+    assert [rule for rule in rules if rule in SYSTEM_PROMPT_TEMPLATE] == []

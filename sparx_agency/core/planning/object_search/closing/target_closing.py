@@ -23,7 +23,6 @@ from sparx_agency.core.planning.object_search.world_model.sightlines import unkn
 from sparx_agency.core.mapping.objects.support_surface import (
     SUPPORT_SURFACE_CLASSES, is_support_surface, supports)
 from sparx_agency.core.planning.object_search.closing.target_backoff import BackoffManeuver
-from sparx_agency.core.planning.object_search.perception.target_context import suspect
 from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
 from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
 
@@ -165,18 +164,6 @@ class TargetClosingSettings:
     # problem. Border clipping, incoherent depth and the map's contradiction stand.
     # 1.0 disables the override.
     override_confidence: float = 0.80
-    # The semantic sanity check (``target_context.suspect``): a candidate in a room
-    # whose STRONG type excludes the target, or whose measured surface height
-    # contradicts its class (a counter top read as a bed), counts
-    # ``context_penalty`` of its confidence toward the start threshold and needs
-    # ``context_confirmation_frames`` consecutive frames from at least two
-    # viewpoints ``context_baseline_m`` apart to lock. Allensville/2 and
-    # Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter at 0.55 m after
-    # two frames from one spot. ``context_check=False`` is the former behaviour.
-    context_check: bool = True
-    context_penalty: float = 0.70
-    context_confirmation_frames: int = 4
-    context_baseline_m: float = 0.30
     # In VERIFY a fresh, aligned candidate too close for a step used to be held --
     # and a satisfied hold is idle, which the headless agent turns into a TURN that
     # moves the box out of the frame (Allensville toilet, action 77: centred at
@@ -550,16 +537,8 @@ class TargetClosingSettings:
         if (isinstance(self.override_confidence, bool) or not math.isfinite(self.override_confidence)
                 or not self.confidence <= self.override_confidence <= 1):
             raise ValueError("override_confidence must lie in [confidence, 1]")
-        for key in ("context_check", "verify_keep_in_frame"):
-            if type(getattr(self, key)) is not bool:
-                raise ValueError("%s must be a bool" % key)
-        if (isinstance(self.context_penalty, bool) or not math.isfinite(self.context_penalty)
-                or not 0 < self.context_penalty <= 1):
-            raise ValueError("context_penalty must lie in (0, 1]")
-        if type(self.context_confirmation_frames) is not int or self.context_confirmation_frames < self.confirmation_frames:
-            raise ValueError("context_confirmation_frames must be an int of at least confirmation_frames")
-        if isinstance(self.context_baseline_m, bool) or not math.isfinite(self.context_baseline_m) or self.context_baseline_m < 0:
-            raise ValueError("context_baseline_m must be finite and non-negative")
+        if type(self.verify_keep_in_frame) is not bool:
+            raise ValueError("verify_keep_in_frame must be a bool")
         for key in ("memory_noise_floor_m", "sudden_proximity_m"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -644,8 +623,6 @@ class TargetClosing:
         self.nearest_routes = 0            # walks to the reachable cell nearest a locked target with no standoff route
         self.bound_releases = 0            # locks released at the closing's action bound (``release_on_bound``)
         self.overrides = 0                 # takeovers started past the memory by ``override_confidence``
-        self.context_rejections = 0        # confident boxes the context penalty kept under the start threshold
-        self.suspect_locks_held = 0        # frames a suspect candidate had the frames but not the viewpoints
         self.same_spot_rejections = 0      # near candidates refused because they were released from this very spot
         self.blind_frames = 0              # frames the detector was in back-off: no evidence, clocks paused
         self.backoffs = 0                  # backing manoeuvres made for a candidate seen suddenly at close range
@@ -720,7 +697,6 @@ class TargetClosing:
         self.nearest_goal = None           # the nearest-reachable walk in force (``_nearest_reachable``)
         self.nearest_tried = []            # spots walked to under this lock for want of a standoff route
         self.close_trail = []              # (x, y) per consecutive CLOSE action, for the stall clock
-        self.suspect = None                # why the context check doubts this candidate (``target_context``)
         self.sightings = []                # (x, y) of the agent per counted consecutive frame
         self.memory = None                 # TargetMemory3D: the fused XYZ centroid; ``xyz`` mirrors it
         self.history = None                # ApproachHistory: the path walked since the takeover began
@@ -824,9 +800,7 @@ class TargetClosing:
         from every spot already released as unverified on this floor --
         unless it reaches ``override_confidence`` (the unverified and
         map-contradicted memory, the cooldown and a boxed-in spot are
-        bypassed; a failed inspection's spot is not). A box the context
-        check doubts (``target_context.suspect``) counts
-        ``context_penalty`` of its confidence toward the start threshold.
+        bypassed; a failed inspection's spot is not).
         While a candidate is active, a box of the target's class down to
         ``track_confidence`` is projected too, and counts if -- and only if
         -- it lands on the candidate's anchor: a re-sighting, not a new
@@ -910,12 +884,6 @@ class TargetClosing:
             if not self.locked and contradicted_by_map(p, label, xyz, rows[-1].get("radius_m")) is not None:
                 self.map_rejections += 1                       # a confirmed non-target object stands here
                 continue
-            doubt = self._suspect(obs, label, xyz) if (s.context_check and not self.locked) else None
-            if doubt is not None and not associated and detection.conf * s.context_penalty < s.confidence:
-                # Confident enough on its own, not where it stands: no takeover on this box.
-                self.context_rejections += 1
-                kept.append(detection)
-                continue
             kept.append(detection)
             if not obs.pose.z - 0.3 <= xyz[2] <= obs.pose.z + 2.2:
                 continue
@@ -925,7 +893,7 @@ class TargetClosing:
                 self.weak_resightings += 1
             if rows[-1].get("occluder_depth_m") is not None:
                 self.occluder_reads += 1                       # the target's box read around a surface in front of it
-            projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), doubt, rows[-1]))
+            projected.append((detection, tuple(float(v) for v in xyz), rows[-1].get("range_near_m"), rows[-1]))
         return kept, projected, glimpses
 
     def _associated(self, obs, xyz, radius):
@@ -970,20 +938,6 @@ class TargetClosing:
         bearing = math.atan2(self.anchor[1] - obs.pose.y, self.anchor[0] - obs.pose.x)
         seen = normalize_angle(obs.pose.yaw + self._bbox_error(obs, box))
         return abs(normalize_angle(seen - bearing)) <= turn + 1e-6
-
-    def _suspect(self, obs, label, xyz):
-        """Why the context check doubts a box of ``label`` at ``xyz`` (``target_context.suspect``), or None."""
-        p = self.policy
-        info, objects = {}, ()
-        graph = getattr(p, "graph", None)
-        world = getattr(p, "last_world", None)
-        if graph is not None and world is not None and getattr(graph, "labels", None) is not None:
-            pid = graph.room_near(world, (float(xyz[0]), float(xyz[1])), 0.6)
-            if pid is not None:
-                info = graph.label_info(pid) or {}
-                objects = graph.objects_in(pid)
-        return suspect(p.target, label, xyz, obs.pose.z, label=info.get("label"),
-                       strength=info.get("strength"), objects=objects)
 
     def blind(self):
         """Whether this frame carried no detector evidence (the service failed or is in back-off)."""
@@ -1048,7 +1002,7 @@ class TargetClosing:
             return
         here = (float(obs.pose.x), float(obs.pose.y))
         if projected:
-            detection, xyz, near, doubt, row = max(projected, key=lambda item: item[0].conf)
+            detection, xyz, near, row = max(projected, key=lambda item: item[0].conf)
             # Consecutive means no frame WITHOUT the candidate in between: a glimpse -- the box in
             # view on the anchor's bearing without a usable depth -- carries the chain (``last_sighting``).
             chained = obs.step == self.last_sighting + 1
@@ -1105,8 +1059,6 @@ class TargetClosing:
             self.box, self.label, self.last_seen = detection.xyxy, detection.cls, obs.step
             self.conf = float(detection.conf)
             self.best_conf = max(self.best_conf, float(detection.conf))
-            if doubt is not None and not self.locked:
-                self.suspect = doubt
             if self.backoff is None or not (self.backoff.state == "pending" or self.backoff.active):
                 self.locked |= self._confirmed()
             p._target_xy, p._target_step, p._target_floor_id = self.xyz[:2], obs.step, self.floor_id
@@ -1275,25 +1227,8 @@ class TargetClosing:
         return NavigationCommand.follow([here, ahead], info=dict(info, bearing_step="toward the detection"))
 
     def _confirmed(self):
-        """Whether the consecutive frames so far lock the candidate.
-
-        ``confirmation_frames`` frames as before; a candidate the context
-        check doubts (``suspect``) needs ``context_confirmation_frames`` of
-        them, taken from at least two spots ``context_baseline_m`` apart --
-        a turn in place is not a second viewpoint, and the Allensville
-        counter was locked on two frames from one spot.
-        """
-        s = self.settings
-        if self.suspect is None or not s.context_check:
-            return self.count >= s.confirmation_frames
-        if self.count < s.context_confirmation_frames:
-            return False
-        spots = self.sightings[-self.count:]
-        baseline = max((math.dist(a, b) for a in spots for b in spots), default=0.0)
-        if baseline + 1e-9 < s.context_baseline_m:
-            self.suspect_locks_held += 1
-            return False
-        return True
+        """Whether the consecutive frames so far lock the candidate: ``confirmation_frames`` of them."""
+        return self.count >= self.settings.confirmation_frames
 
     def _is_support(self, label):
         return self.settings.support_surface_resilience and is_support_surface(label, self.settings.support_surface_classes)
@@ -1615,17 +1550,10 @@ class TargetClosing:
             self.inspection_index = 0
             error = self._bbox_error(obs)
             info = {"kind": "target_closing", "reason": reason, "target_visible": True}
-            if self.suspect is not None:
-                info["suspect"] = self.suspect
             distance = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2]) if self.xyz is not None else float("inf")
             aligned = abs(error) <= offset + 1e-6
-            # A suspect candidate needs two viewpoints ``context_baseline_m`` apart, and a
-            # turn in place is not one: let it step inside the terminal range (never onto
-            # the object) rather than hold at 1.2 m where it could never lock (review of
-            # 2026-10-07: 52 frames held, five releases, no move).
-            nearest = self.settings.terminal_distance_m if self.suspect is None else 0.6 * self.settings.terminal_distance_m
             if (not self.locked and aligned
-                    and distance > nearest + actions.forward_step_m
+                    and distance > self.settings.terminal_distance_m + actions.forward_step_m
                     and (actions.has_camera_tilt or self._step_keeps_box(obs, distance))):
                 # Two steps ahead: a one-step waypoint sits inside the converter's arrival
                 # tolerance and yields no action at all. One MOVE_FORWARD results either way.
@@ -1645,7 +1573,7 @@ class TargetClosing:
                                                 info=dict(info, verify_step="towards the candidate",
                                                           elevation=self._elevation(obs, distance)))
             if (not self.locked and aligned and not actions.has_camera_tilt
-                    and distance > nearest + actions.forward_step_m):
+                    and distance > self.settings.terminal_distance_m + actions.forward_step_m):
                 self.no_step_holds += 1
                 info["verify_step_withheld"] = "a step would push the box out of the frame"
             if self.settings.verify_keep_in_frame and turn_action(error, offset) is None:
@@ -1746,8 +1674,6 @@ class TargetClosing:
         margin = s.border_margin_px
         info = {"kind": "target_closing", "reason": "verification frame that keeps the box whole",
                 "target_visible": True}
-        if self.suspect is not None:
-            info["suspect"] = self.suspect
         pitch_now = float(obs.pose.camera_pitch)
         tilt = float(actions.tilt_angle_rad) if actions.has_camera_tilt else None
         top_cut, bottom_cut = y1 < margin, y2 > k.height - margin
@@ -2664,8 +2590,7 @@ class TargetClosing:
                 "map_rejections": self.map_rejections, "weak_resightings": self.weak_resightings,
                 "no_path_steps": self.no_path_steps, "footing_sweeps": self.footing_sweeps,
                 "boxed_releases": self.boxed_releases,
-                "overrides": self.overrides, "context_rejections": self.context_rejections,
-                "suspect": self.suspect, "suspect_locks_held": self.suspect_locks_held,
+                "overrides": self.overrides,
                 "same_spot_rejections": self.same_spot_rejections, "blind_frames": self.blind_frames,
                 "memory": None if self.memory is None else self.memory.diagnostics(),
                 "approach": None if self.history is None else dict(self.history.diagnostics(),

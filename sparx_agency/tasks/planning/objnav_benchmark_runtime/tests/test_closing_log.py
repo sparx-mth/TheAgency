@@ -14,8 +14,8 @@ def graph_with(rooms):
 
 
 def policy_with(detections, graph=None, **closing_state):
-    state = dict(phase="SEARCH", active=False, locked=False, count=0, suspect=None, best_conf=0.0, xyz=None, last_release=None,
-                 border_rejections=0, context_rejections=0, glimpse_steps=0, verify_pauses=0, weak_resightings=0, releases=0,
+    state = dict(phase="SEARCH", active=False, locked=False, count=0, best_conf=0.0, xyz=None, last_release=None,
+                 border_rejections=0, glimpse_steps=0, verify_pauses=0, weak_resightings=0, releases=0,
                  memory_sight_refusals=0, inspection_steps=0, support_holds=0, history_holds=0, inspection_releases=0)
     state.update(closing_state)
     closing = SimpleNamespace(settings=SimpleNamespace(confidence=0.25), _clipped=lambda box, k: k == "K" and box[3] >= 470, **state)
