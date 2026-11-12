@@ -194,7 +194,9 @@ def main(argv=None):
     if args.arm == "without":
         say(lines, "   LLM answers: RECORDED into %s (the store every other arm replays)" % without_store)
     elif args.arm != "report":
-        say(lines, "   LLM answers: REPLAYED from %s, new ones recorded into %s" % (without_store, store_root / args.arm))
+        others = sorted(d.name for d in store_root.glob("*") if d.is_dir() and d.name != args.arm and any(d.glob("answers-*.jsonl")))
+        say(lines, "   LLM answers: REPLAYED from the stores of %s; new ones recorded into %s"
+            % (", ".join(others) if others else "(none yet)", store_root / args.arm))
         if not any(without_store.glob("answers-*.jsonl")):
             problems.append("the `without` arm's answer store %s is empty: run `without` first, so the variants replay its answers"
                             % without_store)

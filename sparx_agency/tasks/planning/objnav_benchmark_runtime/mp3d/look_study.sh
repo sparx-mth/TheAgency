@@ -11,10 +11,12 @@
 #
 # Every arm runs the SAME fixed episode subset (sets/warmup_study_v1.json: 39 single-storey MP3D val episodes in 8
 # scenes) under ground-truth perception with the same LLM at temperature 0 and seed 17. The `without` arm RECORDS
-# every LLM answer (runs/look_study/llm_answers/without); every other arm REPLAYS that store and records only what
-# it asks anew, so two arms differ only where the change under test acts. `without` is shared by both studies:
-# run it once. Each arm runs from a frozen snapshot of the tree (~/GIT/TheAgency_snapshots/ls_<arm>), so the
-# checkout may be edited while an arm runs; --resume continues an interrupted arm from its snapshot.
+# every LLM answer (runs/look_study/llm_answers/without); every other arm REPLAYS that store -- and every other
+# arm's store already present -- and records only what it asks anew, so two arms differ only where the change
+# under test acts (an answer is a function of its question in its episode, whichever arm asked first). `without`
+# is shared by both studies: run it once. Each arm runs from a frozen snapshot of the tree
+# (~/GIT/TheAgency_snapshots/ls_<arm>), so the checkout may be edited while an arm runs; --resume continues an
+# interrupted arm from its snapshot.
 #
 # --dry-run prints the plan (arm, config, episodes, model, stores, renderer, workers, a time estimate), checks the
 # interpreter, the data, the LLM server, the GPU and the disk, and starts nothing; a problem is one line that says
@@ -115,7 +117,16 @@ fi
 mkdir -p "$STORE_ROOT/$ARM"
 export LLM_ANSWERS_RECORD="$STORE_ROOT/$ARM"
 if [[ "$ARM" != without ]]; then
-  export LLM_ANSWERS_REPLAY="$STORE_ROOT/without"
+  # Replay every arm's store but this one's: two arms that reach the same map state ask the same question and
+  # must get the same answer, whichever ran first -- the server at temperature 0 does not guarantee it
+  # (LESSONS.md 2026-10-31; on the main machine two arms with IDENTICAL warm-ups differed by 3 success flips).
+  REPLAY_DIRS=()
+  for dir in "$STORE_ROOT"/*/; do
+    dir="${dir%/}"
+    [[ "$(basename "$dir")" == "$ARM" ]] && continue
+    ls "$dir"/answers-*.jsonl > /dev/null 2>&1 && REPLAY_DIRS+=("$dir")
+  done
+  export LLM_ANSWERS_REPLAY="$(IFS=:; echo "${REPLAY_DIRS[*]}")"
 fi
 [[ -n "$CONFIG" ]] && EXTRA+=(--policy-config "$SETS/$CONFIG")
 [[ "$RESUME" == 1 ]] && EXTRA+=(--resume-accepting-changes gpu_plan source_sha256)
