@@ -165,12 +165,6 @@ decides whether to keep a stale label — nothing is cached on failure.
   `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
   five single-storey scenarios against the live model and checks the
   judgement, not just the schema.
-- `room_priors.py` — where a target category cannot be: the room types a
-  search need not enter for it (`IMPLAUSIBLE_ROOMS`, exclusions not
-  permissions; `unknown` never excluded), the home objects that keep a room a
-  node whatever its label (`HOME_OBJECTS`), and the signature objects that
-  make a one-object label strong (`SIGNATURE_OBJECTS`). Pure tables and
-  predicates for the object-search method and its room labels.
 - `revisable_room_labels.py` — `RevisableRoomLabels`, evidence-gated labels
   around `RoomTypeClassifier`: one confirmed landmark is enough to label, the
   label carries a strength (`weak` from one class of evidence, `strong` from
