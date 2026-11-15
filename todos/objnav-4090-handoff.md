@@ -96,6 +96,14 @@ Findings below that belong to Nadav (not worked on here): escape trap (2/50 phas
 Daphna reviewed the frames (2026-11-15): the VLM was right on all 6 wrong stops (including the real tv stopped at 3.3 m). The plants it rejected are real but tiny at 320x240:
 a resolution limit. Design to test on the 4090: ask the VLM about a zoomed crop of the box, with some context, cut from the full-resolution frame inside the run, applied by box size in pixels (a general rule, not per label).
 
+## VLM check on 117 detector bboxes (train sweep, zoomed full-resolution crop) and the 4090 plan (2026-11-15)
+- Question text decided by Daphna: the benchmark's category name only (`bed`, `couch`, `chair`, `tv`, `toilet`, `potted plant`), no definitions. Crop = bbox grown by 0.5 of its size, at least 224 px, bbox drawn in red.
+- Result (`analysis_tools/vlm_box_check.py`, `data/vlm_boxes_results.jsonl`, qwen3-vl:4b-instruct): correct bboxes accepted 58/59, wrong bboxes rejected 28/57 (bed 7/10, tv 6/10, sofa 6/10, chair 4/10, plant 3/10, toilet 2/7);
+  tiny plants accepted 9/9 with the zoomed crop. Some "wrong" bboxes may sit on a real object and only fail the IoU rule. Not yet measured inside a run.
+- Laptop warning: Ollama's CPU runner (`llama-server`) grew from 4.9 to 10 GB over ~100 images and the laptop froze; `analysis_tools/mem_guard.sh` stops the resumable job when available memory < 1.8 GB. Unload the model (`keep_alive: 0`) every few dozen images.
+- 4090 plan: (0) pull, services on CUDA, rerun 3-4 episodes to check the local baseline; (1) offline sweep of all 1,616 train-sweep bboxes with 4B and 8B; (2) new in-loop check before STOP (TDD, flag off by default, category name only);
+  (3) paired runs: the 12 wrong-stop episodes first, then the 70 train episodes, then 100-150 new ones; SR and SPL paired with CIs, vetoes per episode, plants separately. Pre-set criteria: at most one correct STOP blocked, at least half of the wrong STOPs rejected, no negative SR difference.
+
 ## Todos, in order
 1. **Baseline on train, single-floor only** (phase A): SR, SPL, then failure triage with GT as in `todos/` session: wrong stop vs timeout; for wrong stops,
    is a same-kind object within 3 m, is it in the goal set (`goals_by_category` object ids), is it the goal but farther than the success radius.
