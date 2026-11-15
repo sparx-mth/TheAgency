@@ -13,6 +13,8 @@ Provides:
   solver's order, fly to it, map it under a budget, repeat, stop on detection
 - room_costs (by module path, not from here): arc weights between room
   centres and the HPP-PT instance a solver such as RPT* consumes
+- rpt_room_solver (by module path, not from here): the solver itself --
+  the room order that minimises the expected time to find the target
 - survey_state: carry a survey across flights, so one capsize costs a
   segment rather than the whole building
 - Simple exploration policies (e.g., random-walk goal selection)
@@ -37,14 +39,21 @@ from .object_search_supervisor import (
     ObjectSearchParams, ObjectSearchSupervisor, ObjectSearchState, RoomFacts,
     FlyTo, SearchRoom, Release, StandDown, weighted_order,
     SELECT, TRANSIT, SEARCH, FOUND,
-    MAPPED, BUDGET_SPENT, STALLED, UNREACHABLE, TRANSIT_TIMEOUT, BLOCKED,
-    PRODUCTIVE,
+    MAPPED, BUDGET_SPENT, STALLED, EXHAUSTED, TRAVERSED, RECLASSIFIED,
+    UNREACHABLE, TRANSIT_TIMEOUT, BLOCKED, PRODUCTIVE, NEUTRAL,
 )
-# ``room_costs`` is DELIBERATELY not re-exported. It needs numpy and scipy,
-# and this facade is imported inside the Noetic FALCON container (whose
-# mission_watchdog_node imports .progress_monitor through it) where scipy does
-# not exist. Import it by module path -- ``from ...exploration.room_costs
-# import build_instance`` -- from the ROS 2 side only.
+# ``room_costs`` and ``frontier_ranking`` are DELIBERATELY not re-exported.
+# They need numpy and scipy, and this facade is imported inside the Noetic
+# FALCON container (whose mission_watchdog_node imports .progress_monitor
+# through it) where scipy does not exist. Import them by module path --
+# ``from ...exploration.room_costs import build_instance`` -- from the ROS 2
+# side only.
+#
+# ``rpt_room_solver`` is not re-exported either, for a milder reason: it is
+# standard-library-only and would import cleanly in the container, but it
+# pulls the whole ``routing.rpt_star`` package in behind it and nothing in
+# there has any use for a router. Same rule -- import it by module path,
+# ``from ...exploration.rpt_room_solver import RptStarRoomSolver``.
 from .briefing import BriefingStyle, brief
 from .survey_state import load_survey, save_survey
 from .random_walk import RandomWalkParams, RandomWalkPolicy
@@ -69,8 +78,8 @@ __all__ = [
     "ObjectSearchParams", "ObjectSearchSupervisor", "ObjectSearchState",
     "RoomFacts", "FlyTo", "SearchRoom", "Release", "StandDown",
     "weighted_order", "SELECT", "TRANSIT", "SEARCH", "FOUND",
-    "MAPPED", "BUDGET_SPENT", "STALLED", "UNREACHABLE", "TRANSIT_TIMEOUT",
-    "BLOCKED", "PRODUCTIVE",
+    "MAPPED", "BUDGET_SPENT", "STALLED", "EXHAUSTED", "TRAVERSED", "RECLASSIFIED",
+    "UNREACHABLE", "TRANSIT_TIMEOUT", "BLOCKED", "PRODUCTIVE", "NEUTRAL",
     "BriefingStyle", "brief",
     "load_survey", "save_survey",
     "RandomWalkParams",

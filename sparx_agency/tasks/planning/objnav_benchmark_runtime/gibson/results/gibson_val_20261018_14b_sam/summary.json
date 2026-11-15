@@ -1,0 +1,244 @@
+{
+ "agent": "sparx-rpt-llm-host-sweep",
+ "agent_errors": 0,
+ "benchmark": "gibson",
+ "by_category": [
+  {
+   "distance_to_goal_m": 2.9791846848655545,
+   "key": "bed",
+   "mean_path_length_m": 17.10991133772258,
+   "mean_steps": 200.66666666666666,
+   "n_episodes": 123,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.28084986735461354,
+   "spl": 0.2535936016268126,
+   "spl_ci": [
+    0.2004978435743356,
+    0.3109931640956793
+   ],
+   "success_rate": 0.5203252032520326,
+   "success_rate_ci": [
+    0.43276571879576353,
+    0.6066535692389802
+   ]
+  },
+  {
+   "distance_to_goal_m": 0.19255180638107344,
+   "key": "chair",
+   "mean_path_length_m": 6.318122615191496,
+   "mean_steps": 72.49152542372882,
+   "n_episodes": 177,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.7096083841098582,
+   "spl": 0.6969028168721251,
+   "spl_ci": [
+    0.6513160805343713,
+    0.7421376112247556
+   ],
+   "success_rate": 0.9322033898305084,
+   "success_rate_ci": [
+    0.8852494974267818,
+    0.9607954360621743
+   ]
+  },
+  {
+   "distance_to_goal_m": 0.7413446688956685,
+   "key": "couch",
+   "mean_path_length_m": 8.410746757301228,
+   "mean_steps": 93.02183406113537,
+   "n_episodes": 229,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.6804620910818181,
+   "spl": 0.6111584423924342,
+   "spl_ci": [
+    0.5587183965148376,
+    0.663624980187905
+   ],
+   "success_rate": 0.7816593886462883,
+   "success_rate_ci": [
+    0.7237461784708222,
+    0.8302788678133103
+   ]
+  },
+  {
+   "distance_to_goal_m": 0.6839848786563387,
+   "key": "potted plant",
+   "mean_path_length_m": 8.36690800611571,
+   "mean_steps": 93.39378238341969,
+   "n_episodes": 193,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.43295083976594895,
+   "spl": 0.4265826925192316,
+   "spl_ci": [
+    0.3751326193786204,
+    0.4807553574769633
+   ],
+   "success_rate": 0.8186528497409327,
+   "success_rate_ci": [
+    0.7582497782433524,
+    0.8666185840260137
+   ]
+  },
+  {
+   "distance_to_goal_m": 0.7509751418284032,
+   "key": "toilet",
+   "mean_path_length_m": 29.238895773297035,
+   "mean_steps": 270.7692307692308,
+   "n_episodes": 208,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.3721897482105565,
+   "spl": 0.3622132993274161,
+   "spl_ci": [
+    0.3219770717421403,
+    0.40369078456662416
+   ],
+   "success_rate": 0.8653846153846154,
+   "success_rate_ci": [
+    0.8123221970425732,
+    0.9051955204343215
+   ]
+  },
+  {
+   "distance_to_goal_m": 1.9674067497344172,
+   "key": "tv",
+   "mean_path_length_m": 10.752722945681883,
+   "mean_steps": 123.55714285714286,
+   "n_episodes": 70,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.4382853440466688,
+   "spl": 0.40334140824247683,
+   "spl_ci": [
+    0.30595094624249075,
+    0.5014909665399103
+   ],
+   "success_rate": 0.5428571428571428,
+   "success_rate_ci": [
+    0.4269825920547558,
+    0.654272574024364
+   ]
+  }
+ ],
+ "by_scene": [
+  {
+   "distance_to_goal_m": 0.8620069239996081,
+   "key": "Collierville",
+   "mean_path_length_m": 8.012203668714676,
+   "mean_steps": 99.11,
+   "n_episodes": 200,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.5506281039848584,
+   "spl": 0.5416882819526134,
+   "spl_ci": [
+    0.48499219207465044,
+    0.5989054495088412
+   ],
+   "success_rate": 0.765,
+   "success_rate_ci": [
+    0.7015863111723746,
+    0.8184256658476741
+   ]
+  },
+  {
+   "distance_to_goal_m": 1.4287270515490775,
+   "key": "Corozal",
+   "mean_path_length_m": 15.0727548184981,
+   "mean_steps": 155.78,
+   "n_episodes": 200,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.5170555166197147,
+   "spl": 0.4823268977932482,
+   "spl_ci": [
+    0.43066710681015913,
+    0.5396430317081455
+   ],
+   "success_rate": 0.74,
+   "success_rate_ci": [
+    0.6750925439746589,
+    0.7958616993642531
+   ]
+  },
+  {
+   "distance_to_goal_m": 0.7341567013130872,
+   "key": "Darden",
+   "mean_path_length_m": 13.880097225028543,
+   "mean_steps": 159.835,
+   "n_episodes": 200,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.4742944224662395,
+   "spl": 0.4587246111514523,
+   "spl_ci": [
+    0.4080144695823633,
+    0.5077820468247997
+   ],
+   "success_rate": 0.84,
+   "success_rate_ci": [
+    0.7828592983793289,
+    0.8843258796841297
+   ]
+  },
+  {
+   "distance_to_goal_m": 1.1356734536367774,
+   "key": "Markleeville",
+   "mean_path_length_m": 16.404120923148117,
+   "mean_steps": 163.53,
+   "n_episodes": 200,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.41704420707921946,
+   "spl": 0.40257778570548,
+   "spl_ci": [
+    0.3523194666529722,
+    0.45329871476235306
+   ],
+   "success_rate": 0.76,
+   "success_rate_ci": [
+    0.6962665902079583,
+    0.8139338400758631
+   ]
+  },
+  {
+   "distance_to_goal_m": 0.8205343630385087,
+   "key": "Wiconisco",
+   "mean_path_length_m": 14.621233249983568,
+   "mean_steps": 130.79,
+   "n_episodes": 200,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.5791077014284151,
+   "spl": 0.5167015203353017,
+   "spl_ci": [
+    0.46489639806643285,
+    0.571305451397951
+   ],
+   "success_rate": 0.815,
+   "success_rate_ci": [
+    0.7554293723884824,
+    0.8626980719938395
+   ]
+  }
+ ],
+ "confidence": 0.95,
+ "overall": {
+  "distance_to_goal_m": 0.9962196987074118,
+  "key": "all",
+  "mean_path_length_m": 13.5980819770746,
+  "mean_steps": 141.809,
+  "n_episodes": 1000,
+  "n_unreachable_end": 0,
+  "soft_spl": 0.5076259903156894,
+  "spl": 0.4804038193876191,
+  "spl_ci": [
+   0.4559494555012866,
+   0.5027428360309234
+  ],
+  "success_rate": 0.784,
+  "success_rate_ci": [
+   0.7574334101291272,
+   0.8083929910510775
+  ]
+ },
+ "split": "val",
+ "terminations": {
+  "agent_error": 0,
+  "step_limit": 54,
+  "stop": 946
+ }
+}

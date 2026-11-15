@@ -376,3 +376,63 @@ def test_no_rooms_raises():
     with pytest.raises(ValueError, match="at least one room"):
         SearchOracle(client).probabilities("apple", [])
     assert client.calls == []
+
+
+# ---------------------------------------------------------------------
+#  Reusing a reply the model has already given
+# ---------------------------------------------------------------------
+def test_an_unchanged_prompt_reuses_the_reply_and_re_applies_the_effort_numbers():
+    """The model sees labels, classes and areas; time and frontier are applied in code.
+
+    So a second query over the same rooms costs no call, and a query that
+    differs only in ``searched_s`` / ``frontier_clusters`` -- which the model
+    is never shown -- costs no call either, yet its probabilities move.
+    """
+    client = FakeClient([_scores((0, 80), (1, 40), (2, 20))])
+    oracle = SearchOracle(client)
+    first = oracle.probabilities("apple", ROOMS)
+    again = oracle.probabilities("apple", ROOMS)
+    assert len(client.calls) == 1
+    assert first.reused is False and again.reused is True
+    assert again.source == "llm" and again.probs == first.probs and again.scores == first.scores
+    assert oracle.reuses == 1
+
+    exhausted = [ROOMS[0], ROOMS[1],
+                 OracleRoom(id=2, label="hallway", searched_s=300.0, frontier_clusters=0, area_m2=6.0)]
+    moved = oracle.probabilities("apple", exhausted)
+    assert len(client.calls) == 1, "time and frontier are not in the prompt"
+    assert moved.reused is True
+    assert moved.probs[2] < first.probs[2], "... but the effort discount was applied afresh"
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: OracleRoom(id=r.id, label="pantry", searched_s=r.searched_s,
+                         frontier_clusters=r.frontier_clusters,
+                         observed_classes=r.observed_classes, area_m2=r.area_m2),
+    lambda r: OracleRoom(id=r.id, label=r.label, searched_s=r.searched_s,
+                         frontier_clusters=r.frontier_clusters,
+                         observed_classes=r.observed_classes + ("apple",), area_m2=r.area_m2),
+    lambda r: OracleRoom(id=r.id, label=r.label, searched_s=r.searched_s,
+                         frontier_clusters=r.frontier_clusters,
+                         observed_classes=r.observed_classes, area_m2=r.area_m2 + 1.0),
+])
+def test_anything_the_model_is_shown_changing_asks_it_again(change):
+    client = FakeClient([_scores((0, 80), (1, 40), (2, 20)), _scores((0, 10), (1, 40), (2, 90)),
+                         _scores((0, 10), (1, 40), (2, 90))])
+    oracle = SearchOracle(client)
+    oracle.probabilities("apple", ROOMS)
+    changed = [change(ROOMS[0]), ROOMS[1], ROOMS[2]]
+    result = oracle.probabilities("apple", changed)
+    assert len(client.calls) == 2 and result.reused is False
+    assert oracle.probabilities("pear", changed).reused is False, "a different target is a different question"
+    assert len(client.calls) == 3
+
+
+def test_a_reply_that_fell_back_to_uniform_is_not_kept():
+    client = FakeClient([{"answer": 42}, _scores((0, 80), (1, 40), (2, 20))])
+    oracle = SearchOracle(client)
+    _assert_uniform(oracle.probabilities("apple", ROOMS))
+    result = oracle.probabilities("apple", ROOMS)
+    assert len(client.calls) == 2 and result.source == "llm" and result.reused is False
+
+

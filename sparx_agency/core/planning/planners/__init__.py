@@ -36,29 +36,41 @@ from sparx_agency.core.planning.interfaces.planner import (
     BasePlanner3D,
 )
 
-# RRT* (2D and 3D)
-from .rrtstar import (
-    RRTStarOmplParams,
-    RRTStarOmpl3DParams,
-    RRTStarOmplPlanner,
-    RRTStarOmpl3DPlanner,
-    plan_rrtstar,
-    plan_rrtstar_3d,
-)
+from typing import TYPE_CHECKING
 
-# BIT* (3D)
-from .bitstar import (
-    BITStarParams,
-    BITStarPlanner,
-    plan_bitstar_3d,
-)
+# Importing any child package executes this module. Pure A*/ObjectNav must
+# not load optional native sampling planners merely to import grid geometry.
+if TYPE_CHECKING:
+    from .rrtstar import (
+        RRTStarOmplParams, RRTStarOmpl3DParams, RRTStarOmplPlanner,
+        RRTStarOmpl3DPlanner, plan_rrtstar, plan_rrtstar_3d,
+    )
+    from .bitstar import BITStarParams, BITStarPlanner, plan_bitstar_3d
+    from .informed_rrtstar import (
+        InformedRRTStarParams, InformedRRTStarPlanner, plan_informed_rrtstar_3d,
+    )
 
-# Informed RRT* (3D)
-from .informed_rrtstar import (
-    InformedRRTStarParams,
-    InformedRRTStarPlanner,
-    plan_informed_rrtstar_3d,
-)
+_OPTIONAL_EXPORTS = {
+    name: module
+    for module, names in (
+        ("rrtstar", ("RRTStarOmplParams", "RRTStarOmpl3DParams", "RRTStarOmplPlanner",
+                     "RRTStarOmpl3DPlanner", "plan_rrtstar", "plan_rrtstar_3d")),
+        ("bitstar", ("BITStarParams", "BITStarPlanner", "plan_bitstar_3d")),
+        ("informed_rrtstar", ("InformedRRTStarParams", "InformedRRTStarPlanner",
+                              "plan_informed_rrtstar_3d")),
+    )
+    for name in names
+}
+
+
+def __getattr__(name):
+    """Resolve existing sampling-planner exports only when explicitly requested."""
+    if name not in _OPTIONAL_EXPORTS:
+        raise AttributeError("module %r has no attribute %r" % (__name__, name))
+    from importlib import import_module
+    value = getattr(import_module("." + _OPTIONAL_EXPORTS[name], __name__), name)
+    globals()[name] = value
+    return value
 
 from .astar import (
     AStarParams,

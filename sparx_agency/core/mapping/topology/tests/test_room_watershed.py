@@ -511,3 +511,242 @@ def test_the_merged_segmentation_is_deterministic():
     assert np.array_equal(runs[0][1], runs[1][1])
     assert [s.centroid_cells for s in runs[0][2]] == \
         [s.centroid_cells for s in runs[1][2]]
+
+
+# -- door cuts snapped to the choke (detected doors, 2026-10-05) ----------------
+HOME_RES = 0.1  # the ObjectNav maps
+
+
+def room_doorway_hall():
+    """A room, a 0.8 m doorway in a 0.3 m wall, a hall beyond -- and a dead-end notch in the room's wall.
+
+    Returns ``(free, doorway_cell, misplaced_door_cell, notch_cell)``. The
+    misplaced door is where a detected door landed in the Hanson recording:
+    0.6 m short of its doorway, on the room's floor. The notch (0.4 m wide,
+    1 m deep) is narrower than the doorway and as near the misplaced door,
+    but it is a spur: cutting it parts nothing.
+    """
+    free = np.zeros((80, 70), dtype=bool)
+    free[10:40, 10:60] = True          # the room: 3 m x 5 m
+    free[43:70, 10:60] = True          # the hall north of the wall
+    free[40:43, 31:39] = True          # the doorway: 0.8 m wide, 0.3 m thick wall
+    free[0:10, 26:30] = True           # the notch: 0.4 m wide, 1 m deep, dead end in the south wall
+    return free, (35, 41), (35, 35), (28, 5)
+
+
+def home_params(**overrides):
+    base = dict(min_room_separation_m=1.0, min_clearance_m=0.3, min_room_cells=50,
+                door_cut_m=0.75, merge_dynamics_m=0.2)
+    base.update(overrides)
+    return WatershedRoomParams(**base)
+
+
+def clearance_and_skeleton(free):
+    healed = heal_free_mask(free)
+    return healed, distance_transform_edt(healed) * HOME_RES, room_watershed.medial_axis(healed, rng=0)
+
+
+def test_a_misplaced_door_snaps_to_its_doorway_and_the_cut_is_sized_to_the_passage():
+    free, doorway, misplaced, _ = room_doorway_hall()
+    _, clearance, skeleton = clearance_and_skeleton(free)
+    choke = room_watershed.snap_door_to_choke(skeleton, clearance, misplaced, home_params(door_snap_reach_m=0.9), HOME_RES)
+    assert choke is not None
+    (cx, cy), half_width = choke
+    assert 40 <= cy <= 42 and 31 <= cx <= 38, "the choke is in the doorway, 0.6 m from where the door was detected"
+    assert 0.3 <= half_width <= 0.5, "half of a 0.8 m doorway, within a cell"
+
+
+def test_the_snapped_cut_separates_room_and_hall_without_carving_the_rooms_floor():
+    free, doorway, misplaced, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9)
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, [misplaced])
+    room, hall = int(room_lbl[20, 15]), int(room_lbl[60, 35])
+    assert room > 0 and hall > 0 and room != hall and len(stats) == 2
+    assert int(room_lbl[35, 35]) == room, "the floor under the detected position stays the room's"
+    healed, clearance, _ = clearance_and_skeleton(free)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [misplaced], params, HOME_RES)
+    plain = door_disk_mask(free.shape, [misplaced], int(round(params.door_cut_m / HOME_RES)))
+    assert carve.sum() < 0.5 * plain.sum(), "a passage-sized disk in the doorway, not a 1.5 m hole in the room"
+    assert carve[41, 35] and not carve[35, 35]
+    assert not barrier.any(), "a snapped cut parts the rooms by side, not by a disk-shaped barrier"
+
+
+def test_a_dead_end_notch_is_not_a_choke():
+    """Narrower than the doorway and as near, but a spur: its disk parts no passage."""
+    free, doorway, misplaced, notch = room_doorway_hall()
+    _, clearance, skeleton = clearance_and_skeleton(free)
+    params = home_params(door_snap_reach_m=0.9)
+    beside_notch = (28, 12)                                    # on the room floor, 0.2 m from the notch's mouth
+    choke = room_watershed.snap_door_to_choke(skeleton, clearance, beside_notch, params, HOME_RES)
+    assert choke is None or not (26 <= choke[0][0] <= 29 and choke[0][1] <= 12), "the notch is never chosen"
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, [beside_notch])
+    assert int(room_lbl[20, 15]) == int(room_lbl[5, 28]) > 0, "... so the notch stays part of the room"
+
+
+def test_a_door_with_no_choke_within_reach_keeps_the_plain_disk():
+    """Walls not yet observed: the door stands in open floor and the disk carve is all there is."""
+    free = np.zeros((60, 60), dtype=bool)
+    free[5:55, 5:55] = True
+    door = (30, 30)
+    params = home_params(door_snap_reach_m=0.9)
+    healed, clearance, skeleton = clearance_and_skeleton(free)
+    assert room_watershed.snap_door_to_choke(skeleton, clearance, door, params, HOME_RES) is None
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [door], params, HOME_RES)
+    assert np.array_equal(carve, door_disk_mask(free.shape, [door], int(round(params.door_cut_m / HOME_RES))))
+    assert np.array_equal(barrier, carve)
+
+
+def test_snapping_off_reproduces_the_plain_carve():
+    free, doorway, misplaced, _ = room_doorway_hall()
+    healed, clearance, _ = clearance_and_skeleton(free)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [misplaced], home_params(), HOME_RES)
+    assert np.array_equal(carve, door_disk_mask(free.shape, [misplaced], int(round(0.75 / HOME_RES))))
+    assert np.array_equal(barrier, carve)
+    assert not any(m.any() for m in room_watershed.door_carve_mask(healed, clearance, [], home_params(door_snap_reach_m=0.9), HOME_RES))
+
+
+# -- thresholds the robot walked through (2026-10-07) ------------------------------
+def walk(cells_from, cells_to, n):
+    """``n`` trail cells from one ``(cx, cy)`` to another, inclusive."""
+    (x0, y0), (x1, y1) = cells_from, cells_to
+    return [(int(round(x0 + (x1 - x0) * t / (n - 1))), int(round(y0 + (y1 - y0) * t / (n - 1)))) for t in range(n)]
+
+
+def test_a_trail_through_a_doorway_names_the_doorway_and_a_trail_along_a_corridor_names_nothing():
+    """Room -> doorway -> hall: the clearance dips to the doorway's half-width between two wider
+    spaces. The Allensville hallway (0.30-0.50 m of clearance for forty actions) never dips."""
+    free, doorway, _, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5)
+    trail = walk((35, 20), (35, 60), 21)                      # south room, through the doorway, into the hall
+    found = room_watershed.trail_thresholds(free, HOME_RES, trail, params)
+    assert len(found) == 1 and 39 <= found[0][1] <= 43 and found[0][0] == 35, found
+    corridor = np.zeros((20, 80), dtype=bool)
+    corridor[6:14, 2:78] = True                               # 0.8 m wide, uniformly
+    assert room_watershed.trail_thresholds(corridor, HOME_RES, walk((5, 10), (75, 10), 36), params) == []
+    assert room_watershed.trail_thresholds(free, HOME_RES, trail[:2], params) == [], "a two-cell trail says nothing"
+    with pytest.raises(ValueError):
+        room_watershed.trail_thresholds(free, 0.0, trail, params)
+
+
+def test_a_walked_through_threshold_is_carved_like_a_snapped_door_and_only_at_a_severing_choke():
+    free, doorway, _, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5)
+    # No door was ever detected; the robot walked through. The room and the hall still separate.
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, door_cells=[], threshold_cells=[doorway])
+    room, hall = int(room_lbl[20, 15]), int(room_lbl[60, 35])
+    assert room > 0 and hall > 0 and room != hall and len(stats) == 2
+    healed, clearance, _ = clearance_and_skeleton(free)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [], params, HOME_RES, threshold_cells=[doorway])
+    assert carve[41, 35] and not barrier.any(), "a passage-sized cut, never a plain-disk barrier"
+    # A threshold on open floor (no severing choke within reach) is not carved at all.
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [], params, HOME_RES, threshold_cells=[(35, 20)])
+    assert not carve.any() and not barrier.any()
+    # Off by default: the threshold cells are ignored when the reach is 0.
+    carve, _ = room_watershed.door_carve_mask(healed, clearance, [], home_params(door_snap_reach_m=0.9), HOME_RES,
+                                              threshold_cells=[doorway])
+    assert not carve.any()
+
+
+
+# -- the floor beyond an open doorway is a room of its own (2026-10-21) --------------------------------------
+def glimpsed_hall(depth_rows=4):
+    """``room_doorway_hall`` with only ``depth_rows`` of the hall seen through the doorway; returns ``(free, unknown)``."""
+    free, doorway, _, _ = room_doorway_hall()
+    seen = free.copy()
+    seen[43:70, :] = False
+    seen[43:43 + depth_rows, 29:41] = True
+    unknown = np.zeros_like(free)
+    unknown[43:70, 10:60] = True
+    unknown[43:43 + depth_rows, 29:41] = False
+    return seen, unknown
+
+
+def test_the_sliver_seen_through_a_doorway_is_a_stub_room_beyond_the_threshold_not_part_of_the_room():
+    """Before: the sliver had no clearance peak, so no label, and the reclaim handed it to the nearest seeded
+    room ACROSS the cut -- the toilet seen through the door named the hallway a bathroom. With
+    ``stub_min_cells`` the sliver is a room of its own, exempt from ``min_room_cells``."""
+    seen, unknown = glimpsed_hall()
+    _, doorway, misplaced, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    for cuts in (dict(door_cells=[], threshold_cells=[doorway]), dict(door_cells=[misplaced])):
+        room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, params, unknown_mask=unknown, **cuts)
+        room, sliver = int(room_lbl[20, 15]), int(room_lbl[44, 35])
+        assert room > 0 and sliver > 0 and room != sliver and len(stats) == 2, cuts
+        assert all(int(room_lbl[y, x]) == sliver for y in range(43, 47) for x in range(30, 40)), "one stub, whole"
+    # A thinner sliver -- two rows of floor beyond the door -- is under ``min_room_cells`` and kept all the same.
+    thin, thin_unknown = glimpsed_hall(depth_rows=2)
+    room_lbl, _, stats = segment_rooms_watershed(thin, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=thin_unknown)
+    assert len(stats) == 2 and int(room_lbl[43, 35]) != int(room_lbl[20, 15])
+    assert params.stub_min_cells <= min(s.n_cells for s in stats) < params.min_room_cells, "under the floor and kept"
+    # Legacy: with the knob off the sliver is the room's, as before.
+    legacy = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5)
+    room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, legacy, [], threshold_cells=[doorway])
+    assert len(stats) == 1 and int(room_lbl[44, 35]) == int(room_lbl[20, 15])
+    # Nothing seen beyond the door: nothing to instantiate; the whole hall seen: two rooms as ever.
+    none, _, _, _ = room_doorway_hall()
+    none[43:70, :] = False
+    assert len(segment_rooms_watershed(none, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=unknown)[2]) == 1
+    free, _, _, _ = room_doorway_hall()
+    _, _, stats = segment_rooms_watershed(free, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=np.zeros_like(free))
+    assert len(stats) == 2 and min(s.n_cells for s in stats) > params.min_room_cells
+    # As the hall is seen deeper the room beyond the door grows and stays one room apart from the first.
+    deeper, _, _, _ = room_doorway_hall()
+    deeper[53:70, :] = False
+    unk = np.zeros_like(deeper)
+    unk[53:70, 10:60] = True
+    room_lbl, _, stats = segment_rooms_watershed(deeper, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=unk)
+    assert len(stats) == 2 and int(room_lbl[50, 35]) != int(room_lbl[20, 15]) and int(room_lbl[50, 35]) == int(room_lbl[44, 35])
+
+
+def test_a_notch_a_cut_parts_off_is_no_stub_and_neither_is_an_open_rooms_frontier():
+    seen, unknown = glimpsed_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, params, [], threshold_cells=[(28, 11)], unknown_mask=unknown)
+    assert int(room_lbl[5, 28]) == int(room_lbl[20, 15]) > 0, "the dead-end notch borders no unknown: the room's"
+    room = np.zeros((60, 60), dtype=bool)
+    room[5:30, 5:55] = True                                   # an open room, its north half unseen
+    unk = np.zeros_like(room)
+    unk[30:58, 5:55] = True
+    assert len(segment_rooms_watershed(room, HOME_RES, params, [], threshold_cells=[(30, 27)], unknown_mask=unk)[2]) == 1, (
+        "a threshold at a frontier in open floor severs nothing and partitions nothing")
+
+
+def test_the_cut_at_a_doorway_is_a_line_across_the_passage_and_the_disk_only_where_the_line_does_not_seal():
+    """The disk sized to the passage swallowed a thin sliver whole (no far side left) or left two crescents of
+    it (two stubs). The line -- two cells thick, from the choke toward its jamb and the opposite way -- is the
+    fence the flood needs and keeps the sliver in one piece."""
+    seen, unknown = glimpsed_hall()
+    _, doorway, _, _ = room_doorway_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    healed, clearance, _ = clearance_and_skeleton(seen)
+    carve, barrier = room_watershed.door_carve_mask(healed, clearance, [], params, HOME_RES, threshold_cells=[doorway],
+                                                    unknown_mask=unknown)
+    ys, xs = np.nonzero(carve)
+    assert carve.any() and not barrier.any()
+    assert ys.max() - ys.min() <= 2 and xs.min() <= 31 and xs.max() >= 38, "a band across the 0.8 m doorway, wall to wall"
+    assert 40 <= ys.min() and ys.max() <= 43, "at the doorway, not in the sliver"
+    # The full hall seen: the line still seals the doorway and parts room from hall.
+    free, _, _, _ = room_doorway_hall()
+    room_lbl, _, stats = segment_rooms_watershed(free, HOME_RES, params, [], threshold_cells=[doorway], unknown_mask=np.zeros_like(free))
+    assert len(stats) == 2 and int(room_lbl[20, 15]) != int(room_lbl[60, 35])
+
+
+def test_a_sightline_to_an_opening_names_the_doorway_it_passes_and_an_open_rooms_frontier_names_nothing():
+    from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenham
+    seen, unknown = glimpsed_hall()
+    params = home_params(door_snap_reach_m=0.9, threshold_snap_reach_m=0.5, stub_min_cells=4)
+    line = list(bresenham(35, 20, 35, 45))                     # from the room, through the doorway, to the sliver's frontier
+    dips = room_watershed.sightline_thresholds(seen, HOME_RES, line, params, unknown_mask=unknown)
+    assert len(dips) == 1 and dips[0][0] == 35 and 39 <= dips[0][1] <= 43, dips
+    room_lbl, _, stats = segment_rooms_watershed(seen, HOME_RES, params, [], threshold_cells=dips, unknown_mask=unknown)
+    assert len(stats) == 2 and int(room_lbl[44, 35]) != int(room_lbl[20, 15])
+    # An open room's frontier names no doorway, read against the observed obstacles or against every non-free cell.
+    room = np.zeros((60, 60), dtype=bool)
+    room[5:30, 5:55] = True
+    unk = np.zeros_like(room)
+    unk[30:58, 5:55] = True
+    assert room_watershed.sightline_thresholds(room, HOME_RES, list(bresenham(30, 8, 30, 29)), params, unknown_mask=unk) == []
+    assert room_watershed.sightline_thresholds(room, HOME_RES, list(bresenham(30, 8, 30, 29)), params) == []
+    assert room_watershed.sightline_thresholds(seen, HOME_RES, line[:2], params, unknown_mask=unknown) == []
+    with pytest.raises(ValueError):
+        room_watershed.sightline_thresholds(seen, 0.0, line, params)

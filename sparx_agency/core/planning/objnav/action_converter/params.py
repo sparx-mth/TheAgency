@@ -1,0 +1,103 @@
+"""Tuning of the waypoint-to-action conversion.
+
+The benchmark fixes the *geometry* of an action
+(:class:`~sparx_agency.core.planning.objnav.types.DiscreteActionSpec`); these
+decide which action to take. Two tolerances are deliberately *not* here,
+because they follow from the geometry and a separate knob could only make them
+wrong: the heading dead band is half a turn, and the pitch dead band is half a
+tilt. A dead band narrower than half a turn would make the agent turn left,
+overshoot, turn right, forever.
+An optional bounded hysteresis margin may widen the path-following band after
+forward progress or an opposite turn; it never narrows the geometric band.
+
+Python 3.8 syntax, standard library only.
+"""
+from __future__ import annotations
+
+import math
+import numbers
+from dataclasses import dataclass
+
+from sparx_agency.core.planning.objnav.errors import ObjNavError
+
+
+@dataclass(frozen=True)
+class ActionConverterParams:
+    """How the converter follows a path. Metres.
+
+    Attributes:
+        lookahead_m: How far ahead along the path, from the agent's projection
+            onto it, the heading target sits. At least one forward step (the
+            converter checks this against the spec): a target closer than half
+            a step is overshot by the next step, and the agent turns back.
+            Longer lookaheads cut corners. Two steps by default.
+        goal_tolerance_m: The path counts as complete once the aim point is
+            its last waypoint and the agent is within this distance of it.
+            The effective tolerance is never below the ladder's
+            ``reach_floor``, ``step / (2 cos(turn / 2))`` (0.129 m for
+            Habitat's 0.25 m and 30 degrees): nearer than that no step aligned
+            within the half-turn dead band is sure to close in, and insisting
+            would turn toward the goal, face ``final_yaw`` and turn back
+            forever. One step by default: the policy places the last waypoint
+            where it wants to stand, and 0.25 m is well inside every
+            benchmark's success radius.
+        blocked_epsilon_m: A MOVE_FORWARD that advanced the agent less than
+            this ALONG ITS HEADING is reported as blocked. Sideways skid does
+            not count: a simulator that slides the agent along a wall it
+            walked into (Habitat's ``allow_sliding``) moves it 4-9 cm along
+            the wall per step while it gains 1-3 cm forward, and a threshold
+            on total displacement never fires. A fifth of Habitat's step by
+            default: an unobstructed step advances the full 0.25 m, a graze
+            steeper than ~63 degrees off the wall's normal still advances
+            more than 5 cm and is progress, anything flatter is a blocked
+            step the policy must be told about.
+        heading_hysteresis_deg: Extra path-only deadband after forward progress
+            or a reversing turn on the same path. Zero preserves legacy behavior;
+            bounded to two degrees, never applied to final facing or recovery.
+        plan_position_tolerance_m: How far the agent may stand from a
+            command's ``plan_pose`` for its planned actions to be executed
+            (since 2026-10-28). The simulator executes a step to the
+            millimetre, so this only absorbs float noise and a pose read
+            from a navmesh snap; a centimetre is generous. Beyond it the
+            plan is stale and the waypoints are followed instead.
+        plan_heading_tolerance_deg: The same for the heading, degrees.
+        strict_plan_tracking: Rigid tracking (since 2026-10-28). The ladder's
+            aim is one forward step along the path instead of
+            ``lookahead_m`` -- it turns at every kink and never cuts a
+            corner -- and the heading hysteresis is off; a command with a
+            plan whose start the agent has left is answered with the turn
+            toward the plan's heading before anything else, and with the
+            one-step aim once the heading is right. For a policy that plans
+            every route on the action lattice and re-plans from the exact
+            pose: the ladder is then only ever the fallback, and a fallback
+            that shortcuts the planned turns undoes the plan.
+
+    Raises:
+        ObjNavError: If any value is not a positive finite number, or
+            ``strict_plan_tracking`` is not a bool.
+    """
+
+    lookahead_m: float = 0.5
+    goal_tolerance_m: float = 0.25
+    blocked_epsilon_m: float = 0.05
+    heading_hysteresis_deg: float = 0.0
+    plan_position_tolerance_m: float = 0.02
+    plan_heading_tolerance_deg: float = 1.0
+    strict_plan_tracking: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.strict_plan_tracking, bool):
+            raise ObjNavError("ActionConverterParams.strict_plan_tracking must be a bool, got %r"
+                              % (self.strict_plan_tracking,))
+        for name in ("lookahead_m", "goal_tolerance_m", "blocked_epsilon_m", "plan_position_tolerance_m",
+                     "plan_heading_tolerance_deg"):
+            value = getattr(self, name)
+            if (not isinstance(value, numbers.Real) or isinstance(value, bool)
+                    or not math.isfinite(value) or value <= 0):
+                raise ObjNavError(
+                    "ActionConverterParams.%s must be a positive finite "
+                    "number, got %r" % (name, value))
+        value = self.heading_hysteresis_deg
+        if (not isinstance(value, numbers.Real) or isinstance(value, bool)
+                or not math.isfinite(value) or not 0.0 <= value <= 2.0):
+            raise ObjNavError("heading_hysteresis_deg must be finite and between 0 and 2")

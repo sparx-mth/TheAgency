@@ -182,6 +182,11 @@ class WeightedAStarPlanner2D:
         corridor pays for more. The ladder always restarts at the preferred
         standoff, so a relaxation is never carried over between calls.
 
+        With ``params.detour_factor`` on, a success above the floor standoff is
+        checked against the floor's own route (one more search): a route more
+        than ``detour_factor`` times longer than the squeeze is a detour, and
+        the squeeze is returned instead (``artifacts["detour_avoided_m"]``).
+
         On total failure the phantom probe runs (see :class:`WeightedAStarParams`)
         and its verdict is attached to the returned failure.
 
@@ -191,17 +196,44 @@ class WeightedAStarPlanner2D:
         """
         fields = self.fields_for(world)
         failed = None
-        for inflate_m in self.standoff_ladder():
+        ladder = self.standoff_ladder()
+        for inflate_m in ladder:
             if inflate_m == self.params.inflate_radius_m:
                 cost, lethal, _ = self.cost_for(world)      # cached preferred rung
             else:
                 cost, lethal = assemble_cost_grid(fields, self.params, inflate_m)
             result = self._plan_at(request, world, cost, lethal, inflate_m)
             if result.ok:
+                squeezed = self._squeeze_instead(request, world, fields, result, inflate_m, ladder)
+                if squeezed is not None:
+                    result, inflate_m = squeezed
                 self._last_inflate_m = inflate_m
                 return result
             failed = result
         return self._probe_for_phantom(request, world, fields, failed)
+
+    def _squeeze_instead(self, request, world, fields, result, inflate_m, ladder):
+        """The floor-standoff route when ``result`` is a detour by ``params.detour_factor``, else None.
+
+        Only when the rung that succeeded is above the floor and the factor
+        is on: one more search at the floor rung, and its route replaces the
+        detour when ``detour > detour_factor * squeeze`` (both in metres of
+        path). The returned pair is ``(result, inflate_m)``.
+        """
+        p = self.params
+        floor = ladder[-1]
+        if p.detour_factor <= 0.0 or inflate_m <= floor + 1e-9 or result.path is None:
+            return None
+        cost, lethal = assemble_cost_grid(fields, p, floor)
+        squeeze = self._plan_at(request, world, cost, lethal, floor)
+        if not squeeze.ok or squeeze.path is None:
+            return None
+        detour_m, squeeze_m = result.path.length(), squeeze.path.length()
+        if detour_m <= p.detour_factor * squeeze_m:
+            return None
+        squeeze.artifacts["detour_avoided_m"] = float(detour_m)
+        squeeze.artifacts["detour_factor"] = float(p.detour_factor)
+        return squeeze, floor
 
     def standoff_ladder(self) -> List[float]:
         """Standoffs to attempt, preferred first, descending to the flyable floor."""
