@@ -11,6 +11,33 @@ Format per entry:
 
 ---
 
+## 2026-11-12 — The room-extents A/B's resume was refused after a reboot for a lock-file path, and its report saw no oracle round in 200 episodes
+
+- **Symptom** — The laptop hard-froze at 07:10 (the journal stops cold at the second of Ollama's last answer; no
+  kernel error, no shutdown, no suspend) with arm-with at 53 of 200. After the power cycle `ab_room_extents.sh
+  --output <root> --arm with` resumed the campaign, but both half-done scenes exited 1 at once: `cannot resume ...
+  with a different config (method differ)`. Then, both arms complete, the report said "the arms parted at an oracle
+  round in 0 episodes" and "no oracle round in either arm" on all 16 changed episodes -- with 1,064 and 1,143 oracle
+  answers in the two stores.
+- **Root cause** — (1) `LLM_EXCLUSIVE=1` puts the lock under `tempfile.gettempdir()`, i.e. `$TMPDIR`, which the
+  Copilot CLI sets PER SESSION (`/tmp/github-copilot-<id>`); the lock's path is in the frozen configuration
+  (`method.llm_exclusive.lock`), so a resume from a new session presents a different `method`, and `differing_keys`
+  reports the top-level key only. (2) The launcher writes `--lean` rows, which drop `solver_records` and
+  `estimate_events` -- exactly the ledgers `ab_room_extents_report.rounds()` read -- and the recordings hold no
+  `steps.jsonl`; the report had been written against full records and tested on synthetic ones.
+- **Fix / workaround** — (1) For that run: recreate the old temp dir and resume under `TMPDIR=/tmp/github-copilot-Uv9j47`
+  (`runs/ab_room_extents_20261111T2000Z/resume.sh`), after setting aside the two scenes the first attempt had started
+  under the new path. For the future: the launcher pins `LLM_EXCLUSIVE` to a fixed path per server port, so the
+  configuration no longer depends on the session. (2) The report reads the rounds from the answer stores
+  (`<root>_answers`) when the rows carry no ledgers -- every prompt with its room lines, every answer with its
+  numbers -- and from them also says whether both arms faced the same state at the parting; the rounds then carry
+  no action index (the stores do not record it) and the order is the oracle's numbers, not the solver's.
+- **Don't** — Do not pass `--resume-accepting-changes method` to get past (1): it accepts ANY change under `method`,
+  the model and prompts included, and the harness's refusal is the only thing standing between two experiments and
+  one file. Do not edit a running bash launcher in place to fix it either: bash reads the script by byte offset as it
+  goes, and the fix lands after it exits. And do not read "0 partings" as agreement: a report that cannot see the
+  rounds says so in the counts (`no_oracle_round` = every episode), not in a verdict.
+
 ## 2026-11-11 — A room "with all walls seen" that was twelve times bigger three actions later: the sliver through a door, and the floor of no room
 
 - **Symptom** — Replaying 00880-Nfvxx8J5NCo/000009 through the new room extents, room 5 read `0.7m2, all walls seen`

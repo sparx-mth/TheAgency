@@ -79,7 +79,8 @@ def test_the_report_pairs_the_arms_finds_the_parting_round_and_flags_the_coverag
     assert rep["changes"]["same_outcome"] == 1 and rep["changes"]["spl_up"] == 1 and rep["changes"]["spl_down"] == 1
     assert rep["changes"]["dtg_better"] == 1 and rep["changes"]["dtg_worse"] == 1
     assert rep["paired"]["pairs"] == 3 and rep["paired"]["flips_to_success"] == ["scene/000001"]
-    assert rep["parting"] == {"at_an_oracle_round": 1, "orders_agreed_throughout": 2}
+    assert rep["parting"]["at_an_oracle_round"] == 1 and rep["parting"]["orders_agreed_throughout"] == 2
+    assert rep["parting"]["source"] == "ledgers" and rep["parting"]["no_oracle_round"] == 0
     improved, worse = rep["changed_episodes"]
     assert improved["parted"]["round"] == 1 and improved["parted"]["without_order"] == [2, 3] and improved["parted"]["with_order"] == [3, 2]
     assert improved["coverage_driven"] and "at least 3m2 left" in improved["coverage_words"]
@@ -114,6 +115,103 @@ def test_an_arm_paired_with_itself_changes_nothing(tmp_path):
     rep = report.build_report(a_root, a_root)
     assert rep["changes"]["improved"] == [] and rep["changes"]["worse"] == [] and rep["changed_episodes"] == []
     assert rep["parting"]["at_an_oracle_round"] == 0
+
+
+WITHOUT_LINE = ("id=%d  ROOM  type=%s  size=%dm2  frontier=%d  exits=1 (~20m2 unseen behind them)  status=%s  searched=0s  "
+                "seen: %s")
+WITH_LINE = ("id=%d  ROOM  type=%s  size=at least %dm2 (4+ x 3+m, 4 of 4 walls not seen yet)  covered=2m2 (at most 40%% of the room, "
+             "at least 3m2 left)  seen: %s  frontier=%d (~18m2 unknown behind them)  exits=1  status=%s  searched=0s")
+
+
+def oracle_record(episode_id, stamp, lines, scores, reasons=None):
+    """One node-oracle record as ``llm_answer_cache`` writes it: the prompt with its room lines, the answer with its numbers."""
+    prompt = "TARGET: toilet\nWHERE IT LIVES: bathroom\n\nHOUSE: rooms found: 1; actions used about 0 of 500\n\nNODES (%d):\n%s\n\nScore all nodes." % (
+        len(lines), "\n".join(lines))
+    answer = {"home": "bathroom", "house": "one room", "stage": "early", "pass": "first",
+              "nodes": [{"id": nid, "why": (reasons or {}).get(nid, ""), "p": p} for nid, p in scores.items()]}
+    return {"route": "reasoning", "model": "qwen2.5:3b-instruct", "system": "rules", "user": prompt, "source": "model",
+            "reply": {}, "schema": "llm_answers/1", "key": "k", "answer": json.dumps(answer), "scope": episode_id,
+            "recorded_utc": stamp}
+
+
+def write_lean_arms_with_stores(tmp_path):
+    """Lean rows (no ledgers) and the two answer stores beside them, as the A/B launcher leaves a run."""
+    a_root, b_root = tmp_path / "without", tmp_path / "with"
+    for root in (a_root, b_root):
+        (root / "scene").mkdir(parents=True)
+    lean = {"agent_info": {"lean": True, "policy": {"room_search_loop": {"order": [], "stats": {}}}}}
+    a_rows = [dict(row("scene/000001", True, 0.6, 0.1, 90, []), **lean), dict(row("scene/000002", True, 0.5, 0.1, 120, []), **lean),
+              dict(row("scene/000003", True, 0.5, 0.1, 50, []), **lean)]
+    b_rows = [dict(row("scene/000001", False, 0.0, 6.0, 500, []), **lean), dict(row("scene/000002", True, 0.5, 0.1, 120, []), **lean),
+              dict(row("scene/000003", False, 0.0, 4.0, 500, []), **lean)]
+    for root, rows in ((a_root, a_rows), (b_root, b_rows)):
+        (root / "scene" / "episodes.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    # Episode 1: the same two rooms in both arms at round 0 -- a scanned dining room and an unentered unknown room; the
+    # arms' numbers put a different room first. Episode 2: the same numbers, no parting. Episode 3: arm-with's round 1
+    # shows a room arm-without never had (the arms diverged before that round, elsewhere than at the oracle).
+    a_records = [oracle_record("scene/000001", "2026-11-12T00:00:01Z",
+                               [WITHOUT_LINE % (0, "dining_room", 14, 3, "scanned(full rotation, 0s ago)", "chair, table"),
+                                WITHOUT_LINE % (2, "unknown", 6, 1, "never_entered", "nothing yet")], {0: 10, 2: 60}),
+                 oracle_record("scene/000002", "2026-11-12T00:00:02Z", [WITHOUT_LINE % (0, "bathroom", 5, 1, "never_entered", "nothing yet")], {0: 70}),
+                 oracle_record("scene/000003", "2026-11-12T00:00:03Z", [WITHOUT_LINE % (0, "hallway", 5, 1, "never_entered", "nothing yet")], {0: 20}),
+                 oracle_record("scene/000003", "2026-11-12T00:00:04Z", [WITHOUT_LINE % (0, "hallway", 5, 1, "never_entered", "nothing yet"),
+                                                                        WITHOUT_LINE % (1, "bedroom", 12, 1, "never_entered", "bed")], {0: 20, 1: 50})]
+    b_records = [oracle_record("scene/000001", "2026-11-12T00:00:01Z",
+                               [WITH_LINE % (0, "dining_room", 14, "chair, table", 3, "scanned(full rotation, 0s ago)"),
+                                WITH_LINE % (2, "unknown", 6, "nothing yet", 1, "never_entered")], {0: 55, 2: 30},
+                               reasons={0: "dining room, scanned, 3m2 left", 2: "unknown room, mostly unseen"}),
+                 oracle_record("scene/000002", "2026-11-12T00:00:02Z", [WITH_LINE % (0, "bathroom", 5, "nothing yet", 1, "never_entered")], {0: 70}),
+                 oracle_record("scene/000003", "2026-11-12T00:00:03Z", [WITH_LINE % (0, "hallway", 5, "nothing yet", 1, "never_entered")], {0: 20}),
+                 oracle_record("scene/000003", "2026-11-12T00:00:04Z", [WITH_LINE % (0, "hallway", 5, "nothing yet", 1, "never_entered"),
+                                                                        WITH_LINE % (4, "kitchen", 9, "sink", 1, "never_entered")], {0: 20, 4: 50})]
+    for root, records in ((a_root, a_records), (b_root, b_records)):
+        store = tmp_path / (root.name + "_answers")
+        store.mkdir()
+        (store / "answers-host-1.jsonl").write_text("\n".join(json.dumps(r) for r in records) + "\n" + "\x00" * 40 + "\n")
+    return str(a_root), str(b_root)
+
+
+def test_lean_rows_take_their_oracle_rounds_from_the_answer_stores_and_tell_a_same_state_parting_apart(tmp_path):
+    a_root, b_root = write_lean_arms_with_stores(tmp_path)
+    rep = report.build_report(a_root, b_root)
+    assert rep["answer_stores"] == {"without": a_root + "_answers", "with": b_root + "_answers"}
+    assert rep["parting"]["source"] == "answer store"
+    assert rep["parting"]["at_an_oracle_round"] == 2 and rep["parting"]["orders_agreed_throughout"] == 1
+    assert rep["parting"]["same_state_at_parting"] == 1 and rep["parting"]["state_already_differed_at_parting"] == 1
+    assert rep["parting"]["same_state_episodes"] == ["scene/000001"]
+    first, third = rep["changed_episodes"]
+    assert first["rounds_source"] == "answer store" and first["parted"]["round"] == 0
+    assert first["parted"]["without_order"] == [2, 0] and first["parted"]["with_order"] == [0, 2]
+    assert first["same_state_at_parting"] is True and first["coverage_driven"]
+    assert "3m2 left" in first["coverage_words"]
+    assert first["parted"]["with_nodes"][0]["p"] == 55 and first["parted"]["with_nodes"][0]["line"].startswith("id=0  ROOM  type=dining_room  size=at least 14m2")
+    assert first["parted"]["without_nodes"][0]["line"].startswith("id=2  ROOM  type=unknown  size=6m2")
+    assert third["parted"]["round"] == 1 and third["same_state_at_parting"] is False
+    text = report.markdown(rep)
+    for fragment in ("rounds from the answer store", "1 were on the SAME state", "1 after the arms had already diverged",
+                     "the same rooms and evidence in both arms; the size and coverage lines alone differed",
+                     "the rooms or evidence already differed: the arms had parted before this round",
+                     "covered=2m2 (at most 40% of the room, at least 3m2 left)", "-> p=55.00"):
+        assert fragment in text, fragment
+
+
+def test_the_room_line_parser_reads_both_formats_and_the_signature_ignores_what_the_mechanism_changed():
+    before = report.parse_node_line(WITHOUT_LINE % (3, "dining_room?", 8, 7, "never_entered", "dining table"))
+    after = report.parse_node_line(WITH_LINE % (3, "dining_room?", 8, "dining table", 7, "never_entered"))
+    assert before["id"] == after["id"] == 3 and before["kind"] == after["kind"] == "ROOM"
+    assert before["fields"]["size"] == "8m2" and after["fields"]["size"].startswith("at least 8m2")
+    assert "covered" not in before["fields"] and after["fields"]["covered"].startswith("2m2")
+    assert before["fields"]["seen"] == after["fields"]["seen"] == "dining table"
+    assert report.state_signature([before]) == report.state_signature([after]) == ((3, "ROOM", "dining_room?", "dining table", 7, 1, "never_entered"),)
+    assert report.parse_node_line("HOUSE: rooms found: none") is None
+    assert report.parse_node_line("Score all 3 nodes independently. JSON only.") is None
+
+
+def test_a_missing_store_leaves_the_report_as_before(tmp_path):
+    a_root, b_root = write_arms(tmp_path)
+    rep = report.build_report(a_root, b_root, a_answers="", b_answers="")
+    assert rep["parting"]["source"] == "ledgers" and rep["answer_stores"] == {"without": "", "with": ""}
+    assert report.load_answer_store(None) == {} and report.load_answer_store(str(tmp_path / "nowhere")) == {}
 
 
 REAL = os.path.expanduser("~/GIT/TheAgency/runs/rerun2_relook_lookdown_20261105")

@@ -689,19 +689,35 @@ python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.representati
 
 The code before the room size and coverage mechanism (a detached worktree at `95aae785`, made beside this checkout)
 against the code with it, on the fixed set, one arm after the other: ground-truth perception, `qwen2.5:3b-instruct`
-in both LLM roles on an Ollama of its own (port 11436 -- a resident server is never asked, never evicts), temperature
-0, seed 17, `LLM_EXCLUSIVE=1`, the first arm recording its answers and the second replaying them, `--record` on both.
-It refuses to start unless the card holds the 3B and the renderers beside whatever is running (`AB_MIN_FREE_MIB`,
-5,500 by default); `--dry-run` prints the plan and the verdict. Then `ab_room_extents_report.py` writes SR / SPL /
-SoftSPL / DTG per arm with the paired intervals and McNemar, the improved / worse episodes, where each parted (the
-first oracle round whose order differs, both arms' room lines and numbers from the recordings) and the partings
-arm-with made on coverage or size.
+in both LLM roles on an Ollama of its own (a native server on port 11436 where the `ollama` binary exists; where
+Ollama is only the Docker container publishing 11434 -- the laptop -- that container, with nothing else running
+beside the A/B), both routes at the 8192-token window (4096 cut the oracle prompt, whose system part alone is
+~3,900 tokens with the mechanism), temperature 0, seed 17, `LLM_EXCLUSIVE` at a fixed lock path, the first arm
+recording its answers and the second replaying them, `--record` on both. It refuses to start unless the card holds
+the 3B and the renderers beside whatever is running (`AB_MIN_FREE_MIB`, 5,500 by default; what the A/B's own server
+already holds counts as free); `--dry-run` prints the plan and the verdict, `-- --preflight` runs both arms'
+preflights without an episode. An arm is relaunched (up to `AB_MAX_ATTEMPTS`, the frozen GPU plan replayed) until
+every episode of the set has a row, and `--output <root>` of an earlier run resumes it -- `--arm with` alone when
+arm-without is already complete. Then `ab_room_extents_report.py` writes SR / SPL / SoftSPL / DTG per arm with the
+paired intervals and McNemar, the improved / worse episodes, where each parted (the first oracle round whose order
+differs) and the partings arm-with made on coverage or size. The launcher writes lean rows, which carry no oracle
+ledgers, so the report reads the rounds from the two answer stores (`<root>_answers`): every oracle prompt with its
+room lines and every answer with its numbers and words, and says whether both arms faced THE SAME STATE at the
+parting (the size and coverage lines were then the only difference the oracle saw) or had already diverged.
 
 ```bash
 sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --dry-run
-sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --jobs 2          # ~7 h for both arms
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --jobs 2          # ~7 h for both arms on the 24 GB machine; ~12 h on the laptop
+sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --output runs/ab_room_extents_<stamp> --arm with   # resume arm-with after an interruption
 sparx_agency/tasks/planning/objnav_benchmark_runtime/hm3d/ab_room_extents.sh --report-only runs/ab_room_extents_<stamp>
 ```
+
+The first run, `runs/ab_room_extents_20261111T2000Z` (laptop, 2026-11-11/12): SR 0.690 → 0.670 (paired −0.020,
+95 % CI [−0.060, 0.020], McNemar p = 0.45), SPL 0.348 → 0.343 (−0.005 [−0.027, 0.016]), DTG 3.66 → 3.77 m;
+6 episodes improved, 10 got worse, 184 unchanged; same-storey SR 0.816 → 0.791, cross-storey 0.214 → 0.214. The
+arms parted at an oracle round in 137 of the 200 episodes, 113 of them on the same state -- the 3B reads
+"mostly unseen" as a reason to go and "N m2 left" as a reason to leave, whichever room type it is -- and the
+difference is within the noise of a 200-episode set (`docs/progress/` and `HANDOFF.md` 2026-11-12).
 
 ### Development split
 

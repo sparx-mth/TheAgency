@@ -17,10 +17,22 @@ their recordings, and writes:
   size the arm-with's words name flagged as COVERAGE-DRIVEN decisions;
 * the examples: the coverage-driven partings with the biggest outcome change.
 
+The oracle rounds come from the rows' ledgers where the run kept them. The
+launchers write ``--lean`` rows by default, which drop those ledgers; then the
+rounds are read from the arms' ANSWER STORES (``LLM_ANSWERS_RECORD``, the
+``<root>_answers`` directory beside each root unless ``--answers-without`` /
+``--answers-with`` say otherwise): every oracle prompt with its room lines and
+every answer with its numbers and words, in order, per episode. A round from
+the store carries the state the oracle was shown -- the rooms, their types and
+their evidence, without the size and coverage fields -- so a parting is also
+said to be on THE SAME STATE (the mechanism's lines were the only difference,
+and they changed the decision) or after an earlier divergence (the arms had
+already parted elsewhere: a fresh room label, a different scan).
+
 Usage::
 
     python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.ab_room_extents_report <without root> <with root> \\
-        [--markdown report.md] [--json report.json] [--examples 8]
+        [--markdown report.md] [--json report.json] [--examples 8] [--answers-without DIR] [--answers-with DIR]
 
 Python 3.8 syntax; standard library plus the runtime's own modules.
 """
@@ -34,6 +46,7 @@ import math
 import os
 import re
 import sys
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, STAIRS, OPENING, SearchNode, format_node
@@ -44,6 +57,10 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.paired_ab import compa
 COVERAGE_WORDS = ("cover", "left", "unseen", "wall", "m2", "mapped", "at least", "most of", "unexplored part", "remaining",
                   "lower bound", "size")
 NODE_FIELDS = {f for f in SearchNode.__dataclass_fields__}  # type: ignore[attr-defined]
+#: A room line of the oracle prompt, both before and with the mechanism: ``id=3  ROOM  type=... size=... ...``.
+NODE_LINE = re.compile(r"^id=(\d+)\s+(ROOM|STAIRS|OPENING)\s+(.*)$")
+#: The answer-store route the node oracle records under (``llm_client`` names the label route ``default``).
+ORACLE_ROUTE = "reasoning"
 
 
 def recording_key(episode_id: str) -> str:
@@ -84,6 +101,131 @@ def rounds(row: dict) -> List[dict]:
                     "pass": event.get("pass_verdict"), "house": event.get("house", ""),
                     "p_present": event.get("p_present")})
     return out
+
+
+def default_answer_store(root: str) -> Optional[str]:
+    """The ``<root>_answers`` directory the A/B launcher records beside an arm's root, when it exists."""
+    base = os.path.normpath(root)
+    candidate = os.path.join(os.path.dirname(base), os.path.basename(base) + "_answers")
+    return candidate if os.path.isdir(candidate) else None
+
+
+def load_answer_store(path: Optional[str]) -> Dict[str, List[dict]]:
+    """The node oracle's records of an answer store, by episode, in the order they were recorded.
+
+    Every ``*.jsonl`` file under ``path`` holds one record per line (``llm_answer_cache``); a line that is not JSON
+    (a write cut by a crash) is skipped. Only the oracle's route is kept: the room-label route asks nothing the
+    report reads.
+    """
+    by_episode = defaultdict(list)  # type: Dict[str, List[dict]]
+    if not path or not os.path.isdir(path):
+        return {}
+    serial = 0
+    for file in sorted(glob.glob(os.path.join(path, "*.jsonl"))):
+        with open(file, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("route") != ORACLE_ROUTE:
+                    continue
+                serial += 1
+                record["_serial"] = serial
+                by_episode[str(record.get("scope"))].append(record)
+    for records in by_episode.values():
+        records.sort(key=lambda r: (str(r.get("recorded_utc") or ""), r["_serial"]))
+    return dict(by_episode)
+
+
+def parse_node_line(line: str) -> Optional[dict]:
+    """One room line of the oracle prompt as ``{id, kind, fields, line}``; None for any other line.
+
+    Fields are ``key=value`` groups two or more spaces apart; ``seen: a, b`` is the room's evidence. The format
+    before the mechanism (``size=14m2  frontier=3  exits=2 (~35m2 unseen behind them)  ...  here=yes  seen: ...``)
+    and with it (``size=at least 14m2 (...)  covered=7m2 (...)  seen: ...  frontier=3 (~33m2 unknown behind them)``)
+    both parse; the signature below keeps what the mechanism did not touch.
+    """
+    match = NODE_LINE.match(line.strip())
+    if not match:
+        return None
+    fields = {}  # type: Dict[str, str]
+    for part in re.split(r"\s{2,}", match.group(3).strip()):
+        if part.startswith("seen:"):
+            fields["seen"] = part[len("seen:"):].strip()
+        elif "=" in part:
+            key, value = part.split("=", 1)
+            fields[key.strip()] = value.strip()
+    return {"id": int(match.group(1)), "kind": match.group(2), "fields": fields, "line": line.strip()}
+
+
+def _leading_int(text: Optional[str]) -> Optional[int]:
+    match = re.match(r"\s*(\d+)", text or "")
+    return int(match.group(1)) if match else None
+
+
+def state_signature(nodes: Sequence[dict]) -> Tuple[Tuple[Any, ...], ...]:
+    """What the oracle was shown that the mechanism does not change: each room's id, kind, type, evidence, frontier
+    and exit counts and its status word. Equal signatures in both arms mean the same situation, differently worded."""
+    out = []
+    for node in nodes:
+        fields = node["fields"]
+        status = re.match(r"[a-z_]+", fields.get("status", "") or "")
+        out.append((node["id"], node["kind"], fields.get("type"), fields.get("seen"),
+                    _leading_int(fields.get("frontier")), _leading_int(fields.get("exits")),
+                    status.group(0) if status else None))
+    return tuple(out)
+
+
+def store_rounds(records: Sequence[dict]) -> List[dict]:
+    """The episode's oracle rounds from its answer-store records, in the shape :func:`rounds` gives, plus
+    ``nodes`` (the room lines with the numbers and words the oracle gave them) and ``state`` (:func:`state_signature`).
+
+    The order is the oracle's own numbers, highest first (ties by id): the solver's order, which the ledgers hold,
+    is not in the store. ``step`` is unknown and None.
+    """
+    out = []
+    for index, record in enumerate(records):
+        prompt = str(record.get("user") or "")
+        answer = record.get("answer")
+        if isinstance(answer, str):
+            try:
+                answer = json.loads(answer)
+            except ValueError:
+                answer = {}
+        answer = answer if isinstance(answer, dict) else {}
+        nodes = [n for n in (parse_node_line(line) for line in prompt.splitlines()) if n]
+        scores, reasons = {}, {}  # type: Dict[int, float], Dict[int, str]
+        for item in answer.get("nodes") or []:
+            try:
+                nid = int(item.get("id"))
+                scores[nid] = float(item.get("p"))
+            except (TypeError, ValueError):
+                continue
+            reasons[nid] = str(item.get("why") or "")
+        order = sorted(scores, key=lambda nid: (-scores[nid], nid))
+        house = next((line[len("HOUSE:"):].strip() for line in prompt.splitlines() if line.startswith("HOUSE:")), "")
+        rendered = [{"id": n["id"], "line": n["line"], "p": scores.get(n["id"]), "why": reasons.get(n["id"], "")} for n in nodes]
+        rendered.sort(key=lambda item: -(item["p"] if item["p"] is not None else -1.0))
+        out.append({"index": index, "step": None, "order": order, "top": order[0] if order else None,
+                    "reading": {str(k): v for k, v in scores.items()}, "pass": answer.get("pass"), "house": house,
+                    "p_present": None, "nodes": rendered, "state": state_signature(nodes)})
+    return out
+
+
+def pick_rounds(a_row: dict, b_row: dict, a_store: Dict[str, List[dict]], b_store: Dict[str, List[dict]],
+                episode_id: str) -> Tuple[List[dict], List[dict], str]:
+    """Both arms' rounds from one source: the ledgers when both rows carry them, else the answer stores."""
+    a_rounds, b_rounds = rounds(a_row), rounds(b_row)
+    if a_rounds or b_rounds:
+        return a_rounds, b_rounds, "ledgers"
+    a_records, b_records = a_store.get(episode_id) or [], b_store.get(episode_id) or []
+    if a_records or b_records:
+        return store_rounds(a_records), store_rounds(b_records), "answer store"
+    return [], [], "none"
 
 
 def first_parting(a_rounds: Sequence[dict], b_rounds: Sequence[dict]) -> Optional[Tuple[dict, dict]]:
@@ -150,9 +292,10 @@ def coverage_driven(b_nodes: Sequence[dict], a_top: Any, b_top: Any) -> Tuple[bo
     return bool(named), "; ".join(named)
 
 
-def episode_detail(episode_id: str, a_row: dict, b_row: dict, a_root: str, b_root: str) -> dict:
+def episode_detail(episode_id: str, a_row: dict, b_row: dict, a_root: str, b_root: str,
+                   a_store: Optional[Dict[str, List[dict]]] = None, b_store: Optional[Dict[str, List[dict]]] = None) -> dict:
     """Everything the report says about one episode whose outcome changed."""
-    a_rounds, b_rounds = rounds(a_row), rounds(b_row)
+    a_rounds, b_rounds, source = pick_rounds(a_row, b_row, a_store or {}, b_store or {}, episode_id)
     parting = first_parting(a_rounds, b_rounds)
     detail = {
         "episode_id": episode_id, "target": a_row.get("target_category"),
@@ -162,7 +305,8 @@ def episode_detail(episode_id: str, a_row: dict, b_row: dict, a_root: str, b_roo
         "with": {"success": bool(b_row.get("success")), "spl": float(b_row.get("spl", 0.0)),
                  "dtg_m": b_row.get("distance_to_goal_m"), "steps": b_row.get("steps"),
                  "termination": b_row.get("termination"), "rounds": len(b_rounds)},
-        "parted": None, "coverage_driven": False, "coverage_words": "",
+        "rounds_source": source, "parted": None, "same_state_at_parting": None,
+        "coverage_driven": False, "coverage_words": "",
     }
     if parting is None:
         detail["parted"] = {"where": "never at an oracle round: the orders agreed round for round" if a_rounds else
@@ -173,16 +317,24 @@ def episode_detail(episode_id: str, a_row: dict, b_row: dict, a_root: str, b_roo
               "without_order": ra["order"], "with_order": rb["order"],
               "without_reading": ra["reading"], "with_reading": rb["reading"],
               "without_house": ra["house"], "with_house": rb["house"]}
-    a_dir, b_dir = find_recording(a_root, episode_id), find_recording(b_root, episode_id)
-    if a_dir and ra["step"] is not None:
-        reasoning = oracle_at(load_steps(a_dir), ra["step"])
-        parted["without_nodes"] = render_nodes(reasoning) if reasoning else []
-    if b_dir and rb["step"] is not None:
-        reasoning = oracle_at(load_steps(b_dir), rb["step"])
-        parted["with_nodes"] = render_nodes(reasoning) if reasoning else []
+    if source == "answer store":
+        parted["without_nodes"], parted["with_nodes"] = ra.get("nodes") or [], rb.get("nodes") or []
+        if ra.get("state") is not None and rb.get("state") is not None:
+            detail["same_state_at_parting"] = ra["state"] == rb["state"]
+    else:
+        a_dir, b_dir = find_recording(a_root, episode_id), find_recording(b_root, episode_id)
+        if a_dir and ra["step"] is not None:
+            reasoning = oracle_at(load_steps(a_dir), ra["step"])
+            parted["without_nodes"] = render_nodes(reasoning) if reasoning else []
+        if b_dir and rb["step"] is not None:
+            reasoning = oracle_at(load_steps(b_dir), rb["step"])
+            parted["with_nodes"] = render_nodes(reasoning) if reasoning else []
     detail["parted"] = parted
     flagged, words = coverage_driven(parted.get("with_nodes", []), ra["top"], rb["top"])
-    detail["coverage_driven"], detail["coverage_words"] = flagged, words
+    # On the same state the mechanism's lines (and its rules) were the only difference the oracle saw: a changed
+    # top room there is its doing whether or not the words say so.
+    detail["coverage_driven"] = flagged or (bool(detail["same_state_at_parting"]) and ra["top"] != rb["top"])
+    detail["coverage_words"] = words
     return detail
 
 
@@ -200,13 +352,18 @@ def arm_summary(rows: Dict[str, dict], ids: Sequence[str]) -> dict:
             "steps": mean([rows[i].get("steps") for i in ids])}
 
 
-def build_report(a_root: str, b_root: str, examples: int = 8, levels: Optional[Dict[str, Dict[str, str]]] = None) -> dict:
+def build_report(a_root: str, b_root: str, examples: int = 8, levels: Optional[Dict[str, Dict[str, str]]] = None,
+                 a_answers: Optional[str] = None, b_answers: Optional[str] = None) -> dict:
     a, b = load_rows(a_root), load_rows(b_root)
     common = sorted(set(a) & set(b))
     if not common:
         raise ValueError("no episode is in both arms")
+    a_answers = a_answers if a_answers is not None else default_answer_store(a_root)
+    b_answers = b_answers if b_answers is not None else default_answer_store(b_root)
+    a_store, b_store = load_answer_store(a_answers), load_answer_store(b_answers)
     report = {"without_root": a_root, "with_root": b_root, "common_episodes": len(common),
               "only_without": sorted(set(a) - set(b)), "only_with": sorted(set(b) - set(a)),
+              "answer_stores": {"without": a_answers, "with": b_answers},
               "without": arm_summary(a, common), "with": arm_summary(b, common),
               "paired": compare(a, b)}
     improved = [i for i in common if b[i].get("success") and not a[i].get("success")]
@@ -225,17 +382,37 @@ def build_report(a_root: str, b_root: str, examples: int = 8, levels: Optional[D
                                  "with": arm_summary(b, same) if same else None}
         report["cross_storey"] = {"episodes": len(cross), "without": arm_summary(a, cross) if cross else None,
                                   "with": arm_summary(b, cross) if cross else None}
-    details = [episode_detail(i, a[i], b[i], a_root, b_root) for i in improved + worse]
+    details = [episode_detail(i, a[i], b[i], a_root, b_root, a_store, b_store) for i in improved + worse]
     report["changed_episodes"] = details
     # Where did the arms part, over every common episode? The mechanism acts at an oracle round; an episode whose
     # orders agreed throughout and still ended differently parted elsewhere (perception, kinematics, a fresh answer).
-    parted_at_round = parted_never = 0
+    # From the answer stores a round also says whether both arms faced the same state there.
+    parted_at_round = parted_never = no_round = same_state = state_differed = 0
+    sources = set()
+    same_state_episodes = []  # type: List[str]
     for i in common:
-        if first_parting(rounds(a[i]), rounds(b[i])) is None:
+        a_rounds, b_rounds, source = pick_rounds(a[i], b[i], a_store, b_store, i)
+        sources.add(source)
+        if not a_rounds and not b_rounds:
+            no_round += 1
+            continue
+        parting = first_parting(a_rounds, b_rounds)
+        if parting is None:
             parted_never += 1
-        else:
-            parted_at_round += 1
-    report["parting"] = {"at_an_oracle_round": parted_at_round, "orders_agreed_throughout": parted_never}
+            continue
+        parted_at_round += 1
+        ra, rb = parting
+        if ra.get("state") is not None and rb.get("state") is not None:
+            if ra["state"] == rb["state"]:
+                same_state += 1
+                same_state_episodes.append(i)
+            else:
+                state_differed += 1
+    report["parting"] = {"source": ", ".join(sorted(s for s in sources if s != "none")) or "none",
+                         "at_an_oracle_round": parted_at_round, "orders_agreed_throughout": parted_never,
+                         "no_oracle_round": no_round, "same_state_at_parting": same_state,
+                         "state_already_differed_at_parting": state_differed,
+                         "same_state_episodes": same_state_episodes}
     flagged = [d for d in details if d["coverage_driven"]]
     flagged.sort(key=lambda d: -abs(d["with"]["spl"] - d["without"]["spl"]))
     report["coverage_examples"] = flagged[:max(0, int(examples))]
@@ -260,8 +437,14 @@ def markdown(report: dict) -> str:
               "- worse (found without, failed with): **%d** -- %s" % (len(c["worse"]), ", ".join(c["worse"]) or "none"),
               "- same outcome: %d; SPL up on %d / down on %d (over 0.01); DTG better on %d / worse on %d (over 0.1 m)"
               % (c["same_outcome"], c["spl_up"], c["spl_down"], c["dtg_better"], c["dtg_worse"]),
-              "- the arms parted at an oracle round in %d episodes; the orders agreed throughout in %d"
-              % (report["parting"]["at_an_oracle_round"], report["parting"]["orders_agreed_throughout"])]
+              "- the arms parted at an oracle round in %d episodes; the orders agreed throughout in %d; no oracle round in %d "
+              "(rounds from the %s)"
+              % (report["parting"]["at_an_oracle_round"], report["parting"]["orders_agreed_throughout"],
+                 report["parting"].get("no_oracle_round", 0), report["parting"].get("source", "ledgers"))]
+    if report["parting"].get("same_state_at_parting") or report["parting"].get("state_already_differed_at_parting"):
+        lines.append("- of the partings, %d were on the SAME state (the same rooms and evidence in both arms: the size and "
+                     "coverage lines alone changed the oracle's choice) and %d after the arms had already diverged"
+                     % (report["parting"]["same_state_at_parting"], report["parting"]["state_already_differed_at_parting"]))
     for key, title in (("same_storey", "Same-storey goals"), ("cross_storey", "Cross-storey goals")):
         block = report.get(key)
         if block and block.get("without"):
@@ -302,8 +485,11 @@ def _episode_md(d: dict, full: bool = False) -> List[str]:
     if "where" in parted:
         lines.append("parted: %s" % parted["where"])
         return lines + [""]
-    lines.append("parted at oracle round %s (without: action %s, order %s; with: action %s, order %s)" % (
-        parted.get("round"), parted.get("without_step"), parted.get("without_order"), parted.get("with_step"), parted.get("with_order")))
+    lines.append("parted at oracle round %s (without: action %s, order %s; with: action %s, order %s)%s" % (
+        parted.get("round"), parted.get("without_step"), parted.get("without_order"), parted.get("with_step"), parted.get("with_order"),
+        "" if d.get("same_state_at_parting") is None else
+        " -- the same rooms and evidence in both arms; the size and coverage lines alone differed" if d["same_state_at_parting"] else
+        " -- the rooms or evidence already differed: the arms had parted before this round"))
     if d["coverage_words"]:
         lines.append("arm-with's words: %s" % d["coverage_words"])
     if full or d["coverage_driven"]:
@@ -331,9 +517,14 @@ def main(argv=None):
     parser.add_argument("--json", default=None)
     parser.add_argument("--examples", type=int, default=8)
     parser.add_argument("--levels", default=str(SETS_DIR / "hm3d_v1_val_levels.csv"))
+    parser.add_argument("--answers-without", default=None,
+                        help="arm-without's answer store (LLM_ANSWERS_RECORD); default: <without root>_answers if it exists")
+    parser.add_argument("--answers-with", default=None,
+                        help="arm-with's answer store; default: <with root>_answers if it exists")
     args = parser.parse_args(argv)
     levels = load_levels(args.levels) if args.levels else None
-    report = build_report(args.without_root, args.with_root, examples=args.examples, levels=levels or None)
+    report = build_report(args.without_root, args.with_root, examples=args.examples, levels=levels or None,
+                          a_answers=args.answers_without, b_answers=args.answers_with)
     text = markdown(report)
     if args.markdown:
         with open(args.markdown, "w", encoding="utf-8") as handle:

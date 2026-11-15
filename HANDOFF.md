@@ -1,5 +1,55 @@
 # Handoff — HM3D ObjectNav benchmark
 
+## 2026-11-12 — The room-extents A/B ran on the laptop: 200 vs 200, the mechanism's effect is within the noise, and it moves the 3B's choices in a pattern
+
+Branch: **`feat/objnav-room-extents-nadav`** at `b46acf21` plus the working-tree changes below. Run:
+`runs/ab_room_extents_20261111T2000Z` (laptop, RTX 5070 8 GB; the Docker Ollama on 11434, `qwen2.5:3b-instruct` in
+both roles, `LLM_EXCLUSIVE`, `--jobs 2`; arm-without 19:58 → 03:27 UTC, arm-with 03:27 → 12:39 UTC with a
+host freeze at 05:10 UTC and a resume at 07:37 UTC). Both arms complete: 200 of 200 episodes, 20 of 20 scenes, no
+agent error. Report: `ab_report.md` / `.json` / `.txt` in the run root.
+
+| arm | SR | SPL | SoftSPL | DTG | steps |
+|---|---|---|---|---|---|
+| without (`95aae785`) | 0.690 | 0.348 | 0.362 | 3.66 m | 258 |
+| with (`b46acf21`) | 0.670 | 0.343 | 0.357 | 3.77 m | 268 |
+
+Paired with − without: **SR −0.020, 95 % CI [−0.060, 0.020], McNemar exact p = 0.45**; SPL −0.005 [−0.027, 0.016],
+sign-flip p = 0.65. Outcomes: **6 improved, 10 worse, 184 the same** (SPL up on 29 / down on 24 over 0.01; DTG better
+on 29 / worse on 28 over 0.1 m). Same-storey (158): SR 0.816 → 0.791, SPL 0.416 → 0.407, DTG 1.43 → 1.57 m.
+Cross-storey (42): SR 0.214 → 0.214, SPL 0.092 → 0.101, DTG 12.04 → 12.02 m.
+
+**Where the arms parted** (from the answer stores; the rows are lean): at an oracle round in 137 of the 200
+episodes, 113 of them on THE SAME STATE -- the same rooms, types and evidence in both arms, only the `size=` /
+`covered=` lines and the rules about them differed, and the 3B ranked the rooms differently (a different first room in
+most, the order below the first in some); 19 after the arms had
+already diverged; the orders agreed throughout in 31; 32 episodes never consulted the oracle. The decision changed
+in more than half the set and the outcome in 16: most re-orderings were harmless. The pattern in the 16 is one
+reading: the 3B takes **"mostly unseen" as a reason to go** (an unknown, never-entered room outranks a typed one)
+and **"N m2 left" / "mostly covered" as a reason to leave** -- whichever the room type and the target's priors.
+That cuts both ways: it found three TVs and a chair by leaving a scanned room for an unseen one (00880/000002:
+`dining_room ... covered=17m2 (at most 70%)` → p 0 against two unknown rooms at 15, found in 204 steps where
+arm-without spent 500), and it lost a TV and a plant the same way (00876/000031: the unentered `dining_room?` with
+7 frontiers that held the TV dropped from 35 to 20 behind an `unknown ... mostly unseen` room at 45, 99 steps → 500;
+00891/000057: the scanned dining room with the plant, `covered=13m2 (at most 80%)`, dropped from first to third,
+74 steps → 500).
+
+**Conclusion:** on this set and this model the mechanism neither helps nor hurts measurably -- the point estimate is
+−2 successes in 200 with an interval of ±4 % that holds zero, and the paired tests do not reject no effect. What it
+does, demonstrably, is change which room the oracle chooses on identical evidence in 113 episodes, and the 3B uses
+the new facts as a coverage heuristic rather than together with the room-type priors. The next step is the prompt's
+rules for those facts (or a model that can weigh them), not the geometry.
+
+**Harness changes of the day (working tree, uncommitted):** `hm3d/ab_room_extents.sh` picks the interpreter and the
+Ollama (native 11436 or the Docker container on 11434) from the machine, runs both routes at 8192 (4096 cut the
+"with" oracle prompt), counts what its own server holds as free and budgets only the rest, relaunches an incomplete
+arm until every row is in (`AB_MAX_ATTEMPTS`), pins the exclusive lock to a fixed path (a `$TMPDIR` path broke the
+resume after the freeze; `LESSONS.md` 2026-11-12) and writes the report whenever both arms are complete.
+`ab_room_extents_report.py` reads the oracle rounds from the answer stores when the rows are lean and tells a
+same-state parting from an earlier divergence (`tests/test_ab_room_extents_report.py`). `runs/ab_room_extents_20261111T2000Z/resume.sh`
+is the run's own resume (sets the TMPDIR the frozen configurations recorded).
+
+---
+
 ## 2026-11-11 — Room size and coverage in the room node and the oracle prompt; the fixed 200-episode set; the A/B waits for the card
 
 Branch: **`feat/objnav-room-extents-nadav`** (pushed; renamed from the Copilot worktree branch
