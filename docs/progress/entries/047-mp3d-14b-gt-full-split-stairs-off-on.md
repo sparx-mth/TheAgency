@@ -1,7 +1,7 @@
 # 047 - MP3D v1 val with the 14B in both LLM roles, ground truth, all fixes: stairs off, then stairs on
 
 **Branch:** `feat/objnav-habitat-mp3d-nadav` (worktree branch `copilot/worktree-2026-11-11T10-35-31-03da`)
-**Status:** in-progress (run 1 complete and written up below; run 2, stairs on, running since 2026-11-12 13:07 UTC)
+**Status:** done (both runs complete; the comparison below)
 **Roadmap item:** the method on the full official MP3D split under ideal perception, with the larger model the
 prompts were written for (entry 043 ran the 3B), and the first measurement of the multi-storey search on MP3D.
 
@@ -205,12 +205,181 @@ Ollama from 15:21 to about 21:00 local on the 11th (three workers) cost run 1 ab
 ran (95 -> 65-70 episodes/h). Faster runs want the grammar constraint off (the client could validate the JSON it
 gets instead) or a second GPU, not more workers.
 
-## Run 2: stairs on (started 2026-11-12 13:07 UTC)
+## Run 2: stairs on (2026-11-12 13:07 -> 2026-11-13 00:25 UTC, 11.3 h)
 
-`runs/gt_oracle_mp3d_2195ep_14b_stairs_20261112T130740Z`: the same launch with `--policy-config
-{"allow_stair_traversal": true}` and `LLM_ANSWERS_REPLAY` on run 1's store (a question an episode had already had
-answered gets the same answer; only the questions stair traversal adds go to the model). Running at ~185
-episodes/h on the replayed answers; the comparison (`storey_report.py stairs-off=... stairs-on=...`) follows.
+`runs/gt_oracle_mp3d_2195ep_14b_stairs_20261112T130740Z`: `complete: true`, 2,195 of 2,195, 222 shards all exit 0,
+no stall, no resume, no agent error. The one difference from run 1 in the frozen configuration is
+`allow_stair_traversal: true` (and the answer store's paths; `preflight.json` diffed field by field). Run 1's
+answers were replayed: 3,544 of the 23,160 questions came from its store, 19,616 went to the model -- the arms part
+early, because stair traversal changes the HOUSE line and the node list of almost every oracle call and the rooms
+the labeller sees -- and 653 episodes asked nothing live. 22,817 answers recorded (115 MB); run 2 asked half as
+much as run 1 (2.2 oracle and 9.0 label calls an episode against 4.9 and 24.9) because its episodes end sooner.
+
+| | episodes | SR | SPL | SoftSPL | DTG (m) | mean steps | STOP / limit / error | wrong STOPs >= 3 m |
+|---|---|---|---|---|---|---|---|---|
+| **stairs on, official 0.1 m** | 2195 | **56.4 %** (CI 54.3-58.4) | **25.7 %** | 29.9 % | 4.33 | 222 | 1856 / 339 / 0 | 475 |
+| stairs off (run 1) | 2195 | 65.6 % (CI 63.6-67.6) | 29.1 % | 31.8 % | 3.82 | 253 | 1527 / 668 / 0 | 23 |
+
+**Stair traversal on costs 9.3 SR points (CI -11.2 to -7.4, McNemar p < 0.001) and 3.4 SPL points; it flips 132
+episodes to success and 336 to failure.** The whole loss is one mechanism, below.
+
+## Comparison (`storey_report.py stairs-off=... stairs-on=...`; `entries/047/comparison_storey_report.md`)
+
+### Overall, same storey, cross storey
+
+| arm | group | n | SR [95 %] | SPL | SoftSPL | DTG (m) | steps | STOP / limit | wrong STOPs >= 3 m | dSR [95 %] | McNemar p | dSPL [95 %] | dDTG; flips + / - |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| stairs off | all | 2195 | 65.6 % [63.6, 67.6] | 29.1 % | 31.8 % | 3.82 | 253 | 1527 / 668 | 23 | | | | |
+| stairs on | all | 2195 | 56.4 % [54.3, 58.4] | 25.7 % | 29.9 % | 4.33 | 222 | 1856 / 339 | 475 | **-9.3 [-11.2, -7.4]** | < 0.001 | -3.4 [-4.4, -2.5] | +0.51 m; +132 / -336 |
+| stairs off | same storey (1807) | 1807 | 77.4 % [75.4, 79.2] | 34.3 % | 37.0 % | 1.91 | 208 | 1480 / 327 | 21 | | | | |
+| stairs on | same storey | 1807 | 65.2 % [63.0, 67.4] | 30.0 % | 33.7 % | 3.03 | 201 | 1572 / 235 | 276 | **-12.1 [-14.2, -10.0]** | < 0.001 | -4.3 [-5.4, -3.3] | +1.12 m; +91 / -310 |
+| stairs off | cross storey (388) | 388 | 11.1 % [8.3, 14.6] | 4.6 % | 7.3 % | 12.69 | 463 | 47 / 341 | 2 | | | | |
+| stairs on | cross storey | 388 | 14.9 % [11.7, 18.8] | 5.5 % | 12.3 % | 10.37 | 319 | 284 / 104 | 199 | +3.9 [-0.3, 8.0] | 0.086 | +0.9 [-1.1, 2.7] | -2.32 m; +41 / -26 |
+
+By the level survey (`start_level == goal_level`): same level 74.9 -> 63.5 % (-11.4 [-13.5, -9.4]), other level
+10.2 -> 13.7 % (+3.5 [-0.6, 7.6], p 0.12).
+
+The cross-storey gain is real but small and not significant at n = 388: 41 cross-storey episodes won, 26 lost, DTG
+2.3 m shorter, SoftSPL 7.3 -> 12.3 %. The same-storey loss is large and certain: 310 same-storey episodes that run 1
+solved fail in run 2, 196 of them by a wrong STOP (146 of those 3 m or more from every view point), 114 at the step
+limit.
+
+### Why: the stair traversal's SAFE_HALT ends the episode
+
+`building.phase` at the last action of run 2's 619 wrong STOPs: **541 are `SAFE_HALT`**
+(`stair_traversal.py`: `retreat_budget_exhausted_on_unconfirmed_support`), 318 of them same-storey episodes and
+221 cross-storey, 459 of them 3 m or more from the goal, median 9.0 m. The sequence, read from the recordings: the
+search commits to a staircase (the loop offers it as a node or the fallback takes it); the observed-stairs
+traversal stalls on the flight (`blocked_or_stalled` 345 of 616 retreats, `timeout` 271) having climbed a median
+0.31 m (under 0.3 m in 250 of 539); it retreats along its trace for `retreat_actions` (80) without the source
+platform being *verified* (level support of `min_floor_area_m2` 3 m2, within 0.45 m of the entry, off the flight);
+the budget runs out and the traversal plans `NavigationCommand.stop_here(...)` -- a STOP the scorer takes as the
+agent's answer, at a median action 241 with half the budget left, in 91 of 200 sampled cases standing within
+0.12 m of the source floor's height (back on the storey it left). In no halted episode had the target closing ever
+seen a goal. The mechanism tagger reads these as `stop_seen_through_barrier` (292) and `stop_other` (233) because
+the agent stands far from every view point with no closing memory; they are one failure, the traversal's.
+
+So the comparison measures the traversal's safety halt, not the multi-storey search: of 391 episodes that
+attempted a traversal, 129 completed one or more (`stable_platform_and_stair_exit`: 75 same-storey, 54 cross-storey; SR
+41.1 % among them), and 541 ended in the halt (2 of them successes by coincidence). 26 of the 58 cross-storey
+successes followed a floor arrival; the other 32 are the split-level goals run 1 also reached. The halt is the
+`RETREAT`-never-exits gap `HANDOFF.md` (2026-10-01) records for HM3D, now measured on MP3D: a retreat that cannot
+re-verify its source platform should hand the episode back to the search on the storey it stands on, not STOP.
+
+### Failure mechanisms, both arms (`single_storey_failures.py`; `entries/047/run{1,2}_*_failure_mechanisms.txt`)
+
+| mechanism | stairs off | stairs on | of which SAFE_HALT (run 2) |
+|---|---|---|---|
+| `limit_locks_released` | 392 | 99 | 0 |
+| `limit_never_seen` | 222 | 213 | 0 |
+| `limit_wedged` | 54 | 27 | 0 |
+| `stop_near_miss` (beside / in band / far) | 44 (23 / 19 / 2) | 55 (37 / 16 / 2) | 7 |
+| `stop_seen_through_barrier` | 21 | 306 | 292 |
+| `stop_other` | 9 | 237 | 233 |
+| `stop_other_level` | 0 | 6 | 6 |
+| ground-truth phantoms (outside the analysis) | 12 | 15 | 1 |
+| **failures** | **754** | **958** | **541** |
+
+Without the 541 halts run 2 would have 417 failures to run 1's 754 -- fewer step limits (339 against 668) because
+the episodes that would have run out of budget on the wrong storey now attempt the stairs; whether they would have
+converted is what a fix to the halt will measure.
+
+### Per category
+
+
+| category | n | SR stairs-off | SR stairs-on | SPL stairs-off | SPL stairs-on | DTG stairs-off | DTG stairs-on | dSR stairs-on vs stairs-off |
+|---|---|---|---|---|---|---|---|---|
+| bathtub | 9 | 44.4 % | 0.0 % | 25.4 % | 0.0 % | 9.77 | 12.01 | -44.4 pts (+0 / -4) |
+| bed | 48 | 43.8 % | 35.4 % | 21.7 % | 15.3 % | 10.50 | 10.16 | -8.3 pts (+6 / -10) |
+| cabinet | 180 | 75.6 % | 60.6 % | 35.6 % | 29.3 % | 2.20 | 3.78 | -15.0 pts (+6 / -33) |
+| chair | 434 | 61.8 % | 55.5 % | 26.8 % | 25.9 % | 3.85 | 4.00 | -6.2 pts (+33 / -60) |
+| chest_of_drawers | 63 | 52.4 % | 36.5 % | 25.0 % | 19.5 % | 6.83 | 7.50 | -15.9 pts (+2 / -12) |
+| clothes | 25 | 44.0 % | 36.0 % | 22.1 % | 16.6 % | 8.28 | 8.27 | -8.0 pts (+3 / -5) |
+| counter | 66 | 50.0 % | 43.9 % | 23.5 % | 23.3 % | 5.86 | 7.79 | -6.1 pts (+6 / -10) |
+| cushion | 239 | 74.5 % | 69.5 % | 40.6 % | 37.8 % | 2.48 | 2.45 | -5.0 pts (+14 / -26) |
+| fireplace | 30 | 83.3 % | 70.0 % | 42.4 % | 36.1 % | 1.18 | 3.68 | -13.3 pts (+2 / -6) |
+| gym_equipment | 44 | 9.1 % | 25.0 % | 2.3 % | 9.1 % | 11.10 | 8.01 | +15.9 pts (+9 / -2) |
+| picture | 161 | 70.8 % | 59.0 % | 34.9 % | 31.2 % | 1.61 | 2.44 | -11.8 pts (+11 / -30) |
+| plant | 87 | 47.1 % | 56.3 % | 21.8 % | 24.0 % | 4.67 | 3.96 | +9.2 pts (+15 / -7) |
+| seating | 87 | 77.0 % | 67.8 % | 21.8 % | 18.9 % | 1.94 | 2.19 | -9.2 pts (+1 / -9) |
+| shower | 70 | 74.3 % | 72.9 % | 32.9 % | 32.7 % | 3.86 | 3.61 | -1.4 pts (+5 / -6) |
+| sink | 82 | 73.2 % | 57.3 % | 31.9 % | 26.5 % | 3.38 | 4.31 | -15.9 pts (+5 / -18) |
+| sofa | 53 | 50.9 % | 37.7 % | 22.7 % | 20.1 % | 6.37 | 7.50 | -13.2 pts (+3 / -10) |
+| stool | 68 | 52.9 % | 42.6 % | 24.4 % | 18.0 % | 7.54 | 8.97 | -10.3 pts (+3 / -10) |
+| table | 340 | 84.4 % | 68.8 % | 31.1 % | 25.2 % | 1.58 | 2.70 | -15.6 pts (+2 / -55) |
+| toilet | 28 | 42.9 % | 7.1 % | 15.9 % | 2.1 % | 8.56 | 10.41 | -35.7 pts (+1 / -11) |
+| towel | 73 | 42.5 % | 32.9 % | 20.0 % | 16.3 % | 6.22 | 5.23 | -9.6 pts (+5 / -12) |
+| tv_monitor | 8 | 12.5 % | 12.5 % | 10.4 % | 10.4 % | 14.76 | 14.95 | +0.0 pts (+0 / -0) |
+
+### Per category by storey (SR; n same / n cross)
+
+
+| category | n same | same stairs-off | same stairs-on | n cross | cross stairs-off | cross stairs-on |
+|---|---|---|---|---|---|---|
+| bathtub | 7 | 57.1 % | 0.0 % | 2 | 0.0 % | 0.0 % |
+| bed | 29 | 72.4 % | 44.8 % | 19 | 0.0 % | 21.1 % |
+| cabinet | 161 | 80.7 % | 66.5 % | 19 | 31.6 % | 10.5 % |
+| chair | 338 | 75.4 % | 67.5 % | 96 | 13.5 % | 13.5 % |
+| chest_of_drawers | 56 | 55.4 % | 39.3 % | 7 | 28.6 % | 14.3 % |
+| clothes | 24 | 45.8 % | 37.5 % | 1 | 0.0 % | 0.0 % |
+| counter | 54 | 61.1 % | 53.7 % | 12 | 0.0 % | 0.0 % |
+| cushion | 202 | 85.6 % | 79.7 % | 37 | 13.5 % | 13.5 % |
+| fireplace | 29 | 82.8 % | 69.0 % | 1 | 100.0 % | 100.0 % |
+| gym_equipment | 7 | 57.1 % | 28.6 % | 37 | 0.0 % | 24.3 % |
+| picture | 150 | 72.0 % | 61.3 % | 11 | 54.5 % | 27.3 % |
+| plant | 54 | 75.9 % | 68.5 % | 33 | 0.0 % | 36.4 % |
+| seating | 81 | 82.7 % | 72.8 % | 6 | 0.0 % | 0.0 % |
+| shower | 59 | 86.4 % | 83.1 % | 11 | 9.1 % | 18.2 % |
+| sink | 73 | 80.8 % | 64.4 % | 9 | 11.1 % | 0.0 % |
+| sofa | 38 | 65.8 % | 52.6 % | 15 | 13.3 % | 0.0 % |
+| stool | 46 | 76.1 % | 60.9 % | 22 | 4.5 % | 4.5 % |
+| table | 315 | 89.8 % | 72.7 % | 25 | 16.0 % | 20.0 % |
+| toilet | 19 | 57.9 % | 10.5 % | 9 | 11.1 % | 0.0 % |
+| towel | 63 | 49.2 % | 38.1 % | 10 | 0.0 % | 0.0 % |
+| tv_monitor | 2 | 50.0 % | 50.0 % | 6 | 0.0 % | 0.0 % |
+
+Every category but gym_equipment (+15.9 pts: 9 of its 37 cross-storey episodes reached the upstairs gym),
+plant (+9.2) and tv_monitor (0) loses; bathtub (-44, 4 of 9), toilet (-36) and table (-15.6, 55 lost) most, the
+small bathroom categories because a bathroom search that passes a staircase commits to it.
+
+### Storey transitions per episode
+
+| arm | group | n | floor arrivals / ep | episodes with an arrival | arrivals 0 / 1 / 2 / 3+ | completed stair traversals (attempts) | level changes / ep (trajectory) | episodes with a change | changes 0 / 1 / 2 / 3+ | ended on the goal's level | SR with a change | SR without |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| stairs-off | all | 2195 | 0.03 | 71 | 2124 / 67 / 4 / 0 | 21 (121) | 0.01 | 15 | 2180 / 9 / 6 / 0 | 1704 of 2017 | 9 / 15 | 1432 / 2180 |
+| stairs-off | same_storey | 1807 | 0.01 | 21 | 1786 / 20 / 1 / 0 | 6 (36) | 0.01 | 9 | 1798 / 5 / 4 / 0 | 1658 of 1673 | 6 / 9 | 1392 / 1798 |
+| stairs-off | cross_storey | 388 | 0.14 | 50 | 338 / 47 / 3 / 0 | 15 (85) | 0.02 | 6 | 382 / 4 / 2 / 0 | 46 of 344 | 3 / 6 | 40 / 382 |
+| stairs-on | all | 2195 | 0.07 | 129 | 2066 / 110 / 18 / 1 | 149 (601) | 0.10 | 152 | 2043 / 100 / 44 / 8 | 1785 of 2093 | 50 / 152 | 1187 / 2043 |
+| stairs-on | same_storey | 1807 | 0.05 | 75 | 1732 / 60 / 14 / 1 | 91 (357) | 0.07 | 94 | 1713 / 60 / 28 / 6 | 1701 of 1741 | 30 / 94 | 1149 / 1713 |
+| stairs-on | cross_storey | 388 | 0.15 | 54 | 334 / 50 / 4 / 0 | 58 (244) | 0.20 | 58 | 330 / 40 / 16 / 2 | 84 of 352 | 20 / 58 | 38 / 330 |
+
+Stairs on: 149 completed traversals in 601 attempts, in 129 episodes (run 1: 21 in 121, all off a stair spawn), floor arrivals in
+129 episodes (110 once, 18 twice, 1 three times), a settled-level change of the recorded height in 152 episodes
+(mean 0.10 a trajectory; cross-storey 0.20); 84 of 352 cross-storey episodes ended on the goal's level (run 1: 46
+of 344), and 20 of the 58 cross-storey episodes whose trajectory changed level succeeded against 38 of 330 that
+did not. On the same-storey episodes a level change happened in 94 and 30 of them still succeeded; the other 64 are
+the agent on the wrong storey when the halt or the budget ended the episode.
+
+### Runtime and utilisation, run 2
+
+11.3 h, **194 episodes/h** (2.4x run 1: half the LLM calls an episode, 15 % of them replayed, shorter episodes --
+134 s mean, 64 s median, 81 worker-hours); the card's memory 86 % mean / 91 % peak, its compute 36 % mean (above
+80 % in 2.7 % of samples), CPU 23 %, RAM 32 %, 7.3 workers mean; 17 GB of logs. Both runs together: 38.5 h of wall
+time, 73,000 LLM answers recorded, every episode of both arms replayable.
+
+## What to do with this
+1. **Fix the halt before measuring stair traversal again.** `StairTraversal.plan` returns `stop_here` when the
+   retreat budget is spent without a verified source platform; on 91 of 200 sampled halts the agent stood within
+   0.12 m of the source floor's height. A retreat that ends on the storey it left (the atlas's `floor_match_m` test,
+   as `observe` already accepts for a settled return) should release the portal with a cooldown and return the
+   episode to the room search; one that ends mid-flight should keep retreating along the stair terrain rather than
+   STOP. Measured target: run 2's 541 halts, 318 of them on same-storey episodes run 1 solved.
+2. **Then re-run the stairs-on arm** on the same answers (`LLM_ANSWERS_REPLAY` on both stores): the cross-storey
+   388 are where the method can still gain 30-40 SR points overall (entry 043's and run 1's ceiling without them is
+   ~77 %), and the gym_equipment / tv_monitor / bed episodes of 8194nk5LbLH and X7HyMhZNoso are the test.
+3. The same-storey failures of run 1 (408) are the closing's and the search's: 392 limits after a released lock
+   (the target seen, not converted) are the largest remaining mechanism on the start storey; `failures.json` lists
+   every lock's release reason.
 
 ## Notes
 - 2026-11-11: the harness needed three things before launch (CHANGELOG 2026-11-11): a log-only recording (the
@@ -218,6 +387,9 @@ episodes/h on the replayed answers; the comparison (`storey_report.py stairs-off
   and ignored with `--shard-episodes`), and a resource monitor. One model in both roles was a reading of "a 14B
   model" (the previous full run also used one model in both roles); the default split would have kept the 3B on
   the labels.
+- 2026-11-15: run 2 was read three days after it finished (2026-11-13 00:25 UTC); the machine sat idle in between.
+  The helper processes (supervisors, Ollama keeper, resource monitors) were stopped afterwards; the Ollama on 11435 is
+  left running.
 - 2026-11-12: the storey report's first count of completed traversals took every `completed_transitions` entry
   with a `destination` key -- the abandoned ones carry one too (the portal's); a traversal that arrived is the one
   with a completion reason and a destination storey (121 -> 21 in run 1).

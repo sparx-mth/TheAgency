@@ -5,6 +5,17 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-13/15, the stairs-on arm of the MP3D 14B run and the comparison -- docs/progress/entries/047)
+- **`runs/gt_oracle_mp3d_2195ep_14b_stairs_20261112T130740Z`: the same split, model, seed and settings as run 1 with
+  `allow_stair_traversal` TRUE, replaying run 1's answers (15 % of its questions): SR 56.4 % (CI 54.3-58.4), SPL 25.7 %,
+  DTG 4.33 m -- 9.3 SR points UNDER stairs off (CI -11.2 to -7.4, McNemar p < 0.001), +132 / -336 flips.** Same storey
+  77.4 -> 65.2 % (-12.1 pts), cross storey 11.1 -> 14.9 % (+3.9 pts, p 0.09). One mechanism: 541 of run 2's 619 wrong
+  STOPs are the observed-stairs traversal's `SAFE_HALT` (`retreat_budget_exhausted_on_unconfirmed_support`), a STOP the
+  scorer takes as the answer at a median 9 m from the goal, half the budget left, on 91 of 200 sampled halts within
+  0.12 m of the source floor's height -- the `RETREAT`-never-exits gap of HANDOFF.md 2026-10-01, measured. 149
+  traversals completed in 601 attempts (129 episodes, SR 41 % among them); 26 of 58 cross-storey successes followed a
+  floor arrival. 11.3 h at 194 episodes/h. The fix to make before stair traversal is measured again is written in the
+  entry: a spent retreat standing on the storey it left should release the portal and resume the search, not STOP.
 ### Added (2026-11-12, the full MP3D val split with the 14B in both roles under ground truth, stair traversal off -- docs/progress/entries/047)
 - **`runs/gt_oracle_mp3d_2195ep_14b_20261111T095333Z`: SR 65.6 % (CI 63.6-67.6), SPL 29.1 %, DTG 3.82 m over all 2,195
   episodes** (entry 043's 3B run with none of the fixes of entries 044-046: 52.1 % / 23.6 % / 4.42 m); at ApexNav's
