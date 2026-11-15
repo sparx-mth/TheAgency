@@ -158,10 +158,14 @@ def standing_spot(pose, published: dict, boxes: Dict[int, tuple]) -> Optional[di
 
 
 def recordings_by_episode(scene_dir: Path) -> Dict[str, Path]:
+    """``{episode_id: recording directory}`` of a scene: its own ``recordings/`` and, for a scene merged from
+    shards (``campaign.py --shard-episodes``), the recordings its ``shard_<k>/`` directories keep."""
     out = {}
-    for meta in glob.glob(str(scene_dir / "recordings" / "*" / "episode.json")):
+    patterns = [str(scene_dir / "recordings" / "*" / "episode.json"),
+                str(scene_dir / "shard_*" / "recordings" / "*" / "episode.json")]
+    for meta in sorted(path for pattern in patterns for path in glob.glob(pattern)):
         try:
-            out[json.load(open(meta))["episode_id"]] = Path(meta).parent
+            out.setdefault(json.load(open(meta))["episode_id"], Path(meta).parent)
         except (ValueError, KeyError):
             continue
     return out

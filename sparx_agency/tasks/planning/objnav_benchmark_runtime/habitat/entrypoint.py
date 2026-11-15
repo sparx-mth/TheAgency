@@ -260,6 +260,8 @@ def run_main(argv, *, benchmark, parser, label_mapper, protocol_for, prepare, wr
             settings=protocol.evaluation_settings(), episode_ids=selected,
             resume=args.resume, accept_changes=tuple(args.resume_accepting_changes), frozen_lock=frozen_lock,
             expected_episode_ids=expected_episode_ids, record=args.record,
+            # ``--record-log-only`` (MP3D's parser; absent from HM3D's) records the episode log and renders no video.
+            record_video=not getattr(args, "record_log_only", False),
             video_fps=args.video_fps, save_frames=args.save_frames, progress=progress, wrap_env=wrap_env,
             agent_class=LeanHeadlessObjNavAgent if args.lean else HeadlessObjNavAgent)
         live["tracker"].finish()

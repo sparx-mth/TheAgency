@@ -54,7 +54,7 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                    episode_ids=None, resume=False, accept_changes=(), frozen_lock=None,
                    expected_episode_ids=None, record=False, video_fps=6,
                    writer_factory=None, save_frames=False, dashboard=True, progress=None,
-                   wrap_env=None, agent_class=HeadlessObjNavAgent):
+                   wrap_env=None, agent_class=HeadlessObjNavAgent, record_video=True):
     """Run the exact prepared policy, optionally locked/recorded, and close the env.
 
     Adapters own data loading, published episode identities, model provisioning,
@@ -80,7 +80,9 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
     episode, for an adapter's console line. It receives the recorded row the
     logger wrote, never evaluator telemetry the policy may not see.
     ``save_frames`` (with ``record``) also keeps every dashboard frame as a JPEG
-    still beside the video; see :class:`EpisodeRecorder`.
+    still beside the video; see :class:`EpisodeRecorder`. ``record_video=False``
+    (with ``record``) is the log-only recording: every step log and map journal,
+    no dashboard frame rendered, no video, stills or review page.
     """
     options = settings or EvaluationSettings()
     recorder = None
@@ -105,10 +107,11 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                 from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import (
                     EpisodeRecorder, PolicyProbe, RecordingAgent, RecordingEnv, VideoSink,
                 )
-                write_live_page(output)
+                if record_video:
+                    write_live_page(output)
                 recorder = EpisodeRecorder(output, policy, fps=video_fps,
                                            writer_factory=writer_factory or VideoSink,
-                                           save_frames=save_frames)
+                                           save_frames=save_frames, video=record_video)
                 probe = PolicyProbe(policy)
                 agent = RecordingAgent(agent_class(probe, label_mapper, params, name=policy.name),
                                        probe, recorder)
@@ -136,7 +139,7 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                 path_length_epsilon_m=options.path_length_epsilon_m,
                 path_tolerance_m=options.path_tolerance_m, kinematics=options.kinematics,
                 on_agent_error=options.on_agent_error)
-        if record and dashboard:
+        if record and dashboard and record_video:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.dashboard import write_dashboard
             write_dashboard(output)
         return summary

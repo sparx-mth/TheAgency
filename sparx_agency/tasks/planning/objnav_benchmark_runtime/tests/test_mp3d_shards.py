@@ -10,6 +10,9 @@ processes replaced.
 from __future__ import annotations
 
 import json
+import os
+import signal
+import time
 import types
 
 import pytest
@@ -166,6 +169,63 @@ def test_a_failing_pool_stops_the_shards_it_started(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         shard_pool.run_pool(jobs, cap=lambda: 1, gate=OpenGate(), popen=popen, sleep=sleep, log=lambda m: None)
     assert started[0].terminated
+
+
+def test_the_watchdog_kills_a_silent_shard_and_leaves_a_writing_one_alone(tmp_path, monkeypatch):
+    """Two shards run under a 100 s stall: one rewrites its live record, the other writes nothing after launch."""
+    base = time.time()
+    wall = [base]
+    killed = []
+    monkeypatch.setattr(shard_pool.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    processes = {}
+
+    class Hung(FakeProcess):
+        pid = 4242
+
+        def wait(self, timeout=None):
+            self.code = -9
+            return self.code
+
+    def popen(command, stdout, stderr, env, **options):
+        assert options == {"start_new_session": True}, "a watched shard runs in its own session"
+        processes[command[1]] = Hung(polls=10 ** 6)
+        return processes[command[1]]
+
+    def sleep(_):
+        wall[0] += 30.0
+        live = tmp_path / "s" / "shard_0" / "live.json"
+        live.parent.mkdir(parents=True, exist_ok=True)
+        live.write_text("{}")
+        os.utime(live, (wall[0], wall[0]))          # shard_0 keeps writing; shard_1 never does after its launch
+        if wall[0] > base + 400.0:
+            processes["0"].polls = 0              # shard_0 finishes on its own after its sibling was killed
+        assert wall[0] < base + 10000.0, "the pool never ended the silent shard"
+
+    jobs = [shard_pool.PoolJob("s/shard_%d" % i, ["run", str(i)], tmp_path / "s" / ("%d.log" % i),
+                               directory=tmp_path / "s" / ("shard_%d" % i)) for i in range(2)]
+    messages = []
+    codes, unstarted = shard_pool.run_pool(
+        jobs, cap=lambda: 2, gate=OpenGate(), popen=popen, sleep=sleep, log=messages.append, stall_s=100.0,
+        wall_clock=lambda: wall[0])
+    assert codes == {"s/shard_0": 0, "s/shard_1": shard_pool.STALLED_RETURNCODE} and unstarted == []
+    assert killed == [(4242, signal.SIGKILL)]
+    assert any("STALLED s/shard_1" in m for m in messages)
+    with pytest.raises(ValueError):
+        shard_pool.run_pool(jobs, cap=lambda: 1, gate=OpenGate(), popen=popen, stall_s=-1.0)
+
+
+def test_the_heartbeat_is_the_newest_of_the_shard_files_and_its_console_log(tmp_path):
+    job = shard_pool.PoolJob("s/shard_0", ["run"], tmp_path / "s" / "shard_0.console.log",
+                             directory=tmp_path / "s" / "shard_0")
+    assert shard_pool.job_heartbeat(job) is None
+    job.directory.mkdir(parents=True)
+    (job.directory / "progress.json").write_text("{}")
+    os.utime(job.directory / "progress.json", (100.0, 100.0))
+    assert shard_pool.job_heartbeat(job) == 100.0
+    job.log_path.write_text("line\n")
+    os.utime(job.log_path, (250.0, 250.0))
+    assert shard_pool.job_heartbeat(job) == 250.0
+    assert shard_pool.job_heartbeat(shard_pool.PoolJob("x", ["run"], tmp_path / "none.log")) is None
 
 
 def test_the_vram_gate_delays_starts_and_never_counts_more_than_the_card_holds():

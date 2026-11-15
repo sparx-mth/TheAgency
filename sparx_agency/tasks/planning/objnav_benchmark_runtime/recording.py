@@ -129,14 +129,23 @@ class EpisodeRecorder:
 	``recordings/<key>/frames/<ordinal>_step<step>.jpg`` -- one per decision, plus the terminal
 	frame -- so a single moment can be inspected without decoding the video. The FINAL banner
 	frame is ``final.jpg``, as before.
+
+	``video=False`` is the log-only recording (2026-11-11, the full MP3D run): ``steps.jsonl``,
+	``trajectory.csv``, the map journal, ``metrics.json`` and the live status are written exactly
+	as with a video, and no dashboard frame is rendered or encoded -- no ``video.mp4``, no stills,
+	no ``final.jpg``, no ``latest.jpg``. The log is the record; a video of any episode can be
+	re-made afterwards by replaying it with its recorded LLM answers.
 	"""
 	def __init__(self, root, policy, fps=6, writer_factory=VideoSink, selected_episode_ids=None, display_floor_counts=None,
-	             save_frames=False):
+	             save_frames=False, video=True):
 		self.root, self.policy = Path(root), policy
 		self.fps, self.writer_factory = fps, writer_factory
 		self.selected_episode_ids = None if selected_episode_ids is None else set(selected_episode_ids)
 		self.display_floor_counts = dict(display_floor_counts or {})
 		self.save_frames = bool(save_frames)
+		self.render = bool(video)
+		if self.save_frames and not self.render:
+			raise ValueError("save_frames keeps the dashboard frames the video receives; a log-only recording renders none")
 		self.frames_dir = None
 		self.frame_count = 0
 		self.panels = None
@@ -174,9 +183,10 @@ class EpisodeRecorder:
 			"distance_to_goal_m", "path_length_m", "wall_s"))
 		self.csv.writeheader()
 		write_atomically(self.episode_dir / "episode.json", strict_json({
-			"episode_id": episode.episode_id, "scene": episode.scene_id, "target": episode.target_category, "video_fps": self.fps,
+			"episode_id": episode.episode_id, "scene": episode.scene_id, "target": episode.target_category,
+			"video_fps": self.fps if self.render else None, "video": self.render,
 			"display_floor_count": len(self.panels.slots) if self.panels else None,
-			"video_timebase": "one frame per decision; accelerated, not real time",
+			"video_timebase": "one frame per decision; accelerated, not real time" if self.render else None,
 			"frames": ("frames/<ordinal>_step<step>.jpg: every video frame as a still; the FINAL banner is final.jpg"
 			           if self.save_frames else None),
 			"review": ("python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording <this dir> "
@@ -236,6 +246,13 @@ class EpisodeRecorder:
 				trail.append(point)
 		if self.panels is not None:
 			self.panels.capture(self.policy, observation)
+		closing = snapshot.get("target_closing") or {}
+		if self.render:
+			self._render(observation, decision, snapshot, closing, trail, final)
+		self._live(observation, decision, snapshot, closing)
+
+	def _render(self, observation, decision, snapshot, closing, trail, final):
+		"""The dashboard frame of this decision: into the video, the optional still, and ``latest.jpg``."""
 		frame = render_dashboard(self.policy, observation, trail, decision, self.episode.episode_id, snapshot,
 			final=final, floor_panels=self.panels)
 		graph = getattr(self.policy, "graph", None)
@@ -246,7 +263,7 @@ class EpisodeRecorder:
 		confidence_text = "N/A" if confidence is None else "%.2f" % confidence
 		goal = getattr(self.policy, "_goal", None)
 		kind = getattr(getattr(self.policy, "route_memory", None), "kind", None)
-		frontier = ("F%s@%.2f,%.2f" % (floor_id, goal[0], goal[1])
+		frontier = ("F%s@%.2f,%.2f" % (snapshot.get("floor_id", 0), goal[0], goal[1])
 			if goal is not None and kind == "frontier" else "none")
 		text = "Scene: %s | DTG: %s m | Room: %s confidence: %s | Frontier ID: %s" % (
 			self.episode.scene_id, self.display_telemetry.get("distance_to_goal_m", "N/A"),
@@ -254,7 +271,6 @@ class EpisodeRecorder:
 		cv2.rectangle(frame, (0, 839), (1599, 899), (20, 20, 20), -1)
 		cv2.putText(frame, text, (12, 866), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
 			(230, 230, 230), 1, cv2.LINE_AA)
-		closing = snapshot.get("target_closing") or {}
 		xyz = closing.get("xyz")
 		range_text = "N/A" if xyz is None else "%.2f m" % math.hypot(xyz[0] - observation.pose.x, xyz[1] - observation.pose.y)
 		elapsed = max(time.monotonic() - self.started, 1e-6)
@@ -276,6 +292,9 @@ class EpisodeRecorder:
 		if not cv2.imwrite(str(temporary), frame):
 			raise HarnessError("Cannot write live preview")
 		temporary.replace(self.root / "latest.jpg")
+
+	def _live(self, observation, decision, snapshot, closing):
+		"""``live.json``: where the episode stands after this decision -- the live page's and the stall watchdog's."""
 		search = snapshot.get("search") or {}
 		write_atomically(self.root / "live.json", strict_json({
 			"episode_id": self.episode.episode_id, "step": int(observation.step), "action": decision.get("action", "terminal"),

@@ -5,6 +5,17 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-13/15, the stairs-on arm of the MP3D 14B run and the comparison -- docs/progress/entries/049)
+- **`runs/gt_oracle_mp3d_2195ep_14b_stairs_20261112T130740Z`: the same split, model, seed and settings as run 1 with
+  `allow_stair_traversal` TRUE, replaying run 1's answers (15 % of its questions): SR 56.4 % (CI 54.3-58.4), SPL 25.7 %,
+  DTG 4.33 m -- 9.3 SR points UNDER stairs off (CI -11.2 to -7.4, McNemar p < 0.001), +132 / -336 flips.** Same storey
+  77.4 -> 65.2 % (-12.1 pts), cross storey 11.1 -> 14.9 % (+3.9 pts, p 0.09). One mechanism: 541 of run 2's 619 wrong
+  STOPs are the observed-stairs traversal's `SAFE_HALT` (`retreat_budget_exhausted_on_unconfirmed_support`), a STOP the
+  scorer takes as the answer at a median 9 m from the goal, half the budget left, on 91 of 200 sampled halts within
+  0.12 m of the source floor's height -- the `RETREAT`-never-exits gap of HANDOFF.md 2026-10-01, measured. 149
+  traversals completed in 601 attempts (129 episodes, SR 41 % among them); 26 of 58 cross-storey successes followed a
+  floor arrival. 11.3 h at 194 episodes/h. The fix to make before stair traversal is measured again is written in the
+  entry: a spent retreat standing on the storey it left should release the portal and resume the search, not STOP.
 ### Added (2026-11-13, stair traversal on against off on HM3D v1 val: the same 2,000 episodes, paired -- docs/progress/entries/048)
 - **Run 2, `allow_stair_traversal: true`** (`runs/gt_oracle_2000ep_14b_stairs_20261112T115622Z`, `hm3d/sets/policy_stairs_on.json`,
   everything else as Run 1, Run 1's LLM answers replayed): complete in 12 h 31 min, **SR 63.0 %, SPL 36.8 %, DTG 3.12 m**.
@@ -21,6 +32,15 @@ future-you, not for a commit log.
 - **`campaign_breakdown.py` reads traversal-on runs**: `stop_safe_halt`, `limit_in_traversal`, `limit_no_transition`
   tags from `building.allow_stair_traversal` / `phase` / `completed_transitions`, a storey-transitions-per-episode
   section, and single-scene roots.
+### Added (2026-11-12, the full MP3D val split with the 14B in both roles under ground truth, stair traversal off -- docs/progress/entries/049)
+- **`runs/gt_oracle_mp3d_2195ep_14b_20261111T095333Z`: SR 65.6 % (CI 63.6-67.6), SPL 29.1 %, DTG 3.82 m over all 2,195
+  episodes** (entry 043's 3B run with none of the fixes of entries 044-046: 52.1 % / 23.6 % / 4.42 m); at ApexNav's
+  0.2 m 66.7 % / 29.7 %. Same storey (1,807 episodes) 77.4 % / 34.3 % / 1.91 m, cross storey (388) 11.1 % / 4.6 % /
+  12.69 m with stair traversal off. 754 failures: 392 step limits after a released lock, 222 never seen (341 of the
+  668 limits are cross-storey), 54 wedged, 44 near-miss STOPs (23 beside the object), 21 through a barrier, 12 the
+  sensor's phantoms. 27.2 h at 80.7 episodes/h, LLM-bound (50,149 answers recorded, 22.8 an episode, all replayable);
+  the card's compute 37 % busy, its memory 85 %. Every episode's step log recorded without video. The stairs-on arm
+  (`gt_oracle_mp3d_2195ep_14b_stairs_20261112T130740Z`, replaying run 1's answers) runs next.
 ### Added (2026-11-11, the HM3D v1 val ground-truth run with the 14B in both LLM roles: what it needed to run unattended and be read)
 - **A per-step heartbeat for the stall watchdog** (`progress.ProgressTracker.heartbeat`, `heartbeat.json` beside
   `progress.json`, rewritten at most every 30 s from `ProgressEnv.step`; `scene_pool.HEARTBEAT_FILES` watches it):
@@ -124,6 +144,36 @@ future-you, not for a commit log.
 - **Every goal category of every registered benchmark has a WHERE IT LIVES prior** -- pinned by a test over
   `default_label_mapper_registry()` (`tests/test_room_scans.py`), so the oracle briefing written for MP3D's fifteen
   unprimed categories stays a contract on HM3D, Gibson and whatever table is registered next.
+### Added (2026-11-11, the full MP3D val run with the 14B: log-only recordings, the shard watchdog, a resource monitor)
+- **`mp3d.run --record-log-only` / `run_benchmark.sh --record-log-only`** (`recording.EpisodeRecorder(video=False)`,
+  `evaluation.run_evaluation(record_video=)`): every episode's `steps.jsonl`, `trajectory.csv`, map journal and
+  `metrics.json` are written exactly as with a video, and no dashboard frame is rendered or encoded -- no `video.mp4`,
+  stills, `final.jpg`, `latest.jpg` or review page, no FFmpeg. `live.json` still updates on every action (the stall
+  watchdog's heartbeat). The full split's failure mechanisms can now be read from the logs of a run that recorded
+  no video; a video of a chosen episode is re-made by replaying it with its recorded LLM answers.
+- **The stall watchdog covers sharded campaigns** (`shard_pool.run_pool(stall_s=)`, `PoolJob.directory`,
+  `job_heartbeat`, `sharded_campaign.run_sharded_campaign(stall_s=)`; `campaign.py --stall-minutes` now reaches the
+  sharded path, default 30): a shard runs in its own session and one whose `live.json` / `progress.json` /
+  `episodes.jsonl` / console log are silent for the period is killed with its session and recorded as exit -9, so the
+  pool moves on and a resume of the root continues the shard. Before this, `--stall-minutes` was accepted and ignored
+  with `--shard-episodes`.
+- **`single_storey_failures.recordings_by_episode` reads a merged scene's `shard_*/recordings/`** (the merge moves
+  the rows, not the recordings), so the failure tagging runs on a sharded campaign root as it does on a per-scene one.
+- **`mp3d/storey_report.py`**: one or several campaign roots tabulated overall and on the same-storey against the
+  cross-storey episodes (entry 043's +-0.5 m view-point rule, and the level survey as a second reading), per category
+  and per category by storey, paired against the first arm (bootstrap dSR / dSPL, exact McNemar, flips), with the
+  storey transitions per episode -- the floor atlas's `floor_arrival` events and completed stair traversals from the
+  full records, the settled-level changes of each recorded trajectory, and how many cross-storey episodes ended on
+  the goal's storey. The table of the stairs-off / stairs-on comparison. Tests in `tests/test_mp3d_storey_report.py`.
+- **`objnav_benchmark_runtime/resource_monitor.py`**: `record out.csv --interval 15` samples GPU utilisation, VRAM,
+  CPU, RAM, load and the live worker count; `summarize out.csv [--since-utc ..]` gives mean / median / peak of each
+  and the share of samples the GPU spent above 80 % -- the utilisation line of a campaign's report, which until now was
+  read off a terminal.
+- **Measured for the 14B on the 4090** (`mp3d/README.md`): `qwen2.5:14b-instruct` at 4 slots and 8k context takes
+  15.1 GB; the client's `format: json` caps it at ~0.5 answers/s (0.36 against 0.93 requests/s with and without the
+  format on an idle card at 4 concurrent; 8 slots, 12 workers or a q8_0 KV cache change nothing, the grammar's sampling
+  being CPU work serialised in Ollama's runner), so 7-8 MP3D renderers (270-1,180 MiB each by scene) saturate it at
+  ~110 episodes/h with the card's compute ~40 % busy and its memory full.
 ### Added (2026-11-10, MP3D single storey: a fixed set, a deterministic baseline, the flat-p ablation, and the single-storey fixes -- docs/progress/entries/046)
 - **A fixed single-storey evaluation set and its launcher** (`mp3d/single_storey_set.py`, `mp3d/sets/single_storey_flat_v1.json`:
   180 same-storey episodes in 8 flat houses, the split-level scenes excluded, seeded; `mp3d/run_single_storey.sh <name>`

@@ -1,0 +1,529 @@
+{
+ "agent": "sparx-rpt-llm-host-sweep",
+ "apexnav_radius": {
+  "extra_successes": 24,
+  "spl": 0.2630359094365295,
+  "success_distance_m": 0.2,
+  "success_rate": 0.574487471526196
+ },
+ "by_category": [
+  {
+   "distance_to_goal_m": 12.009912278917101,
+   "key": "bathtub",
+   "mean_path_length_m": 48.663812470946986,
+   "mean_steps": 438.0,
+   "n_episodes": 9,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.0634537707491358,
+   "spl": 0.0,
+   "spl_ci": [
+    0.0,
+    0.0
+   ],
+   "success_rate": 0.0,
+   "success_rate_ci": [
+    0.0,
+    0.299145048419544
+   ]
+  },
+  {
+   "distance_to_goal_m": 10.159264308516867,
+   "key": "bed",
+   "mean_path_length_m": 31.288726621309184,
+   "mean_steps": 318.0416666666667,
+   "n_episodes": 48,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.18278514606634402,
+   "spl": 0.1531416674617295,
+   "spl_ci": [
+    0.08613796093761276,
+    0.2281217259537008
+   ],
+   "success_rate": 0.3541666666666667,
+   "success_rate_ci": [
+    0.2343364412560486,
+    0.4956094298965691
+   ]
+  },
+  {
+   "distance_to_goal_m": 3.78459083033053,
+   "key": "cabinet",
+   "mean_path_length_m": 21.476557883594165,
+   "mean_steps": 213.26111111111112,
+   "n_episodes": 180,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.33204688267258725,
+   "spl": 0.2925006577303411,
+   "spl_ci": [
+    0.25028264777736425,
+    0.33306764797329114
+   ],
+   "success_rate": 0.6055555555555555,
+   "success_rate_ci": [
+    0.5326680819105162,
+    0.6740317574171432
+   ]
+  },
+  {
+   "distance_to_goal_m": 3.995924155744332,
+   "key": "chair",
+   "mean_path_length_m": 17.173565660684787,
+   "mean_steps": 197.0483870967742,
+   "n_episodes": 434,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.28688839152736123,
+   "spl": 0.258540664273198,
+   "spl_ci": [
+    0.23427549777399864,
+    0.28352311133886615
+   ],
+   "success_rate": 0.5552995391705069,
+   "success_rate_ci": [
+    0.5082653258764256,
+    0.601363397107656
+   ]
+  },
+  {
+   "distance_to_goal_m": 7.4952889236932,
+   "key": "chest_of_drawers",
+   "mean_path_length_m": 28.707287292922572,
+   "mean_steps": 295.6031746031746,
+   "n_episodes": 63,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.24795573562495482,
+   "spl": 0.1947034820471764,
+   "spl_ci": [
+    0.12749559729765791,
+    0.26284418000734106
+   ],
+   "success_rate": 0.36507936507936506,
+   "success_rate_ci": [
+    0.2571539286503654,
+    0.48851290298472155
+   ]
+  },
+  {
+   "distance_to_goal_m": 8.267521433904767,
+   "key": "clothes",
+   "mean_path_length_m": 36.7220798537029,
+   "mean_steps": 350.92,
+   "n_episodes": 25,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.20078464239233404,
+   "spl": 0.16558661993755844,
+   "spl_ci": [
+    0.07104729484874878,
+    0.2656502823905613
+   ],
+   "success_rate": 0.36,
+   "success_rate_ci": [
+    0.20247880774458224,
+    0.5548150225183514
+   ]
+  },
+  {
+   "distance_to_goal_m": 7.787199571573486,
+   "key": "counter",
+   "mean_path_length_m": 24.385274790014797,
+   "mean_steps": 255.3939393939394,
+   "n_episodes": 66,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.3017220116556769,
+   "spl": 0.2329918306004011,
+   "spl_ci": [
+    0.16721021815249162,
+    0.30924113598057335
+   ],
+   "success_rate": 0.4393939393939394,
+   "success_rate_ci": [
+    0.3262812091954945,
+    0.5591736462000864
+   ]
+  },
+  {
+   "distance_to_goal_m": 2.4521331941995332,
+   "key": "cushion",
+   "mean_path_length_m": 16.21934722681213,
+   "mean_steps": 179.56903765690376,
+   "n_episodes": 239,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.4044561320125519,
+   "spl": 0.3784916798043314,
+   "spl_ci": [
+    0.3401832816894624,
+    0.4136942237123029
+   ],
+   "success_rate": 0.694560669456067,
+   "success_rate_ci": [
+    0.6334711596008739,
+    0.7494947493161371
+   ]
+  },
+  {
+   "distance_to_goal_m": 3.6802072303990525,
+   "key": "fireplace",
+   "mean_path_length_m": 18.944495392353794,
+   "mean_steps": 184.1,
+   "n_episodes": 30,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.40038346667246644,
+   "spl": 0.3607445129173605,
+   "spl_ci": [
+    0.2583617120377638,
+    0.4646191867038452
+   ],
+   "success_rate": 0.7,
+   "success_rate_ci": [
+    0.5212421254128505,
+    0.833352517317562
+   ]
+  },
+  {
+   "distance_to_goal_m": 8.011707932010971,
+   "key": "gym_equipment",
+   "mean_path_length_m": 48.077584440939745,
+   "mean_steps": 429.6363636363636,
+   "n_episodes": 44,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.17424119781788266,
+   "spl": 0.09056245501637596,
+   "spl_ci": [
+    0.04605108842864532,
+    0.14339004148606604
+   ],
+   "success_rate": 0.25,
+   "success_rate_ci": [
+    0.14574213828964885,
+    0.3944056635895914
+   ]
+  },
+  {
+   "distance_to_goal_m": 2.4407631668077077,
+   "key": "picture",
+   "mean_path_length_m": 17.276531926793535,
+   "mean_steps": 171.9937888198758,
+   "n_episodes": 161,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.3783547113234814,
+   "spl": 0.3120036771290525,
+   "spl_ci": [
+    0.2627077737558088,
+    0.3594005124500688
+   ],
+   "success_rate": 0.5900621118012422,
+   "success_rate_ci": [
+    0.5128542381882102,
+    0.663072377649039
+   ]
+  },
+  {
+   "distance_to_goal_m": 3.95533136867158,
+   "key": "plant",
+   "mean_path_length_m": 26.88790598428376,
+   "mean_steps": 281.28735632183907,
+   "n_episodes": 87,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.27614016784565654,
+   "spl": 0.2404447682023735,
+   "spl_ci": [
+    0.18438141298103522,
+    0.2975387491491734
+   ],
+   "success_rate": 0.5632183908045977,
+   "success_rate_ci": [
+    0.4585155432104803,
+    0.6625745421184239
+   ]
+  },
+  {
+   "distance_to_goal_m": 2.190131946027964,
+   "key": "seating",
+   "mean_path_length_m": 15.949883549733096,
+   "mean_steps": 171.67816091954023,
+   "n_episodes": 87,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.2520177726912947,
+   "spl": 0.18853750847156298,
+   "spl_ci": [
+    0.15219585308465944,
+    0.22566492083398423
+   ],
+   "success_rate": 0.6781609195402298,
+   "success_rate_ci": [
+    0.5742610907174533,
+    0.7669927861185496
+   ]
+  },
+  {
+   "distance_to_goal_m": 3.61115997429671,
+   "key": "shower",
+   "mean_path_length_m": 22.208573698743937,
+   "mean_steps": 227.11428571428573,
+   "n_episodes": 70,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.3416570397731489,
+   "spl": 0.32727891510686485,
+   "spl_ci": [
+    0.26653498438804885,
+    0.38966731579911945
+   ],
+   "success_rate": 0.7285714285714285,
+   "success_rate_ci": [
+    0.6145568826371893,
+    0.8188040031181171
+   ]
+  },
+  {
+   "distance_to_goal_m": 4.310121376186655,
+   "key": "sink",
+   "mean_path_length_m": 24.99686261802686,
+   "mean_steps": 266.0853658536585,
+   "n_episodes": 82,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.30596131507625823,
+   "spl": 0.2653153588158458,
+   "spl_ci": [
+    0.20530481212387788,
+    0.32808171978907263
+   ],
+   "success_rate": 0.573170731707317,
+   "success_rate_ci": [
+    0.46521208028574057,
+    0.6745805113693667
+   ]
+  },
+  {
+   "distance_to_goal_m": 7.5029335623817905,
+   "key": "sofa",
+   "mean_path_length_m": 28.496998648427276,
+   "mean_steps": 297.0566037735849,
+   "n_episodes": 53,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.2635057919761975,
+   "spl": 0.20119426739396706,
+   "spl_ci": [
+    0.12443082581294157,
+    0.28434308328707764
+   ],
+   "success_rate": 0.37735849056603776,
+   "success_rate_ci": [
+    0.25936265472876113,
+    0.5119310405824662
+   ]
+  },
+  {
+   "distance_to_goal_m": 8.970414691892287,
+   "key": "stool",
+   "mean_path_length_m": 25.18966813220028,
+   "mean_steps": 269.30882352941177,
+   "n_episodes": 68,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.21362987484254806,
+   "spl": 0.17954424073940278,
+   "spl_ci": [
+    0.1273774973153072,
+    0.2321159927148201
+   ],
+   "success_rate": 0.4264705882352941,
+   "success_rate_ci": [
+    0.3159724314773308,
+    0.5448321768344443
+   ]
+  },
+  {
+   "distance_to_goal_m": 2.700657909082742,
+   "key": "table",
+   "mean_path_length_m": 16.644348547126924,
+   "mean_steps": 174.81470588235294,
+   "n_episodes": 340,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.2715447642642893,
+   "spl": 0.2522064481303489,
+   "spl_ci": [
+    0.22791944101277226,
+    0.2781896973622949
+   ],
+   "success_rate": 0.6882352941176471,
+   "success_rate_ci": [
+    0.6371260801261586,
+    0.7351385107670217
+   ]
+  },
+  {
+   "distance_to_goal_m": 10.412983095339898,
+   "key": "toilet",
+   "mean_path_length_m": 41.7479180685451,
+   "mean_steps": 413.32142857142856,
+   "n_episodes": 28,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.0786020176564818,
+   "spl": 0.020922350751155533,
+   "spl_ci": [
+    0.0,
+    0.054836745801741874
+   ],
+   "success_rate": 0.07142857142857142,
+   "success_rate_ci": [
+    0.01981206411530574,
+    0.22645362568399047
+   ]
+  },
+  {
+   "distance_to_goal_m": 5.229420717856655,
+   "key": "towel",
+   "mean_path_length_m": 27.3879425019427,
+   "mean_steps": 270.3150684931507,
+   "n_episodes": 73,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.3462646491841799,
+   "spl": 0.16272373939863558,
+   "spl_ci": [
+    0.10248741938824027,
+    0.22849490326560987
+   ],
+   "success_rate": 0.3287671232876712,
+   "success_rate_ci": [
+    0.2319448586470001,
+    0.44270993859811336
+   ]
+  },
+  {
+   "distance_to_goal_m": 14.948564641643316,
+   "key": "tv_monitor",
+   "mean_path_length_m": 35.452570582435385,
+   "mean_steps": 352.5,
+   "n_episodes": 8,
+   "n_unreachable_end": 0,
+   "soft_spl": 0.21908976562094049,
+   "spl": 0.10416781950505273,
+   "spl_ci": [
+    0.0,
+    0.3125034585151582
+   ],
+   "success_rate": 0.125,
+   "success_rate_ci": [
+    0.02241749145005667,
+    0.47088818221285345
+   ]
+  }
+ ],
+ "by_scene": [
+  {
+   "episodes": 200,
+   "finished": true,
+   "scene": "2azQ1b91cZZ",
+   "soft_spl": 0.3414535689641272,
+   "spl": 0.31128438103410294,
+   "success_rate": 0.635
+  },
+  {
+   "episodes": 201,
+   "finished": true,
+   "scene": "8194nk5LbLH",
+   "soft_spl": 0.2083555446803798,
+   "spl": 0.1436064768135768,
+   "success_rate": 0.3383084577114428
+  },
+  {
+   "episodes": 198,
+   "finished": true,
+   "scene": "EU6Fwq7SyZv",
+   "soft_spl": 0.3282161401218888,
+   "spl": 0.2960029841848434,
+   "success_rate": 0.5505050505050505
+  },
+  {
+   "episodes": 197,
+   "finished": true,
+   "scene": "QUCTc6BB5sX",
+   "soft_spl": 0.18781060338134756,
+   "spl": 0.1405329732399469,
+   "success_rate": 0.2893401015228426
+  },
+  {
+   "episodes": 200,
+   "finished": true,
+   "scene": "TbHJrupSAjP",
+   "soft_spl": 0.29674633160626074,
+   "spl": 0.2547813400611802,
+   "success_rate": 0.525
+  },
+  {
+   "episodes": 200,
+   "finished": true,
+   "scene": "X7HyMhZNoso",
+   "soft_spl": 0.17986527335842928,
+   "spl": 0.11934679803516275,
+   "success_rate": 0.265
+  },
+  {
+   "episodes": 200,
+   "finished": true,
+   "scene": "Z6MFQCViBuw",
+   "soft_spl": 0.25011057149975474,
+   "spl": 0.2281719368182072,
+   "success_rate": 0.54
+  },
+  {
+   "episodes": 201,
+   "finished": true,
+   "scene": "oLBMNvg9in8",
+   "soft_spl": 0.37144587122289613,
+   "spl": 0.3292880119869105,
+   "success_rate": 0.6368159203980099
+  },
+  {
+   "episodes": 200,
+   "finished": true,
+   "scene": "pLe4wQe7qrG",
+   "soft_spl": 0.2810049960001732,
+   "spl": 0.28596857307250934,
+   "success_rate": 0.97
+  },
+  {
+   "episodes": 200,
+   "finished": true,
+   "scene": "x8F5xyUWy9e",
+   "soft_spl": 0.38557167759423727,
+   "spl": 0.2916756206566441,
+   "success_rate": 0.635
+  },
+  {
+   "episodes": 198,
+   "finished": true,
+   "scene": "zsNo4HB9uLZ",
+   "soft_spl": 0.4594078457723325,
+   "spl": 0.4232647996960603,
+   "success_rate": 0.8131313131313131
+  }
+ ],
+ "complete": true,
+ "dataset_version": "v1",
+ "episodes": 2195,
+ "episodes_published": 2195,
+ "overall": {
+  "distance_to_goal_m": 4.330576488338087,
+  "key": "all",
+  "mean_path_length_m": 21.231026909351584,
+  "mean_steps": 221.93439635535307,
+  "n_episodes": 2195,
+  "n_unreachable_end": 0,
+  "soft_spl": 0.2990609596694015,
+  "spl": 0.2566731385517757,
+  "spl_ci": [
+   0.24561769877557552,
+   0.268752406545422
+  ],
+  "success_rate": 0.5635535307517084,
+  "success_rate_ci": [
+   0.5427129232523423,
+   0.5841720774287146
+  ]
+ },
+ "scenes_expected": 11,
+ "scenes_published": 11,
+ "scenes_unfinished": [],
+ "scenes_with_rows": 11,
+ "scenes_without_rows": [],
+ "split": "val"
+}
