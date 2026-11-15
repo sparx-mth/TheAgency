@@ -93,6 +93,9 @@ Findings below that belong to Nadav (not worked on here): escape trap (2/50 phas
   On frames of real, close targets the agent released: toilet and sofa accepted (clear ones), **plants rejected 6 of 6** and one low-confidence toilet rejected. Small samples, low resolution,
   ~50 s per frame on a CPU (expect ~1 s on the 4090). Re-test with full-resolution frames inside the run (`closing/vlm_confirmation.py` exists, commit 41eb1bde).
 
+Daphna reviewed the frames (2026-11-15): the VLM was right on all 6 wrong stops (including the real tv stopped at 3.3 m). The plants it rejected are real but tiny at 320x240:
+a resolution limit. Design to test on the 4090: ask the VLM about a zoomed crop of the box, with some context, cut from the full-resolution frame inside the run, applied by box size in pixels (a general rule, not per label).
+
 ## Todos, in order
 1. **Baseline on train, single-floor only** (phase A): SR, SPL, then failure triage with GT as in `todos/` session: wrong stop vs timeout; for wrong stops,
    is a same-kind object within 3 m, is it in the goal set (`goals_by_category` object ids), is it the goal but farther than the success radius.
