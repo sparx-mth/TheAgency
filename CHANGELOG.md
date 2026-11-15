@@ -5,6 +5,22 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-13, stair traversal on against off on HM3D v1 val: the same 2,000 episodes, paired -- docs/progress/entries/048)
+- **Run 2, `allow_stair_traversal: true`** (`runs/gt_oracle_2000ep_14b_stairs_20261112T115622Z`, `hm3d/sets/policy_stairs_on.json`,
+  everything else as Run 1, Run 1's LLM answers replayed): complete in 12 h 31 min, **SR 63.0 %, SPL 36.8 %, DTG 3.12 m**.
+  Paired against Run 1: **overall −8.0 SR points** [−10.0, −5.9]; **cross-storey goals +13.5** (11.2 → 24.7 %, DTG 12.7 → 8.3 m);
+  **same-storey goals −12.5** (83.5 → 71.1 %). 406 episodes changed storey (mean 0.28 transitions an episode; 0.63 on
+  cross-storey goals, 0.20 on same-storey ones, where none was needed); 546 of the 740 failures end inside the traversal
+  machinery -- 358 `SAFE_HALT` STOPs and 188 step limits mid-traversal, 355 of them same-storey episodes whose traversal
+  started at a median action 63 before the storey was searched.
+- **`hm3d/compare_campaigns.py`**: two campaign roots paired episode by episode -- SR / SPL / DTG per arm and the paired
+  B − A differences with bootstrap intervals and McNemar, overall, per category, by storey and per category × storey;
+  storey transitions per episode per arm; flips with the mechanism each arm failed by; and a pairing-integrity check on
+  the episodes in which the change never acted (including that A's spawn-floor guard painted nothing, since the guard is
+  inert once traversal is allowed).
+- **`campaign_breakdown.py` reads traversal-on runs**: `stop_safe_halt`, `limit_in_traversal`, `limit_no_transition`
+  tags from `building.allow_stair_traversal` / `phase` / `completed_transitions`, a storey-transitions-per-episode
+  section, and single-scene roots.
 ### Added (2026-11-11, the HM3D v1 val ground-truth run with the 14B in both LLM roles: what it needed to run unattended and be read)
 - **A per-step heartbeat for the stall watchdog** (`progress.ProgressTracker.heartbeat`, `heartbeat.json` beside
   `progress.json`, rewritten at most every 30 s from `ProgressEnv.step`; `scene_pool.HEARTBEAT_FILES` watches it):

@@ -47,21 +47,29 @@ DEFAULT_LEVELS = Path(__file__).resolve().parent / "sets" / "hm3d_v1_val_levels.
 #: Step-limit endings (no STOP):
 #:   ``limit_cross_storey_goal``  the goal's view points lie on another storey and the search is confined to the
 #:                                spawn storey (``allow_stair_traversal`` off): unreachable by construction;
-#:   ``limit_never_seen``         same storey, the target was never in a frame the closing accepted;
+#:   ``limit_in_traversal``       (traversal on) the limit came mid-traversal: the building layer was still in
+#:                                TRAVERSE / RETREAT / CONFIRM_DESTINATION;
+#:   ``limit_no_transition``      (traversal on) a cross-storey goal and the agent never completed a storey change;
+#:   ``limit_never_seen``         the target was never in a frame the closing accepted;
 #:   ``limit_wedged``             the closing released a lock for going nowhere, or forward was refused 40+ times;
 #:   ``limit_seen_not_converted`` the target was seen (a lock, a pursuit or a bearing) and no STOP followed;
 #:   ``limit_other``              none of the above held.
 #: STOPs scored as failures:
-#:   ``stop_cross_storey_goal``   a STOP with the goal on another storey (a same-category object of the spawn
-#:                                storey, or a goal seen across levels);
+#:   ``stop_safe_halt``           (traversal on) the traversal gave up and halted: the building layer's SAFE_HALT
+#:                                ends the episode with a STOP wherever the agent stands;
+#:   ``stop_cross_storey_goal``   (traversal off) a STOP with the goal on another storey (a same-category object of
+#:                                the spawn storey, or a goal seen across levels);
 #:   ``stop_near_miss``           within a metre of a view point -- the standing spot, not the object;
 #:   ``stop_far``                 farther than that: a wrong instance or a geodesic the planar range did not show.
 #: ``agent_error``: the harness recorded an exception; ``*_unknown``: a lean record, the counters are not there.
 MECHANISMS = ("agent_error",
-              "limit_cross_storey_goal", "limit_never_seen", "limit_wedged", "limit_seen_not_converted", "limit_other",
-              "limit_unknown", "stop_cross_storey_goal", "stop_near_miss", "stop_far", "stop_unknown")
+              "limit_cross_storey_goal", "limit_in_traversal", "limit_no_transition", "limit_never_seen", "limit_wedged",
+              "limit_seen_not_converted", "limit_other", "limit_unknown",
+              "stop_safe_halt", "stop_cross_storey_goal", "stop_near_miss", "stop_far", "stop_unknown")
 NEAR_MISS_M = 1.0
 WEDGED_BLOCKED_FORWARD = 40
+#: The building layer's phases while a storey change is under way (``multifloor/stair_traversal.py``).
+TRAVERSAL_PHASES = ("TRAVERSE", "RETREAT", "CONFIRM_DESTINATION")
 
 
 def load_levels(path: Path) -> Dict[str, dict]:
@@ -76,9 +84,12 @@ def load_levels(path: Path) -> Dict[str, dict]:
 
 
 def load_rows(root: Path):
-    """``(records, raw)`` of every scene's ``episodes.jsonl``: the harness records and the raw JSON rows, by id."""
+    """``(records, raw)`` of every ``episodes.jsonl`` under a campaign root (``<scene>/``) or of a single-scene run (the root itself)."""
     records, raw = [], {}
-    for source in sorted(root.glob("*/episodes.jsonl")):
+    sources = sorted(root.glob("*/episodes.jsonl"))
+    if (root / "episodes.jsonl").is_file():
+        sources.insert(0, root / "episodes.jsonl")
+    for source in sources:
         for _, record in read_episode_rows(source):
             records.append(record)
         with source.open() as stream:
@@ -97,6 +108,22 @@ def storey_of(episode_id: str, levels: Dict[str, dict]) -> Optional[str]:
     return "same" if row["goal_same_level"] == 1 else "cross"
 
 
+def building_of(row: dict) -> dict:
+    """The building layer's report of the row (``policy.building``), or ``{}`` on a lean record."""
+    return ((row.get("agent_info") or {}).get("policy") or {}).get("building") or {}
+
+
+def traversal_allowed(row: dict) -> Optional[bool]:
+    """Whether the row ran with ``allow_stair_traversal`` on; None where the record does not say."""
+    value = building_of(row).get("allow_stair_traversal")
+    return None if value is None else bool(value)
+
+
+def transitions_of(row: dict) -> int:
+    """Storey changes the episode completed (``building.completed_transitions``)."""
+    return len(building_of(row).get("completed_transitions") or [])
+
+
 def mechanism(row: dict, storey: Optional[str]) -> str:
     """The failed episode's tag (:data:`MECHANISMS`), from its row alone."""
     if row.get("termination") == "agent_error" or row.get("agent_error"):
@@ -106,17 +133,25 @@ def mechanism(row: dict, storey: Optional[str]) -> str:
     lean = bool(info.get("lean"))
     closing = policy.get("target_closing") or {}
     pursuit = (policy.get("target_pursuit") or {}).get("stats") or {}
+    building = building_of(row)
+    allowed = traversal_allowed(row)
     dtg = row.get("distance_to_goal_m")
     if row.get("stop_called"):
-        if storey == "cross":
+        if allowed and building.get("phase") == "SAFE_HALT":
+            return "stop_safe_halt"
+        if storey == "cross" and not allowed:
             return "stop_cross_storey_goal"
         if dtg is None or (isinstance(dtg, float) and not math.isfinite(dtg)):
             return "stop_far"
         if dtg <= NEAR_MISS_M:
             return "stop_near_miss"
         return "stop_far" if closing or lean else "stop_unknown"
-    if storey == "cross":
+    if storey == "cross" and not allowed:
         return "limit_cross_storey_goal"
+    if allowed and building.get("phase") in TRAVERSAL_PHASES:
+        return "limit_in_traversal"
+    if allowed and storey == "cross" and transitions_of(row) == 0:
+        return "limit_no_transition"
     if not closing:
         return "limit_unknown"
     seen = int(closing.get("last_seen_step", -1)) >= 0 or int(closing.get("releases", 0) or 0) > 0 \
@@ -165,12 +200,39 @@ def storey_events(rows: Sequence[dict]) -> Counter:
     """The building layer's events over every episode (storey confirmations, ignored departures, transitions)."""
     events = Counter()
     for row in rows:
-        building = ((row.get("agent_info") or {}).get("policy") or {}).get("building") or {}
+        building = building_of(row)
         for event in building.get("events") or []:
             events[event.get("event", "?")] += 1
         if building.get("completed_transitions"):
             events["completed_transitions"] += len(building["completed_transitions"])
     return events
+
+
+def transitions_summary(rows: Sequence[dict], storeys: Dict[str, Optional[str]]) -> dict:
+    """Storey changes per episode: the distribution, and the mean by storey group and by outcome.
+
+    The number the stairs-on arm is read with: a cross-storey goal needs at least one, a same-storey goal needs
+    none, and a transition in a same-storey episode is a detour the search paid for.
+    """
+    counts = {row["episode_id"]: transitions_of(row) for row in rows}
+    values = list(counts.values())
+    distribution = Counter(values)
+
+    def mean_of(ids):
+        ids = list(ids)
+        return round(sum(counts[i] for i in ids) / len(ids), 3) if ids else None
+
+    by_row = {row["episode_id"]: row for row in rows}
+    out = {"episodes": len(values), "total": sum(values), "mean": round(sum(values) / len(values), 3) if values else None,
+           "max": max(values) if values else 0, "episodes_with_any": sum(1 for v in values if v > 0),
+           "distribution": {str(k): distribution[k] for k in sorted(distribution)},
+           "mean_by_storey": {s: mean_of(i for i in counts if storeys.get(i) == s) for s in ("same", "cross")},
+           "mean_by_outcome": {"success": mean_of(i for i in counts if by_row[i]["success"]),
+                               "failure": mean_of(i for i in counts if not by_row[i]["success"])},
+           "cross_storey_successes_with_transition": sum(1 for i in counts if storeys.get(i) == "cross" and by_row[i]["success"] and counts[i] > 0),
+           "same_storey_episodes_with_transition": sum(1 for i in counts if storeys.get(i) == "same" and counts[i] > 0),
+           "allowed": sorted({str(traversal_allowed(r)) for r in rows})}
+    return out
 
 
 def _group(key: str, records) -> Optional[dict]:
@@ -243,6 +305,7 @@ def breakdown(root: Path, levels: Dict[str, dict], launcher_log: Optional[Path] 
                          "last_release_reasons": dict(release_reasons(failures).most_common(15)),
                          "tags": tags},
             "llm": llm_health(list(raw.values())), "storey_events": dict(storey_events(list(raw.values()))),
+            "transitions": transitions_summary(list(raw.values()), storeys),
             "runtime": {"started_utc": _read(root / "started_utc.txt"), "finished_utc": _read(root / "finished_utc.txt"),
                         "scene_hours": scene_durations(launcher_log),
                         "mean_wall_s_per_episode": round(sum(r.wall_s for r in records) / len(records), 1)},
@@ -292,6 +355,15 @@ def markdown(report: dict) -> str:
         llm["oracle_calls_total"], llm["oracle_calls_mean"], llm["episodes_without_oracle_answer"], llm["label_calls_total"], llm["label_calls_mean"], llm["room_llm_failures"])]
     if report["storey_events"]:
         lines += ["", "## Storey events (building layer, all episodes)", "", ", ".join("%s %d" % kv for kv in sorted(report["storey_events"].items()))]
+    t = report.get("transitions")
+    if t:
+        lines += ["", "## Storey transitions per episode (allow_stair_traversal: %s)" % ", ".join(t["allowed"]), "",
+                  "%d transitions in %d episodes: mean %.3f per episode, %d episodes with at least one (max %d); distribution %s" % (
+                      t["total"], t["episodes"], t["mean"] or 0.0, t["episodes_with_any"], t["max"], json.dumps(t["distribution"])),
+                  "mean per episode: same-storey goals %s, cross-storey goals %s; successes %s, failures %s" % (
+                      t["mean_by_storey"]["same"], t["mean_by_storey"]["cross"], t["mean_by_outcome"]["success"], t["mean_by_outcome"]["failure"]),
+                  "cross-storey successes with a transition %d; same-storey episodes that changed storey %d" % (
+                      t["cross_storey_successes_with_transition"], t["same_storey_episodes_with_transition"])]
     rt = report["runtime"]
     lines += ["", "## Runtime", "", "started %s, finished %s; mean wall %.0f s per episode" % (rt["started_utc"], rt["finished_utc"], rt["mean_wall_s_per_episode"])]
     if rt["scene_hours"]:

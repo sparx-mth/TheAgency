@@ -1,5 +1,19 @@
 # Handoff — HM3D ObjectNav benchmark
 
+## 2026-11-13 — Stair traversal on against off, the same 2,000 episodes paired (entry 048)
+
+Run 2 = Run 1 below with `allow_stair_traversal: true` (`hm3d/sets/policy_stairs_on.json`), Run 1's answers replayed:
+`runs/gt_oracle_2000ep_14b_stairs_20261112T115622Z`, complete in 12 h 31 min (half the LLM calls: a traversal makes
+none and a SAFE_HALT ends the episode early). **SR 0.630 / SPL 0.368 / DTG 3.12.** Paired: overall **−8.0 SR points**,
+cross-storey **+13.5** (0.112 → 0.247, DTG 12.7 → 8.3 m, 177 of 348 episodes changed storey), same-storey **−12.5**
+(0.835 → 0.711; 229 same-storey episodes changed storey for no reason). 546 of 740 failures end in the traversal
+machinery: 358 `SAFE_HALT` STOPs (242 same-storey, traversal started at a median action 63, target never seen, Run 1
+succeeded on 156 of them) and 188 step limits in TRAVERSE/RETREAT. The flag stays off; the two levers are the
+stairs-node valuation before the storey is searched and SAFE_HALT → STOP after a failed traversal (resume the
+search instead). Tables: `..._stairs_..._support/compare_stairs_off_vs_on.md`; the tool is `hm3d/compare_campaigns.py`.
+
+---
+
 ## 2026-11-12 — The ground-truth oracle ran the full v1 val split with the 14B model in both LLM roles
 
 Branch: `feat/objnav-habitat-hm3d-nadav`, tree `0dd7d39c` plus the uncommitted harness additions below. Full account:

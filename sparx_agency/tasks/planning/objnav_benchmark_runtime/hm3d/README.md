@@ -550,6 +550,16 @@ closing release reasons, the LLM's health (episodes with no oracle answer,
 room-LLM failures), the building layer's storey events, per-scene runtime and
 the machine's utilization when `../utilization_log.py` sampled it beside the
 run (`--out <support>/utilization.csv --interval 15`, then `--summarise`).
+Under `allow_stair_traversal: true` the tags add `stop_safe_halt` (the
+traversal gave up and SAFE_HALT ended the episode with a STOP),
+`limit_in_traversal` and `limit_no_transition`, and a storey-transitions
+section counts `building.completed_transitions` per episode.
+
+Two campaigns on the same episodes are compared paired with
+`compare_campaigns.py runs/A runs/B --label-a off --label-b on` (SR / SPL /
+DTG differences with intervals per group, transitions per episode per arm,
+flips, and the integrity check on the episodes in which the change never
+acted -- run arm B with `LLM_ANSWERS_REPLAY=<A's store>` so that holds).
 
 ### 3.5 The perception upper bound: ground-truth boxes and masks from the simulator
 
@@ -813,6 +823,8 @@ issue.
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
 | `campaign_breakdown.py` | what a finished campaign is read with: SR / SPL / DTG overall, per category and same- vs cross-storey (the goal's storey against the start's, from `sets/hm3d_v1_val_levels.csv`), one failure-mechanism tag per failed episode from the full records, the LLM's health, per-scene runtime and the `../utilization_log.py` summary |
 | `episode_levels.py`, `sets/hm3d_v1_val_levels.csv` | the level survey of a split (storeys, where each start stands, the nearest goal view point's storey) and the shipped survey of v1 val (1,652 same-storey goals, 348 cross-storey) |
+| `compare_campaigns.py` | two campaign roots on the same episodes, paired: SR / SPL / DTG per arm and the B − A differences with bootstrap intervals and McNemar, overall, per category, by storey and per category × storey; storey transitions per episode; flips with each arm's failure mechanism; the pairing-integrity check (entry 048: stairs on against off) |
+| `sets/policy_stairs_on.json` | the one-line `--policy-config` that turns `allow_stair_traversal` on (Run 2 of entry 048); everything else stays the launcher's default |
 | `sota.py` | the published numbers, with the table each came from |
 | `frozen_eval.py` | freeze an exact configuration, then run the full split under it |
 | `smooth_replay.py` | visualization-only smooth video, after the fact, never scored |
