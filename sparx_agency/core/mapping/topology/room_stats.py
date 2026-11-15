@@ -30,9 +30,11 @@ from typing import (Dict, Iterable, List, Optional, Sequence, Set,
                     Tuple)
 
 import numpy as np
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, find_objects
 from scipy.ndimage import label as cc_label
 
+from sparx_agency.core.mapping.topology.frontier_split import (
+    SIDE_MIN_CELLS, SIDE_WINDOW_CELLS, frontier_sides, split_by_side)
 from sparx_agency.core.mapping.topology.room_segmentation import FREE_MAX, UNKNOWN
 
 
@@ -161,20 +163,33 @@ def count_frontier_clusters(
     grid: np.ndarray,
     room_lbl: np.ndarray,
     min_cluster_cells: int,
+    split_sides: bool = True,
+    side_window_cells: int = SIDE_WINDOW_CELLS,
+    side_min_cells: int = SIDE_MIN_CELLS,
 ) -> Dict[int, int]:
     """Count frontier clusters per room.
 
     A frontier cell is a free cell 4-adjacent to an unknown cell
     (diagonal contacts produce noisier clusters on room corners, so
     they do not count). Frontier cells are clustered by 8-connectivity;
-    clusters below the size floor are dropped as noise; each surviving
-    cluster is assigned to one room by majority vote over the room
-    labels at its cells (label-0 cells abstain).
+    a cluster that wraps round a block of unknown is cut into one per
+    side of the block (:mod:`frontier_split`, since 2026-10-22, the same
+    cut the goal maker makes); clusters below the size floor are dropped
+    as noise; each surviving cluster is assigned to one room by majority
+    vote over the room labels at its cells (label-0 cells abstain).
 
     Args:
         grid: (H, W) int8 occupancy grid.
         room_lbl: (H, W) int room label image (0 = no room).
         min_cluster_cells: Clusters smaller than this are dropped.
+        split_sides: Cut the wrapping clusters (the default); False is
+            the historical one-component-one-cluster count.
+        side_window_cells: Half-width of the window the unknown's side is
+            read from (:func:`frontier_split.side_window_cells` for the
+            grid's resolution; the default suits 0.1 m cells).
+        side_min_cells: Fewest cells a side needs to stand as a cluster of
+            its own (:func:`frontier_split.side_min_cells`; a doorway's
+            width at 0.1 m by default).
 
     Returns:
         ``{room_label: cluster_count}`` with an entry (possibly 0) for
@@ -197,20 +212,25 @@ def count_frontier_clusters(
     if n == 0:
         return counts
 
-    flat_lbl = fc_lbl.ravel()
-    flat_room = room_lbl.ravel()
-    for k in range(1, n + 1):
-        sel = flat_lbl == k
-        size = int(sel.sum())
-        if size < min_cluster_cells:
+    sides = frontier_sides(unk, side_window_cells) if split_sides else None
+    for k, window in enumerate(find_objects(fc_lbl), start=1):
+        if window is None:
             continue
-        rooms_here = flat_room[sel]
-        rooms_here = rooms_here[rooms_here > 0]
-        if rooms_here.size == 0:
+        local_ys, local_xs = np.nonzero(fc_lbl[window] == k)
+        if local_ys.size < min_cluster_cells:
             continue
-        winner = int(Counter(rooms_here.tolist()).most_common(1)[0][0])
-        if winner in counts:
-            counts[winner] += 1
+        ys, xs = local_ys + window[0].start, local_xs + window[1].start
+        parts = [(ys, xs)]
+        if sides is not None:
+            parts = split_by_side(ys, xs, sides[ys, xs], max(int(min_cluster_cells), int(side_min_cells)))
+        for rows, cols in parts:
+            rooms_here = room_lbl[rows, cols]
+            rooms_here = rooms_here[rooms_here > 0]
+            if rooms_here.size == 0:
+                continue
+            winner = int(Counter(rooms_here.tolist()).most_common(1)[0][0])
+            if winner in counts:
+                counts[winner] += 1
     return counts
 
 

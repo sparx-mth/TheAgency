@@ -1,0 +1,14 @@
+2195 episodes, 958 failures: 943 the method's, 15 the ground-truth sensor's (phantom ids, outside the analysis)
+  gt_phantom_sliver            2   (GT artefact)
+  gt_phantom_id                13   (GT artefact)
+  stop_near_miss               55
+                               beside 37, in_band 16, far 2
+  stop_other_level             6
+  stop_seen_through_barrier    306
+  stop_other                   237
+  limit_never_seen             213
+  limit_wedged                 27
+  limit_locks_released         99
+
+2azQ1b91cZZ/000000   cabinet          limit_locks_released       LIMIT DTG  6.80  steps 500  locks 3  agent->vp 5.34  mem->goal None  mem dz None  first box None H None
+                          last lock @488: None

@@ -1,16 +1,11 @@
-"""2D path planning utilities."""
+"""2D path planning utilities; native OMPL is loaded only by its objective builder."""
 from __future__ import annotations
 
 from math import hypot
-from typing import List, TYPE_CHECKING
+from typing import List
 
 from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.environment import Costmap2D
-
-from .ompl_imports import ob, OMPL_AVAILABLE
-
-if TYPE_CHECKING:
-    from ompl import base as ob
 
 
 def interpolate_path_2d(points: List[Pose2D], spacing: float) -> List[Pose2D]:
@@ -22,7 +17,6 @@ def interpolate_path_2d(points: List[Pose2D], spacing: float) -> List[Pose2D]:
     for a, b in zip(points[:-1], points[1:]):
         dx, dy = b.x - a.x, b.y - a.y
         dist = hypot(dx, dy)
-
         if dist > spacing:
             n_segments = int(dist / spacing)
             for i in range(1, n_segments + 1):
@@ -155,22 +149,21 @@ def reduce_path_2d(si, costmap: Costmap2D, states: List, min_clearance: float) -
     """Adaptive waypoint reduction for 2D."""
     if len(states) < 3:
         return [si.cloneState(s) for s in states]
-
     kept = [si.cloneState(states[0])]
     for i in range(1, len(states) - 1):
         x, y = states[i][0], states[i][1]
         clearance = costmap.world_clearance(x, y)
         can_skip = si.checkMotion(kept[-1], states[i + 1])
-
         if clearance < min_clearance or not can_skip:
             kept.append(si.cloneState(states[i]))
-
     kept.append(si.cloneState(states[-1]))
     return kept
 
 
 def make_clearance_objective_2d(si, costmap: Costmap2D, weight: float):
     """Create 2D clearance objective."""
+    from .ompl_imports import ob, OMPL_AVAILABLE
+
     if not OMPL_AVAILABLE:
         raise RuntimeError("OMPL not available")
 

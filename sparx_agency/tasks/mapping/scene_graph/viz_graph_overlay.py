@@ -206,7 +206,11 @@ def draw_doors(panel, graph, extent):
         if ppm < DOOR_LABEL_MIN_PPM or "index" not in door:
             continue
         label_bgr = DOOR_LABEL_BGR if discovered else DOOR_UNDISCOVERED_BGR
-        cv2.putText(panel, "d%d" % int(door["index"]),
+        index = door["index"]
+        # A detected door is ``d<n>``; a threshold edge (``scene_graph._door_links``, since 2026-10-21) carries
+        # its own ``t<k>`` name and is drawn with it.
+        text = ("d%d" % int(index)) if isinstance(index, (int, np.integer)) else str(index)
+        cv2.putText(panel, text,
                     (px + half + 2, py - half - 2), FONT, 0.32, label_bgr, 1,
                     cv2.LINE_AA)
 

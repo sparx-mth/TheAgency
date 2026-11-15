@@ -1,16 +1,10 @@
-"""3D path planning utilities."""
+"""3D path planning utilities; native OMPL builders are loaded on demand."""
 from __future__ import annotations
 
 from math import sqrt
-from typing import List, Tuple, TYPE_CHECKING
+from typing import List, Tuple
 
 from sparx_agency.core.common.types import Pose3D
-
-from .ompl_imports import ob, og, OMPL_AVAILABLE
-
-if TYPE_CHECKING:
-    from ompl import base as ob
-    from ompl import geometric as og
 
 
 # =============================================================================
@@ -31,7 +25,6 @@ def interpolate_path_3d(points: List[Pose3D], spacing: float) -> List[Pose3D]:
     for a, b in zip(points[:-1], points[1:]):
         dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
         d = sqrt(dx * dx + dy * dy + dz * dz)
-
         if d > spacing:
             n_segments = int(d / spacing)
             for i in range(1, n_segments + 1):
@@ -45,16 +38,13 @@ def reduce_path_3d(si, voxelmap, states: List, min_clearance: float) -> List:
     """Adaptive waypoint reduction for 3D."""
     if len(states) < 3:
         return [si.cloneState(s) for s in states]
-
     kept = [si.cloneState(states[0])]
     for i in range(1, len(states) - 1):
         x, y, z = states[i][0], states[i][1], states[i][2]
         clearance = voxelmap.world_clearance(x, y, z)
         can_skip = si.checkMotion(kept[-1], states[i + 1])
-
         if clearance < min_clearance or not can_skip:
             kept.append(si.cloneState(states[i]))
-
     kept.append(si.cloneState(states[-1]))
     return kept
 
@@ -65,6 +55,8 @@ def reduce_path_3d(si, voxelmap, states: List, min_clearance: float) -> List:
 
 def make_clearance_objective_3d(si, voxelmap, weight: float):
     """Create 3D clearance-based optimization objective."""
+    from .ompl_imports import ob, OMPL_AVAILABLE
+
     if not OMPL_AVAILABLE:
         raise RuntimeError("OMPL not available")
 
@@ -97,9 +89,9 @@ def get_voxelmap_dim(voxelmap, primary: str, fallback: str) -> int:
 def get_voxelmap_resolution(voxelmap) -> float:
     """Return voxel resolution (meters per cell) supporting common field names."""
     if hasattr(voxelmap, "resolution"):
-        return float(getattr(voxelmap, "resolution"))
+        return float(voxelmap.resolution)
     if hasattr(voxelmap, "voxel_size"):
-        return float(getattr(voxelmap, "voxel_size"))
+        return float(voxelmap.voxel_size)
     raise AttributeError("Voxelmap missing resolution attribute: 'resolution' or 'voxel_size'")
 
 
@@ -108,29 +100,24 @@ def get_voxelmap_resolution(voxelmap) -> float:
 # =============================================================================
 
 def setup_ompl_space_3d(voxelmap, params) -> Tuple:
-    """
-    Create OMPL state space and SimpleSetup for 3D planning.
-    
+    """Create OMPL state space and SimpleSetup for 3D planning.
+
     Returns:
-        Tuple of (space, simple_setup, space_information)
+        Tuple of (space, simple_setup, space_information).
     """
+    from .ompl_imports import ob, og, OMPL_AVAILABLE
+
     if not OMPL_AVAILABLE:
         raise RuntimeError("OMPL not available")
-
     space = ob.RealVectorStateSpace(3)
     bounds = ob.RealVectorBounds(3)
-
-    # Get dimensions (support multiple attribute names)
     sx = get_voxelmap_dim(voxelmap, "size_x", "width")
     sy = get_voxelmap_dim(voxelmap, "size_y", "height")
     sz = get_voxelmap_dim(voxelmap, "size_z", "depth")
     res = get_voxelmap_resolution(voxelmap)
-
     ox = float(voxelmap.origin_x)
     oy = float(voxelmap.origin_y)
     oz = float(voxelmap.origin_z)
-
-    # World bounds
     bounds.setLow(0, ox)
     bounds.setHigh(0, ox + sx * res)
     bounds.setLow(1, oy)
@@ -138,14 +125,11 @@ def setup_ompl_space_3d(voxelmap, params) -> Tuple:
     bounds.setLow(2, oz)
     bounds.setHigh(2, oz + sz * res)
     space.setBounds(bounds)
-
-    # Longest valid segment fraction (in meters -> fraction of space diagonal)
     longest_valid_m = getattr(params, "longest_valid_segment_m", None)
     if longest_valid_m is not None:
         diag = sqrt((sx * res) ** 2 + (sy * res) ** 2 + (sz * res) ** 2)
         fraction = max(0.001, min(0.1, float(longest_valid_m) / diag))
         space.setLongestValidSegmentFraction(fraction)
-
     ss = og.SimpleSetup(space)
     si = ss.getSpaceInformation()
     si.setStateValidityCheckingResolution(float(params.collision_check_resolution))

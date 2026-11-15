@@ -44,6 +44,24 @@
 # Env overrides: DETECT_PORT, DETECT_MODEL, LLM_MODEL, RVIZ, VIZ_WINDOW,
 #   KILL_STALE, SKIP_GPU_CHECK, FALCON_LAUNCH_ARGS.
 #
+# Object search (--object-search only):
+#   SEARCH_BACKEND  who maps the chosen room, falcon (default) or host_sweep
+#   ROOM_BUDGET_S   seconds per room before its turn ends (default 90)
+#   SEARCH_SOLVER   what decides the room ORDER. rpt_star (default) weighs
+#                   how likely each room is against what it costs to reach,
+#                   and returns the whole tour that minimises expected time
+#                   to find. weighted is the old one-room probability draw
+#                   that ignores travel cost -- the A/B baseline, not a
+#                   fallback (rpt_star falls back to it by itself).
+#   RPT_BUDGET_S    seconds one solve may block the tick (default 2.0)
+#   RPT_EPSILON     F-RPT* sub-optimality factor; negative (the default) runs
+#                   the exact search. Only worth raising (~0.5) if the log
+#                   shows solves timing out.
+#   RPT_MAX_ROOMS   most rooms one solve ranges over (default 12). Not a
+#                   speed knob: past ~15 the exact search times out and the
+#                   order silently degrades to nearest-first, which ignores
+#                   the belief entirely.
+#
 # GPU discipline (the 8 GB card is EXCLUSIVE): YOLO-World owns it, alone.
 # Gazebo renders on the CPU (llvmpipe, bringup_world.sh does this), every host
 # node runs with CUDA_VISIBLE_DEVICES="", and ollama runs CPU-only by design.
@@ -239,7 +257,7 @@ export LLM_TIMEOUT_S="${LLM_TIMEOUT_S:-120}"
 VENV_PY="${REPO_ROOT}/.venv/bin/python"
 NAVDP_PY="${HOME}/miniconda3/envs/navdp/bin/python"
 DETECT_PORT="${DETECT_PORT:-8092}"
-DETECT_MODEL="${DETECT_MODEL:-${REPO_ROOT}/yolov8s-worldv2.pt}"
+DETECT_MODEL="${DETECT_MODEL:-${REPO_ROOT}/yolov8x-worldv2.pt}"
 OLLAMA_NAME="ollama-scene-graph"
 
 say "world=${WORLD}  target='${TARGET}'  out=${OUT_DIR}"
@@ -456,7 +474,7 @@ if detect_healthy; then
     say "reusing the healthy detection server on :${DETECT_PORT}"
 else
     [[ -f "${DETECT_MODEL}" ]] || die "YOLO-World checkpoint missing: ${DETECT_MODEL}
-  (gitignored, per-device — download yolov8s-worldv2.pt to the repo root, or
+  (gitignored, per-device — provision yolov8x-worldv2.pt in the repo root, or
   set DETECT_MODEL=/path/to/it)"
     say "starting the detection server on :${DETECT_PORT} (log: ${OUT_DIR}/detection_server.log)..."
     # cd "$HOME", NEVER the repo: ultralytics silently downloads checkpoints
@@ -601,7 +619,11 @@ if [[ "${OBJECT_SEARCH}" == "1" ]]; then
     start_node object_search_node \
         -p "fly:=$([[ "${SEARCH_FLY}" == "1" ]] && echo true || echo false)" \
         -p "search_backend:=${SEARCH_BACKEND:-falcon}" \
-        -p "search_timeout_s:=${ROOM_BUDGET_S:-90.0}"
+        -p "search_timeout_s:=${ROOM_BUDGET_S:-90.0}" \
+        -p "solver:=${SEARCH_SOLVER:-rpt_star}" \
+        -p "rpt_time_budget_s:=${RPT_BUDGET_S:-2.0}" \
+        -p "rpt_epsilon:=${RPT_EPSILON:--1.0}" \
+        -p "rpt_max_rooms:=${RPT_MAX_ROOMS:-12}"
 fi
 
 # The last leg: once target_watcher_node latches /target_seen, this is what
