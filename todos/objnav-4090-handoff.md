@@ -91,7 +91,7 @@ Findings below that belong to Nadav (not worked on here): escape trap (2/50 phas
   that steps toward a glimpsed candidate needs distance > terminal + one step (1.62 m). A glimpse of 10+ steps appears in 5 of 50 episodes (2 failures, 3 successes at ~34 wasted steps).
 - VLM check on stored 320x240 frames (qwen3-vl:4b-instruct, frame with a red box, "is it a X?"): rejects 5 of 5 true false-detection stops, accepts 42 of 42 successful stops.
   On frames of real, close targets the agent released: toilet and sofa accepted (clear ones), **plants rejected 6 of 6** and one low-confidence toilet rejected. Small samples, low resolution,
-  ~50 s per frame on a CPU (expect ~1 s on the 4090). Re-test with full-resolution frames inside the run (`closing/vlm_confirmation.py` exists, commit 41eb1bde).
+  ~50 s per frame on a CPU (expect ~1 s on the 4090). Re-test with full-resolution frames inside the run. The earlier in-loop module (`closing/vlm_confirmation.py`, commit 41eb1bde) was removed at Daphna's request (it carried hand-written per-label definitions, a prior on the environment); any VLM check must be built without it.
 
 Daphna reviewed the frames (2026-11-15): the VLM was right on all 6 wrong stops (including the real tv stopped at 3.3 m). The plants it rejected are real but tiny at 320x240:
 a resolution limit. Design to test on the 4090: ask the VLM about a zoomed crop of the box, with some context, cut from the full-resolution frame inside the run, applied by box size in pixels (a general rule, not per label).
@@ -101,7 +101,7 @@ a resolution limit. Design to test on the 4090: ask the VLM about a zoomed crop 
    is a same-kind object within 3 m, is it in the goal set (`goals_by_category` object ids), is it the goal but farther than the success radius.
    Rewrite the triage script (it lived in laptop `/tmp` and is lost). Use HM3D semantic boxes in public frame (x=gy, y=-gx).
 2. **Scale to 100-150 episodes** on the 4090. At 40% base SR, a paired +10 point change needs about 100+ episodes. Report paired differences with CIs.
-3. **VLM confirm before STOP** (already in the repo, commit 41eb1bde, entry 042): evaluate the full-frame + red-box prompt against the current one, paired.
+3. **VLM confirm before STOP**: the old module was removed (hand-written per-label definitions); build a new check that asks the VLM about the box without per-label text, paired against the baseline.
 4. **Detector choice by false-positive stops**, not by global AUC: YOLO-World vs `closed_open` vs RF-DETR on the same episodes.
 5. **SPL**: measure wasted steps in scans, revisits and escapes; test what shortens the path (search order, MORE, node oracle).
 6. **Bigger models on the 4090**: `qwen3-vl:8b` for confirm, 14B for the reasoning calls, CUDA detectors. Compare to the 3B/4B laptop setting.
