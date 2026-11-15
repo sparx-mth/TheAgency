@@ -78,6 +78,21 @@ Outputs: `~/trace_train_a` (laptop; archived to OneDrive), triage in `~/tc_sweep
 3. Measure paired on the same 50 episodes, then on 100-150 on the 4090, split into "real close target" vs other.
 Daphna continues this on the 4090 PC at the office.
 
+## Scope (Daphna, 2026-11-15): detection and classification are ours; planning and navigation are Nadav's
+Findings below that belong to Nadav (not worked on here): escape trap (2/50 phase A, 1/20 holdout; both phase-A cases start at z 1.25 / 1.62 with `drop_cells`
+1419 / 983 of the spawn-floor guard; 459-469 of 500 steps in escape, 66 forward steps, 0 blocked), memory-STOP refusals (1/50: 31 refusals 0.3 m from the goal,
+`_memory_in_sight` finds an occupied cell between), path efficiency (SPL/SR 0.43). Nadav's MP3D entries 044-047 (`feat/objnav-habitat-mp3d-nadav`) already cover the same mechanisms.
+
+## Holdout and detector results (laptop, train; no per-label thresholds)
+- Holdout: 20 fresh single-floor train episodes in 10 unseen scenes (`~/tc_sweep/holdout_episodes.json`, seed 23): **SR 65%, SPL 0.285** (phase A: 62%, 0.268). Same picture.
+- 6 of 70 episodes (phase A + holdout) end with a STOP where no object of the kind is within 3 m; 4 of the 6 are beds. Detector on fresh train frames with exact boxes
+  (YOLO-World, one global threshold 0.30, precision/recall): toilet 75/87, sofa 73/74, chair 60/38, bed 58/55, tv 51/37, plant 22/33.
+- Verification deadlock (`00422/030802`): toilet box conf 0.95 in 36 consecutive frames, not locked ("glimpse", no usable depth); the agent stood still 34 steps because the rule
+  that steps toward a glimpsed candidate needs distance > terminal + one step (1.62 m). A glimpse of 10+ steps appears in 5 of 50 episodes (2 failures, 3 successes at ~34 wasted steps).
+- VLM check on stored 320x240 frames (qwen3-vl:4b-instruct, frame with a red box, "is it a X?"): rejects 5 of 5 true false-detection stops, accepts 42 of 42 successful stops.
+  On frames of real, close targets the agent released: toilet and sofa accepted (clear ones), **plants rejected 6 of 6** and one low-confidence toilet rejected. Small samples, low resolution,
+  ~50 s per frame on a CPU (expect ~1 s on the 4090). Re-test with full-resolution frames inside the run (`closing/vlm_confirmation.py` exists, commit 41eb1bde).
+
 ## Todos, in order
 1. **Baseline on train, single-floor only** (phase A): SR, SPL, then failure triage with GT as in `todos/` session: wrong stop vs timeout; for wrong stops,
    is a same-kind object within 3 m, is it in the goal set (`goals_by_category` object ids), is it the goal but farther than the success radius.
