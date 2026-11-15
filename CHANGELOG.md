@@ -5,6 +5,58 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-15, the paper's first complete draft: `docs/paper/zson_paper.tex`)
+- **`docs/paper/zson_paper.tex`: one self-contained LaTeX file (27 pages, bibliography embedded, builds clean), written
+  against the working tree after the `room_priors.py` removal.** Single-storey method, experimental setup, the two 14B
+  full-split results (HM3D v1 val SR 71.0 / SPL 39.8; MP3D v1 val SR 65.6 / SPL 29.1), failure analysis, limitations,
+  and appendices: module map, constants (read from `RPTSearchPolicy.configuration()`), both prompts, run records. It
+  says what the numbers are NOT: both runs carried the hand-written room priors (Section 5.6), the MP3D run
+  (`a77c946c`) also predates the five HM3D-branch closing/navigation commits that the HM3D run (`0dd7d39c`, method code
+  identical to HEAD) has, perception is the simulator's and its target labels are the publisher's goal ids, the
+  closing snaps standing points to the navmesh, and the rules were developed on the evaluated val episodes. 25 `TODO`
+  notes mark what is not done (re-run with the current code first). No ablation and no model-size comparison, by
+  request. Supersedes `docs/paper/zero_shot_objectnav_paper.tex`, `docs/method_algorithms.tex`,
+  `docs/algorithm_exploration.tex` and `docs/Method.docx`, which describe earlier versions and were left in place.
+- **`docs/paper/sync_prompts.py`**: copies the room labeller's and the node oracle's prompts from the code into the
+  paper's Appendix C between `%%PROMPT-BEGIN/END%%` markers; `--check` exits 1 when the paper is stale. Run it after
+  any prompt change.
+### Removed (2026-11-15, the hand-written room priors: `core/mapping/topology/room_priors.py` and every consumer)
+- **`room_priors.py` is deleted.** It told the search where things are, by hand: `TARGET_HOMES` (the room types each
+  target category is likely and rare in -- rendered into every node-oracle prompt as a `WHERE IT LIVES` line since
+  2026-11-09, which the system prompt told the model to copy into its `home` step), `IMPLAUSIBLE_ROOMS` (the hard
+  `type_prior` exclusion, off by default, and the room half of the closing's context check, on), `HOME_OBJECTS` (a room
+  holding one was kept a node, not finished by sight from outside, a clue that interrupted a walk for an oracle call, a
+  cue for a glance, and floored by `home_floor`), `SIGNATURE_OBJECTS` and `GENERIC_OBJECTS` (how strong a room label
+  is, and whether a room is labelled at all). Where a target lives is now the node oracle's own judgement.
+- **Gone with it:** `LoopSettings.type_prior`, `.home_floor`, `.weak_type_max_openings`; `RoomLabelSettings
+  .signature_objects`, `.distinctive_required`, `.generic_evidence_gate`; `SearchNode.home`, `SearchContext
+  .target_home`, `HOME_FLOOR` and the `home_floor` argument of the oracle; the `WHERE IT LIVES` sentence of
+  `SYSTEM_PROMPT` (so recorded LLM answer stores no longer replay: the prompt hash changed); `target_context
+  .room_conflict`; the fallback's type demotion (`split_exits(type_rule=...)`, `type_demoted`); the loop counters
+  `weak_type_kept`, `home_object_kept`, `excluded_type`; the home-object component of `discovery.semantic_signature`
+  (now `(storey, rooms on offer, their types)`). A config or `--policy-config` naming a removed field is refused
+  (`TypeError`), not ignored.
+- **What a room label's strength is now:** `strong` on two or more kinds of object and a confident classifier, `weak`
+  otherwise -- a count of the evidence. A room named from one bed reads `bedroom?` again; a room of a cabinet alone is
+  classified (weakly) instead of staying `unknown`.
+- **Audit: the two full-split results on record were NOT clean of this file.** `gt_oracle_2000ep_14b_20261111T114322Z`
+  (HM3D v1 val, tree `0dd7d39c`) and `gt_oracle_mp3d_2195ep_14b_20261111T095333Z` (MP3D v1 val, method code of
+  `60c9823a`) both ran with `room_priors.py` wired in: `type_prior` was off, but every oracle prompt carried the
+  `WHERE IT LIVES` line, `signature_objects` / `distinctive_required` / `generic_evidence_gate` were on, the
+  home-object guard, clue and cue were live, and `context_check` read the implausible-room table (the frozen
+  `preflight.json` of the MP3D run says so in `method.node_oracle.asks`; the code at both commits calls
+  `target_home_line` unconditionally; and every oracle prompt in the two answer stores of the same period that are
+  kept on this machine -- `runs/ss_gt_fixes_llm_answers`, 612 of 612, and `runs/single_storey_v1_llm_answers`, 496 of
+  496 -- carries the line; the two runs' own stores are on the office machine and were not opened). Their numbers
+  are results of the method WITH the table; a table-free number needs a re-run.
+- **Still hand-written, deliberately left and listed** (`core/planning/object_search/README.md`, "No hand-written
+  semantic priors"): the two prompts (the oracle's system prompt names typical homes for the six HM3D categories and
+  gives numeric bands), the code-side scaling of the oracle's numbers by exploration state, `CLASS_HEIGHT_BANDS`,
+  `SUPPORT_SURFACE_CLASSES`, `SHADOWLESS_CLASSES`.
+- Tests: the suites of the three packages pass as before the change (1,697 passed; the one failure,
+  `test_monitor.py::test_finished_is_judged_by_the_pid...`, fails on the untouched tree too). Tests of the removed
+  behaviour were replaced by tests of its absence (`test_no_module_of_hand_written_room_priors_exists`,
+  `test_the_oracle_takes_no_hand_written_prior_about_where_the_target_lives`, ...).
 ### Added (2026-11-13/15, the stairs-on arm of the MP3D 14B run and the comparison -- docs/progress/entries/049)
 - **`runs/gt_oracle_mp3d_2195ep_14b_stairs_20261112T130740Z`: the same split, model, seed and settings as run 1 with
   `allow_stair_traversal` TRUE, replaying run 1's answers (15 % of its questions): SR 56.4 % (CI 54.3-58.4), SPL 25.7 %,

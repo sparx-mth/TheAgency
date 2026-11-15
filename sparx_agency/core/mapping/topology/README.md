@@ -146,8 +146,8 @@ decides whether to keep a stale label — nothing is cached on failure.
   parse, drop invented ids, give an omitted node a small share, clamp
   below 1, refuse a reply with no usable node, reuse the reply when the
   prompt is byte-identical (effort and budget numbers are shown in coarse
-  steps for that). The three arithmetic floors (`unexplored_floor`,
-  `unexplored_elsewhere`, `home_floor`) are knobs, **off by default**; the
+  steps for that). The two arithmetic floors (`unexplored_floor`,
+  `unexplored_elsewhere`) are knobs, **off by default**; the
   storey/stairs rules (`home_here`) are a `STAIRS_SUPPLEMENT` appended only
   when a staircase is a node. `LLMClient.chat_json` takes `reasoning=True`
   to select the reasoning model, its timeout, its reply cap and its
@@ -164,33 +164,36 @@ decides whether to keep a stale label — nothing is cached on failure.
   reply filled the window, raises (`_refuse_truncation`).
   `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
   five single-storey scenarios against the live model and checks the
-  judgement, not just the schema. **Since 2026-11-09** the user prompt also
-  carries a WHERE IT LIVES line (`SearchContext.target_home`, written by
-  `room_priors.target_home_line`) so the `home` step starts from a prior
-  for every category of every benchmark rather than from the model's
-  own -- the 3B model of the MP3D ground-truth run had put a table in the
-  bathroom and a stool in the hallway; the HOUSE line's frontier statement
-  is a tri-state (reachable / only slivers / unreachable from here / none)
-  rather than reachable-or-not; and a node under a square metre is shown
-  as `size=under 1m2` rather than rounded to `0m2`.
-- `room_priors.py` — where a target category lives and where it cannot
-  be: the room types a search need not enter for it (`IMPLAUSIBLE_ROOMS`,
-  exclusions not permissions; `unknown` never excluded), the home objects
-  that keep a room a node whatever its label (`HOME_OBJECTS`), the
-  signature objects that make a one-object label strong
-  (`SIGNATURE_OBJECTS`), and, since 2026-11-09, the room types a category
-  is likely and rarely found in (`TARGET_HOMES`, rendered for the oracle
-  by `target_home_line`). The three tables cover every category of the
-  three ObjectNav benchmarks -- the six HM3D ones, the twenty-one MP3D
-  ones (`counter`, `stool`, `gym_equipment`, `picture`, `cushion`...) and
-  the Gibson set -- under the dataset's own names and the detector's
-  accept labels (`target_key`, `_TARGET_ALIASES`; `_ALIASES` is the
-  object-class vocabulary and stays separate). Pure tables and predicates
-  for the object-search method and its room labels.
+  judgement, not just the schema. **Since 2026-11-09** the HOUSE line's
+  frontier statement is a tri-state (reachable / only slivers / unreachable
+  from here / none) rather than reachable-or-not, and a node under a square
+  metre is shown as `size=under 1m2` rather than rounded to `0m2`.
+  **No hand-written category table (since 2026-11-15).** From 2026-11-09 to
+  that date the user prompt also carried a `WHERE IT LIVES` line, rendered
+  from a table of the room types each target category is likely and rare
+  in, and the system prompt told the model to copy it into its `home` step;
+  a node could be flagged as holding a "home object" of the target and
+  floored (`home_floor`). All of that went with `room_priors.py` (below):
+  where a target lives is the model's own step 1. What the model is still
+  told about homes is what the system prompt itself says (its examples of
+  typical homes and its numeric bands) -- read `SYSTEM_PROMPT` before
+  claiming the judgement is the model's alone.
+- `room_priors.py` — **deleted on 2026-11-15.** It held hand-written tables
+  that told the search where things are: the room types a target category
+  is likely and rare in (`TARGET_HOMES`, the `WHERE IT LIVES` prompt line),
+  the room types a search need not enter for it (`IMPLAUSIBLE_ROOMS`), the
+  "home objects" that kept a room a node (`HOME_OBJECTS`), the "signature"
+  objects that made a one-object label strong and the "generic" ones that
+  kept a room unlabelled. None of it was measured by the method or asked
+  of the model, so none of it belongs in a method whose claim is that the
+  LLM supplies the semantics. Do not reintroduce a table under another
+  name; if the model lacks a prior, that is a prompt or a model question.
 - `revisable_room_labels.py` — `RevisableRoomLabels`, evidence-gated labels
   around `RoomTypeClassifier`: one confirmed landmark is enough to label, the
-  label carries a strength (`weak` from one class of evidence, `strong` from
-  two classes or a signature object), and a new kind of object revises it.
+  label carries a strength (`weak` from one class of evidence or a hesitant
+  model, `strong` from two or more classes and a confident model -- a count
+  of the evidence, never a judgement of which objects they are), and a new
+  kind of object revises it.
   Since 2026-11-09 a verdict that differs from the current label without a
   new kind of evidence -- a count that crossed a bucket, a periodic
   refresh -- is held (`held` counter, a `held: True` history entry) until

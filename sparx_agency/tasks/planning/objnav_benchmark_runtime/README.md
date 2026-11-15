@@ -181,12 +181,12 @@ Allensville/2 and Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter
 front read as `bed` from 0.55 m -- its supported points 0.67-0.70 m above the
 agent's base where every real bed of the recording measured 0.11-0.52 m, inside
 a room the map had made a STRONG kitchen from its refrigerator and oven -- after
-two frames from one spot. A candidate is **suspect** when its footprint lies in
-a room whose strong type is one the target is not searched for in
-(`room_priors.IMPLAUSIBLE_ROOMS`, `room:kitchen`) or when its measured centroid
-height contradicts its class (`CLASS_HEIGHT_BANDS`, calibrated on the Allensville
-recordings: a bed's or a toilet's surface under 0.60 m above the base,
-`height:0.69`). A suspect box counts `context_penalty` (0.70) of its confidence
+two frames from one spot. A candidate is **suspect** when its measured centroid
+height contradicts its class (`CLASS_HEIGHT_BANDS`, a hand-written per-class table
+calibrated on the Allensville recordings: a bed's or a toilet's surface under
+0.60 m above the base, `height:0.69`). Until 2026-11-15 a candidate standing in a
+room whose strong type a second hand-written table excluded for the target
+(`room:kitchen`) was suspect too; that table went with `room_priors.py`. A suspect box counts `context_penalty` (0.70) of its confidence
 toward the start threshold (0.60 x 0.70 is no takeover; 0.75 is), and its lock
 needs `context_confirmation_frames` (4) consecutive frames from at least two
 viewpoints `context_baseline_m` (0.30 m) apart -- a turn in place is not a
@@ -883,7 +883,7 @@ action converter serialises the LOOK before the body action):
 | `objects/support_surface.py` | Whether a box of another class is the surface the target stands on: exact class membership and strict geometry under the memory's footprint |
 | `objects/landmarks.py` | The landmark map: per-class association (a tight dedupe radius or footprint-disc IoU; classes never merge), confirmation by observation count; the class vote of 2026-10-04 kept behind `class_votes=True` |
 | `tracking/target_memory_3d.py` | The closing's 3-D memory: the fused, precision-weighted XYZ centroid (near frames dominate), its standard error and spread, the fixed association anchor |
-| `topology/room_priors.py`, `topology/revisable_room_labels.py` | Where a target cannot be (exclusions, not permissions; `unknown` never excluded); one-object (weak) and two-class (strong) room labels revised the action a new kind of object lands |
+| `topology/revisable_room_labels.py` | One-object (weak) and two-class (strong) room labels revised the action a new kind of object lands. (`topology/room_priors.py`, the hand-written tables of where a target can and cannot be, was deleted on 2026-11-15.) |
 | `topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room still a node and every staircase -- P(going there next finds the target) per node plus "elsewhere" |
 
 **The adapters and the operator tooling** (this tree):
@@ -1213,10 +1213,11 @@ refresh.
    in place of `entered_discount` (0.5): as good as scanned, whatever the
    model writes (the prompt now says so too: "searched 20 s or longer with
    frontier 0 or 1 is as good as scanned: 0-5"). The
-   three arithmetic floors below (`unexplored_floor`, `unexplored_elsewhere`,
-   `home_floor`) and the hard type exclusion (`type_prior`) are **off by
-   default** -- they were the 3B era's defaults, and the model is given the
-   facts they encoded instead; each stays a knob. The storey/stairs
+   two arithmetic floors below (`unexplored_floor`, `unexplored_elsewhere`)
+   are **off by default** -- they were the 3B era's defaults, and the model is
+   given the facts they encoded instead; each stays a knob. (A third floor,
+   `home_floor`, and the hard type exclusion, `type_prior`, were removed on
+   2026-11-15 with the hand-written tables they read, `room_priors.py`.) The storey/stairs
    reasoning of the multi-storey development protocol is a supplement to
    the prompt shown only when a staircase is a node. With nothing to offer
    -- the spawn room finished by the warm-up, no doorway seen yet -- the
@@ -1264,52 +1265,27 @@ refresh.
    **What is not a node (the first pass).** At every loop point the loop
    withholds finished rooms from the solver and the transit until the
    storey is covered, and records why (`excluded` in the events,
-   estimates and HUD); with `LoopSettings.type_prior` switched on it also
-   withholds a room whose identified type **cannot hold the target**
-   (`core/mapping/topology/room_priors.py`: a sofa is not
-   searched for in a bedroom, a bathroom or a kitchen; a toilet not in a
-   bedroom; the table is exclusions, not permissions, so a hallway stays
-   searchable and `unknown` is never excluded). Since 2026-10-05 the type
-   rule has three guards (`room_priors.ruled_out`): it applies to a
-   **strong** label only (two or more kinds of object agree -- a weak
-   label is a guess the oracle sees as `type=bedroom?` and values itself,
-   `weak_type_kept` events); never when an object of the target's own
-   class has been confirmed in the room; and never when a **home object**
-   of the target stands in it (`HOME_OBJECTS`: a sink or a shower where a
-   toilet lives -- the Hanson recording merged a bathroom's sink into a
-   "living room" of sofas and ruled it out for the toilet a metre from
-   the sink; `home_object_kept` events). **One signature object makes a
-   label strong** (`room_priors.SIGNATURE_OBJECTS`,
-   `RoomLabelSettings.signature_objects`, since 2026-10-05): a bed is a
-   bedroom, a toilet, a shower or a bathtub a bathroom, an oven, a stove or
-   a refrigerator a kitchen, with no second kind of object needed, when the
-   classifier's label agrees -- the Hanson re-fly of 2026-10-05 saw a bed
-   and a television through a doorway at action 270, kept the "bedroom?"
-   weak and walked in to scan it for a toilet (actions 270-289). A chair,
-   a cabinet, a desk or a plant names nothing on its own and stays weak;
-   the home-object guard still holds (a bed in a room with a sink keeps
-   the room a node for a toilet). The two kinds that make a label strong
-   must include one that is **distinctive**
-   (`RoomLabelSettings.distinctive_required`, `room_priors.GENERIC_OBJECTS`:
-   a cabinet, a plant, a book, a vase, a clock, a cup, a bottle describe no
-   room): the Ranchester couch search had a cabinet and a potted plant make
-   an upstairs room a strong "living_room" at 0.95, which put a living room
-   on the storey summary the node oracle reads and wobbled its verdict on
-   where living rooms are. **A home object is a prior, not only a guard**
-   (`LoopSettings.home_floor`, off by default since the LLM-first change;
-   0.60 restores it): a room holding a
-   confirmed home object of the target is handed to the oracle with
-   `SearchNode.home` set and, with the floor on, is never read below it,
-   whatever the model wrote and whatever its storey verdict says -- a
-   bathtub on this storey IS the toilet's home type, found -- and such a
-   room is **never finished by sight from outside it** (this guard stands
-   regardless): the scan ledger's `seen_from_scan`
-   and `seen_through` verdicts (half its floor seen through its door) do not
-   exclude it, only a scan the agent stood in does (`home_object_kept` events
-   with `scanned`). The Allensville toilet run's warm-up spin at the spawn
-   point saw more than half of the bathroom's floor through its door,
-   finished it with the bathtub inside and the toilet behind the jamb, valued
-   it 0 and peeked twenty openings before coming back to it at action 283.
+   estimates and HUD). Nothing else withholds a room: **no room is ruled
+   out for its type.** Until 2026-11-15 a file of hand-written tables
+   (`core/mapping/topology/room_priors.py`) told the agent where things
+   are: a room whose strong label the table called implausible for the
+   target could be withheld (`LoopSettings.type_prior`, off by default since
+   2026-10-07); a room holding a "home object" of the target (a sink or a
+   shower where a toilet lives) was kept a node, was not finished by sight
+   from outside, interrupted a walk for a fresh oracle call and was a cue
+   for a glance; one "signature" object (a bed, a toilet, an oven) made a
+   label strong and a room of "generic" ones (a cabinet, a plant) stayed
+   unlabelled; and, since 2026-11-09, the oracle's prompt carried a
+   `WHERE IT LIVES` line naming the room types each target category is
+   likely and rare in. All of it was deleted with the file: where a target
+   lives is the oracle's judgement to make, not a table's. What remains is
+   evidence only. A room's label is **strong** on two or more kinds of
+   object and a confident classifier (`RoomLabelSettings.strong_classes`,
+   `strong_confidence`) and **weak** otherwise, shown to the oracle as
+   `type=bedroom?`; every object is evidence the classifier is asked
+   about; and a room finished by sight from outside is finished whatever
+   stands in it, and is offered again once the storey is covered
+   (`LoopSettings.revisit_unentered`).
    **The labels are read before the nodes
    are chosen** (`ObservedSceneGraph.refresh_labels` at the loop point):
    until 2026-10-05 the re-classification ran inside the oracle call,
@@ -1455,8 +1431,8 @@ refresh.
    timeout and context window; the 14B follows the rules and answers in
    ~25 s on the laptop's CPU once loaded, and is the model for the
    benchmark runs. Development runs since 2026-10-04 set it to
-   `qwen2.5:3b-instruct` for turnaround -- the type prior and the finished
-   ledger now take the exclusions the 3B used to get wrong out of its
+   `qwen2.5:3b-instruct` for turnaround -- the finished
+   ledger now takes the exclusions the 3B used to get wrong out of its
    hands, so what it is left to weigh is the unknown rooms against the
    stairs) and
    waits for it. The oracle
@@ -2135,8 +2111,7 @@ a hole in the mesh, and the optimistic scorer values it again every time).
 turns out and back (`max(cue_min_gain_m2, min_gain_per_action_m2 * 2 *
 turns)`: 3 m2 for three turns, 2 m2 for two) -- that re-run took nine cue
 glances of 1.7-2.6 m2 at six actions each, a chair or a cabinet at the
-edge of a room already mapped; the target's own class and its home objects
-still need no gain. `enabled=False` is the ablation.
+edge of a room already mapped; the target's own class still needs no gain. `enabled=False` is the ablation.
 
 **Wide glances** (since 2026-10-21, `wide_rad`, 120 degrees): a right angle
 with the 79-degree camera shows the floor to about 130 degrees off the
@@ -2157,8 +2132,9 @@ of at least `cue_confidence` (0.4), spanning at least `cue_min_box_frac`
 (30 %) of the frame's height, cut off by the frame's left or right
 edge (`cue_border_px`) is a cue to turn that way -- enough turns to centre
 the object and one more, at most `cue_max_turns` (3), not a right angle.
-The target's own class and its home objects are cues outright (the
-takeover refuses a border box, so turning is how it starts); any other
+The target's own class is a cue outright (the
+takeover refuses a border box, so turning is how it starts; until 2026-11-15 a
+hand-written list of the target's "home objects" were cues outright too); any other
 class only while that side still holds `cue_min_gain_m2` (1.5) of unknown
 floor; a class already glanced at on that side within `cue_repeat_m` (2 m)
 is not a cue again (`cues`, `cues_repeated`, `cues_without_gain` in the
@@ -2476,11 +2452,11 @@ checkpoints remain selectable. The Gibson context vocabulary includes `stairs`
 and `staircase`, neither a goal category nor a navigation oracle. Semantics can
 request inspection; observed step geometry must independently support a portal.
 Since 2026-10-05 it also carries **distractor prompts** -- `toy`, `rocking
-horse`, `stuffed animal` -- and `bathtub` (a home object of the toilet the
-vocabulary lacked): an open-vocabulary detector scores every prompt it was
+horse`, `stuffed animal` -- and `bathtub` (a bathroom fixture the
+vocabulary lacked, a room cue for the classifier): an open-vocabulary detector scores every prompt it was
 given against the crop and lands on the nearest, and Hanson/000001 stopped at
 action 14 on a child's ride-on horse read as `chair` at 0.9, 11.7 m from the
-nearest chair. A distractor is never a goal, never a home object and names no
+nearest chair. A distractor is never a goal and names no
 room; it only gives the wrong match somewhere else to go. **A detector
 service started before this change must be restarted** with the new
 `--print-vocabulary` output; the health check pins the class list.

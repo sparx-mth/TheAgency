@@ -60,8 +60,8 @@ reuse the last reply when the prompt is byte-identical -- the effort and
 budget numbers are shown in coarse steps so an unchanged map produces an
 unchanged prompt.
 
-Three arithmetic floors remain available as knobs and are OFF by default
-(``unexplored_floor``, ``unexplored_elsewhere``, ``home_floor``). They were
+Two arithmetic floors remain available as knobs and are OFF by default
+(``unexplored_floor``, ``unexplored_elsewhere``). They were
 written for a 3B model that wrote off never-entered rooms at 0-1% and copied
 the worked example's numbers (the Hanson and Ranchester recordings of
 2026-10-04/05, see the git history of this file); a 14B model given the
@@ -70,6 +70,13 @@ would be exactly the default value the search is meant to stop relying on.
 The multi-storey supplement's ``home_here`` verdict is still parsed, so a
 development run that lifts the stair ban can switch the floors back on.
 
+**No hand-written category table (since 2026-11-15).** Until then the user
+prompt carried a ``WHERE IT LIVES`` line rendered from a table of likely and
+rare room types per target category, a room holding a listed "home object" of
+the target could be floored (``home_floor``), and the system prompt told the
+model to copy that line into its ``home`` step. All three are gone with the
+table (``room_priors.py``): where a target lives is the model's own step 1.
+
 Python 3.8 syntax, standard library only.
 """
 from __future__ import annotations
@@ -77,7 +84,7 @@ from __future__ import annotations
 import inspect
 import math
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 ROOM = "room"
 STAIRS = "stairs"
@@ -98,9 +105,6 @@ UNEXPLORED_FLOOR = 0.0
 #: What an unexplored node is read at when the multi-storey supplement's ``home_here``
 #: verdict says the target's home type lives on another storey. OFF by default.
 UNEXPLORED_ELSEWHERE = 0.0
-#: The least a node holding a confirmed HOME OBJECT of the target (``SearchNode.home``) is
-#: read at. OFF by default: the room's ``seen:`` line shows the bathtub to the model.
-HOME_FLOOR = 0.0
 #: The three answers to the multi-storey supplement's "is a room of the home type on this storey?".
 HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE = "found", "missing", "elsewhere"
 HOME_HERE = (HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE)
@@ -171,9 +175,7 @@ family room or an office); a television in a living room, then a bedroom, rarely
 never a bathroom; a chair in a dining room, kitchen, office, bedroom or living room; a potted \
 plant in a living room, hallway, kitchen or balcony; a refrigerator, oven or stove in a \
 kitchen; a bathtub or shower in a bathroom. Small objects that travel (cup, book, bottle) \
-have a home too, only a weaker one. When the prompt carries a WHERE IT LIVES line under the \
-TARGET, that line IS step 1 -- the room types it names, in its order, with its rare ones rare: \
-copy it into "home" and reason from it; never replace it with a guess of your own.
+have a home too, only a weaker one.
 STEP 2 "house": read the home from the rooms found. A typical home has ONE kitchen, ONE \
 living room, ONE dining area, one to four bedrooms, one to three bathrooms (one often \
 en-suite off the main bedroom), a hallway, perhaps an office, a laundry or a garage. If a \
@@ -303,7 +305,7 @@ storey is worth about 10 when home_here is "elsewhere" -- a look into it comes a
 storey the target lives on. Changing storeys costs many actions, but that is NOT your \
 concern: the planner adds travel and climbing cost itself."""
 
-USER_PROMPT_TEMPLATE = """TARGET: {target}{home}
+USER_PROMPT_TEMPLATE = """TARGET: {target}
 
 HOUSE: {house}
 {storeys}
@@ -343,10 +345,6 @@ class SearchNode:
         arrived_ago_s: Stairs: seconds since that arrival, when ``arrived_by``.
         via: Opening: the mapped room it opens from, in prompt words --
             ``room 6 (type=bathroom?)`` -- or None when unknown.
-        home: The room holds a confirmed HOME OBJECT of the target (a
-            bathtub or a sink for a toilet, a television for a sofa). Read
-            at the oracle's ``home_floor`` at least when that floor is on;
-            the loop sets it from ``room_priors.HOME_OBJECTS``.
         scanned: How the room was finished by the scan ledger, in prompt
             words (``full rotation``, ``seen from another room's scan``,
             ``looked into, no frontier left``, ``fragment``), or None while
@@ -384,7 +382,6 @@ class SearchNode:
     arrived_by: bool = False
     arrived_ago_s: Optional[float] = None
     via: Optional[str] = None
-    home: bool = False
     scanned: Optional[str] = None
     scanned_ago_s: Optional[float] = None
     exits: int = 0
@@ -436,17 +433,11 @@ class SearchContext:
             left, its rank in the building. Shown when a STAIRS node is
             offered or another storey is known.
         others: Multi-storey only: one line per other storey known.
-        target_home: Where the target normally lives, in prompt words
-            (:func:`~room_priors.target_home_line`: ``lives in: bathroom,
-            kitchen (most likely first); rare in: bedroom``); rendered as a
-            ``WHERE IT LIVES`` line under the TARGET, which the system prompt
-            makes step 1. Empty leaves step 1 to the model (since 2026-11-09).
     """
 
     house: str = ""
     storey: str = ""
     others: Tuple[str, ...] = field(default_factory=tuple)
-    target_home: str = ""
 
     @property
     def multi_storey(self) -> bool:
@@ -599,9 +590,8 @@ def format_prompt(target: str, nodes: Sequence[SearchNode], context: Optional[Se
         storeys = STOREY_LINES_TEMPLATE.format(
             storey=context.storey or "the only storey mapped so far",
             others="; ".join(context.others) if context.others else "none known")
-    home = ("\nWHERE IT LIVES: %s" % context.target_home.strip()) if context.target_home.strip() else ""
     return USER_PROMPT_TEMPLATE.format(
-        target=target, home=home, house=context.house or "nothing known yet", storeys=storeys,
+        target=target, house=context.house or "nothing known yet", storeys=storeys,
         n=len(nodes), nodes="\n".join(format_node(n) for n in nodes))
 
 
@@ -750,9 +740,8 @@ def parse_pass(reply: Any) -> Optional[str]:
 
 def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unexplored_floor: float,
                      home_here: Optional[str] = None, unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE,
-                     home_floor: float = 0.0,
                      ) -> Tuple[Dict[int, float], Tuple[int, ...], Tuple[int, ...]]:
-    """Apply the optional arithmetic floors to the unexplored and home nodes; return the new scores, the ids raised and the ids lowered.
+    """Apply the optional arithmetic floors to the unexplored nodes; return the new scores, the ids raised and the ids lowered.
 
     The floor and the elsewhere value are fractions in ``[0, 1)``; the
     scores are percentages. With ``home_here`` ``found`` or ``missing`` (or
@@ -760,9 +749,8 @@ def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unex
     node the model scored above it is left alone. With
     ``home_here="elsewhere"`` -- the multi-storey reading that the target's
     home type lives on another storey -- every unexplored node is read at
-    ``unexplored_elsewhere`` exactly. ``home_floor`` is the least a node
-    with :attr:`SearchNode.home` is read at. 0 disables the respective
-    value; all three are 0 by default (see the module docstring).
+    ``unexplored_elsewhere`` exactly. 0 disables the respective value; both
+    are 0 by default (see the module docstring).
     """
     out = dict(scores)
     floored, capped = [], []
@@ -773,10 +761,7 @@ def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unex
             if nid in out and node.unexplored and abs(out[nid] - percent) > 1e-9:
                 (floored if out[nid] < percent else capped).append(nid)
                 out[nid] = percent
-        homed = []  # type: List[int]
-        _floor_home(out, nodes, home_floor, homed)
-        capped = [nid for nid in capped if nid not in homed]
-        return out, tuple(sorted(set(floored + homed))), tuple(sorted(capped))
+        return out, tuple(sorted(set(floored))), tuple(sorted(capped))
     if unexplored_floor > 0.0:
         percent = 100.0 * float(unexplored_floor)
         for node in nodes:
@@ -784,20 +769,7 @@ def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unex
             if nid in out and node.unexplored and out[nid] < percent - 1e-9:
                 out[nid] = percent
                 floored.append(nid)
-    _floor_home(out, nodes, home_floor, floored)
     return out, tuple(sorted(set(floored))), ()
-
-
-def _floor_home(out: Dict[int, float], nodes: Sequence[SearchNode], home_floor: float, floored: List[int]) -> None:
-    """Raise every ``home`` node below ``home_floor`` to it, in place, noting the ids in ``floored``."""
-    if not home_floor > 0.0:
-        return
-    percent = 100.0 * float(home_floor)
-    for node in nodes:
-        nid = int(node.id)
-        if nid in out and node.home and out[nid] < percent - 1e-9:
-            out[nid] = percent
-            floored.append(nid)
 
 
 def normalise(scores: Dict[int, float], elsewhere: float) -> Tuple[Dict[int, float], float]:
@@ -843,9 +815,6 @@ class SearchNodeOracle:
         unexplored_elsewhere: What an unexplored node is read at when the
             multi-storey supplement's verdict says the home type lives on
             another storey; 0 (the default) leaves the model's numbers.
-        home_floor: The least a node holding a confirmed home object of
-            the target (:attr:`SearchNode.home`) is read at; 0 (the
-            default) leaves the model's numbers.
         flat_p: The ablation that measures what the oracle contributes: when
             given, every node is read at this probability and the model is
             never asked (``source='flat'``), so RPT* orders the nodes by
@@ -858,15 +827,13 @@ class SearchNodeOracle:
         queries: Calls actually made.
         unexplored_floor: As given.
         unexplored_elsewhere: As given.
-        home_floor: As given.
         flat_p: As given.
     """
 
     def __init__(self, client, unexplored_floor: float = UNEXPLORED_FLOOR,
-                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE, home_floor: float = HOME_FLOOR,
+                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE,
                  flat_p: Optional[float] = None) -> None:
-        for name, value in (("unexplored_floor", unexplored_floor), ("unexplored_elsewhere", unexplored_elsewhere),
-                            ("home_floor", home_floor)):
+        for name, value in (("unexplored_floor", unexplored_floor), ("unexplored_elsewhere", unexplored_elsewhere)):
             if not (0.0 <= float(value) < 1.0) or not math.isfinite(float(value)):
                 raise ValueError("%s must lie in [0, 1), got %r" % (name, value))
         if flat_p is not None and (isinstance(flat_p, bool) or not math.isfinite(float(flat_p))
@@ -877,7 +844,6 @@ class SearchNodeOracle:
         self._last_reply = None   # type: Optional[Dict[str, Any]]
         self.unexplored_floor = float(unexplored_floor)
         self.unexplored_elsewhere = float(unexplored_elsewhere)
-        self.home_floor = float(home_floor)
         self.flat_p = None if flat_p is None else float(flat_p)
         self.reuses = 0
         self.queries = 0
@@ -911,7 +877,7 @@ class SearchNodeOracle:
             return self.flat(nodes, self.flat_p)
         user = self.prompt(target, nodes, context)
         if user == self._last_prompt and self._last_reply is not None:
-            kept = self.score(self._last_reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
+            kept = self.score(self._last_reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
             if kept is not None:
                 self.reuses += 1
                 return replace(kept, reused=True)
@@ -919,7 +885,7 @@ class SearchNodeOracle:
             reply = self.ask(user, system_prompt(nodes, context))
         except Exception:
             return self.uniform(nodes, raw_reply=None)
-        result = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
+        result = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
         if result is None:
             return self.uniform(nodes, raw_reply=reply if isinstance(reply, dict) else None)
         self.remember(user, reply)
@@ -945,15 +911,14 @@ class SearchNodeOracle:
 
     @staticmethod
     def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0,
-              unexplored_elsewhere: float = 0.0, home_floor: float = 0.0) -> Optional[NodeOracleResult]:
+              unexplored_elsewhere: float = 0.0) -> Optional[NodeOracleResult]:
         """Parse, fill the omitted, apply the optional floors, normalise, clamp; read the verdicts."""
         parsed = parse_reply(reply, nodes)
         if parsed is None:
             return None
         scores, elsewhere, reasons, omitted = parsed
         home_here = parse_home_here(reply)
-        scores, floored, capped = floor_unexplored(scores, nodes, unexplored_floor, home_here, unexplored_elsewhere,
-                                                   home_floor=home_floor)
+        scores, floored, capped = floor_unexplored(scores, nodes, unexplored_floor, home_here, unexplored_elsewhere)
         probs, elsewhere = normalise(scores, elsewhere)
         values = list(probs.values())
         reading = {key: str(reply[key])[:200] for key in ("home", "house", "stage", "pass", "storey", "home_here")

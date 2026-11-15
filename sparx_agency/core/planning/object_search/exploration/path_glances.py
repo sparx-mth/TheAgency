@@ -61,8 +61,10 @@ little, but the detector sees the room's furniture at the edge of the
 frame. A confident box cut off by the frame's left or right edge is a
 cue to turn that way -- enough turns to centre the object and one more,
 not a right angle (:meth:`GlanceScheduler._cue`). The target's own class
-and its home objects (a sink, for a toilet) are cues outright; any other
-class only while that side still holds unknown floor. Hanson 2026-10-05,
+is a cue outright; any other
+class only while that side still holds unknown floor (until 2026-11-15 a
+hand-written list of the target's "home objects" -- a sink, for a toilet --
+were cues outright too; it went with ``room_priors.py``). Hanson 2026-10-05,
 action 101: a bathroom vanity read as ``cabinet 0.84`` on the left edge,
 two right glances were taken toward a larger unknown, and the toilet
 beside the vanity was reached 250 actions later. The unknown the scorer
@@ -82,7 +84,6 @@ from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.exploration.view_gain import (
     UnknownView, camera_rotation_turns, cone_from_camera, glance_gains)
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
-from sparx_agency.core.mapping.topology.room_priors import home_object
 
 LEFT, RIGHT, FULL = "left", "right", "full"
 
@@ -205,8 +206,7 @@ class GlanceSettings:
             (``min_gain_per_action_m2 * 2 * turns``: 3 m2 for three turns),
             since 2026-10-13: the Darden re-run took nine cue glances of
             1.7-2.6 m2 at six actions each, a chair or a cabinet at the edge
-            of a room already mapped; the target's own class and its home
-            objects (:data:`room_priors.HOME_OBJECTS`) need none.
+            of a room already mapped; the target's own class needs none.
         cue_max_turns: Most turns a cue glance makes: enough to centre the
             object and see what stands beside it, not a right angle.
         cue_repeat_m: No second cue glance for the same class and side
@@ -728,8 +728,7 @@ class GlanceScheduler:
             bearing = abs(math.atan2(-(u - k.cx) / k.fx, 1.0))
             turns = max(1, min(s.cue_max_turns, int(math.ceil(bearing / turn - 1e-9)) + 1))
             direction = 1.0 if side == LEFT else -1.0
-            own = bool(target is not None and (
-                (callable(getattr(target, "accepts", None)) and target.accepts(cls)) or home_object(target, cls)))
+            own = bool(target is not None and callable(getattr(target, "accepts", None)) and target.accepts(cls))
             half_fov = math.atan(0.5 * float(k.width) / float(k.fx))
             if self._already_looked(here, float(obs.pose.yaw) + direction * 0.5 * turns * turn,
                                     0.5 * turns * turn + half_fov):

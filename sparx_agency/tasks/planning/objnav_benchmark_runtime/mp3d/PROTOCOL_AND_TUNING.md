@@ -101,9 +101,12 @@ success rule or the distances; each is a deliberate, recorded choice.
 5. **Method parameters are not protocol.** Body height and radius come from the
    protocol; every other knob (clearance, stop distance, closing, peeks, the
    explorer) is `RPTSettings`' default, exactly as on Gibson and HM3D. The
-   method's room-type priors know the six HM3D/Gibson categories; MP3D's other
-   fifteen run without a type prior (the node oracle still answers), which is a
-   method matter and is recorded in each run's `method` block.
+   method carries no hand-written room-type priors since 2026-11-15
+   (`core/mapping/topology/room_priors.py` was deleted; where a target lives is
+   the node oracle's own judgement). Runs recorded before that date were
+   briefed by those tables -- a `WHERE IT LIVES` prompt line per category, the
+   "home object" and "signature object" rules -- as each run's `method` block
+   records (`node_oracle.asks`, `room_labels.signature_objects`).
 6. **Kinematic self-check.** `climb_m` 0.85 m and `reproject_m` 0.15 m are
    HM3D's bounds, derived from habitat-sim's step filter and the navmesh it
    recomputes at this agent (cell height 0.20 m, max climb 0.20 m, 45° slope

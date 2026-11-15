@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    HOME_FLOOR, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, USABLE_SOURCES, SearchNodeOracle, system_prompt)
+    UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, USABLE_SOURCES, SearchNodeOracle, system_prompt)
 
 
 class RepairingNodeOracle(SearchNodeOracle):
@@ -15,9 +15,9 @@ class RepairingNodeOracle(SearchNodeOracle):
     """
 
     def __init__(self, client, unexplored_floor=UNEXPLORED_FLOOR, unexplored_elsewhere=UNEXPLORED_ELSEWHERE,
-                 home_floor=HOME_FLOOR, flat_p=None):
+                 flat_p=None):
         super().__init__(client, unexplored_floor=unexplored_floor, unexplored_elsewhere=unexplored_elsewhere,
-                         home_floor=home_floor, flat_p=flat_p)
+                         flat_p=flat_p)
         self.repair_attempts = 0
         self.repair_successes = 0
 
@@ -36,7 +36,7 @@ class RepairingNodeOracle(SearchNodeOracle):
         reply, repaired = None, None
         try:
             reply = self.ask(user, system_prompt(nodes, context))
-            repaired = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere, self.home_floor)
+            repaired = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
         except Exception:
             repaired = None
         if repaired is not None and reply is not None:

@@ -643,7 +643,7 @@ def detect_openings(policy, obs, world, settings: OpeningSettings, registry: Ope
     # A frontier with a room's floor right behind it is nobody's shadow (``shadow_exemption``, since
     # 2026-10-14): the strip behind a bed has the wall behind it, and the 2.9 m frontier onto
     # Collierville/000023's toilet room was dropped as the refrigerator's.
-    exits, _ = split_exits(goals, landmarks, world.resolution, p.fallback.settings, type_rule=False,
+    exits, _ = split_exits(goals, landmarks, world.resolution, p.fallback.settings,
                            exempt=shadow_exemption(view, p.fallback.settings))
     stairs = stair_points(p)
     # The stairs' test is directional (since 2026-10-14 evening): a frontier beside a flight

@@ -138,10 +138,6 @@ class ObservedSceneGraph:
         self.threshold_events = []
         self._trail_grown = False
         self._sighted = {}             # opening index -> the viewpoint its sightline was last read from
-        #: Optional ``class_name -> bool``: whether an object class is a home object of the
-        #: episode's target (``room_priors.home_object``); sets :attr:`SearchNode.home` on the
-        #: nodes handed to the oracle, which reads such a room at its ``home_floor`` at least.
-        self.home_object = None
         #: Optional ``world -> (H, W) bool`` naming the unknown cells the search has
         #: settled (:class:`~sightlines.SightLedger.resolved`): looked through without
         #: a return, or enclosed pockets. The frontier is read with them written
@@ -562,7 +558,6 @@ class ObservedSceneGraph:
         metadata = self.label_tracker.metadata
         here = self.room_at(world, here_xy) if here_xy is not None else None
         excluded = set(int(pid) for pid in exclude)
-        is_home = getattr(self, "home_object", None)
         scanned = scanned or {}
         exits = exits or {}
         out = []
@@ -582,7 +577,6 @@ class ObservedSceneGraph:
                 searched_s=float(self.searched.get(pid, 0.0)),
                 last_inside_ago_s=None if inside is None else max(0.0, (int(step) - inside) * action_time_s),
                 here=(pid == here), objects=objects,
-                home=bool(is_home is not None and any(is_home(name) for name in objects)),
                 scanned=None if finished is None else str(finished[0]),
                 scanned_ago_s=None if finished is None or finished[1] is None else max(0.0, float(finished[1])),
                 exits=0 if gaps is None else int(gaps.count),

@@ -1,8 +1,8 @@
-"""The semantic sanity check on a target candidate and the verification frame that keeps the box whole.
+"""The geometric sanity check on a target candidate and the verification frame that keeps the box whole.
 
 Allensville/2 of the 5x3 benchmark (``807d9d0107aa``): a kitchen counter front read as ``bed`` from
-0.55 m, its surface 0.67-0.70 m above the agent's base, inside a STRONG kitchen (refrigerator,
-oven), locked on two frames from one spot and STOPped on, 2.18 m from the real bed. The toilet run
+0.55 m, its surface 0.67-0.70 m above the agent's base, locked on two frames from one spot and STOPped
+on, 2.18 m from the real bed. The toilet run
 (``b536f3c4fe05``): a centred toilet at 1.18 m counted one frame, the satisfied hold was idle, the
 headless agent turned, the box left the frame, and the candidate was released ``unverified``.
 """
@@ -23,7 +23,7 @@ from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
 from sparx_agency.core.planning.object_search.perception.target_context import (
-    CLASS_HEIGHT_BANDS, height_conflict, room_conflict, suspect)
+    CLASS_HEIGHT_BANDS, height_conflict, suspect)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_target_closing import freeze_global
 
@@ -42,18 +42,16 @@ def test_a_counter_top_read_as_a_bed_conflicts_by_height_and_a_real_bed_does_not
     assert set(CLASS_HEIGHT_BANDS) >= {"bed", "toilet", "sofa", "chair", "potted plant", "television"}
 
 
-def test_a_strong_kitchen_conflicts_with_a_bed_but_a_weak_one_or_a_confirmed_bed_in_it_does_not():
-    target = gibson_label_mapper().target_labels("bed")
-    assert room_conflict(target, "kitchen", "strong", ["refrigerator", "oven"]) == "room:kitchen"
-    assert room_conflict(target, "kitchen", "weak", ["refrigerator"]) is None, "a weak label is a guess"
-    assert room_conflict(target, "bedroom", "strong", ["bed"]) is None
-    assert room_conflict(target, "kitchen", "strong", ["oven", "bed"]) is None, "the map confirmed a bed here"
-    assert room_conflict(target, "unknown", "strong", []) is None
-    assert suspect(target, "bed", (0, 0, 0.9), 0.178, label="kitchen", strength="strong",
-                   objects=["oven"]) == "room:kitchen", "the room first"
-    assert suspect(target, "bed", (0, 0, 0.9), 0.178) == "height:0.72"
-    assert suspect(target, "bed", (0, 0, 0.5), 0.178, label="bedroom", strength="strong") is None
-    assert suspect("office chair", "office chair", (0, 0, 2.0), 0.0) is None, "a target the tables do not know"
+def test_the_room_a_candidate_stands_in_is_no_part_of_the_check():
+    """Until 2026-11-15 a candidate in a room whose STRONG type a hand-written table excluded for the target (a bed
+    in a kitchen) was suspect too; the table went with ``room_priors.py``. The check reads the height alone."""
+    import sparx_agency.core.planning.object_search.perception.target_context as context
+    assert not hasattr(context, "room_conflict")
+    assert suspect("bed", (0, 0, 0.9), 0.178) == "height:0.72"
+    assert suspect("bed", (0, 0, 0.5), 0.178) is None
+    assert suspect("office chair", (0, 0, 2.0), 0.0) is None, "a class without a band: no opinion"
+    with pytest.raises(TypeError):
+        suspect("bed", (0, 0, 0.5), 0.178, label="kitchen", strength="strong")
 
 
 def test_context_settings_are_validated():

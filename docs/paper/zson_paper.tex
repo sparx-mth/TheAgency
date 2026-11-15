@@ -1,0 +1,1982 @@
+% ============================================================================
+%  Zero-shot object-goal navigation by LLM-guided room search (single storey)
+%  FIRST DRAFT -- written against the code, 2026-11-15.
+%
+%  Single self-contained file: preamble, body, appendix and bibliography.
+%  Compile:  pdflatex zson_paper && pdflatex zson_paper   (no BibTeX run needed)
+%  Overleaf: upload this one file and compile with pdfLaTeX.
+%
+%  Placeholders: \TODO{...} prints a red note; \tbd prints a red "TODO" in a
+%  table cell. Search the source for "TODO" to find every open item.
+%
+%  Source of truth. Every statement in Sections 3-4 and the appendices was
+%  written from the code under sparx_agency/ (Appendix A maps each component to
+%  its module; the constants of Appendix B were read from the policy's own
+%  configuration() dump). The prompt listings in Appendix C are copied verbatim
+%  from the code by a script, not typed:
+%     core/mapping/topology/search_node_oracle.py   (SYSTEM_PROMPT, USER_PROMPT_TEMPLATE)
+%     core/mapping/topology/room_classifier.py      (SYSTEM_PROMPT_TEMPLATE, USER_PROMPT_TEMPLATE)
+%  Re-generate them whenever a prompt changes:
+%     python docs/paper/sync_prompts.py          (--check reports a stale paper)
+%
+%  Results. Sections 5-6 were written from the run records
+%     docs/progress/entries/047-hm3d-gt-oracle-14b-val.md
+%     docs/progress/entries/049-mp3d-14b-gt-full-split-stairs-off-on.md  (+ 049/)
+%  Both runs predate the removal of core/mapping/topology/room_priors.py
+%  (2026-11-15); Section 5.6 says so. Replace the numbers after the re-run.
+%
+%  This file supersedes docs/paper/zero_shot_objectnav_paper.tex,
+%  docs/method_algorithms.tex, docs/algorithm_exploration.tex and
+%  docs/Method.docx, which describe earlier versions of the method.
+% ============================================================================
+\documentclass[10pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{textcomp}
+\usepackage{microtype}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{xspace}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,calc}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=green!40!black,urlcolor=blue!60!black]{hyperref}
+\usepackage[capitalise,nameinlink]{cleveref}
+
+% --- Placeholders -------------------------------------------------------------
+\newcommand{\TODO}[1]{\textcolor{red}{\textbf{[TODO:} #1\textbf{]}}}
+\newcommand{\tbd}{\textcolor{red}{TODO}}
+
+% --- Method name --------------------------------------------------------------
+% TODO: choose the final method name. It is NOT "ZSON": that is the method of
+% Majumdar et al. (NeurIPS 2022). "LGOS" (LLM-Guided Object Search) is a
+% working name only.
+\newcommand{\ours}{LGOS\xspace}
+
+% --- Small helpers ------------------------------------------------------------
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\m}{\,\mathrm{m}}
+\newcommand{\sqm}{\,\mathrm{m}^2}
+\newcommand{\cm}{\,\mathrm{cm}}
+\newcommand{\degree}{^{\circ}}
+\newcommand{\Nodes}{\mathcal{V}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\lstdefinestyle{prompt}{
+  basicstyle=\ttfamily\scriptsize,
+  breaklines=true,
+  breakatwhitespace=true,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  framesep=3pt,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  showstringspaces=false,
+  upquote=true
+}
+
+\title{Zero-Shot Object-Goal Navigation via LLM Room Probabilities and
+Minimum-Expected-Time Ordering on an Online Scene Graph}
+\author{\TODO{authors and affiliations}}
+\date{First draft, November 2026}
+
+\begin{document}
+\maketitle
+
+% ============================================================================
+\begin{abstract}
+We present \ours, a training-free system for object-goal navigation in unseen
+indoor environments that combines an online metric--topological map, large
+language model (LLM) reasoning about rooms, and a planner that minimises the
+expected time to find the target. From posed RGB-D frames the agent builds a
+2-D occupancy grid, partitions the observed free space into rooms with a
+clearance watershed constrained by detected doorways, and keeps a map of object
+landmarks. One LLM query labels each room from the objects observed in it; a
+second query estimates, for every candidate room, the probability that
+searching it next finds the target. These probabilities and geodesic travel
+times define a Hamiltonian-path problem with probabilistic terminals, which we
+solve with RPT* to obtain a visiting order of minimum expected time-to-find. A
+chosen room is searched by a view-gain frontier walk, routes are executed by a
+planner over the benchmark's own discrete actions, and a dedicated closing
+behaviour verifies, approaches and stops at a detected target. The system uses
+no learned navigation policy and no task-specific training.
+
+This draft reports the system in its current \emph{single-storey}
+configuration, and under \emph{simulator-provided (oracle) semantic
+perception} in place of a learned detector, i.e.\ as an upper bound on the
+mapping, reasoning and planning stack. In that setting, earlier revisions of
+the system, which still contained hand-written priors about where objects are
+that the method described here no longer has, reach $71.0\%$ success rate (SR)
+and $39.8\%$ SPL on the HM3D ObjectNav validation split (2{,}000 episodes) and
+$65.6\%$ SR and $29.1\%$ SPL on the Matterport3D validation split (2{,}195
+episodes); on the episodes whose goal lies on the start storey, SR is $83.5\%$
+and $77.4\%$. These are development-set numbers. We state exactly which inputs
+are privileged, which parts of the system are hand-designed, and what is still
+open: \TODO{re-run of both benchmarks with the current code; evaluation with
+learned perception and on held-out episodes; multi-storey search}.
+\end{abstract}
+
+% ============================================================================
+\section{Introduction}\label{sec:intro}
+
+In object-goal navigation (ObjectNav) an agent is placed at an unknown location
+in an unseen building, is given only the name of an object category, and must
+find an instance of it and declare success within a fixed budget of
+actions~\citep{anderson2018evaluation,batra2020objectnav}. \emph{Zero-shot}
+approaches solve the task without training a navigation policy on it: they
+compose pretrained perception models with classical mapping and exploration,
+and use vision--language or language models to decide \emph{where to look
+next}~\citep{gadre2023cows,zhou2023esc,yu2023l3mvn,yokoyama2024vlfm,yin2024sg}.
+
+Most such systems score \emph{frontiers}, the boundaries between explored and
+unexplored space, and walk to the best-scoring one. This couples the semantic
+question (where is a toilet likely to be?) to a geometric by-product of the
+sensor's range, and it decides greedily: the frontier chosen now ignores what
+choosing it does to the cost of everything visited later. People search
+differently. They think in \emph{rooms}: they recognise a kitchen from its
+fittings, know that a toilet is not in it, and plan a short tour of the places
+worth checking.
+
+\ours follows that intuition and makes it explicit as an optimisation problem.
+The agent maintains an online scene graph whose nodes are rooms, obtained by
+segmenting the observed free space. A language model names each room from the
+objects seen in it, and, given the whole picture of the home so far, estimates
+for every candidate room the probability that searching it next would find the
+target. Together with the travel time between rooms on the current map, these
+probabilities define a classical optimal-search problem: visit the candidates
+in the order that minimises the \emph{expected time until the target is
+found}~\citep{stone1975theory,blum1994minimum}. We solve it with
+RPT*~\citep{lyu2026rpt}, a recent exact search for Hamiltonian paths with
+probabilistic terminals. The order is recomputed whenever a room has been
+searched or the scene graph changes in a way that matters.
+
+Around this core the system has to deal with everything a discrete-action
+agent meets in a real floor plan: partial maps in which a glimpsed room is not
+yet a room, doorways narrower than a turn of $30\degree$ can thread, detections
+that are cut by the image border, and a success criterion that is only
+satisfied by standing at the right place and saying so. A large part of this
+paper, and of the implementation, is therefore about execution.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=*,itemsep=2pt,topsep=2pt]
+  \item A room-level formulation of zero-shot object search as
+        minimum-expected-time ordering of candidate rooms, with independent
+        per-room success probabilities estimated by an LLM from an online scene
+        graph and the order computed by RPT* (\cref{sec:oracle,sec:rpt}).
+  \item An online room scene graph for partially observed homes: a clearance
+        watershed of the observed free space with doorway constraints,
+        persistent room identities, revisable LLM room labels, and an explicit
+        ledger of which rooms are finished (\cref{sec:rooms}).
+  \item An execution stack for the benchmark's discrete action space: routes
+        planned on a clearance-shaped cost map and executed as action
+        sequences found on a lattice of the benchmark's own motion primitives,
+        and a target-closing behaviour that verifies, approaches and stops
+        (\cref{sec:navigation,sec:closing}).
+  \item A full-split evaluation on HM3D and Matterport3D under oracle semantic
+        perception, with a failure taxonomy and an explicit account of
+        privileged inputs and hand-designed components
+        (\cref{sec:experiments,sec:results}).
+\end{itemize}
+
+\paragraph{Scope of this draft.} The search is confined to the storey on which
+the agent starts (\cref{sec:storey}); episodes whose goal is on another storey
+are reported separately and are, by construction, mostly failures. All reported
+numbers use the simulator's semantic annotations as the object detector
+(\cref{sec:experiments-privileges}); they measure the search and execution
+stack, not an end-to-end system, and are not directly comparable to published
+zero-shot results that use learned detectors. They were also produced by
+revisions of the code that predate the method as described here
+(\cref{sec:experiments-revisions}) and on the episodes used for development.
+
+% ============================================================================
+\section{Related Work}\label{sec:related}
+
+\paragraph{Object-goal navigation.} ObjectNav and its evaluation protocol were
+standardised by \citet{anderson2018evaluation} and \citet{batra2020objectnav}
+and are commonly studied in the Habitat
+simulator~\citep{savva2019habitat,szot2021habitat} on scans from
+Matterport3D~\citep{chang2017matterport3d} and
+HM3D~\citep{ramakrishnan2021habitat,yadav2023habitat}. Modular learned methods
+build a semantic map and train a goal-selection policy on
+it~\citep{chaplot2020object,ramakrishnan2022poni}.
+
+\paragraph{Zero-shot ObjectNav.} ZSON~\citep{majumdar2022zson} trains an
+image-goal policy in a multimodal embedding space and transfers it to object
+goals. CoW~\citep{gadre2023cows} combines frontier
+exploration~\citep{yamauchi1997frontier} with open-vocabulary localisation.
+A line of work uses language models to rank frontiers with commonsense
+knowledge: ESC~\citep{zhou2023esc}, L3MVN~\citep{yu2023l3mvn},
+LGX~\citep{dorbala2024can} and LFG~\citep{shah2023navigation}.
+VLFM~\citep{yokoyama2024vlfm} builds a vision--language value map over
+frontiers; OpenFMNav~\citep{kuang2024openfmnav},
+TriHelper~\citep{zhang2024trihelper}, InstructNav~\citep{long2024instructnav}
+and ApexNav~\citep{zhang2025apexnav} refine the combination of foundation
+models, semantic fusion and exploration. Closest to our representation,
+SG-Nav~\citep{yin2024sg} prompts an LLM with an online 3-D scene graph. Our
+system differs in the decision it asks of the language model and in what it
+does with the answer: the LLM values \emph{rooms}, not frontiers, as independent
+search-success probabilities, and the visiting order is the solution of an
+explicit expected-time optimisation rather than a greedy choice.
+
+\paragraph{Scene graphs and room segmentation.} Hierarchical 3-D scene graphs
+with room layers are built online by Hydra~\citep{hughes2022hydra}, and
+open-vocabulary variants serve language-conditioned
+planning~\citep{gu2024conceptgraphs,werby2024hierarchical}. Segmenting a grid
+map into rooms is a long-studied problem~\citep{bormann2016room}; we use a
+watershed transform~\citep{vincent1991watersheds} of the clearance field and
+merge over-segmented basins by their dynamics~\citep{grimaud1992new}.
+
+\paragraph{Optimal search.} Ordering a set of locations to minimise the
+expected time to find a target is the subject of classical search
+theory~\citep{stone1975theory} and is related to the minimum latency
+problem~\citep{blum1994minimum}; object search with semantic priors over places
+was studied by \citet{kollar2009utilizing} and \citet{aydemir2013active}.
+RPT*~\citep{lyu2026rpt} solves the ordering problem exactly by a heuristic
+search over a state that carries the probability of not having found the
+target yet. We use it as the global planner; to our knowledge it has not been
+combined with LLM-estimated probabilities on an online room graph before
+\TODO{verify this claim against the literature before submission}.
+
+% ============================================================================
+\section{Problem Formulation and Overview}\label{sec:problem}
+
+\subsection{Task and setting}\label{sec:task}
+We follow the Habitat ObjectNav protocol~\citep{batra2020objectnav}. An episode
+places the agent at a start pose in a building it has never seen and names a
+target category $c$. At every step $t$ the agent receives an observation
+\[
+  o_t = \bigl(I_t,\; D_t,\; x_t,\; K,\; c,\; t\bigr),
+\]
+an RGB image $I_t$ and a depth image $D_t$ of $640\times480$ pixels with a
+$79\degree$ horizontal field of view from a camera $0.88\m$ above the floor,
+the agent's pose $x_t$ (position, heading and camera pitch), and the camera
+intrinsics $K$. It answers with one of six actions: \code{MOVE\_FORWARD}
+($0.25\m$), \code{TURN\_LEFT}/\code{TURN\_RIGHT} ($30\degree$),
+\code{LOOK\_UP}/\code{LOOK\_DOWN} ($30\degree$, pitch limited to $30\degree$ up
+and $60\degree$ down) and \code{STOP}. The body is a cylinder of radius
+$0.18\m$; a step that would collide is refused as a whole (no sliding). The
+episode ends at \code{STOP} or after $T=500$ actions and is a success iff the
+agent called \code{STOP} with a geodesic distance of at most $0.1\m$ to one of
+the published \emph{view points} of a goal instance.
+
+\paragraph{What the agent knows.} The agent has no map, no goal location and
+no scene annotation. As is standard in this benchmark, the pose $x_t$ and the
+depth image are the simulator's (no localisation or depth noise); depth is
+clipped to $[0.5, 5.0]\m$. Pixels without a depth return (glass, mirrors,
+holes in the scan) are dropped, with one exception made by our simulator
+adapter: a hole that is enclosed by valid depth on at least half of its rim
+and covers at most half of the frame is filled with the depth of its nearest
+valid pixels. \Cref{sec:experiments-privileges} lists every other
+input that a physical robot would not have, including those specific to the
+experiments in this draft.
+
+\subsection{The search objective}\label{sec:objective}
+At any moment the map offers a finite set of \emph{candidate nodes}
+$\Nodes=\{v_1,\dots,v_n\}$, places where the search could continue (rooms; see
+\cref{sec:nodes}). Let $p(v)\in[0,1)$ be the probability that searching node
+$v$ finds the target, and let $c(u,v)$ be the time to travel from $u$ to $v$
+\emph{and} search $v$. For a visiting order $\pi=(v_{\pi_1},\dots,v_{\pi_n})$
+starting from the agent's position $v_{\pi_0}$ with $p(v_{\pi_0})=0$, and
+treating the per-node outcomes as independent, the expected time spent until
+the target is found (or every node has been searched) is
+\begin{equation}\label{eq:objective}
+  J(\pi) \;=\; \sum_{i=0}^{n-1} q_i \; c\bigl(v_{\pi_i}, v_{\pi_{i+1}}\bigr),
+  \qquad
+  q_i \;=\; \prod_{k=0}^{i}\bigl(1-p(v_{\pi_k})\bigr),
+\end{equation}
+where $q_i$ is the probability that the target has not been found by the time
+leg $i$ is travelled~\citep{lyu2026rpt}. The global decision of \ours is
+$\pi^\star=\argmin_\pi J(\pi)$; the agent commits to the first node of
+$\pi^\star$ and re-solves when that node has been searched or the candidate
+set changes. Neither ``most likely first'' nor ``nearest first'' minimises
+\cref{eq:objective}: a leg late in the order is only paid for if nothing was
+found earlier.
+
+\subsection{Method overview}\label{sec:overview}
+\Cref{fig:overview} and \cref{alg:loop} summarise one decision step. Every
+action, the new frame is integrated into an occupancy grid
+(\cref{sec:mapping}) and passed to an object detector whose boxes are lifted
+to 3-D landmarks (\cref{sec:perception}). The observed free space is
+partitioned into rooms, which are tracked over time and labelled by an LLM
+(\cref{sec:rooms}). At a \emph{loop point} (whenever no room is in force) a
+second LLM query values every candidate room (\cref{sec:oracle}), RPT* orders
+them (\cref{sec:rpt}), and the agent walks to the first and searches it
+(\cref{sec:visits}). Routes are planned on the grid and executed as discrete
+actions (\cref{sec:navigation}). A detection of the target category at any
+time hands control to the target-closing behaviour (\cref{sec:closing}). The
+search is confined to the start storey (\cref{sec:storey}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=7mm and 6mm,
+  box/.style={draw, rounded corners=2pt, align=center, inner sep=3pt,
+              minimum height=10mm, text width=29mm},
+  llm/.style={box, fill=orange!18},
+  arr/.style={-{Latex[length=2mm]}, semithick}]
+  \node[box] (obs) {RGB-D frame, pose,\\ target category};
+  \node[box, right=of obs] (map) {Occupancy grid,\\ sight ledger, frontiers};
+  \node[box, right=of map] (rooms) {Room partition\\ (watershed + doorways)};
+  \node[llm, right=of rooms] (label) {LLM: room labels\\ from observed objects};
+  \node[box, below=of obs] (perc) {Detector (+ masks),\\ 3-D landmarks, doors};
+  \node[box, below=of map] (exec) {Route planning,\\ action lattice, closing};
+  \node[box, below=of rooms] (rpt) {RPT*: order of\\ min.\ expected time};
+  \node[llm, below=of label] (oracle) {LLM: per-room\\ success probability};
+  \node[below=4mm of exec] (act) {discrete action};
+  \draw[arr] (obs) -- (map);
+  \draw[arr] (map) -- (rooms);
+  \draw[arr] (rooms) -- (label);
+  \draw[arr] (label) -- (oracle);
+  \draw[arr] (oracle) -- (rpt);
+  \draw[arr] (rpt) -- (exec);
+  \draw[arr] (obs) -- (perc);
+  \draw[arr] (perc) -- node[above, font=\scriptsize] {target} (exec);
+  \draw[arr] (exec) -- (act);
+\end{tikzpicture}
+\caption{One decision step of \ours. Shaded boxes are the two language-model
+queries. Landmarks from the detector also feed the room labels and the room
+descriptions (not drawn). A detection of the target category hands control to
+the closing behaviour.}
+\label{fig:overview}
+\end{figure}
+
+\begin{algorithm}[t]
+\caption{\ours, one episode (single storey). Details in the sections cited.}
+\label{alg:loop}
+\KwIn{target category $c$; action budget $T$}
+turn in place until every bearing has been seen once \tcp*{warm-up, \cref{sec:visits}}
+\For{$t \leftarrow 1$ \KwTo $T$}{
+  integrate $(D_t, x_t)$ into the occupancy grid \tcp*{\cref{sec:mapping}}
+  detect objects in $I_t$; update landmarks and doorways \tcp*{\cref{sec:perception}}
+  \If{a target candidate is active or starts on this frame}{
+    $a_t \leftarrow$ \textsc{Closing} (verify, approach, inspect, \code{STOP} or release) \tcp*{\cref{sec:closing}}
+    \textbf{continue}\;
+  }
+  update room partition, identities and per-room facts \tcp*{\cref{sec:rooms}}
+  \If{no node is in force}{
+    label rooms with the LLM; mark finished rooms \tcp*{\cref{sec:labels,sec:visits}}
+    $p(\cdot) \leftarrow$ \textsc{NodeOracle}(scene graph, $c$) \tcp*{LLM, \cref{sec:oracle}}
+    $\pi^\star \leftarrow$ \textsc{RPT*}$(p, c)$; commit to its first node \tcp*{\cref{sec:rpt}}
+  }
+  \uIf{walking to the committed node}{route to its entry point}
+  \uElseIf{inside the committed node}{frontier walk; release the node when finished \tcp*{\cref{sec:visits}}}
+  \Else{exploration fallback \tcp*{\cref{sec:fallback}}}
+  $a_t \leftarrow$ next action of the lattice plan along the route \tcp*{\cref{sec:navigation}}
+}
+\end{algorithm}
+
+% ============================================================================
+\section{Method}\label{sec:method}
+
+\subsection{Occupancy mapping}\label{sec:mapping}
+The map is a 2-D log-odds occupancy grid~\citep{elfes1989using} of
+$80\m\times80\m$ at $0.1\m$ resolution, centred on the start position. Each
+depth image is sub-sampled every $8$ pixels and back-projected with the pose
+and the current camera pitch. Let $h$ be the height of the storey plane
+(initially the start height). Points whose height lies in
+$[h+0.15,\,h+0.93]\m$ are obstacle evidence: a cell that receives $n$ such
+points in a frame is updated by
+$L \leftarrow \mathrm{clip}(L + 0.85\,s,\,-4,\,4)$ with
+$s=\mathrm{clip}(n/10,\,0.2,\,1)$, and every cell on the grid ray from the
+camera to such a point by $L \leftarrow \mathrm{clip}(L-0.40,\,-4,\,4)$.
+Points within $0.10\m$ of the plane are floor evidence and decrement their own
+cell in the same way unless it is currently occupied. With
+$P=1/(1+e^{-L})$, a cell is \emph{free} if $P\le0.45$, \emph{occupied} if
+$P\ge0.65$ and \emph{unknown} otherwise or if never updated. The cells under
+the body are free unless occupied.
+
+\paragraph{Contact evidence.} The simulator refuses a forward step that would
+collide. The agent detects this from its own pose (a \code{MOVE\_FORWARD} that
+displaced it by less than $5\cm$) and sets the cell one step ahead to the
+maximum log-odds. A second refusal within $0.5\m$ of an earlier one writes a
+bar one body wide across the heading that stays occupied for $120$ actions.
+Conversely, cells on which the agent has stood are always treated as free by
+the planner.
+
+\paragraph{Frontiers and settled unknown.} A frontier cell is a free cell
+4-adjacent to an unknown cell; frontier cells are grouped into 8-connected
+clusters of at least four cells, and a cluster that wraps around a block of
+unknown space is cut into one cluster per side. Not all unknown space is worth
+exploring. A \emph{sight ledger} marks unknown cells as \emph{settled} when
+(i) camera rays cast over the map ended at them within $2.5\m$ from at least
+two distinct poses without the depth ever resolving them (a window, a railing,
+a hole in the mesh), or (ii) they form an enclosed pocket of at most $3\sqm$
+that is narrower than $0.6\m$ or that the agent has stood on. Settled cells
+are ignored when frontiers, exits and view gains are computed; the planner
+keeps using the real map.
+
+\subsection{Object perception and landmarks}\label{sec:perception}
+\paragraph{Detector interface.} The method consumes a generic detector: for
+each frame, boxes with a class name from a closed vocabulary and a confidence.
+The vocabulary consists of the prompts of the benchmark's goal categories plus
+\emph{context} words that help to tell rooms apart (e.g.\ sink, oven,
+refrigerator, bathtub), doorway words and a few distractors. Optionally a
+segmenter returns a mask for each target-class box. The implementation
+supports YOLO-World~\citep{cheng2024yolo} and box-prompted
+SAM~\citep{kirillov2023segment} behind this interface; \emph{all experiments
+in this draft instead answer the interface from the simulator's semantic
+annotations} (\cref{sec:experiments-privileges}).
+
+\paragraph{From a box to a 3-D point.} A box with confidence at least $0.30$
+is measured on the depth pixels it covers, or on its mask when one is given.
+We take a robust depth for the region, keep the largest connected component of
+pixels within a depth band around it, and require at least eight supporting
+pixels (and, without a mask, that the component covers at least $35\%$ of the
+valid pixels of the box's central region, so that a box spanning two surfaces
+is rejected). The component is back-projected; its per-axis median is the
+object's position and the $10$th percentile of its horizontal distances to
+the agent is the \emph{near-surface range} used later for stopping. Without a
+mask, a near surface that covers only part of a box in front of a second
+surface spanning the whole box is treated as an occluder and removed before
+the measurement. A projected object must lie between $0.3\m$ below and
+$2.2\m$ above the storey plane and be supported by observed floor nearby.
+
+\paragraph{Landmark map.} Projected objects are fused into landmarks. Two
+observations of the \emph{same class} belong to one landmark when their
+positions are within $0.35\m$ or their footprint discs overlap with an IoU of
+at least $0.25$, and their heights differ by at most $0.35\m$; different
+classes never merge. A landmark is \emph{confirmed} after two observations and
+is retracted when it stood, unoccluded and in range, in four views from
+distinct viewpoints without a detection of its class.
+
+\paragraph{Doorways.} Boxes of the doorway classes (accepted from confidence
+$0.05$) are located from the depth of the door frame, not of what is seen
+through it, and must pass geometric gates (apparent width $0.35$--$1.5\m$, top
+at least $1.4\m$ and bottom at most $0.5\m$ above the floor). A doorway is
+confirmed after three observations from viewpoints at least $0.2\m$ or
+$20\degree$ apart. Confirmed doorways are used only as constraints for the
+room partition.
+
+\subsection{Online room graph}\label{sec:rooms}
+\paragraph{Partition.} Rooms are obtained from the current free mask alone.
+Small holes are healed and the Euclidean clearance $d(\cdot)$ to the nearest
+non-free cell is computed. Every local maximum of $d$ with $d\ge0.3\m$,
+separated from other maxima by at least $1.0\m$, seeds a room, and a
+watershed~\citep{vincent1991watersheds} of $-d$ grows the seeds until they
+meet at the narrow places between them. Two kinds of cuts are forced before
+the flood: (i) each confirmed doorway, moved to the nearest \emph{choke} of the
+medial axis within $0.9\m$ (a point of clearance between $0.25$ and $0.8\m$
+whose removal splits the skeleton into two substantial parts) and sized to the
+passage there, or a disc of radius $0.75\m$ when no choke is found; and (ii)
+\emph{thresholds} the agent itself has walked through, read off its trail as
+points where the clearance dips to at most $0.55\m$ and rises by at least
+$0.3\m$ on both sides within $1.5\m$. The watershed over-segments rooms that
+have two wide areas; adjacent basins are therefore merged when the
+\emph{dynamics} of their common saddle~\citep{grimaud1992new}, the smaller of
+the two clearance peaks minus the clearance at the saddle, is below $0.2\m$,
+never across a forced cut. Regions smaller than $50$ cells are dropped.
+
+\paragraph{Identity.} The partition is recomputed as the map grows, so rooms
+must keep their identity across updates. A new region inherits the identifier
+of a previous room if it contains that room's birth anchor with sufficient
+overlap, else by intersection-over-union (at least $0.15$), else by
+containment (at least $0.6$); rooms that vanish are remembered and re-adopted
+when they reappear, and identifiers are never reused.
+
+\paragraph{Room facts.} For every room the graph keeps its area and elongation,
+the confirmed landmarks credited to it (the room under the landmark, or the
+nearest room floor within the landmark's footprint plus $0.6\m$, since
+furniture stands on occupied cells), the number of reachable frontier clusters
+inside it, the time the agent has spent in it and when it was last inside, and
+its \emph{exits}: frontier clusters at the room's edge that lead to space not
+seen yet, with whether a doorway was detected there, which objects were
+glimpsed through them and how much unseen floor the camera could reach beyond
+them. An exit is an attribute of its room, not a node of its own.
+
+\subsection{Room labels from a language model}\label{sec:labels}
+A room is named by a language model from what was observed in it. The prompt
+(\cref{app:prompts-room}) lists the confirmed objects of the room with their
+counts and its geometry (area, shape, number of doorways) and asks for one
+label from a fixed set of twelve residential room types, five non-residential
+ones and \code{unknown}, with a confidence. A room is classified as soon as it
+holds one confirmed object; a room without objects is classified from its
+geometry alone when it is at least $2\sqm$ and looks like a passage (elongation
+of at least $2.5$, or two or more doorways). The label is revised when a new
+kind of object appears in the room, when object counts change (at loop points)
+and periodically (every $50$ actions); a changed verdict that is not backed by
+a new kind of object is adopted only when the model repeats it. Each label
+carries a \emph{strength}: it is \emph{strong} when it rests on at least two
+kinds of object and the model's confidence is at least $0.65$, and
+\emph{weak} otherwise. The strength is shown to the second LLM query (a weak
+label is printed with a question mark); it does not exclude a room from the
+search.
+
+\subsection{Candidate nodes}\label{sec:nodes}
+The candidates $\Nodes$ of \cref{eq:objective} are, in the single-storey
+configuration, of two kinds.
+\emph{Rooms}: every room of the current partition that is not \emph{finished}
+(\cref{sec:visits}) and whose entry point has not repeatedly proved
+unreachable.
+\emph{Target landmarks}: a landmark of the target's own class that the map has
+confirmed, or that was seen once with confidence of at least $0.5$, but that
+did not trigger the closing behaviour (typically a far or weak detection). It
+is offered at a fixed probability of $0.85$ without an LLM query and is visited
+by walking to a point $1.5\m$ from it and looking at it.
+
+\subsection{Per-room success probabilities from a language model}\label{sec:oracle}
+\paragraph{Query.} At a loop point the model is shown the whole picture in one
+prompt (\cref{app:prompts-oracle}) and asked, for each room, for the
+probability \emph{that going there next finds the target}. The prompt contains
+(i) the target category; (ii) a one-line summary of the home so far: the room
+types found and whether each was entered or finished, how many rooms are
+unidentified, how many exits have not been looked into, whether unexplored
+frontier is still reachable, and how many of the $500$ actions are used; and
+(iii) one line per room with its label (and whether the label is weak), floor
+area, number of frontier clusters, exits (count, how many at a detected
+doorway, unseen area behind them, objects glimpsed through them), status
+(never entered / entered / finished and how), time spent inside, and the
+objects confirmed in it (at most eight classes). The model is told not to
+reason about distance, which the planner accounts for, and to answer in JSON
+with three short pieces of reasoning (where the target usually is; what the
+rooms found imply about the rest of the home; how the remaining budget
+weighs), a verdict on whether the home has been covered once (recorded, but
+not acted upon in the configuration reported here), and, for every room, a
+justification of at most twelve words followed by one integer percentage.
+
+\paragraph{What the prompt supplies.} The system prompt is long and
+prescriptive, and this must be read as part of the method. Beyond describing
+the input format it contains hand-written guidance of four kinds.
+(i) \emph{Where objects are}: one sentence lists the typical rooms of a
+toilet, a bed, a sofa, a television, a chair and a potted plant, and of
+kitchen and bathroom fixtures (refrigerator, oven, stove, bathtub, shower).
+These are exactly the six goal categories of HM3D; of the 21 goal categories
+of Matterport3D, eight are covered by that sentence and thirteen are given no
+typical room.
+(ii) \emph{What a home looks like}: typical room counts (one kitchen, one
+living room, one to four bedrooms, one to three bathrooms) and room sizes.
+(iii) \emph{Numeric bands} that tie a room's number to its label and its
+exploration status, for example $0$--$2\%$ for a finished room of a type the
+target does not live in, at least $30\%$ for an unvisited room of a fitting
+type that still has frontier, and at least $60\%$ when objects glimpsed
+through a door name the fitting type.
+(iv) A worked example with numbers.
+These are priors that \emph{we} give the model through the prompt; the
+probabilities are therefore not purely the model's own judgement, and for the
+HM3D categories the prompt states the object--room association outright.
+\TODO{Redesign the prompt so that it states the task and the evidence and
+leaves the reasoning about where objects are, and how large the numbers should
+be, to the model; re-evaluate.} Outside the two prompts no knowledge of where
+objects are found reaches the search: the code contains no table that maps
+object categories to rooms.
+
+\paragraph{Parsing.} The percentages are divided by $100$ and clipped to
+$[0, 1-10^{-6}]$. They are \emph{not} normalised: several rooms may each hold
+an instance, and \cref{eq:objective} treats them as independent. Identifiers
+that were not offered are dropped, and a room the model omitted receives
+$1\%$. A reply that cannot be parsed is retried once with a schema reminder;
+if that fails too, or the service is unreachable, the loop does not substitute
+a uniform distribution: the exploration fallback (\cref{sec:fallback}) acts
+and the query is retried after a back-off that starts at $25$ actions and
+doubles up to $200$. Quantities that change continuously (times, the action
+count) are printed in coarse steps so that an unchanged scene produces an
+identical prompt, in which case the previous reply is reused without a call.
+
+\paragraph{Adjustment by exploration state.} Before the numbers reach the
+planner, the code rescales them by what the agent has already done, as a
+safeguard against a model that ignores the status fields. For a room that was
+never entered, $p \leftarrow \min(1,\,1.5\,p)$ and, if $p>0$, at least $0.15$.
+For a room that was entered and left without being finished,
+\begin{equation}\label{eq:dwell}
+  p \;\leftarrow\; p\cdot\max\!\bigl(0.05,\; 0.5\cdot 2^{-\tau/20}\bigr),
+\end{equation}
+where $\tau$ is the number of actions already spent inside; if $\tau\ge20$ and
+at most one significant frontier is left in the room, the factor is at most
+$0.2$. The room the agent is standing in keeps its number. Rooms whose adjusted
+probability is below $0.05$ are not offered to the planner. These constants are
+hand-set.
+
+\paragraph{When the model is queried.} The oracle is queried at every loop
+point, i.e.\ whenever a node has been searched and released, and once at the
+start. Between loop points it is queried again only when a room's label
+changes, or, at most every $8$ actions, when the set of offered rooms changes
+(the partition renumbers rooms frequently as the map grows). A node that was
+released because it could not be reached does not trigger a query; the order is
+re-solved on the standing numbers.
+
+\subsection{Ordering by minimum expected time: RPT*}\label{sec:rpt}
+\paragraph{Instance.} Each node is represented by its \emph{entry point}
+(\cref{sec:visits}). The travel distance $d(u,v)$ between two entry points, and
+from the agent to each, is the shortest path on the 8-connected graph of
+passable grid cells, measured at the planner's preferred obstacle clearance
+where that connects the two points and at its minimum clearance otherwise;
+nodes that cannot be reached from the agent on the current map are withheld.
+Distances are converted to time at one forward step ($0.25\m$) per action, and
+the expected duration $\tau_v$ of searching $v$ is added to every leg entering
+it:
+\begin{equation}\label{eq:cost}
+  c(u,v) \;=\; \frac{d(u,v)}{0.25\m} \;+\; \tau_v,
+  \qquad
+  \tau_v \;=\; \min\bigl(60,\; 4 + 4\,f_v\bigr)\ \text{actions},
+\end{equation}
+where $f_v$ is the number of significant frontiers in room $v$ ($\tau_v=4$ for
+a target-landmark node). Two special cases: $\tau_v=20$ (half an approach plus
+a full turn) for a room that was finished from outside and is offered again,
+and $\tau_v=12$ when the room's frontier count is not available. Folding
+$\tau_v$ into the entering legs keeps the costs metric, which the solver
+requires, and makes the planner discount the search time of a room by the
+probability that the target was already found.
+
+\paragraph{Solver.} We minimise \cref{eq:objective} with our own
+implementation of RPT*~\citep{lyu2026rpt}, written from the paper's text (no
+reference code was available to us): a best-first search over states that
+consist of the current node, the set of visited nodes, the accumulated
+expected cost and the survival probability $q$, with dominance pruning and an
+admissible heuristic obtained from a relaxation that allows revisits. The
+search is exact when it terminates within its time budget ($2$\,s); otherwise
+it returns a nearest-neighbour order and marks the result as carrying no
+guarantee. If no instance can be built at all, a single node is drawn at
+random with probability proportional to $p$ (seeded per episode). Because the
+search is exponential in the number of nodes, at most $12$ nodes enter one
+solve: the nearest node and the eleven most probable ones. The agent commits
+to the first node of the returned order and the order is re-solved at the next
+loop point. \TODO{Report how often the solver returned a guaranteed-optimal
+order in the evaluation runs; the per-episode solver records exist but were
+not aggregated.} \TODO{Our implementation departs from the published
+pseudo-code in a few places that we believe are errata (documented in the
+code); confirm them with the authors of RPT* before describing them.}
+
+\subsection{Visiting a room}\label{sec:visits}
+\paragraph{Warm-up.} An episode starts with a rotation in place of ten
+$30\degree$ turns, which is what the $79\degree$ camera needs to have seen
+every bearing once. It gives the map its first rooms and the detector its first
+objects, and it is recorded as a completed look-around of the start room.
+
+\paragraph{Transit.} A room is entered at its \emph{entry point}: its most
+valuable frontier (see below), or, if it has none left, its passable cell
+nearest to the agent. The walk to the entry point is \emph{committed}: it ends
+only by arrival, by a route that the planner refuses or on which the agent
+makes no progress, by a timeout, or by a target detection. If the partition
+renumbers the room on the way, the commitment follows the place. An entry point
+that repeatedly cannot be reached is remembered by position and avoided for a
+period that doubles with each failure.
+
+\paragraph{Frontier walk.} Inside the room, the agent repeatedly walks to the
+frontier of that room with the highest utility
+\begin{equation}\label{eq:viewgain}
+  U(g) \;=\; \frac{G(g)}
+  {\bigl(\ell(g)+0.25\m\bigr)\,\bigl(1+|\Delta\theta(g)|/\pi\bigr)\,
+   \bigl(1+0.05\,n(g)\bigr)},
+\end{equation}
+where $G(g)$ is the number of unknown, unsettled cells that a full turn of the
+camera at $g$ would reveal (rays stop at occupied cells) plus the size of the
+frontier cluster, $\ell(g)$ is the geodesic distance, $\Delta\theta(g)$ the
+turn needed to face $g$, and $n(g)$ the number of actions the agent has already
+spent within $1.5\m$ of $g$. Only \emph{significant} frontiers, those with at
+least $1\sqm$ of revealable area, are walked to, kept as reasons to keep a
+room open, or counted in $f_v$. The visit ends when no significant frontier is
+left or after $60$ actions.
+
+\paragraph{Finished rooms.} A ledger decides when a room needs no (further)
+visit, from geometry alone:
+(a) the agent completed a look-around inside it;
+(b) a completed look-around elsewhere had at least $80\%$ of the room's cells in
+unobstructed view within $4\m$, and the room has no significant frontier;
+(c) the room has no significant frontier and the agent stood in it;
+(d) it has no significant frontier and is narrow (clearance of at most
+$0.9\m$) and was walked through, or was looked into from a recorded pose;
+(e) it has no significant frontier and is a fragment (under $3\sqm$ without a
+doorway, or under $1\sqm$).
+Finished rooms are neither shown to the oracle as nodes nor offered to the
+planner (their types still appear in the summary line). Two exceptions bring a
+finished room back: a room finished by a look-around that still has exits with
+significant frontier is re-offered for what lies behind them, and rooms that
+were finished from outside without ever being entered are re-offered once
+every room is finished and no exit is left. A verdict is re-examined if the
+room later grows by more than half.
+
+\paragraph{Glances.} While walking, the agent may turn towards a confident
+detection (at least $0.4$) that is cut by the left or right image border and
+spans at least $30\%$ of the image height: always for the target class, and
+for other classes only if that side still holds at least $2\sqm$ of unknown
+floor. It turns at most
+three times and then resumes its route.
+
+\subsection{Exploration fallback}\label{sec:fallback}
+When no node is in force (no room clears the probability threshold, every route
+failed, or the language model is unavailable) the agent keeps moving by a fixed
+ladder of rules, the first that yields a route being taken:
+(1) the best reachable frontier on the storey by \cref{eq:viewgain}, excluding
+frontiers that are probably the sensor shadow of an object, frontiers within
+the camera's blind radius ($1.2\m$) and insignificant ones;
+(2) the same frontiers with routes planned at the body radius;
+(3) the frontiers excluded in (1);
+(4) frontiers that were given up earlier, and then any frontier that is
+reachable when routes are planned at the body radius;
+(5) a relocation to a far reachable cell for a new vantage point;
+(6) a look down at the floor around the agent, turning a full circle, when the
+agent is surrounded by unknown cells;
+(7) a single probing step through the thinnest mapped barrier when the agent is
+boxed in by occupied cells;
+(8) a turn in place.
+Rule (1) uses a short hand-written list of object classes that hide no floor
+(e.g.\ clock, vase, book, television) and are therefore never treated as
+casting a shadow. When rule (1) finds nothing, an episode that started on a
+staircase may at that point use its one storey switch (\cref{sec:storey})
+before the remaining rules are tried.
+
+\subsection{Route planning and execution}\label{sec:navigation}
+\paragraph{Routes.} Routes are computed with A*~\citep{hart1968formal} on the
+8-connected grid. Unknown cells are not traversable. Occupied cells are
+inflated by a preferred clearance of $0.30\m$; the planner relaxes this in
+$5\cm$ steps down to $0.25\m$ when no route exists or when the route at the
+preferred clearance is more than $1.5$ times longer than the relaxed one. The
+cell cost adds two soft terms to the unit cost: a clearance term that decays
+with distance from obstacles, and a centreline term
+$4\,(1-d/0.6\m)$ for cells with clearance $d<0.6\m$, which makes a route cross
+a doorway through its middle. A turn penalty discourages staircase-shaped
+paths, and the result is smoothed by line-of-sight shortcuts and corner
+rounding. A route is kept as long as its goal has not moved and it remains
+collision-free on the updated map.
+
+\paragraph{From route to actions.} The benchmark's motion is discrete:
+$0.25\m$ steps and $30\degree$ turns, with any contact refusing the step.
+Following a 2-D route with a waypoint controller cuts corners into door jambs.
+Instead, every route is refined by a search in the spirit of
+Hybrid~A*~\citep{dolgov2010path} over states (position, heading) whose only
+transitions are the benchmark's own forward step and turns. Each action costs
+one unit; a forward step additionally pays for its lateral offset from the 2-D
+route, and the search is confined to a $0.4\m$ corridor around the route and
+collision-checked against the clearance field. The resulting action sequence
+is executed open loop while the pose matches the plan (to $2\cm$ and
+$1\degree$); a small displacement re-anchors the plan, anything else triggers
+re-planning from the true pose. A refused step is remembered as a
+\emph{pose} from which stepping forward is excluded for $120$ actions, rather
+than as an obstacle. If the lattice search finds no plan, a simple
+waypoint-following rule is used.
+
+\paragraph{Narrow passages.} Two rules address doorways. A refused step inside
+a narrow passage while roughly aligned with it is treated as a scrape and is
+\emph{not} written into the map, unless the same place refuses the agent three
+times within $40$ actions. And when a route is about to enter a passage
+narrower than $0.9\m$, the camera is pitched down by $30\degree$ once so that
+the floor of the passage, which a level camera does not see closer than about
+$1.4\m$, is mapped before the agent enters.
+
+\subsection{Target closing}\label{sec:closing}
+A detection of the target category suspends the search and hands control to a
+state machine that either ends the episode with \code{STOP} or releases the
+candidate and returns to the search.
+
+\paragraph{Start and lock.} A takeover starts on a box of the target class
+with confidence of at least $0.5$ that has a valid 3-D projection, is not cut
+by the image border (a box cut only at the bottom by the floor is accepted),
+and is not near a place where a candidate was rejected before (a confidence of
+at least $0.8$ overrides most rejection memories). The candidate becomes a
+\emph{lock} after two consecutive frames whose projections fall on the same
+object; while a candidate is active, boxes down to confidence $0.3$ count as
+re-sightings if they project onto it. Until the lock, the agent turns or steps
+so as to keep the box in view, for at most $12$ actions. Three special cases
+are handled: a box without usable depth (too far) starts a bounded walk along
+its bearing until depth is available; a candidate first seen closer than
+$1.3\m$ is re-examined from a few steps back unless it was already seen in
+recent frames or is very confident; and a candidate whose measured height is
+outside a hand-set, per-class band (\cref{sec:handdesigned}) is not refused
+but doubted: its confidence counts at $0.7$ of its value towards the start
+threshold, and it needs four frames from two viewpoints at least $0.3\m$
+apart.
+
+\paragraph{Memory.} The position of a locked target is a precision-weighted
+fusion of its associated observations, with a measurement noise that grows
+with range. A re-sighting is associated to the lock if it falls within a
+cylinder around the line of sight to the remembered position.
+
+\paragraph{Approach.} The agent walks to a \emph{standoff} point on a ring
+around the remembered position whose radius is chosen so that arriving puts
+the agent within $1\m$ of the target (about $0.65\m$ with our tolerances).
+Candidate points are tried in a fixed order: first on the side from which the
+target was seen, then beside and behind it; for each, the default planner,
+then the planner at body-radius clearance, then a planner that may cross
+unknown cells at eight times the cost of free ones. For a target mounted above
+the floor whose visible surface is planar (e.g.\ a picture), a plane is fitted
+to its depth pixels and standoff points in front of that plane are tried first.
+Wider rings are tried when no point of the first ring is reachable, and a point
+whose route is much longer than the straight-line range is taken only as a
+last resort. Every standing point the closing proposes (the standoff points,
+the spot of the back-off manoeuvre, and the closest reachable points used when
+no standoff has a route) is first projected onto the simulator's navigation
+mesh, and is discarded when the mesh has no point within $0.5\m$ horizontally
+and $0.2\m$ vertically of it. This is privileged geometry
+(\cref{sec:experiments-privileges}); routes to the projected points are still
+planned on the agent's own map. Within
+$1.5\m$ the camera pitch is servoed to keep the box inside the image.
+
+\paragraph{Stop.} When a fresh detection of the lock measures a near-surface
+range of at most $1.05\m$, or the agent has arrived within $1\m$ of the
+remembered position, the agent inspects: it centres the box by turning and
+tilting, may take up to three single steps if the range is within one step of
+the limit, and issues \code{STOP} on a fresh, complete box of the target within
+range. \code{STOP} is issued without a fresh box only in narrow cases: when
+the target was detected within the last $15$ actions of the approach and the
+map shows a free line of sight to the remembered position; or when no closer
+standing point is reachable and the last fresh range was within one step of
+the limit. For a target above the floor, up to three further forward steps are
+taken after the decision to stop, because the benchmark's success region for
+raised objects lies closer to the object (\cref{sec:handdesigned}).
+
+\paragraph{Release.} A candidate is released when it is not confirmed within
+its budget, when no route to any standoff exists, when the approach stalls for
+$20$ actions, when the closing as a whole exceeds $160$ actions, or when the
+inspection never sees the target from the standoff. A release remembers the
+place (radius $1\m$, doubled after a failed inspection) so that the same
+detection does not restart the takeover from the same spot, except when the
+map shows that the standoff had no line of sight to the target. A lock that
+was released only for want of a route is kept and pursued again, within a
+bounded number of actions, once the map offers a route.
+
+\subsection{Single-storey confinement}\label{sec:storey}
+In this draft the search does not change storeys. The agent tracks the height
+of the floor it stands on from its pose. Staircases are recognised from the
+agent's own depth as support surfaces that rise or fall in steps, and their
+footprint is written as impassable into the planning map; so is every cell
+whose observed floor lies more than $0.30\m$ below the storey plane, including
+cells that depth rays crossed below that level. Single steps and raised or
+sunken parts of the same storey, up to the height the agent can walk onto,
+remain free. A goal is refused if the floor the agent stands on is more than
+$0.5\m$ from the start height. No simulator geometry is used for any of this.
+
+\paragraph{Starts on a staircase.} Some episodes start on a stair tread or
+landing, where no floor is level with the agent. In that case the first storey
+the agent settles on becomes its storey: it walks the flight it sees to the
+nearer end. The implementation additionally allows such an episode \emph{one}
+switch to the storey at the other end of the same flight once the first storey
+has been searched out, and never back. In all other episodes the agent stays on
+its start storey. \TODO{Multi-storey search with staircases as nodes of
+\cref{eq:objective} is implemented but is not part of this draft.}
+
+\subsection{What is hand-designed}\label{sec:handdesigned}
+The method is training-free, but it is not free of design choices, and several
+of them encode knowledge about homes or about the benchmark. For transparency
+we list them in one place.
+\begin{itemize}[leftmargin=*,itemsep=1pt,topsep=2pt]
+  \item \textbf{The two prompts} (\cref{app:prompts}), in particular the
+        examples and numeric bands of the oracle's system prompt
+        (\cref{sec:oracle}).
+  \item \textbf{The rescaling of the model's probabilities} by exploration
+        state (\cref{sec:oracle}) and the fixed probability of a
+        target-landmark node (\cref{sec:nodes}).
+  \item \textbf{Three small tables about object classes}, none of which says
+        where a target is: per-class height bands used to doubt a candidate
+        (bed, toilet, sofa, chair, potted plant, television;
+        \cref{sec:closing}); a list of furniture classes that can carry other
+        objects, used so that a detection of the supporting furniture does not
+        contradict a locked target; and the list of classes that hide no floor
+        (\cref{sec:fallback}).
+  \item \textbf{Alias tables and switched-off rules.} Synonymous class names
+        are folded by small alias tables (couch and sofa; tv, monitor and
+        television; armchair and chair), and synonymous room names in the
+        model's replies likewise (corridor and hallway, study and office).
+        Two hand-written labelling rules exist in the code and are switched
+        off in the configuration described here: a minimum number of chairs
+        for a dining room, and a rule that labels a room a hallway from its
+        shape.
+  \item \textbf{The detector vocabulary}: the context words given to the
+        detector besides the goal categories.
+  \item \textbf{Stopping rules shaped by the benchmark's success criterion}:
+        the $1\m$ terminal range, and the additional steps towards raised
+        targets, which follow from how the benchmark generates goal view
+        points.
+  \item \textbf{All numeric thresholds} (\cref{app:hyperparams}). They were set
+        by hand during development on the same validation episodes that we
+        report (\cref{sec:experiments-privileges}).
+\end{itemize}
+
+% ============================================================================
+\section{Experimental Setup}\label{sec:experiments}
+
+\subsection{Benchmarks and protocol}\label{sec:experiments-benchmarks}
+We evaluate on the validation splits of two Habitat ObjectNav benchmarks, each
+in full:
+\begin{itemize}[leftmargin=*,itemsep=1pt,topsep=2pt]
+  \item \textbf{HM3D}~\citep{ramakrishnan2021habitat,yadav2023habitat}: the
+        ObjectNav v1 episodes, $2{,}000$ episodes in $20$ scenes, with six
+        goal categories (chair, bed, plant, toilet, tv\_monitor, sofa).
+  \item \textbf{Matterport3D (MP3D)}~\citep{chang2017matterport3d}: the
+        ObjectNav v1 episodes, $2{,}195$ episodes in $11$ scenes, with $21$
+        goal categories (listed in \cref{tab:mp3d-cat}).
+\end{itemize}
+Both use the agent of \cref{sec:task} and the same rules. We run
+habitat-sim~0.2.4~\citep{savva2019habitat,szot2021habitat} through our own
+adapter, which reproduces the episode and measurement rules of habitat-lab's
+ObjectNav task: a budget of $500$ actions, no sliding along obstacles, success
+only on \code{STOP}, distance measured as the geodesic distance to the nearest
+published view point of any goal instance, and a navigation mesh recomputed for
+the agent's dimensions (radius $0.18\m$, height $0.88\m$). Every episode of
+both splits is run; none is skipped, filtered or restarted. Both runs use a
+single seed. \TODO{Report the agreement between the start-to-goal geodesic
+distances computed by our adapter and those published with the episodes, as a
+check of the evaluation code.}
+
+\subsection{Metrics}\label{sec:experiments-metrics}
+For episode $i$ let $S_i\in\{0,1\}$ denote success, $l_i$ the geodesic distance
+from the start to the nearest goal view point, $p_i$ the length of the path the
+agent travelled, and $d_i$ the geodesic distance to the nearest goal view point
+when the episode ends. We report the success rate
+$\mathrm{SR}=\tfrac1N\sum_i S_i$; success weighted by path
+length~\citep{anderson2018evaluation},
+$\mathrm{SPL}=\tfrac1N\sum_i S_i\,l_i/\max(p_i,l_i)$; its soft variant
+$\mathrm{SoftSPL}=\tfrac1N\sum_i \max(0,\,1-d_i/l_i)\,l_i/\max(p_i,l_i)$; and
+the mean final distance to the goal, $\mathrm{DTG}=\tfrac1N\sum_i d_i$.
+Intervals are at the $95\%$ level: Wilson score
+intervals~\citep{wilson1927probable} for SR and percentile bootstrap
+intervals~\citep{efron1979bootstrap} over episodes for SPL.
+
+\subsection{Language model}\label{sec:experiments-llm}
+Both queries of the method, the room labels of \cref{sec:labels} and the
+per-room probabilities of \cref{sec:oracle}, are answered by the same
+off-the-shelf model, Qwen2.5-14B-Instruct~\citep{qwen25}, in the 4-bit
+quantisation distributed by Ollama (\code{qwen2.5:14b-instruct}) and served
+locally. The model receives text only; it never sees an image. We use
+temperature $0$ with a fixed seed, the server's JSON-constrained output mode, a
+context window of $8{,}192$ tokens, and reply limits of $768$ tokens for a room
+label and $1{,}536$ tokens for the probabilities. The model is used as
+released: there is no fine-tuning, no retrieval, and no in-context example
+other than the single worked example inside the system prompt
+(\cref{app:prompts}).
+
+\subsection{Perception: simulator annotations in place of a detector}
+\label{sec:experiments-oracle}
+All experiments in this draft answer the detector and segmenter interfaces of
+\cref{sec:perception} from the simulator's semantic annotations (the
+HM3D-Semantics annotations~\citep{yadav2023habitat} and the Matterport3D object
+annotations~\citep{chang2017matterport3d}) instead of from learned models. The
+results are therefore an \emph{upper bound with respect to perception}: they
+measure mapping, reasoning, planning and execution given ideal detections.
+Precisely:
+\begin{itemize}[leftmargin=*,itemsep=2pt,topsep=2pt]
+  \item \textbf{Boxes.} For every frame the simulator renders an instance-id
+        image. Every annotated instance that is visible in the frame, covers at
+        least $64$ pixels and maps to a word of the detector vocabulary is
+        reported once, with the tight box of its visible pixels and confidence
+        $1.0$. The confidence thresholds of
+        \cref{sec:perception,sec:nodes,sec:visits,sec:closing} therefore never
+        bind in these experiments.
+  \item \textbf{Masks.} The mask of a target-class box is the set of that
+        instance's own pixels.
+  \item \textbf{Which instances are the target.} For a goal category that the
+        scene's episodes ask for, the instances reported under that category
+        are \emph{exactly the instances that the episode dataset lists as its
+        goals}. An instance whose annotation names the same category but which
+        the dataset does not list as a goal is not reported at all. The oracle
+        therefore never produces a target detection that the benchmark would
+        not accept, which no detector that recognises a category from
+        appearance can guarantee. This is stronger than category-level
+        ground-truth semantics and must be kept in mind when reading the
+        numbers. (In a scene without episodes for a category, its instances
+        are reported by annotation name.)
+  \item \textbf{Other classes.} Context and doorway classes are assigned from
+        the annotation names by a fixed table (for MP3D also from the
+        \emph{mpcat40} class, for doors, stairs, mirrors and curtains).
+        Instances whose name has no entry are not reported.
+  \item \textbf{Mis-registered annotations.} In some scans the semantic mesh
+        is not registered to the rendered mesh everywhere, so that the sensor
+        paints an object onto a surface metres away from it. A pixel is
+        therefore kept only if the frame's depth places it inside the
+        instance's annotated 3-D bounding box inflated by $0.25\m$, and an
+        instance with fewer than half of its measurable pixels inside that box
+        is not reported. Twelve of the MP3D failures are nevertheless
+        attributed to such phantom detections (\cref{sec:results-failures}).
+\end{itemize}
+Everything downstream of the two interfaces, from the projection of boxes to
+the landmark map, the doorway finder and the closing behaviour, runs
+unchanged. \TODO{Evaluate with learned perception (YOLO-World and SAM are
+implemented behind the same interfaces) and report that as the main result.}
+
+\subsection{Privileged inputs}\label{sec:experiments-privileges}
+For clarity we list everything the agent receives that a physical robot with
+an RGB-D camera would not have.
+\begin{enumerate}[leftmargin=*,itemsep=2pt,topsep=2pt]
+  \item \textbf{Pose.} The exact pose of the simulator (position, heading and
+        camera pitch) at every step, as is standard in this benchmark.
+  \item \textbf{Depth.} Noise-free depth, with the range limit and the
+        hole-filling rule of \cref{sec:task}.
+  \item \textbf{Semantic perception.} The oracle of
+        \cref{sec:experiments-oracle}, including its use of the benchmark's
+        goal list to decide which instances are the target.
+  \item \textbf{Navigation mesh, in target closing only.} Candidate standing
+        points of the closing behaviour are projected onto the simulator's
+        navigation mesh (\cref{sec:closing}). The query returns only the
+        nearest mesh point; it carries no information about the goal, and the
+        routes are planned on the agent's own map. It does, however, tell the
+        agent where navigable floor lies next to the target, and the
+        benchmark's success region is defined on that same mesh.
+        \TODO{Re-run with the projection disabled and report the difference.}
+\end{enumerate}
+The agent does \emph{not} receive goal positions or view points, distances to
+the goal, a success signal, a collision flag (it infers a refused step from
+its own pose), scene geometry, or storey and staircase annotations (our adapter
+reads the latter from the navigation mesh for the analysis of
+\cref{sec:results}; the method does not use them in this configuration).
+
+\paragraph{Development on the evaluation data.} The method has no trained
+parameters, but its rules and thresholds were developed by inspecting its
+behaviour on validation episodes of these two benchmarks (and of Gibson), the
+same splits that we report. We have no held-out measurement. The numbers below
+are development-set numbers and are likely to be optimistic. \TODO{Freeze the
+method and evaluate on episodes and scenes that were not used during
+development.}
+
+\subsection{Which code produced the numbers}\label{sec:experiments-revisions}
+\Cref{sec:method} describes the current code. The two full-split runs reported
+below were made a few days before the last revision of that code, from two
+different earlier revisions, and neither is the method exactly as described.
+We state the differences instead of presenting the numbers as results of the
+described method.
+
+\paragraph{Both runs: a hand-written table of room priors.} At the time of both
+runs the code contained a hand-written table that told the search where
+objects are. We have since removed it, with everything that read it, because
+it contradicts the premise of the method. It was active in both runs in the
+following ways.
+(i) Every oracle prompt carried an additional line that listed, for the target
+category, the room types in which it is likely and those in which it is rare
+(the table covered every goal category of both benchmarks), and the system
+prompt told the model to use that line.
+(ii) For each target category the table named objects that share its room (for
+example a sink for a toilet); a room containing such an object was not marked
+finished from outside, and the appearance of one could trigger a new oracle
+query or a glance.
+(iii) Lists of ``signature'' and ``generic'' objects decided whether a room
+label was strong, and whether a room holding only generic objects was labelled
+at all.
+(iv) A target candidate standing in a room whose type the table called
+implausible needed additional confirmation frames before it was locked.
+A hard exclusion of implausible room types from the search also existed but
+was disabled in both runs. We have not measured the effect of removing the
+table. \TODO{Re-run both benchmarks with the current code. Until then the
+numbers of \cref{sec:results} are results of the method \emph{with} these
+hand-written priors, not of the method as described in \cref{sec:method}.}
+
+\paragraph{The MP3D run: an older execution stack.} Apart from the table
+above, the HM3D run used the current code. The MP3D run was started earlier
+from a different branch, whose execution stack predates several changes that
+\cref{sec:navigation,sec:closing} describe:
+the lattice search inflated its heuristic by $1.5$ (now $1.0$);
+the look-down before a narrow passage was triggered from $1.5\m$ away and
+without a width test (now from $0.9\m$, only for passages narrower than
+$0.9\m$, once per place);
+a place that repeatedly refused the agent was not yet closed on the map, and a
+refused entry point was not retried at body-radius clearance;
+standoff points were not yet tried front-first with long detours last;
+a stop without a fresh detection was not yet restricted to targets seen within
+the last $15$ actions, and the rules for a target box cut by the image border
+and for re-sightings at the terminal range did not exist;
+and after the decision to stop, one or two further forward steps could be
+taken towards any target (now none for targets on the floor and up to three
+for raised ones).
+The two benchmarks were therefore not evaluated with the same code, and the two
+rows of \cref{tab:main} must not be compared as one method on two datasets.
+
+\subsection{Compute}\label{sec:experiments-compute}
+Both runs used one workstation with a single 24\,GB GPU (NVIDIA RTX~4090),
+which hosted the language model and the simulator's renderers, 24 CPU cores and
+64\,GB of memory, with eight (MP3D) or nine (HM3D) episodes running in
+parallel. The HM3D run took $24.0$ hours of wall-clock time and the MP3D run
+$27.2$ hours; an episode took $372$\,s and $343$\,s on average. The language
+model is the bottleneck. An episode issued on average $5.5$ (HM3D) and $4.9$
+(MP3D) probability queries and $27.6$ and $24.9$ room-label queries; in the
+MP3D run a probability query had on average $3{,}306$ prompt tokens and $162$
+reply tokens, a room-label query $453$ and $43$. Every answer of the model was
+recorded ($49{,}743$ and $50{,}149$ answers), so that any episode can be
+replayed exactly. \TODO{Report per-step latency of the method itself, excluding
+queueing for the shared language-model server.}
+
+% ============================================================================
+\section{Results}\label{sec:results}
+
+All numbers in this section are subject to the three caveats of
+\cref{sec:experiments}: oracle semantic perception
+(\cref{sec:experiments-oracle}), development on the evaluated episodes
+(\cref{sec:experiments-privileges}), and code revisions that still contained
+hand-written room priors (\cref{sec:experiments-revisions}).
+
+\subsection{Main results}\label{sec:results-main}
+
+\begin{table}[t]
+\centering
+\caption{Full validation splits under oracle semantic perception with the
+search confined to the start storey. SR, SPL and SoftSPL in percent, with
+$95\%$ intervals in brackets where they were computed; DTG in metres; Steps is
+the mean number of actions per episode. The two benchmarks were run with
+different revisions of the code, both of which contained hand-written room
+priors that the method no longer has (\cref{sec:experiments-revisions}). The
+storey of the goal is determined after the fact from the simulator's
+navigation mesh and is unknown to the agent; the two benchmarks use different
+rules for it (see text).}
+\label{tab:main}
+\small
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{@{}llrllrrr@{}}
+\toprule
+Benchmark & Episodes & $N$ & SR & SPL & SoftSPL & DTG & Steps \\
+\midrule
+HM3D val & all                    & 2{,}000 & 71.0 [68.9, 72.9] & 39.8 [38.4, 41.2] & 41.1 & 3.15 & 248 \\
+         & goal on start storey   & 1{,}652 & 83.5 [81.7, 85.3] & 47.2 & \tbd & 1.14 & 202 \\
+         & goal on another storey & 348     & 11.2 [8.3, 14.9]  & 4.8  & \tbd & 12.72 & 468 \\
+\midrule
+MP3D val & all                    & 2{,}195 & 65.6 [63.6, 67.6] & 29.1 [28.0, 30.2] & 31.8 & 3.82 & 253 \\
+         & goal on start storey   & 1{,}807 & 77.4 [75.4, 79.2] & 34.3 & 37.0 & 1.91 & 208 \\
+         & goal on another storey & 388     & 11.1 [8.3, 14.6]  & 4.6  & 7.3  & 12.69 & 463 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:main} gives the results on the two splits. Overall the system
+succeeds in $71.0\%$ of the HM3D episodes and $65.6\%$ of the MP3D episodes.
+
+\paragraph{The storey of the goal.} The search is confined to the start storey
+(\cref{sec:storey}), and $17.4\%$ of the HM3D episodes and $17.7\%$ of the MP3D
+episodes have their goal on another storey. On those episodes the success rate
+is $11\%$ on both benchmarks; on the others it is $83.5\%$ (HM3D) and $77.4\%$
+(MP3D). The split is made after the fact from the simulator's navigation mesh.
+For HM3D an episode counts as ``goal on start storey'' when the goal view
+point nearest to the start lies on the start's storey in a decomposition of the
+mesh into levels; for MP3D, when some goal view point lies within $0.5\m$ of
+the start height. Under the level decomposition the MP3D split divides into
+$1{,}880$ and $315$ episodes with SR $74.9\%$ $[72.9, 76.9]$ and $10.2\%$
+$[7.3, 14.0]$ and SPL $33.2\%$ and $4.6\%$. \TODO{Use one rule for both
+benchmarks and fill the missing SoftSPL cells.} The successes on other-storey
+episodes are not climbs. On HM3D, $174$ episodes start on a staircase; $37$ of
+the $39$ other-storey successes are such starts, and in $31$ of them the agent
+left the staircase onto the goal's storey (\cref{sec:storey}). On MP3D the $43$
+other-storey successes are goals that could be reached without the staircases
+the agent may not take (split levels, ramps, view points on a landing) and
+stair starts.
+
+\paragraph{Categories.} \Cref{tab:hm3d-cat,tab:mp3d-cat} give the results per
+goal category. On HM3D, chair and sofa are found most reliably ($86\%$ and
+$80\%$) and plant, tv\_monitor, toilet and bed least ($58$--$65\%$). On MP3D
+the per-category numbers are dominated by where the instances are: the two
+categories whose goals are mostly on another storey in this split
+(gym\_equipment, $37$ of $44$ episodes, and tv\_monitor, $6$ of $8$) score
+lowest overall, while on the start storey the success rate ranges from $46\%$
+(clothes) and $49\%$ (towel) to $90\%$ (table).
+Several MP3D categories have very few episodes (bathtub $9$, tv\_monitor $8$),
+and their numbers carry little information.
+
+\begin{table}[t]
+\centering
+\caption{HM3D val per goal category (all $2{,}000$ episodes; same run and
+caveats as \cref{tab:main}).}
+\label{tab:hm3d-cat}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Category & $N$ & SR & SPL & DTG & Steps \\
+\midrule
+chair       & 428 & 86.2 & 54.0 & 1.07 & 162 \\
+sofa        & 376 & 79.8 & 51.2 & 2.05 & 194 \\
+bed         & 433 & 64.7 & 33.8 & 4.12 & 280 \\
+toilet      & 398 & 64.1 & 28.9 & 3.63 & 304 \\
+tv\_monitor & 281 & 59.1 & 31.6 & 4.41 & 311 \\
+plant       & 84  & 58.3 & 26.9 & 7.34 & 289 \\
+\midrule
+all         & 2{,}000 & 71.0 & 39.8 & 3.15 & 248 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{MP3D val per goal category (all $2{,}195$ episodes; same run and
+caveats as \cref{tab:main}). The last four columns split the episodes by
+whether a goal view point lies within $0.5\m$ of the start height.}
+\label{tab:mp3d-cat}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lrrrr@{\hspace{14pt}}rrrr@{}}
+\toprule
+ & \multicolumn{4}{c}{All episodes} & \multicolumn{2}{c}{Start storey}
+ & \multicolumn{2}{c}{Other storey} \\
+\cmidrule(r){2-5}\cmidrule(lr){6-7}\cmidrule(l){8-9}
+Category & $N$ & SR & SPL & DTG & $N$ & SR & $N$ & SR \\
+\midrule
+table              & 340 & 84.4 & 31.1 & 1.58  & 315 & 89.8 & 25 & 16.0 \\
+fireplace          & 30  & 83.3 & 42.4 & 1.18  & 29  & 82.8 & 1  & 100.0 \\
+seating            & 87  & 77.0 & 21.8 & 1.94  & 81  & 82.7 & 6  & 0.0 \\
+cabinet            & 180 & 75.6 & 35.6 & 2.20  & 161 & 80.7 & 19 & 31.6 \\
+cushion            & 239 & 74.5 & 40.6 & 2.48  & 202 & 85.6 & 37 & 13.5 \\
+shower             & 70  & 74.3 & 32.9 & 3.86  & 59  & 86.4 & 11 & 9.1 \\
+sink               & 82  & 73.2 & 31.9 & 3.38  & 73  & 80.8 & 9  & 11.1 \\
+picture            & 161 & 70.8 & 34.9 & 1.61  & 150 & 72.0 & 11 & 54.5 \\
+chair              & 434 & 61.8 & 26.8 & 3.85  & 338 & 75.4 & 96 & 13.5 \\
+stool              & 68  & 52.9 & 24.4 & 7.54  & 46  & 76.1 & 22 & 4.5 \\
+chest\_of\_drawers & 63  & 52.4 & 25.0 & 6.83  & 56  & 55.4 & 7  & 28.6 \\
+sofa               & 53  & 50.9 & 22.7 & 6.37  & 38  & 65.8 & 15 & 13.3 \\
+counter            & 66  & 50.0 & 23.5 & 5.86  & 54  & 61.1 & 12 & 0.0 \\
+plant              & 87  & 47.1 & 21.8 & 4.67  & 54  & 75.9 & 33 & 0.0 \\
+bathtub            & 9   & 44.4 & 25.4 & 9.77  & 7   & 57.1 & 2  & 0.0 \\
+clothes            & 25  & 44.0 & 22.1 & 8.28  & 24  & 45.8 & 1  & 0.0 \\
+bed                & 48  & 43.8 & 21.7 & 10.50 & 29  & 72.4 & 19 & 0.0 \\
+toilet             & 28  & 42.9 & 15.9 & 8.56  & 19  & 57.9 & 9  & 11.1 \\
+towel              & 73  & 42.5 & 20.0 & 6.22  & 63  & 49.2 & 10 & 0.0 \\
+tv\_monitor        & 8   & 12.5 & 10.4 & 14.76 & 2   & 50.0 & 6  & 0.0 \\
+gym\_equipment     & 44  & 9.1  & 2.3  & 11.10 & 7   & 57.1 & 37 & 0.0 \\
+\midrule
+all                & 2{,}195 & 65.6 & 29.1 & 3.82 & 1{,}807 & 77.4 & 388 & 11.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Failure analysis}\label{sec:results-failures}
+\Cref{tab:failures} sorts the failed episodes by one tag each. The tags are
+assigned automatically from the episode logs, by a different script for each
+benchmark (hence the different categories), and are a first reading rather
+than a verified diagnosis.
+
+\begin{table}[t]
+\centering
+\caption{Failed episodes by automatically assigned tag. ``Limit'' is the
+budget of $500$ actions. The two benchmarks were tagged by different scripts
+and the categories do not correspond one to one.}
+\label{tab:failures}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{HM3D val}: $581$ failures of $2{,}000$ episodes & $N$ & Share \\
+\midrule
+Limit; goal on another storey                              & 307 & 52.8\% \\
+Limit; goal on start storey, target never detected          & 160 & 27.5\% \\
+Limit; target detected, no \code{STOP}                      & 61  & 10.5\% \\
+Limit; stuck (no progress towards a lock, or $\ge40$ refused steps) & 36 & 6.2\% \\
+\code{STOP} within $1\m$ of a view point                    & 11  & 1.9\% \\
+\code{STOP} elsewhere                                       & 6   & 1.0\% \\
+\midrule
+\textbf{MP3D val}: $754$ failures of $2{,}195$ episodes & $N$ & Share \\
+\midrule
+Limit; a target was locked at least once and released       & 392 & 52.0\% \\
+Limit; no target was ever locked                            & 222 & 29.4\% \\
+Limit; stuck ($\ge40$ refused steps, or a stalled approach) & 54  & 7.2\% \\
+\code{STOP} within $1\m$ of a view point                    & 44  & 5.8\% \\
+\code{STOP} with a wall, railing or void before the view point & 21 & 2.8\% \\
+\code{STOP} $1\m$ or more from every view point             & 9   & 1.2\% \\
+Phantom detection of the oracle (\cref{sec:experiments-oracle}) & 12 & 1.6\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Goals on another storey} are the largest group of failures: $309$
+of the $581$ HM3D failures and $345$ of the $754$ MP3D failures are episodes
+whose goal is not on the start storey. In the MP3D tags these episodes are
+spread over the step-limit rows ($341$ of the $668$ step-limit failures).
+
+\paragraph{On the start storey,} HM3D has $272$ failures. In $160$ of them
+($59\%$) the target was never detected within the budget: the search did not
+reach it. These episodes built a median of eight rooms and issued a median of
+eleven probability queries; toilets ($58$) and beds ($33$) are the most
+frequent targets. In $97$ ($36\%$) the target was detected but the episode
+ended without a \code{STOP}, because the closing behaviour released the
+candidate or the agent could not make progress; tv\_monitor ($40$) and toilet
+are the most frequent targets. Only $15$ are wrong stops. On MP3D ($409$
+start-storey failures) the available tags do not separate the storeys. Over
+the whole split the most frequent tag is a target that was locked and released
+without a \code{STOP} ($392$). This count includes episodes in which a goal on
+another storey was locked from the start storey (at least $65$, by the totals
+above), so it overstates the failures of the closing behaviour proper. Of the
+$86$ wrong stops, $44$ are within $1\m$ of a view point, $23$ of them beside
+the object rather than in front of it. Even with ideal detections, converting
+a sighting into a stop inside the benchmark's success region is a substantial
+source of failure on both benchmarks, next to not reaching the target at all.
+\TODO{Break the MP3D failures down by storey; verify a sample of tags by hand
+on both benchmarks.}
+
+\paragraph{Wrong stops are rare:} $17$ of $2{,}000$ HM3D episodes ($0.9\%$)
+and $86$ of $2{,}195$ MP3D episodes ($3.9\%$) end with a \code{STOP} outside
+the success region. This is to be expected under oracle perception, in which,
+apart from the mis-registration artefacts, no detection of the target class is
+a false positive (\cref{sec:experiments-oracle}); it says nothing about wrong
+stops with a learned detector.
+
+\paragraph{Episodes decided before any reasoning.} In $324$ of the $2{,}000$
+HM3D episodes ($16\%$) the probability query of \cref{sec:oracle} was never
+issued, because the target was detected during the initial look-around or
+before the first decision was due; $98.5\%$ of these episodes succeeded, after
+a median of $38$ actions. For this share of the benchmark the outcome does not
+depend on the room reasoning at all. \TODO{Report the same count for MP3D.}
+
+\subsection{Relation to published results}\label{sec:results-comparison}
+We do not tabulate published zero-shot results next to ours. Those results
+were obtained with learned detectors, and ours with simulator annotations that
+are, in addition, aligned with the benchmark's goal list
+(\cref{sec:experiments-oracle}); a side-by-side table would suggest a
+comparison that the experiments do not support. \TODO{Add a comparison with
+published training-free methods once results with learned perception exist,
+quoting each number from its source.} \TODO{Add a qualitative figure: the map
+of one episode with the room partition, the room labels, the probabilities
+and the order chosen at successive loop points.}
+
+% ============================================================================
+\section{Limitations and Open Items}\label{sec:limitations}
+
+We collect here what the current evidence does and does not support.
+
+\paragraph{The numbers are not yet results of the described method.} Both runs
+predate the removal of hand-written room priors, and the MP3D run predates
+several changes to execution (\cref{sec:experiments-revisions}). Re-running
+both benchmarks with the current code is the first open item.
+
+\paragraph{Perception is an oracle.} The detections come from the simulator's
+annotations, and the instances that count as the target are those of the
+benchmark's goal list (\cref{sec:experiments-oracle}). The system has not been
+evaluated end to end. Misses, false positives and confusions of a learned
+detector affect every stage: the room labels, the descriptions shown to the
+language model, the target candidates and the decision to stop.
+
+\paragraph{The language model is guided by hand.} The system prompt of the
+probability query states where the HM3D goal categories are usually found,
+describes a typical home and gives numeric bands (\cref{sec:oracle}), and the
+code rescales the model's numbers by exploration state. How much of the
+behaviour is the model's own judgement has not been measured. For the MP3D
+categories that the prompt does not mention, the model is on its own.
+
+\paragraph{No held-out evaluation.} Rules and thresholds were developed on the
+evaluated validation episodes (\cref{sec:experiments-privileges}).
+
+\paragraph{One storey.} The agent does not change storeys, which bounds the
+success rate by the share of episodes whose goal is on the start storey (about
+$82\%$ on both splits, plus stair starts). \TODO{Multi-storey search.}
+
+\paragraph{Privileged geometry in the closing.} Standing points next to a
+target are projected onto the simulator's navigation mesh
+(\cref{sec:experiments-privileges}).
+
+\paragraph{Idealised sensing and a benchmark-shaped controller.} Pose and
+depth are noise-free. The execution stack (the action lattice, the scrape and
+look-down rules, the stopping rules) is built for the discrete action space
+and the success criterion of the Habitat benchmark; it would have to be
+replaced by a continuous controller on a robot, and its stopping rules are
+tied to how the benchmark defines success (\cref{sec:handdesigned}).
+
+\paragraph{Modelling assumptions.} \Cref{eq:objective} treats the rooms as
+independent and takes the language model's numbers as probabilities. We have
+not measured their calibration. The solver is exact only for the instance it
+is given: at most twelve nodes, with travel times measured on a partial map
+and fixed estimates of search time. \TODO{Calibration of the predicted
+probabilities against the observed frequency of finding the target in a room.}
+
+\paragraph{Cost.} An episode takes several minutes of wall-clock time in our
+set-up, dominated by language-model calls (\cref{sec:experiments-compute}).
+
+\paragraph{Further open items.}
+\TODO{Statistical comparison across seeds; all runs use one seed.}
+\TODO{Evaluation on the HM3D v2 and Gibson episode sets, for which adapters
+exist.}
+\TODO{Real-robot experiments.}
+
+% ============================================================================
+\section{Conclusion}\label{sec:conclusion}
+We described a training-free system for object-goal navigation that reasons
+about rooms: it segments the observed floor into rooms, has a language model
+name them and estimate for each the probability that searching it finds the
+target, and orders the rooms by minimum expected time-to-find with RPT*,
+executing the plan with a planner over the benchmark's own discrete actions and
+a dedicated behaviour for approaching and stopping at the target. Under oracle
+semantic perception and confined to one storey, earlier revisions of the
+system succeed in $71.0\%$ of the HM3D validation episodes and $65.6\%$ of the
+Matterport3D validation episodes, and in $83.5\%$ and $77.4\%$ of the episodes
+whose goal is on the start storey. These numbers bound what the mapping,
+reasoning and execution stack achieves given ideal detections; they were
+obtained on the episodes used for development and with hand-written room
+priors that have since been removed. The failure analysis points to three
+places where the remaining errors are: goals on other storeys, targets that
+are never reached within the budget, and sightings that are not converted into
+a stop inside the success region. \TODO{Rewrite once the current code has been
+re-evaluated, with learned perception and on held-out episodes.}
+
+\section*{Acknowledgements}
+\TODO{Acknowledgements and funding.}
+
+% ============================================================================
+%%BIB-BEGIN%%
+% TODO: verify every entry against the publisher's record before submission.
+% 35 entries were carried over from the earlier draft; Dolgov, Efron, Elfes, Grimaud,
+% Qwen and Wilson were added for this draft.
+\begin{thebibliography}{41}
+\small
+
+\bibitem[{Anderson et~al.(2018)}]{anderson2018evaluation}
+Peter Anderson, Angel Chang, Devendra~Singh Chaplot, Alexey Dosovitskiy, Saurabh Gupta, Vladlen Koltun, Jana Kosecka, Jitendra Malik, et~al.
+\newblock On evaluation of embodied navigation agents.
+\newblock \emph{arXiv preprint arXiv:1807.06757}, 2018.
+
+\bibitem[{Aydemir et~al.(2013)}]{aydemir2013active}
+Alper Aydemir, Andrzej Pronobis, Moritz G{\"o}belbecker, and Patric Jensfelt.
+\newblock Active visual object search in unknown environments using uncertain semantics.
+\newblock \emph{IEEE Transactions on Robotics (T-RO)}, 29(4):986--1002, 2013.
+
+\bibitem[{Batra et~al.(2020)}]{batra2020objectnav}
+Dhruv Batra, Aaron Gokaslan, Aniruddha Kembhavi, Oleksandr Maksymets, Roozbeh Mottaghi, Manolis Savva, Alexander Toshev, and Erik Wijmans.
+\newblock {ObjectNav} revisited: On evaluation of embodied agents navigating to objects.
+\newblock \emph{arXiv preprint arXiv:2006.13171}, 2020.
+
+\bibitem[{Blum et~al.(1994)}]{blum1994minimum}
+Avrim Blum, Prasad Chalasani, Don Coppersmith, Bill Pulleyblank, Prabhakar Raghavan, and Madhu Sudan.
+\newblock The minimum latency problem.
+\newblock In \emph{Proceedings of the 26th Annual ACM Symposium on Theory of Computing (STOC)}, 1994.
+
+\bibitem[{Bormann et~al.(2016)}]{bormann2016room}
+Richard Bormann, Florian Jordan, Wenzhe Li, Joshua Hampp, and Martin H\"{a}gele.
+\newblock Room segmentation: Survey, implementation, and analysis.
+\newblock In \emph{IEEE International Conference on Robotics and Automation (ICRA)}, pages 1019--1026, 2016.
+
+\bibitem[{Chang et~al.(2017)}]{chang2017matterport3d}
+Angel Chang, Angela Dai, Thomas Funkhouser, Maciej Halber, Matthias Nie{\ss}ner, Manolis Savva, Shuran Song, Andy Zeng, et~al.
+\newblock {Matterport3D}: Learning from {RGB-D} data in indoor environments.
+\newblock In \emph{International Conference on 3D Vision (3DV)}, 2017.
+
+\bibitem[{Chaplot et~al.(2020)}]{chaplot2020object}
+Devendra~Singh Chaplot, Dhiraj Gandhi, Abhinav Gupta, and Ruslan Salakhutdinov.
+\newblock Object goal navigation using goal-oriented semantic exploration.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\bibitem[{Cheng et~al.(2024)}]{cheng2024yolo}
+Tianheng Cheng, Lin Song, Yixiao Ge, Wenyu Liu, Xinggang Wang, and Ying Shan.
+\newblock {YOLO-World}: Real-time open-vocabulary object detection.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, pages 16901--16911, 2024.
+
+\bibitem[{Dolgov et~al.(2010)}]{dolgov2010path}
+Dmitri Dolgov, Sebastian Thrun, Michael Montemerlo, and James Diebel.
+\newblock Path planning for autonomous vehicles in unknown semi-structured environments.
+\newblock \emph{The International Journal of Robotics Research}, 29(5):485--501, 2010.
+
+\bibitem[{Dorbala et~al.(2024)}]{dorbala2024can}
+Vishnu~Sashank Dorbala, James~F. Mullen~Jr., and Dinesh Manocha.
+\newblock Can an embodied agent find your ``cat-shaped mug''? {LLM}-based zero-shot object navigation.
+\newblock \emph{IEEE Robotics and Automation Letters (RA-L)}, 9(5):4083--4090, 2024.
+
+\bibitem[{Efron(1979)}]{efron1979bootstrap}
+Bradley Efron.
+\newblock Bootstrap methods: Another look at the jackknife.
+\newblock \emph{The Annals of Statistics}, 7(1):1--26, 1979.
+
+\bibitem[{Elfes(1989)}]{elfes1989using}
+Alberto Elfes.
+\newblock Using occupancy grids for mobile robot perception and navigation.
+\newblock \emph{Computer}, 22(6):46--57, 1989.
+
+\bibitem[{Gadre et~al.(2023)}]{gadre2023cows}
+Samir~Yitzhak Gadre, Mitchell Wortsman, Gabriel Ilharco, Ludwig Schmidt, and Shuran Song.
+\newblock CoWs on pasture: Baselines and benchmarks for language-driven zero-shot object navigation.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2023.
+
+\bibitem[{Grimaud(1992)}]{grimaud1992new}
+Michel Grimaud.
+\newblock New measure of contrast: the dynamics.
+\newblock In \emph{Image Algebra and Morphological Image Processing III}, volume 1769 of \emph{Proceedings of SPIE}, pages 292--305, 1992.
+
+\bibitem[{Gu et~al.(2024)}]{gu2024conceptgraphs}
+Qiao Gu, Alihusein Kuwajerwala, Sacha Morin, Krishna~Murthy Jatavallabhula, Bipasha Sen, Aditya Agarwal, Corban Rivera, William Paul, et~al.
+\newblock ConceptGraphs: Open-vocabulary 3D scene graphs for perception and planning.
+\newblock In \emph{IEEE International Conference on Robotics and Automation (ICRA)}, 2024.
+
+\bibitem[{Hart et~al.(1968)}]{hart1968formal}
+Peter~E. Hart, Nils~J. Nilsson, and Bertram Raphael.
+\newblock A formal basis for the heuristic determination of minimum cost paths.
+\newblock \emph{IEEE Transactions on Systems Science and Cybernetics}, 4(2):100--107, 1968.
+
+\bibitem[{Hughes et~al.(2022)}]{hughes2022hydra}
+Nathan Hughes, Yun Chang, and Luca Carlone.
+\newblock Hydra: A real-time spatial perception system for 3D scene graph construction and optimization.
+\newblock In \emph{Robotics: Science and Systems (RSS)}, 2022.
+
+\bibitem[{Kirillov et~al.(2023)}]{kirillov2023segment}
+Alexander Kirillov, Eric Mintun, Nikhila Ravi, Hanzi Mao, Chloe Rolland, Laura Gustafson, Tete Xiao, Spencer Whitehead, et~al.
+\newblock Segment anything.
+\newblock In \emph{IEEE/CVF International Conference on Computer Vision (ICCV)}, pages 3992--4003, 2023.
+
+\bibitem[{Kollar and Roy(2009)}]{kollar2009utilizing}
+Thomas Kollar and Nicholas Roy.
+\newblock Utilizing object-object and object-scene context when planning to find things.
+\newblock In \emph{IEEE International Conference on Robotics and Automation (ICRA)}, 2009.
+
+\bibitem[{Kuang et~al.(2024)}]{kuang2024openfmnav}
+Yuxuan Kuang, Hai Lin, and Meng Jiang.
+\newblock {OpenFMNav}: Towards open-set zero-shot object navigation via vision-language foundation models.
+\newblock In \emph{Findings of the Association for Computational Linguistics: NAACL 2024}, 2024.
+
+\bibitem[{Long et~al.(2024)}]{long2024instructnav}
+Yuxing Long, Wenzhe Cai, Hongcheng Wang, Guanqi Zhan, and Hao Dong.
+\newblock InstructNav: Zero-shot system for generic instruction navigation in unexplored environment.
+\newblock In \emph{Proceedings of the 8th Conference on Robot Learning (CoRL)}, volume 270 of \emph{Proceedings of Machine Learning Research}, 2024.
+
+\bibitem[{Lyu et~al.(2026)}]{lyu2026rpt}
+Yunpeng Lyu, Chao Cao, Ji Zhang, Howie Choset, and Zhongqiang Ren.
+\newblock RPT*: Global planning with probabilistic terminals for target search in complex environments.
+\newblock \emph{arXiv preprint arXiv:2601.12701}, 2026.
+
+\bibitem[{Majumdar et~al.(2022)}]{majumdar2022zson}
+Arjun Majumdar, Gunjan Aggarwal, Bhavika Devnani, Judy Hoffman, and Dhruv Batra.
+\newblock ZSON: Zero-shot object-goal navigation using multimodal goal embeddings.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2022.
+
+\bibitem[{Qwen Team(2024)}]{qwen25}
+Qwen Team.
+\newblock Qwen2.5 technical report.
+\newblock \emph{arXiv preprint arXiv:2412.15115}, 2024.
+
+\bibitem[{Ramakrishnan et~al.(2021)}]{ramakrishnan2021habitat}
+Santhosh~Kumar Ramakrishnan, Aaron Gokaslan, Erik Wijmans, Oleksandr Maksymets, Alexander Clegg, John Turner, Eric Undersander, Wojciech Galuba, et~al.
+\newblock {Habitat-Matterport 3D Dataset (HM3D)}: 1000 large-scale {3D} environments for embodied {AI}.
+\newblock In \emph{Proceedings of the Neural Information Processing Systems Track on Datasets and Benchmarks (NeurIPS Datasets and Benchmarks)}, 2021.
+
+\bibitem[{Ramakrishnan et~al.(2022)}]{ramakrishnan2022poni}
+Santhosh~Kumar Ramakrishnan, Devendra~Singh Chaplot, Ziad Al-Halah, Jitendra Malik, and Kristen Grauman.
+\newblock {PONI}: Potential functions for {ObjectGoal} navigation with interaction-free learning.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\bibitem[{Savva et~al.(2019)}]{savva2019habitat}
+Manolis Savva, Abhishek Kadian, Oleksandr Maksymets, Yili Zhao, Erik Wijmans, Bhavana Jain, Julian Straub, Jia Liu, et~al.
+\newblock Habitat: A platform for embodied {AI} research.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, 2019.
+
+\bibitem[{Shah et~al.(2023)}]{shah2023navigation}
+Dhruv Shah, Michael~Robert Equi, B{\l}a{\.z}ej Osi{\'n}ski, Fei Xia, Brian Ichter, and Sergey Levine.
+\newblock Navigation with large language models: Semantic guesswork as a heuristic for planning.
+\newblock In \emph{Conference on Robot Learning (CoRL)}, 2023.
+
+\bibitem[{Stone(1975)}]{stone1975theory}
+Lawrence~D. Stone.
+\newblock \emph{Theory of Optimal Search}, volume 118 of \emph{Mathematics in Science and Engineering}.
+\newblock Academic Press, New York, 1975.
+
+\bibitem[{Szot et~al.(2021)}]{szot2021habitat}
+Andrew Szot, Alexander Clegg, Eric Undersander, Erik Wijmans, Yili Zhao, John Turner, Noah Maestre, Mustafa Mukadam, et~al.
+\newblock {Habitat 2.0}: Training home assistants to rearrange their habitat.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2021.
+
+\bibitem[{Vincent and Soille(1991)}]{vincent1991watersheds}
+Luc Vincent and Pierre Soille.
+\newblock Watersheds in digital spaces: An efficient algorithm based on immersion simulations.
+\newblock \emph{IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI)}, 13(6):583--598, 1991.
+
+\bibitem[{Werby et~al.(2024)}]{werby2024hierarchical}
+Abdelrhman Werby, Chenguang Huang, Martin B{\"u}chner, Abhinav Valada, and Wolfram Burgard.
+\newblock Hierarchical open-vocabulary 3D scene graphs for language-grounded robot navigation.
+\newblock In \emph{Robotics: Science and Systems (RSS)}, 2024.
+
+\bibitem[{Wilson(1927)}]{wilson1927probable}
+Edwin~B. Wilson.
+\newblock Probable inference, the law of succession, and statistical inference.
+\newblock \emph{Journal of the American Statistical Association}, 22(158):209--212, 1927.
+
+\bibitem[{Yadav et~al.(2023)}]{yadav2023habitat}
+Karmesh Yadav, Ram Ramrakhya, Santhosh~Kumar Ramakrishnan, Theo Gervet, John Turner, Aaron Gokaslan, Noah Maestre, Angel~Xuan Chang, et~al.
+\newblock {Habitat-Matterport 3D} semantics dataset.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2023.
+
+\bibitem[{Yamauchi(1997)}]{yamauchi1997frontier}
+Brian Yamauchi.
+\newblock A frontier-based approach for autonomous exploration.
+\newblock In \emph{Proceedings of the IEEE International Symposium on Computational Intelligence in Robotics and Automation (CIRA)}, pages 146--151, 1997.
+
+\bibitem[{Yin et~al.(2024)}]{yin2024sg}
+Hang Yin, Xiuwei Xu, Zhenyu Wu, Jie Zhou, and Jiwen Lu.
+\newblock SG-Nav: Online 3D scene graph prompting for LLM-based zero-shot object navigation.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem[{Yokoyama et~al.(2024)}]{yokoyama2024vlfm}
+Naoki Yokoyama, Sehoon Ha, Dhruv Batra, Jiuguang Wang, and Bernadette Bucher.
+\newblock VLFM: Vision-language frontier maps for zero-shot semantic navigation.
+\newblock In \emph{IEEE International Conference on Robotics and Automation (ICRA)}, 2024.
+
+\bibitem[{Yu et~al.(2023)}]{yu2023l3mvn}
+Bangguo Yu, Hamidreza Kasaei, and Ming Cao.
+\newblock L3MVN: Leveraging large language models for visual target navigation.
+\newblock In \emph{IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)}, 2023.
+
+\bibitem[{Zhang et~al.(2024)}]{zhang2024trihelper}
+Lingfeng Zhang, Qiang Zhang, Hao Wang, Erjia Xiao, Zixuan Jiang, Honglei Chen, and Renjing Xu.
+\newblock {TriHelper}: Zero-shot object navigation with dynamic assistance.
+\newblock In \emph{IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)}, 2024.
+
+\bibitem[{Zhang et~al.(2025)}]{zhang2025apexnav}
+Mingjie Zhang, Yuheng Du, Chengkai Wu, Jinni Zhou, Zhenchao Qi, Jun Ma, and Boyu Zhou.
+\newblock ApexNav: An adaptive exploration strategy for zero-shot object navigation with target-centric semantic fusion.
+\newblock \emph{IEEE Robotics and Automation Letters (RA-L)}, 10(11):11530--11537, 2025.
+
+\bibitem[{Zhou et~al.(2023)}]{zhou2023esc}
+Kaiwen Zhou, Kaizhi Zheng, Connor Pryor, Yilin Shen, Hongxia Jin, Lise Getoor, and Xin~Eric Wang.
+\newblock ESC: Exploration with soft commonsense constraints for zero-shot object navigation.
+\newblock In \emph{Proceedings of the 40th International Conference on Machine Learning (ICML)}, volume 202 of \emph{Proceedings of Machine Learning Research}, 2023.
+
+\end{thebibliography}
+%%BIB-END%%
+
+% ============================================================================
+\appendix
+
+\section{Implementation Map}\label{app:implementation}
+\Cref{tab:implementation} maps each component of \cref{sec:method} to the
+modules that implement it, so that every statement of the paper can be checked
+against the code. Paths are relative to \path{sparx_agency/} in the project
+repository; \path{o_s/} abbreviates \path{core/planning/object_search/}. The
+policy class is \code{RPTSearchPolicy}.
+
+\begin{longtable}{@{}>{\raggedright}p{0.31\linewidth}>{\raggedright\arraybackslash}p{0.65\linewidth}@{}}
+\caption{Components of the method and the modules that implement them.}
+\label{tab:implementation}\\
+\toprule
+Component & Modules \\
+\midrule
+\endfirsthead
+\toprule
+Component & Modules \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+Decision order per frame; all settings &
+  \path{o_s/policy.py}, \path{o_s/settings.py} \\
+Occupancy grid (\cref{sec:mapping}) &
+  \path{o_s/world_model/observed_map.py},
+  \path{core/mapping/costmap/log_odds_grid.py} \\
+Sight ledger, settled unknown &
+  \path{o_s/world_model/sightlines.py} \\
+Depth hole filling (in the adapter) &
+  \path{core/mapping/depth/depth_holes.py} \\
+Box projection, landmarks, doorways (\cref{sec:perception}) &
+  \path{o_s/perception/cycle.py}, \path{o_s/perception/projection.py},
+  \path{o_s/perception/doors.py}, \path{core/mapping/objects/} \\
+Room partition and identity (\cref{sec:rooms}) &
+  \path{core/mapping/topology/room_watershed.py},
+  \path{core/mapping/topology/room_registry.py},
+  \path{o_s/rooms/scene_graph.py} \\
+Room labels (\cref{sec:labels}) &
+  \path{core/mapping/topology/room_classifier.py},
+  \path{core/mapping/topology/revisable_room_labels.py} \\
+Candidate nodes (\cref{sec:nodes}) &
+  \path{o_s/rooms/scene_graph.py}, \path{o_s/rooms/opening_nodes.py} \\
+Probability query (\cref{sec:oracle}) &
+  \path{core/mapping/topology/search_node_oracle.py},
+  \path{o_s/rooms/house_context.py}, \path{o_s/rooms/oracle_retry.py},
+  \path{o_s/rooms/discovery.py},
+  \path{core/mapping/topology/llm_client.py} \\
+Search loop; rescaling of probabilities &
+  \path{o_s/rooms/room_search_loop.py} \\
+RPT* and its instance (\cref{sec:rpt}) &
+  \path{core/planning/routing/rpt_star/},
+  \path{core/planning/exploration/rpt_room_solver.py},
+  \path{core/planning/exploration/room_costs.py} \\
+Room visits, finished rooms, glances (\cref{sec:visits}) &
+  \path{o_s/rooms/room_search_loop.py}, \path{o_s/rooms/room_scans.py},
+  \path{o_s/rooms/room_vantage.py},
+  \path{core/planning/exploration/frontier_ranking.py},
+  \path{core/planning/exploration/view_gain.py},
+  \path{o_s/exploration/path_glances.py} \\
+Exploration fallback (\cref{sec:fallback}) &
+  \path{o_s/exploration/exploration_fallback.py},
+  \path{o_s/exploration/escape_probe.py} \\
+Route planning (\cref{sec:navigation}) &
+  \path{core/planning/planners/astar/}, \path{o_s/route_memory.py} \\
+Action lattice and its execution &
+  \path{core/planning/planners/lattice/},
+  \path{o_s/navigation/kinematic_follower.py},
+  \path{core/planning/objnav/action_converter/} \\
+Narrow passages &
+  \path{o_s/navigation/bottlenecks.py}, \path{o_s/navigation/scrape_guard.py},
+  \path{o_s/navigation/doorway_look_down.py} \\
+Target closing (\cref{sec:closing}) &
+  \path{o_s/closing/target_closing.py}, \path{o_s/closing/target_path.py},
+  \path{o_s/closing/target_backoff.py}, \path{o_s/closing/approach_history.py},
+  \path{o_s/closing/target_pursuit.py},
+  \path{o_s/perception/target_context.py},
+  \path{o_s/perception/face_normal.py}, \path{core/mapping/tracking/} \\
+Single-storey confinement (\cref{sec:storey}) &
+  \path{o_s/multifloor/spawn_floor_guard.py}, \path{o_s/multifloor/drop_rays.py},
+  \path{o_s/multifloor/spawn_switch.py},
+  \path{o_s/world_model/stair_terrain.py},
+  \path{core/localization/floor_atlas.py} \\
+Hand-written class tables (\cref{sec:handdesigned}) &
+  \path{o_s/perception/target_context.py} (height bands),
+  \path{core/mapping/objects/support_surface.py},
+  \path{o_s/exploration/exploration_fallback.py} (classes without shadow) \\
+Detector vocabularies &
+  \path{core/planning/objnav/labels/datasets/} \\
+Benchmark adapters and scoring &
+  \path{tasks/planning/objnav_benchmark_runtime/habitat/},
+  \path{tasks/planning/objnav_benchmark_runtime/hm3d/},
+  \path{tasks/planning/objnav_benchmark_runtime/mp3d/},
+  \path{tasks/planning/objnav_benchmark/} \\
+Oracle perception (\cref{sec:experiments-oracle}) &
+  \path{tasks/planning/objnav_benchmark_runtime/ground_truth/} \\
+\end{longtable}
+
+\section{Hyperparameters}\label{app:hyperparams}
+\Cref{tab:hyperparams} lists the constants of the method in the configuration
+described in \cref{sec:method}. All were set by hand
+(\cref{sec:handdesigned}). The same values are used for both benchmarks; the
+only settings of the method taken from a benchmark are the agent's body
+dimensions, the detector vocabulary of its goal categories and, for benchmarks
+that score the distance to view points, the absence of additional steps after
+the decision to stop at a target on the floor.
+
+\begin{longtable}{@{}p{0.60\linewidth}p{0.36\linewidth}@{}}
+\caption{Constants of the method (current code).}\label{tab:hyperparams}\\
+\toprule
+Constant & Value \\
+\midrule
+\endfirsthead
+\toprule
+Constant & Value \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\multicolumn{2}{@{}l}{\emph{Mapping} (\cref{sec:mapping})} \\
+Grid extent, resolution & $80\m\times80\m$, $0.1\m$ \\
+Depth sub-sampling & every $8$ pixels \\
+Obstacle band above the storey plane & $0.15$--$0.93\m$ \\
+Floor band around the storey plane & $\pm0.10\m$ \\
+Log-odds per hit, per miss, clamp & $+0.85$, $-0.40$, $\pm4$ \\
+Free, occupied probability & $\le0.45$, $\ge0.65$ \\
+Refused step: displacement, duration of the bar & $<0.05\m$, $120$ actions \\
+Settled unknown: views, range & $2$ poses, $2.5\m$ \\
+Settled pocket: area, width & $\le3\sqm$, $<0.6\m$ \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Perception and landmarks} (\cref{sec:perception})} \\
+Minimum box confidence (doorway classes) & $0.30$ ($0.05$) \\
+Supporting depth pixels, coverage without a mask & $\ge8$, $\ge35\%$ \\
+Height of an object above the storey plane & $-0.3$ to $2.2\m$ \\
+Landmark association: distance, footprint IoU, height & $0.35\m$, $0.25$, $0.35\m$ \\
+Landmark confirmed, retracted after & $2$ observations, $4$ misses \\
+Doorway: width, top, bottom & $0.35$--$1.5\m$, $\ge1.4\m$, $\le0.5\m$ \\
+Doorway confirmed after & $3$ views, $0.2\m$ or $20\degree$ apart \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Rooms} (\cref{sec:rooms,sec:labels})} \\
+Seed: clearance, separation & $\ge0.3\m$, $\ge1.0\m$ \\
+Doorway cut: snap reach, choke clearance, fallback radius & $0.9\m$, $0.25$--$0.8\m$, $0.75\m$ \\
+Walked threshold: dip, rise, window & $\le0.55\m$, $\ge0.3\m$, $1.5\m$ \\
+Merge below saddle dynamics; minimum region & $0.2\m$; $50$ cells \\
+Identity: IoU, containment & $\ge0.15$, $\ge0.6$ \\
+Label refresh period & $50$ actions \\
+Strong label & $\ge2$ object classes, confidence $\ge0.65$ \\
+Geometry-only label & $\ge2\sqm$; elongation $\ge2.5$ or $\ge2$ doorways \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Probabilities and ordering}
+(\cref{sec:nodes,sec:oracle,sec:rpt})} \\
+Object classes shown per room & $\le8$ \\
+Probability of an omitted room & $1\%$ \\
+Never-entered room: factor, floor & $1.5$, $0.15$ \\
+Entered room: factor, half-life, floor & $0.5$, $20$ actions, $0.05$ \\
+Entered room, $\ge20$ actions and $\le1$ frontier & factor $\le0.2$ \\
+Minimum probability of an offered node & $0.05$ \\
+Target-landmark node: probability, standoff & $0.85$, $1.5\m$ \\
+Re-query spacing between loop points & $8$ actions \\
+Back-off after a failed query & $25$ actions, doubling to $200$ \\
+Action count shown to the model in steps of & $25$ \\
+Nodes per solve; time budget & $12$; $2$\,s \\
+Search time $\tau_v$ & $\min(60,\,4+4f_v)$ actions \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Visits and fallback}
+(\cref{sec:visits,sec:fallback})} \\
+Warm-up & $10$ turns of $30\degree$ \\
+Visit bound; significant frontier & $60$ actions; $\ge1\sqm$ revealable \\
+Utility: distance floor, visit weight, visit radius & $0.25\m$, $0.05$, $1.5\m$ \\
+Finished by sight: share of cells, range & $\ge80\%$, $4\m$ \\
+Narrow room; fragment & clearance $\le0.9\m$; $<3\sqm$ (no doorway) or $<1\sqm$ \\
+Unreachable entry: failures, back-off factor & $2$, $\times2$ \\
+Glance: confidence, box height, turns & $\ge0.4$, $\ge30\%$ of the image, $\le3$ \\
+Blind radius of the camera on the floor & $1.2\m$ \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Planning and execution} (\cref{sec:navigation})} \\
+Clearance: preferred, minimum, relaxation step & $0.30\m$, $0.25\m$, $0.05\m$ \\
+Detour factor that triggers relaxation & $1.5$ \\
+Clearance cost: weight, margin & $3$, $0.8\m$ \\
+Centreline cost: weight, half-width & $4$, $0.6\m$ \\
+Turn penalty & $0.3$ \\
+Lattice: corridor, offset cost, heuristic weight & $0.4\m$, $2$, $1.0$ \\
+Plan tracking tolerance & $0.02\m$, $1\degree$ \\
+Refused pose excluded for & $120$ actions \\
+Scrape rule & $3$ refusals within $40$ actions \\
+Look-down: passage width, distance, pitch & $<0.9\m$, $0.9\m$, $30\degree$ \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Target closing} (\cref{sec:closing})} \\
+Confidence: start, re-sighting, override & $0.5$, $0.3$, $0.8$ \\
+Lock after; verification budget & $2$ frames; $12$ actions \\
+Close first sighting re-examined below & $1.3\m$ \\
+Height outside the class band & confidence $\times0.7$; $4$ frames, $0.3\m$ baseline \\
+Terminal range; tolerance; standoff radius & $1.0\m$; $0.05\m$; $0.65\m$ \\
+Cost of unknown cells in the last-resort planner & $8\times$ \\
+Detour rule for a standoff & route $>1.5\times$ range $+1\m$ \\
+Inspection steps; steps towards a raised target & $\le3$; $\le3$ \\
+Raised target; frontal standoff from & $\ge0.3\m$; $\ge0.6\m$ above the floor \\
+Stop without a fresh box: last seen within & $15$ actions \\
+Release: stall, total budget & $20$, $160$ actions \\
+Rejection memory radius (after a failed inspection) & $1\m$ ($2\m$) \\
+Navigation-mesh projection accepted within & $0.5\m$ horizontally, $0.2\m$ vertically \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Storey} (\cref{sec:storey})} \\
+Drop below the storey plane & $>0.30\m$ \\
+Goals accepted within (of the start height) & $0.5\m$ \\
+Staircase: total rise, risers, riser height & $\ge0.4\m$, $\ge3$, $0.10$--$0.24\m$ \\
+\end{longtable}
+
+\section{Prompts}\label{app:prompts}
+The listings in this appendix are copied from the code by a script
+(\path{docs/paper/sync_prompts.py}), not typed, and are the prompts of the
+current code. In the two evaluation runs of \cref{sec:results} the user prompt
+of the probability query carried one additional line, and its system prompt
+one sentence referring to that line (\cref{sec:experiments-revisions}). The
+code contains two supplements to the system prompt of the probability query
+for configurations that are not used in this draft, one for staircases offered
+as nodes and one for exits offered as nodes of their own; they are not listed.
+The supplement for staircases contains further hand-written statements (which
+rooms are usually on which storey) and must be disclosed when multi-storey
+search is reported.
+
+\subsection{Room labels}\label{app:prompts-room}
+System prompt. The label set is inserted by the code and is shown as used.
+%%PROMPT-BEGIN:labeller-system%%
+\begin{lstlisting}[style=prompt]
+You are a scene-understanding assistant that
+classifies the rooms of a HOME from the objects observed inside them and,
+when given, the room's shape.
+
+You will be given a list of objects observed in one room, and perhaps its
+floor area, its shape and how many doorways open off it. Based ONLY on that
+and common sense about residential layouts, output one room label.
+Observations are incomplete and may contain false detections: a single
+detection of one kind of object is a clue, not a proof, and a detector
+confuses a dining table or a sofa with a bed, a cabinet with a refrigerator.
+Prefer distinctive room-function evidence over generic furniture. A home has
+rooms with few objects of their own: a long narrow space with several doorways
+and nothing in it is a hallway or corridor; a small space at the entrance is a
+foyer; a table with chairs and no kitchen fittings is a dining room; a desk is
+an office or study; a washing machine or dryer is a laundry or utility room;
+shelves or a tiny windowless space is a closet, pantry or storage; an outdoor
+floor with garden furniture is a balcony or patio. Use unknown when evidence is
+insufficient or contradictory. Do not invent unobserved objects. Reassess the
+current evidence rather than assuming an earlier room label was correct.
+
+Choose the label from this set (do not invent new ones):
+kitchen, bedroom, bathroom, living_room, dining_room, office, hallway, foyer, storage_closet, laundry_room, balcony, garage, lobby, waiting_area, patient_room, exam_room, reception, unknown
+
+Reply with a JSON object of the form:
+{"label": "<one label from the set>",
+  "confidence": <float between 0 and 1>,
+  "reasoning": "<one short sentence>"}
+\end{lstlisting}
+%%PROMPT-END:labeller-system%%
+User prompt template. \code{\{obj\_list\}} is one line per object class with
+its count; \code{\{facts\}} is the room's floor area, shape and number of
+doorways, each when known.
+%%PROMPT-BEGIN:labeller-user%%
+\begin{lstlisting}[style=prompt]
+Room observed objects:
+{obj_list}
+{facts}
+Classify this room.
+\end{lstlisting}
+%%PROMPT-END:labeller-user%%
+
+\subsection{Per-room probabilities}\label{app:prompts-oracle}
+System prompt.
+%%PROMPT-BEGIN:oracle-system%%
+\begin{lstlisting}[style=prompt]
+You are the reasoning module of a robot searching ONE home for an instance of ONE target object category, within a fixed budget of actions. The robot has partly mapped the home into NODES. For EACH node you estimate the probability, in percent, that going there NEXT finds the target: the target is there and the robot would see it by going and looking. You reason like a person who knows how homes are laid out and where things are kept.
+
+NODE LINES.
+ROOM: a region the robot segmented. type= was inferred from the objects seen in it (unknown = NOT IDENTIFIED YET, never "empty"; a type ending in "?" rests on a single kind of object and may be wrong -- a sink alone reads as a kitchen until a toilet shows). size= floor area. frontier= unexplored boundaries still accessible inside it (0 is NOT proof that nothing is there). exits= the doorways and gaps at its edge that lead to space NOT seen yet -- rooms the robot has not entered. They are NOT nodes of their own: going to the room means walking its exits and looking through each; in brackets, how many stand at a seen door frame and about how much unexplored floor the camera could reach beyond them (exits=2 (1 doorway, ~30m2 unseen behind them)): a room whose exits open onto a large unseen area is where rooms not found yet must be, one whose exits open onto a few m2 leads nowhere new. glimpsed through its exits: objects seen beyond those thresholds -- they name the rooms BEHIND the exits (a toilet -> a bathroom; a bed -> a bedroom), not this room. status= one of: never_entered (only seen from outside, or not at all); entered (the robot stood in it and its camera has seen most of what is mapped of it, but it never completed a look-around: what is left of it lies behind its frontier= boundaries and its exits=); scanned(<how>, <ago>) (the robot completed a full look-around in it, or saw most of it from one, <ago> ago -- what was visible then was seen ONCE by a detector that misses objects that are small, far, half-hidden, behind a door or under furniture; a scanned room with exits= left is offered again for what lies BEHIND them, not for itself). searched= time spent inside. seen= objects confirmed in it. here=yes: the robot stands in it now.
+The HOUSE line is the big picture: every room type found so far (scanned ones included), how many rooms are still unidentified, how many exits (openings) of the whole home are not yet looked into, whether any unexplored frontier is still reachable -- or only slivers of it, or frontier that no route from here reaches: then the home is NOT covered, the robot is cut off from the rest of it -- and the budget -- actions used of the total. Use ALL of it.
+
+EXITS. What lies behind a room's exits is decided by the HOME, never by the count alone: an exit leads to a room of this home, and the rooms the home still lacks say which. Exits RAISE a room ONLY when its type fits the target -- a bathroom with an unlooked door (a second bathroom or an en-suite beyond it) when the target is a toilet; a bedroom whose exit may be an en-suite's; a kitchen's exits for a refrigerator -- or when a glimpse through one of them names the home type (a toilet glimpsed through an exit of the hallway: that room is the bathroom seen from its door, 60 or more). Exits of a hallway, a corridor or an unidentified room are valued by what the home still lacks behind them: while the bathroom is missing, they are where it must be. Exits of a room whose type does NOT fit the target do NOT raise it, however many: three gaps off a living room, for a toilet, lead to strips of the living room or to rooms already found, and the living room stays low. A room with many exits and no fit is no more promising than one with none.
+
+HOW TO JUDGE. Work in this order and write steps 1-3 into the reply before any number.
+STEP 1 "home": the room types where this object normally lives, most likely first, and where it is rare. Typical homes: a toilet in a bathroom -- a separate one, or an en-suite reached through a bedroom; a bed in a bedroom; a sofa or couch in a living room (sometimes a family room or an office); a television in a living room, then a bedroom, rarely a kitchen, never a bathroom; a chair in a dining room, kitchen, office, bedroom or living room; a potted plant in a living room, hallway, kitchen or balcony; a refrigerator, oven or stove in a kitchen; a bathtub or shower in a bathroom. Small objects that travel (cup, book, bottle) have a home too, only a weaker one.
+STEP 2 "house": read the home from the rooms found. A typical home has ONE kitchen, ONE living room, ONE dining area, one to four bedrooms, one to three bathrooms (one often en-suite off the main bedroom), a hallway, perhaps an office, a laundry or a garage. If a type that occurs once has been FOUND, an unidentified room is unlikely to be another of it, and the odds of the target's home being among the unidentified rooms drop. If the home type is still MISSING, the unidentified rooms and the unlooked exits are where it must be: value them in proportion to how well their size fits the home type (bathrooms ARE small, 3-8 m2; bedrooms 9-20 m2; living rooms 15 m2 and up) and to what else the home still lacks -- never write a room off for its size. A home-type object seen in a room of ANOTHER type (a sink in a "living room", a bed in a "kitchen") means the map merged two rooms: value that room as the home type.
+STEP 3 "stage": weigh the budget. EARLY -- much budget left and unexplored places remain: the target is most likely somewhere not yet looked at; unexplored rooms and the rooms whose exits lead to them first, scanned rooms low. LATE -- most of the home seen, few or no unexplored places or frontier left, the home type found but the target not seen: the detector may have MISSED the target in a scanned room of a fitting type (a toilet behind a half-open door, a television on a wall the scan grazed, a chair under a table), and the chance that an unseen room holds it falls with every place looked at; raise the scanned rooms of the home type -- a second look from a different spot -- and lower the rest. Write "pass": "first" while an unexplored place in this home is still worth looking at before any scanned room is re-checked, else "second". The first pass over the home comes before the second, unless a scanned home-type room is the only candidate left.
+STEP 4 the numbers, one per node, independently, integers 0-100:
+ - a scanned room of a type the target does not live in: 0-2.
+ - a scanned room of the home type with the target not seen: 3-10 early in the budget, 15-40 late in it, less if it was scanned moments ago.
+ - an entered but unscanned room: the robot has walked it and seen most of it without seeing the target; value only what its frontier= boundaries still hide -- at most HALF of what an unexplored room of the same type and size would get, and under 10 with frontier=0. One searched= 20s or longer with frontier= 0 or 1 is as good as scanned: 0-5, whatever its type. Never write "known to contain" the target of a room the target was not seen in.
+ - a never-entered room of unknown type: never below 15 while the home type is missing; by size fit and by what the home lacks once it is found. Its frontier= count measures the MAP, not the room: a never-entered room with frontier=0 or 1 is as unexplored as one with five -- clearing one boundary of an unentered room opens the whole of it and what lies beyond. Never lower a never-entered room for a low frontier count.
+ - a never-entered room named as the home type by objects seen through its door, or a room whose exits' glimpse names the home type behind them: 60 or more.
+ - a never-entered room of the home type with frontier left, target not seen: 30 or more; the same room entered: 10-20, more only if its frontier leads to a large unseen part of it.
+ - prefer the places the robot has NOT been near: a room away from everything entered and scanned, or one whose exits lead away from it all, leads to a part of the home not seen at all; a gap at the edge of a scanned room usually shows a strip of it.
+ - a hallway or corridor rarely holds the target, but one with exits LEADS to unseen rooms: value it by what the home still lacks behind them.
+ - searched long and recently -> low, not zero; searched briefly or long ago -> stays promising. The longer searched= reads on an entered room, the lower its number: time already spent inside is evidence the target is not there.
+ - SPREAD, do not copy: the unexplored rooms and the exits of the rooms found compete for the same missing rooms. A missing bathroom is ONE room, so five unlooked exits spread over three rooms share its chance -- the room whose type and exits fit it best gets most, the others about 10-15, never 35 on every room with an exit; with many exits and one or two missing home-type rooms, most such rooms get under 15. Several exits often lead to the same hallway. The sum over the unexplored places should be about the chance that the target is somewhere not yet looked at, not more.
+ALWAYS: NEVER use distance, travel time or here=yes as a reason -- the planner charges travel, and the room the robot stands in is judged exactly like the others. Several rooms may each hold an instance: the numbers are independent search-success probabilities, NOT shares of one distribution; do NOT make them sum to 100. Score EVERY node id given, and only those ids. Per node write "why" first (at most 12 words, lower case, naming the room's likely type and what decided it), then "p".
+Reply with ONLY this JSON, keys in this order:
+{"home":"<step 1, max 12 words>","house":"<step 2, max 25 words>","stage":"<step 3, max 20 words>",
+ "pass":"first|second","nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
+EXAMPLE of the FORMAT and the style of reasoning -- a different home every time, so never copy its numbers or its words. TARGET toilet; HOUSE: rooms found: kitchen (scanned), living_room (scanned), bedroom (never entered), hallway (entered); 1 room unidentified; 3 openings not yet looked into; actions used about 150 of 500:
+id=2  ROOM  type=kitchen  size=12m2  frontier=0  exits=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
+id=3  ROOM  type=living_room  size=24m2  frontier=1  exits=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
+id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)  status=never_entered  searched=0s  seen: bed
+id=6  ROOM  type=unknown  size=5m2  frontier=1  exits=0  status=never_entered  searched=0s  seen: nothing yet
+id=7  ROOM  type=hallway  size=6m2  frontier=1  exits=1 (1 doorway)  status=entered  searched=10s  here=yes  seen: nothing yet
+{"home":"bathroom; often an en-suite off a bedroom",
+ "house":"kitchen and living room found and scanned; no bathroom yet; one unidentified room, bathroom-sized; unlooked doorways off the bedroom and the hallway",
+ "stage":"early, 150 of 500 used, unexplored places remain: first pass",
+ "pass":"first",
+ "nodes":[{"id":2,"why":"kitchen, scanned, toilets are not in kitchens","p":1},
+{"id":3,"why":"living room, scanned; its gap is no bathroom door","p":2},
+{"id":5,"why":"bedroom never entered, its doorway may be an en-suite's","p":35},
+{"id":6,"why":"small unidentified room, bathroom sized, bathroom missing","p":50},
+{"id":7,"why":"hallway; its unlooked doorway leads to the missing bathroom","p":25}]}
+Had the HOUSE line read "every known room identified; 0 openings not yet looked into; no unexplored frontier left; actions used about 420 of 500" with a bathroom found and scanned 4 minutes ago, the pass would be "second": the scanned bathroom 35, the scanned bedroom 8 (an en-suite door the scan may have missed), and the scanned kitchen and living room 1 each.
+\end{lstlisting}
+%%PROMPT-END:oracle-system%%
+User prompt template. \code{\{house\}} is the summary line and
+\code{\{nodes\}} one line per room in the format shown in the example at the
+end of the system prompt; \code{\{storeys\}} is empty in the single-storey
+configuration.
+%%PROMPT-BEGIN:oracle-user%%
+\begin{lstlisting}[style=prompt]
+TARGET: {target}
+
+HOUSE: {house}
+{storeys}
+NODES ({n}):
+{nodes}
+
+Score all {n} nodes independently. JSON only.
+\end{lstlisting}
+%%PROMPT-END:oracle-user%%
+
+\section{Run Records}\label{app:runs}
+For traceability, \cref{tab:runs} identifies the two runs behind
+\cref{sec:results}.
+
+\begin{table}[h]
+\centering
+\caption{The two evaluation runs.}\label{tab:runs}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & HM3D val & MP3D val \\
+\midrule
+Episodes, scenes & $2{,}000$, $20$ & $2{,}195$, $11$ \\
+Episodes completed & $2{,}000$ & $2{,}195$ \\
+Code revision (git) & \code{0dd7d39c} & \code{a77c946c} \\
+Hand-written room priors & present & present \\
+Execution stack & current & older (\cref{sec:experiments-revisions}) \\
+Storey changes & off & off \\
+Oracle perception & $64$ px, $0.25\m$ filter & $64$ px, $0.25\m$ filter \\
+Language model & \code{qwen2.5:14b-instruct} & \code{qwen2.5:14b-instruct} \\
+Seed & $17$ & $17$ \\
+Parallel episodes & $9$ & $8$ \\
+Wall-clock time & $24.0$\,h & $27.2$\,h \\
+Recorded model answers & $49{,}743$ & $50{,}149$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}
+
+
+

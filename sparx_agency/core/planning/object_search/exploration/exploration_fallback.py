@@ -27,9 +27,6 @@ raised, it produces a command that MOVES, in this order:
      6 cm of where it started -- while the passage to the stairs stood two
      metres away as a frontier the whole time, outranked because the strips
      were nearer;
-   * a frontier of a room the **target cannot be in** (the loop's
-     ``type:`` exclusion, :mod:`room_priors`): even a large unexplored
-     bathroom is not where a couch is;
    * a **sliver** (since 2026-10-14): a frontier from whose cell a look
      round would reveal less than ``min_gain_m2`` of unknown floor (the
      loop's ``explore_min_gain_m2`` by default) -- the strip beside a wall,
@@ -49,7 +46,9 @@ raised, it produces a command that MOVES, in this order:
    before any shadow or sliver that happens to be reachable at the floor
    standoff;
 3. the demoted frontiers of rung 1 -- a shadow is still unknown space once
-   every exit is spent, and so is the bathroom;
+   every exit is spent (until 2026-11-15 a frontier of a room whose type a
+   hand-written table ruled out for the target was demoted here too; that
+   rule went with ``room_priors.py``);
 4. frontiers already retired -- a goal retired for a transient plan failure
    is still unknown space;
 4b. a **squeeze** (since 2026-10-25, :meth:`ExplorationFallback._squeeze`):
@@ -132,8 +131,8 @@ class FallbackSettings:
             detector) is left alone after its first failure; doubles per
             consecutive failure.
         service_backoff_max_actions: Cap on that wait.
-        exits_first: Rank exits before object shadows and the frontiers of
-            rooms the target cannot be in (rung 1 vs rung 3). False restores
+        exits_first: Rank exits before object shadows, blind-radius frontiers
+            and slivers (rung 1 vs rung 3). False restores
             the plain utility order.
         shadow_margin_m: A frontier goal within a confirmed object's footprint
             radius plus this margin is beside the object.
@@ -301,13 +300,11 @@ def shadow_exemption(view, settings):
     return exempt
 
 
-def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of=None, type_rule=True, exempt=None):
+def split_exits(goals, landmarks, resolution_m, settings, exempt=None):
     """Split ranked frontier goals into exits and demoted frontiers, order kept.
 
     Demoted, with the reason: inside the camera's blind radius
-    (``settings.near_blind_m``); credited to a room the loop withheld as
-    ``type:`` (when ``type_rule``; ``room_of`` maps a goal to its pid and
-    ``excluded`` a pid to the reason); or an object's shadow
+    (``settings.near_blind_m``), or an object's shadow
     (:func:`object_shadow`) -- unless ``exempt(goal)`` says too much unknown
     lies right behind it to be one (:func:`shadow_exemption`, since
     2026-10-14: a strip behind a bed has the wall behind it; a 2.9 m
@@ -316,16 +313,11 @@ def split_exits(goals, landmarks, resolution_m, settings, excluded=None, room_of
     room as "the shadow of refrigerator 0").
     Returns ``(exits, [(goal, why), ...])``.
     """
-    excluded = excluded or {}
-    room_of = room_of or {}
     exits, demoted = [], []
     for goal in goals:
         why = None
-        pid = room_of.get(goal)
         if goal.geodesic_m < settings.near_blind_m:
             why = "inside the camera's blind radius (%.2f m)" % goal.geodesic_m
-        elif type_rule and pid is not None and str(excluded.get(pid, "")).startswith("type:"):
-            why = "room %d is %s" % (pid, excluded[pid])
         else:
             landmark = object_shadow(goal, landmarks, resolution_m, settings.shadow_margin_m,
                                      settings.shadow_default_radius_m, settings.shadow_length_factor,
@@ -359,7 +351,7 @@ class ExplorationFallback:
         self.stats = {"invocations": 0, "frontier": 0, "stairs": 0, "frontier_demoted": 0, "frontier_retired": 0,
                       "frontier_squeeze": 0,
                       "room_peek": 0, "relocation": 0, "footing": 0, "escape": 0, "hold": 0, "failures": 0,
-                      "shadows_demoted": 0, "type_demoted": 0, "blind_demoted": 0, "slivers_demoted": 0,
+                      "shadows_demoted": 0, "blind_demoted": 0, "slivers_demoted": 0,
                       "goal_kept": 0, "goal_switched": 0, "goal_outranked": 0,
                       ROOM_LLM + "_failures": 0, DETECTOR + "_failures": 0, SEGMENTER + "_failures": 0}
         self._logged = set()
@@ -433,7 +425,7 @@ class ExplorationFallback:
         # chosen (2026-10-04, actions 262-316), and the first treads into the storey's map.
         # Taking the stairs is the coordinator's rung below, on the plain world.
         planning = peek_planning_world(p, world) if p.building is not None else world
-        exits, demoted = self._exits(world, admissible, inventory, obs=obs)
+        exits, demoted = self._exits(world, admissible, obs=obs)
         command = self._frontiers(obs, planning, exits, "frontier")
         if command is not None:
             return self._tag(command, "frontier", reason)
@@ -552,11 +544,7 @@ class ExplorationFallback:
         if not goals:
             return []
         landmarks = list(p.landmarks.confirmed()) if getattr(p, "landmarks", None) is not None else []
-        excluded = getattr(getattr(p, "loop", None), "excluded", None) or {}
-        inventory = p.graph.frontier_inventory
-        exits, _ = split_exits(goals, landmarks, world.resolution, s, excluded=excluded,
-                               room_of=goal_rooms(inventory), type_rule=True,
-                               exempt=self._reveals_a_room(obs, world))
+        exits, _ = split_exits(goals, landmarks, world.resolution, s, exempt=self._reveals_a_room(obs, world))
         return exits
 
     def _frontiers(self, obs, world, goals, stage):
@@ -594,18 +582,17 @@ class ExplorationFallback:
             return list(goals)
         return [in_force] + [g for g in goals if g is not in_force]
 
-    def _exits(self, world, goals, inventory, obs=None):
+    def _exits(self, world, goals, obs=None):
         """Split the admissible goals, utility order kept, into exits and demoted frontiers.
 
         Demoted: an object's shadow (:func:`object_shadow`, against this
         storey's confirmed landmarks), a frontier inside the camera's blind
-        radius, a frontier the inventory credits to a room the loop
-        withheld as ``type:`` -- one the target cannot be in -- or, with
+        radius, or, with
         the pose given, a frontier that reveals less than ``min_gain_m2``
         of unknown floor from its cell (the loop's ``explore_min_gain_m2``
         by default); the exits that remain are then ordered by that gain
         over the walk to them, as the explore visit orders a room's
-        frontiers (:meth:`_by_view_gain`). ``scanned:`` exclusions do not
+        frontiers (:meth:`_by_view_gain`). The loop's ``scanned:`` exclusions do not
         demote: a finished room's opening is how the next room is found.
         """
         p, s = self.policy, self.settings
@@ -613,9 +600,7 @@ class ExplorationFallback:
         if not s.exits_first or not goals:
             return list(goals), []
         landmarks = list(p.landmarks.confirmed()) if getattr(p, "landmarks", None) is not None else []
-        excluded = getattr(getattr(p, "loop", None), "excluded", None) or {}
-        exits, demoted = split_exits(goals, landmarks, world.resolution, s, excluded=excluded,
-                                     room_of=goal_rooms(inventory), type_rule=True,
+        exits, demoted = split_exits(goals, landmarks, world.resolution, s,
                                      exempt=self._reveals_a_room(obs, world))
         if obs is not None and exits:
             ranked, slivers = self._by_view_gain(obs, world, exits)
@@ -632,8 +617,6 @@ class ExplorationFallback:
                     visited.append(tuple(float(v) for v in goal.xy))
                 if self.goal is not None and math.dist(goal.xy, self.goal) <= s.goal_match_m:
                     self.goal = self.goal_stage = None
-            elif why.startswith("room "):
-                self.stats["type_demoted"] += 1
             elif why.startswith("reveals under"):
                 self.stats["slivers_demoted"] += 1
             else:
@@ -741,7 +724,7 @@ class ExplorationFallback:
                 "goal_stage": self.goal_stage, "goal_step": self.goal_step,
                 "demoted": list(self.last_demoted),
                 "stats": {k: self.stats[k] for k in ("frontier", "frontier_demoted", "frontier_retired", "relocation",
-                                                     "shadows_demoted", "type_demoted", "blind_demoted",
+                                                     "shadows_demoted", "blind_demoted",
                                                      "goal_kept", "goal_switched", "goal_outranked")}}
 
     def diagnostics(self):

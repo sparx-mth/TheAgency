@@ -1,28 +1,28 @@
-"""The semantic sanity check on a target candidate: does the box make sense where it stands?
+"""The geometric sanity check on a target candidate: is the box at a height its class is seen at?
 
-A detector's confidence is a score over the crop; it knows nothing about
-the room the crop was taken in or how high the surface it fired on is. Two
-of the 5x3 benchmark's failures (Allensville/2, Newfields/2) were a kitchen
-counter front read as ``bed`` at 0.55-0.6 m -- inside a room the map had
-already made a STRONG kitchen from its refrigerator and oven, with the
-supported depth points 0.67-0.70 m above the agent's base where every real
-bed of the same recording measured 0.11-0.52 m -- and STOPped on after two
-frames from one spot.
+A detector's confidence is a score over the crop; it knows nothing about how
+high the surface it fired on is. Two of the 5x3 benchmark's failures
+(Allensville/2, Newfields/2) were a kitchen counter front read as ``bed`` at
+0.55-0.6 m, with the supported depth points 0.67-0.70 m above the agent's
+base where every real bed of the same recording measured 0.11-0.52 m -- and
+STOPped on after two frames from one spot.
 
 :func:`suspect` names the conflict, or None:
 
-* ``room:<label>`` -- the candidate's footprint lies in a room whose STRONG
-  type is one the target is not searched for in
-  (:data:`~room_priors.IMPLAUSIBLE_ROOMS`: a bed in a kitchen, a toilet in a
-  living room). A weak label is a guess and never makes a candidate
-  suspect; a room the target has already been confirmed in neither.
 * ``height:<z>`` -- the measured height of the candidate's supported
   surface, above the agent's base, lies outside the band the class is seen
   at (:data:`CLASS_HEIGHT_BANDS`: a bed's or a toilet's surface is low; a
   counter top is not).
 
-A suspect candidate is not refused -- the target may stand in a room the
-partition merged with a kitchen, and a bed with a high mattress exists. It
+Until 2026-11-15 a second conflict, ``room:<label>``, doubted a candidate
+standing in a room whose STRONG type a hand-written table called implausible
+for the target (a bed in a kitchen, a toilet in a living room). It went with
+``room_priors.py``: which room a target may stand in is not this check's to
+assume. What is left is geometry -- and still a hand-written, per-class
+table (:data:`CLASS_HEIGHT_BANDS`), which is why ``context_check`` is a
+setting recorded in every run's frozen configuration.
+
+A suspect candidate is not refused -- a bed with a high mattress exists. It
 is PENALISED: its confidence counts for ``context_penalty`` of itself
 toward the takeover's start threshold, and the lock needs
 ``context_confirmation_frames`` consecutive frames taken from at least two
@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import math
 
-from sparx_agency.core.mapping.topology.room_priors import (
-    _ALIASES, implausible_room, target_key)
 
+#: Detector labels folded onto the band table's keys: a naming convention, not a judgement.
+_ALIASES = {"couch": "sofa", "tv": "television", "tv monitor": "television", "monitor": "television",
+            "armchair": "chair", "plant": "potted plant"}
 
 #: Class -> ``(lowest, highest)`` height, in metres above the agent's base, the measured
 #: centroid of the class's supported depth points is seen at. Calibrated on the Allensville
@@ -76,24 +77,7 @@ def height_conflict(class_name, xyz, base_z):
     return "height:%.2f" % above
 
 
-def room_conflict(target, label, strength, objects):
-    """``room:<label>`` when a STRONG room type excludes the target and no target object was confirmed there."""
-    if str(strength or "").lower() != "strong":
-        return None
-    if not implausible_room(target, label):
-        return None
-    accepts = getattr(target, "accepts", None)
-    if callable(accepts) and any(accepts(name) for name in objects or ()):
-        return None
-    return "room:%s" % str(label).strip().lower()
-
-
-def suspect(target, class_name, xyz, base_z, label=None, strength=None, objects=()):
-    """Why a candidate box does not make sense where it stands, or None (the room first, then the height)."""
-    if target_key(target) is None:
-        return None
-    why = room_conflict(target, label, strength, objects)
-    if why is not None:
-        return why
+def suspect(class_name, xyz, base_z):
+    """Why a candidate box does not make sense where it stands, or None: its height against its class's band."""
     return height_conflict(class_name, xyz, base_z)
 

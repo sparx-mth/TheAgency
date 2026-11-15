@@ -207,14 +207,16 @@ class TargetClosingSettings:
     # problem. Border clipping, incoherent depth and the map's contradiction stand.
     # 1.0 disables the override.
     override_confidence: float = 0.80
-    # The semantic sanity check (``target_context.suspect``): a candidate in a room
-    # whose STRONG type excludes the target, or whose measured surface height
-    # contradicts its class (a counter top read as a bed), counts
+    # The geometric sanity check (``target_context.suspect``): a candidate whose
+    # measured surface height contradicts its class's band (a counter top read as
+    # a bed; ``target_context.CLASS_HEIGHT_BANDS``, a hand-written per-class table) counts
     # ``context_penalty`` of its confidence toward the start threshold and needs
     # ``context_confirmation_frames`` consecutive frames from at least two
     # viewpoints ``context_baseline_m`` apart to lock. Allensville/2 and
     # Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter at 0.55 m after
     # two frames from one spot. ``context_check=False`` is the former behaviour.
+    # (Until 2026-11-15 a candidate in a room whose STRONG type a table excluded
+    # for the target was doubted too; that half went with ``room_priors.py``.)
     context_check: bool = True
     context_penalty: float = 0.70
     context_confirmation_frames: int = 4
@@ -1199,18 +1201,8 @@ class TargetClosing:
         return abs(normalize_angle(seen - bearing)) <= turn + 1e-6
 
     def _suspect(self, obs, label, xyz):
-        """Why the context check doubts a box of ``label`` at ``xyz`` (``target_context.suspect``), or None."""
-        p = self.policy
-        info, objects = {}, ()
-        graph = getattr(p, "graph", None)
-        world = getattr(p, "last_world", None)
-        if graph is not None and world is not None and getattr(graph, "labels", None) is not None:
-            pid = graph.room_near(world, (float(xyz[0]), float(xyz[1])), 0.6)
-            if pid is not None:
-                info = graph.label_info(pid) or {}
-                objects = graph.objects_in(pid)
-        return suspect(p.target, label, xyz, obs.pose.z, label=info.get("label"),
-                       strength=info.get("strength"), objects=objects)
+        """Why the context check doubts a box of ``label`` at ``xyz`` (``target_context.suspect``: its height), or None."""
+        return suspect(label, xyz, obs.pose.z)
 
     def blind(self):
         """Whether this frame carried no detector evidence (the service failed or is in back-off)."""

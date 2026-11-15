@@ -6,7 +6,6 @@ import math
 import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
-from sparx_agency.core.mapping.topology.room_priors import home_object
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import threshold_cells
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import RoomReasoningUnavailable
@@ -65,8 +64,8 @@ def discover(p, obs, world, cost):
         previous = None
     p._semantic_signature_step = int(obs.step)
     event = p.peek.pending_reason or (previous is not None and signature != previous)
-    # A room's type or a home object of the target is a semantic clue, acted on at once; rooms appearing on
-    # or leaving the offer is geometry -- the watershed renumbering at a boundary -- which the loop debounces.
+    # A room's type changing is a semantic clue, acted on at once; rooms appearing on or leaving the offer
+    # is geometry -- the watershed renumbering at a boundary -- which the loop debounces.
     semantic = bool(p.peek.pending_reason) or (previous is not None and semantic_change(previous, signature))
     if event and p.graph.registry.rooms:
         try:
@@ -87,21 +86,25 @@ def discover(p, obs, world, cost):
 
 
 def semantic_signature(p):
-    """What a change of warrants a fresh decision mid-walk: the storey, the rooms on offer, their types, the target's home objects.
+    """What a change of warrants a fresh decision mid-walk: the storey, the rooms on offer, their types.
 
     Until 2026-11-09 the signature held every room's full object-class set,
     so a vase first credited to the kitchen, or a room renumbered by the
     watershed, interrupted the walk and bought an oracle call: QUCTc6BB5sX/
     000069 (MP3D, ground truth) asked 27 times in 230 actions in a 5 m patch,
     often on consecutive actions, over the same two or three nodes. A clue is
-    a room appearing on or leaving the offer, a room's type changing, or a
-    HOME OBJECT of the target appearing (``room_priors.HOME_OBJECTS``: a sink
-    for a toilet); the target's own class is the closing's business.
+    a room appearing on or leaving the offer, or a room's type changing; the
+    target's own class is the closing's business. (Until 2026-11-15 a "home
+    object" of the target -- a sink for a toilet, from a hand-written table
+    -- appearing on the storey was a third clue; it went with
+    ``room_priors.py``. A new object changes the oracle's reading only
+    through the room type the classifier gives it, or at the next loop
+    point, where the node list carries it.)
 
-    Returns ``(floor, offered, types, homes)``: the offered room ids, the
-    type of each offered room by id, and the home-object kinds of every room
-    by id -- dicts, so :func:`semantic_change` can compare the rooms common
-    to two readings and is not fooled by the ids the renumbering moves.
+    Returns ``(floor, offered, types)``: the offered room ids and the type of
+    each offered room by id -- a dict, so :func:`semantic_change` can compare
+    the rooms common to two readings and is not fooled by the ids the
+    renumbering moves.
     """
     rooms = p.graph.registry.rooms
     loop = getattr(p, "loop", None)
@@ -110,30 +113,22 @@ def semantic_signature(p):
     tracker = getattr(p.graph, "label_tracker", None)
     labels = getattr(tracker, "labels", {}) or {}
     types = {pid: (labels[pid].label if pid in labels else "unknown") for pid in offered}
-    target = p.target
-    homes = {pid: frozenset(c for c in p.graph.objects_in(pid) if home_object(target, c)) for pid in sorted(rooms)}
-    return (p.mapping.floor_id, offered, types, homes)
+    return (p.mapping.floor_id, offered, types)
 
 
 def semantic_change(previous, signature):
     """Whether the difference between two signatures is one the oracle should be asked about at once.
 
-    A room on offer in both readings whose type changed, or a home-object
-    kind of the target new to the storey (a first sink when the target is
-    a toilet). A room appearing on or leaving the offer, and a known kind
-    moving between ids -- the watershed renumbering, a merge -- is geometry,
-    which the loop debounces (``LoopSettings.reconsider_min_actions``); a
-    second instance of a known kind is read at the next loop point, where
-    the node list carries it.
+    A room on offer in both readings whose type changed (or a change of
+    storey). A room appearing on or leaving the offer -- the watershed
+    renumbering, a merge -- is geometry, which the loop debounces
+    (``LoopSettings.reconsider_min_actions``); a new object is read at the
+    next loop point, where the node list carries it.
     """
     if previous[0] != signature[0]:
         return True
     before_types, types = previous[2], signature[2]
-    if any(pid in before_types and before_types[pid] != label for pid, label in types.items()):
-        return True
-    floor_before = frozenset().union(*previous[3].values()) if previous[3] else frozenset()
-    floor_now = frozenset().union(*signature[3].values()) if signature[3] else frozenset()
-    return bool(floor_now - floor_before)
+    return any(pid in before_types and before_types[pid] != label for pid, label in types.items())
 
 
 def resume_after_peek(p, obs, world):

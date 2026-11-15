@@ -150,14 +150,12 @@ class RPTSearchPolicy:
                               if self.loop_settings.room_level_gaps else
                               "doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs "
                               "(DEPRECATED exits_as_nodes%s), visited by a peek (threshold, face the unknown, one look to each "
-                              "side) priced at %d actions; valued by the oracle (uncertainty floor %s, elsewhere value %s, "
-                              "home floor %s)"
+                              "side) priced at %d actions; valued by the oracle (uncertainty floor %s, elsewhere value %s)"
                               % ("" if self.loop_settings.exploring else ", the %s visit's only way into an exit"
                                  % self.loop_settings.visit,
                                  self.loop_settings.openings.service_steps,
                                  "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor,
-                                 "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere,
-                                 "off" if not self.loop_settings.home_floor else "p=%.2f" % self.loop_settings.home_floor))
+                                 "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere))
                              + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
                                 "visited by a peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
                                                                     self.loop_settings.openings.landmark_standoff_m)
@@ -167,7 +165,7 @@ class RPTSearchPolicy:
                                     "initially classified, scanned and previously peeked rooms are exempt"
                                     if self.settings.doorway_peek.gate_floor_departure else
                                     "none: a floor change is the RPT* order's or the fallback rule's to take at any time"),
-                "node_oracle": {"nodes": "every room of the floor in force (finished and type-excluded ones shown with "
+                "node_oracle": {"nodes": "every room of the floor in force (finished ones shown with "
                                          "their status) + its staircases" + (
                                     "" if not self.loop_settings.openings.enabled else
                                     "; each room's exits are attributes on its line, not nodes"
@@ -175,19 +173,19 @@ class RPTSearchPolicy:
                                 "asks": "independent P(searching there finds target), without a fixed action horizon; "
                                         "the model is briefed with the HOUSE line (room types found, rooms unidentified, "
                                         "openings unlooked, the frontier state -- reachable, slivers, unreachable, none -- "
-                                        "actions used of the budget) and, since 2026-11-09, a WHERE IT LIVES line from "
-                                        "room_priors.TARGET_HOMES for every category of the three benchmarks, and writes "
-                                        "home/house/stage and a first|second pass verdict before the numbers (LLM-first, "
-                                        "2026-10-07)",
+                                        "actions used of the budget) and writes home/house/stage and a first|second pass "
+                                        "verdict before the numbers (LLM-first, 2026-10-07); where the target lives is "
+                                        "the model's own step 1 -- no hand-written category table, no type exclusion, "
+                                        "no home-object rule (room_priors.py removed 2026-11-15); the system prompt's "
+                                        "own examples of typical homes are the model's only briefing",
                                 "probability_model": "independent_search_success",
                                 "flat_p": self.loop_settings.flat_p,
                                 "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor,
-                                                "unexplored_elsewhere": self.loop_settings.unexplored_elsewhere,
-                                                "home_floor": self.loop_settings.home_floor},
-                                "second_pass": self.loop_settings.second_pass, "type_prior": self.loop_settings.type_prior,
+                                                "unexplored_elsewhere": self.loop_settings.unexplored_elsewhere},
+                                "second_pass": self.loop_settings.second_pass,
                                 "route": "LLM_REASONING_MODEL",
-                                "cadence": "loop points and semantic discovery -- a room on or off the offer, a room's type, a "
-                                           "home object of the target (discovery.semantic_signature, 2026-11-09); geometry alone "
+                                "cadence": "loop points and semantic discovery -- a room on or off the offer, a room's type "
+                                           "(discovery.semantic_signature, 2026-11-09); geometry alone "
                                            "within reconsider_min_actions of the last call waits for the loop point; unchanged "
                                            "prompts reused"},
                 "floor_change_decision": ("RPT* over rooms and stair nodes; a staircase is charged its flight plus "
@@ -227,11 +225,9 @@ class RPTSearchPolicy:
             return "bounded frontier sweep of %d actions" % loop.local_steps
         finishing = ("finished rooms are shown to the oracle with their status and offered again%s once its pass "
                      "verdict says the home is covered (a revisit scans from a spot at least %.1f m from the earlier "
-                     "scan points); rooms whose STRONG type label cannot hold the target are %s; one signature object "
-                     "(a bed, a toilet, an oven) makes a label strong"
-                     % ("" if loop.second_pass else " (DISABLED: second_pass off)", loop.revisit_standoff_m,
-                        "not nodes (type_prior on)" if loop.type_prior
-                        else "valued by the oracle like every other room (type_prior off)"))
+                     "scan points); every unfinished room is valued by the oracle whatever its type (no type "
+                     "exclusion); a room's label is strong on two or more kinds of object and a confident model"
+                     % ("" if loop.second_pass else " (DISABLED: second_pass off)", loop.revisit_standoff_m))
         if loop.exploring:
             return ("frontier walk: the room's frontier that reveals the most unknown floor per metre walked, then the "
                     "next, until none is left (bounded by %d actions); a room the agent stood in with no live frontier "

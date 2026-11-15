@@ -8,11 +8,12 @@ from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
 from sparx_agency.core.planning.object_search.exploration.doorway_peek import DoorwayPeek
-from sparx_agency.core.planning.object_search.rooms.discovery import semantic_change
+from sparx_agency.core.planning.object_search.rooms.discovery import semantic_change, semantic_signature
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import IN_A, loop_policy, obs_at, see
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
+    IN_A, NamingLLM, loop_policy, obs_at, see)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import search_snapshot
 
 
@@ -180,44 +181,47 @@ def test_inaccessible_frontiers_are_absent_from_counts_and_display():
 
 
 def test_non_destination_semantic_clue_triggers_reasoning_even_without_peeks(monkeypatch):
-    """A HOME OBJECT of the target seen in a room off the route is a clue the walk is interrupted for; an object that
-    says nothing about the target's room (a sink, for a chair) is not -- since 2026-11-09 the semantic signature
-    holds the rooms on offer, their types and the target's home objects, not every object class (the ground-truth
-    detector credited a new class to some room on nearly every action, and the oracle was asked on consecutive
-    actions about the same nodes: QUCTc6BB5sX/000069, 27 calls in 230 actions)."""
-    p, ep, world, _, reasoned = loop_policy(order=(1, 0))
+    """A room off the route changing its TYPE is a clue the walk is interrupted for; a new object that leaves every
+    room's type as it was is not -- since 2026-11-09 the semantic signature holds the rooms on offer and their
+    types, not every object class (the ground-truth detector credited a new class to some room on nearly every
+    action, and the oracle was asked on consecutive actions about the same nodes: QUCTc6BB5sX/000069, 27 calls in
+    230 actions). Until 2026-11-15 a "home object" of the target (a desk, for a chair: a hand-written table) was a
+    clue too; it went with ``room_priors.py``."""
+    p, ep, world, _, reasoned = loop_policy(order=(1, 0), llm=NamingLLM())
     obs = obs_at(ep, 0, IN_A)
     p.loop.plan(obs, world)
     p._discover(obs, world, p.navigation_cost(world))
-    see(p, {0: ["sink"], 1: []}, 1)                      # not a home object of a chair: no interruption
+    see(p, {0: ["desk"], 1: []}, 1)                      # evidence recorded, no room renamed: no interruption
     p._discover(obs_at(ep, 1, IN_A), world, p.navigation_cost(world))
     assert reasoned == [0]
-    see(p, {0: ["sink", "desk"], 1: []}, 2)              # a desk is where chairs stand: the clue
+    see(p, {0: ["desk", "toilet"], 1: []}, 2)
+    p.graph.relabel(0, 2)                                # room A is a bathroom now: its type changed -- the clue
+    assert p.graph.label_info(0)["label"] == "bathroom"
     p._discover(obs_at(ep, 2, IN_A), world, p.navigation_cost(world))
     assert reasoned == [0, 2]
     assert p.supervisor.room_id == 1 and p.supervisor.state == TRANSIT
 
 
-def test_semantic_change_reads_types_and_new_home_kinds_not_room_ids():
+def test_semantic_change_reads_types_not_room_ids_or_objects():
     """The watershed renumbers rooms on consecutive actions; the ids are not the clue (2026-11-09).
 
-    A room on offer in both readings whose type changed, or a home-object kind
-    new to the storey, is semantic -- asked about at once. Ids moving, a room
-    appearing or leaving, a known kind credited to another id (a merge) are
-    geometry, which the loop debounces.
+    A room on offer in both readings whose type changed is semantic -- asked
+    about at once. Ids moving, a room appearing or leaving are geometry, which
+    the loop debounces. The signature carries no objects: until 2026-11-15 a
+    "home object" of the target new to the storey was a third clue, from a
+    hand-written table that went with ``room_priors.py``.
     """
-    none, desk = frozenset(), frozenset({"desk"})
-    before = (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: none, 1: none})
-    renumbered = (0, (0, 2), {0: "kitchen", 2: "unknown"}, {0: none, 2: none})
+    before = (0, (0, 1), {0: "kitchen", 1: "unknown"})
+    renumbered = (0, (0, 2), {0: "kitchen", 2: "unknown"})
     assert not semantic_change(before, renumbered)
-    assert not semantic_change(before, (0, (0,), {0: "kitchen"}, {0: none}))             # a room left the offer
-    assert semantic_change(before, (0, (0, 1), {0: "bathroom", 1: "unknown"}, {0: none, 1: none}))
-    assert semantic_change(before, (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: none, 1: desk}))
-    with_desk = (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: desk, 1: none})
-    moved = (0, (0, 2), {0: "kitchen", 2: "unknown"}, {0: none, 2: desk})               # the desk's room renumbered
-    assert not semantic_change(with_desk, moved)
-    assert not semantic_change(with_desk, (0, (0, 1), {0: "kitchen", 1: "unknown"}, {0: desk, 1: desk}))
+    assert not semantic_change(before, (0, (0,), {0: "kitchen"}))             # a room left the offer
+    assert not semantic_change(before, (0, (0, 1, 2), {0: "kitchen", 1: "unknown", 2: "bedroom"}))   # one appeared
+    assert semantic_change(before, (0, (0, 1), {0: "bathroom", 1: "unknown"}))
+    assert semantic_change(before, (0, (0, 1), {0: "kitchen", 1: "bedroom"}))
     assert semantic_change(before, (1,) + before[1:])
+    p, ep, world, _, _ = loop_policy(order=(1, 0))
+    signature = semantic_signature(p)
+    assert len(signature) == 3 and isinstance(signature[2], dict), "(storey, rooms on offer, their types): no objects"
 
 
 def test_a_sliver_the_exclusions_withhold_at_once_is_no_clue(monkeypatch):
@@ -235,7 +239,7 @@ def test_a_sliver_the_exclusions_withhold_at_once_is_no_clue(monkeypatch):
     assert reasoned == [0] and p.loop.stats["reconsiders_spaced"] == 2
     p.loop.reconsider(obs_at(ep, 70, IN_A), world, semantic=False)     # 70 actions on, a new offer: asked
     assert reasoned == [0, 70]
-    p.loop.reconsider(obs_at(ep, 72, IN_A), world, semantic=True)      # a type or a home object: asked at once
+    p.loop.reconsider(obs_at(ep, 72, IN_A), world, semantic=True)      # a room's type changed: asked at once
     assert reasoned == [0, 70, 72]
 
 

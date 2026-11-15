@@ -303,21 +303,26 @@ def test_a_long_frontier_passing_an_object_is_an_opening_not_its_shadow():
     assert command.waypoints[-1][0] < 2.0 and not policy.fallback.last_demoted
 
 
-def test_a_frontier_of_a_room_the_target_cannot_be_in_waits_behind_the_exits():
+def test_a_frontier_is_an_exit_whatever_room_it_is_credited_to():
+    """Until 2026-11-15 a frontier credited to a room the loop withheld as ``type:`` -- one a hand-written table
+    said the target could not be in -- waited behind the other exits. The table went with ``room_priors.py``: the
+    fallback reads no room type, and a frontier is demoted only for geometry (a shadow, the blind radius, a sliver)."""
     from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
     from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
+    from sparx_agency.core.planning.object_search.exploration.exploration_fallback import split_exits
     policy, episode, world, rooms, _ = loop_policy(order=(1, 0))
     labels = policy.graph.labels.copy()
     no_rooms(policy)
     cost = assemble_cost_grid(policy.planner.fields_for(world), policy.planner_params, policy.settings.body_radius_m)[0]
     policy.graph.frontier_inventory = accessible_frontiers(world, cost, labels, IN_A, 0.0, policy.sweep.settings.ranking)
     assert 1 in policy.graph.frontier_inventory.by_room, "room A's west frontier is credited to label 1 = pid 0"
-    policy.loop._excluded = {0: "type:bathroom"}            # room A (pid 0) cannot hold the target
+    policy.loop._excluded = {0: "type:bathroom"}            # a reason of the removed rule: nothing reads it now
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert moving(command) and command.info["fallback_stage"] == "frontier"
-    assert command.waypoints[-1][0] > 6.0, "room B's frontier through the door, not the nearer bathroom's"
-    assert policy.fallback.last_demoted and policy.fallback.last_demoted[0]["why"] == "room 0 is type:bathroom"
-    assert policy.fallback.stats["type_demoted"] >= 1
+    assert not any("type:" in str(item.get("why", "")) for item in policy.fallback.last_demoted)
+    assert "type_demoted" not in policy.fallback.stats
+    with pytest.raises(TypeError):
+        split_exits([], [], world.resolution, policy.fallback.settings, type_rule=True)
 
 
 def test_demoted_frontiers_are_still_unknown_space_once_the_exits_are_spent():

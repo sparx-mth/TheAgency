@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from sparx_agency.core.mapping.topology.search_node_oracle import (
-    HOME_FLOOR, OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, SOURCE_FLAT,
+    OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, SOURCE_FLAT,
     SOURCE_LLM, STAIRS, STAIRS_SUPPLEMENT, SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, USABLE_SOURCES,
     SearchContext, SearchNode, SearchNodeOracle,
     budget_line, coarse_seconds, floor_unexplored, format_exits, format_node, format_prompt, normalise, parse_home_here,
@@ -334,9 +334,9 @@ def test_which_nodes_are_unexplored():
 
 
 def test_the_floors_are_off_by_default_so_the_models_numbers_stand():
-    assert UNEXPLORED_FLOOR == 0.0 and UNEXPLORED_ELSEWHERE == 0.0 and HOME_FLOOR == 0.0
+    assert UNEXPLORED_FLOOR == 0.0 and UNEXPLORED_ELSEWHERE == 0.0
     oracle = SearchNodeOracle(Scripted({}))
-    assert oracle.unexplored_floor == 0.0 and oracle.unexplored_elsewhere == 0.0 and oracle.home_floor == 0.0
+    assert oracle.unexplored_floor == 0.0 and oracle.unexplored_elsewhere == 0.0
     nodes = [KITCHEN, UNKNOWN, UP, GAP, DOORWAY_WITH_TOILET, WEAK_BEDROOM_UNENTERED]
     reply = {"home_here": "elsewhere",
              "nodes": [{"id": 0, "p": 0}, {"id": 2, "why": "small unknown room", "p": 1},
@@ -345,9 +345,6 @@ def test_the_floors_are_off_by_default_so_the_models_numbers_stand():
     result = SearchNodeOracle.score(reply, nodes)
     assert result.floored == () and result.capped == ()
     assert result.probs[2] == pytest.approx(0.01) and result.probs[200002] == 0.0, "written off is written off: the model's call"
-    bathroom = SearchNode(1, ROOM, "bathroom", area_m2=4.0, frontier_clusters=0, objects=("bathtub",), home=True)
-    home = SearchNodeOracle.score({"nodes": [{"id": 1, "p": 0}]}, [bathroom])
-    assert home.probs[1] == 0.0 and home.floored == ()
 
 
 def test_the_floor_raises_what_the_model_wrote_off_and_leaves_the_rest_alone_when_switched_on():
@@ -366,23 +363,25 @@ def test_the_floor_raises_what_the_model_wrote_off_and_leaves_the_rest_alone_whe
     assert above.floored == () and above.probs[2] == pytest.approx(0.40), "a serious valuation stands"
 
 
-def test_a_room_holding_a_home_object_is_read_at_the_home_floor_when_switched_on():
-    bathroom = SearchNode(1, ROOM, "bathroom", area_m2=4.0, frontier_clusters=0, objects=("bathtub",), home=True)
+def test_the_oracle_takes_no_hand_written_prior_about_where_the_target_lives():
+    """No table briefs the model (``room_priors.py`` was removed on 2026-11-15): the prompt carries no WHERE IT
+    LIVES line, a node carries no ``home`` flag, and no floor raises a room for the objects standing in it."""
+    text = format_prompt("toilet", [KITCHEN, LIVING, UNKNOWN], SearchContext(HOUSE))
+    assert text.startswith("TARGET: toilet\n\nHOUSE: " + HOUSE)
+    assert "WHERE IT LIVES" not in text and "WHERE IT LIVES" not in SYSTEM_PROMPT
+    assert not hasattr(SearchContext(), "target_home") and not hasattr(KITCHEN, "home")
+    with pytest.raises(TypeError):
+        SearchContext(HOUSE, target_home="bathroom (most likely first)")
+    with pytest.raises(TypeError):
+        SearchNodeOracle(Scripted({}), home_floor=0.6)
+    with pytest.raises(TypeError):
+        SearchNode(1, ROOM, "bathroom", home=True)
+    bathroom = SearchNode(1, ROOM, "bathroom", area_m2=4.0, frontier_clusters=0, objects=("bathtub",))
     nodes = [KITCHEN, bathroom, UNKNOWN]
     reply = {"home_here": "found", "nodes": [{"id": 0, "p": 0}, {"id": 1, "why": "bathroom, seen", "p": 0}, {"id": 2, "p": 30}]}
-    result = SearchNodeOracle.score(reply, nodes, 0.25, 0.10, 0.60)
-    assert result.probs[1] == pytest.approx(0.60) and 1 in result.floored
-    assert result.probs[0] == 0 and result.probs[2] == pytest.approx(0.30), "the others keep the model's numbers"
-    assert result.reasons[1] == "bathroom, seen", "the model's words stay beside the floored number"
-    higher = SearchNodeOracle.score(dict(reply, nodes=[{"id": 1, "p": 85}]), [bathroom], 0.25, 0.10, 0.60)
-    assert higher.probs[1] == pytest.approx(0.85) and higher.floored == (), "a valuation above the floor stands"
-    # 'elsewhere' caps the unexplored places; the home room is still read at its floor.
-    result = SearchNodeOracle.score(dict(reply, home_here="elsewhere"), nodes, 0.25, 0.10, 0.60)
-    assert result.probs[1] == pytest.approx(0.60) and result.probs[2] == pytest.approx(0.10)
-    assert 1 in result.floored and 1 not in result.capped
-    with pytest.raises(ValueError):
-        SearchNodeOracle(Scripted({}), home_floor=1.0)
-    assert not KITCHEN.home and SearchNode(9, ROOM, "unknown").home is False
+    result = SearchNodeOracle.score(reply, nodes, 0.25, 0.10)
+    assert result.probs[1] == 0.0 and 1 not in result.floored, "a bathtub in the room raises nothing: the model's number stands"
+    assert result.probs[0] == 0 and result.probs[2] == pytest.approx(0.30)
 
 
 def test_when_the_model_says_the_home_type_is_elsewhere_unexplored_places_read_at_the_elsewhere_value_when_switched_on():
