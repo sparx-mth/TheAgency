@@ -1,5 +1,6 @@
 """Score a detector's boxes on the object views against the exact boxes: hits on the target, wrong boxes, votes over views."""
 import collections
+import math
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.evaluate import iou, merged_by_kind
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.kinds import DETECTOR_KIND
@@ -99,6 +100,24 @@ def sequence_vote_summary(scored_rows, need, max_distance_m):
             streak = streak + 1 if r["detections"] else 0
             if streak >= need:
                 result["stopped_right" if r["hit_goal"] else "stopped_wrong"] += 1
+                break
+        else:
+            result["never"] += 1
+    return {k: result[k] for k in ("sequences", "stopped_right", "stopped_wrong", "never")}
+
+
+def answers_within(answers, min_conf, max_distance_m):
+    return [a for a in answers if a["conf"] >= min_conf and a["distance_m"] <= max_distance_m]
+
+
+def consistent_stop_summary(sequences, need, radius_m):
+    """Per approach sequence of boxes (``step``, floor ``point``, ``right``): a STOP at the first box that ``need - 1`` earlier steps also put within ``radius_m``."""
+    result = collections.Counter(sequences=len(sequences))
+    for boxes in sequences:
+        for index, current in enumerate(boxes):
+            supporting = {b["step"] for b in boxes[:index] if b["step"] < current["step"] and math.dist(b["point"], current["point"]) <= radius_m}
+            if len(supporting) >= need - 1:
+                result["stopped_right" if current["right"] else "stopped_wrong"] += 1
                 break
         else:
             result["never"] += 1

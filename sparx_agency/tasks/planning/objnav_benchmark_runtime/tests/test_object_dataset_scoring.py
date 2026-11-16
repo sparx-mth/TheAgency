@@ -1,7 +1,7 @@
 import pytest
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import (
-    KIND_OF_CATEGORY, accepted_by_vote, score_view, sequence_vote_summary, summarise)
+    KIND_OF_CATEGORY, accepted_by_vote, answers_within, consistent_stop_summary, score_view, sequence_vote_summary, summarise)
 
 TARGET = {"instance": 7, "kind": "chair", "name": "chair", "xyxy": [100, 100, 200, 200], "pixels": 5000, "is_goal": True, "truncated": False}
 OTHER_GOAL = {"instance": 8, "kind": "chair", "name": "chair", "xyxy": [300, 100, 400, 200], "pixels": 5000, "is_goal": True, "truncated": False}
@@ -145,3 +145,47 @@ def test_a_stop_needs_that_many_consecutive_steps_with_a_box_and_is_judged_at_th
 def test_steps_farther_than_the_limit_do_not_count():
     steps = [step_view(0, boxes_hit=False, bucket=3.5), step_view(1, boxes_hit=True, bucket=1.2)]
     assert sequence_vote_summary(steps, need=1, max_distance_m=2.5)["stopped_right"] == 1
+
+
+def answer(label, reply, conf=0.6, distance=2.0, category="chair"):
+    return {"label": label, "answer": reply, "conf": conf, "distance_m": distance, "category": category}
+
+
+def test_the_vlm_report_rows_filter_by_confidence_and_distance():
+    rows = [answer("target", "yes"), answer("non_goal", "no", conf=0.4), answer("nothing", "no", distance=3.5)]
+    assert len(answers_within(rows, min_conf=0.5, max_distance_m=2.5)) == 1
+    assert len(answers_within(rows, min_conf=0.0, max_distance_m=9.0)) == 3
+
+
+def box(step, point, right):
+    return {"step": step, "point": point, "right": right}
+
+
+def test_two_steps_that_put_a_box_at_the_same_place_confirm_it():
+    result = consistent_stop_summary([[box(0, (1.0, 1.0), False), box(1, (1.2, 1.1), True)]], need=2, radius_m=0.5)
+    assert result == {"sequences": 1, "stopped_right": 1, "stopped_wrong": 0, "never": 0}
+
+
+def test_boxes_at_different_places_do_not_confirm_each_other():
+    result = consistent_stop_summary([[box(0, (1.0, 1.0), False), box(1, (4.0, 1.0), True)]], need=2, radius_m=0.5)
+    assert result["never"] == 1 and result["stopped_right"] == 0
+
+
+def test_boxes_of_the_same_step_do_not_confirm_each_other():
+    result = consistent_stop_summary([[box(0, (1.0, 1.0), False), box(0, (1.0, 1.1), False)]], need=2, radius_m=0.5)
+    assert result["never"] == 1
+
+
+def test_three_needs_two_earlier_steps_at_the_place_and_the_stop_is_judged_at_the_last_box():
+    boxes = [box(0, (0.0, 0.0), False), box(1, (0.1, 0.0), False), box(2, (0.2, 0.0), True)]
+    assert consistent_stop_summary([boxes], need=3, radius_m=0.5)["stopped_right"] == 1
+    assert consistent_stop_summary([boxes[:2]], need=3, radius_m=0.5)["never"] == 1
+
+
+def test_one_is_the_first_box():
+    result = consistent_stop_summary([[box(0, (0.0, 0.0), False), box(1, (0.0, 0.0), True)]], need=1, radius_m=0.5)
+    assert result["stopped_wrong"] == 1
+
+
+def test_a_sequence_without_boxes_never_stops():
+    assert consistent_stop_summary([[]], need=1, radius_m=0.5)["never"] == 1
