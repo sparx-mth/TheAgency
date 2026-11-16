@@ -3,6 +3,7 @@ import argparse
 import collections
 import csv
 import json
+import string
 from pathlib import Path
 
 import cv2
@@ -44,7 +45,7 @@ def floor_map(cells, regions, room, chosen):
     image = np.full((MAP_SIZE, MAP_SIZE, 3), 255, np.uint8)
     for (x, _, z), region in zip(cells[near_floor], regions[near_floor]):
         cv2.circle(image, pixel(x, z), 3, ROOM_COLOUR if region == room["region"] else OTHER_COLOUR, -1)
-    for letter, view in zip("ABCD", chosen):
+    for letter, view in zip(string.ascii_uppercase, chosen):
         centre = pixel(view["x"], view["z"])
         tip = pixel(view["x"] - 0.8 * np.sin(view["yaw"]), view["z"] - 0.8 * np.cos(view["yaw"]))
         cv2.arrowedLine(image, centre, tip, SPOT_COLOUR, 2, tipLength=0.35)
