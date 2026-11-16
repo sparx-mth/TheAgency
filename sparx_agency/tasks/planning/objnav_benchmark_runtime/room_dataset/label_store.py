@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 ROOM_TYPES = ("bedroom", "bathroom", "toilet", "kitchen", "living room", "dining room", "family room or lounge", "tv room", "office",
-              "library", "hallway", "stairs", "entryway", "closet", "laundry room", "utility room", "garage", "game room", "gym",
+              "library", "study", "playroom or kids room", "hallway", "stairs", "entryway", "closet", "laundry room", "utility room", "garage", "game room", "gym",
               "balcony or porch", "outdoor", "other room", "unsure", "not a room")
 
 
