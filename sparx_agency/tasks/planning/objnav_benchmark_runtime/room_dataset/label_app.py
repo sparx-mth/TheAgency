@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.label_store import ROOM_TYPES, LabelStore
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import floor_map, object_summary, pick_frames
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import far_fraction, floor_map, object_summary, pick_frames
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.room_names import majority_name
 
 FRAMES_SHOWN = 6
@@ -27,11 +27,14 @@ class Rooms:
                 answers[row["room"]].append(row["answer"])
         for folder in sorted(d for d in views.iterdir() if (d / "rooms.json").exists()):
             frames = [json.loads(line) for line in (folder / "views.jsonl").read_text().splitlines()]
+            for view in frames:
+                depth = cv2.imread(str(folder / "depth" / (view["frame"] + ".png")), cv2.IMREAD_UNCHANGED) / 1000.0
+                view["far_fraction"] = far_fraction(depth)
             for room in json.loads((folder / "rooms.json").read_text()):
                 own = [v for v in frames if v["room"] == room["room"]]
                 shown = pick_frames(own, count=FRAMES_SHOWN)
                 mixed = not shown
-                shown = shown or pick_frames(own, count=FRAMES_SHOWN, min_share=0.0)
+                shown = shown or pick_frames(own, count=FRAMES_SHOWN, min_share=0.0, max_far=1.0)
                 self.chosen[room["room"]] = (folder, room, shown)
                 self.rooms.append({"room": room["room"], "scene": room["scene"], "area_m2": round(room["area_m2"]), "objects": object_summary(room),
                                    "guess": majority_name(answers[room["room"]])[0], "mixed": mixed,

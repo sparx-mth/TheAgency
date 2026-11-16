@@ -17,6 +17,8 @@ MAP_MARGIN_M = 2.0
 FRAMES_PER_SHEET = 4
 MAX_FRAMES_PER_SPOT = 2
 MIN_IN_ROOM_SHARE = 0.5
+FAR_M = 4.0
+MAX_FAR_FRACTION = 0.2
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 ROOM_COLOUR, OTHER_COLOUR, SPOT_COLOUR = (200, 120, 30), (200, 200, 200), (30, 30, 220)
 
@@ -27,9 +29,15 @@ def in_room_share(view):
     return sum(o["pixels"] for o in view["visible"] if o["region"] == view["region"]) / total if total else 0.0
 
 
-def pick_frames(views, count=FRAMES_PER_SHEET, per_spot=MAX_FRAMES_PER_SPOT, min_share=MIN_IN_ROOM_SHARE):
-    """The views that look mostly at the room itself, best first, at most ``per_spot`` from one standing spot."""
-    ranked = sorted((v for v in views if in_room_share(v) >= min_share), key=lambda v: (-in_room_share(v), v["spot"], v["heading"]))
+def far_fraction(depth_m, far_m=FAR_M):
+    """The share of the valid depth pixels farther than ``far_m``: how much of a view is far away."""
+    valid = depth_m[depth_m > 0]
+    return float((valid > far_m).mean()) if valid.size else 0.0
+
+
+def pick_frames(views, count=FRAMES_PER_SHEET, per_spot=MAX_FRAMES_PER_SPOT, min_share=MIN_IN_ROOM_SHARE, max_far=MAX_FAR_FRACTION):
+    """The views that look mostly at the room itself and not far away, best first, at most ``per_spot`` from one standing spot."""
+    ranked = sorted((v for v in views if in_room_share(v) >= min_share and v.get("far_fraction", 0.0) <= max_far), key=lambda v: (-in_room_share(v), v["spot"], v["heading"]))
     taken, per = [], collections.Counter()
     for view in ranked:
         if per[view["spot"]] < per_spot:

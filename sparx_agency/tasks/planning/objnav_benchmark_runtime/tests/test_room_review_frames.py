@@ -1,4 +1,6 @@
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import in_room_share, pick_frames
+import numpy as np
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import far_fraction, in_room_share, pick_frames
 
 
 def view(frame, spot, visible, region=7):
@@ -33,3 +35,22 @@ def test_a_frame_that_mostly_shows_another_room_is_never_picked_even_when_slots_
 def test_with_no_minimum_the_best_frames_of_a_mixed_room_are_still_returned():
     views = [view("a", 0, [(7, 100), (3, 900)]), view("b", 1, [(3, 1000)])]
     assert [v["frame"] for v in pick_frames(views, count=6, min_share=0.0)] == ["a", "b"]
+
+
+def test_the_far_fraction_is_the_share_of_valid_depth_beyond_the_distance():
+    depth = np.array([[1.0, 2.0, 5.0, 6.0], [0.0, 0.0, 3.0, 9.0]])
+    assert far_fraction(depth, far_m=4.0) == 0.5
+
+
+def test_a_frame_without_valid_depth_has_no_far_part():
+    assert far_fraction(np.zeros((2, 2)), far_m=4.0) == 0.0
+
+
+def test_a_frame_looking_far_away_is_not_picked_even_when_it_is_all_in_the_room():
+    near, far = dict(view("near", 0, [(7, 900)]), far_fraction=0.1), dict(view("far", 1, [(7, 900)]), far_fraction=0.6)
+    assert [v["frame"] for v in pick_frames([far, near], count=6)] == ["near"]
+
+
+def test_with_no_far_limit_a_far_frame_is_returned():
+    far = dict(view("far", 0, [(7, 900)]), far_fraction=0.9)
+    assert [v["frame"] for v in pick_frames([far], count=6, max_far=1.0)] == ["far"]
