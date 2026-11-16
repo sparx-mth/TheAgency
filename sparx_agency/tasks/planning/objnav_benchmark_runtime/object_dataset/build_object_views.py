@@ -12,6 +12,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.kinds import kind_of_annotation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.sample_frames import navigable_points, yaw_quaternion_wxyz
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.semantic_frame import instance_extents
@@ -73,10 +74,14 @@ def build_scene(scene, args, protocol, out):
     chosen = [goals[i] for i in rng.permutation(len(goals))[:args.objects_per_scene]]
     folder = out / scene
     (folder / "frames").mkdir(parents=True, exist_ok=True)
-    rows = []
+    rows, skipped = [], []
 
     def render(position, yaw, **fields):
-        rgb, _, pose = simulator.reset(glb, navmesh, position, yaw_quaternion_wxyz(yaw), args.seed)
+        try:
+            rgb, _, pose = simulator.reset(glb, navmesh, position, yaw_quaternion_wxyz(yaw), args.seed)
+        except EnvContractError:
+            skipped.append(1)
+            return
         name = "%05d.jpg" % len(rows)
         cv2.imwrite(str(folder / "frames" / name), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
         boxes = boxes_in_view(simulator, goal_instances, width, height)
@@ -101,7 +106,7 @@ def build_scene(scene, args, protocol, out):
     simulator.close()
     with open(folder / "views.jsonl", "w") as handle:
         handle.writelines(json.dumps(r) + "\n" for r in rows)
-    return len(rows)
+    return len(rows), len(skipped)
 
 
 def main(argv=None):
@@ -123,7 +128,8 @@ def main(argv=None):
             print("%s: already built" % scene)
             continue
         split = "held_out" if is_held_out(scene, args.held_out_fraction) else "dev"
-        print("%s (%s): %d views" % (scene, split, build_scene(scene, args, protocol, args.out)), flush=True)
+        views, skipped = build_scene(scene, args, protocol, args.out)
+        print("%s (%s): %d views, %d skipped" % (scene, split, views, skipped), flush=True)
     return 0
 
 
