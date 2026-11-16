@@ -95,7 +95,7 @@ def search_snapshot(policy):
                for lm in policy.landmarks.confirmed()] if hasattr(policy, "landmarks") else []
     building = getattr(policy, "building", None)
     floor = {}
-    if building is not None and building.ground_truth is not None:
+    if building is not None and building.allowed:               # the building line: only where a storey change is possible
         floor = {"phase": building.phase, "spent": int(round(now / max(1e-6, policy.settings.action_time_s))),
                  "arrived_by": building.arrived_by, "active_portal": building.active["id"] if building.active else None,
                  "selected_by": building.active.get("selected_by") if building.active else None}
@@ -222,9 +222,6 @@ def method_snapshot(policy):
     supervisor = getattr(policy, "supervisor", None)
     burst = hierarchy.machine.burst if hierarchy is not None else None
     building = getattr(policy, "building", None)
-    # The perfect stair detector's boxes ride beside the object detector's: a staircase is
-    # "detected" only in the frames it is actually in, and the overlay shows exactly those.
-    stair_boxes = list(getattr(building, "last_sightings", ()) or ()) if building is not None else []
     atlas = building.policy.mapping.atlas.diagnostics() if building else {}
     state = hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting")
     explorer = getattr(policy, "explorer", None)
@@ -252,8 +249,11 @@ def method_snapshot(policy):
             "explorer": getattr(getattr(policy, "settings", None), "local_exploration", "unknown"),
             "burst_actions_left": max(0, hierarchy.params.burst_actions - burst.actions) if burst is not None else None,
             "planned_path": [[float(p.x), float(p.y)] if hasattr(p, "x") else list(p[:2]) for p in points],
-            "detections": boxes + stair_boxes, "detector_ms": getattr(detector, "last_inference_ms", None),
-            "stairs_seen": building.sightings.diagnostics().get("seen", []) if building is not None and hasattr(building, "sightings") else [],
+            "detections": boxes, "detector_ms": getattr(detector, "last_inference_ms", None),
+            # The flights the robot's own depth has measured from the storey in force (the coordinator's portals).
+            "stairs_seen": [{"portal_id": q["id"], "direction": "up" if q["direction"] > 0 else "down",
+                             "entry": [round(float(v), 2) for v in q["entry"][:2]]}
+                            for q in building.portals if q["floor_id"] == building.floor_id] if building is not None else [],
             "objects": [{"id": lm.id, "class": lm.class_name, "xy": list(lm.xy), "count": lm.count}
                         for lm in policy.landmarks.all_landmarks()] if hasattr(policy, "landmarks") else [],
             "reasoning": graph.last_reasoning if graph is not None else {},
@@ -315,11 +315,9 @@ def render_dashboard(policy, observation, trail, decision, episode_id, snapshot,
         _draw_masks(rgb, getattr(getattr(policy, "perception", None), "masks", None))
     for detection in snapshot.get("detections", ()) if not final else ():
         x1, y1, x2, y2 = (int(v) for v in detection["xyxy"])
-        ground_truth = detection.get("source") == "ground_truth"
-        color = (60, 140, 255) if ground_truth else (0, 220, 255)        # orange for the perfect stair detector
+        color = (0, 220, 255)
         cv2.rectangle(rgb, (x1, y1), (x2, y2), color, 2)
-        text = ("%s GT %.1fm" % (detection["label"], detection.get("distance_m", 0.0)) if ground_truth
-                else "%s %.2f" % (detection["label"], detection["confidence"]))
+        text = "%s %.2f" % (detection["label"], detection["confidence"])
         cv2.putText(rgb, text, (x1, max(16, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     frame[40:520, :640] = cv2.resize(rgb, (640, 480))
     depth = observation.depth_m

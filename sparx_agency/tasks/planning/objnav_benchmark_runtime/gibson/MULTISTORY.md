@@ -6,8 +6,17 @@ annotated-target successes. Multi-story search quality is not solved.
 
 ## Where the stairs come from (`RPTSettings.multifloor.stair_source`)
 
-Two sources, one setting; the atlas, the per-floor contexts and the portal
-bookkeeping are the same under both.
+**From the robot's own depth, and nowhere else.** `stair_source` is
+`"observed"` -- the default since 2026-10-21 and the only source since
+2026-11-15. The method's stairs are what its own RGB-D measures
+(`world_model/stair_terrain.py`: a reachable run of support surfaces rising
+`stair_min_rise_m`, 0.40 m, within 5 m in a flight's profile --
+`stair_min_risers` (3) risers of `stair_riser_min_m` (0.10) to `max_step_m`
+with no tread between them deeper than `stair_max_tread_m` (0.55),
+`stair_profile`, since 2026-10-22 -- is a portal of the storey, placed from
+the measurement and masked on the planning grid by the same capsule as any
+seen flight); no simulator geometry is read, which is the footing of ApexNav,
+SG-Nav and OSG-Nav. Everything in the "Architecture" section describes it.
 
 **Whether they are taken at all is a separate setting:**
 `RPTSettings.allow_stair_traversal`, **false by default** because the
@@ -19,125 +28,61 @@ config, and the frozen `method` block records the value -- so every command in
 this file runs with stairs takeable. A `--policy-config` that sets it false
 wins and turns a multi-storey campaign into a guaranteed spawn-floor search.
 
-**`observed` -- the default since 2026-10-21.** The method's stairs are what its
-own RGB-D measures (`world_model/stair_terrain.py`: a reachable run of support
-surfaces rising `stair_min_rise_m`, 0.40 m, within 5 m in a flight's
-profile -- `stair_min_risers` (3) risers of `stair_riser_min_m` (0.10) to
-`max_step_m` with no tread between them deeper than `stair_max_tread_m`
-(0.55), `stair_profile`, since 2026-10-22 -- is a portal of the
-storey, placed from the measurement and masked on the planning grid by the
-same capsule as any seen flight); no simulator geometry is read, which is the
-footing of ApexNav, SG-Nav and OSG-Nav. The navmesh connectors below are the
-ablation: their centreline begins 0.45 m before Darden's first riser, on a
-sloped threshold, and drawn on the grid it closed the junction below the
-flight. Everything in the "Architecture" section describes the observed mode.
+With traversal allowed, a floor change is the building coordinator's decision
+(`MultiFloorSearch.plan`): once a floor's `floor_search_actions` allowance is
+spent, or at once when the exploration fallback reports the floor exhausted,
+RPT\* over the seen portals picks one (`_select`); the approach is planned on
+the observed map, the flight is walked on measured tread support
+(`stair_traversal.py`), and look-down inspections look for stairs at natural
+pauses (`_inspect`).
 
-**`ground_truth` -- the ablation** (`{"multifloor": {"stair_source": "ground_truth"}}`;
-the fixtures that hand an episode a scene structure ask for it). The evaluator reads the scene's navmesh once
-per scene (`habitat/stair_connectors.py`): the area-supported storey heights
-(the generator's own rule -- 8 m² within ±0.30 m, 1.5 m apart) and, between
-them, every cluster of off-level walkable surface as one **connector** -- its
-bottom and top floor anchors, the storey heights it joins and the polyline
-walked along it (the band's centreline; the navmesh shortest path repairs it
-where the centreline is not walkable). The block rides on the episode metadata
-(`stair_connectors`, `floor_levels`); it names no goal, no distance and no
-target floor, and the harness's privileged-key tripwire accepts it. The
-building coordinator then:
+### Removed on 2026-11-15: the `ground_truth` stair source
 
-- makes every connector touching the storey in force a portal once the camera
-  has SEEN it (`stair_sightings.py`; a flight just walked is seen from both
-  ends), oriented from that storey (`+1` up / `-1` down; `stair_ground_truth.py`).
-  What the oracle is told before any flight is seen is the building's storey
-  count and this storey's rank among them (`stair_nodes.storey_position`),
-  which comes from the same metadata and is disclosed under `ground_truth_stairs`;
-- **offers every portal to the room-search loop as a NODE** (`core/planning/object_search/rooms/stair_nodes.py`)
-  once its foot is on the observed passable map and it is not cooling after a
-  failed approach. The loop hands the staircase to the node oracle beside the
-  rooms -- up or down, whether the other storey was visited and what was found
-  and searched there, whether the robot arrived by it and how long ago -- and
-  the LLM answers the probability that going there next finds the target, in
-  the same distribution as the rooms. RPT* then orders rooms and staircases
-  together, the staircase sitting at the foot of its flight with a LEAF of the
-  flight's length plus `MultiFloorParams.floor_change_cost_m` (8 m, about
-  thirty actions -- the climb's turns, the settle and the exit stub) charged
-  on every arc into AND out of it, so going upstairs puts every room down
-  here that much further away. **Nothing decides a floor change by a clock:**
-  `floor_search_actions` is the observed mode's allowance only. When the order
-  puts a staircase first the loop calls `MultiFloorSearch.commit`; the
-  coordinator approaches the foot of the flight, starts the traversal there
-  and tells the loop (`stairs_taken`, verdict `traversed`), so the floor's
-  supervisor is clean when the robot comes back down and the way back up is
-  a node like any other (`arrived_by` in its facts, no cooldown). Events:
-  `portal_selected` with `solver_source: rpt_star`, `traversal_started` with
-  `selected_by`;
-- **keeps the explicit rule as the exploration fallback's last resort**
-  (`floor_decision.py`, `rule: fallback`): asked only when the loop has
-  nothing to offer -- the room LLM is away, or no node on the floor is worth
-  anything -- and the floor is exhausted. Eligible = not cooling; reachable
-  now = entry anchor snaps onto the observed passable map within 1.5 m
-  (`snap_entry`: the nearest passable cell with a clear Bresenham line to the
-  anchor through what the map knows -- unknown allowed, occupied not; the
-  Euclidean-nearest cell of a stair head is as likely in the room behind the
-  corridor's wall as in the corridor, and was, in the first recorded
-  campaign), else re-checked in 10 actions; worth it = the other storey is
-  unvisited, or visited with frontier left; score = worth per metre, worth 1.0
-  unvisited / 0.5 visited-with-frontier, cost = the walk to the entry plus the
-  same `stair_cost_m` the RPT* leaf uses. Every call is a `floor_decision`
-  event naming the winner, its direction, its score and each loser's verdict
-  -- one record per distinct verdict. A chosen connector whose approach cannot
-  be planned is re-snapped onto the passable map and retried
-  `approach_failures` (3) times before it is deferred; an approach that ENDS
-  short of the entry (more than 0.65 m from it) is re-snapped on the map as
-  it stands from there and extended while that brings the agent nearer
-  (`approach_extended` events), so the flight is walked from as close to its
-  foot as the observed map allows;
-- **walks the connector's own polyline** (`ground_truth_traversal.py`): a
-  FOLLOW command on every action, led in from where the agent stands -- the
-  first point of every command is the agent's position when its next vertex
-  was decided, held fixed until that vertex changes, so the converter's
-  forward-only progress runs along the lead-in first and can reach the far
-  leg of a folded flight (a U-shaped staircase's top anchor passes within a
-  metre of its bottom one in XY) only by walking there; past the far anchor
-  to step clear of the stair head; a vertex is reached within 0.26 m in plan
-  view and 0.45 m in height (`REACHED_XY_M` / `REACHED_Z_M`; the flight above a
-  switchback is a hand's breadth away in plan view); the atlas confirms the
-  storey only at the far anchor at the destination height, and a storey first
-  reached this way is pinned to the connector's navmesh height (since
-  2026-10-05: the poses the atlas settled on lay on the eased last treads, 0.17 m
-  above the storey in Hanson, and no staircase seen up there ever became a
-  portal). **Once begun, a transition is finished**: a blocked forward step
-  first tightens the following to a straight line at the next vertex (no
-  lookahead to cut the corner into the banister the shortest path grazes) and
-  otherwise falls back to the last vertex reached rather than skipping; turning
-  back takes `commit_failures` (12) blocked steps or `commit_stall_actions`
-  (30) in which the distance still to walk along the route never shrank by
-  4 cm (displacement is not progress: an agent skidding along a wall moves
-  every action and gets nowhere), and the transition budget no longer turns
-  the agent round -- it lets the atlas settle wherever the agent stands while
-  the following goes on; at the destination height by the far anchor, the
-  storey is confirmed outright after `confirm_actions` (24) if the atlas's
-  translated-plateau test has not fired (`destination_forced` -- a landing
-  walled on three sides). A retreat goes back down the vertices walked and
-  then off the flight to where the approach ended -- or, when no vertex was
-  ever reached, straight to where the traversal began -- and the return is
-  settled the action it is reached rather than left to a plateau test an
-  agent turning on the spot never passes. A spent retreat never halts the
-  episode either;
-- **starts an unplanned transition only ON a connector**: a height departure
-  beyond `departure_m` (0.45 m) within `near_connector_m` (0.75 m) of a
-  polyline completes the climb in the direction already taken; any other
-  departure is logged once (`height_departure_ignored`) and left to the atlas.
-  The 13 cm raised bathroom floor and the 12 cm wobble at a stair head that
-  the observed mode took for first treads never reach the threshold;
-- runs **no look-down inspections** and applies **no depth veto** on the
-  committed route -- the stairs are known.
+Until then `{"multifloor": {"stair_source": "ground_truth"}}` selected an
+ablation in which the evaluator read each scene's navmesh
+(`habitat/stair_connectors.py`: storey heights and, between them, every
+stair connector with its anchors, its centreline and a sample of its
+surface), attached that block to `ObjNavEpisode.metadata`, and the building
+coordinator used it: a "perfect stair detector" made a connector a portal once
+its surface was in frame, the node oracle was told how many storeys the
+building has and this storey's rank among them, every such portal was a NODE
+of the room-search loop's RPT\* instance, the fallback had an explicit up/down
+rule (`floor_decision.py`), and the climb followed the connector's polyline
+(`ground_truth_traversal.py`). It was the default from its introduction (progress
+entry 012) until 2026-10-21.
 
-`configuration()["ground_truth_stairs"]` is `True` for such a run; it is not an
-observed-only run, and its results must say so. RGB stair detections (YOLO
-`stairs`/`staircase`) are context labels only, as before.
+It was privileged scene geometry -- no published zero-shot ObjectNav method is
+told where the stairs are or how many storeys a building has -- and it is
+gone: the modules, the settings that only it read (`near_connector_m`,
+`commit_failures`, `commit_stall_actions`, `confirm_actions`), the adapters'
+metadata, the storey count and rank in the prompt. Asking for it raises
+(`ValueError: ... was removed`); the harness refuses an episode whose metadata
+carries storeys, stairs or a navmesh; and
+`core/planning/object_search/tests/test_no_privileged_geometry.py` fails if
+`core` can reach any of it again. What this leaves, and what it does not:
 
-**`observed`** -- the default (above). Everything in the next section
-describes it.
+- **`habitat/stair_connectors.py` stays, for analysis only** -- the
+  after-the-fact breakdown of results by the storey a goal is on
+  (`hm3d/episode_levels.py`). It is never handed to a policy.
+- **Staircases as nodes have no stair source.** The loop's side
+  (`rooms/stair_nodes.py`, `MultiFloorSearch.commit`, the way-back hold, the
+  leaf of flight length plus `floor_change_cost_m`) is kept and tested on
+  hand-placed portals, but a staircase is offered only when its portal says
+  which storey the flight leads to, and the observed discovery measures a
+  flight's treads, not where it ends. Giving the observed source that
+  knowledge -- from the flight's measured rise, or from a storey once it has
+  been stood on -- is the open work.
+- **Results recorded with it stay what they were.** The six tracked Gibson
+  validation records of 2026-10-08 to 2026-10-18 (`gibson/results/*/run.json`:
+  `"stair_source": "ground_truth"`, `"ground_truth_stairs": true`) were run
+  while that source was the default: the staircases their search knew and
+  masked were the navmesh's connectors, not flights the robot had measured.
+  They cannot be reproduced with this code; read them as such. The 15-episode
+  campaign of [MULTISTORY_RESULTS.md](MULTISTORY_RESULTS.md) (2026-09-17)
+  predates the source and never used it.
+
+RGB stair detections (YOLO `stairs`/`staircase`) are context labels only, as
+before.
 
 ## Architecture
 
@@ -151,16 +96,14 @@ Floor IDs are discovery IDs, not surveyed floor numbers.
 The detector, revisable room labels, RPT* objective, frontier/FALCON local search,
 weighted A*, route commitment and multi-view target confirmation are preserved.
 The building coordinator schedules stair portals after bounded floor search or
-local exhaustion -- in observed mode with the RPT* solver over observed travel
-costs, in ground-truth mode with the explicit rule above. Unknown floors retain
+local exhaustion, with the RPT* solver over observed travel costs. Unknown floors retain
 explicit prior probability; a local room ranking does not assert the whole
 building has been searched.
 
 Floor changes require a translated, stable-height plateau. Turning on a stair
-or crossing successive treads does not allocate a floor. In observed mode new
-floors also require at least 3 m² of connected, observed near-level support,
-excluding small stair landings; in ground-truth mode the storey heights are
-known and the 1.5 m separation rule alone keeps landings from becoming floors.
+or crossing successive treads does not allocate a floor. New floors also
+require at least 3 m² of connected, observed near-level support, excluding
+small stair landings: nobody tells the atlas the storey heights.
 A return to an existing height restores the saved context and revalidates
 routes. Intermediate stair observations do not contaminate floor semantics.
 Room clocks pause off-floor; the episode action clock never pauses or refills.
@@ -174,13 +117,11 @@ the same floor, never unknown cells. The underfoot height is measured from depth
 rather than assuming a fixed offset between a smoothed navmesh base and a
 scanned tread. Steering checks legal discrete headings, and retreat commits to a
 fixed observed reverse trail. Failed proposals have bounded attempts and
-cooldowns. In that mode the policy never receives scene geometry, GT heights,
-goal maps, navmesh queries, evaluator distances or success-region entry signals;
-in ground-truth mode it receives the storey heights and stair connectors and
-nothing else.
+cooldowns. The policy never receives scene geometry, GT heights, goal maps,
+navmesh queries, evaluator distances or success-region entry signals.
 
 Configuration is under `RPTSettings.multifloor` (`enabled: true`,
-`stair_source: "observed"` by default since 2026-10-21; `"ground_truth"` is the ablation).
+`stair_source: "observed"`, the only source; `"ground_truth"` raises).
 `{"multifloor": {"enabled": false}}` explicitly selects the historical destructive
 floor-reset ablation. Both `--explorer frontier` and `--explorer falcon` support
 the building coordinator. The frontier mode remains the default; enabling
@@ -309,24 +250,21 @@ The latter covers height hysteresis, stair landings/turns, return edges,
 independent grids and target memory, paused floor clocks, coverage deduplication,
 step-connected terrain versus cliffs, height-safe scoring and selective recording.
 `tests/test_stair_ground_truth.py` covers the navmesh reading on a synthetic
-two-storey house and the policy's orientation of connectors;
-`tests/test_ground_truth_floor_transitions.py` covers the fallback rule (the
-climb charged, a dearer connector losing at equal worth, the approach sweep),
-the stair-node builder (ids, facts, leaf, the way back marked `arrived_by`,
-the storey summaries the prompt shows), the coordinator deciding nothing by a
-clock, `commit` and the climb ending the node's turn, the re-snapped approach,
-the polyline traversal and its commitment (tight following before a skip, many
-blocked steps before a retreat, the transition budget no longer turning the
-climb round, the forced confirmation at a boxed stair head), the raised-floor
-and accidental-descent cases and the arrival that settles a new floor;
-`tests/test_room_search_loop.py` covers the staircase as a node of the order
-end to end. The observed-mode stair tests in
-`tests/test_multistory_repair.py` select `stair_source: "observed"` explicitly.
+two-storey house (the analysis module, nothing a policy sees);
+`tests/test_stair_nodes.py` covers the loop's side of staircases as nodes on
+hand-placed portals -- ids, facts, the leaf, the approach point that must see
+the entry, the way back marked `arrived_by`, `commit` and the climb ending the
+node's turn -- and that a flight the robot only measured is not a node and
+`stair_source: "ground_truth"` is refused; `tests/test_room_search_loop.py`
+covers the staircase as a node of the order end to end on the same portals.
+The observed stair tests are in `tests/test_multistory_repair.py`,
+`tests/test_multifloor.py` and `tests/test_spawn_floor_guard.py`.
 Actual simulator smoke tests remain necessary: synthetic tests alone cannot
-establish navigation success. The connector reading itself was checked against
-the real Ranchester navmesh: storeys at 0.05 m and 2.64 m, one connector,
-bottom anchor (13.35, 1.56) to top anchor (15.21, 1.77) ENU, 5.5 m long -- the
-flight the recorded episodes climbed and descended.
+establish navigation success. The navmesh reading itself (the analysis
+module) was checked against the real Ranchester navmesh: storeys at 0.05 m
+and 2.64 m, one connector, bottom anchor (13.35, 1.56) to top anchor
+(15.21, 1.77) ENU, 5.5 m long -- the flight the recorded episodes climbed and
+descended.
 
 `gibson.stair_diagnostic` runs a bounded, recorded component test from a pose in
 an existing observation trajectory. Its optional `--spent-floor-budget` setting

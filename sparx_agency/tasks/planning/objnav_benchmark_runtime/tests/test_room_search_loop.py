@@ -90,7 +90,7 @@ class RecordingSupervisor:
         return getattr(self.inner, name)
 
 
-def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None, stair_prob=0.3, metadata=None,
+def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None, stair_prob=0.3,
                 visit="sweep", settings=None, **loop_overrides):
     """A policy on the two-room world, with a counting LLM and a fixed room order.
 
@@ -100,13 +100,12 @@ def loop_policy(order=(1, 0), probs=(0.6, 0.4), room_b_resolved=False, llm=None,
     without a probability 0.05 and every stair node offered ``stair_prob``,
     and recording the nodes and context it was handed. ``llm`` replaces the
     neutral fake for the classifier (the oracle is stubbed either way);
-    ``metadata`` is the episode's scene structure (the ground-truth stairs);
     ``settings`` are ``RPTSettings`` overrides (``loop_overrides`` are the
     loop's own). ``visit`` is the loop's visit mode: these regressions were
     written for the bounded ``sweep`` and keep running it; the scan-mode
     tests ask for ``visit="scan"``.
     """
-    policy, episode = setup_policy(llm=llm, metadata=metadata or {}, **(settings or {}))
+    policy, episode = setup_policy(llm=llm, **(settings or {}))
     policy.loop_settings = LoopSettings(visit=visit, **loop_overrides)
     policy.supervisor_params = policy.loop_settings.supervisor_params(policy.settings.seed)
     policy.loop.settings = policy.loop_settings
@@ -751,29 +750,40 @@ def test_a_room_llm_in_back_off_leaves_the_name_standing_and_the_turn_running():
     assert policy.supervisor.state == TRANSIT and command.info["kind"] == "transit/1"
 # -- the stairs as nodes of the order ----------------------------------------------
 FLIGHT = [[4.0, 1.0, 0.0], [4.0, 2.0, 0.9], [4.0, 3.0, 1.8], [4.0, 4.0, 2.7]]
-STRUCTURE = {"stair_source": "navmesh",
-             "floor_levels": [{"height_m": 0.0, "area_m2": 40.0}, {"height_m": 2.7, "area_m2": 40.0}],
-             "stair_connectors": [{"id": 0, "bottom_xyz": FLIGHT[0], "top_xyz": FLIGHT[-1], "bottom_z": 0.0,
-                                   "top_z": 2.7, "polyline_xyz": FLIGHT, "length_m": 4.0, "rise_m": 2.7}]}
 STAIRS = stair_node_id(0)
 FLIGHT_M = 3 * math.hypot(1.0, 0.9)
-def stair_policy(order, stair_prob=0.3, probs=(0.6, 0.4), structure=STRUCTURE, **loop_overrides):
-    """The two-room world with one ground-truth staircase whose foot stands in room A -- and has been SEEN.
+def place_stairs(policy, obs, flight=FLIGHT, stairs_id=0, leads_to=True):
+    """One flight on the floor in force, placed as the coordinator places a flight it has measured.
 
-    The coordinator knows only the stairs its perfect detector has had in
-    frame; the fixture stands in for that sighting, so the connector becomes
-    a portal of this floor when the building observes. The benchmark default
-    forbids taking stairs (``allow_stair_traversal=False``); these are the
-    multi-storey regressions, so the fixture lifts it explicitly.
+    ``MultiFloorSearch._portal`` is what the observed discovery calls for a
+    run of treads. With ``leads_to`` the portal also says which storey the
+    flight ends on (``destination_z``) and carries an identity both of its
+    ends share (``stairs_id``) -- the two facts a stair NODE needs
+    (``rooms/stair_nodes.py``). No stair source of the agent's supplies them
+    today (the one that did read the simulator's navmesh, and is removed), so
+    the tests of the loop's side of staircases-as-nodes write them by hand;
+    nothing of a simulator is in the fixture.
+    """
+    direction = 1 if flight[-1][2] > flight[0][2] else -1
+    portal = policy.building._portal(obs, direction, [tuple(float(v) for v in point) for point in flight])
+    portal["observations"] = 2                                 # seen twice: eligible wherever a portal has to be
+    if leads_to:
+        portal.update(destination_z=float(flight[-1][2]), stairs_id=stairs_id)
+    return portal
+def stair_policy(order, stair_prob=0.3, probs=(0.6, 0.4), flight=FLIGHT, **loop_overrides):
+    """The two-room world with one staircase whose foot stands in room A, placed and known to lead upstairs.
+
+    The benchmark default forbids taking stairs (``allow_stair_traversal=False``); these are the
+    multi-storey regressions, so the fixture lifts it explicitly. See :func:`place_stairs` for what the
+    portal is and is not.
     """
     policy, episode, world, rooms, reasoned = loop_policy(order=order, probs=probs, stair_prob=stair_prob,
-                                                          metadata=structure, settings={"allow_stair_traversal": True},
+                                                          settings={"allow_stair_traversal": True},
                                                           **loop_overrides)
     obs = obs_at(episode, 0, IN_A)
     policy.mapping.atlas.update(obs.pose)                      # floor 0 at z=0, as the first mapping update does
-    for connector in policy.building.ground_truth.connectors:
-        policy.building.sightings.mark_seen(connector.id, 0, connector.polyline)
-    policy.building.observe(obs)                               # the seen connector becomes a portal on this floor
+    place_stairs(policy, obs, flight)
+    policy.building.observe(obs)
     return policy, episode, world, rooms, reasoned
 def test_a_staircase_is_offered_to_the_oracle_and_the_solver_as_a_node_charged_for_the_climb():
     policy, episode, world, rooms, reasoned = stair_policy(order=(1, 0, STAIRS))
@@ -781,7 +791,9 @@ def test_a_staircase_is_offered_to_the_oracle_and_the_solver_as_a_node_charged_f
     assert len(policy.building.portals) == 1 and policy.building.portals[0]["cooldown_until"] == 0
     assert policy.reasoned_with[0]["stairs"] == [STAIRS], "the staircase went to the oracle beside the rooms"
     context = policy.reasoned_with[0]["context"]
-    assert "2 storeys known" in context.storey and context.others == ()
+    assert context.others == (), "only the storeys the robot has stood on are summarised"
+    assert "storeys known" not in context.storey and "lowest" not in context.storey, (
+        "how many storeys the building has, and this one's rank, is nothing the robot has observed")
     assert policy.reasoned_with[0]["here"] == IN_A
     assert policy.loop.stats["stairs_offered"] == 1 and sorted(policy.loop._stairs) == [STAIRS]
     estimate = policy.loop.estimates[STAIRS]
@@ -808,11 +820,14 @@ def test_when_the_order_puts_the_stairs_first_the_building_climbs_and_the_node_t
     assert list(command.waypoints[-1]) == pytest.approx(FLIGHT[0][:2], abs=0.2)
     assert [e for e in building.events if e["event"] == "portal_selected"][0]["solver_source"] == "rpt_star"
     assert policy.loop.events[-1]["event"] == "transit" and policy.loop.events[-1]["entry"] == "stairs"
-    assert not [e for e in building.events if e["event"] == "floor_decision"], "no explicit rule ran: the order decided"
+    assert [e["solver_source"] for e in building.events if e["event"] == "portal_selected"] == ["rpt_star"], (
+        "the order decided, once: the coordinator's own allowance rule did not run")
     # From here the policy asks the building, not the loop (``_decide`` on ``building.committed``).
-    climb = building.plan(obs_at(episode, 1, (4.2, 1.0)), world)
+    foot = obs_at(episode, 1, (4.2, 1.0))
+    building.prepare_observation(foot)                         # the coordinator's terrain reads this frame, as every action
+    climb = building.plan(foot, world)
     assert building.transition is not None and building.phase == "TRAVERSE" and climb.info["kind"] == "TRAVERSE"
-    assert climb.info["direction"] == "up" and climb.waypoints
+    assert climb.info["portal"] == 0, "walked on measured tread support (``stair_traversal``), from the foot of the flight"
     assert policy.supervisor.state == SELECT and policy.supervisor.history[-1][:2] == (STAIRS, TRAVERSED)
     assert policy.loop.stats["stairs_taken"] == 1 and policy.loop.next_room is None and policy.loop._needs_reason
     assert policy.loop.events[-1]["event"] == "stairs_taken" and policy.loop.events[-1]["portal"] == 0
@@ -843,9 +858,7 @@ def test_the_stairs_the_agent_came_down_are_offered_again_with_the_arrival_noted
     assert policy.loop.estimates[STAIRS]["arrived_by"] is True
 def test_a_staircase_the_observed_map_has_not_reached_is_not_a_node_this_action():
     far = [[14.0, 3.0, 0.0], [15.0, 3.0, 0.9], [16.0, 3.0, 1.8], [17.0, 3.0, 2.7]]     # beyond the 12 m world
-    structure = dict(STRUCTURE, stair_connectors=[dict(STRUCTURE["stair_connectors"][0], bottom_xyz=far[0],
-                                                       top_xyz=far[-1], polyline_xyz=far)])
-    policy, episode, world, rooms, reasoned = stair_policy(order=(1, 0, STAIRS), structure=structure)
+    policy, episode, world, rooms, reasoned = stair_policy(order=(1, 0, STAIRS), flight=far)
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert len(policy.building.portals) == 1
     assert policy.reasoned_with[0]["stairs"] == [] and policy.loop._stairs == {}
@@ -879,7 +892,8 @@ def test_the_loop_reports_the_visit_order_and_the_next_node():
     assert diagnostics["order"] == [1, STAIRS, 0] and diagnostics["next_room"] == 1
     assert diagnostics["stairs_offered"] == [STAIRS] and diagnostics["estimates"][str(STAIRS)]["kind"] == "stairs"
     configuration = policy.configuration()
-    assert "RPT* over rooms and stair nodes" in configuration["floor_change_decision"]
+    assert configuration["floor_change_decision"] == "exploration fallback only", (
+        "what a run of this code does: no stair source says where a flight leads, so no run offers a stair node")
     assert configuration["node_oracle"]["route"] == "LLM_REASONING_MODEL"
 @pytest.mark.parametrize("kwargs", [{"stairs_as_nodes": 1}, {"entry_frontier": "no"}])
 def test_loop_settings_reject_nonsense_flags(kwargs):

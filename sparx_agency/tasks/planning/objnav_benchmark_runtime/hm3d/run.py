@@ -266,9 +266,6 @@ def prepare(args):
         if oracle and ground_truth is None:
             raise RuntimeError("ground-truth perception has no annotations to read (see the issues above)")
         policy, method = _method(args, protocol, ground_truth)
-        if args.agent in ("rpt", "falcon-yolo"):
-            policy.target_projector = getattr(env, "target_projector", None)
-            method["target_navmesh_projection"] = policy.target_projector is not None
     except Exception as exc:
         issues.append("Method services/configuration: %s" % exc)
     try:

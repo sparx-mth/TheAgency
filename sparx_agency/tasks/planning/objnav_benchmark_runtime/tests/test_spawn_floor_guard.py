@@ -14,16 +14,21 @@ from sparx_agency.core.localization.floor_atlas import MultiFloorParams
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
-    FLIGHT, IN_A, STAIRS, STRUCTURE, loop_policy, obs_at, stair_policy)
+    FLIGHT, IN_A, STAIRS, loop_policy, obs_at, place_stairs, stair_policy)
 
 
-def forbidden_stairs(order=(STAIRS, 1, 0), stair_prob=0.9, metadata=STRUCTURE, **loop_overrides):
-    """``stair_policy`` under the benchmark default: the staircase is seen and placed, traversal forbidden."""
-    policy, episode, world, rooms, _ = loop_policy(order=order, stair_prob=stair_prob, metadata=metadata, **loop_overrides)
+def forbidden_stairs(order=(STAIRS, 1, 0), stair_prob=0.9, flight=FLIGHT, **loop_overrides):
+    """``stair_policy`` under the benchmark default: the staircase is seen and placed, traversal forbidden.
+
+    The flight is placed as the coordinator places one its depth has measured (``place_stairs``), and the
+    spawn storey is confirmed -- walked level on support of floor size, as it is a few actions into most
+    episodes -- so the guard's rules here are a storey's, not a provisional spawn's.
+    """
+    policy, episode, world, rooms, _ = loop_policy(order=order, stair_prob=stair_prob, **loop_overrides)
     obs = obs_at(episode, 0, IN_A)
     policy.mapping.atlas.update(obs.pose)
-    for connector in policy.building.ground_truth.connectors:
-        policy.building.sightings.mark_seen(connector.id, 0, connector.polyline)
+    place_stairs(policy, obs, flight)
+    policy.building.storey_confirmed = True
     policy.building.observe(obs)
     assert len(policy.building.portals) == 1, "the seen staircase is still placed: knowledge, not a destination"
     return policy, episode, world, rooms
@@ -231,9 +236,12 @@ def test_a_settled_half_level_is_adopted_as_part_of_the_spawn_storey_after_thirt
     assert not policy.floor_guard.off_plane and policy.floor_guard.goal_allowed(obs, world, (4.0, 3.0), "room_entry")
     assert policy.episode_info()["spawn_floor_guard"]["half_levels"] == [1]
     # A plateau a storey away is another storey: the atlas makes a floor of it itself, the guard adopts
-    # nothing, and every goal on it is refused as before.
+    # nothing, and every goal on it is refused as before. What makes it a storey to the atlas is level
+    # support of floor size under the agent, measured by its own depth (``plateau_observer``) -- nobody
+    # tells it the storey heights.
     policy, episode, world, _ = forbidden_stairs()
     atlas = policy.mapping.atlas
+    atlas.plateau_observer = lambda pose: 6.0
     policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
     for i in range(HALF_LEVEL_ACTIONS + 10):
         atlas.update(at(episode, i + 1, 3.0 + 0.3 * min(i, 5), 3.0, z=1.6).pose)
@@ -246,14 +254,12 @@ def test_a_settled_half_level_is_adopted_as_part_of_the_spawn_storey_after_thirt
 
 # -- the mask never traps the agent (Collierville/000000, 2026-10-08: 309 idle turns 0.6 m from the foot) --------
 RUN_UP = [[4.0, 0.2, 0.0], [4.0, 1.0, 0.0]] + FLIGHT[1:]          # a flat run on the floor, then the same flight
-RUN_UP_STRUCTURE = dict(STRUCTURE, stair_connectors=[dict(STRUCTURE["stair_connectors"][0], bottom_xyz=RUN_UP[0],
-                                                           polyline_xyz=RUN_UP, length_m=4.8)])
 
 
 def test_the_floor_run_of_a_flight_is_not_masked_while_its_treads_are():
     """The polyline begins on the storey's own floor; within FLOOR_RUN_M of the plane it is floor, not flight."""
     from sparx_agency.core.planning.object_search.world_model.peek_stairs import FLOOR_RUN_M
-    policy, episode, world, _ = forbidden_stairs(metadata=RUN_UP_STRUCTURE)
+    policy, episode, world, _ = forbidden_stairs(flight=RUN_UP)
     mask = stair_peek_mask(policy, world)
     assert mask.any()
     gx, gy = world.world_to_grid(4.0, 0.2)
@@ -337,9 +343,7 @@ def test_the_trail_stays_carved_after_the_agent_moves_on():
 # -- the capsule never closes a corridor (Markleeville/000000, 2026-10-08) -------------------------------------
 def along_the_wall(x):
     """The same flight, standing ``x`` from the west face of the wall at x = 5.5 (room A's east wall)."""
-    flight = [[x, 1.0, 0.0], [x, 2.0, 0.9], [x, 3.0, 1.8], [x, 4.0, 2.7]]
-    return dict(STRUCTURE, stair_connectors=[dict(STRUCTURE["stair_connectors"][0], bottom_xyz=flight[0],
-                                                   top_xyz=flight[-1], polyline_xyz=flight)])
+    return [[x, 1.0, 0.0], [x, 2.0, 0.9], [x, 3.0, 1.8], [x, 4.0, 2.7]]
 
 
 def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_the_wall_passable():
@@ -350,7 +354,7 @@ def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_t
     a squeeze a non-sliding body cannot walk -- and is no corridor to spare any more)."""
     from scipy import ndimage
     from sparx_agency.core.planning.object_search.world_model.peek_stairs import _passable
-    policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(4.6))     # 0.9 m from the wall
+    policy, episode, world, _ = forbidden_stairs(flight=along_the_wall(4.6))     # 0.9 m from the wall
     world.grid[5:55, 30:44] = world.values.occupied                                 # x 3.0-4.4, y 0.5-5.5: no way round
     obs = obs_at(episode, 0, (5.25, 0.7))                                            # at the corridor's south end
     confined = policy.floor_guard.observe(obs, world)
@@ -374,7 +378,7 @@ def test_the_stair_capsule_shrinks_to_keep_the_corridor_between_the_flight_and_t
 
 
 def test_the_capsule_keeps_its_preferred_margin_where_nothing_is_in_the_way():
-    policy, episode, world, _ = forbidden_stairs(metadata=along_the_wall(2.0))     # 3.5 m of open floor to the wall
+    policy, episode, world, _ = forbidden_stairs(flight=along_the_wall(2.0))     # 3.5 m of open floor to the wall
     policy.floor_guard.observe(obs_at(episode, 0, IN_A), world)
     preferred = policy.settings.stair_margin_m
     assert preferred == 0.45 and list(policy.floor_guard.stair_margins_m.values()) == [
@@ -385,7 +389,7 @@ def test_the_capsule_keeps_its_preferred_margin_where_nothing_is_in_the_way():
     from sparx_agency.core.planning.object_search.settings import RPTSettings
     with pytest.raises(ValueError):
         RPTSettings(stair_margin_m=0.1)
-    wider, episode_w, world_w, _ = forbidden_stairs(metadata=along_the_wall(2.0), settings={"stair_margin_m": 0.55})
+    wider, episode_w, world_w, _ = forbidden_stairs(flight=along_the_wall(2.0), settings={"stair_margin_m": 0.55})
     wider.floor_guard.observe(obs_at(episode_w, 0, IN_A), world_w)
     assert list(wider.floor_guard.stair_margins_m.values()) == [0.6], "the older six cells, asked for explicitly"
 
@@ -440,7 +444,7 @@ def test_a_flight_walked_down_with_traversal_forbidden_is_walked_back_up_the_tra
     building, atlas = policy.building, policy.mapping.atlas
     # A storey: its level support is of floor size (``confirm_area_m2``), so walking it confirms it.
     monkeypatch.setattr(type(building.terrain), "plateau_area", lambda self, pose: 6.0)
-    assert building.ground_truth is None and not building.allowed
+    assert not building.allowed
     step = 0
     for i in range(6):                                                    # along the storey
         policy.plan(at(episode, step, 1.0 + 0.25 * i, 1.0, depth=3.0)); step += 1
@@ -1262,10 +1266,28 @@ def test_the_stair_mask_is_lifted_from_steps_by_the_same_bound_that_frees_them(m
 
 
 def test_the_closing_may_stand_where_the_guard_frees_and_nowhere_further():
-    """The standoff tolerance is the guard's step reach: the band from a provisional spawn storey, ``departure_m`` after."""
+    """Where the closing may stand is the standing floor of the world the guard hands the policy -- no rule of its own.
+
+    00835/000006: the television's nearest view points stand 0.41 m down three treads. Until 2026-11-15 the
+    closing compared each standoff's NAVMESH height with the agent's and tolerated the guard's step reach;
+    it reads no height from anyone now. The guard writes the steps the storey owns free and a flight or a
+    drop occupied, and the closing's standing floor is what is left: free where the guard frees, and nothing
+    on a cell the guard masked.
+    """
     from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
-    policy, _, _, _ = forbidden_stairs()
+    assert not hasattr(TargetApproachPath, "_height_tolerance")
+    policy, episode, world, _ = forbidden_stairs()
     guard, departure = policy.floor_guard, policy.mapping.atlas.params.departure_m
-    assert not guard.provisional, "a ground-truth storey is a storey"
-    assert TargetApproachPath(policy)._height_tolerance() == pytest.approx(guard.step_reach_m) == pytest.approx(departure)
-    assert departure > 0.41, "00835/000006: the television's nearest view points stand 0.41 m down the treads"
+    assert not guard.provisional, "a storey walked level is a storey"
+    assert guard.step_reach_m == pytest.approx(departure) and departure > 0.41
+    obs = obs_at(episode, 0, IN_A)
+    confined = guard.observe(obs, world)
+    stairs = stair_peek_mask(policy, world, obs.pose)
+    assert stairs.any() and (confined.grid[stairs] == world.values.occupied).all()
+    for clearance in (policy.settings.min_clearance_m, policy.settings.body_radius_m):
+        floor = policy.closing.standing_floor(obs, confined, clearance)
+        assert floor.reachable.any() and not (floor.standable & stairs).any(), "no standing point on a masked flight"
+        assert not floor.contains((4.0, 1.3)), "the first treads, 0.27 m up: masked, and no place to stand"
+        assert floor.contains(IN_A), "the storey's own floor is"
+        assert floor.reachable.sum() < policy.closing.standing_floor(obs, world, clearance).reachable.sum(), (
+            "the guard's world is the one the closing reads: the flight it masks is floor on the plain map")

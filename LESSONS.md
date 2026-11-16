@@ -11,6 +11,98 @@ Format per entry:
 
 ---
 
+## 2026-11-15 — "Declared" privileged geometry stayed in the agent for a month: a navmesh snap in the closing and the navmesh's stairs in the episode metadata
+
+**Symptom:** an audit of what the ZSON agent is given found the simulator's navmesh in `core/`, twice. Every run script
+bound `policy.target_projector` to `HabitatRGBDSimulator.project_target` (a `pathfinder.snap_point`), and the closing
+projected every standing point through it -- the standoff ring, the back-off spot, the nearest-floor goal. And both
+environment adapters put the navmesh's storeys and stair connectors into `ObjNavEpisode.metadata`, which
+`stair_source="ground_truth"` read. Both full-split runs behind the paper used the first. ASCENT, ApexNav, VLFM and
+MFNP give their agents neither.
+
+**Root cause:** each was introduced as *declared*, and a declaration is not a boundary. The projection was "geometry
+only -- no goal, no distance, no view point", written into the run configuration (`target_navmesh_projection: true`)
+and into every docstring as "optional, separate from evaluator data"; the scene structure was "non-privileged scene
+structure, nothing about the goal", and the harness's metadata tripwire was taught to accept it. Both statements were
+true and beside the point: the navmesh says where walkable floor is whether or not the agent has looked there, and the
+benchmark's success region is defined on that same mesh. Nothing failed, because the only check was a list of key
+names that someone had extended. `core/planning/object_search/tests/test_package_boundaries.py` forbade IMPORTING the
+simulator, and neither leak needed an import: one was a callable injected at run time, the other a dict.
+
+**Fix / workaround:** both removed (CHANGELOG 2026-11-15); standing points come from the agent's own map
+(`world_model/standing_floor.py`). The boundary is now a test, not a sentence:
+`core/planning/object_search/tests/test_no_privileged_geometry.py` closes the three ways such data reaches code -- by
+import (transitive closure), by NAME (an injected handle needs no import, but the code using it must spell
+`snap_point`, `target_projector`, `stair_connectors` ...) and through the episode (no `core` module reads
+`episode.metadata`) -- and every scanner is run against planted leaks so a rule that matches nothing cannot pass.
+`objnav_benchmark_runtime/tests/test_agent_gets_no_scene_geometry.py` does the adapters' side, and the harness refuses
+`navmesh`/`stair`/`storey`/`floor` metadata keys at reset.
+
+**Don't:** accept "it carries no goal information" as the test for privilege -- ask what a robot with the same camera
+would have. Don't extend an allow-list to let a new input through a tripwire; and don't record a privileged input in
+the configuration and call that disclosure enough: the numbers still came from it.
+
+## 2026-11-15 — The standing floor asked more of the default planner than the rule did, so the squeeze planner took the standoffs; and a mean of bumps that was two episodes of something else
+
+**Symptom:** the first paired run of the closing without the navmesh (85 MP3D episodes, the same episodes with and
+without the change, a deterministic pipeline: an A/A control repeated 20 of 20 trajectories exactly) did not lose
+success -- five episodes won, one lost -- but the squeeze planner had taken a standoff in 32 of the 85 episodes where
+the navmesh runs had taken none, and the one loss was Z6MFQCViBuw/000098: 160 actions in front of a strip three cells
+wide between a sofa and a table, the action bound, the chair given up. Blocked forward moves were up 1.1 an episode.
+
+**Root cause:** two things, and the second is about reading the first. (1) The two planners had been given two FLOORS,
+each "every cell within the planner's standoff observed free". For the squeeze planner that is the rule asked for (the
+body radius, 0.18 m). For the default planner it asked for a 0.25 m disc of OBSERVED floor, which is more than the
+rule and more than the planner needs: its standoff is from obstacles, and it has always walked beside cells nobody has
+seen. A map of a few frames has almost no such disc -- sampling holes, the edge of the view, a bump mark beside the
+agent -- so the default planner was not asked, and the squeeze planner's `detour_factor` trades a roomy way for a
+tight one half again as short. (2) The mean of the bumps was not a narrow-passage effect: two episodes
+(zsNo4HB9uLZ/000015, 2azQ1b91cZZ/000118) made up 67 of the 94 extra bumps, and both were the verification's blind
+"glimpse" steps -- up to 35 forward steps at a box seen without a usable depth, refused one after another -- a loop
+that is in the navmesh runs too (2azQ1b91cZZ/000118: 35 such steps, 46 bumps) and has nothing to do with where the
+agent may stand. The median difference was zero and the count identical in 50 of 85 episodes.
+
+**Fix / workaround:** ONE floor at the body radius (`world_model/standing_floor.py`), two planners asked of it: the
+default planner first, of the standing cells that keep its standoff from every OBSERVED obstacle (`standoff_m`;
+unknown cells cast none), the squeeze planner then of all of them (`TargetClosing.standing_planners`). On the same
+85 episodes the squeeze planner then took a standoff in 17 (was 32) and boxed-in releases fell from 0.176 to 0.094 an
+episode; success was within two episodes either way. On all 180 of the set, against the navmesh runs: success 0.778 ->
+0.789, refused forward steps 6.67 -> 7.95 an episode -- 133 of the 230 extra in five glimpse-loop episodes, the rest
+in the 34 episodes with a squeezed standoff (6.59 -> 9.97), none in the other 141 (5.65 -> 5.52). The glimpse loop is
+left as it is and written down here: it is not this change's.
+
+**Don't:** make a squeezed standoff "provisional" by asking the order again on every action for one the default
+planner reaches -- tried and withdrawn the same day: it did not rescue the episode it was written for, and the one
+other episode looked at went from 445 steps and 52 refused moves to 500 and 216. Don't read a mean of collisions
+without its tail: look for the episodes that carry it and at what they were doing. And don't expect the standing
+rule to find a way round an obstacle the target was seen over (pLe4wQe7qrG/000109: a table 1.4 m off with a line of
+occupied cells between, the lock released as boxed in after the footing sweep): the navmesh knew there was floor to stand on beside it
+and the old routes crossed the unseen floor to get there; the agent now has to explore its way round, and nothing
+aims the search at doing so.
+
+## 2026-11-15 — Six software-rendered Habitat scenes at once took a 30 GB laptop to 3 GB free: a CPU campaign is bounded by RAM, not cores
+
+**Symptom:** a paired A/B launched CPU-only (`--software-render`, Mesa llvmpipe, `/dev/dri` hidden, GPU untouched) with
+six MP3D scene processes on a 32-core machine: within 80 s `MemAvailable` fell from 16 GB to 3 GB and 4 GB went to
+swap. Each process held 1.7-5.9 GB resident (Z6MFQCViBuw 5.9, 2azQ1b91cZZ 5.0, zsNo4HB9uLZ 2.5, 8194nk5LbLH 1.9,
+pLe4wQe7qrG 1.7), flat after the scene load, at about one core each.
+
+**Root cause:** under llvmpipe everything the GPU would hold -- geometry, textures, the semantic mesh -- lives in the
+process's own RAM, and the footprint is the scene's, not the episode's. The GPU plan (`gpu_plan.py`) budgets VRAM per
+renderer; nothing budgets RAM for the software path, and `--jobs` sized for the cores oversubscribes memory several
+times over. `SimulatorConfiguration.requires_textures = False` did not change the footprint (habitat-sim 0.2.4, MP3D:
+1.92 GB with and without), so it is not a way out.
+
+**Fix / workaround:** launch scene jobs against `MemAvailable`, not against a job count: start one only if a reserve
+(4-5 GB here) is left after its scene's footprint, learn the footprint from the scene's first process, first fit from
+the queue. Three to four scenes at once is what 30 GB carries. Per step the method costs 0.3-0.5 s on a CPU with an
+in-process stub LLM (a 500-step episode is four minutes). Raising `LP_NUM_THREADS` from 2 to 6 changed nothing
+measurable (174 steps in 47 s and in 50 s; 500 steps in 248 s and in 233 s): the policy, not the rasteriser, is the
+cost, so more render threads are not a way to buy the time back either.
+
+**Don't:** size a software-render campaign by `nproc`. And don't raise GNU `xargs -P` and walk away: `SIGUSR2` lowers
+it for jobs not yet started, but the ones already running keep their memory.
+
 ## 2026-11-10 — Nine near-miss STOPs read as "the evaluator measures 1 m from the base in 3-D"; the generator's source said otherwise, and the fix changed shape
 
 **Symptom:** the MP3D single-storey baseline had nine STOPs within a metre of a goal's view point that scored 0, seven

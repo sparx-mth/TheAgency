@@ -75,18 +75,29 @@ def test_disabled_nothing_is_remembered_and_settings_are_checked():
     assert "target_pursuit" in policy.episode_info()
 
 
-def test_a_standoff_on_a_step_down_is_a_standoff_of_this_storey_but_not_one_on_another():
-    """00835/000006 (2026-10-31): every ring point of a television 0.4 m down three treads was skipped at 0.2 m."""
+def test_a_standoff_on_a_step_down_is_a_standoff_where_the_map_shows_floor_and_none_where_it_shows_a_drop():
+    """00835/000006 (2026-10-31): every ring point of a television 0.4 m down three treads was skipped, because the
+    simulator's navmesh put them 0.4 m below the agent and the closing tolerated 0.2 m. The closing reads no
+    height from anyone any more: where it may stand is what the agent's own storey map shows as standing floor.
+    The spawn-floor guard writes that map -- the steps the storey owns free, a drop or a flight occupied -- so a
+    sunken room is approached exactly when the guard has freed it, and never when it has not."""
     from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
-    confined, _ = setup_policy("bed")
-    assert confined.floor_guard.provisional, "a spawn storey never walked level: the whole step band"
-    assert TargetApproachPath(confined)._height_tolerance() == pytest.approx(confined.settings.step_surface_band_m)
-    assert 0.4 < confined.settings.step_surface_band_m < confined.settings.multifloor.min_floor_separation_m
-    confined.building.storey_confirmed = True          # walked level: as far as the guard frees, the atlas's departure
-    assert TargetApproachPath(confined)._height_tolerance() == pytest.approx(confined.settings.multifloor.departure_m)
-    assert confined.settings.multifloor.departure_m > 0.4
-    climbing, _ = setup_policy("bed", allow_stair_traversal=True)
-    assert TargetApproachPath(climbing)._height_tolerance() == pytest.approx(0.2), "multi-storey: a step, as before"
+    assert not hasattr(TargetApproachPath, "_height_tolerance"), "no height rule of the closing's own"
+    policy, ep = setup_policy("bed")
+    released(policy, ep)
+    freed = room(True)                                       # the sunken half beyond the doorway: steps, freed
+    command = policy.pursuit.command(at(ep, 30), freed)
+    assert command is not None and command.waypoints[-1][0] > 4.1, "a standoff on the floor the guard freed"
+    assert policy.closing.standing_floor(at(ep, 30), freed).contains(command.waypoints[-1])
+    # The same half written occupied -- a drop below the storey plane, a staircase's footprint: no standoff there.
+    fresh, ep2 = setup_policy("bed")
+    released(fresh, ep2)
+    dropped = room(True)
+    grid = dropped.grid.copy()
+    grid[1:-1, 41:-1] = VALUES.occupied
+    dropped = OccupancyGrid2D(grid, dropped.params, values=VALUES)
+    assert fresh.pursuit.command(at(ep2, 30), dropped) is None
+    assert not fresh.closing.standing_floor(at(ep2, 30), dropped).reachable[:, 41:].any()
 
 
 def test_a_bearing_approach_stopped_by_a_wall_hands_its_target_over_beyond_the_depth_range():

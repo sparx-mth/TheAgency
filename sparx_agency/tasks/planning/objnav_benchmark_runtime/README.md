@@ -10,16 +10,16 @@ the code is" below for the map and the recipe for a new dataset.
 Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order →
 local exploration and A*/WA* paths → existing discrete actions. Both explorers
 retain persistent floor contexts; stairs are what the robot's own RGB-D
-measures by default (`RPTSettings.multifloor.stair_source: "observed"` since
-2026-10-21 -- a reachable run of treads rising 0.40 m within 5 m in a
-flight's profile: three or more risers of 0.10-0.24 m with no level between
-them walked for more than 0.55 m, `world_model/stair_terrain.py`
-`stair_profile` since 2026-10-22, when a coffee table and a sofa had passed
-for one; no simulator geometry is read. The navmesh
-connectors are the `"ground_truth"` ablation, see
-[MULTISTORY.md](gibson/MULTISTORY.md): their centreline begins 0.45 m before
-Darden's first riser, on a sloped threshold, and drawn on the grid it closed
-the junction below the flight). **Taking them is off by default**
+measures (`RPTSettings.multifloor.stair_source: "observed"`, the default since
+2026-10-21 and the only source since 2026-11-15 -- a reachable run of treads
+rising 0.40 m within 5 m in a flight's profile: three or more risers of
+0.10-0.24 m with no level between them walked for more than 0.55 m,
+`world_model/stair_terrain.py` `stair_profile` since 2026-10-22, when a
+coffee table and a sofa had passed for one; no simulator geometry is read.
+The `"ground_truth"` ablation that took the navmesh's stair connectors and
+storey levels from the episode metadata is removed and raises, see "The agent
+is given no scene geometry" below and [MULTISTORY.md](gibson/MULTISTORY.md)).
+**Taking them is off by default**
 (`RPTSettings.allow_stair_traversal: false`): the standard ZSON benchmarks
 score an episode on its spawn storey, so the search is confined to it --
 seen staircases and observed drops are impassable (a drop is a surface
@@ -30,13 +30,45 @@ Corozal/000142's own storey; the three-tread flight Darden/000034 walked
 down, inside the tolerance, is the open item), no goal off
 the spawn plane is accepted, and no staircase is a node, a fallback or a
 climb (`core/planning/object_search/multifloor/spawn_floor_guard.py`; the multi-storey development
-entrypoints lift the flag explicitly). Habitat target closing additionally uses
-declared local NavMesh projection (`target_navmesh_projection` in run configuration).
+entrypoints lift the flag explicitly). The target closing stands only on floor
+the agent has observed (`standing_points` in the run configuration; until
+2026-11-15 its standing points were projected onto the simulator's navmesh,
+`target_navmesh_projection`).
 This is an experimental multi-story algorithm, **not a claim of solved navigation**.
+
+## The agent is given no scene geometry
+Since 2026-11-15 nothing of the simulator's scene geometry crosses the agent
+interface. The navmesh is used on THIS side only -- the simulator's own
+physics, episode setup and start validation, the geodesic a score is measured
+by, the harness's kinematics check (`pose_confirmed_on_navmesh`,
+`placed_pose`), the preflight, and the after-the-fact analysis
+(`habitat/stair_connectors.py`, `hm3d/episode_levels.py`). What was removed:
+
+| was | where | now |
+|---|---|---|
+| `policy.target_projector = env.target_projector` in every run script, recorded as `method.target_navmesh_projection` | `hm3d/run.py`, `mp3d/run.py`, `gibson/run.py`, `gibson/run_development.py` | no binding; the policy has no such seam |
+| `HabitatObjNavEnv.target_projector`, `GibsonEnv.target_projector` → `HabitatRGBDSimulator.project_target` (a navmesh `snap_point` of a standing point) | `habitat/env.py`, `gibson/env.py`, `habitat/simulator.py` | deleted; standing points come from `core/.../world_model/standing_floor.py` |
+| `ObjNavEpisode.metadata` = the navmesh's storeys and stair connectors (`HabitatRGBDSimulator.scene_structure`) | `habitat/env.py`, `gibson/env.py` | the episode carries no metadata; the bridge has no `scene_structure` |
+| `multifloor.stair_source: "ground_truth"` (perfect stair detector, centreline traversal, the fallback's up/down rule) | `core/.../multifloor/` | removed; the value raises |
+
+Three things keep it that way: `tests/test_agent_gets_no_scene_geometry.py`
+(no episode built with metadata, nothing of an environment or a simulator
+assigned onto a policy, the projector seam gone under every name, the navmesh
+analysis imported by analysis only), the harness's reset check
+(`objnav_benchmark/env_contract.PRIVILEGED_KEY_PARTS` now refuses `navmesh`,
+`pathfinder`, `stair`, `storey` and `floor` keys beside the goal and geodesic
+ones), and `core/planning/object_search/tests/test_no_privileged_geometry.py`
+on the agent's side. A run recorded before the change is a different method:
+its frozen configuration differs (`standing_points` for
+`target_navmesh_projection`, no `through_unknown`), so `--resume` refuses to
+continue it with this code, as it should.
+
+The simulator's ground-truth semantics under `--perception ground-truth` are a
+separate, declared upper bound on perception and are unchanged.
 ## Layout: one navigation core, one task per dataset
 | Layer | Where | Owns |
 |---|---|---|
-| **Shared navigation core** | `methods/` (RPT*, room-search loop, frontier sweep, exploration fallback, perception with YOLO-World default), `habitat/` (RGB-D bridge, navmesh stair connectors), `evaluation.py`, `provenance.py`, `recording.py`, `visualization.py`, `dashboard.py`, `replay.py` | The algorithm, its settings, and the dataset-neutral execution/recording path. **No dataset loader, episode list, category table, scoring rule or benchmark profile lives here**, and `tests/test_runtime_boundaries.py` fails if a core module imports `gibson/`, `hm3d/` or a label table. |
+| **Shared navigation core** | `methods/` (RPT*, room-search loop, frontier sweep, exploration fallback, perception with YOLO-World default), `habitat/` (RGB-D bridge; the navmesh's storeys and stair connectors for after-the-fact analysis only), `evaluation.py`, `provenance.py`, `recording.py`, `visualization.py`, `dashboard.py`, `replay.py` | The algorithm, its settings, and the dataset-neutral execution/recording path. **No dataset loader, episode list, category table, scoring rule or benchmark profile lives here**, and `tests/test_runtime_boundaries.py` fails if a core module imports `gibson/`, `hm3d/` or a label table. |
 | **GibsonTask** | [`gibson/`](gibson/README.md) | SemExp v1.1 episodes, FMM scoring maps, planar path accounting, sliding, success without STOP, its CLI and campaigns. |
 | **HM3DTask** | [`hm3d/`](hm3d/README.md) | HM3D ObjectNav v1/v2 episodes and scenes, habitat-lab's view-point geodesic metrics, STOP-required success, published-geodesic agreement preflight, its CLI and campaign runner. |
 Both tasks construct the same `RPTSearchPolicy` from the same `RPTSettings`,
@@ -239,8 +271,11 @@ map keeps voting on the frames the takeover sees, so the map release can fire,
 while the legacy target evidence stands down.
 
 The closing sub-policy reuses coherent RGB-D backprojection with the actual camera
-pitch. It samples standoff footpoints around the observed target, projects them
-onto Habitat's local NavMesh when bound, and uses existing collision-qualified
+pitch. It samples standoff footpoints around the observed target, moves each to
+the nearest floor the agent can stand on by its own map (since 2026-11-15,
+`world_model/standing_floor.py`: a cell observed free, with the body's clearance
+of observed free floor around it, reachable through such cells; until then they
+were projected onto Habitat's local NavMesh), and uses existing collision-qualified
 observed-grid A* to approach. **The selected 3D footpoint and route persist through
 occlusion**: missing detections neither cancel the path nor invoke a scan. Fresh
 associated observations refine the stored target with a 50/50 update; an XY shift
@@ -248,7 +283,7 @@ over `refine_distance_m` (0.15 m) since the goal was selected triggers a refinem
 -- and a refinement **keeps the standoff goal when it still ends inside
 `terminal_distance_m` of the refined memory** (since 2026-10-11, `TargetApproachPath.kept`;
 `goal_kept` in the diagnostics): re-selecting a bearing-relative ring about the new
-position is a different set of points, each needing a navmesh projection and a path,
+position is a different set of points, each needing floor to stand on and a path,
 and Collierville/000194 traded a reachable goal for a ring with none and released the
 real television as "no safe path from here" the moment the along-ray association made
 its memory 0.11 m more accurate. A kept goal that a slow drift carries past the terminal
@@ -274,11 +309,12 @@ are spent or a step is blocked (the cabinet), the agent stands as close as the f
 allows and STOPs -- the release that followed before gave up a target in plain view.
 Collision, blockage and
 progress validation remain active; persistence is not permission to cross obstacles.
-Remote or other-floor snaps and unreachable paths
-are rejected. The optional simulator callback contains no target annotations,
-success flag or evaluator DTG; NavMesh geometry is nevertheless privileged and
-is declared in the frozen configuration. Non-Habitat callers use observed-grid A*
-without NavMesh projection, explicitly reported as such.
+A standing point with no standing floor within `standing_snap_m` (0.5 m), or
+none the map joins to the agent, is dropped. No simulator geometry is consulted
+on any benchmark: until 2026-11-15 an optional simulator callback projected the
+footpoints onto the NavMesh -- no target annotation, success flag or evaluator
+DTG in it, but privileged geometry all the same, and it is gone (see "The agent
+is given no scene geometry").
 
 A* owns heading during transit, including doorway/corner turns that put the target
 outside the FOV. Bbox yaw servoing is confined to terminal inspection so it cannot
@@ -455,19 +491,30 @@ within `boxed_in_radius_m` (1.0 m) of it, so the search -- which can walk --
 carries on and the same plant is locked again from somewhere a path exists.
 `footing_sweep: false` drops the sweep alone (a protocol without LOOK
 actions never has it); the release after the bound stands either way.
-**Before any of that, the ring is planned through the unknown** (since
-2026-10-14, `through_unknown`, `through_unknown_cost` 8): the floor between a
-corridor and the toilet seen through its doorway is routinely unknown -- a
-level camera sees the floor from 1.4 m out -- and Collierville/000023
-(action 375) released a lock on a toilet in plain view at 2.8 m as boxed in,
-then refused its 0.82-0.88 re-sightings from the spot. When no route to the
-standoff ring exists on the known floor, the same ring is planned with unknown
-cells passable at eight times the cost of open floor (the policy's
-`optimistic_planner`, the strict planner's twin); the committed route is
-re-checked against the map as it fills in like any other, an obstruction
-re-plans, a bump marks the cell. `through_unknown_routes` counts them and the
-command carries `through_unknown: true`; the footing sweep and the boxed-in
-release are what happens when even that finds nothing.
+**Floor not yet seen is looked at, not walked through** (since 2026-11-15).
+The floor between a corridor and the toilet seen through its doorway is
+routinely unknown -- a level camera sees the floor from 1.4 m out -- and
+Collierville/000023 (action 375) released a lock on a toilet in plain view at
+2.8 m as boxed in, then refused its 0.82-0.88 re-sightings from the spot. From
+2026-10-14 the ring was then planned THROUGH the unknown, at eight times the
+cost of open floor (`through_unknown`, the policy's `optimistic_planner`).
+That is gone with the navmesh projection: an unknown cell is never a standing
+point, never part of its clearance and never on a route to it. What answers
+the case instead, in order, when no standoff has a route: the walk to the
+observed floor nearest the target, while it brings the agent
+`nearest_progress_m` closer (`nearest_routes`); the footing sweep above; then
+a standoff that was set aside -- one a detour long, or, while floor in front
+of the target is unobserved, one beside it, behind it or out of the map's
+sight of it (`standoff_detours`, `far_side_standoffs`); and the boxed-in
+release when even that finds nothing. The ring is tried again on every action
+as the floor between fills in. The standing floor is ONE floor -- observed
+free, the body's own 0.18 m disc observed free, joined to the agent -- and two
+planners are asked of it: the default planner of the cells that keep its
+0.25 m standoff from every observed obstacle, then the squeeze planner of all
+of them (unknown cells cast no standoff; `TargetClosing.standing_planners`).
+`squeezed_standoffs` counts the standoffs the squeeze planner took because
+the default planner had no route to a cell it can stop at, `standoffs_revoked`
+the ones given up because the map stopped showing them as standing floor.
 All thresholds are configurable under `RPTSettings.target_closing`; the phase,
 persistent lock, visibility, target xyz, projected goal, refinements, occluded path
 steps, bbox, failures, release counts (`releases`, `inspection_releases`,
@@ -793,8 +840,9 @@ the label tables, never the method:
    names per instance, overrides `_annotations()` (`mp3d/env.py` is 40 lines).
    Its dataset must offer `semantic_scene_dataset_config()` beside the episode
    readers. `habitat/simulator.py` is reused as is -- frames, pose, depth
-   clips, collisions, `scene_structure()` and `semantic_boxes()` are already
-   in the public frame.
+   clips, collisions and `semantic_boxes()` are already in the public frame.
+   The adapter attaches no metadata to an episode and exposes nothing of the
+   navmesh to a policy (`tests/test_agent_gets_no_scene_geometry.py`).
 4. **Label table.** `core/planning/objnav/labels/datasets/<dataset>.py`, a
    `TableLabelMapper` registered in `labels/registry.py`: the dataset's goal
    names, the detector prompts in a fixed order, and the labels that count.
@@ -859,9 +907,9 @@ and a pose, and answers in world coordinates.
 | `exploration/path_glances.py`, `exploration/doorway_peek.py`, `exploration/doorway_candidates.py` | Informative glances along a route; the one-shot doorway inspection and its candidates |
 | `exploration/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
 | `multifloor/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied, and `_navigate` refusing a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`); a spawn storey never walked level is provisional, and the first storey the agent settles on from it becomes the spawn plane (`rebase`, since 2026-10-26); inert when traversal is allowed |
-| `multifloor/multifloor_policy.py` | The building coordinator: portals per floor, the approach and climb of the staircase the loop's order chose, arrival bookkeeping, both stair sources; in ground-truth mode it decides nothing by a clock. With traversal forbidden, a height departure the atlas reports (a flight walked down by a committed route, three treads before the atlas calls it one) is walked back up the storey trail (`_retreat_to_storey`, `retreat_started` / `retreat_ended` events, bounded by `multifloor.retreat_actions`) -- until 2026-10-25 it was an `AttributeError` on every remaining action of the episode |
+| `multifloor/multifloor_policy.py` | The building coordinator: the flights the robot's depth measured as portals per floor, the approach and climb of a chosen staircase, arrival bookkeeping. With traversal allowed a floor change is decided by the `floor_search_actions` allowance and RPT* over the seen portals (`_select`); the loop's stair nodes (`commit`) have no stair source since 2026-11-15, when the `ground_truth` one was removed. With traversal forbidden, a height departure the atlas reports (a flight walked down by a committed route, three treads before the atlas calls it one) is walked back up the storey trail (`_retreat_to_storey`, `retreat_started` / `retreat_ended` events, bounded by `multifloor.retreat_actions`) -- until 2026-10-25 it was an `AttributeError` on every remaining action of the episode |
 | `multifloor/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
-| `multifloor/stair_ground_truth.py`, `multifloor/floor_decision.py`, `multifloor/ground_truth_traversal.py`, `multifloor/stair_sightings.py` | Ground-truth stairs (the `stair_source: "ground_truth"` ablation): the navmesh connectors as the policy reads them, the fallback rule's up/down choice, the committed polyline traversal, the perfect stair detector |
+| `multifloor/stair_approach.py` | Where a staircase offered as a node is entered from on the observed map, and what the climb costs (`approach_points`, `stair_cost_m`). Until 2026-11-15 this was `floor_decision.py` beside `stair_ground_truth.py`, `ground_truth_traversal.py` and `stair_sightings.py` -- the `stair_source: "ground_truth"` ablation (navmesh connectors from the episode metadata, a perfect stair detector, a polyline traversal, the fallback's up/down rule), removed as privileged scene geometry |
 | `world_model/stair_terrain.py`, `world_model/stair_grid.py`, `multifloor/stair_traversal.py` | Observed stairs (the default since 2026-10-21): measured support surfaces, step-connected candidate paths rising `stair_min_rise_m` in a flight's profile (`stair_profile`: `stair_min_risers` risers of `stair_riser_min_m`-`max_step_m`, treads at most `stair_max_tread_m`) -- the portals the capsule masks under the benchmark's confinement -- and, with traversal allowed, native-heading safety checks and the committed transition lifecycle |
 | `falcon/policy.py`, `falcon/regions.py` | Bounded hierarchy and persistent local region history |
 | `falcon/motion.py`, `falcon/routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
@@ -898,7 +946,7 @@ action converter serialises the LOOK before the body action):
 | `habitat/env.py` | `HabitatObjNavEnv`: the habitat-lab ObjectNav episode, measurement, start validation, navmesh provenance and oracle hand-off every dataset adapter subclasses (`hm3d/env.py`, `mp3d/env.py` add their name and annotation naming) |
 | `habitat/geodesic.py` | habitat-lab's `DistanceToGoal` to the goal view points, reproduced against habitat-sim's pathfinder; the one quantity SR, SPL, SoftSPL and DTG are built from |
 | `habitat/entrypoint.py` | What every Habitat `run.py` shares: `method_defaults(protocol)`, `run_main`, the geodesic preflight check, the oracle liveness gate, the runtime record, the GPU gate, the live hooks |
-| `habitat/stair_connectors.py` | Storeys and stair connectors read once per scene from the navmesh, attached to the episode metadata |
+| `habitat/stair_connectors.py` | Storeys and stair connectors read from a scene's navmesh, for ANALYSIS only (`hm3d/episode_levels.py`: which storey a goal is on). Ground truth: never attached to an episode, never handed to a policy |
 | `scene_pool.py`, `smoke_plan.py`, `campaign_common.py` | The scene process pool with its stall watchdog and `--jobs max`, the category-balanced smoke cover, and the child-argument and episode-plan rules every dataset's campaign shares |
 | `gibson/protocol.py`, `gibson/dataset.py`, `gibson/distance.py`, `gibson/env.py` | The SemExp v1.1 protocol, the published episodes and evaluator maps, the FMM scorer, the `ObjNavEnv` |
 | `gibson/run.py`, `gibson/frozen_eval.py`, `gibson/run_development.py` | Protocol execution and frozen source/model/data checks |
@@ -1442,7 +1490,12 @@ refresh.
    (`oracle_reuses`). The per-node record in `room_search_loop.estimates`
    carries the probability, the model's reason and the distance charged.
 4. **Visit order** -- RPT* over the surviving nodes, rooms and staircases
-   together (`core/planning/object_search/rooms/stair_nodes.py`). A room enters the instance at its
+   together (`core/planning/object_search/rooms/stair_nodes.py`; **since
+   2026-11-15 no staircase is a node**: a stair node needs to know which
+   storey its flight leads to, only the removed navmesh stair source said so,
+   and the observed stair discovery measures a flight's treads, not its
+   destination -- what follows about staircases describes the loop's side,
+   kept for an observed source that does). A room enters the instance at its
    entry point; a staircase at the foot of the flight on this floor's map,
    with a **leaf** as long as the flight plus `MultiFloorParams
    .floor_change_cost_m` (8 m, about thirty actions) charged on every arc
@@ -1925,15 +1978,14 @@ Every way the decision pipeline can fail lands in one place,
    (`goal_memory_actions`, 12: until 2026-10-14 the goal was forgotten after
    ONE action the fallback did not own, and every glance re-ranked the
    frontier greedily);
-2. the **stairs** by the explicit fallback rule (`floor_decision.py`:
-   eligible, reachable now, storey worth visiting, worth per metre of
-   approach, flight and fixed change cost), when the floor is exhausted.
-   The normal way to the stairs is not this rung: the loop offers every
-   staircase to the oracle and to RPT* as a node beside the rooms and climbs
-   when the order says so. This is for the floor where that machinery has
-   nothing left -- the room LLM is away, or no node is worth anything and
-   the frontier is gone -- and a climb it makes is recorded
-   `rule: fallback`;
+2. the **stairs**, when the floor is exhausted and stair traversal is
+   allowed: the building coordinator chooses among the flights the robot has
+   seen by RPT* over those portals (`MultiFloorSearch._select`). With
+   traversal forbidden -- the benchmark default -- the only thing this rung
+   ever takes is the one switch along the flight a stair spawn came off
+   (`spawn_switch.py`). (Until 2026-11-15 a `ground_truth` stair source had
+   an explicit up/down rule here, `floor_decision.py`; it was removed with
+   that source);
 3. the **demoted frontiers** of rung 1 (`frontier_demoted`): a shadow is still
    unknown space once every exit is spent, and so is the bathroom;
 4. a **retired frontier** -- a goal dropped for a transient plan failure is

@@ -75,7 +75,7 @@ def test_an_identifier_of_only_whitespace_is_refused(field, value):
         episode(**{field: value})
 
 
-@pytest.mark.parametrize("metadata", [None, [("floor", 1)], "floor 1"],
+@pytest.mark.parametrize("metadata", [None, [("lighting", 1)], "lighting 1"],
                          ids=["none", "pairs", "string"])
 def test_metadata_that_is_not_a_mapping_is_refused(metadata):
     """The policy reads it as a dict; None or pairs would fail inside the policy, far from the adapter."""
@@ -85,10 +85,10 @@ def test_metadata_that_is_not_a_mapping_is_refused(metadata):
 
 def test_metadata_is_stored_as_a_dict_copy_of_any_mapping():
     """The adapter may reuse its dict for the next episode; this one must not change with it."""
-    source = {"floor": 1}
+    source = {"lighting": 1}
     run = episode(metadata=MappingProxyType(source))
-    source["floor"] = 2
-    assert type(run.metadata) is dict and run.metadata == {"floor": 1}
+    source["lighting"] = 2
+    assert type(run.metadata) is dict and run.metadata == {"lighting": 1}
 
 
 def test_a_camera_or_action_spec_of_the_wrong_type_is_refused():

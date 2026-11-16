@@ -45,11 +45,6 @@ class GibsonEnv(ObjNavEnv):
     def episode_ids(self):
         return tuple(self._dataset.episodes)
 
-    @property
-    def target_projector(self):
-        """Optional local NavMesh geometry service, separate from evaluator data."""
-        return getattr(self._simulator, "project_target", None)
-
     @lru_cache(maxsize=8)      # six categories per scene: every field of a scene stays resident
     def _field(self, scene, floor_id, category_index):
         episode = next(e for e in self._dataset.episodes.values()
@@ -92,21 +87,11 @@ class GibsonEnv(ObjNavEnv):
                                       row.start_position, row.start_rotation, seed)
         self._episode = ObjNavEpisode(episode_id, row.scene, self.protocol.benchmark, self.protocol.split,
                                      self.target_override or row.category, self._camera, self._actions,
-                                     self.protocol.max_steps, metadata=self._scene_metadata())
+                                     self.protocol.max_steps)
         self._observation = self._observation_from(frame)
         if any(abs(a - b) > 1e-4 for a, b in zip(self._habitat_position(), row.start_position)):
             raise EnvContractError("Simulator changed the published episode start")
         return self._episode, self._observation
-
-    def _scene_metadata(self):
-        """Non-privileged scene structure for the policy: storeys and stair connectors.
-
-        Read from the simulator's navmesh when it can provide it (the Habitat
-        bridge); a simulator without ``scene_structure`` -- the synthetic ones
-        in tests -- yields empty metadata. Nothing about the goal is in it.
-        """
-        provider = getattr(self._simulator, "scene_structure", None)
-        return dict(provider()) if callable(provider) else {}
 
     def _observation_from(self, frame):
         rgb, depth, pose = frame

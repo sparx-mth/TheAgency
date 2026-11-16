@@ -89,10 +89,21 @@ def test_a_native_metric_the_harness_computes_differently_fails_the_episode():
      "metadata['task_info']['distance_to_target']"),
     ({"viewPoints": []}, "metadata['viewPoints']"),
     ({"geodesic_distance": 4.2}, "metadata['geodesic_distance']"),
+    ({"stair_source": "navmesh", "scene": "x"}, "metadata['stair_source']"),
+    ({"stair_connectors": [{"id": 0, "bottom_z": 0.0, "top_z": 2.7}]}, "metadata['stair_connectors']"),
+    ({"floor_levels": [{"height_m": 0.0}, {"height_m": 2.7}]}, "metadata['floor_levels']"),
+    ({"floor_count": 2}, "metadata['floor_count']"),
+    ({"scene": {"NavMesh_path": "x.navmesh"}}, "metadata['scene']['NavMesh_path']"),
+    ({"storeys": 3}, "metadata['storeys']"),
 ], ids=["robothor_row", "nested_in_a_list", "allenact_task_info", "camel_case",
-        "habitat_geodesic"])
+        "habitat_geodesic", "stair_source", "stair_connectors", "storey_heights", "storey_count",
+        "navmesh", "storeys"])
 def test_metadata_naming_privileged_information_is_refused_at_reset(metadata, key):
-    """The agent receives the metadata at reset; a goal or a shortest path there makes SR and SPL meaningless."""
+    """The agent receives the metadata at reset; a goal or a shortest path there makes SR and SPL meaningless.
+
+    So does scene geometry the agent did not observe: the navmesh, the building's storeys and its stairs
+    (what the Habitat adapters attached as a "ground-truth stair source" until 2026-11-15).
+    """
     with pytest.raises(EnvContractError,
                        match=re.escape(key) + ", a key that names privileged"):
         one_episode(MetadataCorridor(metadata))
@@ -101,5 +112,5 @@ def test_metadata_naming_privileged_information_is_refused_at_reset(metadata, ke
 def test_metadata_without_privileged_keys_passes_the_tripwire():
     """Public extras are what metadata is for; the tripwire must not refuse them."""
     record = one_episode(MetadataCorridor(
-        {"floor_count": 2, "scene_dataset": "hm3d", "notes": ["x", {"lighting": "day"}]}))
+        {"scene_dataset": "hm3d", "sensor_noise": "none", "notes": ["x", {"lighting": "day"}]}))
     assert record.success

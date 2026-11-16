@@ -174,7 +174,7 @@ def test_accidental_tread_entry_retreats_to_source_before_visiting_other_floor()
     p, ep, world, _ = coverage_rig()
     p.building.source_trail = [(4.0, 0.5, 0.0), (4.0, 0.9, 0.0)]
     obs = replace(obs_at(ep, 1, (4.0, 2.0), math.pi / 2), pose=replace(obs_at(ep, 1, (4.0, 2.0)).pose, z=0.9))
-    p.building._start_unplanned(obs, 0.0)
+    p.building.prepare_observation(obs)          # 0.9 m off the storey plane with no traversal under way: one starts
     transition = p.building.transition
     assert transition is not None and transition.phase == "RETREAT"
     assert transition.retreat_path[-1] == (4.0, 0.5, 0.0), "clear of the first tread's arrival band"

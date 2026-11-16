@@ -798,21 +798,49 @@ cylinder around the line of sight to the remembered position.
 around the remembered position whose radius is chosen so that arriving puts
 the agent within $1\m$ of the target (about $0.65\m$ with our tolerances).
 Candidate points are tried in a fixed order: first on the side from which the
-target was seen, then beside and behind it; for each, the default planner,
-then the planner at body-radius clearance, then a planner that may cross
-unknown cells at eight times the cost of free ones. For a target mounted above
-the floor whose visible surface is planar (e.g.\ a picture), a plane is fitted
-to its depth pixels and standoff points in front of that plane are tried first.
-Wider rings are tried when no point of the first ring is reachable, and a point
-whose route is much longer than the straight-line range is taken only as a
-last resort. Every standing point the closing proposes (the standoff points,
-the spot of the back-off manoeuvre, and the closest reachable points used when
-no standoff has a route) is first projected onto the simulator's navigation
-mesh, and is discarded when the mesh has no point within $0.5\m$ horizontally
-and $0.2\m$ vertically of it. This is privileged geometry
-(\cref{sec:experiments-privileges}); routes to the projected points are still
-planned on the agent's own map. Within
-$1.5\m$ the camera pitch is servoed to keep the box inside the image.
+target was seen, then beside and behind it; for each, the default planner and
+then the planner at body-radius clearance. For a target mounted above the
+floor whose visible surface is planar (e.g.\ a picture), a plane is fitted to
+its depth pixels and standoff points in front of that plane are tried first.
+Wider rings are tried when no point of the first ring is reachable.
+
+\paragraph{Standing points.} Every point at which the closing asks the agent
+to stand (a standoff point, the spot of the back-off manoeuvre, and the
+closest floor used when no standoff has a route) is taken from the agent's own
+occupancy map and from nothing else. A cell is \emph{standing floor} if
+(i)~it has been observed free;
+(ii)~every cell whose centre lies within the body radius ($0.18\m$) of its
+centre has been observed free as well, so that neither an obstacle nor
+unobserved space lies under the agent's body; and
+(iii)~it is connected to the agent's position through cells that satisfy (i)
+and (ii).
+There is one such floor, and each planner is offered the part of it on which
+it can end a route: the default planner the standing cells farther than its
+minimum clearance ($0.25\m$) from every observed obstacle, and the planner at
+body-radius clearance, which is asked second, all of them. Unobserved cells
+do not count towards the planner's clearance: beyond the body's own disc
+nothing has to have been observed. A
+candidate point is moved to the nearest standing-floor cell within $0.5\m$
+($0.15\m$ for the back-off spot) that is not separated from it by an observed
+obstacle, and is discarded if there is none; the route is then planned to
+exactly that cell. An unobserved cell is therefore never stood on, never
+counted as clearance and never crossed, and a standoff is given up as soon as
+the map no longer shows it as standing floor. No simulator geometry is
+consulted (\cref{sec:experiments-privileges}).
+
+A level camera does not see the floor closer than about $1.4\m$, so the floor
+in front of a target seen through a doorway is often not yet on the map, while
+the floor of the room behind the target's wall is. Two rules keep the agent
+from walking around that wall. A standoff whose walk over standing floor is
+longer than $1.5$ times the range to the target plus $1\m$ is set aside. And
+as long as a point in front of the target lies on unobserved floor, so is a
+standoff beside or behind the target, or one from which the map shows an
+obstacle before the target. When nothing else is left, the agent walks to the
+standing floor nearest the target, provided this brings it closer; then, if it
+can tilt its camera and much of the floor around it is unobserved, it looks
+down and around once; and only then does it take a standoff that was set
+aside. Within $1.5\m$ of the target the camera pitch is servoed to keep the
+box inside the image.
 
 \paragraph{Stop.} When a fresh detection of the lock measures a near-surface
 range of at most $1.05\m$, or the agent has arrived within $1\m$ of the
@@ -854,8 +882,14 @@ the agent settles on becomes its storey: it walks the flight it sees to the
 nearer end. The implementation additionally allows such an episode \emph{one}
 switch to the storey at the other end of the same flight once the first storey
 has been searched out, and never back. In all other episodes the agent stays on
-its start storey. \TODO{Multi-storey search with staircases as nodes of
-\cref{eq:objective} is implemented but is not part of this draft.}
+its start storey. The search loop can offer a staircase to
+\cref{eq:objective} as a node beside the rooms, but only if it knows which
+storey the flight leads to, and the agent's own stair detection measures the
+steps of a flight, not where it ends. An earlier revision took this from the
+simulator's navigation mesh; that source has been removed
+(\cref{sec:experiments-revisions}), so that at present no staircase is offered.
+\TODO{Multi-storey search with staircases, observed by the agent, as nodes of
+\cref{eq:objective}.}
 
 \subsection{What is hand-designed}\label{sec:handdesigned}
 The method is training-free, but it is not free of design choices, and several
@@ -1006,20 +1040,26 @@ an RGB-D camera would not have.
   \item \textbf{Semantic perception.} The oracle of
         \cref{sec:experiments-oracle}, including its use of the benchmark's
         goal list to decide which instances are the target.
-  \item \textbf{Navigation mesh, in target closing only.} Candidate standing
-        points of the closing behaviour are projected onto the simulator's
-        navigation mesh (\cref{sec:closing}). The query returns only the
-        nearest mesh point; it carries no information about the goal, and the
-        routes are planned on the agent's own map. It does, however, tell the
-        agent where navigable floor lies next to the target, and the
-        benchmark's success region is defined on that same mesh.
-        \TODO{Re-run with the projection disabled and report the difference.}
 \end{enumerate}
 The agent does \emph{not} receive goal positions or view points, distances to
 the goal, a success signal, a collision flag (it infers a refused step from
-its own pose), scene geometry, or storey and staircase annotations (our adapter
-reads the latter from the navigation mesh for the analysis of
-\cref{sec:results}; the method does not use them in this configuration).
+its own pose), or any scene geometry: it has no access to the simulator's
+navigation mesh or path finder, and it is given no storey or staircase
+annotations. In this respect it is on the footing of the zero-shot methods we
+compare with. The navigation mesh is used only outside the agent: by the
+simulator to move the agent, by the benchmark to place it and to measure the
+distances that are scored, and by our analysis of the results by storey
+(\cref{sec:results}). The episode description handed to the agent carries the
+scene and category names, the camera, the action set and the step budget, and
+nothing else; the evaluation harness refuses an episode that carries
+navigation-mesh, storey or staircase data, and a test in the code base fails
+if any module of the method can reach the navigation mesh, the path finder or
+such data, by import, by name or through the episode (\cref{app:implementation}).
+
+This holds for the method as described. The two runs reported in
+\cref{sec:results} were made with an earlier revision whose closing behaviour
+did query the navigation mesh; \cref{sec:experiments-revisions} gives the
+details.
 
 \paragraph{Development on the evaluation data.} The method has no trained
 parameters, but its rules and thresholds were developed by inspecting its
@@ -1059,6 +1099,37 @@ was disabled in both runs. We have not measured the effect of removing the
 table. \TODO{Re-run both benchmarks with the current code. Until then the
 numbers of \cref{sec:results} are results of the method \emph{with} these
 hand-written priors, not of the method as described in \cref{sec:method}.}
+
+\paragraph{Both runs: a navigation-mesh query and routes through unobserved
+space in target closing.} At the time of both runs the closing behaviour used
+privileged geometry, which we have since removed. Every standing point that
+the closing proposed (the standoff points, the spot of the back-off manoeuvre,
+and the closest reachable points used when no standoff has a route) was first
+projected onto the simulator's navigation mesh, and was discarded when the
+mesh had no point within $0.5\m$ horizontally and $0.2\m$ vertically of it.
+The query returned only the nearest mesh point and carried no information
+about the goal, and the routes were planned on the agent's own map. It did,
+however, tell the agent where navigable floor lies next to the target,
+including floor that the agent had not observed, and the benchmark's success
+region is defined on that same mesh. In addition, when no standoff could be
+reached over observed floor, the route was planned by a planner that could
+cross unobserved cells at eight times the cost of free ones. In the current
+code, standing points come from the agent's own map and unobserved cells are
+never used (\cref{sec:closing}). The code of that time could also hand the
+agent the storeys and staircases of the navigation mesh, as an optional source
+of stairs for multi-storey search. Neither run used it (both took their
+staircases from the agent's own depth, with storey changes disabled), and it
+has been removed as well. We have not measured the effect of these removals on
+the full splits. A paired check on $180$ single-storey MP3D episodes, run once
+with the former and once with the current closing, gave a success rate of
+$77.8\%$ with the navigation-mesh query and $78.9\%$ without it (seven
+episodes gained, five lost), an SPL of $0.349$ and $0.346$, and $6.7$ and
+$8.0$ refused forward steps per episode. This check used ground-truth
+perception, a fixed stand-in for the language model, software rendering and a
+single seed; it is not the configuration of \cref{sec:results}, and only the
+paired differences carry meaning. \TODO{Re-run both benchmarks with the current code. Until
+then the numbers of \cref{sec:results} are results of a closing behaviour
+\emph{with} the navigation-mesh query.}
 
 \paragraph{The MP3D run: an older execution stack.} Apart from the table
 above, the HM3D run used the current code. The MP3D run was started earlier
@@ -1101,7 +1172,8 @@ All numbers in this section are subject to the three caveats of
 \cref{sec:experiments}: oracle semantic perception
 (\cref{sec:experiments-oracle}), development on the evaluated episodes
 (\cref{sec:experiments-privileges}), and code revisions that still contained
-hand-written room priors (\cref{sec:experiments-revisions}).
+hand-written room priors and a navigation-mesh query in target closing
+(\cref{sec:experiments-revisions}).
 
 \subsection{Main results}\label{sec:results-main}
 
@@ -1324,9 +1396,10 @@ and the order chosen at successive loop points.}
 We collect here what the current evidence does and does not support.
 
 \paragraph{The numbers are not yet results of the described method.} Both runs
-predate the removal of hand-written room priors, and the MP3D run predates
-several changes to execution (\cref{sec:experiments-revisions}). Re-running
-both benchmarks with the current code is the first open item.
+predate the removal of hand-written room priors and of the navigation-mesh
+query in target closing, and the MP3D run predates several changes to
+execution (\cref{sec:experiments-revisions}). Re-running both benchmarks with
+the current code is the first open item.
 
 \paragraph{Perception is an oracle.} The detections come from the simulator's
 annotations, and the instances that count as the target are those of the
@@ -1349,9 +1422,18 @@ evaluated validation episodes (\cref{sec:experiments-privileges}).
 success rate by the share of episodes whose goal is on the start storey (about
 $82\%$ on both splits, plus stair starts). \TODO{Multi-storey search.}
 
-\paragraph{Privileged geometry in the closing.} Standing points next to a
-target are projected onto the simulator's navigation mesh
-(\cref{sec:experiments-privileges}).
+\paragraph{Standing points are only as good as the map.} The agent stands
+only on floor that it has observed, with observed clearance for its body
+(\cref{sec:closing}). Next to a target this is conservative: the floor in
+front of an object is often the last part of a room to be observed, and thin
+or low obstacles that the map misses are not excluded. The rule replaces a
+query against the simulator's navigation mesh that the reported runs still
+used; its effect on the success rate, and on how often the agent fails to find
+a place to stand, has not been measured on the full splits. In the paired
+check of \cref{sec:experiments-revisions} the closing gave up a target because
+no standing point had a route about twice as often as with the query ($0.14$
+against $0.07$ times per episode), and the agent was refused a forward step
+more often where it had to approach at body-radius clearance.
 
 \paragraph{Idealised sensing and a benchmark-shaped controller.} Pose and
 depth are noise-free. The execution stack (the action lattice, the scrape and
@@ -1691,9 +1773,11 @@ Narrow passages &
 Target closing (\cref{sec:closing}) &
   \path{o_s/closing/target_closing.py}, \path{o_s/closing/target_path.py},
   \path{o_s/closing/target_backoff.py}, \path{o_s/closing/approach_history.py},
-  \path{o_s/closing/target_pursuit.py},
+  \path{o_s/closing/target_pursuit.py}, \path{o_s/closing/map_sight.py},
   \path{o_s/perception/target_context.py},
   \path{o_s/perception/face_normal.py}, \path{core/mapping/tracking/} \\
+Standing points (\cref{sec:closing}) &
+  \path{o_s/world_model/standing_floor.py} \\
 Single-storey confinement (\cref{sec:storey}) &
   \path{o_s/multifloor/spawn_floor_guard.py}, \path{o_s/multifloor/drop_rays.py},
   \path{o_s/multifloor/spawn_switch.py},
@@ -1712,6 +1796,12 @@ Benchmark adapters and scoring &
   \path{tasks/planning/objnav_benchmark/} \\
 Oracle perception (\cref{sec:experiments-oracle}) &
   \path{tasks/planning/objnav_benchmark_runtime/ground_truth/} \\
+No navigation mesh, path finder or storey data in the method
+(\cref{sec:experiments-privileges}) &
+  \path{o_s/tests/test_no_privileged_geometry.py} (the method),
+  \path{tasks/planning/objnav_benchmark_runtime/tests/test_agent_gets_no_scene_geometry.py}
+  (the adapters), \path{tasks/planning/objnav_benchmark/env_contract.py} (the
+  check at every reset) \\
 \end{longtable}
 
 \section{Hyperparameters}\label{app:hyperparams}
@@ -1809,14 +1899,15 @@ Lock after; verification budget & $2$ frames; $12$ actions \\
 Close first sighting re-examined below & $1.3\m$ \\
 Height outside the class band & confidence $\times0.7$; $4$ frames, $0.3\m$ baseline \\
 Terminal range; tolerance; standoff radius & $1.0\m$; $0.05\m$; $0.65\m$ \\
-Cost of unknown cells in the last-resort planner & $8\times$ \\
-Detour rule for a standoff & route $>1.5\times$ range $+1\m$ \\
+Standing floor: observed-free disc; obstacle clearance (default, body-radius planner) & $0.18\m$; $0.25\m$, $0.18\m$ \\
+Standing point moved by at most (standoff; back-off spot) & $0.5\m$; $0.15\m$ \\
+Detour rule for a standoff & walk over standing floor $>1.5\times$ range $+1\m$ \\
+Look around for footing: unobserved share within & $\ge25\%$ within $1.2\m$ \\
 Inspection steps; steps towards a raised target & $\le3$; $\le3$ \\
 Raised target; frontal standoff from & $\ge0.3\m$; $\ge0.6\m$ above the floor \\
 Stop without a fresh box: last seen within & $15$ actions \\
 Release: stall, total budget & $20$, $160$ actions \\
 Rejection memory radius (after a failed inspection) & $1\m$ ($2\m$) \\
-Navigation-mesh projection accepted within & $0.5\m$ horizontally, $0.2\m$ vertically \\
 \midrule
 \multicolumn{2}{@{}l}{\emph{Storey} (\cref{sec:storey})} \\
 Drop below the storey plane & $>0.30\m$ \\
@@ -1835,7 +1926,11 @@ for configurations that are not used in this draft, one for staircases offered
 as nodes and one for exits offered as nodes of their own; they are not listed.
 The supplement for staircases contains further hand-written statements (which
 rooms are usually on which storey) and must be disclosed when multi-storey
-search is reported.
+search is reported. It also refers to a rank of the current storey among the
+storeys of the building, which only the removed navigation-mesh source of
+stairs supplied (\cref{sec:experiments-revisions}); the agent's own
+observations give no such rank, and the supplement has to be revised before it
+is used.
 
 \subsection{Room labels}\label{app:prompts-room}
 System prompt. The label set is inserted by the code and is shown as used.
@@ -1964,8 +2059,11 @@ Episodes, scenes & $2{,}000$, $20$ & $2{,}195$, $11$ \\
 Episodes completed & $2{,}000$ & $2{,}195$ \\
 Code revision (git) & \code{0dd7d39c} & \code{a77c946c} \\
 Hand-written room priors & present & present \\
+Navigation-mesh query in target closing & present & present \\
+Routes through unobserved cells in target closing & present & present \\
 Execution stack & current & older (\cref{sec:experiments-revisions}) \\
 Storey changes & off & off \\
+Source of staircases & agent's depth & agent's depth \\
 Oracle perception & $64$ px, $0.25\m$ filter & $64$ px, $0.25\m$ filter \\
 Language model & \code{qwen2.5:14b-instruct} & \code{qwen2.5:14b-instruct} \\
 Seed & $17$ & $17$ \\

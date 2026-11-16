@@ -158,7 +158,8 @@ class WeightedAStarParams:
             ~1.5x before it splits, rather than always coming out below it).
             <= 0 disables resampling.
         goal_snap_radius_m: If the goal cell is blocked, snap to the nearest
-            free cell within this radius. 0 disables.
+            free cell within this radius. 0 disables. A request carrying
+            ``options["exact_goal"]`` is never snapped, whatever this says.
         start_skip_m: Drop leading waypoints within this distance of the start
             so a follower is never pointed at a point it already occupies.
         max_expansions: Safety cap on A* node pops; None means unlimited.

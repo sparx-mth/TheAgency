@@ -19,8 +19,9 @@ The example selects **`yolo_world`** -- YOLO only is the default object-detectio
 pipeline for now, in the JSON, in the service's no-config default and in every
 Gibson entrypoint's `--detector-backend`. Grounding DINO and BLIP-2 (`grounded_vlm`,
 `hybrid`) remain selectable but disabled by default; their stair verification is
-deferred work, and the multi-story policy now takes its stairs from the simulator's
-navmesh instead (`MultiFloorParams.stair_source`). `grounding_dino` is also
+deferred work, and the multi-story policy takes its stairs from the robot's own depth
+instead (`world_model/stair_terrain.py`; `MultiFloorParams.stair_source` is `observed`, the only
+source since 2026-11-15, when the simulator-navmesh one was removed). `grounding_dino` is also
 selectable for detector-only ablation, and `llmdet` remains available. CLI flags
 override JSON. Unused model paths are not loaded or required to exist. Unknown
 settings and explicitly blank paths fail. Relative paths in JSON resolve against its

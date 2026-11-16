@@ -481,7 +481,7 @@ def test_the_episode_the_policy_sees_carries_no_goal_and_the_benchmark_identity(
     episode, observation = fixture.env.reset(EPISODE)
     assert episode.benchmark == "mp3d_v1" and episode.split == "val"
     assert episode.target_category == "chair" and episode.max_steps == PROTOCOL.max_steps
-    assert episode.metadata == {}  # a simulator without scene_structure yields none
+    assert episode.metadata == {}  # nothing of the scene: no storeys, no stairs, no navmesh
     assert observation.pose.position() == pytest.approx(START_ENU)
     assert not hasattr(observation, "distance_to_goal_m")
     assert habitat_position(observation.pose) == pytest.approx(START)
@@ -573,7 +573,10 @@ def test_the_default_simulator_is_the_shared_bridge_built_from_the_protocol(tmp_
     assert (bridge.radius_m, bridge.height_m) == (0.18, 0.88)
     assert bridge.camera.max_depth_m == 5.0 and bridge.actions.forward_step_m == 0.25
     assert bridge.depth_holes.enabled and bridge.semantic is False
-    assert env.target_projector is not None and env.name == "habitat/mp3d-objectnav-v1"
+    assert env.name == "habitat/mp3d-objectnav-v1"
+    assert not hasattr(env, "target_projector") and not hasattr(bridge, "project_target"), (
+        "the navmesh is the evaluator's: no projector for a policy to be bound to (removed 2026-11-15)")
+    assert not hasattr(bridge, "scene_structure"), "and no storeys or stair connectors for an episode's metadata"
     env.close()
 
 

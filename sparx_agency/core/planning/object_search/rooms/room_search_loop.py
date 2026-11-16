@@ -449,7 +449,10 @@ class LoopSettings:
         stairs_as_nodes: Offer the floor's staircases to the oracle and the
             solver as nodes beside the rooms (the default). Off, the floor is
             searched alone and the stairs are only ever the exploration
-            fallback's last resort -- the ablation, not a mode to fly.
+            fallback's last resort -- the ablation, not a mode to fly. A
+            staircase is offered only when its portal says which storey it
+            leads to (``stair_nodes.stair_options``); since 2026-11-15 no
+            stair source does, so the setting has nothing to switch.
         openings: The floor's openings -- doorways and gaps to space not
             yet seen (:mod:`opening_nodes`). ``openings.enabled`` is the
             switch. Since 2026-10-21 an exit is an ATTRIBUTE of the room it
@@ -1412,7 +1415,7 @@ class RoomSearchLoop:
         p = self.policy
         building = getattr(p, "building", None)
         if (not self.settings.stairs_as_nodes or not p.settings.allow_stair_traversal or building is None
-                or building.ground_truth is None or building.committed):
+                or building.committed):
             self._stairs = {}
             return []
         rooms_left = self.settings.finishing and (any(pid not in self._excluded
@@ -1426,13 +1429,13 @@ class RoomSearchLoop:
             self.stats["stairs_offered"] += len(set(offered) - set(self._stairs))
         arrived_by = getattr(building, "arrived_by", None)
         if rooms_left and arrived_by is not None and not any(
-                o.portal.get("connector_id") == arrived_by for o in options) and any(
-                q.get("connector_id") == arrived_by and q["floor_id"] == building.floor_id for q in building.portals):
+                o.portal.get("stairs_id") == arrived_by for o in options) and any(
+                q.get("stairs_id") == arrived_by and q["floor_id"] == building.floor_id for q in building.portals):
             left = sorted(pid for pid in p.graph.registry.rooms if pid not in self._excluded)
             held = (tuple(left), tuple(sorted(self._openings)))
             if self._way_back_held_logged != held:              # once per change of what holds it, not per action
                 self.stats["way_back_held_for_rooms"] += 1
-                self._log(obs, "way_back_held", connector=arrived_by, rooms_left=left,
+                self._log(obs, "way_back_held", stairs=arrived_by, rooms_left=left,
                           openings_left=len(self._openings))
                 self._way_back_held_logged = held
         self._stairs = offered
@@ -1501,7 +1504,7 @@ class RoomSearchLoop:
             # (LLM-first, 2026-10-07), from its own knowledge of where the target lives.
             p.graph.reason(world, p.target, obs.step,
                            extra_nodes=[o.node for o in stairs] + [o.node for o in shown],
-                           context=search_context(getattr(p, "building", None), p, p.floors.save(), house=house),
+                           context=search_context(p, p.floors.save(), house=house),
                            here_xy=(obs.pose.x, obs.pose.y), action_time_s=p.settings.action_time_s,
                            exclude=hidden, scanned=scanned, exits=exits)
         except Exception as exc:  # the room LLM: timeout, bad JSON, refused uniform prior

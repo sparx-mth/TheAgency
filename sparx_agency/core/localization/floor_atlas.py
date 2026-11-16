@@ -16,10 +16,11 @@ import math
 from typing import Dict, List, Optional, Tuple
 
 
-#: Where the building coordinator learns where the stairs are.
-STAIR_SOURCE_GROUND_TRUTH = "ground_truth"
+#: Where the building coordinator learns where the stairs are: from the robot's own RGB-D, and nowhere else.
 STAIR_SOURCE_OBSERVED = "observed"
-STAIR_SOURCES = (STAIR_SOURCE_GROUND_TRUTH, STAIR_SOURCE_OBSERVED)
+STAIR_SOURCES = (STAIR_SOURCE_OBSERVED,)
+#: The source removed on 2026-11-15: stair connectors and storey levels read from the simulator's navmesh.
+REMOVED_STAIR_SOURCES = ("ground_truth",)
 
 
 @dataclass(frozen=True)
@@ -27,68 +28,45 @@ class MultiFloorParams:
     """Floor hysteresis for the atlas plus the building coordinator's knobs.
 
     Attributes:
-        stair_source: ``observed`` (the default since 2026-10-21) -- stairs
-            are what the robot's own RGB-D sees: measured support surfaces
-            rising ``stair_min_rise_m`` or more within reach in a flight's
-            profile -- ``stair_min_risers`` risers of ``stair_riser_min_m``
-            to ``max_step_m`` with treads of ``stair_min_tread_m`` to
+        stair_source: ``observed``, the only source -- stairs are what the
+            robot's own RGB-D sees: measured support surfaces rising
+            ``stair_min_rise_m`` or more within reach in a flight's profile
+            -- ``stair_min_risers`` risers of ``stair_riser_min_m`` to
+            ``max_step_m`` with treads of ``stair_min_tread_m`` to
             ``stair_max_tread_m`` between them (``world_model/stair_terrain.py``
             ``stair_profile``, since 2026-10-22: a coffee table and a sofa,
-            or a bed, are no flight) -- masked on the planning grid
-            like any other seen flight, with no simulator geometry consulted
-            -- the footing of ApexNav, SG-Nav and OSG-Nav, which have no
-            staircase oracle. ``ground_truth`` -- the ablation: stair
-            connectors and floor levels come from the simulator's navmesh
-            through the episode metadata, a perfect detector sights them,
-            and a floor transition is started only at one of them. Its
-            footprint is the navmesh centreline, which in Darden begins
-            0.45 m before the first riser, on a sloped threshold: drawn on
-            the grid it closed the junction below the flight. The atlas
-            itself reads poses only in either mode; this is the
-            coordinator's choice.
-        near_connector_m: How close (XY, metres) to a ground-truth connector's
-            polyline an unplanned height departure must be to count as being
-            on those stairs rather than on a step or a threshold.
-        floor_search_actions: OBSERVED mode only -- actions to search a floor
-            before its portals are considered. In ground-truth mode nothing
-            decides a floor change by a clock: a staircase is a node of the
-            room-search loop's RPT* instance, valued by the LLM and charged
-            for the climb, and taken when the order says so.
-        floor_change_cost_m: Ground truth -- the fixed cost of a storey
-            change in metres of walking, added to the flight's own length on
-            every arc into or out of a staircase node: the climb's turns, the
-            settle at the top and the exit stub, whatever the flight's
-            length. Eight metres is about thirty actions at the benchmark's
-            step -- what the Ranchester recordings spent per completed
-            flight. A cost, not a budget: it makes RPT* prefer a room here
-            to a storey there at equal probability; it never forbids the
-            stairs, and nothing counts actions against it.
-        commit_failures: Ground truth only. Blocked forward steps a committed
-            traversal absorbs -- tightening its following, then skipping a
-            grazed vertex -- before it turns back. Generous on purpose: the
-            connector is walkable by construction, and a retreat spends the
-            climb twice and the search once more on the same decision.
-        commit_stall_actions: Ground truth only. Actions with neither XY
-            progress nor a polyline vertex reached before a traversal turns
-            back -- a stuck-agent bound, not a budget for the climb.
-        confirm_actions: Ground truth only. Actions at the destination
-            height near the far anchor after which the storey is confirmed
-            outright when the atlas's translated-plateau test has not fired
-            -- a landing walled on three sides, an exit stub blocked at every
-            heading. The traversal has done its part; the transition ends.
+            or a bed, are no flight) -- masked on the planning grid like any
+            other seen flight, with no simulator geometry consulted -- the
+            footing of ApexNav, SG-Nav and OSG-Nav, which have no staircase
+            oracle. The setting is kept, with its one value, because every
+            recorded run configuration names it. ``ground_truth`` -- stair
+            connectors and storey levels read from the simulator's navmesh
+            and handed to the agent in the episode metadata -- was an
+            ablation until 2026-11-15 and is refused now: the agent is given
+            no simulator geometry, and asking for it raises rather than
+            falling back to the observed source unannounced.
+        floor_search_actions: Actions to search a floor before its portals
+            are considered, when stair traversal is allowed.
+        floor_change_cost_m: The fixed cost of a storey change in metres of
+            walking, added to the flight's own length on every arc into or
+            out of a staircase node of the room-search loop
+            (``rooms/stair_nodes.py``): the climb's turns, the settle at the
+            top and the exit stub, whatever the flight's length. Eight
+            metres is about thirty actions at the benchmark's step. A cost,
+            not a budget: it makes RPT* prefer a room here to a storey there
+            at equal probability; it never forbids the stairs, and nothing
+            counts actions against it.
         approach_failures: Consecutive actions the approach to a chosen
-            connector may fail to plan (the entry re-snapped each time)
-            before the connector is deferred.
-        arrival_grace_actions: Ground truth only. Actions after arriving on a
-            storey before the staircase just climbed is offered again as a
-            node or a fallback candidate. A storey entered two frames ago has
-            one tentative room and no frontier on its map, and the node
-            oracle -- told the agent had just arrived -- sent it straight
-            back down three times in one Pomaria episode (78, 270, 493): half
-            the episode on a flawless staircase. The decision to change
-            floors, once executed, is given at least this long to pay for
-            itself; walking onto the stairs by accident still completes the
-            climb, and any OTHER staircase is offered at once.
+            flight may fail to plan before the flight is deferred (the
+            stair-spawn switch, ``multifloor/spawn_switch.py``).
+        arrival_grace_actions: Actions after arriving on a storey before the
+            staircase just climbed is offered again as a node of the
+            room-search loop. A storey entered two frames ago has one
+            tentative room and no frontier on its map, and the node oracle
+            -- told the agent had just arrived -- sent it straight back down
+            three times in one Pomaria episode (78, 270, 493): half the
+            episode on a flawless staircase. The decision to change floors,
+            once executed, is given at least this long to pay for itself.
         confirm_area_m2: The connected level support (the stair terrain's
             ``plateau_area``) under the agent before a spawn storey walked
             ``stable_distance_m`` level is CONFIRMED a storey rather than a
@@ -131,7 +109,6 @@ class MultiFloorParams:
 
     enabled: bool = True
     stair_source: str = STAIR_SOURCE_OBSERVED
-    near_connector_m: float = 0.75
     departure_m: float = 0.45
     floor_match_m: float = 0.30
     min_floor_separation_m: float = 1.5
@@ -164,9 +141,6 @@ class MultiFloorParams:
     stair_max_tread_m: float = 0.55
     max_failures: int = 4
     floor_change_cost_m: float = 8.0
-    commit_failures: int = 12
-    commit_stall_actions: int = 30
-    confirm_actions: int = 24
     approach_failures: int = 3
     arrival_grace_actions: int = 40
 
@@ -175,11 +149,15 @@ class MultiFloorParams:
             raise ValueError("multifloor.enabled must be boolean")
         if type(self.spawn_switch) is not bool:
             raise ValueError("multifloor.spawn_switch must be boolean")
+        if self.stair_source in REMOVED_STAIR_SOURCES:
+            raise ValueError("multifloor.stair_source %r was removed: the agent is given no simulator stair or "
+                             "storey data; %r is the only source and there is no silent fallback to it"
+                             % (self.stair_source, STAIR_SOURCE_OBSERVED))
         if self.stair_source not in STAIR_SOURCES:
             raise ValueError("multifloor.stair_source must be one of %s; no silent fallback" % (STAIR_SOURCES,))
         for name in ("departure_m", "floor_match_m", "min_floor_separation_m",
                      "min_floor_area_m2", "stable_height_m", "stable_distance_m", "confirm_area_m2", "max_step_m",
-                     "terrain_radius_m", "stair_min_rise_m", "exit_distance_m", "near_connector_m",
+                     "terrain_radius_m", "stair_min_rise_m", "exit_distance_m",
                      "stair_riser_min_m", "stair_min_tread_m", "stair_max_tread_m"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -189,8 +167,7 @@ class MultiFloorParams:
             raise ValueError("floor_change_cost_m must be finite and non-negative")
         for name in ("stable_samples", "floor_search_actions", "transition_actions",
                      "retreat_actions", "retreat_blocked", "portal_cooldown_actions", "max_failures",
-                     "commit_failures", "commit_stall_actions", "confirm_actions", "approach_failures",
-                     "arrival_grace_actions", "stair_min_risers", "spawn_leave_after_actions", "spawn_departure_attempts",
+                     "approach_failures", "arrival_grace_actions", "stair_min_risers", "spawn_leave_after_actions", "spawn_departure_attempts",
                      "spawn_switch_min_floor_actions", "spawn_switch_after_actions",
                      "spawn_switch_min_actions_left"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
@@ -331,14 +308,17 @@ class FloorAtlas:
     def settle(self, pose, height):
         """Confirm arrival at the storey of ``height`` now, without the plateau test.
 
-        For a caller that KNOWS the agent stands on a storey -- the
-        ground-truth traversal at a connector's far anchor, at the
-        destination height the navmesh reported -- and has waited long
-        enough for the translated-plateau test to be evidently not going to
-        fire: a landing walled on three sides, an exit stub blocked at every
-        heading. Poses only, still: the height is the caller's, but the
-        storey it becomes is matched against the floors this atlas has
-        measured, or created at the separation rule every other floor obeys.
+        For a caller that knows, from the poses alone, that the agent stands
+        on a storey and has waited long enough for the translated-plateau
+        test to be evidently not going to fire -- the trail retreat back at
+        the plane it left (``MultiFloorSearch._retreat_to_storey``), and the
+        spawn-floor guard confirming a return in place or adopting a
+        half-level after its thirty actions (an agent that cannot move never
+        translates). The height is always one this atlas measured -- its own
+        elevation, or the pose height the agent has held -- never a height
+        from outside: the storey it becomes is matched against the floors
+        this atlas has measured, or created at the separation rule every
+        other floor obeys.
 
         Args:
             pose: The agent's pose, whose XY ends the measured stair edge.

@@ -1,13 +1,24 @@
-"""Ground-truth floor levels and stair connectors from a scene's navmesh.
+"""Ground-truth floor levels and stair connectors from a scene's navmesh -- for ANALYSIS, never for the agent.
 
 The simulator's navmesh is the walkable surface of the building. Its
 triangles at a storey's height are floor; the triangles in between are the
-stairs that join two storeys. This module reads that geometry ONCE per scene
-and hands the evaluator a short list of connectors -- where each staircase
-starts, where it ends, which two ADJACENT storeys it joins, the centreline
-to walk it by and a sample of its surface -- so that the policy's perfect
-stair detector has something to look for, and a committed climb has a route
-that keeps to the middle of the flight.
+stairs that join two storeys. This module reads that geometry and returns the
+storeys (:func:`floor_levels`) and a short list of connectors -- where each
+staircase starts, where it ends, which two ADJACENT storeys it joins, its
+centreline and a sample of its surface.
+
+**Who may call this.** Code that looks at an episode from outside: the
+after-the-fact breakdown of results by the storey the goal is on
+(``hm3d/episode_levels.py``), dataset generation, diagnostics. It is
+privileged scene geometry. Until 2026-11-15 the environment adapters put
+:func:`scene_structure` into ``ObjNavEpisode.metadata`` and the policy's
+``ground_truth`` stair source read it there (a "perfect stair detector" over
+the surface samples, a climb along the centreline); that source is removed,
+the adapters attach nothing, the harness refuses such metadata at reset
+(``env_contract.PRIVILEGED_KEY_PARTS``) and
+``core/planning/object_search/tests/test_no_privileged_geometry.py`` fails if
+any of it reaches ``sparx_agency/core`` again. Do not hand this module's
+output to a policy.
 
 Four rules, each bought by a recording:
 
@@ -28,9 +39,8 @@ Four rules, each bought by a recording:
   (``try_step``) at the agent's stride; a leg the agent could not walk is
   repaired through the pathfinder's path between its ends.
 * **The stairs are a surface, not a line.** A sample of the stair surface
-  (ENU) rides with each connector so the policy's detector can test, frame
-  by frame, whether THIS staircase is in view -- knowledge of the stairs
-  comes from seeing them, never from this file.
+  (ENU) rides with each connector, so an analysis can test whether a
+  staircase was in a recorded frame's view.
 
 Everything is expressed in the public world frame the policy already
 navigates in: right-handed Z-up ENU, ``(x, y, z) = (-h_z, -h_x, h_y)`` from
@@ -38,9 +48,8 @@ Habitat's +Y-up ``(h_x, h_y, h_z)`` -- the same conversion as
 :func:`~sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator.habitat_pose`.
 
 This is scene structure, not task information: no goal, no distance to it
-and no floor id of the target leave here. It is still ground truth, and a
-method that consumes it says so in its configuration
-(``ground_truth_stairs``); a run with it is not an observed-only run.
+and no floor id of the target leave here. It is still ground truth, which is
+why no method consumes it.
 
 Host side only (numpy, scipy); ``habitat_sim`` is imported only by
 :func:`pathfinder_hooks`.
@@ -562,7 +571,7 @@ def stair_connectors(tris: np.ndarray, levels: Sequence[Dict[str, float]],
         polyline's two ends, ENU: the floor anchors on the flight's line),
         ``bottom_z``/``top_z`` (the storey heights they join),
         ``polyline_xyz`` from bottom to top along the middle of the flight,
-        ``surface_xyz`` (a sample of the stair surface, for the detector),
+        ``surface_xyz`` (a sample of the stair surface),
         ``length_m``, ``rise_m`` and ``walkability`` (the stride check's
         counts). Empty for a single-storey scene.
     """
@@ -610,7 +619,7 @@ def stair_connectors(tris: np.ndarray, levels: Sequence[Dict[str, float]],
 
 
 def scene_structure(vertices, path_between=None, snap=None, step=None) -> Dict[str, object]:
-    """The metadata block for an episode: storeys and connectors, ENU."""
+    """A scene's storeys and connectors, ENU, as one JSON-serialisable block -- for analysis, never an episode's metadata."""
     tris = triangles(vertices)
     levels = floor_levels(tris)
     return {"stair_source": "navmesh",

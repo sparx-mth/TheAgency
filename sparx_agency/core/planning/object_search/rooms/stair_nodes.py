@@ -15,11 +15,27 @@ the building coordinator into such a node:
   found and searched there, whether the robot arrived by these stairs;
 * the **cost**: the node sits at the foot of the flight on this floor's map
   (its approach point) at the end of a leaf as long as the flight plus the
-  fixed cost of a storey change (:func:`~floor_decision.stair_cost_m`),
+  fixed cost of a storey change (:func:`~stair_approach.stair_cost_m`),
   charged on every arc into AND out of it -- going upstairs puts every room
   down here that much further away, which is exactly what RPT* must see.
 
 Nothing here decides anything; the decision is the order the solver returns.
+
+**No staircase is a node today.** A stair node's facts need two things of
+its portal: the height of the storey the flight leads to (``destination_z``
+-- is that storey visited, and what was found there?) and an identity the
+portals at the flight's two ends share (``stairs_id`` -- did the robot just
+arrive by these stairs?). The only source that ever supplied them was the
+``ground_truth`` stair source: connectors and storey levels read from the
+simulator's navmesh, privileged scene geometry, removed on 2026-11-15. The
+observed discovery (``world_model/stair_terrain.py``) measures a flight's
+treads, not where it ends, so its portals carry neither and
+:func:`stair_options` offers none of them; a floor change is then the
+building coordinator's allowance rule
+(:meth:`~multifloor_policy.MultiFloorSearch.plan`). The loop's side is kept
+whole -- ids, facts, cost, commitment -- for an observed source that does
+measure them, and the prompt never tells the oracle how many storeys the
+building has: only the ones the robot has stood on are summarised.
 """
 from __future__ import annotations
 
@@ -28,7 +44,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from sparx_agency.core.mapping.topology.search_node_oracle import STAIRS, SearchContext, SearchNode
 from sparx_agency.core.planning.exploration.room_search_policy import RoomOption
-from sparx_agency.core.planning.object_search.multifloor.floor_decision import (
+from sparx_agency.core.planning.object_search.multifloor.stair_approach import (
     Approach, approach_points, floor_at, stair_cost_m)
 
 #: Room pids count up from zero; stair node ids start here. A registry would
@@ -122,8 +138,9 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
                   rooms_left: bool = False) -> List[StairOption]:
     """Every eligible staircase on the floor in force, as a node the loop can offer.
 
-    Eligible: a ground-truth connector's portal on this floor -- a SEEN
-    staircase, the coordinator makes portals of no other -- that is not
+    Eligible: a portal on this floor that says which storey its flight leads
+    to (``destination_z``; see the module docstring -- no portal of the
+    observed discovery does, so today the list is empty), that is not
     cooling (a failed approach defers it for a while), whose entry the
     observed passable map has reached, and that is not the staircase the
     agent arrived by while the way back is held: for
@@ -149,14 +166,14 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
         action_time_s: Seconds per action, to phrase "arrived N ago".
         rooms_left: Whether a room of this storey is still a node of the search.
     """
-    if building is None or building.ground_truth is None:
+    if building is None:
         return []
     if not building.can_leave_floor(obs):
         return []
     held = getattr(building, "way_back_held", lambda step: False)(obs.step) or bool(rooms_left)
     portals = [q for q in building.portals if q["floor_id"] == building.floor_id
-               and q.get("connector_id") is not None and obs.step >= q.get("cooldown_until", 0)
-               and not (held and q.get("connector_id") == building.arrived_by)]
+               and q.get("destination_z") is not None and obs.step >= q.get("cooldown_until", 0)
+               and not (held and _arrived_by(building, q))]
     if not portals:
         return []
     approaches = approach_points(portals, obs, world, cost)
@@ -171,7 +188,7 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
         direction = int(portal["direction"])
         destination = floor_at(atlas, float(portal["destination_z"]), params.floor_match_m)
         visited = destination is not None
-        arrived_by = building.arrived_by == portal.get("connector_id")
+        arrived_by = _arrived_by(building, portal)
         node = SearchNode(
             id=stair_node_id(portal["id"]), kind=STAIRS,
             label="stairs %s" % ("up" if direction > 0 else "down"), direction=direction,
@@ -184,56 +201,27 @@ def stair_options(building, obs, world, cost, contexts: Dict, action_time_s: flo
     return options
 
 
-def storey_position(building, elevation_m: float) -> str:
-    """Where this storey lies in the building, in the prompt's words -- geometry, not judgement.
-
-    The storey's rank from both ends: ``the lowest of 2 known storeys``,
-    ``the highest of 3 known storeys, 2 above the lowest``, ``1 above the
-    lowest and 1 below the highest of 3 known storeys``. No floor name:
-    the node oracle's STEP 2 reads the storey from this rank AND the rooms
-    found, with the rooms decisive. On 2026-10-05 the 14B model read a
-    storey given only as ``(this one at +3.1 m)`` as a ground floor and kept
-    the couch's living room "here"; the same evening a line that called
-    every storey above the lowest "an upper floor" had it say the living
-    room lives elsewhere on the Newfields ground floor -- whose lowest
-    storey is a basement -- with a living room found on it. Which storeys
-    exist is the building's ground-truth stair data; the match tolerance
-    is the atlas's.
-    """
-    levels = sorted(float(z) for z in building.ground_truth.levels)
-    if not levels:
-        return ""
-    tolerance = float(getattr(building.params, "floor_match_m", 1.0) or 1.0)   # storeys lie 1.5 m or more apart
-    below = sum(1 for z in levels if z < elevation_m - tolerance)
-    above = sum(1 for z in levels if z > elevation_m + tolerance)
-    n = len(levels)
-    if n == 1:
-        return "this storey is the only one known"
-    if below == 0:
-        return "this storey is the lowest of %d known storeys" % n
-    if above == 0:
-        return "this storey is the highest of %d known storeys, %d above the lowest" % (n, below)
-    return "this storey is %d above the lowest and %d below the highest of %d known storeys" % (below, above, n)
+def _arrived_by(building, portal: Dict) -> bool:
+    """Whether ``portal`` is an end of the staircase the agent last arrived by (a portal with no identity never is)."""
+    stairs = portal.get("stairs_id")
+    return stairs is not None and stairs == building.arrived_by
 
 
-def search_context(building, policy, contexts: Dict, house: str = "") -> SearchContext:
-    """What the prompt says about this home: the HOUSE line, and the storeys when more than one is known.
+def search_context(policy, contexts: Dict, house: str = "") -> SearchContext:
+    """What the prompt says about this home: the HOUSE line, and the storeys the robot has stood on.
 
     ``house`` is the big-picture line (:func:`~house_context.house_line`);
     the storey lines are kept for the multi-storey development protocol and
-    are shown only when another storey is known or a staircase is offered
-    (the standard single-storey benchmarks never see them).
+    are shown only when another storey has been visited or a staircase is
+    offered (the standard single-storey benchmarks never see them). Only
+    storeys the robot has stood on are named: how many storeys the building
+    has, and where this one ranks among them, is not something it has
+    observed, and until 2026-11-15 those two facts came from the
+    simulator's navmesh.
     """
     here = {key: getattr(policy, key) for key in ("graph", "_floor_time")}
     floor_id = policy.mapping.floor_id
     storey = summarise_floor(here, floor_id)
-    if building is not None and building.ground_truth is not None:
-        elevation = policy.mapping.atlas.elevation_m if policy.mapping.atlas.floors else 0.0
-        storey += "; %d storey%s known to the building" % (
-            len(building.ground_truth.levels), "" if len(building.ground_truth.levels) == 1 else "s")
-        position = storey_position(building, elevation)
-        if position:
-            storey += "; " + position
     others = tuple(summarise_floor(context, other) for other, context in sorted(contexts.items()) if other != floor_id)
     return SearchContext(house=house or storey, storey=storey, others=others)
 

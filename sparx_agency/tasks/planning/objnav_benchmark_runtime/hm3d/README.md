@@ -4,8 +4,9 @@
 observed RGB-D mapping → YOLO-World detections → room scene graph → room LLM
 (P(target) per room) → RPT\* room order → **room-search loop** with A\* routes →
 discrete actions. Every failed plan, model call or decision lands in the
-**exploration fallback** (a move, never an idle spin); stairs come from the
-simulator's navmesh (ground truth, declared as such in the run configuration).
+**exploration fallback** (a move, never an idle spin); stairs are the flights
+the robot's own depth measures, and no simulator geometry -- navmesh, storeys,
+stair annotations -- reaches the agent (since 2026-11-15 without exception).
 Habitat supplies ground-truth RGB-D and a perfect pose, so what is measured is
 the search logic and nothing else. No navigation-specific training is performed.
 
@@ -335,8 +336,10 @@ never shown to the policy.
 
 **Single floor.** The papers compared against search one storey and never take stairs, and so does this
 runtime: `method.allow_stair_traversal` is `false` (the `RPTSettings` default) and the preflight prints it.
-`method.ground_truth_stairs: true` only says the navmesh's stair connectors are *known to the policy*, not
-used to change floors; do not turn `allow_stair_traversal` on for a number you compare with them.
+`method.ground_truth_stairs` reads `false` in every run of this code and `method.stair_source` reads
+`observed`: the stairs the search masks are the ones the robot's own depth measured, and the ablation that
+handed the policy the navmesh's stair connectors was removed on 2026-11-15 (a run record that reads `true`
+predates it). Do not turn `allow_stair_traversal` on for a number you compare with them.
 
 ### 2.6 Smooth first-person replay (visualization only)
 
@@ -359,7 +362,7 @@ overridden with a JSON file:
 ```bash
 cat > /tmp/policy.json <<'EOF'
 {"detection_confidence": 0.35, "stop_distance_m": 1.0,
- "multifloor": {"stair_source": "ground_truth"}}
+ "target_closing": {"standing_snap_m": 0.5}}
 EOF
 "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run \
     $RUN_FLAGS --policy-config /tmp/policy.json --scenes 00877-4ok3usBNeis --limit 1 --preflight
@@ -812,7 +815,7 @@ issue.
 |---|---|
 | `protocol.py` | `HM3DProtocol`, `HM3D_V1`, `HM3D_V2`, the navmesh choice, the named ApexNav radius |
 | `dataset.py` | the published episodes and goals, scene-qualified ids, XYZW→WXYZ, the manifest |
-| `env.py` | `HM3DEnv`: the shared `habitat/env.py::HabitatObjNavEnv` (the episode with navmesh storeys/stairs as its only metadata, the measurement, start validation, navmesh provenance, the oracle hand-off of frames, depth, pose, camera and instance boxes) named for HM3D; since 2026-11-11 nothing else is written here |
+| `env.py` | `HM3DEnv`: the shared `habitat/env.py::HabitatObjNavEnv` (the episode with NO metadata -- nothing of the navmesh reaches the policy -- the measurement, start validation, navmesh provenance, the oracle hand-off of frames, depth, pose, camera and instance boxes) named for HM3D; since 2026-11-11 nothing else is written here |
 | `assets.py` | what is installed, what is missing, and the commands that would fix it (`--check --semantic` and step 5 for the HM3D-Semantics annotations) |
 | `run_benchmark.sh` | The one-command launcher: services (`../benchmark_services.sh`), preflight, `campaign.py` or a `run.py` scene, the aggregate; `--perception ground-truth`, `--jobs max` |
 | `../ground_truth/` | the perception upper bound: `semantic_frame.py` (boxes/masks from an id frame), `hm3d_categories.py` (raw names → vocabulary, the publisher's goal ids first), `source.py` (the env→oracle hand-off, strict frame identity), `perception.py` (`GroundTruthDetector` / `GroundTruthSegmenter`) |

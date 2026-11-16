@@ -5,15 +5,19 @@ category, the camera, the action geometry and the step budget. Goal positions,
 geodesic distances and the start-to-goal path length are **privileged** --
 they stay inside the environment and reach the harness through
 :class:`~sparx_agency.core.planning.objnav.types.measurement.EpisodeMeasurement`,
-never the agent. A benchmark number produced by an agent that could see them
-would be meaningless, and nothing would flag it.
+never the agent. So is the scene's geometry as the simulator knows it: its
+navigation mesh, how many storeys the building has and where its stairs are.
+The agent learns the building from its observations or not at all. A
+benchmark number produced by an agent that could see any of these would be
+meaningless, and nothing would flag it.
 
 The typed fields have no place for them, but ``metadata`` is a free-form
 mapping handed to the policy unchanged, and nothing here can tell a harmless
 extra from a leaked one. Privileged values must never be put in it -- a
-dataset row copied wholesale carries ``shortest_path`` and friends. The
-adapter is responsible. The harness's reset check refuses the known leak keys,
-but it is a tripwire for those keys, not a guarantee.
+dataset row copied wholesale carries ``shortest_path`` and friends, and the
+Habitat adapters attached the navmesh's storeys and stair connectors until
+2026-11-15. The adapter is responsible. The harness's reset check refuses the
+known leak keys, but it is a tripwire for those keys, not a guarantee.
 
 Python 3.8 syntax; numpy arrives only through the camera's intrinsics type.
 """
@@ -46,8 +50,9 @@ class ObjNavEpisode:
         max_steps: The step budget. The environment ends the episode once
             this many actions have been executed.
         metadata: Non-privileged extras: a mapping, stored as a dict copy.
-            Never goal positions, distances or paths -- the adapter keeps them
-            out; nothing here can tell.
+            Never goal positions, distances or paths, and never scene
+            geometry read from the simulator (navmesh, storeys, stairs) --
+            the adapter keeps them out; nothing here can tell.
 
     Raises:
         ObjNavError: On an identifier that is not a non-blank string (a

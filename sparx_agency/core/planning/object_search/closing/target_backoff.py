@@ -12,11 +12,14 @@ Clear space is checked before a step is taken, in two ledgers the agent
 already keeps: the trail of poses it stood at on this storey
 (``SightLedger.poses`` -- walked once, known free) and the observed grid with
 the floor guard and the collision-qualified A* planner (``_plan_to``). A
-candidate on the spawn floor's forbidden cells, off the local NavMesh when
-one is bound, in unknown or occupied cells, or without a path from here is
-not clear space -- nor is a spot the observed grid puts a wall between and
-the target (``_sees``, since 2026-10-14: a perspective the door jamb hides
-the toilet from is not a wider one). When nothing qualifies the manoeuvre is
+candidate must be standing floor on that grid (``world_model/standing_floor.py``:
+observed free, every cell the body would cover observed free, joined to the
+agent through such cells; since 2026-11-15, in place of the projection onto
+the simulator's navigation mesh). One on the spawn floor's forbidden cells,
+in or beside unknown or occupied cells, or without a path from here is not
+clear space -- nor is a spot the observed grid puts a wall between and the
+target (``_sees``, since 2026-10-14: a perspective the door jamb hides the
+toilet from is not a wider one). When nothing qualifies the manoeuvre is
 skipped and recorded as such: verification proceeds in place, as before.
 """
 from __future__ import annotations
@@ -28,10 +31,14 @@ from typing import Dict, Optional, Sequence, Tuple
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
-from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
+from sparx_agency.core.planning.object_search.closing.map_sight import map_sight_clear
 
 #: Bearings tried around "straight away from the target", degrees: behind first, then the sides.
 RETREAT_OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90)
+#: How far a retreat candidate may be moved to reach standing floor, metres: its own cell or the one beside it.
+#: The candidate is a place the agent chose to stand (a pose of its trail, a ring point one retreat away), not a
+#: point about the target, so it is not moved further than that.
+SPOT_SNAP_M = 0.15
 
 
 class BackoffManeuver:
@@ -44,6 +51,7 @@ class BackoffManeuver:
         self.steps, self.max_actions, self.min_gain_m = steps, max_actions, float(min_gain_m)
         self.state = "pending"              # pending -> retreat -> face -> done
         self.goal: Optional[Tuple[float, float]] = None
+        self.planner = None                 # the planner the retreat's route was found with (None: the default)
         self.source: Optional[str] = None   # "trail" or "ring": where the clear spot came from
         self.skipped: Optional[str] = None  # why no manoeuvre was made
         self.outcome: Optional[str] = None  # how a manoeuvre that was made ended
@@ -67,7 +75,7 @@ class BackoffManeuver:
             self.state = "done"
             self.finished = int(obs.step)
             return False
-        self.goal, self.source = goal
+        (self.goal, self.planner), self.source = goal
         self.state = "retreat"
         return True
 
@@ -100,7 +108,8 @@ class BackoffManeuver:
             if math.dist(here, self.goal) <= tolerance or self._stalled >= 3 or self.retreat_actions >= budget:
                 self.state = "face"
             else:
-                command = self.policy._navigate(obs, world, self.goal, "target_backoff")
+                command = self.policy._navigate(obs, world, self.goal, "target_backoff", planner=self.planner,
+                                                exact_goal=True)
                 if command is None:
                     self.state = "face"                      # the path is gone: face the target from here
                 else:
@@ -121,8 +130,14 @@ class BackoffManeuver:
         self.outcome = why
         return None
 
-    def _retreat_goal(self, obs, world, target_xyz) -> Optional[Tuple[Tuple[float, float], str]]:
-        """The nearest clear spot ``steps`` forward steps away that widens the range to the target."""
+    def _retreat_goal(self, obs, world, target_xyz):
+        """The nearest clear spot ``steps`` forward steps away that widens the range to the target.
+
+        Returns:
+            ``((xy, planner), source)`` -- the spot, the planner its route was
+            found with (None: the default) and where the candidate came from
+            -- or None when no candidate is clear space.
+        """
         p = self.policy
         spec = p.episode.action_spec
         reach = self.steps * spec.forward_step_m
@@ -161,32 +176,31 @@ class BackoffManeuver:
         only what the map has seen as a wall counts) and stops ``standoff_m``
         short of the target, which is an occupied cell itself.
         """
-        dx, dy = target_xy[0] - xy[0], target_xy[1] - xy[1]
-        length = math.hypot(dx, dy)
-        if length <= standoff_m:
-            return True
-        scale = (length - standoff_m) / length
-        end = (xy[0] + dx * scale, xy[1] + dy * scale)
-        x0, y0 = world.world_to_grid(float(xy[0]), float(xy[1]))
-        x1, y1 = world.world_to_grid(float(end[0]), float(end[1]))
-        if not (world.in_bounds(x0, y0) and world.in_bounds(x1, y1)):
-            return False
-        return line_of_sight_clear(world.grid == world.values.occupied, x0, y0, x1, y1)
+        return map_sight_clear(world, xy, target_xy, skip_to_m=standoff_m)
 
-    def _clear_spot(self, obs, world, xy) -> Optional[Tuple[float, float]]:
-        """``xy`` snapped to the NavMesh when one is bound, if it is a free, allowed, reachable cell."""
+    def _clear_spot(self, obs, world, xy):
+        """``xy`` as a place to retreat to -- ``(spot, planner)`` -- if the agent's own map shows one there, else None.
+
+        The spot is standing floor of the observed grid
+        (``TargetClosing.standing_floor``) within :data:`SPOT_SNAP_M` of the
+        candidate: observed free, with every cell the body would cover
+        observed free, joined to the agent through such cells. It must be
+        allowed by the floor guard and have a route that ends on it exactly.
+        Asked first of the cells that keep the default planner's standoff
+        from every observed obstacle, then of all the standing floor, for
+        the squeeze planner (``TargetClosing.standing_planners``) -- a pose
+        of the agent's own trail beside a sofa is nearer the sofa than the
+        first allows.
+        """
         p = self.policy
-        if p.target_projector is not None:
-            snapped = p.target_projector((float(xy[0]), float(xy[1]), float(obs.pose.z)))
-            if snapped is None or abs(snapped[2] - obs.pose.z) > 0.2 or math.dist(snapped[:2], xy) > 0.15:
-                return None
-            xy = (float(snapped[0]), float(snapped[1]))
-        gx, gy = world.world_to_grid(*xy)
-        if not world.in_bounds(gx, gy) or not world.is_free(gx, gy):
-            return None
-        if not p.floor_guard.goal_allowed(obs, world, xy, "target_backoff"):
-            return None
-        return xy if p._plan_to(obs, world, xy) is not None else None
+        for planner, standoff_m in p.closing.standing_planners():
+            spot = p.closing.standing_floor(obs, world, standoff_m).nearest(xy, SPOT_SNAP_M)
+            if spot is None or not p.floor_guard.goal_allowed(obs, world, spot, "target_backoff"):
+                continue
+            options = {"exact_goal": True} if planner is None else {"planner": planner, "exact_goal": True}
+            if p._plan_to(obs, world, spot, **options) is not None:
+                return spot, planner
+        return None
 
     def diagnostics(self) -> Dict[str, object]:
         return {"state": self.state, "goal": None if self.goal is None else [round(v, 2) for v in self.goal],

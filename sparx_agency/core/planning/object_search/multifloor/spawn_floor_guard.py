@@ -143,14 +143,13 @@ carved out of the combined mask -- the agent was physically there, and
 nothing written for planning may outvote that (``walked_exempt_cells``).
 
 All of this is a constraint on what the agent may choose, not knowledge
-about the target. Under the default ``stair_source == "observed"`` (since
-2026-10-21) nothing here is privileged at all: the flights masked are the
+about the target, and nothing here is privileged: the flights masked are the
 ones the robot's own depth measured rising (``stair_terrain`` candidates,
 placed as portals by the coordinator), the drops are its own depth reads.
-Under the ``ground_truth`` ablation the one privileged input is the stair
-geometry the perfect detector hands the coordinator once a staircase is in
-frame. With ``allow_stair_traversal`` true the guard is inert and returns
-the world untouched.
+(Until 2026-11-15 a ``ground_truth`` stair source could hand the coordinator
+the simulator's stair geometry instead; it is removed.) With
+``allow_stair_traversal`` true the guard is inert and returns the world
+untouched.
 """
 from __future__ import annotations
 
@@ -323,9 +322,9 @@ class SpawnFloorGuard:
     # -- the provisional spawn storey -----------------------------------------
     @property
     def provisional(self) -> bool:
-        """Whether the spawn storey may be a tread: observed stairs, and the agent never walked it level (see the module docstring)."""
+        """Whether the spawn storey may be a tread: the agent never walked it level (see the module docstring)."""
         building = getattr(self.policy, "building", None)
-        return building is not None and building.ground_truth is None and not building.storey_confirmed
+        return building is not None and not building.storey_confirmed
 
     @property
     def step_reach_m(self) -> float:

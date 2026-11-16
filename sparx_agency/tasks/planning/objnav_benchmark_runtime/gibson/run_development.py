@@ -37,8 +37,6 @@ def prepare(args):
         # benchmark default (no stair traversal) is lifted here, visibly in ``method``,
         # unless --policy-config says otherwise.
         policy, method = _method(args, defaults={"allow_stair_traversal": True} if multistory else None)
-        policy.target_projector = getattr(env, "target_projector", None)
-        method["target_navmesh_projection"] = policy.target_projector is not None
         protocol = env.protocol if multistory else DEVELOPMENT_PROTOCOL
         recorded = ids[:1] if getattr(args, "record_first", False) else ids
         display_counts = {scene: len(audit["levels"]) for scene, audit in

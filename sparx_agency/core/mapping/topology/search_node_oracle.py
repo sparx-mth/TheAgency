@@ -281,7 +281,13 @@ Line format: id=200001  OPENING  doorway off room 7 (type=hallway)  to space NOT
 glimpsed through it: nothing yet -- in the example above, with the hallway's doorway offered \
 so, the opening would take the hallway's 25 and the hallway itself 5."""
 
-#: Appended to :data:`SYSTEM_PROMPT` when a STAIRS node is offered: the multi-storey rules.
+#: Appended to :data:`SYSTEM_PROMPT` when a STAIRS node is offered or another storey has been visited: the
+#: multi-storey rules. Its sentences about the storey's RANK ("the lowest of N known storeys ...") describe a
+#: line of the user prompt that nothing writes any more: the rank was computed from the storey levels of the
+#: simulator's navmesh, which the agent is no longer given (2026-11-15; the THIS STOREY line now holds only what
+#: the robot found on the storeys it stood on). The text is left exactly as the evaluated runs sent it -- under
+#: the observed stair source of those runs the rank line was absent too -- and is to be reworded with the
+#: multi-storey work, when the prompt is next changed on purpose.
 STAIRS_SUPPLEMENT = """
 THIS SEARCH MAY CHANGE STOREYS. STAIRS nodes are staircases to another storey (up or down). \
 Taking one means leaving this storey and searching the other one. The line says whether that \
@@ -430,9 +436,10 @@ class SearchContext:
             see :func:`budget_line`). Empty reads as ``nothing known yet``.
         storey: Multi-storey only: one line on the storey the robot stands
             on -- rooms found by type, time searched, rooms with frontier
-            left, its rank in the building. Shown when a STAIRS node is
-            offered or another storey is known.
-        others: Multi-storey only: one line per other storey known.
+            left. Shown when a STAIRS node is offered or another storey has
+            been visited.
+        others: Multi-storey only: one line per other storey the robot has
+            stood on.
     """
 
     house: str = ""

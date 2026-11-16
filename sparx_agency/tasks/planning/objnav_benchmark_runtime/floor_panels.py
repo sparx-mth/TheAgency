@@ -215,7 +215,7 @@ class FloorPanels:
 
     @staticmethod
     def _stairs_on(policy, floor_id):
-        """The staircases the building knows on ``floor_id`` -- seen ones, placed where they were seen."""
+        """The staircases the building knows on ``floor_id`` -- the flights the robot's depth measured, placed where they were seen."""
         building = getattr(policy, "building", None)
         if building is None:
             return []
@@ -223,10 +223,8 @@ class FloorPanels:
         for portal in getattr(building, "portals", ()):
             if portal.get("floor_id") != floor_id:
                 continue
-            out.append({"portal_id": portal["id"], "connector_id": portal.get("connector_id"),
-                        "direction": int(portal.get("direction", 0)), "entry": list(portal["entry"][:2]),
-                        "footprint": [list(p[:2]) for p in portal.get("footprint", ())],
-                        "seen_step": portal.get("seen_step"), "cooling_until": portal.get("cooldown_until", 0)})
+            out.append({"portal_id": portal["id"], "direction": int(portal.get("direction", 0)),
+                        "entry": list(portal["entry"][:2]), "cooling_until": portal.get("cooldown_until", 0)})
         return out
 
     def metadata(self):
@@ -235,8 +233,7 @@ class FloorPanels:
                  "known_cells": int(np.count_nonzero(s["grid"] >= 0)), "rooms": s["rooms"],
                  "settled_cells": int(np.count_nonzero(s["settled"])),
                  "objects": list(s["objects"]), "search_time_s": s["search_time_s"],
-                 "stairs": [dict({k: v for k, v in st.items() if k != "footprint"}, footprint_points=len(st["footprint"]))
-                            for st in s["stairs"]],
+                 "stairs": [dict(st) for st in s["stairs"]],
                  "occupancy_sha256": hashlib.sha256(s["grid"].tobytes()).hexdigest(),
                   "room_labels_sha256": hashlib.sha256(s["room_labels"].tobytes()).hexdigest(),
                   "map_style": "minimal-room-outlines", "viewport_cells": self._bounds,

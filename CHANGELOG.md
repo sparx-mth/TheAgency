@@ -5,6 +5,94 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Removed (2026-11-15, the agent's privileged scene geometry: the navmesh projection of the closing's standing points and the ground-truth stair source)
+- **The ZSON agent is given no simulator geometry any more.** An audit found two things reaching `core/` that ASCENT,
+  ApexNav, VLFM and MFNP do not give their agents. (1) Every run script bound `policy.target_projector` to the
+  environment's navmesh snap (`HabitatRGBDSimulator.project_target`), and the closing projected every standing point
+  through it at three call sites -- the standoff ring (`closing/target_path.py`), the back-off spot
+  (`target_backoff.py`) and the nearest-floor goal (`target_closing.py::_nearest_reachable`). (2) Both environment
+  adapters put the navmesh's storeys and stair connectors into `ObjNavEpisode.metadata`, which
+  `multifloor.stair_source = "ground_truth"` read. Both are deleted, with the seam on every side: the three call
+  sites, `target_projector` on `RPTSearchPolicy` and `FalconYoloBaseline`, the binding in `hm3d/run.py`, `mp3d/run.py`,
+  `gibson/run.py` and `gibson/run_development.py`, the `target_projector` property of `HabitatObjNavEnv` and
+  `GibsonEnv`, `project_target` and `scene_structure` on the simulator bridge, the `target_navmesh_projection` record,
+  `_scene_metadata`, `multifloor/stair_ground_truth.py`, `stair_sightings.py`, `ground_truth_traversal.py`, the
+  fallback's up/down rule (`floor_decision.py`, whose geometry half is now `stair_approach.py`), the storey count and
+  rank in the oracle's context (`stair_nodes.storey_position`) and the four `MultiFloorParams` knobs only that
+  traversal read. `stair_source` accepts `"observed"` only and raises on the old value;
+  `configuration()["ground_truth_stairs"]` is the constant `False`. The navmesh stays outside the agent: simulator
+  physics, episode setup, scoring, the harness's checks, analysis (`habitat/stair_connectors.py`, now documented as
+  analysis-only).
+- **What replaced the projection: `core/planning/object_search/world_model/standing_floor.py`.** A standing point is
+  a cell of the agent's own occupancy map that (1) was observed free, (2) has every cell within the body radius
+  (0.18 m) observed free too -- an unknown cell there disqualifies it as an occupied one does -- and (3) is joined to
+  the agent through such cells. One floor, two planners: the default planner is asked first, of the standing cells
+  that keep its own standoff (0.25 m) from every *observed obstacle*; the squeeze planner then, of all of them
+  (`TargetClosing.standing_planners`; unknown cells cast no standoff). A candidate is moved
+  to the nearest such cell within `standing_snap_m` (0.5 m; never across an obstacle the map shows) or dropped, and
+  the route is planned to that cell exactly (`PlanRequest.options["exact_goal"]`, new in the weighted A\* planner).
+  **Unobserved space is never used**: the closing's planner through unknown cells (`through_unknown`,
+  `through_unknown_cost`, the policy's `optimistic_planner`) is removed with the projection -- a config naming them
+  is a `TypeError`. What the agent cannot yet stand on it looks at: the walk to the observed floor nearest the target,
+  then the footing sweep, and only then a standoff that was set aside -- one a detour long (now measured as the walk
+  over standing floor, one Dijkstra instead of an A\* per candidate), or, while floor in front of the target is still
+  unobserved, one beside it, behind it or out of the map's sight of it (`closing/map_sight.py`). New counters:
+  `squeezed_standoffs`, `standoffs_revoked`, `far_side_standoffs`; `navmesh_goal_xyz` is `standoff_goal_xyz`,
+  `through_unknown_routes` is gone.
+- **What the stairs lost.** With traversal forbidden (the benchmark default) nothing: the flights masked were already
+  the ones the robot's depth measured. With it allowed, floor changes are the coordinator's allowance rule, as under
+  the observed source before. The loop's staircases-as-nodes (`rooms/stair_nodes.py`, `MultiFloorSearch.commit`) had
+  no source but the navmesh: a portal is offered only when it says which storey its flight leads to, the observed
+  discovery does not measure that, so today no staircase is a node. The loop's side is kept and tested on hand-placed
+  portals (`tests/test_stair_nodes.py`). `search_node_oracle.STAIRS_SUPPLEMENT` still words a storey RANK that only
+  the navmesh's levels supplied; the prompt text is untouched (it is what the evaluated runs sent) and is flagged
+  beside it.
+- **Tests that keep it out.** `core/planning/object_search/tests/test_no_privileged_geometry.py` fails if anything
+  under `sparx_agency/core` can reach the navmesh, the pathfinder or ground-truth storey data -- by import (the
+  transitive import closure of every `core` module, lazy and relative imports followed, computed imports registered),
+  by name (no identifier may spell the navmesh, the pathfinder's API, the projector seam or the storey structure) or
+  through the episode (no `core` module reads `ObjNavEpisode.metadata`; a policy handed the navmesh's structure there
+  acts exactly as one handed nothing) -- with every scanner run against planted leaks. On the pre-change tree it fails
+  at exactly the audit's findings. The adapters' half is
+  `objnav_benchmark_runtime/tests/test_agent_gets_no_scene_geometry.py` (no episode built with metadata, nothing of an
+  environment bound to a policy), and the harness's reset check now refuses `navmesh`, `pathfinder`, `stair`,
+  `storey` and `floor` metadata keys (`env_contract.PRIVILEGED_KEY_PARTS`). `tests/test_standing_floor.py` pins the
+  three rules on small grids and random maps (painting every unknown cell occupied changes no answer) and the
+  planner standoff (observed obstacles only).
+- **Measured: the same 180 episodes with and without the change.** MP3D v1 val, the fixed single-storey set
+  (`mp3d/sets/single_storey_flat_v1.json`: 8 scenes, 19 categories), the tree at `38bd79e8` against this change,
+  ground-truth perception, the frontier explorer, seed 17 -- and NOT the configuration of the reported runs: software
+  rendering on the CPU (the GPU was not to be taken) and an in-process stub in place of the language model (every
+  room `living_room` at 0.8). The absolute numbers are therefore not the paper's; only the paired differences mean
+  anything. The pipeline is deterministic: an A/A control repeated 20 of 20 trajectories exactly, so every difference
+  is the change's. **Outcome:** success 0.778 -> 0.789 (7 episodes won, 5 lost; exact McNemar p = 0.77), SPL 0.349 ->
+  0.346, steps 190.1 -> 196.8 (65 episodes longer, 35 shorter), step limit reached in 13.3% -> 12.2%. **Stuck
+  indicators:** refused forward steps 6.67 -> 7.95 an episode (+1.28, bootstrap 95% [+0.12, +2.60]; median
+  difference 0, 40 episodes up and 36 down). The increase is a tail in two places. 133 of the 230 extra refusals are
+  five episodes of the verification's blind "glimpse" steps -- a loop of the old code too (3 such episodes before, 5
+  after), not a matter of where the agent stands. And in the 34 other episodes where a standoff had to be taken with
+  the squeeze planner refusals went 6.59 -> 9.97 (median +1); in the remaining 141 episodes 5.65 -> 5.52. The closing
+  more often has nowhere to stand from where it is: boxed-in releases 0.072 -> 0.139 an episode (22 episodes against
+  10), and the rungs that look first are used -- the walk to the nearest observed floor 0.072 -> 0.217 an episode,
+  the footing sweep in 33 episodes against 1. The first version of the floor (two floors, the default planner's a
+  0.25 m disc observed free) was run on 85 of these episodes: the squeeze planner took a standoff in 32 of them and
+  boxed-in releases were 0.176 an episode; the one floor has 17 and 0.094 on the same 85 (LESSONS 2026-11-15). **The
+  five losses:** two STOPs 0.14 and 0.19 m outside the success region, at a second table, after the first -- seen
+  over an obstacle, no floor observed beside it -- was released as boxed in (pLe4wQe7qrG/000085, /000109; the navmesh
+  runs walked round through unobserved floor); one STOP on the threshold (zsNo4HB9uLZ/000045, 0.10 m);
+  Z6MFQCViBuw/000098, the action bound twice in front of a three-cell strip between a sofa and a table that the
+  squeeze planner keeps routing through; Z6MFQCViBuw/000093, a 155-action pursuit. **Not measured:** either full
+  split, the real language model, HM3D, a second seed.
+  `test_ground_truth_floor_transitions.py`, `test_stair_sightings.py` and `rollout_stairs_navmesh.py` went with the
+  mode they tested; the fixtures that handed an episode a scene structure place a flight as the coordinator places a
+  measured one.
+- **Not comparable with earlier runs, on purpose.** The frozen configuration differs (`standing_points` for
+  `target_navmesh_projection`, no `through_unknown`), so `--resume` refuses a campaign recorded before the change.
+  Every number in `docs/paper/zson_paper.tex` and `docs/progress/entries/047`, `049` was produced WITH the navmesh
+  projection and the through-unknown routes (and without ground-truth stairs); the paper now says so
+  (Section 5.6) and describes the standing-floor rule. Docs: this file, the `object_search`, runtime, HM3D, harness
+  and contract READMEs, `QUICKSTART.md`, `gibson/MULTISTORY.md`, `GROUNDED_VLM.md`.
+
 ### Added (2026-11-15, the paper's first complete draft: `docs/paper/zson_paper.tex`)
 - **`docs/paper/zson_paper.tex`: one self-contained LaTeX file (27 pages, bibliography embedded, builds clean), written
   against the working tree after the `room_priors.py` removal.** Single-storey method, experimental setup, the two 14B

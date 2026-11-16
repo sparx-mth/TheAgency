@@ -97,22 +97,8 @@ class FloorDepartureGuard:
         if self.ready(obs):
             return
         t = b.transition
-        if b.ground_truth is not None:
-            flat = [point for point in reversed(b.source_trail)
-                    if abs(point[2] - t.source_height) <= b.params.stable_height_m]
-            source = next((point for point in flat if math.dist(point[:2], t.polyline[0][:2])
-                           > p.converter_params.goal_tolerance_m + p.settings.map_resolution_m),
-                          flat[0] if flat else t.polyline[0])
-            t.origin = tuple(source)
-            height = t.direction * (obs.pose.z - t.source_height)
-            walked = [i for i, point in enumerate(t.polyline)
-                      if t.direction * (point[2] - t.source_height) <= height + 0.05]
-            t.cursor = max(walked, default=0)
-            t._entered = True
-            t._begin_retreat(obs, "rooms_not_peeked")
-        else:
-            t.retreat_path = list(reversed(t.trace))
-            t.retreat_step, t.phase = obs.step, "RETREAT"
-            b.events.append(dict(action=obs.step, event="retreat_started", portal_id=t.portal["id"],
-                                 reason="rooms_not_peeked"))
+        t.retreat_path = list(reversed(t.trace))
+        t.retreat_step, t.phase = obs.step, "RETREAT"
+        b.events.append(dict(action=obs.step, event="retreat_started", portal_id=t.portal["id"],
+                             reason="rooms_not_peeked"))
         p.peek.cancel(obs, "stairs_recovery", restore=False)

@@ -277,8 +277,13 @@ def test_category_filter_keeps_only_that_goal_in_split_order():
         episodes_of_category(ids, episodes, "sofa")
 
 
-class StructuredLineSimulator(LineSimulator):
-    """The Habitat bridge's contract: the navmesh's storeys and stairs, read once per scene."""
+class OfferingLineSimulator(LineSimulator):
+    """A simulator that still OFFERS what the Habitat bridge handed the agent until 2026-11-15.
+
+    The navmesh's storeys and stairs (``scene_structure``) and a navmesh snap
+    for a standing point (``project_target``). The adapter must ask for
+    neither: ``asked`` records every call.
+    """
 
     STRUCTURE = {"stair_source": "navmesh",
                  "floor_levels": [{"height_m": 0.0, "area_m2": 50.0}, {"height_m": 2.7, "area_m2": 40.0}],
@@ -286,24 +291,36 @@ class StructuredLineSimulator(LineSimulator):
                                        "bottom_z": 0.0, "top_z": 2.7, "length_m": 4.0, "rise_m": 2.7,
                                        "polyline_xyz": [[2.0, 0.0, 0.0], [3.5, 0.0, 1.35], [5.0, 0.0, 2.7]]}]}
 
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+
     def scene_structure(self):
+        self.asked.append("scene_structure")
         return dict(self.STRUCTURE)
 
+    def project_target(self, point):
+        self.asked.append("project_target")
+        return tuple(point)
 
-def test_reset_attaches_the_navmesh_structure_when_the_simulator_provides_it(tmp_path, semantic):
-    from sparx_agency.tasks.planning.objnav_benchmark.env_contract import checked_reset
+
+def test_reset_attaches_nothing_of_the_navmesh_even_when_the_simulator_offers_it(tmp_path, semantic):
+    """No storeys, no stairs and no navmesh projector cross to the agent -- and the harness refuses an adapter that tries."""
+    import dataclasses
+    from sparx_agency.tasks.planning.objnav_benchmark.env_contract import _check_metadata, checked_reset
+    from sparx_agency.core.planning.objnav.errors import EnvContractError
     paths = write_dataset(tmp_path, semantic)
-    env = GibsonEnv(GibsonDataset(*paths, full=False), simulator=StructuredLineSimulator())
+    simulator = OfferingLineSimulator()
+    env = GibsonEnv(GibsonDataset(*paths, full=False), simulator=simulator)
     episode_id = env.episode_ids()[0]
-    episode, _ = env.reset(episode_id)
-    assert episode.metadata["stair_connectors"][0]["top_z"] == 2.7
-    assert [level["height_m"] for level in episode.metadata["floor_levels"]] == [0.0, 2.7]
-    assert not any(key in ("goal", "shortest", "geodesic") for key in json.dumps(episode.metadata))
-    checked_reset(env, episode_id)                           # the harness's privileged-key tripwire accepts it
-    plain = GibsonEnv(GibsonDataset(*paths, full=False), simulator=LineSimulator())
-    assert plain.reset(episode_id)[0].metadata == {}, "a simulator without a navmesh reader attaches nothing"
+    episode, _ = checked_reset(env, episode_id)
+    assert episode.metadata == {}, "the episode carries nothing of the scene"
+    assert not hasattr(env, "target_projector"), "nothing of the navmesh is exposed for a policy to be bound to"
+    assert simulator.asked == [], "the adapter did not even read them"
+    leaked = dataclasses.replace(episode, metadata=dict(OfferingLineSimulator.STRUCTURE))
+    with pytest.raises(EnvContractError, match="names privileged information"):
+        _check_metadata(leaked)
     env.close()
-    plain.close()
 
 
 

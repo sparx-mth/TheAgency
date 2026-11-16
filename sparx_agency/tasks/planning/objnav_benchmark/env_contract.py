@@ -10,7 +10,9 @@ these bugs are caught, and each function here raises
   that forgets to clear its STOP flag ends every later episode at step 0);
 * no key of the episode's metadata names privileged information. The agent
   receives the metadata at reset, and a goal position or shortest path in it
-  makes SR and SPL meaningless without failing anything. This is a tripwire
+  -- or the building's storeys, stairs or navmesh, which a zero-shot agent
+  has to observe for itself -- makes SR and SPL meaningless without failing
+  anything. This is a tripwire
   for the known leaks (:data:`PRIVILEGED_KEY_PARTS`), not a guarantee: what an
   adapter puts in the metadata stays its responsibility;
 * every episode is of the run's benchmark and split;
@@ -54,10 +56,15 @@ _STOP = DiscreteAction.STOP
 #: is refused at reset: the names the datasets and evaluators give privileged
 #: values (RoboTHOR's ``shortest_path_length``, allenact's
 #: ``distance_to_target`` and ``path_to_target``, Habitat's goal
-#: ``view_points``). A tripwire for these known leaks, not a guarantee.
+#: ``view_points``), and the names of scene geometry read from the simulator
+#: rather than seen by the agent -- the navmesh, and the building's storeys
+#: (``floor_levels``, a ``floor_count``) and stairs (``stair_connectors``,
+#: ``stair_source``), which the Habitat adapters attached until 2026-11-15.
+#: A tripwire for these known leaks, not a guarantee.
 PRIVILEGED_KEY_PARTS = ("goal", "shortest", "geodesic", "distance_to",
                         "path_to", "view_point", "viewpoint",
-                        "target_position", "object_position")
+                        "target_position", "object_position",
+                        "navmesh", "pathfinder", "stair", "storey", "floor")
 
 
 def _check_belongs(observation: ObjNavObservation, episode: ObjNavEpisode,
@@ -102,7 +109,9 @@ def _check_metadata(episode: ObjNavEpisode) -> None:
             "(any key containing one of %s); the agent receives the metadata "
             "at reset, so goal positions, shortest or geodesic paths and "
             "distances and view points stay inside the environment and reach "
-            "the harness only through measure()"
+            "the harness only through measure(), and the scene's navmesh, "
+            "storeys and stairs reach the agent through its observations or "
+            "not at all"
             % (episode.episode_id, ", ".join(leaks[:5]),
                ", ".join(PRIVILEGED_KEY_PARTS)))
 

@@ -1,15 +1,31 @@
 """Observed-only ObjectNav with persistent floors and frontier or planar FALCON.
 
-Stairs included, since 2026-10-21: ``RPTSettings.multifloor.stair_source``
-is ``"observed"`` by default -- a staircase is a measured support surface
-rising within reach of the robot's own RGB-D (``world_model/stair_terrain.py``),
-masked on the planning grid from that measurement, and no simulator geometry
-is consulted (ApexNav, SG-Nav and OSG-Nav have no staircase oracle either).
-``"ground_truth"`` is the declared ablation: the building coordinator takes
-the simulator's navmesh connectors from the episode metadata, and
-``configuration()["ground_truth_stairs"]`` says so.
-An optional local NavMesh target-standoff projector is declared separately by
-``configuration()["target_navmesh_projection"]``; evaluator goals remain private.
+**The agent is given no scene geometry.** What it knows of the building is
+what its own RGB-D and pose have measured: the occupancy map, the storeys it
+has stood on, the stairs it has seen. Since 2026-11-15 that holds without
+exception -- two things used to reach it from the simulator and are gone:
+
+* *Standing points.* Where the closing may stand beside a target was, from
+  2026-10-14, projected onto the simulator's navigation mesh through a
+  ``target_projector`` the evaluator bound to the policy. It is now read off
+  the observed map (``world_model/standing_floor.py``): a cell observed free,
+  with the body's clearance of observed free floor around it, reachable from
+  the agent through such cells. ``configuration()["standing_points"]``
+  records the rule.
+* *Stairs and storeys.* ``RPTSettings.multifloor.stair_source`` is
+  ``"observed"`` -- a staircase is a measured support surface rising within
+  reach of the robot's own RGB-D (``world_model/stair_terrain.py``), masked
+  on the planning grid from that measurement (ApexNav, SG-Nav and OSG-Nav
+  have no staircase oracle either). The ``"ground_truth"`` ablation, which
+  took the navmesh's stair connectors and storey levels from the episode
+  metadata, is removed and raises; ``configuration()["ground_truth_stairs"]``
+  is False always, kept so a run of this code can be told from an older one.
+
+Nothing under ``sparx_agency/core`` may reach the navmesh, the pathfinder or
+ground-truth storey data; ``tests/test_no_privileged_geometry.py`` fails if
+anything does. Evaluator goals remain private. The simulator's ground-truth
+semantics, when a run selects them, replace the DETECTOR at the perception
+interface and are declared by the adapter, not here.
 """
 from __future__ import annotations
 
@@ -98,7 +114,6 @@ class RPTSearchPolicy:
         self.escape_settings = EscapeSettings()
         self.glance_settings = GlanceSettings(geometric_enabled=s.geometric_glances)
         self.sight_settings = SightSettings()
-        self.target_projector = None  # optional simulator-local geometry, never goal annotations
 
     def configuration(self):
         return {"method": self.name, "adaptation": asdict(self.settings),
@@ -135,7 +150,12 @@ class RPTSearchPolicy:
                                        if self.settings.kinematic.enabled else "none: the converter's waypoint ladder"),
                 "doorway_scrape": asdict(self.settings.doorway_scrape),
                 "doorway_look_down": asdict(self.settings.doorway_look_down),
-                "target_navmesh_projection": self.target_projector is not None,
+                "standing_points": "observed map only: a standoff, a back-off spot or a nearest-floor goal is a cell "
+                                   "observed free, with every cell within the planner's floor standoff of it (the body "
+                                   "radius, %.2f m, at the least) observed free too, joined to the agent through such "
+                                   "cells; unknown cells are never stood on, never counted as clearance and never "
+                                   "planned through; no simulator geometry (world_model/standing_floor.py)"
+                                   % self.settings.body_radius_m,
                 "room_visit": self._room_visit_description(),
                 "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
                                   "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
@@ -188,12 +208,9 @@ class RPTSearchPolicy:
                                            "(discovery.semantic_signature, 2026-11-09); geometry alone "
                                            "within reconsider_min_actions of the last call waits for the loop point; unchanged "
                                            "prompts reused"},
-                "floor_change_decision": ("RPT* over rooms and stair nodes; a staircase is charged its flight plus "
-                                          "%.1f m on every arc; no allowance, no clock; the explicit floor_decision "
-                                          "rule is the exploration fallback's last resort"
-                                          % self.settings.multifloor.floor_change_cost_m)
-                if self.loop_settings.stairs_as_nodes and self.settings.multifloor.stair_source == "ground_truth"
-                else "exploration fallback only",
+                # A staircase is a node of the loop's order only when its portal says where it leads, and no
+                # stair source does (``rooms/stair_nodes.py``): the building coordinator's rule is all there is.
+                "floor_change_decision": "exploration fallback only",
                 "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s)"
                                      "%s; synchronous frame processing, one full rotation (warm-up scan) before room "
                                      "selection on every storey first entered"
@@ -212,7 +229,7 @@ class RPTSearchPolicy:
                 "falcon_running": self.settings.local_exploration == "falcon",
                 "falcon_source": dict(FALCON_SOURCE) if self.settings.local_exploration == "falcon" else None,
                 "ground_truth_semantics": False,
-                "ground_truth_stairs": self.settings.multifloor.enabled and self.settings.multifloor.stair_source == "ground_truth",
+                "ground_truth_stairs": False,
                 "stair_source": self.settings.multifloor.stair_source, "training_free": True,
                 "allow_stair_traversal": self.settings.allow_stair_traversal,
                 "floor_plane_bound_m": self.settings.floor_plane_bound_m,
@@ -260,10 +277,10 @@ class RPTSearchPolicy:
                                    sticky_bump_actions=s.sticky_bump_actions)
         self.solver = RptStarRoomSolver(rng=random.Random("%s/%s" % (s.seed, episode.episode_id)), max_rooms=s.max_rooms)
         self.planner = WeightedAStarPlanner2D(self.planner_params)
-        # The LOCKED target's last resort before a boxed-in release: the same planner with unknown
-        # cells passable at a price (``target_closing.through_unknown``), for the standoff ring alone.
-        self.optimistic_planner = WeightedAStarPlanner2D(replace(
-            self.planner_params, unknown_blocked=False, unknown_cost=s.target_closing.through_unknown_cost))
+        # Every planner of the method blocks UNKNOWN cells (``unknown_blocked``): a route is walked on observed
+        # floor or not at all. Until 2026-11-15 the closing kept one more, with unknown passable at a price, to
+        # reach a standoff the simulator's navmesh had vouched for; with the navmesh gone nothing vouches for
+        # floor the agent has not seen (``world_model/standing_floor.py``), and that planner went with it.
         # The exploration fallback's squeeze rung (since 2026-10-25): the same planner relaxing to the BODY radius,
         # for the frontier goals nothing reaches at ``min_clearance_m`` -- a doorway the map draws 0.4 m wide.
         self.squeeze_planner = WeightedAStarPlanner2D(replace(self.planner_params, inflate_floor_m=s.body_radius_m))
@@ -811,7 +828,14 @@ class RPTSearchPolicy:
         grid[clear] = world.values.free
         return OccupancyGrid2D(grid, world.params, values=world.values)
 
-    def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None, retire=True):
+    def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None, retire=True, exact_goal=False):
+        """A follow command along a committed route to ``goal``, or None when the planner has none.
+
+        ``exact_goal`` asks the planner not to move the goal (``PlanRequest.options``): the route ends on the
+        goal's own cell or there is no route. The closing passes it for every standing point it chose on the
+        observed map (``world_model/standing_floor.py``), which the planner's goal snap would otherwise trade
+        for a cell nobody checked.
+        """
         planner = self.planner if planner is None else planner
         # A goal nothing reaches is retired from the frontier memory when it IS a frontier (the
         # sweep's and the fallback's goals, a room's frontier entry). Until 2026-10-28 every kind
@@ -833,8 +857,12 @@ class RPTSearchPolicy:
                 self._route = self._goal = None
                 self._blocked_since = self._floor_time
                 return None
-            path = (self._plan_to(observation, world, goal) if planner is self.planner
-                    else self._plan_to(observation, world, goal, planner=planner))
+            # Keyword arguments only when they say something: a bare ``_plan_to(obs, world, goal)`` is the
+            # call the regression rig's planner stubs were written against.
+            options = {} if planner is self.planner else {"planner": planner}
+            if exact_goal:
+                options["exact_goal"] = True
+            path = self._plan_to(observation, world, goal, **options)
             if path is None:
                 if retiring:
                     self._visited_frontiers.append(tuple(goal))
@@ -844,7 +872,7 @@ class RPTSearchPolicy:
         self._route, self._goal = self.route_memory.path, self.route_memory.goal
         info = {"route": self.route_memory.reason, "kind": kind}
         if planner is not self.planner:
-            info["squeeze" if planner is getattr(self, "squeeze_planner", None) else "through_unknown"] = True
+            info["squeeze"] = True
         if self.route_memory.reason == "new_goal_or_invalid_route":
             info["route_replaced"] = self.route_memory.replaced
         command = NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)
@@ -876,12 +904,14 @@ class RPTSearchPolicy:
             self._target_xy = self._target_id = None
         return command
 
-    def _plan_to(self, observation, world, goal, planner=None):
+    def _plan_to(self, observation, world, goal, planner=None, exact_goal=False):
         p = observation.pose
         planner = self.planner if planner is None else planner
         self._plan_calls += 1
         started = time.monotonic()
-        result = planner.plan(PlanRequest(Pose2D(p.x, p.y, p.yaw), Pose2D(*goal), frame_id="world"), world)
+        request = PlanRequest(Pose2D(p.x, p.y, p.yaw), Pose2D(*goal), frame_id="world",
+                              options={"exact_goal": True} if exact_goal else {})
+        result = planner.plan(request, world)
         self.telemetry.latencies["astar"].append((time.monotonic() - started) * 1000)
         self._plan_step = observation.step
         if not result.ok:

@@ -54,14 +54,11 @@ class FakeDetector:
 
 def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     """A policy on a 20 m synthetic map; ``overrides`` are RPTSettings fields
-    (e.g. ``multifloor={"stair_source": "observed"}`` for the depth-based stair tests).
-    ``llm`` replaces the neutral :class:`FakeLLM` for every model role."""
+    (e.g. ``multifloor={"floor_search_actions": 60}`` for the depth-based stair tests).
+    ``llm`` replaces the neutral :class:`FakeLLM` for every model role. The episode carries no
+    metadata: nothing of the scene reaches the policy but its observations."""
     discovery = overrides.pop("discovery", False)
     segmenter = overrides.pop("segmenter", None)          # with segmentation=True: the fake SAM service
-    if "stair_connectors" in (overrides.get("metadata") or {}) and "multifloor" not in overrides:
-        # A fixture handing the episode a scene structure is a test of the ground-truth stair machinery,
-        # the ablation: the method's default is the observed source (2026-10-21), which reads no metadata.
-        overrides["multifloor"] = {"stair_source": "ground_truth"}
     if not discovery:
         overrides.setdefault("doorway_peek", {"enabled": False})
     closing = overrides.get("target_closing")
@@ -76,7 +73,7 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
         overrides["target_closing"] = closing
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
-                            camera, BODY_ACTIONS_PROTOCOL.actions(), 500, metadata=overrides.pop("metadata", {}))
+                            camera, BODY_ACTIONS_PROTOCOL.actions(), 500)
     policy = RPTSearchPolicy(FakeDetector(label, duplicate), llm or FakeLLM(),
                              RPTSettings(**dict({"map_size_m": 20.0}, **overrides)), segmenter=segmenter)
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))

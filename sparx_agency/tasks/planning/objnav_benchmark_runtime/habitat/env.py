@@ -39,13 +39,18 @@ the harness can cross-check our scoring against it. Where habitat-lab's formula
 is undefined (it divides by ``d0`` without guarding it), the key is omitted
 rather than filled with a convention habitat-lab does not have.
 
-Nothing privileged about the *task* reaches the agent: no goal position, no
-geodesic, no target floor. The one thing ``ObjNavEpisode.metadata`` does carry
-is the building's own vertical structure -- storeys and stair connectors read
-from the navmesh in force (``HabitatRGBDSimulator.scene_structure``) -- which
-the multi-floor search declares as its ground-truth stair source in
-``configuration()["ground_truth_stairs"]``. A simulator without that reading
-(the synthetic ones in tests) yields empty metadata.
+Nothing privileged reaches the agent, about the *task* or about the *scene*:
+no goal position, no geodesic, no target floor -- and no navmesh. The
+episode carries no metadata, and the policy is bound to nothing of the
+simulator's. The navmesh stays on this side of the interface, where the
+benchmark needs it: the simulator's own physics, the start validation, the
+geodesic the score is measured by, the preflight checks. Until 2026-11-15
+two things crossed it -- a ``target_projector`` that snapped the closing's
+standing points onto the navmesh, and the storeys and stair connectors read
+from it in ``ObjNavEpisode.metadata``. Both are removed; the harness refuses
+such metadata at reset (``env_contract.PRIVILEGED_KEY_PARTS``), and
+``core/planning/object_search/tests/test_no_privileged_geometry.py`` fails if
+either comes back.
 
 **The ground-truth perception upper bound** (``ground_truth=`` a
 :class:`~...ground_truth.source.GroundTruthSource`) is the one deliberate
@@ -156,17 +161,6 @@ class HabitatObjNavEnv(ObjNavEnv):
         excluded = set(self.excluded_episode_ids)
         return tuple(i for i in self._dataset.episode_ids() if i not in excluded)
 
-    @property
-    def target_projector(self):
-        """Optional local NavMesh geometry service, separate from evaluator data.
-
-        The same seam ``GibsonEnv`` exposes: the target closing snaps its
-        standoff goal onto the navmesh through it. It carries no goal, no
-        distance and no view point -- geometry the agent could read off its
-        own depth, served by the simulator because it already has the mesh.
-        """
-        return getattr(self._simulator, "project_target", None)
-
     def _distance_field(self, episode):
         """The (scene, category) distance, built once per goal set per scene."""
         key = episode.goals_key
@@ -272,8 +266,7 @@ class HabitatObjNavEnv(ObjNavEnv):
         self._collisions, self._collision_available = 0, True
         self._episode = ObjNavEpisode(
             episode_id, row.scene_key, self._protocol.benchmark, self._protocol.split,
-            row.category, self._camera, self._actions, self._protocol.max_steps,
-            metadata=self._scene_metadata())
+            row.category, self._camera, self._actions, self._protocol.max_steps)
         self._observation = self._observation_from(frame)
         # Height comes from the navmesh now (HabitatSimulator.reset), not
         # index 1 here -- this run is 2.5-D, fixed once.
@@ -292,16 +285,6 @@ class HabitatObjNavEnv(ObjNavEnv):
                 "benchmark cannot measure its shortest path. Run the start "
                 "validation and exclude it explicitly." % episode_id)
         return self._episode, self._observation
-
-    def _scene_metadata(self):
-        """Non-privileged scene structure for the policy: storeys and stair connectors.
-
-        Read from the simulator's navmesh when it can provide it (the Habitat
-        bridge); a simulator without ``scene_structure`` yields empty metadata.
-        Nothing about the goal is in it.
-        """
-        provider = getattr(self._simulator, "scene_structure", None)
-        return dict(provider()) if callable(provider) else {}
 
     def _simulator_scene(self):
         return getattr(self._simulator, "_scene", None)

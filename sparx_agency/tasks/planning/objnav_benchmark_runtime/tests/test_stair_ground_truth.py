@@ -1,15 +1,19 @@
-"""Ground-truth storeys and stair connectors read from a navmesh, and the policy's view of them."""
+"""Ground-truth storeys and stair connectors read from a navmesh -- analysis only, outside the agent.
+
+``habitat/stair_connectors.py`` serves after-the-fact episode analysis (``hm3d/episode_levels.py``: which
+storey a goal is on). Until 2026-11-15 its output was also handed to the policy in the episode metadata as a
+``ground_truth`` stair source; that source and the policy's reader of it are removed, and
+``core/planning/object_search/tests/test_no_privileged_geometry.py`` keeps them out.
+"""
 from __future__ import annotations
 
 import json
-import math
 
 import numpy as np
 import pytest
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.stair_connectors import (
     enu_to_habitat, floor_levels, habitat_to_enu, scene_structure, stair_connectors, triangles)
-from sparx_agency.core.planning.object_search.multifloor.stair_ground_truth import GroundTruthStairs
 
 
 def quad(x0, x1, z0, z1, y0, y1=None):
@@ -134,51 +138,3 @@ def test_a_stairwell_serving_three_storeys_is_two_connectors_between_adjacent_st
     for c in connectors:
         heights = [p[2] for p in c["polyline_xyz"]]
         assert heights[0] == pytest.approx(c["bottom_z"], abs=0.2) and heights[-1] == pytest.approx(c["top_z"], abs=0.2)
-
-
-# -- the policy's reading -------------------------------------------------------
-def metadata(with_stairs=True):
-    return scene_structure(two_storey_house(with_stairs))
-
-
-def test_missing_or_single_storey_structure_means_nothing_to_climb():
-    assert not GroundTruthStairs.from_metadata(None).available
-    assert not GroundTruthStairs.from_metadata({}).available
-    single = GroundTruthStairs.from_metadata({"stair_connectors": [], "floor_levels": [{"height_m": 0.0}]})
-    assert single.available and single.connectors == [] and single.levels == [0.0]
-
-
-def test_connectors_are_oriented_from_the_storey_the_agent_stands_on():
-    stairs = GroundTruthStairs.from_metadata(metadata())
-    assert stairs.levels == pytest.approx([0.0, 2.7], abs=0.05)
-    c = stairs.connectors[0]
-    assert stairs.touching(0.0, 0.3) == [c] and stairs.touching(2.7, 0.3) == [c]
-    assert stairs.touching(1.35, 0.3) == []
-    up, entry, exit_, destination_z, polyline = c.oriented(0.0, 0.3)
-    assert up == 1 and entry == c.bottom and exit_ == c.top and destination_z == pytest.approx(2.7, abs=0.05)
-    assert polyline[0] == c.bottom
-    down, entry, exit_, destination_z, polyline = c.oriented(2.7, 0.3)
-    assert down == -1 and entry == c.top and exit_ == c.bottom and destination_z == pytest.approx(0.0, abs=0.05)
-    assert polyline[0] == c.top and polyline[-1] == c.bottom
-    with pytest.raises(ValueError):
-        c.oriented(1.35, 0.3)
-
-
-def test_nearest_connector_is_by_xy_distance_to_the_flight_within_a_radius():
-    stairs = GroundTruthStairs.from_metadata(metadata())
-    c = stairs.connectors[0]
-    on_the_flight = c.polyline[len(c.polyline) // 2]
-    assert c.distance_xy(on_the_flight[0], on_the_flight[1]) < 0.05
-    assert stairs.nearest(on_the_flight[0], on_the_flight[1], 0.0, 0.3, within_m=0.75) is c
-    far_x, far_y = c.bottom[0] + 5.0, c.bottom[1] + 5.0
-    assert c.distance_xy(far_x, far_y) > 4.0
-    assert stairs.nearest(far_x, far_y, 0.0, 0.3, within_m=0.75) is None
-    assert stairs.nearest(on_the_flight[0], on_the_flight[1], 1.35, 0.3, within_m=0.75) is None, "not from mid-flight"
-
-
-def test_diagnostics_are_plain_json():
-    json.dumps(GroundTruthStairs.from_metadata(metadata()).diagnostics(), allow_nan=False)
-    assert math.isfinite(GroundTruthStairs.from_metadata(metadata()).connectors[0].length_m)
-
-
-

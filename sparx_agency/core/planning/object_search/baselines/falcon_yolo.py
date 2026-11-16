@@ -22,12 +22,13 @@ The ablation of the room-search method (``RPTSearchPolicy``, ``policy.py``) down
    STOP -- exactly as in ``RPTSearchPolicy``.
 
 Spawn-floor confinement is the full method's own, unchanged: the building
-coordinator (``MultiFloorSearch``) sees ground-truth navmesh stairs through
-its perfect detector and places them as portals, and the ``SpawnFloorGuard``
-writes every seen flight and every observed drop below the storey plane
-occupied on the world the policy plans on, and refuses any goal off the spawn
-plane (``allow_stair_traversal`` False, the benchmark default). FALCON's
-frontiers, routes and swept-motion vetoes all read that confined world.
+coordinator (``MultiFloorSearch``) places the flights the robot's own depth
+measured as portals (``world_model/stair_terrain.py``; no simulator stair or
+storey data reaches the policy), and the ``SpawnFloorGuard`` writes every
+seen flight and every observed drop below the storey plane occupied on the
+world the policy plans on, and refuses any goal off the spawn plane
+(``allow_stair_traversal`` False, the benchmark default). FALCON's frontiers,
+routes and swept-motion vetoes all read that confined world.
 
 The policy hosts the shared components under the same attribute names the
 full method gives them (``mapping``, ``planner``, ``route_memory``,
@@ -490,7 +491,6 @@ class FalconYoloBaseline:
         self.fallback_settings = FallbackSettings()
         self.door_settings = DoorSettings()
         self.sight_settings = SightSettings(enabled=False)    # the walked trail only: no pockets, no settled unknown
-        self.target_projector = None       # optional simulator-local geometry, never goal annotations
         self.hierarchy = None              # the building coordinator asks; the baseline has no FALCON/RPT hybrid
 
     def configuration(self):
@@ -499,7 +499,8 @@ class FalconYoloBaseline:
                 "planner": asdict(self.planner_params), "converter": asdict(self.converter_params),
                 "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
                 "target_closing": asdict(s.target_closing),
-                "target_navmesh_projection": self.target_projector is not None,
+                "standing_points": "the full method's: observed map only (world_model/standing_floor.py); no simulator "
+                                   "geometry, no unknown cell stood on or planned through",
                 "exploration": ("planar FALCON run goal-free: one bounded transaction in a %.1f m disc about the agent, "
                                 "its first viewpoint walked and retired, the next transaction; with no useful frontier in "
                                 "the disc, A* to the nearest reachable frontier of the storey and FALCON again from there; "
@@ -518,15 +519,16 @@ class FalconYoloBaseline:
                 "segmentation": ({"enabled": True, "scope": "target boxes at or above detection_confidence"}
                                  if s.segmentation else {"enabled": False, "depth": "robust_bbox_depth over the shrunken box"}),
                 "ground_truth_semantics": False,
-                "ground_truth_stairs": s.multifloor.enabled and s.multifloor.stair_source == "ground_truth",
+                "ground_truth_stairs": False,
                 "stair_source": s.multifloor.stair_source, "training_free": True,
                 "allow_stair_traversal": s.allow_stair_traversal,
                 "floor_plane_bound_m": s.floor_plane_bound_m, "step_down_m": s.step_down_m,
-                # Frozen-configuration text: a resume compares it byte for byte, so the module's historical
-                # path stays as recorded (the guard now lives in multifloor/spawn_floor_guard.py).
-                "spawn_floor_confinement": ("the full method's: seen ground-truth stairs and observed drops below the "
-                                            "storey plane written occupied on the planning world; goals off the spawn "
-                                            "plane refused (methods/spawn_floor_guard.py)"),
+                # Frozen-configuration text: a resume compares it byte for byte. Reworded on 2026-11-15, when the
+                # closing's standing points and the stairs stopped reading the simulator -- a campaign recorded
+                # before that is a different method and must not be resumed as this one.
+                "spawn_floor_confinement": ("the full method's: the flights the robot's depth measured and observed "
+                                            "drops below the storey plane written occupied on the planning world; "
+                                            "goals off the spawn plane refused (multifloor/spawn_floor_guard.py)"),
                 "non_metric": False, "publishable": True}
 
     # -- the episode ----------------------------------------------------------------------------
@@ -535,9 +537,6 @@ class FalconYoloBaseline:
         s = self.settings
         self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m, s.multifloor)
         self.planner = WeightedAStarPlanner2D(self.planner_params)
-        # The LOCKED target's last resort before a boxed-in release (``target_closing.through_unknown``).
-        self.optimistic_planner = WeightedAStarPlanner2D(replace(
-            self.planner_params, unknown_blocked=False, unknown_cost=s.target_closing.through_unknown_cost))
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
         # The service back-off ledger and the failure record the perception cycle writes to; its rungs are never run.
         self.fallback = ExplorationFallback(self, self.fallback_settings)
@@ -733,7 +732,8 @@ class FalconYoloBaseline:
             self.mapping.worlds[self.mapping.floor_id] = confined
         return confined
 
-    def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None):
+    def _navigate(self, observation, world, goal, kind, final_yaw=None, planner=None, exact_goal=False):
+        """``RPTSearchPolicy._navigate`` without the frontier memory and the lattice follower; ``exact_goal`` as there."""
         planner = self.planner if planner is None else planner
         if not self.floor_guard.goal_allowed(observation, world, goal, kind):
             self.route_memory.clear("goal off the spawn floor")
@@ -743,16 +743,16 @@ class FalconYoloBaseline:
             if self.route_memory.reason == "no_progress":
                 self._route = self._goal = None
                 return None
-            path = (self._plan_to(observation, world, goal) if planner is self.planner
-                    else self._plan_to(observation, world, goal, planner=planner))
+            options = {} if planner is self.planner else {"planner": planner}
+            if exact_goal:
+                options["exact_goal"] = True
+            path = self._plan_to(observation, world, goal, **options)
             if path is None:
                 self._route = self._goal = None
                 return None
             self.route_memory.adopt(path, goal, kind, observation)
         self._route, self._goal = self.route_memory.path, self.route_memory.goal
         info = {"route": self.route_memory.reason, "kind": kind}
-        if planner is not self.planner:
-            info["through_unknown"] = True
         if self.route_memory.reason == "new_goal_or_invalid_route":
             info["route_replaced"] = self.route_memory.replaced
         return NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)
@@ -783,12 +783,14 @@ class FalconYoloBaseline:
             self._target_xy = self._target_id = None
         return command
 
-    def _plan_to(self, observation, world, goal, planner=None):
+    def _plan_to(self, observation, world, goal, planner=None, exact_goal=False):
         p = observation.pose
         planner = self.planner if planner is None else planner
         self._plan_calls += 1
         started = time.monotonic()
-        result = planner.plan(PlanRequest(Pose2D(p.x, p.y, p.yaw), Pose2D(*goal), frame_id="world"), world)
+        request = PlanRequest(Pose2D(p.x, p.y, p.yaw), Pose2D(*goal), frame_id="world",
+                              options={"exact_goal": True} if exact_goal else {})
+        result = planner.plan(request, world)
         self.telemetry.latencies["astar"].append((time.monotonic() - started) * 1000)
         if not result.ok:
             return None
@@ -801,13 +803,11 @@ class FalconYoloBaseline:
         if b is None:
             return None
         return {"phase": b.phase, "stair_source": b.params.stair_source, "allow_stair_traversal": b.allowed,
-                "ground_truth": b.ground_truth.diagnostics() if b.ground_truth is not None else None,
-                "stairs_seen": b.sightings.diagnostics(), "atlas": self.mapping.atlas.diagnostics(),
+                "atlas": self.mapping.atlas.diagnostics(),
                 "transition": b.transition.diagnostics() if b.transition else None,
                 "completed_transitions": list(b.completed), "safety_vetoes": b.safety_vetoes,
                 "events": list(b.events),
-                "portals": [dict({k: v for k, v in q.items() if k not in ("path", "footprint")},
-                                 footprint_points=len(q.get("footprint", ()))) for q in b.portals],
+                "portals": [{k: v for k, v in q.items() if k != "path"} for q in b.portals],
                 "active_portal": b.active["id"] if b.active else None,
                 "decides_floor_changes": "never: stair traversal forbidden; stairs are seen, placed and masked"}
 

@@ -30,7 +30,7 @@ from sparx_agency.core.planning.object_search.world_model.peek_stairs import sta
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import BODY_ACTIONS_PROTOCOL, FakeDetector
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
-    FLIGHT, IN_A, STRUCTURE, two_room_world)
+    FLIGHT, IN_A, place_stairs, two_room_world)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import FRAME_SIZE, method_snapshot, render_dashboard
 
 
@@ -39,16 +39,14 @@ class NoDetector:
         return []
 
 
-def baseline(detector=None, label="chair", metadata=None, actions=None, baseline_settings=None, **overrides):
+def baseline(detector=None, label="chair", actions=None, baseline_settings=None, **overrides):
     """The baseline on a 20 m synthetic map; ``overrides`` are RPTSettings fields."""
     closing = dict(overrides.pop("target_closing", None) or {})
     if not any(key.startswith("stop_overshoot") for key in closing):
         closing.update(stop_overshoot_steps=0, stop_overshoot_max_steps=0)
     overrides["target_closing"] = closing
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", label, PROTOCOL.camera(),
-                            actions or BODY_ACTIONS_PROTOCOL.actions(), 500, metadata=metadata or {})
-    if "stair_connectors" in (metadata or {}) and "multifloor" not in overrides:
-        overrides["multifloor"] = {"stair_source": "ground_truth"}      # a scene structure handed in is the GT ablation
+                            actions or BODY_ACTIONS_PROTOCOL.actions(), 500)
     policy = FalconYoloBaseline(detector or NoDetector(), RPTSettings(**dict({"map_size_m": 20.0}, **overrides)),
                                 baseline=baseline_settings)
     policy.reset(episode, gibson_label_mapper().target_labels(label))
@@ -74,7 +72,8 @@ def test_the_baseline_has_no_llm_and_declares_the_full_methods_closing_and_confi
     assert configuration["local_exploration"] == "falcon" and configuration["falcon_running"]
     assert configuration["allow_stair_traversal"] is False and configuration["ground_truth_stairs"] is False
     assert configuration["stair_source"] == "observed", "the baseline reads no navmesh stairs either (2026-10-21)"
-    assert baseline(multifloor={"stair_source": "ground_truth"})[0].configuration()["ground_truth_stairs"] is True
+    with pytest.raises(ValueError, match="removed"):
+        baseline(multifloor={"stair_source": "ground_truth"})      # no simulator stairs for the baseline either
     assert configuration["target_closing"] == configuration["adaptation"]["target_closing"]
     assert policy.llm_client is None and not hasattr(policy, "graph") and not hasattr(policy, "loop")
     assert policy.settings.local_exploration == "falcon", "a frontier setting is overridden: the baseline is FALCON"
@@ -150,8 +149,7 @@ def test_the_actual_converter_closes_a_toilet_from_two_metres_looks_down_and_sto
     monkeypatch.setitem(policy.mapping.__dict__, "update", lambda *a, **kw: world)
     target = np.array([[2.0, 0.0, .45]])
     converter, pose, actions = DiscreteActionConverter(episode.action_spec), AgentPose(0, 0, 0, 0), []
-    projections = []
-    policy.target_projector = lambda point: projections.append(point) or point
+    standoffs = set()
     for step in range(40):
         pixels, depths = project_to_image(target, episode.camera, pose)
         u, v = pixels[0]
@@ -160,6 +158,8 @@ def test_the_actual_converter_closes_a_toilet_from_two_metres_looks_down_and_sto
         policy.detector.detect = lambda rgb, boxes=boxes: boxes
         obs = observation(episode, step, depth=float(depths[0]), pose=pose, label="toilet")
         command = policy.plan(obs)
+        if policy.closing.path.goal_xyz is not None:
+            standoffs.add(tuple(policy.closing.path.goal_xyz[:2]))
         action = converter.step(pose, command).action
         assert action is not None
         guarded = policy.filter_action(obs, action)
@@ -173,7 +173,11 @@ def test_the_actual_converter_closes_a_toilet_from_two_metres_looks_down_and_sto
         pose = apply_action(pose, action, episode.action_spec)
     assert actions[-1] == DiscreteAction.STOP
     assert DiscreteAction.MOVE_FORWARD in actions and DiscreteAction.LOOK_DOWN in actions
-    assert projections, "the standoff ring is projected onto the navmesh exactly as in the full method"
+    assert standoffs, "the standoff is read off the observed map's standing floor exactly as in the full method"
+    for spot in standoffs:
+        assert spot == pytest.approx(world.grid_to_world(*world.world_to_grid(*spot))) and world.is_free(*world.world_to_grid(*spot))
+    assert not hasattr(policy, "target_projector") and not hasattr(policy, "optimistic_planner")
+    assert "target_navmesh_projection" not in policy.configuration()
     assert policy.episode_info()["target_closing"]["locked"]
 
 
@@ -272,15 +276,15 @@ def test_a_decision_failure_is_recorded_and_answered_with_a_turn_not_a_dead_epis
 
 # -- spawn-floor confinement: the full method's ---------------------------------------------------
 def confined_baseline(monkeypatch):
-    """The baseline on the two-room world with the one ground-truth staircase SEEN, traversal forbidden."""
-    policy, episode = baseline(metadata=STRUCTURE)
+    """The baseline on the two-room world with one staircase SEEN and placed, traversal forbidden, the storey confirmed."""
+    policy, episode = baseline()
     world, _ = two_room_world()
     monkeypatch.setitem(policy.mapping.__dict__, "update", lambda *a, **kw: world)
     obs = observation(episode, 0, pose=AgentPose(IN_A[0], IN_A[1], 0.0, 0.0))
     policy.mapping.atlas.update(obs.pose)
     policy.mapping._anchor = 0.0
-    for connector in policy.building.ground_truth.connectors:
-        policy.building.sightings.mark_seen(connector.id, 0, connector.polyline)
+    place_stairs(policy, obs, FLIGHT, leads_to=False)          # as the coordinator places a flight its depth measured
+    policy.building.storey_confirmed = True
     policy.building.observe(obs)
     assert len(policy.building.portals) == 1, "the seen staircase is placed: knowledge, not a destination"
     return policy, episode, world, obs
@@ -327,7 +331,8 @@ def test_an_unplanned_height_departure_starts_no_traversal_and_the_building_neve
     assert any(e["event"] == "height_departure_ignored" for e in policy.building.events)
     assert policy.building.plan(raised, world) is None
     building = policy.episode_info()["building"]
-    assert building["allow_stair_traversal"] is False and building["portals"][0]["stair_source"] == "ground_truth"
+    assert building["allow_stair_traversal"] is False and building["stair_source"] == "observed"
+    assert "ground_truth" not in building and "stairs_seen" not in building, "nothing of the simulator's in the record"
     assert building["decides_floor_changes"].startswith("never")
 
 

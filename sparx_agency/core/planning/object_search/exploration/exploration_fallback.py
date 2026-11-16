@@ -33,13 +33,11 @@ raised, it produces a command that MOVES, in this order:
      the gap behind a chair. The exits that remain are ranked by that gain
      over the walk to them, as the explore visit ranks a room's frontiers,
      not by the length of their boundary;
-2. the building coordinator, when the floor is exhausted: the ground-truth
-   stairs by the explicit fallback rule (up or down, ``floor_decision``).
-   The NORMAL way to the stairs is not this: the room-search loop offers
-   every staircase to the oracle and to RPT* as a node beside the rooms,
-   and climbs when the order says so. This rung is for the floor where that
-   machinery has nothing left -- the room LLM is away, or no node is worth
-   anything and the frontier is gone;
+2. the building coordinator, when the floor is exhausted and stair
+   traversal is allowed: the flights the robot has seen, chosen by RPT* over
+   those portals (``MultiFloorSearch._select``), or the one switch along the
+   flight a stair spawn came off. With traversal forbidden (the benchmark
+   default) only that switch is ever taken here;
 2b. the exits of rung 1 again at the BODY radius (since 2026-10-28, the
    ``exits_only`` form of the squeeze below): a doorway the map draws
    0.5 m wide is still the way to the rooms not yet seen, and it comes

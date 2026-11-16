@@ -16,10 +16,16 @@ library defaults (0.10 m / 1.50 m) while ObjectNav's agent is 0.18 m / 0.88 m.
 Neither is guessed from a benchmark name, and whichever is chosen,
 ``navmesh_provenance()`` records what was actually in force.
 
-Beyond RGB-D and pose the bridge exposes two evaluator/policy-side readings of
-the loaded navmesh: :meth:`scene_structure` (storeys and stair connectors, the
-one declared ground-truth input of the multi-floor search) and
-:attr:`last_collision` (recorder-only). Neither is part of an observation.
+Beyond RGB-D and pose the bridge exposes the loaded navmesh to the EVALUATOR
+only: :attr:`pathfinder` (the geodesic the score is measured by, the start
+validation), :attr:`last_placed_pose` and :attr:`last_pose_on_navmesh` (the
+harness's kinematics check) and :attr:`last_collision` (recorder-only). None
+is part of an observation and none is handed to a policy. Until 2026-11-15
+there were two more that were: ``project_target`` (a standing point snapped
+onto the navmesh for the closing) and ``scene_structure`` (storeys and stair
+connectors for the multi-floor search). Both are removed -- the agent reads
+its own map -- and must not come back; the navmesh analysis they used lives on
+in ``habitat/stair_connectors.py`` for after-the-fact episode analysis.
 
 **The semantic sensor is opt-in and privileged** (``semantic=True``). It
 renders habitat-sim's per-pixel instance ids from the scene's annotation mesh
@@ -206,7 +212,6 @@ class HabitatRGBDSimulator:
                                  "pixels_filled": 0, "pixels_left": 0}
         self._sim = None
         self._scene = None
-        self._structure = None  # per-scene navmesh storeys and stair connectors
         self._semantic_objects = None  # per-scene {instance id: raw annotation category}
         self._semantic_names = {}      # per-scene {naming scheme: {instance id: name}}, see semantic_objects()
         self.last_collision = None  # evaluator-only; not part of RGB-D/pose tuples
@@ -269,7 +274,6 @@ class HabitatRGBDSimulator:
                         "habitat-sim loaded no navmesh for %s; nothing can be "
                         "measured on it" % scene_path)
             self._scene = str(scene_path)
-            self._structure = None
             self._semantic_names = {}
             self._semantic_objects = self._read_semantic_objects(scene_path) if self.semantic else None
         self._sim.seed(seed)
@@ -297,21 +301,6 @@ class HabitatRGBDSimulator:
         self._sim.get_agent(0).set_state(state, reset_sensors=True)
         self.last_collision = None
         return self._observe()
-
-    def scene_structure(self):
-        """Storeys and stair connectors of the loaded scene's navmesh, ENU.
-
-        Ground truth for the building's vertical structure -- never the goal.
-        Computed once per scene from whichever navmesh is in force (see
-        ``habitat/stair_connectors.py``).
-        """
-        if self._sim is None:
-            raise EnvContractError("Simulator not reset; no navmesh to read the building from")
-        if self._structure is None:
-            from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.stair_connectors import (
-                scene_structure_from_pathfinder)
-            self._structure = scene_structure_from_pathfinder(self._sim.pathfinder)
-        return self._structure
 
     def semantic_objects(self, naming=None):
         """``{instance id: annotation category}`` of the loaded scene, under ``semantic=True``.
@@ -485,27 +474,6 @@ class HabitatRGBDSimulator:
                 "navigable_area_m2": float(pathfinder.navigable_area),
                 "islands": int(pathfinder.num_islands)}
 
-    def project_target(self, point):
-        """Project a requested ENU footpoint onto the local NavMesh.
-
-        This explicitly privileged geometry service reads neither semantic
-        annotations nor evaluator targets. Reject other floors, remote snaps
-        and invalid geometry; observed-map A* decides reachability.
-        """
-        if self._sim is None:
-            raise EnvContractError("Simulator not reset; cannot project a target approach")
-        point = np.asarray(point, dtype=float)
-        if point.shape != (3,) or not np.isfinite(point).all():
-            raise ValueError("Target approach projection needs a finite ENU xyz point")
-        native = np.array([-point[1], point[2], -point[0]], dtype=np.float32)
-        snapped = np.asarray(self._sim.pathfinder.snap_point(native), dtype=float)
-        if snapped.shape != (3,) or not np.isfinite(snapped).all():
-            return None
-        enu = np.array([-snapped[2], -snapped[0], snapped[1]])
-        if abs(enu[2] - point[2]) > 0.2 or np.linalg.norm(enu[:2] - point[:2]) > 0.5:
-            return None
-        return tuple(float(v) for v in enu)
-
     def step(self, action):
         """STOP preserves the final view; other actions use native collision tests."""
         if self._sim is None or not self.actions.allows(action):
@@ -572,7 +540,6 @@ class HabitatRGBDSimulator:
             self._sim.close()
         self._sim = None
         self._scene = None
-        self._structure = None
         self._semantic_objects = None
         self.last_semantic = None
 

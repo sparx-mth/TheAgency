@@ -18,6 +18,7 @@ from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
+from sparx_agency.core.planning.object_search.world_model.standing_floor import standing_floor as strict_standing_floor
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 
 
@@ -37,6 +38,23 @@ def floored(obs):
 
 def forbidden(*args, **kwargs):
     raise AssertionError("Global exploration was called after target takeover")
+
+
+def walled_off(x0=0.5, x1=0.7):
+    """Known floor everywhere, and a wall the whole height of the map between the agent (x = 0) and what lies ahead.
+
+    The map's own way of saying there is nowhere to stand near the target: nothing beyond the wall is joined to
+    the agent, and the floor on its own side ends too near for a walk toward the target to be worth taking
+    (``nearest_progress_m``). Until 2026-11-15 these fixtures said it with a navmesh projector that refused every
+    point; the agent has no such oracle any more, only its map.
+    """
+    data = np.zeros((200, 200), np.int8)
+    params = OccupancyGrid2DParams(.1, -10, -10)
+    grid = OccupancyGrid2D(data, params)
+    gx0, _ = grid.world_to_grid(x0, 0.0)
+    gx1, _ = grid.world_to_grid(x1, 0.0)
+    data[:, gx0:gx1 + 1] = grid.values.occupied
+    return OccupancyGrid2D(data, params)
 
 
 def freeze_global(monkeypatch, policy):
@@ -392,20 +410,30 @@ def test_planner_exception_does_not_reach_exploration_fallback(monkeypatch):
     p, ep = setup_policy()
     freeze_global(monkeypatch, p)
     p.plan(observation(ep, 0, depth=3))
-    monkeypatch.setitem(p.__dict__, "_plan_to", lambda *a: (_ for _ in ()).throw(RuntimeError("planner broken")))
+    monkeypatch.setitem(p.__dict__, "_plan_to", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("planner broken")))
     with pytest.raises(RuntimeError, match="planner broken"):
         p.plan(observation(ep, 1, depth=3))
     assert p.closing.active and p.closing.locked
 
 
-def test_unreachable_navmesh_never_uses_unsnapped_goal(monkeypatch):
+def test_a_ring_point_with_no_standing_floor_near_it_is_never_planned_to(monkeypatch):
+    """The floor round the target has never been observed: no ring point has standing floor within reach, so the
+    raw ring point is not handed to the planner (which would snap it wherever it liked) -- the planner is not
+    asked at all. Until 2026-11-15 it took the simulator's navmesh refusing the point to say this."""
     p, ep = setup_policy()
     freeze_global(monkeypatch, p)
-    p.target_projector = lambda point: None
+    data = np.full((200, 200), -1, np.int8)                 # unobserved everywhere ...
+    world = OccupancyGrid2D(data, OccupancyGrid2DParams(.1, -10, -10))
+    gx, gy = world.world_to_grid(0.0, 0.0)
+    data[gy - 4:gy + 5, gx - 4:gx + 5] = world.values.free  # ... but the patch the agent stands on
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
     monkeypatch.setitem(p.__dict__, "_plan_to", forbidden)
     p.plan(observation(ep, 0, depth=3))
     command = p.plan(observation(ep, 1, depth=3))
     assert not command.stop and not command.waypoints and p.closing.locked
+    assert p.closing.path.goal_xyz is None and p.closing.no_path_steps == 1
+    assert not hasattr(p, "target_projector") and not hasattr(p, "optimistic_planner")
+    assert "target_navmesh_projection" not in p.configuration() and "observed map only" in p.configuration()["standing_points"]
 
 
 @pytest.mark.parametrize("column, expected", [(100, DiscreteAction.TURN_LEFT), (540, DiscreteAction.TURN_RIGHT)])
@@ -428,8 +456,7 @@ def test_actual_converter_closes_low_target_looks_down_and_stops(monkeypatch, oc
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
     target = np.array([[2.0, 0.0, .45]])
     converter, pose, actions = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0), []
-    projections = []
-    p.target_projector = lambda point: projections.append(point) or point
+    standoffs = set()
     for step in range(40):
         pixels, depths = project_to_image(target, ep.camera, pose)
         u, v = pixels[0]
@@ -438,6 +465,8 @@ def test_actual_converter_closes_low_target_looks_down_and_stops(monkeypatch, oc
         p.detector.detect = lambda rgb: boxes
         obs = replace(observation(ep, step, depth=float(depths[0])), pose=pose, target_category="toilet")
         command = p.plan(obs)
+        if p.closing.path.goal_xyz is not None:
+            standoffs.add(tuple(p.closing.path.goal_xyz[:2]))
         action = converter.step(pose, command).action
         assert action is not None
         actions.append(action)
@@ -449,7 +478,9 @@ def test_actual_converter_closes_low_target_looks_down_and_stops(monkeypatch, oc
         pose = apply_action(pose, action, ep.action_spec)
     assert actions[-1] == DiscreteAction.STOP
     assert DiscreteAction.MOVE_FORWARD in actions and DiscreteAction.LOOK_DOWN in actions
-    assert projections and p.graph.queries == 0
+    assert standoffs and p.graph.queries == 0
+    for spot in standoffs:                                  # a cell of the agent's own map, at its centre
+        assert spot == pytest.approx(world.grid_to_world(*world.world_to_grid(*spot))) and world.is_free(*world.world_to_grid(*spot))
     if occlusion:
         assert p.closing.occluded_path_steps >= 3, "the four hidden frames land in transit (one is spent reaching terminal range)"
 
@@ -470,19 +501,13 @@ def test_bbox_servo_does_not_interrupt_astar_corner_heading(monkeypatch):
     assert DiscreteActionConverter(ep.action_spec).step(obs.pose, command).action == DiscreteAction.TURN_RIGHT
 
 
-@pytest.mark.parametrize("snap", [(float("nan"), 0, 0), (-2, 4, -1), (-20, 3, -1)])
-def test_navmesh_rejects_invalid_remote_or_other_floor_snaps(snap):
+def test_the_simulator_bridge_offers_no_navmesh_projection_for_a_standing_point():
+    """Until 2026-11-15 ``project_target`` snapped the closing's standoffs onto the navmesh; the agent reads its own map now."""
     sim = HabitatRGBDSimulator(None, None, .18, True, height_m=.88)
-    sim._sim = SimpleNamespace(pathfinder=SimpleNamespace(snap_point=lambda point: snap))
-    assert sim.project_target((1, 2, 3)) is None
-
-
-def test_navmesh_round_trip_enu_native_coordinates():
-    received = []
-    sim = HabitatRGBDSimulator(None, None, .18, True, height_m=.88)
-    sim._sim = SimpleNamespace(pathfinder=SimpleNamespace(snap_point=lambda point: received.append(point) or point))
-    assert sim.project_target((1, 2, 3)) == (1, 2, 3)
-    np.testing.assert_allclose(received[0], [-2, 3, -1])
+    assert not hasattr(sim, "project_target") and not hasattr(sim, "scene_structure")
+    p, _ = setup_policy()
+    assert not hasattr(p, "target_projector") and "target_navmesh_projection" not in p.configuration()
+    assert "observed map" in p.configuration()["standing_points"]
 
 
 @pytest.mark.parametrize("kwargs", [{"confirmation_frames": 1}, {"confirmation_frames": True},
@@ -1318,8 +1343,7 @@ def test_a_locked_target_with_no_safe_path_maps_its_footing_then_gives_the_spot_
     ep = tilt_episode(p, original)
     freeze_global(monkeypatch, p)
     world = OccupancyGrid2D(np.full((200, 200), -1, np.int8), OccupancyGrid2DParams(.1, -10, -10))   # the blind disk: unknown
-    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
-    p.target_projector = lambda point: None                     # no standoff goal exists from here: no path
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)       # nothing observed: nowhere to stand
     converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
     box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
     actions, phases = [], []
@@ -1354,15 +1378,15 @@ def test_a_locked_target_with_no_safe_path_maps_its_footing_then_gives_the_spot_
     p, original = setup_policy()
     ep = tilt_episode(p, original)
     freeze_global(monkeypatch, p)
-    known = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    known = walled_off()                                         # seen all round, and a wall before the target
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: known)
-    p.target_projector = lambda point: None
     converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
     for step in range(30):
         command, action, pose = drive(p, ep, converter, pose, step, box)
         if not p.closing.active:
             break
     assert p.closing.footing_sweeps == 0 and p.closing.boxed_releases == 1 and step <= 10
+    assert p.closing.nearest_routes == 0 and p.closing.standoff_detours == 0, "nothing nearer to walk to, no way round"
 
 
 def test_without_the_footing_sweep_a_pathless_lock_is_still_given_up_after_its_bound(monkeypatch):
@@ -1372,9 +1396,8 @@ def test_without_the_footing_sweep_a_pathless_lock_is_still_given_up_after_its_b
     p, original = setup_policy(target_closing={"footing_sweep": False})
     ep = tilt_episode(p, original)
     freeze_global(monkeypatch, p)
-    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
+    world = walled_off()
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
-    p.target_projector = lambda point: None
     converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
     box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
     actions = []
@@ -1389,7 +1412,6 @@ def test_without_the_footing_sweep_a_pathless_lock_is_still_given_up_after_its_b
     p, ep = setup_policy()
     freeze_global(monkeypatch, p)
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
-    p.target_projector = lambda point: None
     converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
     for step in range(30):
         command, action, pose = drive(p, ep, converter, pose, step, box)
@@ -1417,7 +1439,6 @@ def test_the_footing_sweep_is_cut_short_the_action_a_path_exists_and_the_approac
     known = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
     state = {"world": unknown, "path": False}
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: state["world"])
-    p.target_projector = lambda point: point if state["path"] else None
     converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
     box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
     actions, owners = [], []
@@ -1767,12 +1788,17 @@ def test_a_locked_target_without_a_standoff_route_is_walked_toward_over_the_reac
     assert command.info["kind"] == "target_closing" and command.info["phase"] == "target_close_nearest"
     assert command.waypoints and math.dist(command.waypoints[-1], (2.0, 0.0)) < 1.6 - p.closing.settings.nearest_progress_m
     assert p.closing.nearest_routes == 1 and p.closing.diagnostics()["nearest_routes"] == 1
-    # The walk in force is kept on the next action rather than re-chosen; a projector that refuses every
-    # point leaves nothing to walk to, and the pathless wait of before stands.
+    goal = p.closing.nearest_goal
+    world = p.last_world
+    assert world.is_free(*world.world_to_grid(*goal)) and goal == pytest.approx(world.grid_to_world(*world.world_to_grid(*goal)))
+    assert command.waypoints[-1] == pytest.approx(goal), "planned to the standing cell itself: the planner did not move it"
+    # The walk in force is kept on the next action rather than re-chosen; a map with a wall across the way
+    # leaves nothing nearer to walk to, and the pathless wait of before stands.
     again = p.plan(replace(observation(ep, 3, depth=1.4), pose=AgentPose(0.6, 0, 0, 0)))
-    assert p.closing.nearest_routes == 1 and again.info["phase"] == "target_close_nearest"
+    assert p.closing.nearest_routes == 1 and again.info["phase"] == "target_close_nearest" and p.closing.nearest_goal == goal
     p.closing.nearest_goal, p.closing.nearest_tried = None, []
-    p.target_projector = lambda point: None
+    walled = walled_off(x0=1.0, x1=1.2)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: walled)
     held = p.plan(replace(observation(ep, 4, depth=1.4), pose=AgentPose(0.6, 0, 0, 0)))
     assert p.closing.nearest_routes == 1 and held.info.get("verify_step", "").startswith(("look", "turn"))
 
@@ -2340,11 +2366,22 @@ def test_the_inspection_steps_when_the_fresh_range_is_a_step_beyond_the_limit_an
         TargetClosingSettings(inspection_max_steps=-1)
 
 
-def test_a_locked_target_with_no_route_on_the_known_floor_is_walked_to_through_the_unknown(monkeypatch):
+def crosses_unobserved(world, waypoints):
+    """Whether any leg of a route passes over a cell the map has not observed."""
+    for (x0, y0), (x1, y1) in zip(waypoints, waypoints[1:]):
+        samples = max(2, int(math.dist((x0, y0), (x1, y1)) / (0.5 * world.resolution)) + 1)
+        for t in np.linspace(0.0, 1.0, samples):
+            if world.is_unknown(*world.world_to_grid(x0 + t * (x1 - x0), y0 + t * (y1 - y0))):
+                return True
+    return False
+
+
+def test_a_locked_target_beyond_unobserved_floor_is_not_walked_to_until_the_floor_has_been_seen(monkeypatch):
     """Collierville/000023, action 375: the toilet locked at 2.8 m in plain view, the floor between the corridor
-    and its doorway unknown (a level camera sees the floor from 1.4 m out), no standoff route, a footing sweep,
-    and the lock released as boxed in -- the spot then refused the 0.82-0.88 re-sightings. With no route on
-    the known floor the ring is planned through the unknown; the committed route is re-checked as the map fills."""
+    and its doorway unknown (a level camera sees the floor from 1.4 m out). From 2026-10-14 to 2026-11-15 the ring
+    was then planned THROUGH the unknown cells to a standoff the simulator's navmesh had vouched for. The agent
+    uses no floor it has not observed: it waits where it stands, no route enters the band, and it walks in on the
+    action the band has been seen."""
     p, ep = setup_policy()
     freeze_global(monkeypatch, p)
     # A band of unknown floor across the whole map between the agent (x=0) and the target (x=2).
@@ -2359,80 +2396,114 @@ def test_a_locked_target_with_no_route_on_the_known_floor_is_walked_to_through_t
     p.plan(observation(ep, 0, depth=2))
     command = p.plan(observation(ep, 1, depth=2))
     assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1
-    assert command.waypoints and command.info.get("through_unknown") is True
-    assert p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED") and p.closing.through_unknown_routes == 1
-    assert p.closing.path.through_unknown == 1 and p.closing.no_path_steps == 0 and p.closing.footing_sweeps == 0
-    assert any(gx0 <= world.world_to_grid(x, y)[0] < gx1 for x, y in command.waypoints), "the route crosses the band"
-    assert p.episode_info()["target_closing"]["through_unknown_routes"] == 1
-    # Switched off: the pathless wait as before.
-    q, ep2 = setup_policy(target_closing={"through_unknown": False})
-    freeze_global(monkeypatch, q)
-    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
-    q.plan(observation(ep2, 0, depth=2))
-    pathless = q.plan(observation(ep2, 1, depth=2))
-    assert q.closing.locked and pathless.waypoints == () and q.closing.no_path_steps == 1
-    assert q.closing.through_unknown_routes == 0
+    assert command.waypoints == () and p.closing.no_path_steps == 1 and p.closing.path.goal_xyz is None
+    assert p.closing.nearest_routes == 0, "the floor on the agent's side ends too near to be a walk toward the target"
+    # The floor beyond the band is observed and clear of everything; it is not JOINED to the agent on the map.
+    floor = p.closing.standing_floor(observation(ep, 1, depth=2), world)
+    assert floor.standable_at((1.6, 0.0)) and not floor.contains((1.6, 0.0)) and floor.contains((0.2, 0.0))
+    assert not floor.reachable[:, gx0 - 1:].any(), "nothing on the band, beside it or beyond it"
+    # The band seen (a look down, a step nearer): the standoff beyond it is standing floor now, and is walked to.
+    seen = OccupancyGrid2D(np.zeros((200, 200), np.int8), params)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: seen)
+    walking = p.plan(observation(ep, 2, depth=2))
+    assert walking.waypoints and p.closing.phase in ("CLOSE", "CLOSE_OCCLUDED") and p.closing.no_path_steps == 0
+    assert p.closing.path.goal_xyz[0] > 1.0 and walking.waypoints[-1] == pytest.approx(p.closing.path.goal_xyz[:2])
+    # The planner that crossed unknown floor and its settings are gone: an old config naming them is refused.
+    assert not hasattr(p, "optimistic_planner") and "through_unknown_routes" not in p.episode_info()["target_closing"]
+    for gone in ({"through_unknown": True}, {"through_unknown_cost": 8.0}):
+        with pytest.raises(TypeError):
+            TargetClosingSettings(**gone)
     with pytest.raises(ValueError):
-        TargetClosingSettings(through_unknown_cost=0.5)
+        TargetClosingSettings(standing_snap_m=-0.1)
 
 
-def test_the_front_arc_through_the_unknown_is_taken_before_a_known_floor_route_round_to_behind_the_target(monkeypatch):
+def wall_behind_the_target(front_seen=False):
+    """The agent at x = 0 faces a target at x = 3.1 with a wall half a metre behind it (x = 3.7-3.9 for |y| < 2.2).
+
+    The floor in front of the target and under it (x 1.6-3.65, |y| < 1.2) is not yet observed unless
+    ``front_seen``; the room behind the wall is known floor, joined to the agent's side round the wall's ends --
+    a long way round.
+    """
+    data = np.zeros((200, 200), np.int8)
+    params = OccupancyGrid2DParams(.1, -10, -10)
+    grid = OccupancyGrid2D(data, params)
+    if not front_seen:
+        ux0, uy0 = grid.world_to_grid(1.6, -1.2)
+        ux1, uy1 = grid.world_to_grid(3.65, 1.2)
+        data[uy0:uy1 + 1, ux0:ux1 + 1] = grid.values.unknown
+    wx0, wy0 = grid.world_to_grid(3.75, -2.2)
+    wx1, wy1 = grid.world_to_grid(3.85, 2.2)
+    data[wy0:wy1 + 1, wx0:wx1 + 1] = grid.values.occupied
+    return OccupancyGrid2D(data, params)
+
+
+def walk_until(p, ep, converter, pose, step, box, done, limit=40):
+    """Drive the closing until ``done(command, pose after it)``; returns ``(command, pose, next step, phases seen)``."""
+    phases = []
+    for step in range(step, step + limit):
+        command, _, pose = drive(p, ep, converter, pose, step, box)
+        phases.append(p.closing.phase)
+        if done(command, pose):
+            return command, pose, step + 1, phases
+    raise AssertionError("never reached: phases %r" % phases)
+
+
+@pytest.mark.parametrize("tilt", [False, True])
+def test_floor_not_yet_seen_in_front_of_a_target_is_walked_up_to_and_looked_at_before_any_way_round(monkeypatch, tilt):
     """00891/000006 and /000027 (2026-11-05): the toilet seen through the bathroom doorway from 3 m, the doorway's
-    floor still unknown, and the standoff ring's only known-floor route led to the point BEHIND the toilet -- in the
-    next room, 7.5 m round the outside of the bathroom; the agent inspected a wall from 0.9 m and STOPped 6 m from
-    the goal. The front arc is tried with every planner, the unknown included, before any point beside or behind."""
-    from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
+    floor still unknown, and the standoff ring's only known-floor route led to the point BEHIND the toilet -- in
+    the next room, 7.5 m round the outside of the bathroom; the agent inspected a wall from 0.9 m and STOPped 6 m
+    from the goal. The front arc was then planned through the unknown first. Since 2026-11-15 the agent walks on
+    no floor it has not seen, so the order is the map's own: the detour is set aside, the agent walks up to the
+    edge of the floor it has observed, looks (the footing sweep, where the protocol can tilt), and takes the front
+    arc on the floor that shows. Only when nothing shows is the long way round walked -- and counted."""
+    for front_shows in (True, False):
+        box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
+        p, original = setup_policy()
+        ep = tilt_episode(p, original) if tilt else original
+        freeze_global(monkeypatch, p)
+        state = {"world": wall_behind_the_target()}
+        monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: state["world"])
+        converter, pose = DiscreteActionConverter(ep.action_spec), AgentPose(0, 0, 0, 0)
+        # The lock, and the first decision: no standoff -- the detour behind the wall is NOT taken -- and a walk
+        # toward the target over the floor the agent has seen. (The fake detector's box stands three metres ahead
+        # of wherever the agent is, so once the lock is taken the walk goes on from memory, without boxes.)
+        command, pose, step, _ = walk_until(p, ep, converter, pose, 0, box, lambda c, _: p.closing.locked and c.waypoints)
+        box = []
+        assert p.closing.phase == "CLOSE_NEAREST" and p.closing.nearest_routes == 1
+        assert p.closing.path.goal_xyz is None, "no standoff yet: nothing in front has floor, and the far side waits"
+        assert p.closing.path.detours == 0 and p.closing.standoff_detours == 0 and p.closing.back_arc_standoffs == 0
+        edge = p.closing.nearest_goal
+        assert edge[0] < 3.7, "on the agent's side of the wall: the floor behind it is near the target too, and a detour away"
+        assert math.dist(edge, (3.0, 0.0)) <= 3.0 - p.settings.target_closing.nearest_progress_m
+        assert state["world"].is_free(*state["world"].world_to_grid(*edge)), "floor the agent has seen"
+        assert not crosses_unobserved(state["world"], [(pose.x, pose.y)] + list(command.waypoints))
+        if front_shows:
+            # The walk (or the look from its end) maps the floor in front of the target: the front arc has floor.
+            _, pose, step, _ = walk_until(p, ep, converter, pose, step, box, lambda c, at: math.dist((at.x, at.y), edge) < 0.6)
+            state["world"] = wall_behind_the_target(front_seen=True)
+            command, pose, step, _ = walk_until(p, ep, converter, pose, step, box, lambda c, _: p.closing.path.goal_xyz is not None)
+            goal = p.closing.path.goal_xyz
+            assert goal[0] < 3.7 and p.closing.path.far_side == 0, "a standoff in front of the wall, facing the target on the map"
+            assert p.closing.path.detours == 0 and p.closing.back_arc_standoffs == 0 and p.closing.standoff_detours == 0
+            assert p.episode_info()["target_closing"]["back_arc_standoffs"] == 0
+            continue
+        # Nothing shows (the map never changes): the walk ends at the edge, the floor round the feet is looked at
+        # where the protocol can look down, and only then is the standoff behind the wall taken.
+        command, pose, step, phases = walk_until(p, ep, converter, pose, step, box, lambda c, _: p.closing.path.goal_xyz is not None, limit=120)
+        assert ("FOOTING" in phases) is tilt and p.closing.footing_sweeps == int(tilt), "the sweep comes before the way round"
+        assert p.closing.path.far_side == 1 and p.closing.far_side_standoffs == 1
+        assert p.closing.path.goal_xyz[0] > 3.9, "behind the wall: the only standing floor within reach of the target"
+        assert not crosses_unobserved(state["world"], [(pose.x, pose.y)] + list(command.waypoints))
+        assert p.episode_info()["target_closing"]["far_side_standoffs"] == 1
 
-    def world_with_a_wall_behind_the_target():
-        # The agent at x = 0 faces the target at x = 2. A wall stands at x = 2.15-2.3 for |y| < 1.5, the floor
-        # between agent and target (x 0.6-2.1, |y| < 1.2) is unknown, and the room behind the wall is known
-        # floor joined to the agent's side round the wall's ends.
-        data = np.zeros((200, 200), np.int8)
-        params = OccupancyGrid2DParams(.1, -10, -10)
-        grid = OccupancyGrid2D(data, params)
-        ux0, uy0 = grid.world_to_grid(0.6, -1.2)
-        ux1, uy1 = grid.world_to_grid(2.1, 1.2)
-        data[uy0:uy1 + 1, ux0:ux1 + 1] = -1
-        wx0, wy0 = grid.world_to_grid(2.15, -1.5)
-        wx1, wy1 = grid.world_to_grid(2.3, 1.5)
-        data[wy0:wy1 + 1, wx0:wx1 + 1] = 100
-        return OccupancyGrid2D(data, params)
 
-    world = world_with_a_wall_behind_the_target()
-    p, ep = setup_policy()
-    freeze_global(monkeypatch, p)
-    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
-    p.plan(observation(ep, 0, depth=2))
-    command = p.plan(observation(ep, 1, depth=2))
-    assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1
-    goal = p.closing.path.goal_xyz
-    assert command.waypoints and goal is not None and goal[0] < 2.0, "a standoff on the agent's side of the target"
-    assert command.info.get("through_unknown") is True and p.closing.path.through_unknown == 1
-    assert p.closing.path.back_arc == 0 and p.closing.back_arc_standoffs == 0 and not p.closing.path.behind
-    assert p.episode_info()["target_closing"]["back_arc_standoffs"] == 0
-    # The order of the ring before 2026-11-05 -- every offset at the known floor first, no detour rule -- for the
-    # record: a point beside or behind the target, on the long way round the wall. Since the MP3D closing was
-    # merged (2026-11-11) a second rule puts the front first for a target like this one -- its flat depth reads
-    # as a standing plane, so ``frontal_standoff`` tries the normal's ring, the unknown included, before the
-    # agent's -- and the old order needs that rule off too.
-    monkeypatch.setattr(TargetApproachPath, "BACK_ARC_FROM_DEG", 181)
-    q, ep2 = setup_policy(target_closing={"standoff_detour_factor": 0.0, "frontal_standoff": False})
-    freeze_global(monkeypatch, q)
-    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
-    q.plan(observation(ep2, 0, depth=2))
-    old = q.plan(observation(ep2, 1, depth=2))
-    assert q.closing.locked and old.waypoints and q.closing.path.goal_xyz[0] >= 2.0 - 1e-6, "beside or behind the target"
-    assert not old.info.get("through_unknown") and sum(
-        math.dist(a, b) for a, b in zip(old.waypoints, old.waypoints[1:])) > 2.0 * math.dist((0, 0), (2.0, 0.65))
-
-
-def test_a_standoff_on_a_detour_long_route_waits_for_the_other_bearings_and_the_unknown(monkeypatch):
+def test_a_standoff_on_a_detour_long_route_is_set_aside_and_taken_only_when_nothing_else_is_left(monkeypatch):
     """00891/000006 re-run (2026-11-05): the memory half a metre into the bathroom wall, the front-arc point at 60
-    degrees landed in the wall and the navmesh projection moved it to the room beyond -- a 6.6 m known-floor route
-    for a target 3.4 m away, walked round the outside of the bathroom. A route longer than ``standoff_detour_factor``
-    times the range plus the slack is the fallback: the other bearings and planners are asked first, and the
-    through-unknown route by the doorway wins; with the rule off the detour is walked as before; with nothing else
-    the detour is taken and counted."""
+    degrees landed in the wall and was moved to the floor of the room beyond -- a 6.6 m known-floor route for a
+    target 3.4 m away, walked round the outside of the bathroom. A route longer than ``standoff_detour_factor``
+    times the range plus the slack is not the ring's to take: it is set aside (``deferred``) and adopted once the
+    closing has no walk toward the target and no sweep left; with the rule off the ring takes it as it comes."""
     def strip_world():
         # The agent at x = 0 faces the target at x = 2; a band of unknown floor x 0.6-1.3 for |y| < 3 lies between,
         # and known floor joins the two sides round the band's ends (a 7 m way round).
@@ -2444,32 +2515,46 @@ def test_a_standoff_on_a_detour_long_route_waits_for_the_other_bearings_and_the_
         data[y0:y1 + 1, x0:x1 + 1] = -1
         return OccupancyGrid2D(data, params)
 
+    def length(command):
+        return sum(math.dist(a, b) for a, b in zip(command.waypoints, command.waypoints[1:]))
+
     world = strip_world()
     p, ep = setup_policy()
     freeze_global(monkeypatch, p)
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
     p.plan(observation(ep, 0, depth=2))
     command = p.plan(observation(ep, 1, depth=2))
-    assert p.closing.locked and command.waypoints
-    length = sum(math.dist(a, b) for a, b in zip(command.waypoints, command.waypoints[1:]))
-    assert command.info.get("through_unknown") is True and length < 4.0, "through the band, not round it"
-    assert p.closing.path.detours == 0 and p.closing.standoff_detours == 0
-    # The rule off: the first known-floor route, round the band.
+    # The ring found the standoff beyond the band and its 7 m route, and did not take it; nothing nearer could be
+    # walked to and this protocol cannot look down, so the closing took it on the same action -- as a detour.
+    assert p.closing.locked and command.waypoints and length(command) > 6.0, "round the band, never through it"
+    assert not crosses_unobserved(world, [(0.0, 0.0)] + list(command.waypoints))
+    assert p.closing.path.detours == 1 and p.closing.standoff_detours == 1 and p.closing.nearest_routes == 0
+    assert p.closing.path.goal_xyz[0] > 1.3 and p.closing.path.deferred is None
+    assert p.episode_info()["target_closing"]["standoff_detours"] == 1
+    # Where the protocol CAN look down, the look comes first: the detour waits for the footing sweep.
+    t, original = setup_policy()
+    tilted = tilt_episode(t, original)
+    freeze_global(monkeypatch, t)
+    monkeypatch.setitem(t.mapping.__dict__, "update", lambda *a, **kw: world)
+    converter, pose = DiscreteActionConverter(tilted.action_spec), AgentPose(0, 0, 0, 0)
+    box = [DetectionWire("chair", .9, (280, 200, 360, 280))]
+    phases = []
+    for step in range(40):
+        _, _, pose = drive(t, tilted, converter, pose, step, box)
+        phases.append((t.closing.phase, t.closing.path.detours))
+        if t.closing.path.goal_xyz is not None:
+            break
+    assert t.closing.footing_sweeps == 1 and t.closing.path.detours == 1
+    assert [detours for phase, detours in phases if phase == "FOOTING"] and not any(
+        detours for phase, detours in phases if phase == "FOOTING"), "no detour while the sweep is under way"
+    # The rule off: the ring takes the first standing point with a route, however long, and counts no detour.
     q, ep2 = setup_policy(target_closing={"standoff_detour_factor": 0.0})
     freeze_global(monkeypatch, q)
     monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
     q.plan(observation(ep2, 0, depth=2))
     old = q.plan(observation(ep2, 1, depth=2))
-    assert not old.info.get("through_unknown") and sum(
-        math.dist(a, b) for a, b in zip(old.waypoints, old.waypoints[1:])) > 6.0
-    # Nothing but the detour (no planning through the unknown): taken, and counted.
-    r, ep3 = setup_policy(target_closing={"through_unknown": False})
-    freeze_global(monkeypatch, r)
-    monkeypatch.setitem(r.mapping.__dict__, "update", lambda *a, **kw: world)
-    r.plan(observation(ep3, 0, depth=2))
-    fallback = r.plan(observation(ep3, 1, depth=2))
-    assert fallback.waypoints and r.closing.path.detours == 1 and r.closing.standoff_detours == 1
-    assert r.episode_info()["target_closing"]["standoff_detours"] == 1
+    assert old.waypoints and length(old) > 6.0 and q.closing.path.detours == 0 and q.closing.standoff_detours == 0
+    assert not crosses_unobserved(world, [(0.0, 0.0)] + list(old.waypoints))
     with pytest.raises(ValueError):
         TargetClosingSettings(standoff_detour_factor=-1.0)
 
@@ -2532,7 +2617,7 @@ def test_a_fruitless_sweep_cycle_releases_the_verification_before_its_budget():
 # ── the standoff of a big object (Collierville/000009, 2026-10-15) ───────────────────────────────────
 def locked_at_three_metres(monkeypatch, **closing):
     """A chair locked three metres ahead on an empty map; the standoff the lock frames chose is dropped, so the
-    next action selects the ring anew under the test's own projector."""
+    next action selects the ring anew on the test's own map."""
     p, ep = setup_policy(target_closing=closing) if closing else setup_policy()
     freeze_global(monkeypatch, p)
     world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
@@ -2543,53 +2628,153 @@ def locked_at_three_metres(monkeypatch, **closing):
     p.closing.path.drop()
     p.closing.path.dropped = 0
     return p, ep, world
+
+
+def cabinet_world(monkeypatch, p, radius_m):
+    """The empty map with everything within ``radius_m`` of the locked memory OCCUPIED: a cabinet under a television.
+
+    The memory is a point on the object's near surface and a big object has no floor there. The map says so with
+    occupied cells -- the standing floor begins the body's clearance beyond them -- where these fixtures used to
+    hand the policy a navmesh projector that refused the points.
+    """
+    memory = p.closing.xyz
+    data = np.zeros((200, 200), np.int8)
+    params = OccupancyGrid2DParams(.1, -10, -10)
+    world = OccupancyGrid2D(data, params)
+    ys, xs = np.mgrid[0:200, 0:200]
+    centres_x, centres_y = params.origin_x + (xs + .5) * .1, params.origin_y + (ys + .5) * .1
+    data[np.hypot(centres_x - memory[0], centres_y - memory[1]) <= radius_m] = world.values.occupied
+    world = OccupancyGrid2D(data, params)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    return world
+
+
+def nearest_standing_m(p, ep, world, step, clearance_m):
+    """How near the locked memory the agent's standing floor comes at ``clearance_m``, and the cell that is nearest."""
+    floor = p.closing.standing_floor(observation(ep, step, depth=3), world, clearance_m)
+    xs, ys = floor.cells_xy()
+    ranges = np.hypot(xs - p.closing.xyz[0], ys - p.closing.xyz[1])
+    index = int(np.argmin(ranges))
+    return float(ranges[index]), (float(xs[index]), float(ys[index]))
+
+
 def test_the_standoff_ring_widens_to_the_terminal_radius_when_no_standoff_point_has_a_route(monkeypatch):
     """A 1.5 m television on its cabinet: every 0.70 m ring point inside the cabinet, against it or behind it, in
     both planners, from 3 m away -- three correct locks released as 'no safe path from here' with the television
     in view. Wider rings in the front arc, out to the terminal radius, find the floor the standoff ring has not."""
-    p, ep, world = locked_at_three_metres(monkeypatch)
+    p, ep, _ = locked_at_three_metres(monkeypatch)
     memory = tuple(p.closing.xyz)
-    refused = []
-    def cabinet(point):                                       # no floor within 0.9 m of the memory
-        if math.dist(point[:2], memory[:2]) < 0.9:
-            refused.append(point)
-            return None
-        return point
-    p.target_projector = cabinet
+    world = cabinet_world(monkeypatch, p, 0.7)
+    limit = p.settings.target_closing.terminal_distance_m - p.converter_params.goal_tolerance_m
+    for _, clearance_m in p.closing.standing_planners():
+        assert nearest_standing_m(p, ep, world, 2, clearance_m)[0] > limit, "no floor the standoff ring could end on"
     command = p.plan(observation(ep, 2, depth=3))
     assert command.waypoints and not command.stop and p.closing.phase == "CLOSE" and p.closing.no_path_steps == 0
     path = p.closing.path
     assert path.widened and path.widenings == 1 and p.closing.widened_standoffs == 1
     assert 0.9 <= math.dist(path.goal_xyz[:2], memory[:2]) <= 1.0 + world.resolution
-    assert len(refused) >= 16, "the standoff ring was tried first, at every bearing, with both planners"
     assert math.dist(command.waypoints[-1], memory[:2]) <= 1.0 + world.resolution
+    assert command.waypoints[-1] == pytest.approx(path.goal_xyz[:2]), "the route ends on the standing cell chosen"
+    assert p.closing.standing_floor(observation(ep, 2, depth=3), world).contains(path.goal_xyz[:2])
     assert p.closing.diagnostics()["standoff_widened"] is True and p.closing.diagnostics()["widened_standoffs"] == 1
     # A standoff ring point with floor is still preferred: the widening is only for when it has none.
     q, ep, _ = locked_at_three_metres(monkeypatch)
-    q.target_projector = lambda point: point
     q.plan(observation(ep, 2, depth=3))
     assert not q.closing.path.widened and q.closing.widened_standoffs == 0
     assert math.dist(q.closing.path.goal_xyz[:2], q.closing.xyz[:2]) <= 0.75
+
+
+def test_floor_that_clears_the_body_radius_only_is_a_standoff_for_the_squeeze_planner(monkeypatch):
+    """The floor in front of a cabinet is often drawn narrower than the planner's own floor standoff (0.25 m): the
+    cell that clears the body radius (0.18 m) and no more is a standoff all the same, reached with the squeeze
+    planner and counted. The clearance is from everything not observed free, the cabinet and the unseen alike."""
+    p, ep, _ = locked_at_three_metres(monkeypatch)
+    memory = tuple(p.closing.xyz)
+    world = cabinet_world(monkeypatch, p, 0.55)
+    limit = p.settings.target_closing.terminal_distance_m - p.converter_params.goal_tolerance_m
+    (default, roomy_m), (squeeze, body_m) = p.closing.standing_planners()
+    assert default is None and squeeze is p.squeeze_planner and roomy_m == 0.25 and body_m == p.settings.body_radius_m == 0.18
+    assert nearest_standing_m(p, ep, world, 2, roomy_m)[0] > limit >= nearest_standing_m(p, ep, world, 2, body_m)[0]
+    command = p.plan(observation(ep, 2, depth=3))
+    path = p.closing.path
+    assert command.waypoints and command.info.get("squeeze") is True and path.goal_planner is squeeze
+    assert path.squeezed == 1 and p.closing.squeezed_standoffs == 1 and not path.widened
+    assert math.dist(path.goal_xyz[:2], memory[:2]) <= limit
+    gx, gy = world.world_to_grid(*path.goal_xyz[:2])
+    assert (world.grid[gy - 1:gy + 2, gx - 1:gx + 2] == world.values.free).all(), "the body's own cells, all observed free"
+    assert p.closing.diagnostics()["squeezed_standoffs"] == 1
+
+
+def test_the_default_planner_is_asked_of_floor_hemmed_in_by_cells_nobody_has_observed(monkeypatch):
+    """One floor, two planners. A strip of floor four cells wide, seen through unseen floor, has no cell whose
+    whole 0.25 m disc is observed free -- and the first paired runs (2026-11-15) took such standoffs with the
+    squeeze planner, in 32 of 85 episodes, where the navigation-mesh runs had taken none in the same 85: the
+    squeeze planner trades a roomy way for a tight one half again as short. The body's own disc observed free is
+    the rule; the default planner's standoff is from obstacles the map has SEEN, and unseen cells cast none."""
+    p, ep, _ = locked_at_three_metres(monkeypatch)
+    memory = tuple(p.closing.xyz)
+    params = OccupancyGrid2DParams(.1, -10, -10)
+    blank = OccupancyGrid2D(np.zeros((200, 200), np.int8), params)
+    data = np.full((200, 200), blank.values.unknown, np.int8)
+    data[98:102, 90:126] = blank.values.free          # y in [-0.2, 0.2), x in [-1.0, 2.6): the agent to the ring
+    world = OccupancyGrid2D(data, params)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
+    obs = observation(ep, 2, depth=3)
+    (default, roomy_m), (squeeze, body_m) = p.closing.standing_planners()
+    assert default is None and squeeze is p.squeeze_planner and roomy_m == 0.25 and body_m == 0.18
+    assert not strict_standing_floor(world, (0.0, 0.0), roomy_m).reachable.any(), "no 0.25 m disc observed free anywhere"
+    limit = p.settings.target_closing.terminal_distance_m - p.converter_params.goal_tolerance_m
+    for standoff_m in (roomy_m, body_m):
+        assert nearest_standing_m(p, ep, world, 2, standoff_m)[0] <= limit, "and yet floor each planner can stop on"
+    assert (p.closing.standing_floor(obs, world, roomy_m).reachable == p.closing.standing_floor(obs, world).reachable).all()
+    command = p.plan(obs)
+    path = p.closing.path
+    assert command.waypoints and command.info.get("squeeze") is None and path.goal_planner is None
+    assert path.squeezed == 0 and p.closing.squeezed_standoffs == 0 and p.closing.phase == "CLOSE"
+    assert math.dist(path.goal_xyz[:2], memory[:2]) <= limit
+    gx, gy = world.world_to_grid(*path.goal_xyz[:2])
+    assert (world.grid[gy - 1:gy + 2, gx - 1:gx + 2] == world.values.free).all(), "the body's own cells, all observed free"
+    assert all(world.grid[world.world_to_grid(*xy)[::-1]] == world.values.free for xy in command.waypoints), "nothing unseen on the way"
+
+
 def test_a_goal_a_refinement_makes_stale_is_kept_when_no_ring_point_has_a_route(monkeypatch):
     """Collierville/000009, action 15: the standoff stood 1.01 m from the refined memory with a seventeen-waypoint
     route to it; it was dropped as stale for a ring that had no route at all, and the lock was released six
-    pathless actions later. Kept over no goal, while it lies within the terminal radius plus the tolerance."""
-    p, ep, _ = locked_at_three_metres(monkeypatch)
+    pathless actions later. Kept over no goal, while it lies within the terminal radius plus the tolerance --
+    and while the map still shows it as floor the agent can stand on."""
+    p, ep, _ = locked_at_three_metres(monkeypatch, nearest_approaches=0)
     memory = tuple(p.closing.xyz)
+    world = cabinet_world(monkeypatch, p, 1.0)               # the cabinet reaches the terminal radius
+    s = p.settings.target_closing
+    reach = s.terminal_distance_m + world.resolution
+    for _, clearance_m in p.closing.standing_planners():
+        assert nearest_standing_m(p, ep, world, 2, clearance_m)[0] > reach, "no ring point has floor, at any radius"
+    range_m, stale = nearest_standing_m(p, ep, world, 2, p.planner_params.inflate_floor_m)
+    assert s.terminal_distance_m < range_m <= s.terminal_distance_m + p.converter_params.goal_tolerance_m
     path = p.closing.path
-    path.goal_xyz, path.reference_xyz = (memory[0] - 1.01, memory[1], 0.0), memory
-    p.target_projector = lambda point: None                   # no ring point has floor, at any radius
+    path.goal_xyz, path.reference_xyz = (stale[0], stale[1], 0.0), memory
     command = p.plan(observation(ep, 2, depth=3))
     assert command.waypoints and p.closing.phase == "CLOSE" and p.closing.no_path_steps == 0
-    assert path.goal_xyz[:2] == pytest.approx((memory[0] - 1.01, memory[1]), abs=0.02) and path.widened
+    assert path.goal_xyz[:2] == pytest.approx(stale) and path.widened
     assert path.stale_kept == 1 and p.closing.stale_standoffs_kept == 1 and path.refinements == 1
     assert p.closing.diagnostics()["stale_standoffs_kept"] == 1
     # Beyond the terminal radius plus the arrival tolerance the stale goal is not kept: no path, as before.
-    path.goal_xyz, path.reference_xyz, path.widened = (memory[0] - 1.3, memory[1], 0.0), memory, False
+    path.goal_xyz, path.reference_xyz, path.widened = (memory[0] - 1.45, memory[1], 0.0), memory, False
     command = p.plan(observation(ep, 3, depth=3))
     assert p.closing.no_path_steps == 1 and p.closing.phase == "REACQUIRE" and not command.waypoints
     assert command.info["kind"] == "target_closing" and command.info["target_visible"] is True
     assert path.goal_xyz is None and path.stale_kept == 1 and not path.widened
+    # ... and neither is one the map no longer shows as standing floor, however near: an obstacle seen on it since.
+    path.goal_xyz, path.reference_xyz, path.widened = (stale[0], stale[1], 0.0), memory, False
+    gx, gy = world.world_to_grid(*stale)
+    blocked = world.grid.copy()
+    blocked[gy, gx] = world.values.occupied
+    blocked = OccupancyGrid2D(blocked, world.params)
+    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: blocked)
+    command = p.plan(observation(ep, 4, depth=3))
+    assert not command.waypoints and path.goal_xyz is None and path.stale_kept == 1
+
+
 def arrived_widened_standoff(monkeypatch, widened=True, **closing):
     """The agent at an ARRIVED standoff about 0.95 m from the memory -- found on the widened ring unless told
     otherwise, no closer ring point with floor -- standing 1.1 m from the chair, which fills the frame fresh,
@@ -2599,7 +2784,6 @@ def arrived_widened_standoff(monkeypatch, widened=True, **closing):
     path = p.closing.path
     path.goal_xyz, path.reference_xyz, path.widened = (2.2, 0.0, 0.0), tuple(p.closing.xyz), widened
     path.frontal_retry = True        # the hand-set goal stands for one already chosen with the lock's normal known
-    p.target_projector = lambda point: None
     p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (124, 25, 516, 404))]
     return p, ep, replace(observation(ep, 2, depth=1.2), pose=AgentPose(2.05, 0, 0, 0))
 def test_from_a_widened_standoff_the_inspection_steps_and_stops_when_the_step_is_blocked(monkeypatch):
@@ -2673,10 +2857,9 @@ def test_the_closing_bound_releases_the_lock_instead_of_ending_the_episode(monke
     """The GT-oracle sweep of 2026-10-26 ended 34 episodes with 'closing action bound reached' at a mean step 242,
     six of them inside a metre of the goal. The bound ends the LOCK: released without a rejection, the spot boxed
     in, one turn, and the search resumes; ``release_on_bound=False`` restores the error."""
-    p, ep, near = locked_at_two_metres(monkeypatch, max_closing_steps=4)
-    monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)
+    p, ep, near = locked_at_two_metres(monkeypatch, max_closing_steps=4, nearest_approaches=0)   # nothing to walk to:
+    monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)                        # the wait runs into the bound
     monkeypatch.setattr(p.camera_control, "begin_inspection", lambda *a, **kw: False)
-    p.target_projector = lambda point: None                     # nothing to walk to: the wait runs into the bound
     pose = AgentPose(0.4, 0, 0, 0)
     command = None
     for step in range(2, 12):
@@ -2688,10 +2871,9 @@ def test_the_closing_bound_releases_the_lock_instead_of_ending_the_episode(monke
     assert p.closing.rejected == [], "the candidate was not disproved"
     assert len(p.closing.boxed_in) == 1 and p.closing.diagnostics()["bound_releases"] == 1
     assert step <= 6, "released at the bound, not after it"
-    p, ep, near = locked_at_two_metres(monkeypatch, max_closing_steps=4, release_on_bound=False)
+    p, ep, near = locked_at_two_metres(monkeypatch, max_closing_steps=4, release_on_bound=False, nearest_approaches=0)
     monkeypatch.setattr(p.closing.path, "command", lambda *a, **kw: None)
     monkeypatch.setattr(p.camera_control, "begin_inspection", lambda *a, **kw: False)
-    p.target_projector = lambda point: None
     with pytest.raises(RuntimeError, match="closing action bound reached"):
         for step in range(2, 12):
             p.plan(replace(observation(ep, step, depth=1.6), pose=pose))

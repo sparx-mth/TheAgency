@@ -190,6 +190,13 @@ class WeightedAStarPlanner2D:
         On total failure the phantom probe runs (see :class:`WeightedAStarParams`)
         and its verdict is attached to the returned failure.
 
+        ``request.options["exact_goal"]`` (default off) withholds the goal snap
+        of ``params.goal_snap_radius_m`` for this request: a rung at which the
+        goal cell is blocked fails, and the route that comes back ends on the
+        goal cell or not at all. For a caller that chose the cell by a rule of
+        its own -- the object search's standing floor -- and must not have it
+        traded for the nearest cell the planner happens to like better.
+
         Returns:
             A :class:`PlanResult` whose ``artifacts["inflate_used_m"]`` records
             the standoff achieved (also in ``path.metadata``).
@@ -323,8 +330,15 @@ class WeightedAStarPlanner2D:
                 message=f"goal cell ({gx},{gy}) outside grid {w}x{h}",
             )
 
-        # Snap a blocked goal onto the nearest free cell.
+        # Snap a blocked goal onto the nearest free cell -- unless the caller chose the goal cell itself and
+        # asked for it exactly (``request.options["exact_goal"]``): the rung then fails and the ladder relaxes
+        # toward a standoff the cell does clear, instead of ending the route somewhere the caller never vetted.
         if not np.isfinite(cost[gy, gx]):
+            if request.options.get("exact_goal"):
+                return PlanResult(
+                    status=PlanStatus.INVALID_GOAL,
+                    message=f"goal blocked at {inflate_m:.2f}m standoff; an exact goal is not moved",
+                )
             snap_r = int(p.goal_snap_radius_m / res)
             snapped = snap_to_free_cell(cost, gx, gy, snap_r) if snap_r > 0 else None
             if snapped is None:

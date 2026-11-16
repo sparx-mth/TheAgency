@@ -13,8 +13,10 @@ release, and walked on to other rooms.
 
 :class:`TargetPursuit` keeps those targets. Every ``retry_actions`` it asks
 the closing's own standoff selection (:class:`~target_path.TargetApproachPath`,
-the same ring, planners and navmesh projection) for a route from where the
-agent stands now; when one exists the agent walks it, facing the target on
+the same ring, planners and standing floor of the observed map) for a route
+from where the agent stands now -- a detour-long one included, which the
+closing itself would set aside: walking back is what a pursuit is, and from
+another room every route is long; when one exists the agent walks it, facing the target on
 arrival, and the next fresh box re-locks it as any takeover would -- the
 boxed-in spot it was released from no longer refuses it, since a route now
 exists. A pursuit that loses its route, outlives ``max_walk_actions`` or
@@ -26,8 +28,8 @@ A **bearing approach** given up because a wall stopped it or the class left
 the frame (``TargetClosing._end_bearing``) hands over too: a box without a
 depth is beyond the depth range, so its target is placed on the bearing
 ``bearing_reach_m`` past the camera's ``max_depth_m`` and pursued the same
-way -- around the wall, through the unknown if need be -- until a frame
-measures it. 00853-5cdEh9F2hJL/000065 (2026-10-31) saw its television from
+way -- around the wall, over floor the map has by then observed (never
+through unknown cells, since 2026-11-15) -- until a frame measures it. 00853-5cdEh9F2hJL/000065 (2026-10-31) saw its television from
 beyond 5 m three times, walked three steps into a wall each time, and locked
 it with depth at action 487.
 
@@ -187,7 +189,7 @@ class TargetPursuit:
             # A query that finds nothing must leave the search's committed route as it was: a ring goal the
             # floor guard refuses clears the route memory inside ``_navigate``.
             saved = (dict(vars(p.route_memory)), p._route, p._goal)
-            command = path.command(target, obs, world)
+            command = path.command(target, obs, world) or path.take_deferred(target, obs, world)
             if command is None:
                 vars(p.route_memory).clear()
                 vars(p.route_memory).update(saved[0])
@@ -228,7 +230,8 @@ class TargetPursuit:
     # -- internals ----------------------------------------------------------------------------------------------
     def _shim(self, entry):
         """What :class:`TargetApproachPath` reads of a target: its 3-D memory, the closing's settings, its height
-        above the base (from the lock's lowest point, when the memory kept one), four counters."""
+        above the base (from the lock's lowest point, when the memory kept one), the closing's standing floor
+        and planners, and the counters a selection writes."""
         closing = self.policy.closing
         lowest, normal = entry.get("lowest_m"), entry.get("face_normal_xy")
 
@@ -239,7 +242,9 @@ class TargetPursuit:
 
         return SimpleNamespace(xyz=entry["xyz"], settings=closing.settings, face_normal_xy=normal, frontal_normal=frontal_normal,
                                elevation_above_base=lambda obs: 0.0 if lowest is None else closing.elevation_above_base(obs, lowest),
-                               stale_standoffs_kept=0, widened_standoffs=0, through_unknown_routes=0, frontal_standoffs=0,
+                               standing_floor=closing.standing_floor, standing_planners=closing.standing_planners,
+                               stale_standoffs_kept=0, widened_standoffs=0, squeezed_standoffs=0, standoffs_revoked=0,
+                               back_arc_standoffs=0, standoff_detours=0, far_side_standoffs=0, frontal_standoffs=0,
                                frontal_reselections=0)
 
     def _unbox(self, entry):

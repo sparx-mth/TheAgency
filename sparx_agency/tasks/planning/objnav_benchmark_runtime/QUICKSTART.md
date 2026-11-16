@@ -215,7 +215,8 @@ package versions and the GPU gate, and writes the frozen configuration:
 ```
 
 It exits 0 after writing the JSON (`method.detector.metadata.backend` must read `yolo_world`,
-`method.ground_truth_stairs` `true`, and for a multi-storey manifest `method.allow_stair_traversal`
+`method.stair_source` `observed` and `method.ground_truth_stairs` `false` -- the agent is given no
+simulator stairs or storeys -- and for a multi-storey manifest `method.allow_stair_traversal`
 `true` -- `run_development` lifts the benchmark default, which forbids stairs, for that schema);
 any refusal names the missing piece.
 

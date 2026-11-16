@@ -5,21 +5,19 @@ from dataclasses import dataclass, replace
 import math
 
 import numpy as np
-from scipy.sparse.csgraph import dijkstra
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import pitch_action, turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
-from sparx_agency.core.planning.exploration.room_costs import passable_graph, snap_cell
-from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
-from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.object_search.closing.approach_history import ApproachHistory
+from sparx_agency.core.planning.object_search.closing.map_sight import MEMORY_SIGHT_MARGIN_M, map_sight_clear
 from sparx_agency.core.control.camera.box_pitch_servo import (
     REGION_CENTRE, REGION_CUT_BOTTOM, REGION_CUT_TOP, REGION_LOWER, REGION_UPPER, vertical_fix)
 from sparx_agency.core.mapping.objects.box_extent import clipped_box
 from sparx_agency.core.planning.object_search.perception.projection import observed_objects
 from sparx_agency.core.planning.object_search.perception.cycle import contradicted_by_map
 from sparx_agency.core.planning.object_search.world_model.sightlines import unknown_around
+from sparx_agency.core.planning.object_search.world_model.standing_floor import standing_floor
 from sparx_agency.core.mapping.objects.support_surface import (
     SUPPORT_SURFACE_CLASSES, is_support_surface, supports)
 from sparx_agency.core.planning.object_search.closing.target_backoff import BackoffManeuver
@@ -28,10 +26,6 @@ from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
 from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
 
 
-
-#: Along the line from the agent to the 3-D memory, this much at the memory's end is the object and its support and is
-#: not read by :meth:`TargetClosing._memory_in_sight`.
-MEMORY_SIGHT_MARGIN_M = 0.4
 
 @dataclass(frozen=True)
 class TargetClosingSettings:
@@ -160,27 +154,37 @@ class TargetClosingSettings:
     # stands as close as the floor allows and the closing STOPs. The alternative -- "the inspection saw
     # nothing", a 2 m rejection about a real target -- gives the episode up. False restores the release.
     closest_approach_stop: bool = True
-    # A LOCKED TARGET IS WALKED TO THROUGH THE UNKNOWN BEFORE THE SPOT IS GIVEN UP (since
-    # 2026-10-14). The planner blocks unknown cells, and a level camera 0.88 m up sees the
-    # floor only from about 1.4 m out, so the floor between a corridor and the toilet seen
-    # through a doorway is routinely unknown; the standoff ring then had no path, the lock
-    # was released as boxed in and the spot refused a new takeover (Collierville/000023,
-    # action 375, the toilet at 2.8 m in plain view). When no route to the ring exists on
-    # the known floor, the ring is planned again with unknown cells passable at
-    # ``through_unknown_cost`` times the cost of open floor -- the target was seen along
-    # that line of sight -- and the committed route is re-checked against the map as it
-    # fills in, like any other. ``through_unknown=False`` restores the strict planner alone.
-    through_unknown: bool = True
-    through_unknown_cost: float = 8.0
+    # WHERE THE AGENT STANDS IS READ OFF ITS OWN MAP (since 2026-11-15, ``world_model/standing_floor.py``).
+    # Every place the closing sends the agent to stand -- a standoff on the ring, the spot of the backing
+    # manoeuvre, the nearest floor when no standoff has a route -- is a cell the agent has OBSERVED FREE,
+    # with every cell within the body radius of it (0.18 m) observed free as well, joined to the agent
+    # through cells like it. A candidate point that is not such a cell is moved to the nearest one within
+    # ``standing_snap_m`` -- 0.5 m for a ring point, the distance the navigation-mesh projection it replaces
+    # accepted -- and dropped when there is none; the route is planned to that cell exactly, by the default
+    # planner where the cell keeps that planner's standoff (0.25 m) from every observed obstacle and by the
+    # squeeze planner otherwise (``standing_planners``). Until then the candidate was projected onto the
+    # simulator's navigation
+    # mesh (privileged geometry: it knows where floor is that the agent never looked at), and from 2026-10-14
+    # a ring with no route on the known floor was planned THROUGH unknown cells at eight times the cost of
+    # open floor (``through_unknown``, Collierville/000023: the floor between the corridor and a toilet seen
+    # through its doorway is routinely unknown under a level camera). Neither exists any more: unknown cells
+    # are never stood on, never counted as the body's clearance and never planned through, and floor the
+    # agent has not seen is looked at -- the walk to the nearest observed floor and the footing sweep below
+    # -- before anything is assumed about it.
+    standing_snap_m: float = 0.5
     # A STANDOFF REACHED BY A DETOUR IS THE LAST CHOICE, NOT THE FIRST (since 2026-11-05). The ring takes the
     # first point with a route, and a route much longer than the straight line to the target goes round
     # something -- the wall the target stands against, with the point on its far side. 00891-cvZr5TUy5C5/000006:
     # the memory placed half a metre into the bathroom wall, the ring's front-arc point at 60 degrees landed in the
-    # wall and the navmesh projection moved it to the room beyond; a 6.6 m known-floor route for a target 3.4 m
+    # wall and was moved to the nearest floor, in the room beyond; a 6.6 m known-floor route for a target 3.4 m
     # away, walked out of sight round the outside of the bathroom to inspect a wall. A route longer than
-    # ``standoff_detour_factor`` times the range plus ``standoff_detour_slack_m`` is kept as the fallback while the
-    # other bearings and planners -- the unknown through the doorway among them -- are asked; the shortest detour
-    # is taken only when nothing else has a route. 0 disables the rule.
+    # ``standoff_detour_factor`` times the range plus ``standoff_detour_slack_m`` is set aside while the other
+    # bearings and planners are asked -- and, since 2026-11-15, while the closing can still walk toward the target
+    # on observed floor or owes the footing sweep (``_no_path``): the shortest detour is taken only when nothing
+    # else is left from where the agent stands. The walk is measured over the agent's standing floor. The same
+    # factor and slack bound the walk to the nearest observed floor (``_nearest_reachable``), against the distance
+    # that walk brings the agent nearer: a cell near the target that is a detour away is behind the same wall.
+    # 0 disables the rule everywhere.
     standoff_detour_factor: float = 1.5
     standoff_detour_slack_m: float = 1.0
     # A LOCKED TARGET SEEN FROM WITHIN THE TERMINAL RANGE IS THE TARGET, WHATEVER THE ANCHOR SAYS (since
@@ -473,8 +477,8 @@ class TargetClosingSettings:
     release_after_footing_steps: int = 6
     boxed_in_radius_m: float = 1.0
     # Before the sweep and the release, the walk that IS possible (since 2026-10-28): when no standoff
-    # ring point has a route from here, the reachable cell nearest the target -- at the floor standoff,
-    # then at the body radius -- is walked to when it brings the agent ``nearest_progress_m`` closer,
+    # ring point has a route from here, the reachable cell nearest the target -- for the default planner,
+    # then for the squeeze planner -- is walked to when it brings the agent ``nearest_progress_m`` closer,
     # up to ``nearest_approaches`` such walks per lock. From the new spot the floor between fills in and
     # the ring is tried again on every action. The GT-oracle sweep of 2026-10-26 released 75 locked
     # targets as "no safe path from here" at a median 4.1 m, with the target in plain view; the search
@@ -531,7 +535,7 @@ class TargetClosingSettings:
     # within ``sudden_proximity_m`` with no approach history -- the agent turned and there
     # it was -- is not closed on from that single viewpoint. Before the lock the agent
     # backs ``backoff_steps`` forward steps into space it knows to be clear (its own
-    # trail, the observed grid, the floor guard, A*, the NavMesh when bound), turns back to
+    # trail, the observed grid's standing floor, the floor guard, A*), turns back to
     # face the remembered coordinates and re-verifies from there; the whole manoeuvre is
     # bounded by ``backoff_max_actions`` (a retreat straight back is six 30-degree turns,
     # three steps and six turns back). With no clear space known it is skipped and
@@ -718,7 +722,7 @@ class TargetClosingSettings:
         for key in ("history_stop_after_missing", "backoff_steps", "backoff_max_actions"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
-        for key in ("backoff", "support_surface_resilience", "through_unknown", "closest_approach_stop",
+        for key in ("backoff", "support_surface_resilience", "closest_approach_stop",
                     "release_on_bound", "terminal_resighting"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
@@ -734,9 +738,9 @@ class TargetClosingSettings:
         for key in ("backoff_persistence_frames", "backoff_persistence_window"):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError("%s must be a positive int" % key)
-        if (isinstance(self.through_unknown_cost, bool) or not math.isfinite(self.through_unknown_cost)
-                or self.through_unknown_cost < 1.0):
-            raise ValueError("through_unknown_cost must be finite and at least 1 (the cost of open floor)")
+        if (isinstance(self.standing_snap_m, bool) or not math.isfinite(self.standing_snap_m)
+                or self.standing_snap_m < 0):
+            raise ValueError("standing_snap_m must be finite and non-negative (0: a ring point must itself be standing floor)")
         for key in ("standoff_detour_factor", "standoff_detour_slack_m"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
@@ -831,10 +835,12 @@ class TargetClosing:
         self.strong_box_steps = []         # the last actions a box of the class at or above ``confidence`` was in the frame
         self.inspection_steps = 0          # inspection frames answered with a step: the fresh range a step beyond the limit
         self.dead_band_alignments = 0      # inspection frames read as aligned because a turn back would undo the last turn
-        self.through_unknown_routes = 0    # standoff routes planned through unknown cells after the known floor had none
+        self.squeezed_standoffs = 0        # standoffs the default planner had no route to, reached with the squeeze planner
+        self.standoffs_revoked = 0         # standoffs given up because the map stopped showing them as standing floor
         self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
         self.back_arc_standoffs = 0        # standoffs taken beside or behind the target, the front arc having no route
-        self.standoff_detours = 0          # standoffs taken on a route a detour long, nothing else having a route
+        self.standoff_detours = 0          # standoffs taken on a route a detour long, nothing else left to try from there
+        self.far_side_standoffs = 0        # standoffs taken beside, behind or out of the map's sight of a target whose front was still unobserved
         self.terminal_resightings = 0      # locked frames counted inside the terminal range though outside the anchor's cylinder
         self.step_out_inspections_kept = 0 # inspections kept on a centred frame a step outside the limit (the step rule's)
         self.history_stops_unseen = 0      # memory STOPs refused because the last fresh box was too old (``history_stop_max_unseen``)
@@ -862,6 +868,7 @@ class TargetClosing:
         self.bearing_failures = []         # (robot xy, floor id, action) per bearing approach given up
         self._depthless = []               # this frame's strong, whole boxes of the class with no usable depth
         self._in_frame = []                # this frame's whole boxes of the class at the threshold in force
+        self._standing = None              # this action's standing floors, by clearance (``standing_floor``)
         self._clear()
 
     def _clear(self):
@@ -888,6 +895,7 @@ class TargetClosing:
         self.footing_done = False          # a footing sweep was asked for by this lock
         self.pathless_after_footing = 0    # pathless actions since the sweep ended
         self.nearest_goal = None           # the nearest-reachable walk in force (``_nearest_reachable``)
+        self.nearest_planner = None        # ... and the planner its route was found with (None: the default)
         self.nearest_tried = []            # spots walked to under this lock for want of a standoff route
         self.close_trail = []              # (x, y) per consecutive CLOSE action, for the stall clock
         self.suspect = None                # why the context check doubts this candidate (``target_context``)
@@ -923,6 +931,59 @@ class TargetClosing:
         self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
         self.overshoot = None              # the decided STOP's forward steps in progress (``_terminal``), else None
         self.bearing = None                # the BEARING approach in force (an RGB box without depth): its box, yaw, counts
+
+    def standing_floor(self, obs, world, standoff_m=None):
+        """The floor the agent may stand on and can walk to this action, on its own map (``world_model/standing_floor.py``).
+
+        Observed-free cells with every cell within the body radius observed
+        free too, joined to the agent through such cells -- one floor, the
+        same whichever planner is to walk there. ``standoff_m`` leaves out
+        the cells nearer than that to an observed obstacle, where a planner
+        keeping that standoff cannot end a route (:meth:`standing_planners`);
+        it defaults to the body radius, which leaves the floor whole, and is
+        never under it. Everything the closing sends the agent to stand on
+        is asked of this -- the standoff ring (``target_path``), the backing
+        manoeuvre's spot (``target_backoff``), the nearest floor
+        (:meth:`_nearest_reachable`) -- and nothing else is: no simulator
+        geometry, no unknown cell.
+
+        One floor per standoff per action: the ring alone asks up to two
+        hundred times. Keyed on the action, the map object and the agent's
+        cell, so a map swapped or a pose moved under a repeated step number
+        (the regression rig does both) is not answered from the last one.
+        """
+        body = float(self.policy.settings.body_radius_m)
+        standoff = body if standoff_m is None else max(body, float(standoff_m))
+        cell = world.world_to_grid(float(obs.pose.x), float(obs.pose.y))
+        key = (int(obs.step), cell)
+        if self._standing is None or self._standing[0] is not world or self._standing[1] != key:
+            self._standing = (world, key, {})
+        floors = self._standing[2]
+        if standoff not in floors:
+            floors[standoff] = standing_floor(world, (obs.pose.x, obs.pose.y), body, standoff_m=standoff)
+        return floors[standoff]
+
+    def standing_planners(self):
+        """``(planner, standoff_m)`` pairs to ask a standing point's route of, the roomier planner first.
+
+        The default planner (``None``) with the standing cells that keep its
+        own floor standoff from every observed obstacle, then the squeeze
+        planner with all of the standing floor -- when the policy has one
+        that relaxes further than the default (the baseline's default
+        planner already relaxes to the body radius). A standing point is
+        offered to a planner only where that planner can end a route, so
+        the planner never has to move it; and the default planner is asked
+        first of every point it could stop at, because the squeeze planner
+        trades a roomy way for a tight one half again as short
+        (``WeightedAStarParams.detour_factor``).
+        """
+        p = self.policy
+        body = float(p.settings.body_radius_m)
+        planners = [(None, max(body, float(p.planner_params.inflate_floor_m)))]
+        squeeze = getattr(p, "squeeze_planner", None)
+        if squeeze is not None and squeeze.params.inflate_floor_m < p.planner_params.inflate_floor_m:
+            planners.append((squeeze, max(body, float(squeeze.params.inflate_floor_m))))
+        return planners
 
     def _clipped(self, box, intrinsics):
         return clipped_box(box, intrinsics, self.settings.border_margin_px)
@@ -1643,18 +1704,12 @@ class TargetClosing:
         world = getattr(self.policy, "last_world", None)
         if world is None or self.xyz is None:
             return True
-        gx, gy = world.world_to_grid(obs.pose.x, obs.pose.y)
-        span = math.dist((obs.pose.x, obs.pose.y), self.xyz[:2])
-        margin = MEMORY_SIGHT_MARGIN_M
-        start = min(span, float(self.policy.settings.body_radius_m))
-        if span - margin <= start:
+        here = (float(obs.pose.x), float(obs.pose.y))
+        if not world.in_bounds(*world.world_to_grid(*here)):
             return True
-        ux, uy = (self.xyz[0] - obs.pose.x) / span, (self.xyz[1] - obs.pose.y) / span
-        x0, y0 = world.world_to_grid(obs.pose.x + start * ux, obs.pose.y + start * uy)
-        x1, y1 = world.world_to_grid(obs.pose.x + (span - margin) * ux, obs.pose.y + (span - margin) * uy)
-        if not (world.in_bounds(gx, gy) and world.in_bounds(x0, y0) and world.in_bounds(x1, y1)):
-            return True
-        clear = line_of_sight_clear(world.grid == world.values.occupied, x0, y0, x1, y1)
+        span = math.dist(here, self.xyz[:2])
+        clear = map_sight_clear(world, here, self.xyz[:2], skip_from_m=min(span, float(self.policy.settings.body_radius_m)),
+                                skip_to_m=MEMORY_SIGHT_MARGIN_M, off_map=True)
         if not clear and refusal:
             self.memory_sight_refusals += 1          # a memory STOP refused; the failed-inspection test counts its own
         return clear
@@ -2213,6 +2268,11 @@ class TargetClosing:
             self.no_path_steps = 0
             self.pathless_after_footing = 0
             return self._inspect_or_release(obs, distance)
+        return self._walk(obs, command, distance)
+
+    def _walk(self, obs, command, distance):
+        """One action along the route to a standoff: the stall clock, the phase and the approach pitch."""
+        p, s = self.policy, self.settings
         self.no_path_steps = 0
         self.pathless_after_footing = 0
         if self._approach_stalled(obs):
@@ -2273,21 +2333,35 @@ class TargetClosing:
         return NavigationCommand.hold(final_yaw=normalize_angle(bearing), info=info)
 
     def _no_path(self, obs, world, distance):
-        """A LOCKED target A* cannot reach from here: look at the floor around, then give the spot up.
+        """A LOCKED target with no standoff to walk to from here: walk nearer, look at the floor around, then give the spot up.
 
-        First the footing sweep (``footing_sweep``; the camera controller
-        owns it and its turns come back here one per action, tagged
-        ``FOOTING``): the blind disk under the camera is the usual reason a
-        path does not exist from where the agent has not moved, so the
-        sweep is asked for only while ``footing_unknown_fraction`` of the
-        cells within ``footing_radius_m`` are still unknown. Then, if the
-        sweep bought no path either -- or there was nothing to sweep -- the
-        lock is released without a rejection after
-        ``release_after_footing_steps`` pathless actions, the spot is
-        remembered as boxed in, and the search -- which can walk -- carries
-        on; a new takeover from within ``boxed_in_radius_m`` of here is
-        refused. Between those, the centring hold as before: the target
-        stays in view.
+        The standoff ring found no standing floor it could reach directly
+        (``target_path``). In order:
+
+        1. **The walk that IS possible** (:meth:`_nearest_reachable`): to
+           the observed floor nearest the target that is not a detour away.
+           From its end the floor between fills in and the ring is tried
+           again on every action.
+        2. **The footing sweep** (``footing_sweep``; the camera controller
+           owns it and its turns come back here one per action, tagged
+           ``FOOTING``): the blind disk under the camera is the usual reason
+           a path does not exist from where the agent has not moved, so the
+           sweep is asked for only while ``footing_unknown_fraction`` of the
+           cells within ``footing_radius_m`` are still unknown.
+        3. **The long way round**, once the sweep bought nothing or there
+           was nothing to sweep: the detour-long standoff the ring set aside
+           (``TargetApproachPath.take_deferred``), then the nearest observed
+           floor whatever the walk to it. Until 2026-11-15 the detour was the
+           ring's own last choice, behind the routes through unknown floor;
+           with those gone it waits here, behind everything that might show
+           the floor in front of the target instead.
+        4. **The release**: without a rejection after
+           ``release_after_footing_steps`` pathless actions, the spot
+           remembered as boxed in, and the search -- which can walk --
+           carries on; a new takeover from within ``boxed_in_radius_m`` of
+           here is refused.
+
+        Between those, the centring hold as before: the target stays in view.
         """
         p, s = self.policy, self.settings
         camera = p.camera_control
@@ -2305,6 +2379,12 @@ class TargetClosing:
                 if sweep is not None:
                     return self._footing_command(obs, sweep)
         if self.footing_done or not s.footing_sweep or not p.episode.action_spec.has_camera_tilt:
+            command = self.path.take_deferred(self, obs, world)
+            if command is not None:
+                return self._walk(obs, command, distance)
+            command = self._nearest_reachable(obs, world, distance, detours=True)
+            if command is not None:
+                return command
             self.pathless_after_footing += 1
             if self.pathless_after_footing >= s.release_after_footing_steps:
                 self.boxed_releases += 1
@@ -2320,22 +2400,35 @@ class TargetClosing:
                           "reason": "no safe path to the target %.1f m away from here; the search moves on" % distance})
         return self._scan(obs, None, "no safe target path; exploration remains suspended")
 
-    def _nearest_reachable(self, obs, world, distance):
-        """No standoff has a route: walk to the reachable cell nearest the target, when that brings the agent nearer.
+    def _nearest_reachable(self, obs, world, distance, detours=False):
+        """No standoff has a route: walk to the standing floor nearest the target, when that brings the agent nearer.
 
         The rung before the footing sweep and the boxed-in release (since
-        2026-10-28, ``nearest_approaches``). The standoff ring is tried
-        with every planner on every action; this is for the actions none
-        of them has a route. The passable graph is read at the floor
-        standoff and then at the body radius (the squeeze planner); over
-        the cells reachable from here the one nearest the target is chosen,
-        provided it lies ``nearest_progress_m`` nearer the target than the
-        agent and is not a spot already walked to under this lock. The walk
-        is a ``target_closing`` route like the ring's own, kept while it
-        makes progress; from its end the floor between fills in and the
-        ring is tried again. When no such cell exists, or
-        ``nearest_approaches`` walks have been made, the sweep and the
-        release follow as before.
+        2026-10-28, ``nearest_approaches``). The standoff ring is tried with
+        every planner on every action; this is for the actions none of them
+        has a route. The candidates are the agent's standing floor
+        (:meth:`standing_floor`: observed free, the body's clearance observed
+        free, joined to the agent) -- the cells the default planner can stop
+        at, then all of them for the squeeze planner. Of those the one
+        nearest the target is chosen, provided it lies ``nearest_progress_m``
+        nearer the target than the agent and is not a spot already walked to
+        under this lock. The walk is a ``target_closing`` route like the
+        ring's own, planned to that cell exactly and kept while it makes
+        progress; from its end the floor between fills in and the ring is
+        tried again. When no such cell exists, or ``nearest_approaches``
+        walks have been made, the sweep and the release follow as before.
+
+        A cell close to the target is not always a step toward it: the floor
+        on the far side of the wall a toilet stands against is 0.4 m from the
+        toilet and seven metres of walking away. So the walk over standing
+        floor (``StandingFloor.geodesic_m``) must fit the standoff ring's
+        detour rule applied to what the walk buys -- no longer than
+        ``standoff_detour_factor`` times the distance it brings the agent
+        nearer the target, plus the slack -- unless ``detours``, which
+        :meth:`_no_path` passes once nothing shorter is left (since
+        2026-11-15; until then the cells came off the planner's passable
+        graph, each was projected onto the simulator's navigation mesh, and
+        the length of the walk was not asked).
         """
         p, s = self.policy, self.settings
         if s.nearest_approaches <= 0 or self.xyz is None:
@@ -2346,37 +2439,23 @@ class TargetClosing:
         if self.nearest_goal is not None:
             goal = self.nearest_goal
             arrived = math.dist(here, goal) <= arrival or (p.route_memory.kind == "target_closing" and p.route_memory.arrived(obs))
-            if not arrived:
-                command = p._navigate(obs, world, goal, "target_closing")
+            if not arrived and self.standing_floor(obs, world).standable_at(goal):
+                command = p._navigate(obs, world, goal, "target_closing", planner=self.nearest_planner, exact_goal=True)
                 if command is not None:
                     return self._nearest_command(command, distance)
             self.nearest_tried.append(goal)
-            self.nearest_goal = None
+            self.nearest_goal = self.nearest_planner = None
         if len(self.nearest_tried) >= s.nearest_approaches:
             return None
-        planners = [p.planner]
-        squeeze = getattr(p, "squeeze_planner", None)
-        if squeeze is not None and squeeze.params.inflate_floor_m < p.planner_params.inflate_floor_m:
-            planners.append(squeeze)
-        gx, gy = world.world_to_grid(*here)
-        snap = max(1, int(round(p.sweep.settings.ranking.snap_radius_m / world.resolution)))
-        for planner in planners:
-            cost = assemble_cost_grid(p.planner.fields_for(world), planner.params, planner.params.inflate_floor_m)[0]
-            ids, graph = passable_graph(cost)
-            source = snap_cell(ids, gx, gy, snap)
-            if source is None or ids.max() < 0:
+        for planner, standoff_m in self.standing_planners():
+            floor = self.standing_floor(obs, world, standoff_m)
+            if not floor.reachable.any():
                 continue
-            distances = dijkstra(graph, directed=False, indices=int(ids[source[1], source[0]]))
-            ys, xs = np.nonzero(ids >= 0)
-            nodes = ids[ys, xs]
-            reachable = np.isfinite(distances[nodes])
-            if not reachable.any():
-                continue
-            xs, ys = xs[reachable], ys[reachable]
-            wx = world.origin_x + (xs + 0.5) * world.resolution
-            wy = world.origin_y + (ys + 0.5) * world.resolution
+            wx, wy = floor.cells_xy()
             euclid = np.hypot(wx - target[0], wy - target[1])
             nearer = euclid <= distance - s.nearest_progress_m
+            if nearer.any() and not detours and s.standoff_detour_factor > 0:
+                nearer &= floor.geodesic_m()[floor.reachable] <= TargetApproachPath.detour_allowance(s, distance - euclid)
             if not nearer.any():
                 continue
             for index in np.argsort(np.where(nearer, euclid, np.inf), kind="stable")[: s.nearest_approaches * 2]:
@@ -2385,17 +2464,9 @@ class TargetClosing:
                 goal = (float(wx[index]), float(wy[index]))
                 if any(math.dist(goal, spot) <= s.nearest_progress_m for spot in self.nearest_tried):
                     continue
-                if p.target_projector is not None:
-                    # The same seam the standoff ring uses: a goal is a navmesh point when the adapter can say so.
-                    snapped = p.target_projector((goal[0], goal[1], float(obs.pose.z)))
-                    if snapped is None or abs(float(snapped[2]) - float(obs.pose.z)) > 0.2:
-                        continue
-                    goal = (float(snapped[0]), float(snapped[1]))
-                    if math.hypot(goal[0] - target[0], goal[1] - target[1]) > distance - s.nearest_progress_m:
-                        continue
-                command = p._navigate(obs, world, goal, "target_closing", planner=None if planner is p.planner else planner)
+                command = p._navigate(obs, world, goal, "target_closing", planner=planner, exact_goal=True)
                 if command is not None:
-                    self.nearest_goal = goal
+                    self.nearest_goal, self.nearest_planner = goal, planner
                     self.nearest_routes += 1
                     return self._nearest_command(command, distance)
         return None
@@ -3098,7 +3169,7 @@ class TargetClosing:
                 "bearing_abandoned": self.bearing_abandoned, "bearing_refusals": self.bearing_refusals,
                 "bearing_clipped_starts": self.bearing_clipped_starts,
                 "persistent_lock": self.locked, "visible": self.last_seen == self.processed,
-                "navmesh_goal_xyz": self.path.goal_xyz, "goal_refinements": self.path.refinements,
+                "standoff_goal_xyz": self.path.goal_xyz, "goal_refinements": self.path.refinements,
                 "occluded_path_steps": self.occluded_path_steps, "inspection_started_step": self.inspection_started,
                 "inspection_sighting_step": self.inspection_sighting, "observed_near_m": self.observed_near_m,
                 "consecutive_frames": self.count, "started_step": self.started,
@@ -3140,10 +3211,12 @@ class TargetClosing:
                 "verify_pauses": self.verify_pauses, "backoff_trusted_skips": self.backoff_trusted_skips,
                 "backoff_persistence_skips": self.backoff_persistence_skips,
                 "inspection_steps": self.inspection_steps, "dead_band_alignments": self.dead_band_alignments,
-                "through_unknown_routes": self.through_unknown_routes, "sweep_releases": self.sweep_releases,
+                "squeezed_standoffs": self.squeezed_standoffs, "standoffs_revoked": self.standoffs_revoked,
+                "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
                 "back_arc_standoffs": self.back_arc_standoffs, "history_stops_unseen": self.history_stops_unseen,
-                "standoff_detours": self.standoff_detours, "terminal_resightings": self.terminal_resightings,
+                "standoff_detours": self.standoff_detours, "far_side_standoffs": self.far_side_standoffs,
+                "terminal_resightings": self.terminal_resightings,
                 "step_out_inspections_kept": self.step_out_inspections_kept,
                 "closest_approach_stops": self.closest_approach_stops, "inspection_blocked": self.inspection_blocked,
                 "arrived_step_out_inspections": self.arrived_step_out_inspections,

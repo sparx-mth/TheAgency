@@ -50,9 +50,11 @@ validated on construction, and four interfaces:
 The episode an agent sees (`ObjNavEpisode`) has no typed field for a goal
 position or a geodesic distance. Its free-form `metadata` mapping is handed to
 the policy as is, so privileged values (shortest paths, geodesic distances,
-goal positions) must never be put there. The adapter is responsible; the
-harness's reset check refuses the known leaking keys as a tripwire, not a
-guarantee.
+goal positions, and scene geometry read from the simulator -- its navmesh,
+the building's storeys and stairs) must never be put there. The adapter is
+responsible; the harness's reset check refuses the known leaking keys as a
+tripwire, not a guarantee, and no module under `core` reads the mapping at
+all (`core/planning/object_search/tests/test_no_privileged_geometry.py`).
 
 **The action converter** (`action_converter/`). A path of world waypoints in, one
 discrete action out, assuming perfect execution and re-deciding from the true

@@ -42,7 +42,9 @@ yields a *plausible* figure, so each one stops the run instead:
   that disagrees with the actions it was sent;
 - episode metadata whose keys name privileged information (goal, shortest,
   geodesic, distance_to, path_to, view_point/viewpoint, target_position,
-  object_position) — a tripwire for the known leaks, not a guarantee;
+  object_position — and, since 2026-11-15, the scene geometry a zero-shot
+  agent has to observe for itself: navmesh, pathfinder, stair, storey, floor)
+  — a tripwire for the known leaks, not a guarantee;
 - a path length the environment reports that disagrees with the one recomputed
   from the poses the agent observed — a unit or accounting bug in an adapter
   (centimetres, a dropped axis, `p` accounted in 2-D or skipping a step). A
