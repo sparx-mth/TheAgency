@@ -31,7 +31,8 @@ def in_room_share(view):
 
 def far_fraction(depth_m, far_m=FAR_M):
     """The share of the valid depth pixels farther than ``far_m``: how much of a view is far away."""
-    valid = depth_m[depth_m > 0]
+    depth_m = np.asarray(depth_m, dtype=float)
+    valid = depth_m[np.isfinite(depth_m) & (depth_m > 0)]
     return float((valid > far_m).mean()) if valid.size else 0.0
 
 

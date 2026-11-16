@@ -38,3 +38,21 @@ def spread_points(points_xz, count):
 
 def compass_yaws(count):
     return [2 * math.pi * i / count for i in range(count)]
+
+
+def in_box_share(depth_m, camera_xz_yaw, box_xz, width, height, hfov_deg, margin_m=0.3, stride=8):
+    """The share of the valid depth pixels whose floor-plan point lies inside the box (x low, z low, x high, z high) grown by ``margin_m``."""
+    sampled = np.asarray(depth_m, dtype=float)[::stride, ::stride]
+    columns = np.arange(0, width, stride)[:sampled.shape[1]]
+    valid = np.isfinite(sampled) & (sampled > 0)
+    sampled = np.where(valid, sampled, 0.0)
+    metres = sampled[valid]
+    sideways = ((columns[None, :] - width / 2) / ((width / 2) / math.tan(math.radians(hfov_deg) / 2)) * sampled)[valid]
+    if not metres.size:
+        return 0.0
+    cam_x, cam_z, yaw = camera_xz_yaw
+    ahead, right = (-math.sin(yaw), -math.cos(yaw)), (math.cos(yaw), -math.sin(yaw))
+    x = cam_x + metres * ahead[0] + sideways * right[0]
+    z = cam_z + metres * ahead[1] + sideways * right[1]
+    x0, z0, x1, z1 = box_xz
+    return float(((x >= x0 - margin_m) & (x <= x1 + margin_m) & (z >= z0 - margin_m) & (z <= z1 + margin_m)).mean())
