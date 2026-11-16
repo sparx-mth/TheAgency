@@ -5,15 +5,16 @@ import math
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.evaluate import iou, merged_by_kind
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.kinds import DETECTOR_KIND
 
-KIND_OF_CATEGORY = {"chair": "chair", "bed": "bed", "sofa": "sofa", "tv_monitor": "tv", "toilet": "toilet", "plant": "plant"}
+#: HM3D's chair goals include armchairs, and the planner prompts "armchair" for them (core/planning/objnav/labels/datasets/hm3d.py).
+KINDS_OF_CATEGORY = {"chair": ("chair", "armchair"), "bed": ("bed",), "sofa": ("sofa",), "tv_monitor": ("tv",), "toilet": ("toilet",), "plant": ("plant",)}
 MATCH_IOU = 0.3
 HEADINGS_PER_STEP = 3
 
 
 def classify_box(row, detection, category):
     """What one box of the goal kind covers: ``target``, ``other_goal``, ``non_goal`` (a kind object outside the goal set) or ``nothing``."""
-    kind = KIND_OF_CATEGORY[category]
-    best = max(((iou(detection["xyxy"], b["xyxy"]), b) for b in row["boxes"] if b["kind"] == kind), key=lambda pair: pair[0], default=(0.0, None))
+    kinds = KINDS_OF_CATEGORY[category]
+    best = max(((iou(detection["xyxy"], b["xyxy"]), b) for b in row["boxes"] if b["kind"] in kinds), key=lambda pair: pair[0], default=(0.0, None))
     if best[0] < MATCH_IOU:
         return "nothing"
     if best[1]["instance"] == row.get("target_instance"):
@@ -23,11 +24,11 @@ def classify_box(row, detection, category):
 
 def score_view(row, detections, threshold, category=None):
     """What the boxes of the goal kind at ``threshold`` did in one view: on the target, on another goal object, or wrong."""
-    kind = KIND_OF_CATEGORY[category or row["category"]]
+    kinds = KINDS_OF_CATEGORY[category or row["category"]]
     score = collections.Counter(detections=0, on_target=0, on_other_goal=0, on_non_goal=0, on_nothing=0)
     target = next((b for b in row["boxes"] if b["instance"] == row.get("target_instance")), None)
     for d in merged_by_kind(detections):
-        if DETECTOR_KIND[d["cls"]] != kind or d["conf"] < threshold:
+        if DETECTOR_KIND[d["cls"]] not in kinds or d["conf"] < threshold:
             continue
         score["detections"] += 1
         score["on_" + classify_box(row, d, category or row["category"])] += 1
@@ -122,3 +123,9 @@ def consistent_stop_summary(sequences, need, radius_m):
         else:
             result["never"] += 1
     return {k: result[k] for k in ("sequences", "stopped_right", "stopped_wrong", "never")}
+
+
+def confirmed_by(detection, others, min_conf, min_iou):
+    """Whether another detector has a box of the same kind at ``min_conf`` or more overlapping this one by ``min_iou``."""
+    kind = DETECTOR_KIND[detection["cls"]]
+    return any(DETECTOR_KIND.get(o["cls"]) == kind and o["conf"] >= min_conf and iou(o["xyxy"], detection["xyxy"]) >= min_iou for o in others)

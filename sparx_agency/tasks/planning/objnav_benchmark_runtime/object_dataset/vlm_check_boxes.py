@@ -11,7 +11,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.box_check_client impor
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.evaluate import merged_by_kind
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.kinds import DETECTOR_KIND
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import is_held_out
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import KIND_OF_CATEGORY, classify_box
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import KINDS_OF_CATEGORY, classify_box
 
 RIGHT = ("target", "other_goal")
 
@@ -26,9 +26,9 @@ def boxes_to_check(views, name, threshold, held_out_fraction):
             row = json.loads(line)
             if row["role"] != "object":
                 continue
-            kind = KIND_OF_CATEGORY[row["category"]]
+            kinds = KINDS_OF_CATEGORY[row["category"]]
             for d in merged_by_kind(found[row["frame"]]):
-                if DETECTOR_KIND[d["cls"]] == kind and d["conf"] >= threshold:
+                if DETECTOR_KIND[d["cls"]] in kinds and d["conf"] >= threshold:
                     yield folder.name, row["frame"], d["xyxy"], d["conf"], row["category"], classify_box(row, d, row["category"]), row["distance_m"]
 
 

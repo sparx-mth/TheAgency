@@ -1,7 +1,7 @@
 import pytest
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import (
-    KIND_OF_CATEGORY, accepted_by_vote, answers_within, consistent_stop_summary, score_view, sequence_vote_summary, summarise)
+    KINDS_OF_CATEGORY, accepted_by_vote, answers_within, confirmed_by, consistent_stop_summary, score_view, sequence_vote_summary, summarise)
 
 TARGET = {"instance": 7, "kind": "chair", "name": "chair", "xyxy": [100, 100, 200, 200], "pixels": 5000, "is_goal": True, "truncated": False}
 OTHER_GOAL = {"instance": 8, "kind": "chair", "name": "chair", "xyxy": [300, 100, 400, 200], "pixels": 5000, "is_goal": True, "truncated": False}
@@ -17,8 +17,9 @@ def view(boxes, visible=True, role="object", category="chair"):
             "distance_m": 1.2, "frame": "f.jpg", "scene": "s"}
 
 
-def test_the_categories_map_to_the_dataset_kinds():
-    assert KIND_OF_CATEGORY == {"chair": "chair", "bed": "bed", "sofa": "sofa", "tv_monitor": "tv", "toilet": "toilet", "plant": "plant"}
+def test_the_categories_map_to_the_dataset_kinds_and_a_chair_goal_includes_armchairs():
+    assert KINDS_OF_CATEGORY == {"chair": ("chair", "armchair"), "bed": ("bed",), "sofa": ("sofa",), "tv_monitor": ("tv",),
+                                 "toilet": ("toilet",), "plant": ("plant",)}
 
 
 def test_a_box_on_the_target_is_a_hit():
@@ -189,3 +190,36 @@ def test_one_is_the_first_box():
 
 def test_a_sequence_without_boxes_never_stops():
     assert consistent_stop_summary([[]], need=1, radius_m=0.5)["never"] == 1
+
+
+def test_a_box_is_confirmed_by_a_confident_box_of_the_same_kind_that_overlaps_it():
+    proposed = det("chair", 0.6, (100, 100, 200, 200))
+    assert confirmed_by(proposed, [det("chair", 0.5, (105, 105, 205, 205))], min_conf=0.4, min_iou=0.5)
+
+
+@pytest.mark.parametrize("other", [det("chair", 0.3, (100, 100, 200, 200)), det("chair", 0.9, (300, 100, 400, 200)),
+                                   det("bed", 0.9, (100, 100, 200, 200))])
+def test_a_weak_far_or_other_kind_box_does_not_confirm(other):
+    assert not confirmed_by(det("chair", 0.6, (100, 100, 200, 200)), [other], min_conf=0.4, min_iou=0.5)
+
+
+def test_the_detectors_other_word_for_the_kind_confirms():
+    assert confirmed_by(det("couch", 0.6, (0, 0, 100, 100)), [det("sofa", 0.8, (0, 0, 100, 100))], min_conf=0.4, min_iou=0.5)
+
+
+ARMCHAIR_TARGET = dict(TARGET, kind="armchair", name="armchair")
+
+
+def test_an_armchair_box_on_the_target_chair_is_a_hit():
+    score = score_view(view([TARGET]), [det("armchair", 0.8, (105, 105, 195, 195))], 0.5)
+    assert score["hit_target"] and score["wrong"] == 0
+
+
+def test_a_chair_box_on_a_goal_armchair_is_a_hit_not_a_wrong_box():
+    score = score_view(view([ARMCHAIR_TARGET]), [det("chair", 0.8, (105, 105, 195, 195))], 0.5)
+    assert score["hit_target"] and score["wrong"] == 0
+
+
+def test_an_armchair_box_on_nothing_is_wrong_for_the_chair_goal():
+    score = score_view(view([TARGET]), [det("armchair", 0.9, (0, 300, 50, 350))], 0.5)
+    assert score["wrong"] == 1

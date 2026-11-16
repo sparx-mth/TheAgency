@@ -5,7 +5,7 @@ from pathlib import Path
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import is_held_out
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import (
-    KIND_OF_CATEGORY, score_view, sequence_vote_summary, summarise, vote_summary)
+    KINDS_OF_CATEGORY, score_view, sequence_vote_summary, summarise, vote_summary)
 
 MIN_TARGET_PIXELS = 1000
 THRESHOLDS = (0.3, 0.5, 0.7)
@@ -40,7 +40,7 @@ def scored_views(rows, threshold):
 
 def random_view_alarms(rows, threshold):
     views = [(row, found) for row, found in rows if row["role"] == "random"]
-    wrong = sum(score_view(row, found[row["frame"]], threshold, category=c)["wrong"] for row, found in views for c in KIND_OF_CATEGORY)
+    wrong = sum(score_view(row, found[row["frame"]], threshold, category=c)["wrong"] for row, found in views for c in KINDS_OF_CATEGORY)
     return len(views), wrong
 
 

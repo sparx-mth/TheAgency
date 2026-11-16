@@ -10,13 +10,14 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.kinds i
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import is_held_out
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.projection import box_floor_point
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import (
-    KIND_OF_CATEGORY, classify_box, consistent_stop_summary)
+    KINDS_OF_CATEGORY, classify_box, confirmed_by, consistent_stop_summary)
 
 THRESHOLDS = (0.3, 0.5, 0.7)
 STOP_RANGES_M = (2.5, 4.5)
 RADII_M = (0.3, 0.5, 1.0)
 NEEDED_STEPS = (1, 2, 3)
 MAX_MEAN_RGB_DIFF = 6.0
+CONFIRM_IOU = 0.5
 WIDTH, HEIGHT, HFOV_DEG = 640, 480, 79.0
 
 
@@ -25,9 +26,13 @@ def camera(row):
     return (-row["y"], -row["x"], row["yaw"])
 
 
-def sequences_of_boxes(folder, name, threshold, max_distance_m):
-    """One list per approach sequence: its goal-kind boxes in step order with their floor point and whether they lie on a goal object."""
+def sequences_of_boxes(folder, name, threshold, max_distance_m, confirmer=None):
+    """One list per approach sequence: its goal-kind boxes in step order with their floor point and whether they lie on a goal object.
+
+    With ``confirmer=(detector name, min conf)`` only boxes that detector also finds (IoU 0.5) are kept.
+    """
     found = json.loads((folder / ("det_%s.json" % name)).read_text())
+    others = json.loads((folder / ("det_%s.json" % confirmer[0])).read_text()) if confirmer else {}
     differences = json.loads((folder / "depth_check.json").read_text())
     grouped, skipped = {}, 0
     for line in (folder / "views.jsonl").read_text().splitlines():
@@ -41,7 +46,9 @@ def sequences_of_boxes(folder, name, threshold, max_distance_m):
             continue
         depth = cv2.imread(str(folder / "depth" / row["frame"].replace(".jpg", ".png")), cv2.IMREAD_UNCHANGED) / 1000.0
         for d in merged_by_kind(found[row["frame"]]):
-            if DETECTOR_KIND[d["cls"]] != KIND_OF_CATEGORY[row["category"]] or d["conf"] < threshold:
+            if DETECTOR_KIND[d["cls"]] not in KINDS_OF_CATEGORY[row["category"]] or d["conf"] < threshold:
+                continue
+            if confirmer and not confirmed_by(d, others[row["frame"]], confirmer[1], CONFIRM_IOU):
                 continue
             point = box_floor_point(d["xyxy"], depth, camera(row), WIDTH, HEIGHT, HFOV_DEG)
             if point is not None:
