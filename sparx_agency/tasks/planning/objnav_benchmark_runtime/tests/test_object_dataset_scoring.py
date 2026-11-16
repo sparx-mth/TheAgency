@@ -1,7 +1,7 @@
 import pytest
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import (
-    KIND_OF_CATEGORY, accepted_by_vote, score_view, summarise)
+    KIND_OF_CATEGORY, accepted_by_vote, score_view, sequence_vote_summary, summarise)
 
 TARGET = {"instance": 7, "kind": "chair", "name": "chair", "xyxy": [100, 100, 200, 200], "pixels": 5000, "is_goal": True, "truncated": False}
 OTHER_GOAL = {"instance": 8, "kind": "chair", "name": "chair", "xyxy": [300, 100, 400, 200], "pixels": 5000, "is_goal": True, "truncated": False}
@@ -125,3 +125,23 @@ def test_the_vlm_summary_counts_kept_right_boxes_and_rejected_wrong_ones_per_cat
     table = vlm_summary(rows)
     assert table["chair"] == {"right": 2, "kept": 1, "wrong": 2, "rejected": 1, "unsure_wrong": 1, "unsure_right": 0}
     assert table["all"]["right"] == 3 and table["all"]["kept"] == 2
+
+
+def step_view(step, boxes_hit=None, bucket=1.2, sequence=0):
+    flags = {"detections": 0, "hit_goal": False, "wrong": 0} if boxes_hit is None else \
+        {"detections": 1, "hit_goal": boxes_hit, "wrong": 0 if boxes_hit else 1}
+    return dict(flags, scene="s", target_instance=7, sequence=sequence, step=step, bucket=bucket)
+
+
+@pytest.mark.parametrize("need, expected", [(1, {"stopped_right": 0, "stopped_wrong": 1, "never": 0}),
+                                            (2, {"stopped_right": 1, "stopped_wrong": 0, "never": 0}),
+                                            (3, {"stopped_right": 0, "stopped_wrong": 0, "never": 1})])
+def test_a_stop_needs_that_many_consecutive_steps_with_a_box_and_is_judged_at_the_last_of_them(need, expected):
+    steps = [step_view(0, boxes_hit=False), step_view(1), step_view(2, boxes_hit=True), step_view(3, boxes_hit=True)]
+    result = sequence_vote_summary(steps, need=need, max_distance_m=2.5)
+    assert {k: result[k] for k in expected} == expected and result["sequences"] == 1
+
+
+def test_steps_farther_than_the_limit_do_not_count():
+    steps = [step_view(0, boxes_hit=False, bucket=3.5), step_view(1, boxes_hit=True, bucket=1.2)]
+    assert sequence_vote_summary(steps, need=1, max_distance_m=2.5)["stopped_right"] == 1

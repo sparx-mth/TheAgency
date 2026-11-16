@@ -84,3 +84,22 @@ def vlm_summary(answers):
                 cell["unsure_right" if right else "unsure_wrong"] += 1
     keys = ("right", "kept", "wrong", "rejected", "unsure_wrong", "unsure_right")
     return {name: {k: cell[k] for k in keys} for name, cell in sorted(cells.items())}
+
+
+def sequence_vote_summary(scored_rows, need, max_distance_m):
+    """Per approach sequence: a STOP once ``need`` consecutive steps within ``max_distance_m`` each have a box, right if the last step's box is on a goal object."""
+    sequences = collections.defaultdict(dict)
+    for r in scored_rows:
+        if r["bucket"] <= max_distance_m:
+            sequences[(r["scene"], r["target_instance"], r["sequence"])].setdefault(r["step"], r)
+    result = collections.Counter(sequences=len(sequences))
+    for steps in sequences.values():
+        streak = 0
+        for _, r in sorted(steps.items()):
+            streak = streak + 1 if r["detections"] else 0
+            if streak >= need:
+                result["stopped_right" if r["hit_goal"] else "stopped_wrong"] += 1
+                break
+        else:
+            result["never"] += 1
+    return {k: result[k] for k in ("sequences", "stopped_right", "stopped_wrong", "never")}

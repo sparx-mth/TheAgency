@@ -5,11 +5,13 @@ from pathlib import Path
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import is_held_out
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import (
-    KIND_OF_CATEGORY, score_view, summarise, vote_summary)
+    KIND_OF_CATEGORY, score_view, sequence_vote_summary, summarise, vote_summary)
 
 MIN_TARGET_PIXELS = 1000
 THRESHOLDS = (0.3, 0.5, 0.7)
 BUCKETS = (0.8, 1.2, 1.8, 2.5, 3.5, 4.5)
+STOP_RANGE_M = 2.5
+CONSECUTIVE_STEPS = (1, 2, 3)
 
 
 def load(views, name, held_out_fraction, include_held_out):
@@ -70,8 +72,17 @@ def report(rows, name):
         out += ["K-view vote (2 of the 3 headings at one approach step), %d groups: a box on the target in %.1f%% of groups by vote vs %.1f%% of single views; "
                 "a wrong box in %.1f%% of groups by vote vs %.1f%% of single views.\n"
                 % (vote["groups"], 100 * vote["hit"] / max(1, vote["groups"]), 100 * vote["single_hit"] / max(1, vote["views"]),
-                   100 * vote["wrong"] / max(1, vote["groups"]), 100 * vote["single_wrong"] / max(1, vote["views"]))]
+                   100 * vote["wrong"] / max(1, vote["groups"]), 100 * vote["single_wrong"] / max(1, vote["views"])),
+            "Voting across approach positions (steps within %.1f m, first heading of each step):\n" % STOP_RANGE_M, sequence_vote_table(scored), ""]
     return "\n".join(out)
+
+
+def sequence_vote_table(scored):
+    lines = ["| consecutive steps with a box | sequences | stop on a goal object | stop on a wrong box | never stops |", "|---|---|---|---|---|"]
+    for need in CONSECUTIVE_STEPS:
+        v = sequence_vote_summary(scored, need, STOP_RANGE_M)
+        lines.append("| %d | %d | %d | %d | %d |" % (need, v["sequences"], v["stopped_right"], v["stopped_wrong"], v["never"]))
+    return "\n".join(lines)
 
 
 def main(argv=None):
