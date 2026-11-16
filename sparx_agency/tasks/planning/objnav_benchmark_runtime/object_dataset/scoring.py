@@ -9,28 +9,30 @@ MATCH_IOU = 0.3
 HEADINGS_PER_STEP = 3
 
 
+def classify_box(row, detection, category):
+    """What one box of the goal kind covers: ``target``, ``other_goal``, ``non_goal`` (a kind object outside the goal set) or ``nothing``."""
+    kind = KIND_OF_CATEGORY[category]
+    best = max(((iou(detection["xyxy"], b["xyxy"]), b) for b in row["boxes"] if b["kind"] == kind), key=lambda pair: pair[0], default=(0.0, None))
+    if best[0] < MATCH_IOU:
+        return "nothing"
+    if best[1]["instance"] == row.get("target_instance"):
+        return "target"
+    return "other_goal" if best[1]["is_goal"] else "non_goal"
+
+
 def score_view(row, detections, threshold, category=None):
     """What the boxes of the goal kind at ``threshold`` did in one view: on the target, on another goal object, or wrong."""
     kind = KIND_OF_CATEGORY[category or row["category"]]
-    ground_truth = [b for b in row["boxes"] if b["kind"] == kind]
-    score = collections.Counter(detections=0, hit_target=0, on_other_goal=0, on_non_goal=0, on_nothing=0)
+    score = collections.Counter(detections=0, on_target=0, on_other_goal=0, on_non_goal=0, on_nothing=0)
     target = next((b for b in row["boxes"] if b["instance"] == row.get("target_instance")), None)
     for d in merged_by_kind(detections):
         if DETECTOR_KIND[d["cls"]] != kind or d["conf"] < threshold:
             continue
         score["detections"] += 1
-        best = max(((iou(d["xyxy"], b["xyxy"]), b) for b in ground_truth), key=lambda pair: pair[0], default=(0.0, None))
-        if best[0] < MATCH_IOU:
-            score["on_nothing"] += 1
-        elif best[1]["instance"] == row.get("target_instance"):
-            score["hit_target"] += 1
-        elif best[1]["is_goal"]:
-            score["on_other_goal"] += 1
-        else:
-            score["on_non_goal"] += 1
+        score["on_" + classify_box(row, d, category or row["category"])] += 1
     score["wrong"] = score["on_non_goal"] + score["on_nothing"]
-    score["hit_goal"] = bool(score["hit_target"] or score["on_other_goal"])
-    score["hit_target"] = bool(score["hit_target"])
+    score["hit_goal"] = bool(score["on_target"] or score["on_other_goal"])
+    score["hit_target"] = bool(score.pop("on_target"))
     score["target_pixels"] = target["pixels"] if target else 0
     score["target_truncated"] = bool(target and target["truncated"])
     return dict(score)
@@ -67,3 +69,18 @@ def vote_summary(scored_rows, need):
             "wrong": sum(accepted_by_vote([r["wrong"] > 0 for r in g], need) for g in full),
             "views": len(views), "single_hit": sum(bool(r["hit_target"]) for r in views),
             "single_wrong": sum(r["wrong"] > 0 for r in views)}
+
+
+def vlm_summary(answers):
+    """Per category and overall: right boxes (on a goal object) the vision model kept, wrong boxes it rejected, and the unsure ones."""
+    cells = collections.defaultdict(collections.Counter)
+    for a in answers:
+        right = a["label"] in ("target", "other_goal")
+        for name in (a["category"], "all"):
+            cell = cells[name]
+            cell["right" if right else "wrong"] += 1
+            cell["kept" if right and a["answer"] != "no" else "rejected" if not right and a["answer"] == "no" else "other"] += 1
+            if a["answer"] == "unsure":
+                cell["unsure_right" if right else "unsure_wrong"] += 1
+    keys = ("right", "kept", "wrong", "rejected", "unsure_wrong", "unsure_right")
+    return {name: {k: cell[k] for k in keys} for name, cell in sorted(cells.items())}

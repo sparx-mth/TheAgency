@@ -106,3 +106,22 @@ def test_the_summary_reports_recall_on_the_goal_set_next_to_recall_on_the_target
             {"hit_target": False, "hit_goal": False, "wrong": 0, "target_visible": True, "category": "chair"}]
     cell = summarise(rows, key="category")["chair"]
     assert cell["recall"] == 0 and cell["recall_goal"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("boxes, xyxy, expected", [([TARGET], (105, 105, 195, 195), "target"),
+                                                   ([TARGET, OTHER_GOAL], (305, 105, 395, 195), "other_goal"),
+                                                   ([TARGET, NOT_GOAL], (455, 105, 545, 195), "non_goal"),
+                                                   ([TARGET], (0, 300, 50, 350), "nothing")])
+def test_one_box_is_classified_by_what_it_covers(boxes, xyxy, expected):
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import classify_box
+    assert classify_box(view(boxes), det("chair", 0.9, xyxy), "chair") == expected
+
+
+def test_the_vlm_summary_counts_kept_right_boxes_and_rejected_wrong_ones_per_category():
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.scoring import vlm_summary
+    rows = [{"category": "chair", "label": "target", "answer": "yes"}, {"category": "chair", "label": "other_goal", "answer": "no"},
+            {"category": "chair", "label": "non_goal", "answer": "no"}, {"category": "chair", "label": "nothing", "answer": "unsure"},
+            {"category": "bed", "label": "target", "answer": "yes"}]
+    table = vlm_summary(rows)
+    assert table["chair"] == {"right": 2, "kept": 1, "wrong": 2, "rejected": 1, "unsure_wrong": 1, "unsure_right": 0}
+    assert table["all"]["right"] == 3 and table["all"]["kept"] == 2
