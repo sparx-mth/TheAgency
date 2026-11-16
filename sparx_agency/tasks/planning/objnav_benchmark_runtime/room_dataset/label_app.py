@@ -28,10 +28,13 @@ class Rooms:
         for folder in sorted(d for d in views.iterdir() if (d / "rooms.json").exists()):
             frames = [json.loads(line) for line in (folder / "views.jsonl").read_text().splitlines()]
             for room in json.loads((folder / "rooms.json").read_text()):
-                shown = pick_frames([v for v in frames if v["room"] == room["room"]], count=FRAMES_SHOWN)
+                own = [v for v in frames if v["room"] == room["room"]]
+                shown = pick_frames(own, count=FRAMES_SHOWN)
+                mixed = not shown
+                shown = shown or pick_frames(own, count=FRAMES_SHOWN, min_share=0.0)
                 self.chosen[room["room"]] = (folder, room, shown)
                 self.rooms.append({"room": room["room"], "scene": room["scene"], "area_m2": round(room["area_m2"]), "objects": object_summary(room),
-                                   "guess": majority_name(answers[room["room"]])[0],
+                                   "guess": majority_name(answers[room["room"]])[0], "mixed": mixed,
                                    "frames": ["/frame/%s/%s.jpg" % (room["scene"], v["frame"]) for v in shown]})
 
     def map_png(self, room):

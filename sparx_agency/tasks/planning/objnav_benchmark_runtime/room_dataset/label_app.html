@@ -39,7 +39,7 @@ async function load(){ state = await (await fetch('/api/state')).json(); at = Ma
 function show(){
   const r = state.rooms[at], done = Object.keys(state.labels).length, total = state.rooms.length;
   $('title').textContent = r.room; $('count').textContent = (at+1) + ' of ' + total + ' · ' + done + ' named';
-  $('fill').style.width = (100*done/total) + '%'; $('meta').textContent = 'scene ' + r.scene + ' · about ' + r.area_m2 + ' m²';
+  $('fill').style.width = (100*done/total) + '%'; $('meta').textContent = 'scene ' + r.scene + ' · about ' + r.area_m2 + ' m²' + (r.mixed ? ' · WARNING: these frames mostly show other rooms, the region is probably not a room of its own (choose "not a room" or "unsure")' : '');
   $('frames').innerHTML = r.frames.map((u,i) => '<figure><b>' + 'ABCDEF'[i] + '</b><img src="' + u + '" data-full="' + u + '"></figure>').join('');
   $('map').src = '/map/' + r.room + '.png';
   $('options').innerHTML = state.options.map(o => '<button class="' + (state.labels[r.room]===o?'on':'') + '" data-o="' + o + '">' + o + '</button>').join('');

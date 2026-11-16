@@ -16,13 +16,20 @@ MAP_SIZE = 560
 MAP_MARGIN_M = 2.0
 FRAMES_PER_SHEET = 4
 MAX_FRAMES_PER_SPOT = 2
+MIN_IN_ROOM_SHARE = 0.5
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 ROOM_COLOUR, OTHER_COLOUR, SPOT_COLOUR = (200, 120, 30), (200, 200, 200), (30, 30, 220)
 
 
-def pick_frames(views, count=FRAMES_PER_SHEET, per_spot=MAX_FRAMES_PER_SPOT):
-    """The views that show the most distinct objects of the room, at most ``per_spot`` from one standing spot."""
-    ranked = sorted(views, key=lambda v: (-len({o["instance"] for o in v["visible"] if o["region"] == v["region"]}), v["spot"], v["heading"]))
+def in_room_share(view):
+    """The share of the annotated pixels of a view that belong to the view's own room: low when it looks out through a door."""
+    total = sum(o["pixels"] for o in view["visible"])
+    return sum(o["pixels"] for o in view["visible"] if o["region"] == view["region"]) / total if total else 0.0
+
+
+def pick_frames(views, count=FRAMES_PER_SHEET, per_spot=MAX_FRAMES_PER_SPOT, min_share=MIN_IN_ROOM_SHARE):
+    """The views that look mostly at the room itself, best first, at most ``per_spot`` from one standing spot."""
+    ranked = sorted((v for v in views if in_room_share(v) >= min_share), key=lambda v: (-in_room_share(v), v["spot"], v["heading"]))
     taken, per = [], collections.Counter()
     for view in ranked:
         if per[view["spot"]] < per_spot:
