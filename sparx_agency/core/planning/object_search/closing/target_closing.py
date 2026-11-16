@@ -273,6 +273,7 @@ class TargetClosingSettings:
     # NULL on this path by construction: a box without a coherent depth projection is never fresh.
     stop_centring: bool = True
     stop_confidence: float = 0.50
+    box_check_enabled: bool = False
     weak_stop_max_holds: int = 2
     # THE STOP OVERSHOOT (since 2026-10-14). The terminal ranges are read short of the truth: the
     # near edge of a box with floor in it, and a centroid fused from the near surfaces, both stand
@@ -608,6 +609,8 @@ class TargetClosing:
         self.path = TargetApproachPath(policy)
         self.rejected = []                 # (anchor xyz, floor id, action, radius m, why) per released candidate
         self.releases = 0
+        self.box_check = None
+        self.box_check_vetoes = 0
         self.inspection_releases = 0
         self.inspection_resumptions = 0    # inspections ended to step closer: seen fresh, measured out of range
         self.stall_releases = 0            # locks released because the approach went nowhere
@@ -2376,6 +2379,9 @@ class TargetClosing:
             measured: Its fresh near-edge range, or None without a fresh box.
             info: The STOP's diagnostics, ``reason`` included.
         """
+        veto = self._box_check_veto(obs)
+        if veto is not None:
+            return veto
         self.phase = "STOP"
         if self.settings.stop_overshoot_max_steps < 1:
             return NavigationCommand.stop_here(info=info)
@@ -2384,6 +2390,20 @@ class TargetClosing:
                           "near_m": None if measured is None else float(measured), "memory_m": float(distance),
                           "steps": 0, "actions": 0, "blocked": False, "ended": None}
         return self._overshoot_step(obs)
+
+    def _box_check_veto(self, obs):
+        """The release that ends the lock when the vision model says the boxed object is not the goal; None keeps the STOP."""
+        fresh = self.box is not None and self.last_seen == obs.step
+        if not (self.settings.box_check_enabled and self.box_check is not None and fresh):
+            return None
+        if self.box_check.verdict(obs.rgb, self.box, obs.target_category) != "no":
+            return None
+        self.box_check_vetoes += 1
+        self._release(obs, why="vlm rejected the boxed object as a %s" % obs.target_category)
+        turn = self.policy.episode.action_spec.turn_angle_rad
+        return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + turn),
+                                      info={"kind": "target_released", "phase": "RELEASED",
+                                            "reason": "the vision model rejected the boxed object; the search resumes"})
 
     def _overshoot_step(self, obs):
         """One action of the overshoot: a forward step toward the memory, or the STOP that ends it."""
