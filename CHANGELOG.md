@@ -5,6 +5,621 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed (2026-11-16, evening: the STOP is taken inside each benchmark's own success zone; the blind-step fix and the 0.20 m retry clearance are withdrawn; the launcher's oracle model is the 3B)
+
+Five items asked for after the day's first check (the entry below, which this one revises): bring back the
+approach before STOP, make the stop distance match each benchmark's success definition exactly, restore the
+previous blind-step behaviour, choose the retry clearance on the measurements in hand, and make the 3B the
+launcher's oracle default. Measured on the same 180 MP3D episodes with the same stand-in for the language model:
+**SR 74.4 % -> 77.8 % with the approach back at the radius the method already had, a planar metre (item 1: 6
+episodes won, none lost) -> 82.2 % with the radius and the measure of MP3D's own definition, 0.9 m in 3-D from the
+floor (item 2: 8 more won, none lost); SPL 0.332 -> 0.341 -> 0.354.** That is 6 won and none lost against this
+morning's "before" (78.9 % / 0.346), whose rules it replaces. HM3D and Gibson were not measured.
+
+#### 1. The approach before STOP is back, as a stop criterion the benchmark's adapter states
+
+- **Deciding to stop and where to stand are two things.** The closing DECIDES on its own evidence, as before: a
+  fresh, whole, confident box of the target inside the terminal range (1.05 m). How near the target it must then
+  STAND is not the method's to choose -- a benchmark defines a success zone round each goal object -- so it is a
+  criterion of two settings, `TargetClosingSettings.stop_within_m` and `stop_measure`, read by one pure function
+  (`core/planning/object_search/closing/stop_criterion.py`, new): `planar` is the horizontal range to the target's
+  nearest measured point; `euclidean` is that range and the height of the target's lowest measured point above the
+  floor under the agent, as the two legs of a triangle (an underside under `stop_elevation_min_m`, 0.30 m, is an
+  object on the floor). Both are the agent's own depth measurements, and both err on the safe side: the reading
+  is never shorter than the true distance to the object's box (but for that 0.30 m threshold, worth under 5 cm).
+- **The walk.** When the STOP is decided and the range reads beyond the distance, the closing walks straight on
+  toward the 3-D memory (phase `ADVANCE`) and STOPs when the range is within it. The range is the deciding
+  frame's, carried forward by the agent's own displacement; no frame is consulted meanwhile (under a raised target
+  the box leaves the top of the frame). It also ends, with the STOP, at a refused step, after four steps or seven
+  actions, when another step would leave the memory under 0.30 m or the measured near edge inside the body radius,
+  when the memory stands more than a quarter turn off, or on the last action the episode's budget holds (a decided
+  STOP is always called). A target whose underside is raised by the stop distance
+  or more is within it of no place on the floor and is stood under as closely as that allows
+  (`stop_approach_shortfalls`). The record carries `stop_decision` (what BOTH measures read on the deciding frame,
+  whatever the criterion), `stop_approach` (where the walk ended and what the range read there) and the counters
+  `stop_approaches`, `stop_approach_steps`, `stop_approach_shortfalls`; `mp3d/stuck_report.py` tables them.
+- **The method's own default is no criterion** (`stop_within_m: 0`): a deployment that names no success zone STOPs
+  on the deciding frame. The benchmark entry points set it below `--policy-config`, so
+  `{"target_closing": {"stop_within_m": 0}}` is the arm without it. The name is not `stop_distance_m`:
+  `RPTSettings.stop_distance_m` is the legacy pursuit's standoff, which the closing never reads.
+- **What is not back.** The unconditional step after every STOP (Gibson's footprint rule of 2026-10-14) and the
+  switch by which evaluator scores the run: the criterion steps only while the range reads beyond the distance.
+  The frontal standoff of raised planar targets: it was not asked for, and the Euclidean measure addresses the same
+  episodes from the definition instead of from recorded view points (measured below: `f257a0ce`'s steps WITHOUT
+  its frontal standoff score one episode more than with it).
+- **Where the line is.** What reaches the method is one distance and one word per dataset, the same for every
+  episode and object. What does not: any view point's position, any goal's position, any distance to them, at
+  run time. `tests/test_agent_gets_no_scene_geometry.py` and the episode contract are untouched.
+
+#### 2. The stop distance matches each benchmark's success definition
+
+- **habitat-lab's definition, for HM3D and MP3D alike:** STOP called, and the geodesic distance from where it was
+  called to the nearest *view point* of any goal object of the category under `SUCCESS_DISTANCE` = 0.1 m
+  (`DISTANCE_TO: VIEW_POINTS`). The challenge text says "within 1.0m Euclidean distance from any instance ... AND
+  the object can be viewed by an oracle"; what is scored is the view points, and they are published with the
+  episodes, so the geometry of "success" is whatever each dataset's generator did.
+- **The generator** (habitat-lab's ObjectNav dataset code as kept in `Ram81/habitat-imitation-baselines`,
+  `object_nav_generator.build_goal`, and for the HM3D lineage `naokiyokoyama/ovon`,
+  `ObjectGoalGenerator._make_object_viewpoints`): candidates on a horizontal grid round the object's axis-aligned
+  box, half the agent's radius apart, out to `max_distance` = 1.0 m; kept when within `max_distance` of the box,
+  navigable, and showing the object's pixels in frames turned toward it. The grid was confirmed on the published
+  episodes: the nearest neighbour of a view point is 0.090 m away on HM3D v1 and MP3D v1 and 0.085 m on HM3D v2.
+- **Which distance "within 1.0 m of the box" is differs between the datasets, and it was measured, not assumed**
+  (every validation goal's view points against the object's box as habitat-sim loads it):
+
+  | dataset | goals, view points | farthest view point from the box, in the plane | in 3-D from the floor point | so the metre is |
+  |---|---|---|---|---|
+  | HM3D v1 | 432 goals of 20 scenes, 111,406 | 1.00 m at every object height (none beyond 1.01 m) | up to 1.3-1.8 m for a mounted television or a raised plant | **planar** |
+  | HM3D v2 | 417 goals annotated as in v1 | 1.00 m | -- | **planar** |
+  | MP3D v1 | 1,316 goals of 11 scenes, 291,810 | by underside height: 1.00 m on the floor, 0.96 m at 0.1-0.3 m, 0.89 m at 0.3-0.6 m, 0.74 m at 0.6-0.9 m, 0.57 m at 0.9-1.0 m (medians over goals) | 1.00 m throughout (1.11 m for the 23 goals over 0.9 m up); no goal's underside is 1.0 m up | **Euclidean from the floor** |
+
+  The code that survives tests in the plane; the 2020 MP3D dataset evidently was not made with it. About 5 % of
+  MP3D's view points stand beyond 1.0 m in the plane, where the generator moved them onto the navigation mesh.
+- **How the other published zero-shot methods stop** (their released code), all three by a PLANAR range to the
+  nearest point of the target's point cloud, on both datasets: **VLFM** STOPs when it is under 0.9 m
+  (`pointnav_stop_radius`); **ASCENT** steps straight on inside 1.0 m and STOPs at 0.6 m, or where a step no
+  longer brings it 0.1 m nearer; **ApexNav** plans to the free cell nearest a point 0.5 m from the object (0.70 m,
+  then 0.85 m, when that has no route), STOPs within 0.2 m of it (0.45 m when stuck), and its evaluation configs
+  set `success_distance: 0.2` for both datasets. None measures in 3-D: on MP3D a planar 0.9 m STOP is outside the
+  zone of any goal raised more than about 0.4 m.
+- **In each adapter.** `hm3d/protocol.py` and `mp3d/protocol.py` state their dataset's zone as a constant
+  (`GOAL_ZONES`: `GoalZone(distance_m, measure, grid_m)`, `habitat/goal_zone.py`, new) and expose it as
+  `protocol.goal_zone` -- a property, so the frozen protocol record and the manifests are unchanged.
+  `habitat/entrypoint.py::method_defaults` turns it into the criterion with `goal_zone.stop_criterion`: the zone's
+  measure, and its distance less `STOP_MARGIN_M` = 0.1 m. **HM3D: `planar`, 0.9 m. MP3D: `euclidean`, 0.9 m.**
+  Gibson (`gibson/run.py::method_defaults`): `planar`, 0.9 m -- SemExp's protocol counts the agent inside the goal
+  footprint dilated by 1.0 m on the 5 cm map, in the plane, and the STOP is taken two map cells inside it.
+- **Why a decimetre inside the zone.** A STOP exactly at the edge is within 0.1 m of a view point only if the
+  grid happens to have a candidate there. No place is farther than half the grid's diagonal (0.064 m) from a
+  candidate, so a STOP 0.9 m out has a candidate INSIDE the zone within the success distance whichever way the
+  grid lies (`test_goal_zone.py` checks it on the geometry, for boxes at any height and grids at any offset); the
+  rest of the decimetre is for what the argument leaves out -- a candidate is a view point only if it is navigable
+  and sees the object, and the agent's range is a measurement. 0.9 m is also VLFM's number. The protocol's success
+  distance is checked against the grid, not subtracted: a run scored at ApexNav's 0.2 m stops where the official
+  one does.
+- **Disclosed.** The two zones were established on validation goals, with the scene annotations' object boxes --
+  only validation scenes are on this machine. That is a use of evaluation data and annotations in development; the
+  paper says so (section 5.5). Nothing of it is read at run time.
+- **Not measured: HM3D and Gibson.** The check is MP3D's. On HM3D the only evidence is older and about another
+  rule (an unconditional step after the STOP never helped on 70 recorded STOPs and walked one out of the zone);
+  the criterion steps only from beyond 0.9 m. On Gibson the criterion replaces "one step always, a second beyond
+  0.9 m" of the runs recorded there. Both are flagged in their documents.
+
+#### 3. The blind verification-step loop: the previous behaviour, restored
+
+- `TargetClosing._glimpse_stalled`, the counter `glimpse_stalls`, the pursuit's `GLIMPSE` source and their four
+  tests are out; `target_closing.py` and `target_pursuit.py` verify a glimpsed candidate exactly as at `f257a0ce`.
+  The loop is a known, open fault, noted at `max_verify_approach_steps` and in `LESSONS.md` with its cause and
+  what the withdrawn fix measured (five episodes changed: three still succeeded, two were lost).
+
+#### 4. The standing-point retry clearance: the body radius, 0.18 m
+
+- **Chosen on the checks already run:** the two arms that differ in this number alone gave SR 73.3 % / SPL 0.325
+  at 0.18 m against 71.1 % / 0.322 at 0.20 m (2 won, 6 lost, exact McNemar p = 0.29); the price is refused forward
+  steps, 6.79 an episode against 5.92. `standing_retry_clearance_m` defaults to `None`, the policy's own body
+  radius (`RPTSearchPolicy.standing_retry_clearance_m()`), and a number between the body radius and
+  `min_clearance_m` selects another rung (`0.20` is the one measured). The retry planner stays the closing's own
+  (`policy.standing_retry_planner`, counter `retry_standoffs`); at the body radius it plans exactly what the
+  fallback's squeeze planner planned for it before today.
+
+#### 5. The launcher's oracle default is the 3B
+
+- `benchmark_services.sh`: `LLM_REASONING_MODEL` defaults to `qwen2.5:3b-instruct` (was `qwen2.5:14b-instruct`),
+  so both LLM roles run on the model the laptop holds unless the environment names another;
+  `tests/test_launcher_defaults.py` pins it. QUICKSTART, `hm3d/README.md`, `gibson/BENCHMARK.md` and the runtime
+  README say so and name the 14B as the model of the runs published before today. **Not changed:**
+  `LLMConfig.from_env` and `gpu_plan.plan_from_environment` still fall back to the 14B when the variable is unset
+  -- code that builds the client without the launcher gets it; every launcher exports the variable.
+
+#### The check
+
+- **The arms**, all on the 180 episodes of `sets/single_storey_flat_v1.json` with the launcher, the flags and the
+  stand-in of the entry below (ground-truth perception, the frontier explorer, seed 17, CPU rendering, every room
+  `living_room`, the nodes an equal share). The base is that entry's arm A2 -- the rules removed, STOP on the
+  deciding frame -- which this tree reproduces when the criterion is off (the controls, below):
+
+  | per episode (180) | SR (successes) | SPL | won / lost against the base (exact McNemar p) | failed STOPs of 158 |
+  |---|---|---|---|---|
+  | *base*: the rules removed, STOP on the deciding frame (A2) | 74.4 % (134) | 0.332 | -- | 24 |
+  | *the approach as it was*: `f257a0ce`'s steps under a raised target, its frontal standoff off | 79.4 % (143) | 0.348 | 9 / 0 (0.004) | 15 |
+  | *this morning's "before"*: those steps and the frontal standoff (`f257a0ce`) | 78.9 % (142) | 0.346 | 8 / 0 (0.008) | 16 |
+  | **item 1**: the approach back, to the radius the method had: `planar` 1.0 m | 77.8 % (140) | 0.341 | 6 / 0 (0.03) | 18 |
+  | item 2, the margin alone: `planar` 0.9 m (VLFM's rule; what HM3D's definition gives) | 80.6 % (145) | 0.350 | 11 / 0 (0.001) | 13 |
+  | item 2, the measure alone: `euclidean` 1.0 m | 80.6 % (145) | 0.352 | 11 / 0 (0.001) | 13 |
+  | **item 2**: MP3D's own definition, `euclidean` 0.9 m -- the adapter's default | **82.2 % (148)** | **0.354** | 14 / 0 (0.0001) | 10 |
+
+- **Item 1 alone** (base -> `planar` 1.0 m): 6 won, none lost (p = 0.03), SPL +0.009; 145 trajectories identical.
+  The STOP is decided inside the terminal range and its tolerance (1.05 m); 35 STOPs were decided between 1.00 and
+  1.05 m in the plane and took one step toward the target (three ended short of the metre). The six that turned
+  were decided at 1.006-1.041 m and had STOPped
+  0.11-0.26 m from the nearest view point: a stool, two tables, a sink, a chair and a picture -- stops a few
+  centimetres outside the metre, with the target in view.
+- **Item 2 alone** (`planar` 1.0 m -> `euclidean` 0.9 m): 8 won, none lost (p = 0.008), SPL +0.014; 89
+  trajectories identical. It is two changes, and all four arms of the two were run:
+
+  | successes of 180 | at the zone's edge, 1.0 m | a decimetre inside, 0.9 m | the margin |
+  |---|---|---|---|
+  | `planar` | 140 | 145 | 5 won, 0 lost (p = 0.06) |
+  | `euclidean` | 145 | 148 | 3 won, 0 lost (p = 0.25) |
+  | the measure | 5 won, 0 lost (p = 0.06) | 3 won, 0 lost (p = 0.25) | |
+
+  *The margin* (planar, 1.0 -> 0.9 m): a cabinet, a towel, a table and two pictures decided at 0.92-0.99 m in the
+  plane -- within the metre -- and 0.14-0.32 m from the nearest view point. Stopping at the zone's edge is not
+  stopping inside it; on MP3D's own measure the same step is worth three (two of them STOPs 0.99 m from an object
+  on the floor). *The measure* (planar -> Euclidean, 0.9 m): three pictures whose planar range ALREADY read inside
+  0.9 m when the STOP was decided (0.88, 0.90 and 0.49 m) while their distance in 3-D from the floor did not (1.31,
+  1.35 and 0.95 m; undersides 0.82-1.01 m up): under the planar measure no step is taken and the STOP fails
+  0.11-0.42 m from a view point. This is the case MP3D's definition predicts and a planar rule cannot see. Neither
+  half is significant on 180 episodes by itself; together they are, each is the direction the dataset's geometry
+  dictates, and no step of the four loses an episode. The adapter's criterion has the highest SR and the highest
+  SPL of the seven arms.
+- **The approach as it was** (base -> `f257a0ce` with its frontal standoff switched off): 9 won, none lost
+  (p = 0.004) -- every one a raised target: six pictures, a cabinet, a sink and a chair. Adding the frontal
+  standoff to it LOSES one and wins none (zsNo4HB9uLZ/000045: from the frontal standoff the steps toward the
+  picture ended at a refused one, 0.101 m from a view point): on this set the standoff was worth nothing, and it
+  is not restored. The criterion wins the same nine and five more, all five on the floor (three tables, a stool,
+  a towel), which a rule for raised targets never stepped toward.
+- **Against this morning's "before"**: 6 won, none lost (exact McNemar p = 0.03), SPL +0.008. The six are those
+  three tables, the stool and the towel, and the picture the frontal standoff had left 0.10 m from a view point.
+- **What the walk is and costs.** In 116 of the 158 episodes that decided a STOP the range read beyond the
+  distance and the agent walked: one step in 89, two in 15, three in 12 (155 forward steps and 20 turns in all,
+  under one action an episode). 88 walks ended within the distance (85 succeeded); 14 at a refused step (10
+  succeeded); 14 under the target, where another step would have left the memory under 0.30 m (12 succeeded). On
+  the 134 episodes that succeed either way the SPL falls by 0.012 (0.25 m of path a step); over all 180 it rises
+  by 0.022. Refused forward steps 1,417 -> 1,432.
+- **What still fails at a STOP** (10 of 158): two STOPs 4.8 and 6.1 m from any view point (not the walk's to
+  mend); four pictures 0.9-1.4 m up, 0.26-0.80 m from a view point, where a step was refused or the agent already
+  stood under the picture; and four on the floor (two beds, a counter, a sofa) that STOPped 0.71-0.87 m from the
+  near edge they measured and 0.24-0.83 m from a view point. The last four are inside the zone by the agent's own
+  measurement and outside the published one. Why was not established (the surface the agent measured may not be
+  the goal instance's box; a zone may lack view points where the generator's visibility test failed); no stop
+  distance drawn from the definition answers it, and none was fitted to it.
+- **Why the pairing can be trusted.** The pipeline is deterministic under the stand-in. (a) In the 64 episodes of
+  the adapter's arm in which the walk took no action -- 22 that never decided a STOP, 42 decided inside the distance
+  or with the target behind the agent -- the trajectory is the base's, step for step; and in all 180 every other
+  counter of the closing is the base's (releases, standing points at the retry clearance 89, blind verification
+  steps 314, the same five episodes with twenty or more of them). So this tree with the criterion off IS this
+  morning's A2, which is also what items 3 and 4 claim. (b) The `planar` 1.0 m, `planar` 0.9 m and `euclidean`
+  1.0 m arms were run on every episode in which they can differ from the base -- a STOP decided at or beyond that
+  distance by that measure, read off the adapter arm's own `stop_decision` record: 36, 105 and 66 episodes -- and
+  the last two on 8 controls each, all identical to the base; the four re-run episodes in which no step was
+  walked are the base's too. Elsewhere their rows are the base's. (c) The tree itself: ten episodes in which the
+  walk acts, run with the criterion off (`{"target_closing": {"stop_within_m": 0}}`), are the base's trajectories,
+  ten of ten; twelve run again after the setting was renamed, twelve after the action-budget rule, and the same
+  twelve on the tree as committed (after the cleanup below), are the adapter arm's, twelve of twelve each time.
+  (d) The reference arm was run on the 14
+  episodes in which the frontal standoff had acted this morning and on 12 controls -- six in which the raised
+  target's steps had acted, and the six carried episodes with a remembered pursuit, through which a standoff could
+  have been chosen uncounted -- all identical to "before"; elsewhere its rows are "before"'s.
+- **How it was run.** The adapter's arm ran from a snapshot of the tree (`stop_20261116_e`); the setting was
+  renamed afterwards (`stop_distance_m` -> `stop_within_m`, to keep it apart from the legacy pursuit's setting of
+  that name) and the partial arms ran from the renamed snapshot (`stop_20261116_f`); the controls after that ran
+  from snapshots of the tree as it then was (`stop_20261116_g`, and `stop_20261116_h` for the tree as committed),
+  and the reference arm from this morning's snapshot of `f257a0ce`. Rows under `runs/cpu_ab_20261116/` (not
+  tracked): `s2_euclid09`, `f_planar10`, `f_planar09{,_z6}`, `f_euclid10{,_z6}`, `f_s2check`, `f_s0control`,
+  `g_final_check`, `h_final_check`, `h_hm3d_smoke`, `x_head_frontal_off{,_pursuits}`.
+- **What this check is not.** The limits of the entry below stand: ground-truth perception, a stand-in for the
+  language model, software rendering, one seed, 180 episodes of eight MP3D scenes. Two more. The zone was
+  established on the validation goals of these same scenes, and the two bounds of the walk (four steps, 0.30 m)
+  were chosen after looking at how HEAD's steps had ended on these episodes (within: 23 of 23 succeeded; at its
+  0.45 m bound: 16 of 19; blocked: 9 of 13) -- so the check is not independent of the design. And nothing here
+  says what the criterion does on HM3D or Gibson.
+
+#### The defaults, after the check
+
+- **MP3D: `euclidean` 0.9 m.** The arm with the highest SR is also the one with the highest SPL -- 82.2 % / 0.354
+  against 80.6 % / 0.352 and 80.6 % / 0.350 for the two nearest arms and 78.9 % / 0.346 for `f257a0ce` -- so the
+  tie-break asked for (where the SR difference is not significant, the better SPL) decides nothing here. It is
+  what `mp3d/protocol.py` states and `habitat/entrypoint.py::method_defaults` hands the policy: built with no
+  `--policy-config`, the MP3D settings equal that arm's recorded settings in all 228 fields (one of them under
+  its new name). The rest of that arm is the default with it: the retry at the body radius (0.18 m), the blind
+  verification steps as at `f257a0ce`, no frontal standoff.
+- **HM3D: `planar` 0.9 m** (`hm3d/protocol.py`, v1 and v2) -- its own definition's measure, the same margin.
+  Between the two planar arms the SR difference is not significant (5 won, none lost, p = 0.06) and 0.9 m has
+  the better SPL (0.350 against 0.341); that was measured on MP3D, and HM3D itself has only been smoke-run
+  (below). **Gibson: `planar` 0.9 m**, not run.
+- **The core's own default stays "no criterion"** (`TargetClosingSettings.stop_within_m = 0`): a success zone is
+  a benchmark's, so the distance lives in the adapters, and every HM3D, MP3D and Gibson entry point builds its
+  policy through one (`hm3d/run.py`, `mp3d/run.py`, `gibson/run.py`: the three callers of `build_policy`).
+- **Run on the defaults, end to end, on the tree as committed** (CPU, the stand-in, snapshot `stop_20261116_h`).
+  MP3D: the twelve control episodes are the adapter arm's trajectories, twelve of twelve (`h_final_check`).
+  HM3D, through `hm3d.run` with the criterion for the first time: the first eight published v1 episodes of two
+  scenes (`h_hm3d_smoke`) -- no agent error; 9 STOPs, all 9 successes, each 0.01-0.06 m from the nearest view
+  point; seven were decided 0.93-1.05 m out in the plane and walked one step each, to 0.68-0.90 m; two were
+  decided inside the distance and took none. Sixteen episodes say that the path works, not what it is worth.
+  Both benchmarks' preflights pass with the launchers' own arguments. The launchers themselves were not started
+  (they load the model on the GPU): `bash -n` and `--help` only.
+
+#### Cleaned up before the commit (no behaviour changed; the controls above ran after it)
+
+- `gibson/run.py` reads the one `STOP_MARGIN_M` of `habitat/goal_zone.py` instead of a copy of its own, and
+  the adapters' defaults are asserted in `tests/test_goal_zone.py` alone (they were repeated in
+  `tests/test_target_closing.py`).
+- `NodeOraclePrompt` refuses a system prompt that does not ask for every key the oracle's parser reads
+  (`REPLY_KEYS`, which only the tests had read).
+- The check's tools are cut by responsibility: `mp3d/ram_gate.py` holds the RAM start gate (`RamGate`, with its
+  own tests) and `mp3d/cpu_stub_campaign.py` the launcher (`build_parser`, `selected_ids`, `main`); the probe's
+  scenarios moved out of its runner into `tests/probe_node_oracle_scenarios.py`.
+- Two long functions split: `TargetClosing._stop_approach_end` (why the walk ends) out of
+  `_stop_approach_step`, `policy_factory.oracle_model_record` out of `build_policy`.
+- `mp3d/stuck_report.py` lost the row of the withdrawn blind-step fix's counter and its two assigned lambdas.
+- Stale words corrected: `mp3d/run.py::_method`'s docstring (the entry point does hand the method the success
+  zone) and the runtime README's description of the probe.
+- **In the commit, deliberately:** the paired check's harness (`stub_llm.py`, `mp3d/cpu_stub_campaign.py`,
+  `mp3d/ram_gate.py`, `mp3d/stuck_report.py`, with tests) -- the check that the READMEs, this file and the paper
+  cite is run with it, and `LESSONS.md` 2026-11-16 records what its absence from the repository cost. **Not in
+  it:** the rows (`runs/`, ignored), the code snapshots (outside the repository), and the per-arm policy
+  configs, id lists and analysis scripts of the day's scratch work.
+
+#### Tests
+
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest sparx_agency/core` (the three torch-importing files
+  ignored): **3,916 passed, 2 skipped** (this morning 3,906 / 2). `objnav_benchmark` and
+  `objnav_benchmark_runtime`: **1,851 passed, 1 skipped** (this morning 1,834 / 1). New:
+  `core/.../tests/test_stop_criterion.py` (the two measures), `tests/test_goal_zone.py` (each adapter's zone; the
+  margin's argument checked on the geometry for boxes at any height and grids at any offset; Gibson's radius),
+  `tests/test_launcher_defaults.py` (the launcher's model defaults, in a clean environment),
+  `tests/test_ram_gate.py` (the start gate, moved out of the launcher's tests), and in
+  `tests/test_target_closing.py` the walk to the stop distance: its start, its measure, every way it ends, the
+  action budget, the record. Rewritten: the retry-clearance tests (the body radius by default, 0.20 m as a
+  setting), the entry point's defaults, the stuck report's rows. Removed: the four tests of the blind-step fix.
+- Every edited file under `core/` parses as Python 3.8 (`stop_criterion.py` is standard library only), pyflakes
+  reports nothing that `f257a0ce` did not, and `docs/paper/sync_prompts.py --check` passes (the prompts were not
+  touched).
+
+### Changed (2026-11-16, before the long run: the oracle's prompt leaves the judgement to the model, the closing loses its evaluator-shaped rules, the stair nodes are deleted, and four faults are fixed)
+
+Seven items asked for in one task, each with its tests; the paper (`docs/paper/zson_paper.tex`) describes the
+method as it now is and says, in its section 5.6, that the reported numbers predate all of it. Ground-truth
+perception and the depth filter were not touched. Nothing here was run on a benchmark with a real model: what was
+measured is a 180-episode paired check with a stand-in for the language model (items 2, 4 and 6, each isolated in
+an arm of its own) and a probe of the prompt on hand-written scenarios (item 1). **In that check every one of the
+three items lowers the success rate: 78.9 % before, 74.4 % without the evaluator-shaped rules, 73.3 % with the
+blind-step fix, 71.1 % with the 0.20 m retry clearance** -- and refused forward steps fall from 7.95 to 5.92 an
+episode. Only the first step is significant at n = 180; the numbers are in the last section.
+
+**Revised the same evening (the entry above), and where the two disagree about the tree the entry above is
+right:** the STOP on the deciding frame of item 2 became a stop criterion each benchmark's adapter states from
+its own success definition; the blind-step fix of item 4 and the 0.20 m retry clearance of item 6 were withdrawn
+(the code is as it was before them); and the launcher's oracle model became the 3B. Items 1, 3, 5 and 7 stand as
+written. Sections 2, 4 and 6 and the check are kept as they were measured, because the later decisions rest on
+them.
+
+#### 1. The node oracle's prompt: the model's own knowledge, and none of ours
+
+- **The principle.** The system prompt tells the model to use its own reasoning and its own knowledge of standard
+  homes and buildings -- how they are laid out, in which rooms furniture and objects of each kind are normally
+  found -- and to derive every probability from that. It holds no category knowledge and no rule of judgement: no
+  room named for any object, no probability, band or typical value, no list of a benchmark's goal categories, no
+  count of rooms a home has, no "coverage first, time second", no rule on what an exit is worth or how the budget
+  weighs, no worked example. What it does hold is what a model cannot know: what a node is, what each field of a
+  line measures and how it was obtained, what the reply looks like, that the numbers are independent, and that
+  travel is the planner's. The one object a model sees named is the target of the episode, on the `TARGET:` line
+  of every query. The default version, `facts-qwen2.5-3b-v1`, is 3,471 characters and is written for the 3B this
+  laptop runs: what a small model would have to infer is SAID, as a fact -- a node is a room together with the
+  unseen space its exits open onto; a detector looks for the target in every frame and has not found it on the
+  floor a line lists as covered; the number is the probability that the target is in the part of the node not
+  checked yet; `unknown` may be any kind; what 0 and 100 mean -- and the question is restated, with the target's
+  name, as the last line of every query. That last definition (the part not checked yet) is the one place where
+  the prompt goes a step past "what a field measures": it says what the number is about, not how to get it.
+- **What it replaced.** 14,751 characters: the typical rooms of a toilet, a bed, a sofa, a television, a chair and
+  a potted plant (the six HM3D goal categories; 13 of MP3D's 21 had none), the rooms and room sizes of a typical
+  home, a band of numbers for every room status ("0-2", "30 or more", "60 or more", "at most HALF"), the rules
+  COVERAGE FIRST / TIME IS SECONDARY / EXITS / SPREAD, a worked toilet example with numbers, and "NEVER use ...
+  here=yes as a reason". Saved verbatim beside the new one in `runs/prompt_side_by_side_20261116.md` (not
+  tracked).
+- **Division of labour.** The model gives one probability per node. Distance, and the weighing of distance
+  against the probabilities, is RPT*'s: the prompt carries no distance, no position and no word on where the robot
+  stands -- `here=yes` is no longer rendered (`SearchNode.here` is kept for the record), and how long ago the robot
+  left a room is read for the status word alone.
+- **The room line carries everything the scene graph stores about the room, except where it is.** New on it:
+  the objects with their counts, the most numerous first (`seen: chair x4, table`; a cut list says so, `+3 more`);
+  the types of the rooms a door or a walked threshold joins it to (`connected to: bedroom x2, hallway`,
+  `ObservedSceneGraph.connections()`, the graph's own edges); the length of boundary still open to unseen space
+  (`open edge 2m`); effort in actions, the unit of the HOUSE line's budget (`searched=40 actions`,
+  `scanned(full rotation, 120 actions ago)`, in the same coarse steps as before, so an unchanged map is an
+  unchanged prompt); and `target: detected here, not reached` on a room whose confirmed objects include one of the
+  target's own kind (`SearchNode.target_seen`, from `TargetLabels.accept_labels`) -- which is what lets the prompt
+  say that the covered floor was looked at without finding it. Left off, and why: the room's centroid, the lines
+  its walls stand on and the agent's distance to each (position is distance), the classifier's confidence (the `?`
+  is its reading), elongation (the two dimensions are there), the previous round's numbers, and bookkeeping ids.
+- **"Final" was a promise the code cannot keep; the words were changed, not the rule.** `size=12m2 (4x3m, all
+  walls seen)` was explained as "FINAL -- the room is that big and no bigger". Of 252 rooms so declared in 40 HM3D
+  recordings, 73 were over a quarter bigger by the end of the episode. Of the 233 growths behind that, 178 were the
+  partition merging two rooms and 51 a cut between two rooms moving -- floor that was mapped, and listed under the
+  neighbouring node, all along -- 1 a fragment and 3 a side read as located that was not. What the extents know is
+  that no side of the room, as the partition draws it now, opens onto unmapped space; they cannot know that the
+  watershed will not join it to its neighbour. So the line reads `all sides mapped` / `1 of 4 sides not mapped
+  yet`, and the prompt says "though the map's division into rooms may still be revised". The alternative --
+  withholding the verdict wherever a side is a cut rather than a wall -- would have told the model that mapped
+  floor is unmapped, to guard against a merge the map does not show coming. `room_extent.FINAL` keeps its name
+  (recordings and `room_extent_replay.py` carry it) with a docstring saying what it does not promise.
+- **The multi-storey supplement is gone** (`STAIRS_SUPPLEMENT`, the STAIRS node kind, the storey lines of the
+  user prompt, the `home_here` verdict and `LoopSettings.unexplored_elsewhere` that read it): the search is
+  single-storey (item 7). The openings supplement, for the deprecated exits-as-nodes mode, is cut to what an
+  OPENING line means.
+- **The reply format is unchanged** -- `{"home","house","stage","pass","nodes":[{"id","why","p"}]}` -- and so is
+  the parser. The schema-repair note no longer shows the shape filled in (`"id":0 ... "p":50` put a number in
+  front of a model that had just failed to produce its own): every value is a placeholder.
+- **Prompt versions, and the run record** (`core/mapping/topology/search_node_prompts.py`, new). A wording is
+  read by one model and may be misread by the next, so a wording is a named *version* (`NodeOraclePrompt`: system
+  prompt, openings supplement, user frame, `tuned_on`), written against one model and probed on it. A run selects
+  one by name (`LoopSettings.oracle_prompt`, policy config `{"room_search": {"oracle_prompt": "<name>"}}`; an
+  unregistered name is refused at start-up) and its record carries
+  `node_oracle.prompt = {version, tuned_on, sha256, system_chars}` and, from the benchmark factory,
+  `node_oracle.model = {name, digest, prompt_tuned_on_it}` -- the model that answered and whether it is the one
+  the version was tuned on (a mismatch is also said once at start-up). `tests/test_search_node_prompts.py` holds
+  EVERY registered version to the contract above, so a version added for the PC's model cannot slip a rule or a
+  room name past it. The module docstring is the four-step procedure for adding one. One version exists,
+  `facts-qwen2.5-3b-v1`; a run on another model uses it and says so (`prompt_tuned_on_it: false`) until that
+  model has its own. No launcher default was changed here: `benchmark_services.sh` and `LLMConfig.from_env`
+  defaulted `LLM_REASONING_MODEL` to `qwen2.5:14b-instruct`, so a laptop run set
+  `LLM_REASONING_MODEL=qwen2.5:3b-instruct` (as `mp3d/run_single_storey.sh` already does). (The launcher's
+  default became the 3B that evening: entry above.)
+- **Probed on the model this laptop runs** (`qwen2.5:3b-instruct`, CPU only, temperature 0, one call per
+  scenario; `tests/probe_node_oracle.py`, rewritten: `--prompt <version>`, `--set P|O|PO`, `--only`, `--repair`).
+  Nineteen hand-written scenarios, each with one ordinal claim a reasoner who knows homes would not get wrong
+  (never shown to the model): `P`, twelve as a run sends them by default, and `O`, the first probe's seven. Claims
+  held at the model's own numbers / replies usable / claims held after the loop's rescaling:
+
+  | wording | system prompt | `P` (12) | `O` (7) | a call |
+  |---|---|---|---|---|
+  | before today (rules and priors) | 14,751 chars | 8 / 12 / 10 | 5 / 7 / 6 | 91-130 s |
+  | the first facts-only wording (this morning, not registered) | 2,955 chars | 3 / 11 / 6 | 2 / 6 / 5 | 54-63 s |
+  | `facts-qwen2.5-3b-v1` | 3,471 chars | 5 / 12 / 10 | 4 / 7 / 6 | 50-56 s |
+
+  So on the 3B the facts-only prompt holds fewer claims at the model's own numbers than the prompt of rules did
+  (9 of 19 against 13) and as many after the loop's rescaling (16 of 19 each); every reply is usable and no
+  never-entered room is put at 0 (the first wording did that in 4 of 19 queries). The 3B's own knowledge of
+  where things are is mostly sound ("beds are typically found in bedrooms") and sometimes wrong (a toilet
+  "typically found in bathrooms or kitchens"); what it does not do is combine fields. The two scenarios that
+  ask what coverage without a detection means (a room of the fitting type covered whole against a barely seen
+  room of another type) were held by the old prompt, which stated the rule, and by none of the facts-only
+  wordings tried -- the loop's discount of an entered room carries both. What helped and what did not (a
+  negation on every line, explaining the detected-target note, `left=` as its own field, an `unchecked=`
+  framing, a scaffold in the readings, a shorter legend) is in `core/mapping/topology/README.md`. Nineteen
+  scenarios, one call each, a model that one sentence moves by three scenarios and that Ollama does not answer
+  bit-identically twice: one or two claims of difference are noise. On `qwen2.5:14b-instruct` the first
+  facts-only wording held 5 of the 7 `O` claims (CPU, one run, before the instruction to stay on the 3B); no
+  version has been tuned on it.
+- **Not changed, and to be decided:** the code still rescales the model's numbers by exploration state (a
+  never-entered room x1.5 and at least 0.15; an entered one x0.5 with a 20-action half-life, at most 0.2 after 20
+  actions with one frontier left; under 0.05 not offered) and offers a target-landmark node at a fixed 0.85. These
+  were hand-set under the old prompt, which stated the same rules to the model; the new prompt states none, so
+  they are now the one hand-set adjustment between the model's number and RPT* -- and the model is shown the
+  evidence they act on, so it may be counted twice. The room labeller's prompt and its fixed set of room types
+  were not touched either.
+
+#### 2. Rules shaped by the evaluator: two removed, one kept with its reason
+
+*(Revised that evening: the STOP on the deciding frame described here cost eight successes, and it was replaced
+by a stop criterion derived from each dataset's own success zone -- which also answers the "Open" point at the
+end of this section. The frontal standoff stays removed. Entry above.)*
+
+- **Removed: every step after a decided STOP** (`stop_overshoot_*`, `elevation_overshoot`, the `ADVANCE` phase
+  and the entrypoint's switch). The planar overshoot walked one or two
+  steps toward the object because a near-edge reading is short of the footprint Gibson's evaluator measures to,
+  and `habitat/entrypoint.py::method_defaults` switched it off when the evaluator scores view points: a rule
+  switched by which evaluator scores the run. The raised-target variant (2026-11-10) took up to three steps under a
+  picture or a wall cabinet "because its view points stand closer", with its reach and its bounds sized on MP3D's
+  validation view points. `method_defaults` now hands the method the agent's body and nothing else, and the
+  closing issues its STOP on the frame that decides it: a fresh, complete box of the target within 1 m, the task
+  definition's own distance.
+- **Removed: the frontal standoff of raised planar targets** (`frontal_standoff`, `perception/face_normal.py`
+  and its tests, the normal carried through `projection.py` and `target_path.py`): a plane fitted to the target's
+  depth pixels, standoffs tried about its normal first, an in-range STOP from beside it deferred -- "no view point
+  is" beside a picture, sized on the view points of the set's 78 pictures. The standoff ring starts from the
+  agent's own bearing to the target, as before 2026-11-10.
+- **Kept: the reach of the storey over steps** (`SpawnFloorGuard.step_reach_m`, `step_surface_band_m`), with the
+  reason now stated in the code and the paper, and it is the agent's own: a step is support the body can walk
+  onto (risers of at most `max_step_m` with head room); from a storey walked level, support further off the plane
+  than the atlas's `departure_m` (0.45 m) is where the agent's own storey tracking reads it as leaving and walks
+  it back; from a provisional spawn storey the whole band (0.8 m) stays under the least separation of two storeys
+  (1.5 m). The 2026-10-31 look at validation shortest paths on the navmesh confirmed the 0.45 m bound and is not
+  its reason; the paper lists it under development on evaluation data. The 0.8 m band is a hand-set value inside
+  those limits and was also looked at against validation goals; it is left and flagged.
+- **A policy config that still names a removed setting is refused** (`TypeError`), never silently ignored:
+  `mp3d/sets/policy_fix_closing.json` is deleted and the other four configs lost their `target_closing` block.
+- **What the removal costs, measured** (arm A2 of the check below: the last commit with the rules, both switched
+  off, against the same commit with them on): SR 0.789 -> 0.744 (8 lost, 0 won, exact McNemar p = 0.008), SPL
+  0.346 -> 0.332. Every loss is a STOP with the target in view and within 1 m in the plane, 0.11-0.42 m from
+  the nearest view point (success needs under 0.1 m): five pictures, a cabinet, a sink, a chair. Seven of the
+  eight had taken the raised target's steps (which acted in 54 episodes: 48 successes with them, 41 without),
+  one the frontal standoff (14 episodes: 8 and 5). The 123 episodes in which neither rule had acted are
+  identical in the two arms, step for step. **Open:** the task definition's distance is Euclidean ("within 1.0m Euclidean distance from any instance
+  of the target object category AND the object can be viewed by an oracle from that stopping position"), and the
+  closing measures its 1 m in the plane -- for a raised target the two differ. Deciding the STOP on a 3-D distance
+  would be a statement about the task and not about an evaluator; it was not done here (the removed rule was not
+  that: under a target more than about 0.9 m up its test could never pass and its three-step bound decided).
+
+#### 3. `ground_truth_semantics` in the run record
+
+- `configuration()["ground_truth_semantics"]` was the constant `False`, in a `--perception ground-truth` run too.
+  It is now read from what the perception services declare (`interfaces.ground_truth_semantics(detector,
+  segmenter)`: only the literal `True` of a `ground_truth_semantics` attribute counts, so a test double that
+  answers every attribute declares nothing). `GroundTruthDetector` and `GroundTruthSegmenter` declare it; the
+  policy and the FALCON+YOLO baseline record it. The method never branches on it. (The two declarations are the
+  only lines changed under `ground_truth/`.)
+
+#### 4. The blind verification-step loop
+
+*(The fix below was withdrawn that evening, to be handled on its own: `_glimpse_stalled` and `glimpse_stalls` are
+not in the tree, and the loop is a known, open fault. What it measured stands. Entry above.)*
+
+- **Cause.** A box of the target's class with no usable depth (a *glimpse*) cannot be placed, so the verification
+  steps along its bearing to get a depth. A step that would collide is refused whole and changes neither the pose
+  nor the frame: the next action saw the same box and asked for the same step. The verification's 12-action
+  budget did not bound it, because its clock pauses while the candidate is in view, which allowed about 36
+  actions a verification. Five of the 180 episodes of the check took 36 to 70 such steps; three of them did so
+  with the navmesh still in the closing.
+- **Fix.** The first refused step ends it (`TargetClosing._glimpse_stalled`, counter `glimpse_stalls`): the
+  glimpse goes to the pursuit, which plans a route on the map instead of a bearing; the spot is remembered as
+  boxed in; the verification releases with no rejection (the candidate was not disproved). The bearing approach
+  is unchanged -- it was never such a loop (it gives up after three steps that went nowhere). Cutting it to one
+  refused step as well was tried and withdrawn: nobody had asked, and on the 180 episodes it changed 33
+  trajectories (one success won, two lost) to save 139 refused steps.
+- **Measured alone** (arm A24 below against A2): exactly the five episodes change. Blind verification steps
+  314 -> 46 in all, refused forward steps 1,417 -> 1,223, no episode with twenty blind steps left. Three of the
+  five still succeed (128, 89 and 80 steps where they took 205, 82 and 116); the other two had ended well after
+  their 70 refused steps and are lost at the step limit (2azQ1b91cZZ/000108 keeps returning to a cushion it
+  cannot reach: nine pursuits, ninety escape probes; QUCTc6BB5sX/000057 walks off after remembered targets and
+  never sees its towel again). SR 74.4 % -> 73.3 % (0 won, 2 lost, exact McNemar p = 0.5).
+- **Not fixed, and next in line:** what refused steps remain are other mechanisms. In the final arm twelve
+  episodes have twenty or more refused steps (524 of the 1,066), nine of them in Z6MFQCViBuw; the fallback's
+  escape probe runs twenty times or more in eight episodes (eleven before today) and 210 times in one.
+
+#### 5. Failing tests
+
+- **`test_monitor.py::test_finished_is_judged_by_the_pid...`: the bug was in the code.** `exit_code()` compared
+  the code file's `st_mtime` with a wall-clock `since`; a file is stamped from the kernel's coarse clock, up to a
+  timer tick behind `time.time()` (1.15 ms measured), so a code written just after `since` read as older and was
+  ignored -- a run that failed with a code was reported as "killed (no exit code recorded)", and a monitor started
+  without a PID never saw it end. `Monitor` now takes its fallback start from a stamp of the run's own directory
+  (`file_clock_now`) and `exit_code()` allows a wall-clock `since` `STAMP_LAG_S` (20 ms). The failing test passes
+  unmodified; two new tests pin the race. Not fixed: a PID reused after a reboot reads as alive.
+- **`test_potential_mapper.py` (8 failing): one bug in the code, seven stale tests.** The code: OpenCV 5 returns
+  `HoughLinesP` as `(N, 4)` where 4.x returned `(N, 1, 4)`, so `lines.squeeze(axis=1)` raised inside every
+  `update()` that found a wall -- now `reshape(-1, 4)`, right under both. The tests: six called `step()`, removed
+  on 2026-03-16 (`9d5de68c`) -- now `update(_backproject(...))`; two of those also asserted the pre-NaN contract of
+  unobserved cells; and `test_target_navigation` was stale in its frame (the robot at the bottom centre), its law
+  and its laziness (the fields are computed in `update()`). A `def` line lost in an earlier edit is restored
+  (19 -> 20 tests). `zeta` is an unused knob and the constructor prints a debug line; both left.
+
+#### 6. Standing-point clearance: 0.25 m, then 0.20 m
+
+*(Decided that evening on the measurement below: the retry clearance is the body radius, 0.18 m, by default --
+`standing_retry_clearance_m: None` -- and 0.20 m is a setting. The retry planner of the closing's own stays.
+Entry above.)*
+
+- The closing's standing points are planned at the default 0.25 m from every observed obstacle and, only when no
+  route is found, at 0.20 m (`target_closing.standing_retry_clearance_m`, `policy.standing_retry_planner`) -- no
+  longer at the body radius (0.18 m), where the squeeze planner took them until now. On the 0.1 m grid the nearest
+  obstacle cell is then at least 0.283 m and 0.224 m from the agent's cell. The counter is `retry_standoffs`
+  (`squeezed_standoffs` in rows recorded before; `stuck_report` reads either). The fallback's and the room
+  entries' squeeze planner is untouched.
+- **How "0.20 m" was read, and what it is on the grid.** The planner blocks a cell whose clearance is at most
+  its inflation, for 0.25 m and for 0.20 m alike, so the retry keeps MORE than 0.20 m: the nearest obstacle cell
+  centre is 0.224 m away, one cell class further than the 0.200 m the body-radius squeeze allowed. Read
+  inclusively ("0.20 m is enough") the retry would be the old squeeze exactly and item 6 would change nothing.
+- **Measured alone** (after against A24): 42 episodes change. Standing points reached at the relaxed clearance
+  92 -> 52; releases for want of a route 29 -> 49; refused forward steps 1,223 -> 1,066 (in the 42 episodes:
+  13.2 -> 9.5 an episode); SR 73.3 % -> 71.1 % (2 won, 6 lost, exact McNemar p = 0.29), SPL 0.325 -> 0.322. Three
+  of the six lost are STOPs on the target, 0.10-0.34 m from the nearest view point; three run to the step
+  limit, two of them after releases with "no safe path from here" (one spends 210 actions in the fallback's
+  escape probe). The margin costs success here and buys fewer refused steps; whether that is the right trade is
+  the user's call, and `{"target_closing": {"standing_retry_clearance_m": 0.18}}` in a policy config gives the
+  old behaviour back.
+
+#### 7. Stair nodes deleted
+
+- Dormant since 2026-11-15 (no stair source says where a flight leads): `rooms/stair_nodes.py`,
+  `multifloor/stair_approach.py`, `tests/test_stair_nodes.py`; the loop's stair paths; `MultiFloorSearch.commit`,
+  `portal_by_id`, `way_back_held`, the `stairs_taken` callback; `MultiFloorParams.floor_change_cost_m` and
+  `arrival_grace_actions`; the oracle's STAIRS node and supplement (item 1); the stair rows of the search panel,
+  the snapshot and the recording. `graph.stair_probs` is `extra_probs` (the deprecated opening nodes still use
+  it). With traversal allowed a floor change is the building coordinator's allowance rule, as before stair nodes
+  existed. It is all in the history at `f257a0ce` for the multi-storey work.
+- Removing settings and parameters changes the frozen configuration: `--resume` refuses a campaign recorded
+  before today, and a config naming `stairs_as_nodes`, `unexplored_elsewhere`, `floor_change_cost_m`,
+  `arrival_grace_actions` or a removed closing setting raises.
+
+#### The check, and its harness
+
+- **In the repository now:** `objnav_benchmark_runtime/stub_llm.py` (the stand-in for the language model: every
+  room `living_room` at 0.8, the nodes of an oracle prompt an equal share of 90 %; it keys on the node ids alone,
+  so the prompt's wording does not change an arm), `mp3d/cpu_stub_campaign.py` (one process per scene on Mesa's
+  llvmpipe, started against free RAM: `shard_pool.run_pool` with the first-fit `RamGate` of `mp3d/ram_gate.py`,
+  for which `run_pool` gained a `choose(pending)` hook), `mp3d/stuck_report.py` (the paired stuck-indicator table and the
+  identical-trajectory count), with tests. Yesterday's check had been run from a scratch folder; the launcher
+  was rebuilt and, on the tree yesterday's second arm ran, reproduced its stored rows (33 of 33 trajectories on
+  two scenes) -- so that stored arm is today's "before". A first "before" arm run with a differently written
+  stand-in was discarded (16 of its 92 episodes were other trajectories).
+- **Four arms on the 180 episodes of `sets/single_storey_flat_v1.json`** (ground-truth perception, the frontier
+  explorer, seed 17, CPU rendering, the stand-in LLM), each differing from the one before it in one item:
+  *before* = `f257a0ce` (the stored arm); *A2* = `f257a0ce` with the raised target's steps and the frontal
+  standoff switched off (item 2); *A24* = this tree with the retry clearance set back to 0.18 m (plus item 4, and
+  items 3 and 7 and the prompt, which must not move anything); *after* = this tree (plus item 6).
+
+  | per episode | before | A2 | A24 | after |
+  |---|---|---|---|---|
+  | success rate (successes of 180) | 78.9 % (142) | 74.4 % (134) | 73.3 % (132) | 71.1 % (128) |
+  | SPL | 0.346 | 0.332 | 0.325 | 0.322 |
+  | steps | 196.8 | 196.0 | 197.8 | 195.9 |
+  | refused forward steps (in all) | 7.95 (1,431) | 7.87 (1,417) | 6.79 (1,223) | 5.92 (1,066) |
+  | blind verification steps, in all | 314 | 314 | 46 | 41 |
+  | standing points at the relaxed clearance, in all | 89 | 89 | 92 | 52 |
+  | releases for want of a route, in all | 25 | 25 | 29 | 49 |
+  | episodes ended without a STOP | 22 | 22 | 24 | 25 |
+  | against the arm before it: won / lost (exact McNemar p) | -- | 0 / 8 (0.008) | 0 / 2 (0.5) | 2 / 6 (0.29) |
+  | trajectories identical to the arm before it | -- | 124 | 175 | 138 |
+
+  Before to after: 1 won, 15 lost (p = 0.001), 94 trajectories identical. SoftSPL barely moves (38.5, 38.9, 38.7 %
+  for before, A2, after): the agent gets as near as it did, and what is lost is lost at the STOP -- failed STOPs
+  within 1 m of the goal go 14 -> 22 -> 25.
+- **Why the pairing can be trusted.** The pipeline is deterministic under the stand-in, so an episode in which a
+  change never acted is the same trajectory in both arms: the 123 episodes of A2 in which neither removed rule
+  had acted; A24's 175 (the five that differ are the five with a blind step ended at a refusal, and nothing else
+  in today's change -- the stair-node deletion, the record, the prompt, the refactoring -- moved one episode);
+  12 of 12 control episodes run again under A24; 27 of 27 run again under the final tree. `stuck_report` counts
+  the identical trajectories with every table, and its signature now includes where the episode ended (two
+  arms once took the same 21 actions over the same 1.5 m and ended 5 cm apart).
+- **How the last two arms were put together, said plainly.** *after* was first run with the bearing approach cut
+  (item 4, above); when that was withdrawn, the 81 episodes that had started a bearing approach were run again
+  on the final tree, with 27 controls, and replace their first rows. A24 was run on the 45 episodes in which
+  *after* differs from A2, with 12 controls; in the other 135 neither item 4 nor item 6 acted, so A24 is A2
+  there. The arms run from snapshots taken during the day carry the prompt version's name with the digest of a
+  draft wording; the stand-in never reads the system prompt, and no model has been asked under that draft in a
+  run. The rows are under `runs/cpu_ab_20261116/` (not tracked): `a2_head_item2_off`, `a24_retry018{,_quc}`,
+  `after`, `after_c`, `after_c_quc`; a later root given to `stuck_report` or `single_storey_report` overrides an
+  earlier one (`after=runs/.../after,runs/.../after_c,runs/.../after_c_quc`).
+- **What this check is not.** Ground-truth perception, a stand-in for the language model that gives every node
+  the same share, software rendering, one seed, 180 episodes of eight scenes that the rules now removed were
+  partly sized on. Only its paired differences carry meaning, and of the three steps only the first is
+  significant.
+
+#### Tests
+
+*(The counts at the end of the day are in the entry above; these are the counts of this state.)*
+
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest sparx_agency/core` (the three torch-importing files
+  ignored): **3,906 passed, 2 skipped** (before: 3,883 passed, 8 failed -- the eight of `test_potential_mapper.py`,
+  which `CLAUDE.md` still lists as known-red). `objnav_benchmark` and `objnav_benchmark_runtime`: **1,834 passed,
+  1 skipped** (before: 1,840 passed, 1 failed -- the monitor test). The counts moved with what was deleted
+  (`test_stair_nodes.py`, `test_face_normal.py`, the tests of the overshoot and the frontal standoff) and what was
+  added (the prompt versions, the oracle's line, the stand-in, the launcher, the stuck report, the refused blind
+  step, the retry planner, the run record, the monitor's clock). `test_monitor.py` 25 times over: no failure.
+  Every edited file under `core/` parses as Python 3.8, and pyflakes reports nothing the change introduced.
+- **Outside those suites, untouched and unchanged:** `tasks/mapping/scene_graph` 344 passed, 1 failed, as at
+  `f257a0ce` (`test_llmdet.py::test_persistent_false_hypothesis_can_still_pass_existing_stop_gate`);
+  `tasks/planning/routing_benchmark` and `tools/` pass. A blanket run over `tasks/`, `robots/` and `tools/` met
+  two more failures that `f257a0ce` has as well (`launch_params/tests/test_discovery_and_store.py::
+  test_the_real_mission_sources_layer_the_way_the_script_reads_them`, `yolo_world_trt/tests/
+  test_hardware_policy.py::test_backbone_uses_dla_on_orin_and_is_static`) and then hung in
+  `falcon_pegasus/link/tests/test_socket_link.py::test_a_message_arrives_intact`, where it was stopped: the
+  tests after that point (about a third) were not run. The first of these exercises the object-search policy
+  and fails on the same line before and after (the policy STOPs one frame earlier than the test expects); the
+  other three read nothing this change touches.
+
 ### Added (2026-11-16, room size and coverage for the node oracle, read off the agent's own occupancy map: the room extents of `feat/objnav-room-extents-nadav`, ported by hand)
 - **What came over, and how.** The room extents were written on 2026-11-11 on `feat/objnav-room-extents-nadav`
   (`6739f3d3`, `acb837bd`, `991e9be8`), which forked from this branch at `0dd7d39c` -- before `room_priors.py` and the

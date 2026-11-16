@@ -175,7 +175,11 @@ def run_pool(jobs, *, cap, gate, on_exit=None, heartbeat=None, heartbeat_s=300.0
     Args:
         jobs: ``[PoolJob]`` in start order.
         cap: ``() -> int``, re-read every poll; 0 with nothing running drains the pool.
-        gate: Has ``ready() -> bool``, ``started()`` and ``last_reason`` (:class:`VramGate`).
+        gate: Has ``ready() -> bool``, ``started()`` and ``last_reason`` (:class:`VramGate`): the
+            head of the queue starts when the gate is ready. A gate that also has
+            ``choose(pending) -> index or None`` picks WHICH pending job starts instead -- the first
+            that fits, for jobs of unequal size (``ram_gate.RamGate``); ``started()`` is
+            called after it either way.
         on_exit: ``(job, returncode)``, called as each process ends.
         heartbeat: ``(running, pending)``, called every ``heartbeat_s``.
         popen: Must behave like ``subprocess.Popen``.
@@ -226,8 +230,10 @@ def run_pool(jobs, *, cap, gate, on_exit=None, heartbeat=None, heartbeat_s=300.0
                 log("[pool] drained (cap 0): %d job(s) not started" % len(pending))
                 break
             if pending and len(running) < limit:
-                if gate.ready():
-                    job = pending.pop(0)
+                choose = getattr(gate, "choose", None)
+                index = choose(pending) if choose is not None else (0 if gate.ready() else None)
+                if index is not None:
+                    job = pending.pop(index)
                     job.log_path.parent.mkdir(parents=True, exist_ok=True)
                     stream = open(str(job.log_path), "a")
                     options = {"start_new_session": True} if stall_s > 0 else {}

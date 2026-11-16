@@ -384,8 +384,8 @@ class FloorPanels:
             name = ("T%d" % int(opening["landmark_id"]) if landmark and opening.get("landmark_id") is not None
                     else "O%d" % index)
             cls._label(canvas, name, at, color, placed)
-        nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("stairs", ()))
-                 + list(search.get("openings", ())) if n.get("centroid")}
+        nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("openings", ()))
+                 if n.get("centroid")}
         for key, color in (("room_in_force", (40, 170, 235)), ("next_room", (75, 160, 75))):
             node = nodes.get(search.get(key))
             if node is not None:

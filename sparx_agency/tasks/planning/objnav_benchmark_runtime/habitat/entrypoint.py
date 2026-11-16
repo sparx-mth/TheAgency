@@ -19,6 +19,7 @@ import subprocess
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.goal_zone import stop_criterion
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 
@@ -53,39 +54,36 @@ RUNTIME_PACKAGES = (
     ("quaternion", "numpy-quaternion"), ("habitat_sim", "habitat-sim"),
 )
 
-#: The scoring rule under which the STOP is taken on the deciding frame (``method_defaults``).
-DISTANCE_TO_VIEW_POINTS = "view_points"
-
-
 def method_defaults(protocol):
     """The ``RPTSettings`` fields a Habitat entrypoint sets below ``--policy-config``: the benchmark's own facts.
 
-    The agent -- body height and radius -- and what its evaluator measures to.
-    The closing's STOP overshoot (``TargetClosingSettings.stop_overshoot_*``)
-    walks the margin between a near-edge reading and Gibson's FOOTPRINT
-    evaluator; habitat-lab's ObjectNav (HM3D and MP3D alike) scores the
-    geodesic distance to the goal's VIEW POINTS -- navigable spots within a
-    metre of the object from which it is seen -- with a 0.1 m success radius
-    (``protocol.distance_to``), so a decided STOP already stands on them and
-    a step nearer the object can leave them. On the 70 recorded HM3D STOPs of
-    2026-10-28 to 2026-11-05 the step never brought a frame from outside
-    0.1 m to inside it, moved the agent farther from the view points in 18
-    (by 2-14 cm) and nearer in 2, and walked 00891-cvZr5TUy5C5/000006 from
-    0.02 m to 0.16 m against the toilet: a success into a failure. Under a
-    view-point evaluator the planar overshoot is off and the STOP is taken on
-    the deciding frame. A RAISED target keeps its own steps
-    (``stop_overshoot_elevated_max_steps``, the MP3D finding of 2026-11-10:
-    the view points of a wall cabinet or a picture stand closer, 0.84 m
-    against 1.02 m), which ``TargetClosing._terminal`` reads apart. Every
-    other method knob (clearance, stop distance, closing, peeks, ...) is
-    ``RPTSettings``' default here exactly as it is on Gibson; nothing here
-    came from a validation score.
+    Two of them, both published by the benchmark and neither a score:
+
+    * **the agent's body** -- the height and radius the protocol gives it;
+    * **the success zone** -- how near a goal object a STOP must be taken,
+      and by which measure, as the dataset's generator defined it
+      (``protocol.goal_zone``; ``habitat/goal_zone.py`` has the generator,
+      the measurement of both datasets and what the other published methods
+      do). HM3D's metre is horizontal; MP3D's is 3-D from the floor, so an
+      object raised off the floor must be stood under more closely there.
+      The method's STOP criterion is that zone less a decimetre's margin
+      (:func:`~...habitat.goal_zone.stop_criterion`), and the closing walks
+      on to it after it has decided to stop
+      (``TargetClosingSettings.stop_within_m``, ``stop_measure``).
+
+    What does NOT reach the method: the position of any view point, of any
+    goal object, or any distance to them. The zone is one distance and one
+    word per dataset, the same for every episode and every object, and the
+    agent applies it to its own depth measurements. Until 2026-11-16 this
+    function configured the STOP by which evaluator scores the run and by
+    what recorded validation STOPs had shown (steps after the STOP off for
+    objects on the floor, on for raised ones); that day those rules were
+    removed, and then replaced by the definition itself. Every other method
+    knob (clearance, closing, peeks, ...) is ``RPTSettings``' default here
+    exactly as it is on Gibson.
     """
-    defaults = {"body_height_m": protocol.agent_height_m,
-                "body_radius_m": protocol.agent_radius_m}
-    if protocol.distance_to == DISTANCE_TO_VIEW_POINTS:
-        defaults["target_closing"] = {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0}
-    return defaults
+    return {"body_height_m": protocol.agent_height_m, "body_radius_m": protocol.agent_radius_m,
+            "target_closing": stop_criterion(protocol.goal_zone, protocol.success_distance_m)}
 
 
 def geodesic_agreement_issue(agreement, *, allow=False):

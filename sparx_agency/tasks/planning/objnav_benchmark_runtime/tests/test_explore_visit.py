@@ -222,7 +222,7 @@ def test_an_opening_off_a_room_that_is_a_node_is_folded_into_the_rooms_walk():
     assert set(policy.loop._openings) == {o.node_id for o in before}, "... still on record, for the transit's lookups"
     assert policy.loop.stats["openings_folded"] == 3
     assert {e["room"] for e in policy.loop.events if e["event"] == "opening_folded"} == {0, 1}
-    assert policy.reasoned_with[0]["stairs"] == [], "the oracle was shown the rooms, not the gaps"
+    assert policy.reasoned_with[0]["extra"] == [], "the oracle was shown the rooms, not the gaps"
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import search_snapshot
     shown = search_snapshot(policy)["openings"]
     assert {o["id"] for o in shown} == {o.node_id for o in before} and all(o["folded"] for o in shown), (
@@ -262,9 +262,9 @@ def test_an_opening_the_reply_itself_unfolded_is_a_node_at_the_provisional_value
 
     policy.graph.reason = reason
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert gap.node_id not in policy.reasoned_with[0]["stairs"], "folded at the call: room A was a node then"
+    assert gap.node_id not in policy.reasoned_with[0]["extra"], "folded at the call: room A was a node then"
     assert gap.node_id not in policy.loop._folded_now, "... and unfolded by the reply"
-    assert gap.node_id not in policy.graph.stair_probs, "the model never saw it, so it has no number"
+    assert gap.node_id not in policy.graph.extra_probs, "the model never saw it, so it has no number"
     estimate = policy.loop.estimates[gap.node_id]
     assert estimate["prob_source"] == "provisional" and estimate["prob"] == policy.loop.settings.openings.unvalued_prob == 0.10
     assert estimate["entry"] == "peek", "a node RPT* was handed, not one under the floor"
@@ -278,11 +278,11 @@ def test_an_opening_the_reply_itself_unfolded_is_a_node_at_the_provisional_value
     # The node without a number still buys the next call, and the model's number then replaces the prior.
     policy.graph.reason = inner
     policy.loop.plan(obs_at(episode, 7, IN_A), world)
-    assert len(policy.reasoned_with) == 2 and gap.node_id in policy.reasoned_with[1]["stairs"]
+    assert len(policy.reasoned_with) == 2 and gap.node_id in policy.reasoned_with[1]["extra"]
     assert policy.loop.estimates[gap.node_id]["prob_source"] == "oracle" and policy.loop.estimates[gap.node_id]["prob"] == 0.3
     assert policy.loop.stats["openings_provisional"] == 1, "logged once"
     # ... and is remembered across a later call that does not show it again.
-    policy.graph.stair_probs = {}
+    policy.graph.extra_probs = {}
     assert policy.loop._exit_prob(gap.node_id) == (0.3, "remembered")
 
 

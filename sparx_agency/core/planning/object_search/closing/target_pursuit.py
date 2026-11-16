@@ -124,9 +124,7 @@ class TargetPursuit:
     def remember(self, obs, closing):
         """Keep the target of a lock ``closing`` is about to release for want of a path."""
         if closing.xyz is not None:
-            self.remember_at(obs, closing.xyz, closing.label, closing.floor_id, "no_path",
-                             lowest_m=getattr(closing, "lowest_m", None),
-                             face_normal_xy=getattr(closing, "face_normal_xy", None))
+            self.remember_at(obs, closing.xyz, closing.label, closing.floor_id, "no_path")
 
     def remember_bearing(self, obs, label, yaw, floor_id):
         """Keep a target seen only without depth: on its bearing, just beyond the depth range."""
@@ -134,9 +132,8 @@ class TargetPursuit:
         xyz = (float(obs.pose.x) + reach * math.cos(yaw), float(obs.pose.y) + reach * math.sin(yaw), float(obs.pose.z))
         self.remember_at(obs, xyz, label, floor_id, "bearing")
 
-    def remember_at(self, obs, xyz, label, floor_id, source, lowest_m=None, face_normal_xy=None):
-        """Keep a target to walk back to; ``lowest_m`` and ``face_normal_xy`` are the lock's lowest measured point and
-        facing normal, so its standoff is chosen as the closing would choose it (``TargetApproachPath``)."""
+    def remember_at(self, obs, xyz, label, floor_id, source):
+        """Keep a target to walk back to: its position, class, storey and where the handover came from (``source``)."""
         if not self.settings.enabled:
             return
         if source == "bearing" and self.settings.bearing_merge_m > 0.0:
@@ -152,9 +149,7 @@ class TargetPursuit:
                     return
         self.targets.append({"xyz": tuple(float(v) for v in xyz), "floor": floor_id, "label": label,
                              "released": int(obs.step), "last_query": int(obs.step), "attempts": 0,
-                             "from_xy": (float(obs.pose.x), float(obs.pose.y)), "source": source,
-                             "lowest_m": None if lowest_m is None else float(lowest_m),
-                             "face_normal_xy": None if face_normal_xy is None else tuple(float(v) for v in face_normal_xy)})
+                             "from_xy": (float(obs.pose.x), float(obs.pose.y)), "source": source})
         self.stats["remembered"] += 1
         self._log(obs, "remembered", label=label, source=source)
 
@@ -229,23 +224,13 @@ class TargetPursuit:
 
     # -- internals ----------------------------------------------------------------------------------------------
     def _shim(self, entry):
-        """What :class:`TargetApproachPath` reads of a target: its 3-D memory, the closing's settings, its height
-        above the base (from the lock's lowest point, when the memory kept one), the closing's standing floor
-        and planners, and the counters a selection writes."""
+        """What :class:`TargetApproachPath` reads of a target: its 3-D memory, the closing's settings, the closing's
+        standing floor and planners, and the counters a selection writes."""
         closing = self.policy.closing
-        lowest, normal = entry.get("lowest_m"), entry.get("face_normal_xy")
-
-        def frontal_normal(obs):
-            if normal is None or lowest is None or not closing.settings.frontal_standoff:
-                return None
-            return normal if float(lowest) - float(obs.pose.z) >= closing.settings.frontal_min_elevation_m else None
-
-        return SimpleNamespace(xyz=entry["xyz"], settings=closing.settings, face_normal_xy=normal, frontal_normal=frontal_normal,
-                               elevation_above_base=lambda obs: 0.0 if lowest is None else closing.elevation_above_base(obs, lowest),
+        return SimpleNamespace(xyz=entry["xyz"], settings=closing.settings,
                                standing_floor=closing.standing_floor, standing_planners=closing.standing_planners,
-                               stale_standoffs_kept=0, widened_standoffs=0, squeezed_standoffs=0, standoffs_revoked=0,
-                               back_arc_standoffs=0, standoff_detours=0, far_side_standoffs=0, frontal_standoffs=0,
-                               frontal_reselections=0)
+                               stale_standoffs_kept=0, widened_standoffs=0, retry_standoffs=0, standoffs_revoked=0,
+                               back_arc_standoffs=0, standoff_detours=0, far_side_standoffs=0)
 
     def _unbox(self, entry):
         """A route exists now: the spot the target was released from no longer refuses its takeover."""

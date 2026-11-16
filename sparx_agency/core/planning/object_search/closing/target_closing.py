@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
+from typing import Optional
 
 import numpy as np
 
@@ -11,6 +12,7 @@ from sparx_agency.core.planning.objnav.action_converter.action_choice import pit
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.closing.approach_history import ApproachHistory
 from sparx_agency.core.planning.object_search.closing.map_sight import MEMORY_SIGHT_MARGIN_M, map_sight_clear
+from sparx_agency.core.planning.object_search.closing.stop_criterion import EUCLIDEAN, MEASURES, PLANAR, stop_range_m
 from sparx_agency.core.control.camera.box_pitch_servo import (
     REGION_CENTRE, REGION_CUT_BOTTOM, REGION_CUT_TOP, REGION_LOWER, REGION_UPPER, vertical_fix)
 from sparx_agency.core.mapping.objects.box_extent import clipped_box
@@ -78,6 +80,11 @@ class TargetClosingSettings:
     # (at most ``max_verify_approach_steps`` such steps per candidate). The Markleeville
     # toilet (/000188, actions 20-31) was in view at 5 m on every other frame and the
     # verification turned in place at it for its whole budget, twice.
+    # KNOWN AND OPEN (2026-11-16): the step is blind -- straight ahead, no route, no look at the map -- and a
+    # step the simulator refuses leaves the pose and the frame as they were, so the same step is asked again
+    # with the clock paused for each: five of the 180 episodes of the single-storey MP3D check take 36 to 70
+    # such steps. Ending the verification at the first refusal was tried that day and withdrawn the same day,
+    # to be handled on its own (``CHANGELOG.md``): it removed the loop and lost two of the five episodes.
     max_verify_approach_steps: int = 24
     # THE TAKEOVER MAY START ON AN RGB DETECTION WITHOUT DEPTH (since 2026-10-21). The depth sensor
     # returns nothing past about 5 m, and the detector finds the target's class in the RGB frame well
@@ -161,9 +168,9 @@ class TargetClosingSettings:
     # through cells like it. A candidate point that is not such a cell is moved to the nearest one within
     # ``standing_snap_m`` -- 0.5 m for a ring point, the distance the navigation-mesh projection it replaces
     # accepted -- and dropped when there is none; the route is planned to that cell exactly, by the default
-    # planner where the cell keeps that planner's standoff (0.25 m) from every observed obstacle and by the
-    # squeeze planner otherwise (``standing_planners``). Until then the candidate was projected onto the
-    # simulator's navigation
+    # planner where the cell keeps that planner's standoff (0.25 m) from every observed obstacle and, when
+    # that finds no route, by a planner relaxed to ``standing_retry_clearance_m`` (``standing_planners``).
+    # Until then the candidate was projected onto the simulator's navigation
     # mesh (privileged geometry: it knows where floor is that the agent never looked at), and from 2026-10-14
     # a ring with no route on the known floor was planned THROUGH unknown cells at eight times the cost of
     # open floor (``through_unknown``, Collierville/000023: the floor between the corridor and a toilet seen
@@ -172,6 +179,22 @@ class TargetClosingSettings:
     # agent has not seen is looked at -- the walk to the nearest observed floor and the footing sweep below
     # -- before anything is assumed about it.
     standing_snap_m: float = 0.5
+    # A STANDING POINT KEEPS 0.25 M FROM OBSERVED OBSTACLES, AND THE BODY RADIUS WHEN THAT HAS NO ROUTE.
+    # The default planner is asked first, of the standing cells that keep its own standoff
+    # (``RPTSettings.min_clearance_m``, 0.25 m) from every observed obstacle. When it has no route to any
+    # candidate, the same points are asked once more of a planner relaxed to this clearance, of the standing
+    # cells that keep THIS distance: 0.18 m, the body radius -- what the squeeze planner gave the closing
+    # before this setting existed. The value was CHOSEN ON A MEASUREMENT (2026-11-16): the planner blocks a
+    # cell whose clearance is at most its inflation, so on the 0.1 m grid 0.18 m lets the nearest obstacle
+    # cell stand 0.200 m from the agent's cell and "0.20 m" pushes it to 0.224 m, one cell class further. On
+    # the 180 single-storey MP3D episodes of that day's paired check, differing in this number alone, 0.18 m
+    # gave SR 73.3 % and SPL 0.325 and 0.20 m gave 71.1 % and 0.322 (2 won, 6 lost): the stricter rung
+    # reached fewer standing points (92 -> 52), gave a target up for want of a route more often (29 -> 49)
+    # and was refused fewer forward steps (6.79 -> 5.92 an episode). The better SR and SPL decided it; the
+    # refused steps it costs are the price. None (the default) is the policy's own body radius, whatever
+    # body it is given; a number must lie between ``RPTSettings.body_radius_m`` and ``min_clearance_m``
+    # (``RPTSettings`` checks it), and at ``min_clearance_m`` there is no second planner.
+    standing_retry_clearance_m: Optional[float] = None
     # A STANDOFF REACHED BY A DETOUR IS THE LAST CHOICE, NOT THE FIRST (since 2026-11-05). The ring takes the
     # first point with a route, and a route much longer than the straight line to the target goes round
     # something -- the wall the target stands against, with the point on its far side. 00891-cvZr5TUy5C5/000006:
@@ -335,96 +358,57 @@ class TargetClosingSettings:
     stop_centring: bool = True
     stop_confidence: float = 0.50
     weak_stop_max_holds: int = 2
-    # THE STOP OVERSHOOT (since 2026-10-14). The terminal ranges are read short of the truth: the
-    # near edge of a box with floor in it, and a centroid fused from the near surfaces, both stand
-    # nearer than the object's footprint does, and the evaluator measures to the footprint.
-    # Markleeville/000188 (``benchmark_toilet_10episodes_20261014T143259Z``) STOPped on a 0.84 m
-    # near-edge reading 1.27 m from the toilet's footprint -- DTG 0.27, SR 0. (Reading a small
-    # object's range from the fused memory instead was tried the same day and flipped CLOSE and
-    # INSPECT on alternate frames; see ``_fresh_measured``.) So once the STOP is DECIDED, on
-    # whichever evidence, the closing walks on toward the target and STOPs then -- no frame is
-    # consulted, nothing is verified again, the decision stands: ``stop_overshoot_steps`` (one)
-    # MOVE_FORWARD always, then more, up to ``stop_overshoot_max_steps`` in all, while the 3-D
-    # memory still stands farther than ``stop_overshoot_within_m`` from the agent. The memory is
-    # about the footprint's near face (000188: 1.25 m where the footprint's disc began at 1.27),
-    # so a memory inside 0.90 m is a tenth inside the evaluator's radius; the near edge is not
-    # trusted for this -- it is what decided the STOP, and in 000188 it undercut the memory by
-    # 0.41 m where the eight STOPs that succeeded agreed with it within 0.14. Verified in turn
-    # (2026-10-14 evening): two steps always, SR 0.90 but every other STOP 0.01-0.07 SPL dearer
-    # (``…155701Z``); one step always, SR 0.80 with 000188 STOPped 3 cm outside the disc
-    # (``…162832Z``); on those nine deciding frames this rule takes the second step twice.
-    # A step is taken only while the memory would still stand ``stop_overshoot_min_range_m`` or
-    # more beyond the agent after it, and the near edge the deciding frame measured (when it did)
-    # at least the body radius; the agent must face within a quarter turn of the memory (farther
-    # off the converter would turn first, and one over a turn off is not "a step forward"); a
-    # step the converter reports blocked ends the overshoot at once, and
-    # ``stop_overshoot_max_actions`` bounds the whole stage, turns included (the three turns a
-    # quarter-turn error can take, plus the steps). ``stop_overshoot_max_steps`` 0 restores the
-    # STOP on the deciding frame for an object on the floor (a RAISED one reads its own ceiling,
-    # ``stop_overshoot_elevated_max_steps`` below; both at 0 is the overshoot off for every target);
-    # 1 is one step and never a second. The Habitat entrypoints set the planar pair to 0 under a
-    # VIEW-POINT evaluator (``habitat.entrypoint.method_defaults``, HM3D since 2026-11-05, MP3D
-    # since the 2026-11-11 merge): it measures to the goal's view points with a 0.1 m radius, not to
-    # a footprint, and on 70 recorded HM3D STOPs the step never helped, cost margin in 18 and walked
-    # 00891/000006 from 0.02 m to 0.16 m -- out of the region. A raised target keeps its steps
-    # there (``_terminal`` reads the ceiling that applies): the view points of a raised object stand
-    # closer, so the two findings are one rule.
-    stop_overshoot_steps: int = 1
-    stop_overshoot_max_steps: int = 2
-    stop_overshoot_within_m: float = 0.90
-    stop_overshoot_min_range_m: float = 0.45
-    stop_overshoot_max_actions: int = 5
-    # THE OVERSHOOT STANDS CLOSER UNDER A RAISED TARGET (since 2026-11-10). The evaluator's view points lie
-    # within 1 m planar of an object's box at the object's own height, and only where the object's pixels
-    # show with the camera turned to it; for an object raised off the floor that second test prunes the far
-    # points, since a camera 0.88 m up must look up at it. MP3D val, the single-storey set's goals: the
-    # farthest view point stands 1.02 m from the box for an object on the floor (median) but 0.84 m for one
-    # whose underside is 0.3 m up or more -- 0.81 m for a picture, 0.72 m for a wall cabinet. So a wall
-    # cabinet whose underside is 0.9 m up, a picture, a towel on its rail, a cushion on a sofa's seat must be
-    # stood under more closely than a chair: 2azQ1b91cZZ/000025 STOPped 0.86 m from its cabinet's centre,
-    # DTG 0.22, SR 0. With ``elevation_overshoot`` the range the ``stop_overshoot_within_m`` test reads is
-    # ``hypot(planar, lowest_m - base)`` -- the memory's planar range lifted by the target's lowest measured
-    # point above the agent's base -- so the steps go on (``stop_overshoot_elevated_max_steps`` of them at
-    # most) until that lifted range is within the radius, or ``stop_overshoot_min_range_m`` stops them. An
-    # object on the floor reads as before. A lowest point under ``elevation_min_m`` above the base is an
-    # object on the floor (a chair whose legs the near-surface component dropped reads its seat at 0.45 m; a
-    # toilet's bowl its base): no lift.
-    elevation_overshoot: bool = True
-    elevation_min_m: float = 0.30
-    stop_overshoot_elevated_max_steps: int = 3
-    # THE STANDOFF OF A PLANAR TARGET IS IN FRONT OF IT (since 2026-11-10). The view points of a thin
-    # wall-mounted object stand within its own width along the wall (0.26 m beyond it at the median over the
-    # set's 78 pictures, against 0.6-0.9 m for every other category): a 2 cm picture shows nothing from
-    # beside itself. The standoff ring starts from the agent's bearing (``target_path.TargetPath``), so a
-    # picture first seen at a grazing angle was approached and STOPped on from beside it, within the 1 m band
-    # and 0.1-0.5 m from the nearest view point (2azQ1b91cZZ/000157, QUCTc6BB5sX/000055, zsNo4HB9uLZ/000045:
-    # 0.26-0.38 m beside the width, 60-69 degrees off the wall's normal; every picture success of the run
-    # stood within 0.28 m of the width). With ``frontal_standoff`` a lock whose sightings measure a STANDING
-    # PLANE (``perception/face_normal.py``: every depth pixel of the mask fitted as a plane, its spread along the
-    # smallest axis under 5 cm, the normal near horizontal -- a picture, a cabinet's front, a shower screen; a
-    # chair or a sofa is no plane)
-    # keeps that plane's normal (``face_normal_xy``: the mean over its sightings' normals, trusted while they
-    # agree; a sighting more than ``frontal_refine_deg`` off the mean is counted as a conflict), its standoff
-    # ring is tried about the normal BEFORE the agent's bearing (``target_path``) -- at the standoff radius and
-    # then at ``frontal_inner_radii_m``, since a plane has nothing in front of it to collide with and a picture in
-    # a 0.7 m corridor has its view points nearer than the ring (2azQ1b91cZZ/000157) -- and an in-range sighting
-    # from more than ``frontal_off_normal_deg`` off the normal does not STOP while a frontal standoff with a route
-    # is still to be walked, at most ``frontal_max_deferrals`` actions, then the STOP rules apply as before. The
-    # angle is read from the memory, which lies on the NEAR part of a grazed object (up to half its width toward
-    # the agent), so the threshold is tighter than the view points' own 50-degree spread. A first version read the
-    # "front" off the map's free cells, which point to the explored side -- the agent's own -- and move as the map
-    # fills; the sighting's plane does neither.
-    # The rule is for RAISED planes -- a picture, a wall cabinet, a towel on its rail, whose underside stands at
-    # least ``frontal_min_elevation_m`` above the base: the mechanism (view points only in front) is theirs, and a
-    # plane standing on the floor -- a cabinet's front, a table's apron, a cushion on a seat, a chair's backrest --
-    # has view points all round and loses only steps to a frontal detour (90 of 180 locks read a plane when the
-    # rule was ungated, 2026-11-10, at -1.7 SPL points over them).
-    frontal_standoff: bool = True
-    frontal_min_elevation_m: float = 0.6
-    frontal_off_normal_deg: float = 35.0
-    frontal_refine_deg: float = 45.0
-    frontal_max_deferrals: int = 12
-    frontal_inner_radii_m: tuple = (0.65, 0.45)
+    # THE AGENT WALKS ON TO THE STOP DISTANCE BEFORE IT STOPS (the approach before STOP; in this form since
+    # 2026-11-16). The STOP is DECIDED on the closing's own evidence -- a fresh, whole, confident box of the
+    # target inside ``terminal_distance_m`` -- and how near the target the agent must then STAND is a criterion
+    # of its own, because it is not the method's to choose: a benchmark defines a success zone round each goal
+    # object, and its adapter states that zone here from the benchmark's published definition
+    # (``closing/stop_criterion.py`` has the two measures and what the agent reads for each; the Habitat
+    # entrypoints set HM3D's and MP3D's, ``habitat.entrypoint.method_defaults``):
+    #   * ``stop_within_m``: the range inside which the STOP is taken. 0 (the default, for a deployment with
+    #     no such definition) takes it on the deciding frame, inside ``terminal_distance_m``. (Not
+    #     ``RPTSettings.stop_distance_m``: that is the legacy pursuit's standoff, which the closing never reads.)
+    #   * ``stop_measure``: ``planar`` -- the horizontal range to the target's nearest measured point -- or
+    #     ``euclidean`` -- that range and the height of the target's lowest measured point above the floor
+    #     under the agent, as the two legs of a triangle. A lowest point under ``stop_elevation_min_m`` is an
+    #     object on the floor (a chair whose legs the near-surface component dropped reads its seat at 0.45 m,
+    #     a toilet's bowl its base; under 0.3 m the lift changes a 0.9 m range by less than 5 cm).
+    # Once the STOP is decided and the range reads beyond the distance, the closing walks straight on toward
+    # the target and STOPs when the range is within it. The decision stands meanwhile: no frame is consulted
+    # and nothing is verified again -- under a raised target the box leaves the top of the frame, before a low
+    # one it drops under it, and a frame that lost the box is not evidence against a target just verified. The
+    # range is the deciding frame's (its fresh near edge, or the planar range to the 3-D memory when the STOP
+    # was decided without a fresh box), carried forward by the agent's own displacement. The walk ends, and the
+    # STOP is taken where it ends, also when:
+    #   * a step is refused (the simulator moves nothing on contact): as near as the body gets;
+    #   * the memory would stand under ``stop_approach_min_range_m`` after another step, or the measured near
+    #     edge under the body radius: the agent does not walk into what it is stopping at. 0.30 m is the
+    #     clearance the planner itself keeps from an obstacle (0.25 m) and a margin; a target whose underside is
+    #     raised by the stop distance or more -- within it of no place on the floor -- is stood under that
+    #     closely and the STOP taken there (``stop_approach_shortfalls`` counts the walks that end short);
+    #   * ``stop_approach_max_steps`` steps are taken (four: the whole terminal range in forward steps), or
+    #     ``stop_approach_max_actions`` actions with the turns (the agent must face within a quarter turn of
+    #     the memory to step; farther off the converter turns first, and a memory more than a quarter turn
+    #     off is not "a step forward");
+    #   * the action being decided is the last the episode's budget holds: a decided STOP is never walked
+    #     past the step limit.
+    # History. A first form (2026-10-14) took one step always and a second while the memory stood beyond 0.9 m,
+    # for Gibson's footprint evaluator; the Habitat entrypoints switched it off for objects on the floor
+    # (2026-11-05) and stepped in under RAISED targets, by the lifted range the ``euclidean`` measure reads
+    # now, for at most three steps and no nearer than 0.45 m (2026-11-10). All of it was removed on 2026-11-16
+    # as rules switched by which evaluator scores a run and sized on recorded validation STOPs -- at a measured
+    # cost of eight successes in 180 MP3D episodes, every one a STOP with the target in view a few decimetres
+    # outside the zone -- and brought back the same day in this form: an agent that knows by its depth how
+    # far the target stands has no reason to stop short of the zone, and what the zone IS -- one distance and
+    # one measure for a whole dataset -- is the benchmark's published definition, which its adapter may state.
+    # What stays out of the method is the position of any view point, of any goal, at run time. The frontal
+    # standoff of raised planar targets (2026-11-10) is not restored.
+    stop_within_m: float = 0.0
+    stop_measure: str = PLANAR
+    stop_elevation_min_m: float = 0.30
+    stop_approach_max_steps: int = 4
+    stop_approach_min_range_m: float = 0.30
+    stop_approach_max_actions: int = 7
     # After a release, no new takeover may START on a far candidate for this
     # many actions: six twelve-step verifications from one spot three metres
     # from the couch (Ranchester attempt 4) were the same failure repeated,
@@ -478,7 +462,8 @@ class TargetClosingSettings:
     boxed_in_radius_m: float = 1.0
     # Before the sweep and the release, the walk that IS possible (since 2026-10-28): when no standoff
     # ring point has a route from here, the reachable cell nearest the target -- for the default planner,
-    # then for the squeeze planner -- is walked to when it brings the agent ``nearest_progress_m`` closer,
+    # then for the retry planner (``standing_retry_clearance_m``) -- is walked to when it brings the agent
+    # ``nearest_progress_m`` closer,
     # up to ``nearest_approaches`` such walks per lock. From the new spot the floor between fills in and
     # the ring is tried again on every action. The GT-oracle sweep of 2026-10-26 released 75 locked
     # targets as "no safe path from here" at a median 4.1 m, with the target in plain view; the search
@@ -611,6 +596,19 @@ class TargetClosingSettings:
         for key in ("floor_cut_terminal", "blind_cone_stop"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError("%s must be a bool" % key)
+        for key in ("stop_within_m", "stop_elevation_min_m", "stop_approach_min_range_m"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError("%s must be finite and non-negative" % key)
+        if self.stop_within_m > self.terminal_distance_m + self.range_tolerance_m:
+            raise ValueError("stop_within_m lies beyond the terminal range the STOP is decided in "
+                             "(terminal_distance_m + range_tolerance_m); 0 takes the STOP on the deciding frame")
+        if self.stop_measure not in MEASURES:
+            raise ValueError("stop_measure must be one of %s, got %r" % (", ".join(MEASURES), self.stop_measure))
+        if type(self.stop_approach_max_steps) is not int or self.stop_approach_max_steps < 1:
+            raise ValueError("stop_approach_max_steps must be a positive int (stop_within_m 0 switches the approach off)")
+        if type(self.stop_approach_max_actions) is not int or self.stop_approach_max_actions < self.stop_approach_max_steps:
+            raise ValueError("stop_approach_max_actions must be an int of at least stop_approach_max_steps")
         if type(self.blind_cone_max_missing) is not int or self.blind_cone_max_missing < 1:
             raise ValueError("blind_cone_max_missing must be a positive int")
         if (isinstance(self.blind_cone_min_fraction, bool) or not math.isfinite(self.blind_cone_min_fraction)
@@ -633,39 +631,6 @@ class TargetClosingSettings:
             raise ValueError("stop_confidence must lie in [track_confidence, 1]")
         if type(self.weak_stop_max_holds) is not int or self.weak_stop_max_holds < 0:
             raise ValueError("weak_stop_max_holds must be a non-negative int")
-        if type(self.stop_overshoot_steps) is not int or self.stop_overshoot_steps < 0:
-            raise ValueError("stop_overshoot_steps must be a non-negative int")
-        if type(self.stop_overshoot_max_steps) is not int or self.stop_overshoot_max_steps < self.stop_overshoot_steps:
-            raise ValueError("stop_overshoot_max_steps must be an int of at least stop_overshoot_steps")
-        if type(self.elevation_overshoot) is not bool:
-            raise ValueError("elevation_overshoot must be a bool")
-        if isinstance(self.elevation_min_m, bool) or not math.isfinite(self.elevation_min_m) or self.elevation_min_m < 0:
-            raise ValueError("elevation_min_m must be finite and non-negative")
-        if (type(self.stop_overshoot_elevated_max_steps) is not int
-                or self.stop_overshoot_elevated_max_steps < self.stop_overshoot_max_steps):
-            raise ValueError("stop_overshoot_elevated_max_steps must be an int of at least stop_overshoot_max_steps")
-        if type(self.frontal_standoff) is not bool:
-            raise ValueError("frontal_standoff must be a bool")
-        for key in ("frontal_off_normal_deg", "frontal_refine_deg"):
-            value = getattr(self, key)
-            if isinstance(value, bool) or not math.isfinite(value) or not 0.0 < value <= 90.0:
-                raise ValueError("%s must lie in (0, 90] degrees" % key)
-        if type(self.frontal_max_deferrals) is not int or self.frontal_max_deferrals < 0:
-            raise ValueError("frontal_max_deferrals must be a non-negative integer (0: never defer a STOP)")
-        if (isinstance(self.frontal_min_elevation_m, bool) or not math.isfinite(self.frontal_min_elevation_m)
-                or self.frontal_min_elevation_m < 0):
-            raise ValueError("frontal_min_elevation_m must be finite and non-negative (0: every standing plane)")
-        if isinstance(self.frontal_inner_radii_m, list):
-            object.__setattr__(self, "frontal_inner_radii_m", tuple(self.frontal_inner_radii_m))
-        if (not isinstance(self.frontal_inner_radii_m, tuple)
-                or any(isinstance(r, bool) or not math.isfinite(r) or r <= 0 for r in self.frontal_inner_radii_m)):
-            raise ValueError("frontal_inner_radii_m must be a tuple of positive, finite radii (empty: the standoff ring only)")
-        for key in ("stop_overshoot_within_m", "stop_overshoot_min_range_m"):
-            value = getattr(self, key)
-            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-                raise ValueError("%s must be positive and finite" % key)
-        if type(self.stop_overshoot_max_actions) is not int or self.stop_overshoot_max_actions < self.stop_overshoot_max_steps:
-            raise ValueError("stop_overshoot_max_actions must be an int of at least stop_overshoot_max_steps")
         if type(self.release_cooldown_actions) is not int or self.release_cooldown_actions < 0:
             raise ValueError("release_cooldown_actions must be a non-negative int")
         if self.terminal_distance_m + self.range_tolerance_m > self.look_down_distance_m:
@@ -741,6 +706,10 @@ class TargetClosingSettings:
         if (isinstance(self.standing_snap_m, bool) or not math.isfinite(self.standing_snap_m)
                 or self.standing_snap_m < 0):
             raise ValueError("standing_snap_m must be finite and non-negative (0: a ring point must itself be standing floor)")
+        if self.standing_retry_clearance_m is not None and (
+                isinstance(self.standing_retry_clearance_m, bool) or not isinstance(self.standing_retry_clearance_m, (int, float))
+                or not math.isfinite(self.standing_retry_clearance_m) or self.standing_retry_clearance_m <= 0):
+            raise ValueError("standing_retry_clearance_m must be positive and finite, or None for the body radius")
         for key in ("standoff_detour_factor", "standoff_detour_slack_m"):
             value = getattr(self, key)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
@@ -835,7 +804,7 @@ class TargetClosing:
         self.strong_box_steps = []         # the last actions a box of the class at or above ``confidence`` was in the frame
         self.inspection_steps = 0          # inspection frames answered with a step: the fresh range a step beyond the limit
         self.dead_band_alignments = 0      # inspection frames read as aligned because a turn back would undo the last turn
-        self.squeezed_standoffs = 0        # standoffs the default planner had no route to, reached with the squeeze planner
+        self.retry_standoffs = 0           # standoffs the default planner had no route to, reached at ``standing_retry_clearance_m``
         self.standoffs_revoked = 0         # standoffs given up because the map stopped showing them as standing floor
         self.widened_standoffs = 0         # standoffs found beyond the standoff ring, after no point of it had a route
         self.back_arc_standoffs = 0        # standoffs taken beside or behind the target, the front arc having no route
@@ -851,14 +820,10 @@ class TargetClosing:
         self.clipped_resumptions_withheld = 0  # ... or on a box the frame's side cut, whose range is the visible part's
         self.resighting_reselections = 0   # frames whose re-sighting was not the first box of the class (``_best_projected``)
         self.occluder_reads = 0            # candidate frames whose box was read around a surface standing in front of the target
+        self.stop_approaches = 0           # decided STOPs that walked on to the stop distance first (``stop_within_m``)
+        self.stop_approach_steps = 0       # MOVE_FORWARDs taken between a decided STOP and the STOP
+        self.stop_approach_shortfalls = 0  # ... of those walks, the ones that ended with the range still beyond the distance
         self.sweep_releases = 0            # verifications released after a fruitless sweep cycle, before the budget
-        self.overshoot_commands = 0        # MOVE_FORWARDs asked for between a decided STOP and the STOP (``stop_overshoot_steps``)
-        self.elevated_overshoot_steps = 0  # overshoot steps beyond the planar rule's, under a raised target (``elevation_overshoot``)
-        self.frontal_standoffs = 0         # standoffs chosen about the target's facing normal, not the agent's bearing (``frontal_standoff``)
-        self.frontal_deferrals = 0         # in-range STOPs deferred from beside a planar target for its frontal standoff
-        self.frontal_reselections = 0      # agent-ring standoffs re-selected about a normal that arrived after them
-        self.frontal_deferral_caps = 0     # locks whose deferrals ran out (``frontal_max_deferrals``)
-        self.face_normal_conflicts = 0     # sightings whose plane disagreed with the lock's normal beyond ``frontal_refine_deg``
         self.bearing_starts = 0            # bearing approaches begun on an RGB box without a usable depth
         self.bearing_resolved = 0          # ... of which a frame with depth turned into a verification
         self.bearing_abandoned = 0         # ... and those given up: lost, out of actions, or not moving
@@ -908,10 +873,6 @@ class TargetClosing:
         self.terminal_missing = 0          # consecutive terminal-range frames without a fresh target box
         self.visible_floor_m = None        # the lowest height of the fresh frame's supported points
         self.lowest_m = None               # the lowest height the target's supported points reached over this lock
-        self.face_normal_xy = None         # the planar unit normal of a planar target, toward the room (``frontal_standoff``)
-        self.face_normal_sum = [0.0, 0.0]  # the sightings' normals summed; their mean is ``face_normal_xy`` while they agree
-        self.face_normal_count = 0
-        self.lock_deferrals = 0            # this lock's frontal STOP deferrals (``frontal_max_deferrals``)
         self.top_m = None                  # ... and the highest: the object's measured top, for the below-the-frame test
         self.footprint_m = None            # the anchor frame's footprint half-extent (``perception.footprint_radius_m``)
         self._floor_cut_step = -1          # the last action whose terminal range the memory supplied (counted once)
@@ -929,7 +890,8 @@ class TargetClosing:
         self.inspection_blocked = False    # ... and one of them did not: the floor ends here
         self.inspection_turn = None        # (step, sign) of the inspection's last centring turn on a fresh box
         self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
-        self.overshoot = None              # the decided STOP's forward steps in progress (``_terminal``), else None
+        self.stop_approach = None          # the decided STOP's walk to the stop distance in progress (``_terminal``), else None
+        self.stop_decision = None          # what both stop measures read on the frame the STOP was decided (the record's)
         self.bearing = None                # the BEARING approach in force (an RGB box without depth): its box, yaw, counts
 
     def standing_floor(self, obs, world, standoff_m=None):
@@ -967,22 +929,23 @@ class TargetClosing:
         """``(planner, standoff_m)`` pairs to ask a standing point's route of, the roomier planner first.
 
         The default planner (``None``) with the standing cells that keep its
-        own floor standoff from every observed obstacle, then the squeeze
-        planner with all of the standing floor -- when the policy has one
-        that relaxes further than the default (the baseline's default
-        planner already relaxes to the body radius). A standing point is
-        offered to a planner only where that planner can end a route, so
-        the planner never has to move it; and the default planner is asked
-        first of every point it could stop at, because the squeeze planner
-        trades a roomy way for a tight one half again as short
-        (``WeightedAStarParams.detour_factor``).
+        own floor standoff from every observed obstacle (0.25 m), then --
+        when that has no route -- the retry planner with the standing cells
+        that keep ``standing_retry_clearance_m`` (0.18 m, the body radius), when the policy
+        has one that relaxes further than the default (the baseline's
+        default planner already relaxes to the body radius). A standing
+        point is offered to a planner only where that planner can end a
+        route, so the planner never has to move it; and the default planner
+        is asked first of every point it could stop at, because a planner
+        relaxed further trades a roomy way for a tight one half again as
+        short (``WeightedAStarParams.detour_factor``).
         """
         p = self.policy
         body = float(p.settings.body_radius_m)
         planners = [(None, max(body, float(p.planner_params.inflate_floor_m)))]
-        squeeze = getattr(p, "squeeze_planner", None)
-        if squeeze is not None and squeeze.params.inflate_floor_m < p.planner_params.inflate_floor_m:
-            planners.append((squeeze, max(body, float(squeeze.params.inflate_floor_m))))
+        retry = getattr(p, "standing_retry_planner", None)
+        if retry is not None and retry.params.inflate_floor_m < p.planner_params.inflate_floor_m:
+            planners.append((retry, max(body, float(retry.params.inflate_floor_m))))
         return planners
 
     def _clipped(self, box, intrinsics):
@@ -1275,7 +1238,7 @@ class TargetClosing:
             return
         self.processed = obs.step
         self.inspection_step_pending = False      # ``note_blocked`` for the last step has spoken before this frame
-        if self.overshoot is not None:
+        if self.stop_approach is not None:
             # The STOP is decided: the frames between it and the STOP are not evidence
             # (``_terminal``). Nothing is associated, released or re-verified on them.
             return
@@ -1342,7 +1305,6 @@ class TargetClosing:
             if heights:
                 self.lowest_m = float(heights[0]) if self.lowest_m is None else min(self.lowest_m, float(heights[0]))
                 self.top_m = float(heights[1]) if self.top_m is None else max(self.top_m, float(heights[1]))
-            self._note_face_normal(row.get("face_normal_xy"))
             range_m = math.dist(here, xyz[:2])
             if self.anchor is None:
                 # The 3-D memory and the approach ledger start with the takeover; a candidate
@@ -2151,8 +2113,8 @@ class TargetClosing:
         p, s = self.policy, self.settings
         if self.failure:
             self.fail(self.failure)
-        if self.overshoot is not None:
-            return self._overshoot_step(obs)
+        if self.stop_approach is not None:
+            return self._stop_approach_step(obs)
         if self.blind():
             return self._blind_frame(obs, world)
         if self.bearing is not None:
@@ -2240,11 +2202,6 @@ class TargetClosing:
         # object, and a low object without LOOK actions is still in the frame from here where
         # it may not be from the standoff (the Wiconisco toilet at 0.65 m is below the FOV).
         in_range = measured is not None and measured <= limit
-        if self.inspection_started is None and (in_range or (distance <= s.terminal_distance_m and not out_of_range)):
-            # Beside a planar target, in range, with its frontal standoff still to walk: not yet (``frontal_standoff``).
-            deferred = self._frontal_deferral(obs, world, distance)
-            if deferred is not None:
-                return deferred
         if self.inspection_started is None and arrived_a_step_out() and not nearly():
             self.arrived_step_out_inspections += 1
         if (self.inspection_started is not None or in_range or arrived_a_step_out()
@@ -2409,7 +2366,8 @@ class TargetClosing:
         has a route. The candidates are the agent's standing floor
         (:meth:`standing_floor`: observed free, the body's clearance observed
         free, joined to the agent) -- the cells the default planner can stop
-        at, then all of them for the squeeze planner. Of those the one
+        at (0.25 m from every observed obstacle), then the cells the retry
+        planner can (``standing_retry_clearance_m``, 0.18 m). Of those the one
         nearest the target is chosen, provided it lies ``nearest_progress_m``
         nearer the target than the agent and is not a spot already walked to
         under this lock. The walk is a ``target_closing`` route like the
@@ -2841,16 +2799,14 @@ class TargetClosing:
         return None
 
     def _terminal(self, obs, distance, measured, info):
-        """The decided STOP -- taken now, or after the forward steps of ``stop_overshoot_steps``.
+        """The decided STOP -- taken now, or after the walk to the stop distance (``stop_within_m``).
 
         The decision is final here: every STOP of :meth:`_inspect` comes
-        through, and once the overshoot has begun no frame is consulted
-        again (:meth:`observe` and :meth:`plan` short-circuit on it) -- the
-        steps are walked blind toward the 3-D memory, and the STOP follows
-        whatever the detector shows meanwhile. ``stop_overshoot_steps``
-        steps always; more, up to ``stop_overshoot_max_steps``, while the
-        memory still stands beyond ``stop_overshoot_within_m``. See the
-        settings for why.
+        through, and once the walk has begun no frame is consulted again
+        (:meth:`observe` and :meth:`plan` short-circuit on it) -- the steps
+        are walked blind toward the 3-D memory, and the STOP follows whatever
+        the detector shows meanwhile. See the settings for why, and
+        ``closing/stop_criterion.py`` for what the range reads.
 
         Args:
             obs: The deciding frame.
@@ -2859,64 +2815,62 @@ class TargetClosing:
             info: The STOP's diagnostics, ``reason`` included.
         """
         self.phase = "STOP"
-        # The steps the overshoot may take for THIS target: a raised one has its own ceiling (``elevation_overshoot``),
-        # so an entrypoint that turns the planar overshoot off under a view-point evaluator (``stop_overshoot_max_steps``
-        # 0, HM3D and MP3D) still steps in under a wall cabinet or a picture, whose view points stand closer.
-        elevated = self.settings.elevation_overshoot and self.elevation_above_base(obs) > 0.0
-        max_steps = self.settings.stop_overshoot_elevated_max_steps if elevated else self.settings.stop_overshoot_max_steps
-        if max_steps < 1:
+        s = self.settings
+        here = (float(obs.pose.x), float(obs.pose.y))
+        # The range the criterion reads is to the target's nearest measured point: the fresh near edge when the
+        # deciding frame measured one, else the memory. It is placed on the line to the memory, so the agent's
+        # own displacement carries it forward exactly while no frame is consulted.
+        planar = float(distance) if measured is None else float(measured)
+        memory = math.dist(here, self.xyz[:2])
+        elevation = self.elevation_above_base(obs)
+        # Recorded whatever the criterion is, so a run's record says what either measure read where the STOP was
+        # decided -- the walk's own record (``stop_approach``) says what it read where the STOP was taken.
+        self.stop_decision = {"step": int(obs.step), "measured": measured is not None, "memory_m": round(memory, 3),
+                              "elevation_m": round(elevation, 3),
+                              "planar_m": round(stop_range_m(PLANAR, planar, elevation), 3),
+                              "euclidean_m": round(stop_range_m(EUCLIDEAN, planar, elevation), 3)}
+        if s.stop_within_m <= 0.0:
             return NavigationCommand.stop_here(info=info)
-        self.overshoot = {"info": dict(info), "decided": int(obs.step), "step": -1,
-                          "from_xy": (float(obs.pose.x), float(obs.pose.y)),
-                          "near_m": None if measured is None else float(measured), "memory_m": float(distance),
-                          "steps": 0, "actions": 0, "blocked": False, "ended": None}
-        return self._overshoot_step(obs)
+        if memory > 1e-6:
+            unit = ((self.xyz[0] - here[0]) / memory, (self.xyz[1] - here[1]) / memory)
+        else:
+            unit = (math.cos(obs.pose.yaw), math.sin(obs.pose.yaw))
+        self.stop_approach = {"info": dict(info), "decided": int(obs.step), "step": -1, "from_xy": here,
+                              "near_xy": (here[0] + planar * unit[0], here[1] + planar * unit[1]),
+                              "measured": measured is not None, "steps": 0, "actions": 0, "blocked": False,
+                              "ended": None, "within": None, "range_m": None}
+        return self._stop_approach_step(obs)
 
-    def _overshoot_step(self, obs):
-        """One action of the overshoot: a forward step toward the memory, or the STOP that ends it."""
-        s, actions, o = self.settings, self.policy.episode.action_spec, self.overshoot
-        if o["step"] != obs.step:
-            o["actions"] += int(o["step"] >= 0)
-            o["step"] = int(obs.step)
+    def _stop_approach_step(self, obs):
+        """One action of the walk to the stop distance: a forward step toward the memory, or the STOP that ends it."""
+        s, actions, a = self.settings, self.policy.episode.action_spec, self.stop_approach
+        if a["step"] != obs.step:
+            a["actions"] += int(a["step"] >= 0)
+            a["step"] = int(obs.step)
         step_m = actions.forward_step_m
         here = (float(obs.pose.x), float(obs.pose.y))
-        walked = math.dist(here, o["from_xy"])
-        distance = math.dist(here, self.xyz[:2])
-        # The range the overshoot reads: the planar range lifted by the target's height (see ``elevation_overshoot``).
-        elevation = self.elevation_above_base(obs) if s.elevation_overshoot else 0.0
-        lifted = math.hypot(distance, elevation)
-        max_steps = s.stop_overshoot_elevated_max_steps if elevation > 0.0 else s.stop_overshoot_max_steps
-        near = None if o["near_m"] is None else o["near_m"] - walked
+        walked = math.dist(here, a["from_xy"])
+        memory = math.dist(here, self.xyz[:2])
+        planar = math.dist(here, a["near_xy"])
+        elevation = self.elevation_above_base(obs)
+        reading = stop_range_m(s.stop_measure, planar, elevation)
         bearing = math.atan2(self.xyz[1] - obs.pose.y, self.xyz[0] - obs.pose.x)
         error = normalize_angle(bearing - obs.pose.yaw)
-        ended = None
-        if o["blocked"]:
-            ended = "a step was blocked"
-        elif o["steps"] >= max_steps:
-            ended = "%d step(s) taken" % o["steps"]
-        elif o["steps"] >= s.stop_overshoot_steps and lifted <= s.stop_overshoot_within_m:
-            ended = ("%d step(s) taken and the memory stands %.2f m away%s, within %.2f m"
-                     % (o["steps"], distance, "" if elevation <= 0.0 else
-                        " (%.2f m in 3-D, %.2f m up)" % (lifted, elevation), s.stop_overshoot_within_m))
-        elif o["actions"] >= s.stop_overshoot_max_actions:
-            ended = "%d actions spent" % o["actions"]
-        elif distance - step_m < s.stop_overshoot_min_range_m:
-            ended = "the memory would stand %.2f m away after another step" % (distance - step_m)
-        elif near is not None and near - step_m < self.policy.settings.body_radius_m:
-            ended = "the measured near edge would stand %.2f m away after another step" % (near - step_m)
-        elif abs(error) > math.pi / 2:
-            ended = "the memory is %.0f degrees off the heading" % math.degrees(abs(error))
-        stage = {"decided_step": o["decided"], "steps": o["steps"], "actions": o["actions"], "blocked": o["blocked"],
-                 "walked_m": round(walked, 3), "memory_m": round(distance, 3), "elevation_m": round(elevation, 3),
-                 "lifted_m": round(lifted, 3), "near_m": None if near is None else round(near, 3), "ended": ended}
-        if ended is None and o["steps"] >= s.stop_overshoot_max_steps:
-            self.elevated_overshoot_steps += 1       # a step the planar rule would not have taken
+        raised = "" if s.stop_measure == PLANAR or elevation <= 0.0 else " (%.2f m in the plane, %.2f m up)" % (planar, elevation)
+        within = reading <= s.stop_within_m
+        ended = self._stop_approach_end(obs, reading, raised, memory, planar, error)
+        stage = {"decided_step": a["decided"], "steps": a["steps"], "actions": a["actions"], "blocked": a["blocked"],
+                 "walked_m": round(walked, 3), "memory_m": round(memory, 3), "near_m": round(planar, 3),
+                 "elevation_m": round(elevation, 3), "range_m": round(reading, 3), "measure": s.stop_measure,
+                 "stop_within_m": s.stop_within_m, "within": within, "ended": ended}
         if ended is not None:
             self.phase = "STOP"
-            o["ended"] = ended
-            return NavigationCommand.stop_here(info=dict(o["info"], phase="STOP", range_m=distance, stop_overshoot=stage))
+            a["ended"], a["within"], a["range_m"] = ended, within, round(reading, 3)
+            if a["steps"] or a["actions"]:
+                self.stop_approaches += 1
+                self.stop_approach_shortfalls += int(not within)
+            return NavigationCommand.stop_here(info=dict(a["info"], phase="STOP", range_m=memory, stop_approach=stage))
         self.phase = "ADVANCE"
-        self.overshoot_commands += 1
         # Within a turn of the memory the heading that put the object in the frame is the better
         # aim; farther off the converter turns toward the memory first (turns cost no path).
         aim = float(obs.pose.yaw) if abs(error) <= actions.turn_angle_rad else bearing
@@ -2924,122 +2878,72 @@ class TargetClosing:
         ahead = (here[0] + reach_m * math.cos(aim), here[1] + reach_m * math.sin(aim))
         return NavigationCommand.follow(
             [here, ahead], camera_pitch=None,          # the camera stays where it is (``camera_control`` holds it)
-            info=dict(o["info"], phase=self.phase, target_visible=self.last_seen == obs.step, range_m=distance,
-                      stop_overshoot=stage,
-                      reason="STOP decided at action %d (%s): step %d of at most %d toward the target before it%s"
-                             % (o["decided"], o["info"].get("reason"), o["steps"] + 1, max_steps,
-                                "" if o["steps"] < s.stop_overshoot_steps else
-                                "; the memory still stands %.2f m away%s, beyond %.2f m"
-                                % (distance, "" if elevation <= 0.0 else " (%.2f m in 3-D, %.2f m up)" % (lifted, elevation),
-                                   s.stop_overshoot_within_m))))
+            info=dict(a["info"], phase=self.phase, target_visible=self.last_seen == obs.step, range_m=memory,
+                      stop_approach=stage,
+                      reason="STOP decided at action %d (%s): the target stands %.2f m away%s, beyond the stop distance "
+                             "of %.2f m; step %d toward it before the STOP"
+                             % (a["decided"], a["info"].get("reason"), reading, raised, s.stop_within_m,
+                                a["steps"] + 1)))
 
-    def _note_face_normal(self, normal):
-        """Fold the facing normal a sighting measured into the lock's (``frontal_standoff``).
+    def _stop_approach_end(self, obs, reading, raised, memory, planar, error):
+        """Why the walk to the stop distance ends on this action, or None while it goes on (the settings give the reasons).
 
-        The lock's normal is the mean of its sightings' unit normals, trusted
-        while they agree (the mean's length at least half the count: a first
-        sighting whose fit was poor -- a towel folded over its rail, a frame
-        seen through a doorway -- is outvoted by the later ones, and a lock
-        whose sightings disagree has no normal). A sighting more than
-        ``frontal_refine_deg`` off the running mean is counted as a conflict.
+        Args:
+            obs: This action's frame.
+            reading: The range the stop criterion reads now, metres.
+            raised: The reading's two legs in words, for a raised target under the Euclidean measure; else empty.
+            memory: Planar range to the 3-D memory, metres.
+            planar: Planar range to the target's nearest measured point, metres.
+            error: The memory's bearing off the heading, radians.
         """
-        s = self.settings
-        if not s.frontal_standoff or normal is None:
-            return
-        nx, ny = float(normal[0]), float(normal[1])
-        if self.face_normal_xy is not None:
-            ox, oy = self.face_normal_xy
-            if math.degrees(abs(normalize_angle(math.atan2(ny, nx) - math.atan2(oy, ox)))) > s.frontal_refine_deg:
-                self.face_normal_conflicts += 1
-        self.face_normal_sum[0] += nx
-        self.face_normal_sum[1] += ny
-        self.face_normal_count += 1
-        length = math.hypot(*self.face_normal_sum)
-        if length >= 0.5 * self.face_normal_count and length > 0.0:
-            self.face_normal_xy = (self.face_normal_sum[0] / length, self.face_normal_sum[1] / length)
-        else:
-            self.face_normal_xy = None
+        s, a = self.settings, self.stop_approach
+        step_m = self.policy.episode.action_spec.forward_step_m
+        if reading <= s.stop_within_m:
+            return "the target stands %.2f m away%s, within %.2f m" % (reading, raised, s.stop_within_m)
+        if obs.step >= int(self.policy.episode.max_steps) - 1:
+            # The action decided now is the last the episode's budget holds: a step would leave no STOP at all.
+            return "the action budget ends with this action"
+        if a["blocked"]:
+            return "a step was blocked"
+        if a["steps"] >= s.stop_approach_max_steps:
+            return "%d step(s) taken" % a["steps"]
+        if a["actions"] >= s.stop_approach_max_actions:
+            return "%d actions spent" % a["actions"]
+        if memory - step_m < s.stop_approach_min_range_m:
+            return "the memory would stand %.2f m away after another step" % (memory - step_m)
+        if a["measured"] and planar - step_m < self.policy.settings.body_radius_m:
+            return "the measured near edge would stand %.2f m away after another step" % (planar - step_m)
+        if abs(error) > math.pi / 2:
+            return "the memory is %.0f degrees off the heading" % math.degrees(abs(error))
+        return None
 
-    def frontal_normal(self, obs):
-        """The facing normal the standoff ring and the STOP deferral use, or None: a planar target raised
-        ``frontal_min_elevation_m`` or more above the base (``frontal_standoff``)."""
-        s = self.settings
-        if not s.frontal_standoff or self.face_normal_xy is None or self.lowest_m is None:
-            return None
-        if float(self.lowest_m) - float(obs.pose.z) < s.frontal_min_elevation_m:
-            return None
-        return self.face_normal_xy
+    def elevation_above_base(self, obs):
+        """How far the target's lowest measured point stands above the floor under the agent, metres; 0 on the floor.
 
-    def off_normal_deg(self, obs):
-        """How far off the target's facing normal the agent stands, degrees; None without a normal."""
-        if self.face_normal_xy is None or self.xyz is None:
-            return None
-        to_agent = math.atan2(obs.pose.y - self.xyz[1], obs.pose.x - self.xyz[0])
-        return math.degrees(abs(normalize_angle(to_agent - math.atan2(self.face_normal_xy[1], self.face_normal_xy[0]))))
-
-    def _frontal_deferral(self, obs, world, distance):
-        """The approach command when an in-range frame from beside a planar target should not STOP yet, else None.
-
-        The agent stands more than ``frontal_off_normal_deg`` off the target's
-        facing normal, where a thin object has no view point; the frontal
-        standoff (``target_path``, about the normal) has a route and is not
-        reached; the lock's deferrals (``frontal_max_deferrals``) are not
-        spent. The command is the route's own; the inspection is not entered.
+        What the Euclidean stop measure lifts the planar range by
+        (``closing/stop_criterion.py``). The lowest point the lock measured
+        (``lowest_m``, world z) is the object's underside as far as the
+        camera saw it -- never lower than the truth, so the lift is never too
+        small. Under ``stop_elevation_min_m`` it is an object on the floor.
         """
-        s = self.settings
-        if self.inspection_started is not None or self.frontal_normal(obs) is None:
-            return None
-        off = self.off_normal_deg(obs)
-        if off is None or off <= s.frontal_off_normal_deg:
-            return None
-        if self.lock_deferrals >= s.frontal_max_deferrals:
-            if self.lock_deferrals == s.frontal_max_deferrals:
-                self.frontal_deferral_caps += 1
-                self.lock_deferrals += 1               # counted once per lock
-            return None
-        command = self.path.command(self, obs, world)
-        if command is None or not self.path.frontal or self.path.arrived:
-            return None
-        self.lock_deferrals += 1
-        self.frontal_deferrals += 1
-        visible = self.last_seen == obs.step
-        self.phase = "CLOSE" if visible else "CLOSE_OCCLUDED"
-        return replace(command, camera_pitch=self._approach_pitch(obs, distance),
-                       info=dict(command.info, target_confirmed=True, persistent_lock=True, target_visible=visible,
-                                 range_m=distance, phase=self.phase, frontal_deferral=self.lock_deferrals,
-                                 reason="in range but %.0f degrees off the target's facing normal, where a planar object "
-                                        "has no view point: on to the frontal standoff (%d of %d deferrals)"
-                                        % (off, self.lock_deferrals, s.frontal_max_deferrals)))
-
-    def elevation_above_base(self, obs, lowest_m=None):
-        """How far the target's lowest measured point stands above the agent's base, metres; 0 for an object on the floor.
-
-        A raised object's view points stand closer to it and, when it is
-        mounted, in front of it (``elevation_overshoot``, ``frontal_standoff``).
-        The lowest point the lock measured (``lowest_m``, world z) is the
-        object's underside as far as the camera saw it -- never lower than
-        the truth, so the lift is never too small. Under ``elevation_min_m``
-        it is an object on the floor. ``lowest_m`` given reads another
-        target's point (the pursuit's remembered one) instead of this lock's.
-        """
-        lowest = self.lowest_m if lowest_m is None else lowest_m
-        if lowest is None:
+        if self.lowest_m is None:
             return 0.0
-        elevation = float(lowest) - float(obs.pose.z)
-        return elevation if elevation >= self.settings.elevation_min_m else 0.0
+        elevation = float(self.lowest_m) - float(obs.pose.z)
+        return elevation if elevation >= self.settings.stop_elevation_min_m else 0.0
 
     def note_action(self, action):
         """The action the agent took on the closing's command (the policy's ``notify_action``)."""
         forward = getattr(action, "name", action) == "MOVE_FORWARD"
-        if self.overshoot is not None and forward:
-            self.overshoot["steps"] += 1
+        if self.stop_approach is not None and forward:
+            self.stop_approach["steps"] += 1
+            self.stop_approach_steps += 1
         if self.inspection_step_pending and not forward:
             self.inspection_step_pending = False       # the converter turned instead: no step was tried
 
     def note_blocked(self):
         """The converter reports the last MOVE_FORWARD did not move the agent (the policy's ``notify_blocked``)."""
-        if self.overshoot is not None:
-            self.overshoot["blocked"] = True
+        if self.stop_approach is not None:
+            self.stop_approach["blocked"] = True
         if self.inspection_step_pending:
             self.inspection_blocked = True
             self.inspection_step_pending = False
@@ -3211,7 +3115,7 @@ class TargetClosing:
                 "verify_pauses": self.verify_pauses, "backoff_trusted_skips": self.backoff_trusted_skips,
                 "backoff_persistence_skips": self.backoff_persistence_skips,
                 "inspection_steps": self.inspection_steps, "dead_band_alignments": self.dead_band_alignments,
-                "squeezed_standoffs": self.squeezed_standoffs, "standoffs_revoked": self.standoffs_revoked,
+                "retry_standoffs": self.retry_standoffs, "standoffs_revoked": self.standoffs_revoked,
                 "sweep_releases": self.sweep_releases,
                 "widened_standoffs": self.widened_standoffs, "stale_standoffs_kept": self.stale_standoffs_kept,
                 "back_arc_standoffs": self.back_arc_standoffs, "history_stops_unseen": self.history_stops_unseen,
@@ -3226,14 +3130,12 @@ class TargetClosing:
                 "nearest_routes": self.nearest_routes, "bound_releases": self.bound_releases,
                 "nearest_goal": None if self.nearest_goal is None else [round(v, 2) for v in self.nearest_goal],
                 "occluder_reads": self.occluder_reads,
-                "overshoot_commands": self.overshoot_commands,
-                "elevated_overshoot_steps": self.elevated_overshoot_steps,
-                "frontal_standoffs": self.frontal_standoffs, "frontal_deferrals": self.frontal_deferrals,
-                "frontal_reselections": self.frontal_reselections,
-                "frontal_deferral_caps": self.frontal_deferral_caps, "face_normal_conflicts": self.face_normal_conflicts,
-                "face_normal_xy": None if self.face_normal_xy is None else [round(v, 3) for v in self.face_normal_xy],
-                "stop_overshoot": None if self.overshoot is None else {
-                    key: self.overshoot[key] for key in ("decided", "steps", "actions", "blocked", "ended")},
+                "stop_approaches": self.stop_approaches, "stop_approach_steps": self.stop_approach_steps,
+                "stop_approach_shortfalls": self.stop_approach_shortfalls,
+                "stop_decision": self.stop_decision,
+                "stop_approach": None if self.stop_approach is None else {
+                    key: self.stop_approach[key] for key in ("decided", "steps", "actions", "blocked", "ended", "within",
+                                                             "range_m")},
                 "standoff_arrived": self.path.arrived, "standoff_arrivals": self.path.arrivals,
                 "standoff_dropped": self.path.dropped, "standoff_widened": self.path.widened,
                 "boxed_in": [{"xy": [round(v, 2) for v in xy], "floor_id": floor, "step": step}

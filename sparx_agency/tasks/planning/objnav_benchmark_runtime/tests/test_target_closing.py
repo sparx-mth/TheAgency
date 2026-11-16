@@ -12,11 +12,11 @@ from sparx_agency.core.planning.objnav.action_converter.transition import apply_
 from sparx_agency.core.planning.objnav.camera_geometry import project_to_image
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
-from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.multifloor_dataset import MULTIFLOOR_PROTOCOL
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
+from sparx_agency.core.planning.object_search.closing.stop_criterion import EUCLIDEAN, PLANAR
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
 from sparx_agency.core.planning.object_search.world_model.standing_floor import standing_floor as strict_standing_floor
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
@@ -513,11 +513,7 @@ def test_the_simulator_bridge_offers_no_navmesh_projection_for_a_standing_point(
 @pytest.mark.parametrize("kwargs", [{"confirmation_frames": 1}, {"confirmation_frames": True},
                                     {"confidence": float("nan")}, {"confidence": 0}, {"max_verify_steps": 0},
                                     {"border_margin_px": -1}, {"border_margin_px": 2.0},
-                                    {"release_unverified": 1}, {"rejection_radius_m": 0},
-                                    {"stop_overshoot_steps": -1}, {"stop_overshoot_steps": 1.0},
-                                    {"stop_overshoot_min_range_m": 0}, {"stop_overshoot_within_m": float("inf")},
-                                    {"stop_overshoot_max_steps": 0}, {"stop_overshoot_max_steps": 2.0},
-                                    {"stop_overshoot_steps": 3, "stop_overshoot_max_steps": 3, "stop_overshoot_max_actions": 2}])
+                                    {"release_unverified": 1}, {"rejection_radius_m": 0}])
 def test_invalid_closing_settings(kwargs):
     with pytest.raises(ValueError):
         TargetClosingSettings(**kwargs)
@@ -628,7 +624,7 @@ def locked_at_two_metres(monkeypatch, **closing):
     p.plan(observation(ep, 1, depth=2))
     assert p.closing.locked and abs(p.closing.xyz[0] - 2.0) < 0.1 and abs(p.closing.xyz[1]) < 0.1
     # The depth-plane fake reads the chair's lowest point at its seat; a chair stands on the floor (the lock
-    # only ever lowers it), so the overshoot's elevation lift stays out of these tests unless one asks for it.
+    # only ever lowers it).
     p.closing.lowest_m = 0.0
     near = replace(observation(ep, 2, depth=0.9), pose=AgentPose(1.1, 0, 0, 0))
     return p, ep, near
@@ -664,403 +660,255 @@ def test_an_exhausted_inspection_stops_when_the_target_was_seen_fresh_in_termina
     assert final.info["reason"].startswith("inspection exhausted") and "action 2" in final.info["reason"]
 
 
-# -- the STOP overshoot (Markleeville/000188, 2026-10-14: STOPped 1.27 m from the footprint on a 0.84 m reading) ----
-def decided_at(monkeypatch, x, depth, steps=2, **closing):
-    """A chair locked two metres ahead; the agent stands at ``x`` seeing it fill the frame at ``depth``.
-
-    Two unconditional overshoot steps unless told otherwise: the mechanism's tests want the second step."""
-    closing.setdefault("stop_overshoot_max_steps", max(steps, TargetClosingSettings().stop_overshoot_max_steps))
-    p, ep, _ = locked_at_two_metres(monkeypatch, stop_overshoot_steps=steps, **closing)
+# -- the walk to the stop distance (the approach before STOP: removed and restored on 2026-11-16) ---------------------
+def decided_at(monkeypatch, x, depth, stop_within_m=0.9, **closing):
+    """A chair locked two metres ahead; the agent stands at ``x`` seeing it fill the frame at ``depth``."""
+    p, ep, _ = locked_at_two_metres(monkeypatch, stop_within_m=stop_within_m, **closing)
     p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
     frame = replace(observation(ep, 2, depth=depth), pose=AgentPose(x, 0, 0, 0))
     return p, ep, frame
 
 
-def test_a_decided_stop_walks_two_steps_toward_the_target_and_stops_without_consulting_a_frame(monkeypatch):
-    """The Markleeville geometry: the memory 1.25 m ahead, the near edge read at 0.84 m. The STOP is
-    decided on that frame and taken two MOVE_FORWARDs later, whatever the detector shows meanwhile."""
+@pytest.mark.parametrize("lowest_m", [0.0, 1.0])
+def test_without_a_stop_distance_the_stop_is_taken_on_the_deciding_frame(monkeypatch, lowest_m):
+    """The method's own default: a deployment that names no success zone STOPs where it decided to, inside its
+    terminal range, for a target on the floor and for a raised one alike. A benchmark's adapter names the zone."""
+    assert TargetClosingSettings().stop_within_m == 0.0 and TargetClosingSettings().stop_measure == PLANAR
+    p, ep, _ = locked_at_two_metres(monkeypatch)
+    p.closing.lowest_m = lowest_m                                       # on the floor; a wall cabinet's underside
+    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
+    frame = replace(observation(ep, 2, depth=0.84), pose=AgentPose(0.75, 0, 0, 0))
+    decided = p.plan(frame)
+    assert decided.stop and not decided.waypoints and p.closing.phase == "STOP"
+    assert decided.info["reason"] == "fresh terminal target confirmation" and "stop_approach" not in decided.info
+    assert p.closing.stop_approach is None and p.closing.stop_approach_steps == 0
+    # The record still says what either measure read where the STOP was decided: the planar range is the fresh
+    # near edge, the Euclidean one lifts it by a raised underside (and by nothing for an object on the floor).
+    record = p.episode_info()["target_closing"]
+    read = record["stop_decision"]
+    assert record["stop_approach"] is None and read["step"] == 2 and read["measured"] is True
+    lift = p.closing.elevation_above_base(frame)                        # the lowest point the lock measured, above the floor
+    assert (lift > 0.3) is bool(lowest_m), "the frame's own points may lower the underside; an object on the floor reads 0"
+    assert read["planar_m"] == pytest.approx(decided.info["measured_m"], abs=1e-3)
+    assert read["elevation_m"] == pytest.approx(lift, abs=1e-3)
+    assert read["euclidean_m"] == pytest.approx(math.hypot(read["planar_m"], lift), abs=1e-3)
+    assert read["memory_m"] == pytest.approx(math.dist((0.75, 0.0), p.closing.xyz[:2]), abs=1e-3)
+
+
+def test_a_decided_stop_inside_the_stop_distance_is_taken_at_once(monkeypatch):
+    """The near edge read at 0.84 m against a 0.9 m stop distance: the agent already stands where it must."""
     p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84)
+    decided = p.plan(frame)
+    assert decided.stop and p.closing.phase == "STOP" and decided.info["reason"] == "fresh terminal target confirmation"
+    stage = decided.info["stop_approach"]
+    assert stage["within"] is True and stage["steps"] == 0 and stage["near_m"] == pytest.approx(decided.info["measured_m"], abs=1e-3)
+    assert stage["ended"].endswith("within 0.90 m") and stage["measure"] == "planar" and stage["range_m"] <= 0.9
+    assert p.closing.stop_approaches == 0 and p.closing.stop_approach_steps == 0, "no walk was needed: none is counted"
+
+
+def test_a_decided_stop_beyond_the_stop_distance_walks_on_to_it_without_consulting_a_frame(monkeypatch):
+    """The STOP is decided inside the terminal range (1.05 m) and the zone the benchmark defines is nearer
+    (0.9 m): the agent walks straight on and STOPs when its own range reads within it, whatever the detector
+    shows meanwhile. An agent that knows by its depth how far the target stands does not stop a decimetre short."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0)
     converter = DiscreteActionConverter(ep.action_spec, p.converter_params)
     first = p.plan(frame)
     assert not first.stop and first.waypoints and p.closing.phase == "ADVANCE"
-    assert first.info["stop_overshoot"]["steps"] == 0 and first.info["reason"].startswith(
-        "STOP decided at action 2 (fresh terminal target confirmation): step 1 of at most 2")
+    stage = first.info["stop_approach"]
+    near = stage["near_m"]
+    assert 0.9 < near <= 1.05 and stage["within"] is False and stage["steps"] == 0 and stage["ended"] is None
+    assert first.info["reason"].startswith("STOP decided at action 2 (fresh terminal target confirmation): the target stands ")
+    assert first.info["reason"].endswith("beyond the stop distance of 0.90 m; step 1 toward it before the STOP")
     assert converter.step(frame.pose, first).action == DiscreteAction.MOVE_FORWARD
     memory = tuple(p.closing.xyz)
     p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
     p.detector.detect = lambda rgb: []                       # the frames after the decision are not evidence
-    second = p.plan(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
-    assert not second.stop and second.waypoints and second.info["stop_overshoot"]["steps"] == 1
-    assert converter.step(AgentPose(1.0, 0, 0, 0), second).action == DiscreteAction.MOVE_FORWARD
-    p.notify_action(replace(frame, step=3), DiscreteAction.MOVE_FORWARD)
-    final = p.plan(replace(frame, step=4, pose=AgentPose(1.25, 0, 0, 0)))
-    assert final.stop and p.closing.phase == "STOP" and final.info["reason"] == "fresh terminal target confirmation"
-    assert final.info["stop_overshoot"]["ended"] == "2 step(s) taken" and final.info["stop_overshoot"]["walked_m"] == 0.5
-    assert tuple(p.closing.xyz) == memory and p.closing.releases == 0 and p.closing.last_seen == 2
-    assert p.closing.overshoot_commands == 2 and p.episode_info()["target_closing"]["stop_overshoot"]["steps"] == 2
-
-
-def test_by_default_the_overshoot_is_one_step_and_a_second_only_while_the_memory_stands_beyond_0_9_m(monkeypatch):
-    """Two steps always were verified and judged too dear for the SPL; one always STOPped Markleeville/000188
-    3 cm outside the disc (2026-10-14 evening). One step always, a second while the memory is beyond 0.90 m."""
-    defaults = TargetClosingSettings()
-    assert (defaults.stop_overshoot_steps, defaults.stop_overshoot_max_steps, defaults.stop_overshoot_within_m) == (1, 2, 0.90)
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1)
-    first = p.plan(frame)
-    assert first.waypoints and first.info["reason"].endswith("step 1 of at most 2 toward the target before it")
-    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
-    # The memory stands 1.03 m from the deciding spot: a step leaves it at 0.78, inside 0.90 -- no second step.
     final = p.plan(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
-    assert final.stop and final.info["stop_overshoot"]["ended"].startswith("1 step(s) taken and the memory stands 0.7")
-    assert final.info["stop_overshoot"]["ended"].endswith("m away, within 0.90 m")
-    assert final.info["stop_overshoot"]["walked_m"] == 0.25 and p.closing.overshoot_commands == 1
+    assert final.stop and p.closing.phase == "STOP" and final.info["reason"] == "fresh terminal target confirmation"
+    stage = final.info["stop_approach"]
+    assert stage["steps"] == 1 and stage["walked_m"] == 0.25 and stage["within"] is True
+    # The deciding frame's near edge, placed on the line to the memory and carried forward by the agent's own step
+    # (the memory stands a few degrees off the heading, so the step closes a hair under its whole 0.25 m).
+    assert near - 0.25 <= stage["near_m"] <= near - 0.24
+    assert stage["ended"] == "the target stands %.2f m away, within 0.90 m" % stage["range_m"]
+    assert tuple(p.closing.xyz) == memory and p.closing.releases == 0 and p.closing.last_seen == 2
+    record = p.episode_info()["target_closing"]
+    assert (record["stop_approaches"], record["stop_approach_steps"], record["stop_approach_shortfalls"]) == (1, 1, 0)
+    assert record["stop_approach"] == {"decided": 2, "steps": 1, "actions": 1, "blocked": False, "within": True,
+                                       "ended": stage["ended"], "range_m": stage["range_m"]}
+    assert record["stop_decision"]["step"] == 2 and record["stop_decision"]["planar_m"] == near, "... and where it was decided"
+    assert record["stop_decision"]["planar_m"] > 0.9 >= record["stop_approach"]["range_m"]
 
 
-def test_the_second_overshoot_step_is_taken_when_the_first_leaves_the_memory_beyond_0_9_m(monkeypatch):
-    """The Markleeville/000188 geometry: the memory 1.25 m ahead on the deciding frame, a 0.84 m near edge.
-    One step leaves the memory at 1.00 m -- the evaluator's radius to the footprint -- so a second is taken."""
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1)
-    assert p.plan(frame).waypoints
+def test_under_the_euclidean_measure_a_raised_target_is_stood_under_more_closely(monkeypatch):
+    """MP3D's metre is 3-D from the floor: a wall cabinet whose underside is 0.6 m up is within 0.9 m of the floor
+    point only inside 0.67 m in the plane, where a chair is at 0.9 m. 2azQ1b91cZZ/000025 STOPped 0.92 m in the
+    plane from a cabinet 0.88 m up -- 1.27 m in 3-D, 0.32 m from the nearest view point. The planar measure
+    (HM3D's metre) reads the same frame as within and STOPs on it."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, stop_measure=EUCLIDEAN)
+    assert p.plan(frame).stop, "a chair on the floor: 0.84 m is 0.84 m by either measure"
     closing = p.closing
-    closing.overshoot = None
-    closing.xyz = (2.0, 0.0, closing.xyz[2])                       # the memory 1.25 m ahead of x = 0.75
+    closing.stop_approach, closing.phase = None, "INSPECT"
+    closing.xyz = (2.0, 0.0, 1.2)
+    closing.lowest_m = 0.6 + frame.pose.z                           # the underside, 0.6 m above the floor under the agent
     first = closing._terminal(frame, 1.25, 0.84, {"reason": "test"})
-    assert first.waypoints and first.info["stop_overshoot"]["memory_m"] == 1.25
+    stage = first.info["stop_approach"]
+    assert first.waypoints and closing.phase == "ADVANCE" and stage["elevation_m"] == 0.6 and stage["near_m"] == 0.84
+    assert stage["range_m"] == pytest.approx(math.hypot(0.84, 0.6), abs=1e-3) and stage["measure"] == "euclidean"
+    assert "the target stands 1.03 m away (0.84 m in the plane, 0.60 m up), beyond the stop distance of 0.90 m" in first.info["reason"]
     closing.note_action(DiscreteAction.MOVE_FORWARD)
-    second = closing._overshoot_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
-    assert second.waypoints and second.info["stop_overshoot"]["steps"] == 1
-    assert second.info["reason"].endswith("step 2 of at most 2 toward the target before it; the memory still stands 1.00 m away, beyond 0.90 m")
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    final = closing._overshoot_step(replace(frame, step=4, pose=AgentPose(1.25, 0, 0, 0)))
-    assert final.stop and final.info["stop_overshoot"]["ended"] == "2 step(s) taken" and final.info["stop_overshoot"]["memory_m"] == 0.75
+    final = closing._stop_approach_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert final.stop and final.info["stop_approach"]["near_m"] == 0.59 and final.info["stop_approach"]["within"] is True
+    assert final.info["stop_approach"]["ended"] == "the target stands 0.84 m away (0.59 m in the plane, 0.60 m up), within 0.90 m"
+    # The planar measure reads the deciding frame as within, and so does an underside too low to count as raised.
+    planar, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84)
+    planar.closing.lowest_m = 0.6 + frame.pose.z
+    assert planar.plan(frame).stop and planar.closing.stop_approach_steps == 0
+    low, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, stop_measure=EUCLIDEAN)
+    low.closing.lowest_m = 0.25 + frame.pose.z                      # a chair whose legs the mask dropped: its seat
+    assert low.closing.elevation_above_base(frame) == 0.0 and low.plan(frame).stop
+    assert TargetClosingSettings().stop_elevation_min_m == 0.30
 
 
-def test_a_raised_target_is_stood_under_more_closely_because_its_view_points_stand_closer(monkeypatch):
-    """2azQ1b91cZZ/000025 (MP3D, ground truth): a wall cabinet whose underside is 0.87 m above the floor has its
-    view points within 0.49 m planar of its face (the generator keeps only the candidates the object shows from,
-    and a raised object shows from close by); the planar overshoot ended with the memory at 0.86 m -- DTG 0.22,
-    SR 0. The overshoot reads the memory's range lifted by the target's lowest point above the base (since 2026-11-10)."""
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1)
+def test_a_target_raised_beyond_the_stop_distance_is_stood_under_as_closely_as_the_body_gets(monkeypatch):
+    """A picture whose underside is 0.95 m up: no place on the floor is within 0.9 m of it, so the walk goes on
+    until the memory would stand under ``stop_approach_min_range_m`` (0.45 m) after another step, and the STOP
+    is taken there, short of the criterion -- counted as a shortfall."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, stop_measure=EUCLIDEAN)
+    assert p.plan(frame).stop
+    closing = p.closing
+    closing.stop_approach, closing.phase = None, "INSPECT"
+    closing.xyz = (2.0, 0.0, 1.5)
+    closing.lowest_m = 0.95 + frame.pose.z
+    assert closing._terminal(frame, 1.25, 1.0, {"reason": "test"}).waypoints
+    for step, x in ((3, 1.0), (4, 1.25)):
+        closing.note_action(DiscreteAction.MOVE_FORWARD)
+        assert closing._stop_approach_step(replace(frame, step=step, pose=AgentPose(x, 0, 0, 0))).waypoints
+    closing.note_action(DiscreteAction.MOVE_FORWARD)
+    final = closing._stop_approach_step(replace(frame, step=5, pose=AgentPose(1.5, 0, 0, 0)))
+    stage = final.info["stop_approach"]
+    assert final.stop and stage["steps"] == 3 and stage["within"] is False and stage["memory_m"] == 0.5
+    assert stage["ended"] == "the memory would stand 0.25 m away after another step"
+    assert closing.stop_approaches == 1 and closing.stop_approach_shortfalls == 1
+
+
+def test_the_walk_to_the_stop_distance_ends_at_once_on_a_blocked_step(monkeypatch):
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0)
+    assert p.plan(frame).waypoints
+    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    p.notify_blocked(frame)                                   # the simulator refused the step: the pose is unchanged
+    final = p.plan(replace(frame, step=3))
+    assert final.stop and final.info["stop_approach"]["ended"] == "a step was blocked"
+    assert final.info["stop_approach"]["blocked"] is True and final.info["stop_approach"]["walked_m"] == 0.0
+    assert p.closing.stop_approach_shortfalls == 1, "as near as the body gets, and counted"
+
+
+def test_the_walk_to_the_stop_distance_is_bounded_in_steps_and_in_actions(monkeypatch):
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0, stop_approach_max_steps=1, stop_approach_max_actions=2)
     assert p.plan(frame).waypoints
     closing = p.closing
-    closing.overshoot = None
-    closing.xyz = (2.0, 0.0, 1.5)
-    closing.lowest_m = 1.0 + frame.pose.z                            # the underside, 1.0 m above the agent's base
-    first = closing._terminal(frame, 1.25, 1.0, {"reason": "test"})
-    assert first.waypoints and first.info["stop_overshoot"]["elevation_m"] == 1.0
-    assert first.info["stop_overshoot"]["lifted_m"] == pytest.approx(math.hypot(1.25, 1.0), abs=1e-3)
-    assert first.info["reason"].endswith("step 1 of at most 3 toward the target before it"), "a raised target buys a third step"
     closing.note_action(DiscreteAction.MOVE_FORWARD)
-    second = closing._overshoot_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
-    assert second.waypoints and "(1.41 m in 3-D, 1.00 m up), beyond 0.90 m" in second.info["reason"]
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    third = closing._overshoot_step(replace(frame, step=4, pose=AgentPose(1.25, 0, 0, 0)))
-    assert third.waypoints and third.info["stop_overshoot"]["steps"] == 2, "the planar rule would have STOPped at 0.75 m"
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    final = closing._overshoot_step(replace(frame, step=5, pose=AgentPose(1.5, 0, 0, 0)))
-    assert final.stop and final.info["stop_overshoot"]["ended"] == "3 step(s) taken" and final.info["stop_overshoot"]["memory_m"] == 0.5
-    assert closing.elevated_overshoot_steps == 1 and p.episode_info()["target_closing"]["elevated_overshoot_steps"] == 1
-    # On the floor nothing changes: the second step leaves the memory within 0.90 m and the STOP follows.
-    closing.overshoot, closing.lowest_m = None, frame.pose.z
-    assert closing._terminal(frame, 1.25, 1.0, {"reason": "test"}).info["stop_overshoot"]["elevation_m"] == 0.0
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    assert closing._overshoot_step(replace(frame, step=7, pose=AgentPose(1.25, 0, 0, 0))).stop
-    # The minimum range still bounds the steps under a raised target, and the setting restores the planar reading.
-    closing.overshoot, closing.lowest_m = None, 1.0 + frame.pose.z
-    assert closing._terminal(frame, 0.65, 0.5, {"reason": "test"}).waypoints
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    bounded = closing._overshoot_step(replace(frame, step=9, pose=AgentPose(1.6, 0, 0, 0)))
-    assert bounded.stop and bounded.info["stop_overshoot"]["ended"].startswith("the memory would stand 0.1")
-    planar, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1, elevation_overshoot=False)
-    planar.closing.lowest_m = 1.0 + frame.pose.z
-    assert planar.plan(frame).info["stop_overshoot"]["elevation_m"] == 0.0
-    with pytest.raises(ValueError, match="elevated_max_steps"):
-        TargetClosingSettings(stop_overshoot_elevated_max_steps=1)
+    closing.stop_approach["near_xy"] = (9.0, 0.0)             # a near edge that stays out of reach
+    final = closing._stop_approach_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    assert final.stop and final.info["stop_approach"]["ended"] == "1 step(s) taken"
+    # Without the hooks (an executor that reports nothing) the action bound ends it.
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0, stop_approach_max_steps=2, stop_approach_max_actions=2)
+    assert p.plan(frame).waypoints and p.plan(replace(frame, step=3)).waypoints
+    final = p.plan(replace(frame, step=4))
+    assert final.stop and final.info["stop_approach"]["ended"] == "2 actions spent"
+    for bad in ({"stop_approach_max_steps": 0}, {"stop_approach_max_steps": 3, "stop_approach_max_actions": 2},
+                {"stop_within_m": -0.1}, {"stop_within_m": 1.2}, {"stop_measure": "geodesic"},
+                {"stop_elevation_min_m": -0.1}, {"stop_approach_min_range_m": float("nan")}):
+        with pytest.raises(ValueError):
+            TargetClosingSettings(**bad)
 
 
-def test_under_the_view_point_defaults_a_floor_target_stops_on_the_deciding_frame_and_a_raised_one_still_steps_in(monkeypatch):
-    """Two findings merged on 2026-11-11 into one rule. HM3D (2026-11-05): under a view-point evaluator the planar
-    overshoot never helped on 70 recorded STOPs and walked 00891/000006 out of the region, so the Habitat
-    entrypoints set ``stop_overshoot_steps`` and ``stop_overshoot_max_steps`` to 0. MP3D (2026-11-10): the view
-    points of a RAISED target stand closer (0.84 m against 1.02 m), so the overshoot must step in under a wall
-    cabinet or a picture. ``_terminal`` reads the ceiling that applies: none for an object on the floor, the
-    elevated one for a raised object -- so the HM3D defaults do not silence the MP3D fix, and vice versa."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.entrypoint import method_defaults
-
-    view_points = method_defaults(SimpleNamespace(agent_height_m=0.88, agent_radius_m=0.18, distance_to="view_points"))
-    assert view_points["target_closing"] == {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0}
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=0, stop_overshoot_max_steps=0)
-    assert p.closing.settings.stop_overshoot_elevated_max_steps == 3, "the raised ceiling keeps its default"
-    # A chair on the floor: the STOP is taken on the deciding frame, no step.
-    decided = p.plan(frame)
-    assert decided.stop and p.closing.phase == "STOP" and "stop_overshoot" not in decided.info
-    assert p.closing.overshoot_commands == 0 and p.closing.elevated_overshoot_steps == 0
-    # A wall cabinet 1.0 m up, the memory 1.25 m ahead: the lifted range is 1.60 m, so the steps go on -- up to the
-    # elevated ceiling, or until the lifted range is within 0.90 m or the minimum range stops them.
-    q, ep2, frame2 = decided_at(monkeypatch, x=0.75, depth=0.84, steps=0, stop_overshoot_max_steps=0)
-    assert q.plan(frame2).stop
-    closing = q.closing
-    closing.phase, closing.overshoot = "INSPECT", None
-    closing.xyz = (2.0, 0.0, 1.5)
-    closing.lowest_m = 1.0 + frame2.pose.z
-    first = closing._terminal(frame2, 1.25, 1.0, {"reason": "test"})
-    assert first.waypoints and first.info["stop_overshoot"]["elevation_m"] == 1.0
-    assert "step 1 of at most 3 toward the target before it" in first.info["reason"]
-    assert first.info["reason"].endswith("(1.60 m in 3-D, 1.00 m up), beyond 0.90 m"), "no unconditional step: the lifted range is the reason"
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    second = closing._overshoot_step(replace(frame2, step=3, pose=AgentPose(1.0, 0, 0, 0)))
-    assert second.waypoints and second.info["stop_overshoot"]["steps"] == 1
-    assert closing.elevated_overshoot_steps == 2, "both steps under the raised target are ones the planar rule (0) would not take"
-    # With the elevation rule off, the view-point defaults mean what HM3D measured: no step for any target.
-    r, ep3, frame3 = decided_at(monkeypatch, x=0.75, depth=0.84, steps=0, stop_overshoot_max_steps=0, elevation_overshoot=False)
-    r.closing.lowest_m = 1.0 + frame3.pose.z
-    assert r.plan(frame3).stop and r.closing.overshoot_commands == 0
+def test_the_walk_aims_along_the_heading_within_a_turn_and_at_the_memory_beyond_it(monkeypatch):
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0)
+    off = replace(frame, pose=AgentPose(0.75, 0, 0, math.radians(20)))
+    first = p.plan(off)
+    here, ahead = first.waypoints
+    assert math.atan2(ahead[1] - here[1], ahead[0] - here[0]) == pytest.approx(math.radians(20)), "the heading that framed it"
+    q, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0)
+    assert q.plan(frame).waypoints
+    turned = q.closing._stop_approach_step(replace(frame, step=3, pose=AgentPose(0.75, 0, 0, math.radians(50))))
+    here, ahead = turned.waypoints
+    memory = math.atan2(q.closing.xyz[1] - here[1], q.closing.xyz[0] - here[0])
+    assert math.atan2(ahead[1] - here[1], ahead[0] - here[0]) == pytest.approx(memory), "more than a turn off: at the memory"
+    away = q.closing._stop_approach_step(replace(frame, step=4, pose=AgentPose(0.75, 0, 0, math.radians(120))))
+    off_deg = math.degrees(abs(memory - math.radians(120)))
+    assert away.stop and away.info["stop_approach"]["ended"] == "the memory is %.0f degrees off the heading" % off_deg
+    assert off_deg > 90, "over a quarter turn off is not a step forward"
 
 
-def wall_world(y_m=0.15, x_from=1.0, x_to=3.0):
-    """An empty 20 x 20 m map with one wall line along x at ``y_m`` (its cells' centres), 0.1 m cells, and the
-    far side of the wall unknown, as a mapped wall reads."""
-    world = OccupancyGrid2D(np.zeros((200, 200), np.int8), OccupancyGrid2DParams(.1, -10, -10))
-    gy = world.world_to_grid(0.0, y_m)[1]
-    world.grid[gy + 1:, :] = world.values.unknown
-    for gx in range(world.world_to_grid(x_from, 0.0)[0], world.world_to_grid(x_to, 0.0)[0] + 1):
-        world.grid[gy, gx] = world.values.occupied
-    return world
-
-
-def grazing_wall(episode, step, offset_m=0.3, pose=AgentPose(0, 0, 0, 0)):
-    """The frame of a wall running along the agent's line of sight, ``offset_m`` to its right (world -y for an agent
-    facing +x): a picture on it is seen edge-on. The depth is the planar depth of the wall plane x_cam = offset_m;
-    the left half sees nothing."""
-    k = episode.camera.intrinsics
-    depth = np.full((k.height, k.width), np.nan, np.float32)
-    u = np.arange(k.width, dtype=np.float32)
-    right = u > k.cx + 1
-    depth[:, right] = (offset_m * k.fx / (u[right] - k.cx))[None, :]
-    depth[~np.isfinite(depth) | (depth > episode.camera.max_depth_m)] = np.nan
-    return ObjNavObservation(np.zeros((k.height, k.width, 3), np.uint8), depth, pose, episode.camera, "chair", step)
-
-
-def test_a_sighting_on_a_standing_plane_records_its_facing_normal():
-    """The projection measures a picture's plane: a wall seen edge-on 0.3 m to the right has its normal pointing
-    left (-y in the world frame of an agent facing +x), toward the camera; a flat frame facing the agent has
-    its normal toward the agent; a deep object has none."""
+def test_the_standoff_is_on_the_side_the_target_was_seen_from_whatever_its_surface(monkeypatch):
+    """From 2026-11-10 to 2026-11-16 a raised target whose depth pixels fitted a standing plane -- a picture --
+    had its standoff ring tried about the plane's normal first, and an in-range STOP from beside it was deferred,
+    because the evaluator's view points of a thin object lie only in front of it. The ring is the agent's own
+    bearing again, for every target, and no sighting carries a plane."""
     from sparx_agency.core.planning.object_search.perception.projection import observed_objects
-    _, ep = setup_policy()
-    k = ep.camera.intrinsics
-    rows = []
-    box = (int(k.cx) + 60, int(k.cy) - 80, int(k.cx) + 160, int(k.cy) + 80)
-    list(observed_objects(grazing_wall(ep, 0), [DetectionWire("chair", .9, box)], 0.3, rows))
-    assert rows[-1]["status"] == "projected" and rows[-1].get("face_normal_xy") is not None
-    nx, ny = rows[-1]["face_normal_xy"]
-    assert abs(nx) < 0.15 and ny > 0.98, "the wall runs along x on the agent's right (-y); its face points +y, to the agent"
+    p, ep, _ = locked_at_three_metres(monkeypatch)
+    p.closing.lowest_m = 1.2                                            # a picture's underside
+    p.plan(observation(ep, 2, depth=3))
+    goal, memory = p.closing.path.goal_xyz, p.closing.xyz
+    assert goal is not None and goal[0] < memory[0] and abs(goal[1] - memory[1]) < 0.2, "between the agent and the target"
     rows = []
     list(observed_objects(observation(ep, 0, depth=2), [DetectionWire("chair", .9, (280, 200, 360, 280))], 0.3, rows))
-    assert rows[-1]["face_normal_xy"][0] < -0.98, "a flat frame at 2 m faces the agent at the origin"
-    rows = []
-    deep = observation(ep, 0, depth=2)
-    # A sofa seen from the front: a vertical back in the upper half of the box and a seat receding 0.4 m below
-    # it -- one connected surface within the depth band (projected) but no plane.
-    deep.depth_m[240:280, 280:360] = np.linspace(2.0, 2.4, 40, dtype=np.float32)[:, None] * np.ones((40, 80), np.float32)
-    list(observed_objects(deep, [DetectionWire("chair", .9, (280, 200, 360, 280))], 0.3, rows))
-    assert rows[-1]["status"] == "projected", rows[-1]["status"]
-    assert "face_normal_xy" not in rows[-1], "a seat and a back are two surfaces, not a plane"
+    assert rows[-1]["status"] == "projected" and "face_normal_xy" not in rows[-1]
 
 
-def facing(closing, nx, ny, lowest_m=1.2):
-    """Give the lock a facing normal as fifty agreeing sightings would (the fake frames' own normals cannot move it)
-    and a raised underside: a picture at ``lowest_m``, above ``frontal_min_elevation_m``."""
-    closing.face_normal_sum, closing.face_normal_count = [50.0 * nx, 50.0 * ny], 50
-    closing.face_normal_xy = (nx, ny)
-    closing.lowest_m = lowest_m
+def test_the_walk_to_the_stop_distance_never_runs_past_the_episodes_action_budget(monkeypatch):
+    """A decided STOP must be CALLED: a walk that used up the last actions of the budget would end the episode
+    without one. Decided on the budget's last action the STOP is taken on it; decided one action earlier, one
+    step is walked and the STOP follows whatever the range reads."""
+    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0)
+    p.episode = replace(ep, max_steps=3)                     # the deciding frame is action 2: the budget's last
+    last = p.plan(frame)
+    assert last.stop and p.closing.phase == "STOP" and last.info["reason"] == "fresh terminal target confirmation"
+    stage = last.info["stop_approach"]
+    assert stage["ended"] == "the action budget ends with this action" and stage["steps"] == 0 and stage["within"] is False
+    assert p.closing.stop_approaches == 0 and p.closing.stop_approach_steps == 0, "no action was walked: no walk is counted"
+    # One action earlier, with a stop distance three steps away: one step, then the STOP on the budget's last action.
+    q, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0, stop_within_m=0.35)
+    q.episode = replace(ep, max_steps=4)
+    first = q.plan(frame)
+    assert not first.stop and first.waypoints and q.closing.phase == "ADVANCE"
+    q.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    final = q.plan(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
+    stage = final.info["stop_approach"]
+    assert final.stop and stage["ended"] == "the action budget ends with this action"
+    assert stage["steps"] == 1 and stage["within"] is False and stage["range_m"] > 0.35
+    record = q.episode_info()["target_closing"]
+    assert (record["stop_approaches"], record["stop_approach_steps"], record["stop_approach_shortfalls"]) == (1, 1, 1)
+    # With the budget's room the same walk goes on.
+    r, ep, frame = decided_at(monkeypatch, x=0.75, depth=1.0, stop_within_m=0.35)
+    r.plan(frame)
+    r.notify_action(frame, DiscreteAction.MOVE_FORWARD)
+    assert not r.plan(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0))).stop
 
 
-def test_a_planar_target_gets_its_standoff_in_front_of_it_and_a_side_on_stop_waits_for_it(monkeypatch):
-    """2azQ1b91cZZ/000157, QUCTc6BB5sX/000055, zsNo4HB9uLZ/000045 (MP3D, ground truth): pictures first seen at a
-    grazing angle were approached along the agent's own bearing and STOPped on from beside them, where the evaluator
-    has no view point. Here the wall runs along the agent's line of sight, 0.15 m beside the memory, and the lock
-    carries the picture's facing normal (-y): the ring is tried about the normal first (since 2026-11-10), so the
-    standoff stands in front of the picture, out from the wall; an in-range frame from beside it does not STOP
-    while that standoff is to be walked; and when no frontal point has a route the agent's ring is used as before."""
-    p, ep = setup_policy()
-    freeze_global(monkeypatch, p)
-    world = wall_world()
-    monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
-    p.plan(observation(ep, 0, depth=2))
-    first = p.plan(observation(ep, 1, depth=2))
-    closing = p.closing
-    assert closing.locked and abs(closing.xyz[0] - 2.0) < 0.1 and abs(closing.xyz[1]) < 0.1
-    # The flat fake frame faces the agent (its normal is the agent's own bearing) with its lowest point 0.78 m up:
-    # a raised plane, whose frontal ring and the agent's ring agree on the point a step short of the memory.
-    assert first.waypoints and closing.face_normal_xy is not None and closing.face_normal_xy[0] < -0.98
-    assert closing.path.frontal and closing.frontal_standoffs == 1 and closing.path.goal_xyz[0] < 1.8
-    # On the floor -- the lowest point at seat height, 0.45 m -- the plane does not count: the agent's ring.
-    closing.path.drop()
-    closing.lowest_m = 0.45
-    assert p.plan(observation(ep, 2, depth=2)).waypoints and not closing.path.frontal and closing.frontal_standoffs == 1
-    # The picture's own plane faces -y and hangs 1.2 m up: re-selected about that normal, the standoff stands in
-    # front of the picture, out from the wall, not a step short of it along the wall.
-    closing.path.drop()
-    facing(closing, 0.0, -1.0)
-    frontal = p.plan(observation(ep, 3, depth=2))
-    assert frontal.waypoints and closing.path.frontal and closing.frontal_standoffs == 2
-    goal = closing.path.goal_xyz
-    assert abs(goal[0] - 2.0) < 0.1, "in front of the picture along the wall"
-    assert goal[1] < -0.5, "out from the wall, on the agent's side of it"
-    reported = p.episode_info()["target_closing"]["face_normal_xy"]
-    assert reported[1] < -0.99 and abs(reported[0]) < 0.05, "the fifty agreeing sightings outweigh the fake frame's own"
-    # A fresh in-range frame from beside the picture (the agent at x 1.1 on the wall's line, 90 degrees off the
-    # normal) does not STOP: the route to the frontal standoff is walked instead, at most frontal_max_deferrals times.
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
-    beside = replace(observation(ep, 4, depth=0.9), pose=AgentPose(1.1, 0, 0, 0))
-    deferred = p.plan(beside)
-    assert deferred.waypoints and not deferred.stop and deferred.info.get("frontal_deferral") == 1
-    assert "off the target's facing normal" in deferred.info["reason"] and closing.frontal_deferrals == 1
-    for step in range(5, 5 + TargetClosingSettings().frontal_max_deferrals):
-        command = p.plan(replace(beside, step=step))
-        if command.stop or command.info.get("frontal_deferral") is None:
-            break
-    assert closing.lock_deferrals > TargetClosingSettings().frontal_max_deferrals and closing.frontal_deferral_caps == 1
-    assert command.stop or command.info.get("phase") in ("target_inspect", "target_stop", "target_advance"), \
-        "the deferrals spent, the STOP rules apply as before"
-    # In front of the picture (on the normal) an in-range frame STOPs at once, as always.
-    q, ep2 = setup_policy()
-    freeze_global(monkeypatch, q)
-    monkeypatch.setitem(q.mapping.__dict__, "update", lambda *a, **kw: world)
-    q.plan(observation(ep2, 0, depth=2))
-    q.plan(observation(ep2, 1, depth=2))
-    facing(q.closing, 0.0, -1.0)
-    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
-    in_front = replace(observation(ep2, 2, depth=0.9), pose=AgentPose(2.0, -0.9, 0, math.pi / 2))
-    assert q.plan(in_front).info.get("frontal_deferral") is None and q.closing.frontal_deferrals == 0
-    # No frontal point has a route (the floor in front of the picture is occupied): the agent's ring as before.
-    r, ep3 = setup_policy()
-    freeze_global(monkeypatch, r)
-    blocked = wall_world()
-    gx0, gy0 = blocked.world_to_grid(1.0, -1.3)
-    gx1, gy1 = blocked.world_to_grid(3.0, -0.2)
-    blocked.grid[gy0:gy1 + 1, gx0:gx1 + 1] = blocked.values.occupied
-    monkeypatch.setitem(r.mapping.__dict__, "update", lambda *a, **kw: blocked)
-    r.plan(observation(ep3, 0, depth=2))
-    r.plan(observation(ep3, 1, depth=2))
-    r.closing.path.drop()
-    facing(r.closing, 0.0, -1.0)
-    fallback = r.plan(observation(ep3, 2, depth=2))
-    assert fallback.waypoints and not r.closing.path.frontal, "no frontal point had a route: the agent's ring"
-    # With the rule off the normal is not even kept, and the ring is the agent's.
-    off, ep4 = setup_policy(target_closing={"frontal_standoff": False})
-    freeze_global(monkeypatch, off)
-    monkeypatch.setitem(off.mapping.__dict__, "update", lambda *a, **kw: world)
-    off.plan(observation(ep4, 0, depth=2))
-    assert off.plan(observation(ep4, 1, depth=2)).waypoints and off.closing.locked
-    assert off.closing.face_normal_xy is None and not off.closing.path.frontal and off.closing.frontal_standoffs == 0
-    # A plane on the floor -- a cabinet's front at 0.45 m -- keeps the agent's ring even with the normal known.
-    low, ep5 = setup_policy()
-    freeze_global(monkeypatch, low)
-    monkeypatch.setitem(low.mapping.__dict__, "update", lambda *a, **kw: world)
-    low.plan(observation(ep5, 0, depth=2))
-    low.plan(observation(ep5, 1, depth=2))
-    low.closing.path.drop()
-    facing(low.closing, 0.0, -1.0, lowest_m=0.45)
-    assert low.plan(observation(ep5, 2, depth=2)).waypoints and not low.closing.path.frontal
-    with pytest.raises(ValueError, match="frontal_off_normal_deg"):
-        TargetClosingSettings(frontal_off_normal_deg=0.0)
-    with pytest.raises(ValueError, match="frontal_max_deferrals"):
-        TargetClosingSettings(frontal_max_deferrals=-1)
-
-
-def test_a_single_unconditional_step_never_takes_a_second(monkeypatch):
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, steps=1, stop_overshoot_max_steps=1)
-    assert p.plan(frame).waypoints
-    closing = p.closing
-    closing.overshoot = None
-    closing.xyz = (2.0, 0.0, closing.xyz[2])
-    assert closing._terminal(frame, 1.25, 0.84, {"reason": "test"}).waypoints
-    closing.note_action(DiscreteAction.MOVE_FORWARD)
-    final = closing._overshoot_step(replace(frame, step=3, pose=AgentPose(1.0, 0, 0, 0)))
-    assert final.stop and final.info["stop_overshoot"]["ended"] == "1 step(s) taken"
-
-
-def test_the_overshoot_ends_at_once_on_a_blocked_step(monkeypatch):
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84)
-    assert p.plan(frame).waypoints
-    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
-    p.notify_blocked(replace(frame, step=3))                 # the converter: the step did not move the agent
-    final = p.plan(replace(frame, step=3))
-    assert final.stop and final.info["stop_overshoot"]["ended"] == "a step was blocked"
-    assert final.info["stop_overshoot"]["steps"] == 1 and final.info["stop_overshoot"]["walked_m"] == 0.0
-
-
-def test_the_overshoot_keeps_the_memory_beyond_its_minimum_range(monkeypatch):
-    """From 0.9 m the second step would leave the memory 0.40 m away: one step, then the STOP."""
-    p, ep, frame = decided_at(monkeypatch, x=1.1, depth=0.9)
-    assert p.plan(frame).waypoints
-    p.notify_action(frame, DiscreteAction.MOVE_FORWARD)
-    final = p.plan(replace(frame, step=3, pose=AgentPose(1.35, 0, 0, 0)))
-    assert final.stop and final.info["stop_overshoot"]["ended"].startswith("the memory would stand 0.4")
-    assert final.info["stop_overshoot"]["steps"] == 1 and final.info["stop_overshoot"]["memory_m"] < 0.7
-
-
-def test_the_overshoot_is_bounded_in_actions_even_without_the_hooks(monkeypatch):
-    """A harness that never reports the actions: the stage still ends by its action bound."""
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84, stop_overshoot_max_actions=3)
-    for step in (2, 3, 4):
-        assert p.plan(replace(frame, step=step)).waypoints
-    final = p.plan(replace(frame, step=5))
-    assert final.stop and final.info["stop_overshoot"]["ended"] == "3 actions spent"
-
-
-def test_the_overshoot_aims_along_the_heading_within_a_turn_and_at_the_memory_beyond_it(monkeypatch):
-    p, ep, frame = decided_at(monkeypatch, x=0.75, depth=0.84)
-    assert p.plan(frame).waypoints
-    closing, spec = p.closing, ep.action_spec
-    info = {"reason": "test"}
-    closing.overshoot = None
-    within = replace(frame, step=3, pose=AgentPose(0.75, 0, 0, math.radians(20)))
-    command = closing._terminal(within, 1.25, 0.84, info)
-    dx, dy = command.waypoints[1][0] - 0.75, command.waypoints[1][1]
-    assert abs(math.atan2(dy, dx) - math.radians(20)) < 1e-9, "within a turn: the heading that framed the object"
-    closing.overshoot = None
-    beyond = replace(frame, step=4, pose=AgentPose(0.75, 0, 0, math.radians(45)))
-    command = closing._terminal(beyond, 1.25, 0.84, info)
-    dx, dy = command.waypoints[1][0] - 0.75, command.waypoints[1][1]
-    assert abs(math.atan2(dy, dx) - math.atan2(closing.xyz[1], closing.xyz[0] - 0.75)) < 1e-9, "beyond: the memory's bearing"
-    assert DiscreteActionConverter(spec, p.converter_params).step(beyond.pose, command).action == DiscreteAction.TURN_RIGHT
-    closing.overshoot = None
-    away = replace(frame, step=5, pose=AgentPose(0.75, 0, 0, math.pi))
-    command = closing._terminal(away, 1.25, 0.84, info)
-    assert command.stop and command.info["stop_overshoot"]["ended"].startswith("the memory is 17")
-    assert command.info["stop_overshoot"]["ended"].endswith("degrees off the heading")
-
-
-def test_the_overshoot_switched_off_stops_on_the_deciding_frame(monkeypatch):
-    p, ep, near = locked_at_two_metres(monkeypatch, stop_overshoot_steps=0, stop_overshoot_max_steps=0)
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
-    command = p.plan(replace(observation(ep, 2, depth=0.84), pose=AgentPose(0.75, 0, 0, 0)))
-    assert command.stop and "stop_overshoot" not in command.info and p.closing.overshoot is None
-    # A RAISED target reads its own ceiling (``stop_overshoot_elevated_max_steps``; the 2026-11-11 merge): the planar
-    # 0 alone leaves it its steps, both at 0 is the overshoot off for every target.
-    q, ep2, near2 = locked_at_two_metres(monkeypatch, stop_overshoot_steps=0, stop_overshoot_max_steps=0,
-                                          stop_overshoot_elevated_max_steps=0)
-    q.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
-    q.closing.lowest_m = 1.0 + near2.pose.z
-    monkeypatch.setattr(q.closing, "elevation_above_base", lambda obs, lowest_m=None: 1.0)
-    command = q.plan(replace(observation(ep2, 2, depth=0.84), pose=AgentPose(0.75, 0, 0, 0)))
-    assert command.stop and "stop_overshoot" not in command.info and q.closing.overshoot is None
-
-
-def test_without_an_unconditional_step_the_overshoot_steps_only_while_the_memory_stands_beyond_0_9_m(monkeypatch):
-    """``stop_overshoot_steps`` 0 with ``max_steps`` 2: a memory inside 0.90 m STOPs on the deciding frame."""
-    p, ep, near = locked_at_two_metres(monkeypatch, stop_overshoot_steps=0, stop_overshoot_max_steps=2)
-    p.detector.detect = lambda rgb: [DetectionWire("chair", .9, (0, 25, 392, 404))]
-    command = p.plan(replace(observation(ep, 2, depth=0.7), pose=AgentPose(1.2, 0, 0, 0)))
-    assert command.stop and command.info["stop_overshoot"]["ended"].startswith("0 step(s) taken and the memory stands")
-    assert command.info["stop_overshoot"]["memory_m"] <= 0.90
-    closing = p.closing
-    closing.overshoot = None
-    closing.xyz = (2.45, 0.0, closing.xyz[2])                      # 1.25 m ahead: beyond 0.90, so a step
-    assert closing._terminal(replace(observation(ep, 3), pose=AgentPose(1.2, 0, 0, 0)), 1.25, 0.7, {"reason": "test"}).waypoints
+def test_the_evaluator_shaped_settings_are_gone():
+    """What was removed on 2026-11-16 and stays removed: the settings sized on recorded validation STOPs and view
+    points (an unconditional step for a footprint evaluator, three steps under a raised target, the frontal
+    standoff of raised planar targets). A policy config that still names one is refused, never silently ignored.
+    What replaced them -- one distance and one measure per dataset -- is ``test_goal_zone.py``'s."""
+    import importlib.util
+    for gone in ({"stop_overshoot_steps": 0}, {"stop_overshoot_max_steps": 0}, {"stop_overshoot_within_m": 0.9},
+                 {"stop_overshoot_min_range_m": 0.45}, {"stop_overshoot_max_actions": 5}, {"elevation_overshoot": False},
+                 {"elevation_min_m": 0.3}, {"stop_overshoot_elevated_max_steps": 0}, {"frontal_standoff": False},
+                 {"frontal_min_elevation_m": 0.6}, {"frontal_off_normal_deg": 35.0}, {"frontal_refine_deg": 45.0},
+                 {"frontal_max_deferrals": 12}, {"frontal_inner_radii_m": (0.65, 0.45)}):
+        with pytest.raises(TypeError):
+            TargetClosingSettings(**gone)
+    p, _ = setup_policy()
+    record = p.episode_info()["target_closing"]
+    for key in ("stop_overshoot", "overshoot_commands", "elevated_overshoot_steps", "frontal_standoffs",
+                "frontal_deferrals", "frontal_reselections", "face_normal_xy"):
+        assert key not in record
+    for name in ("overshoot", "_overshoot_step", "_frontal_deferral", "frontal_normal", "off_normal_deg", "face_normal_xy"):
+        assert not hasattr(p.closing, name)
+    assert not hasattr(p.closing.path, "frontal") and not hasattr(type(p.closing.path), "WALL_OFFSETS_DEG")
+    assert importlib.util.find_spec("sparx_agency.core.planning.object_search.perception.face_normal") is None
 
 
 def test_an_exhausted_inspection_without_any_in_range_sighting_releases_the_lock_and_remembers_the_spot(monkeypatch):
@@ -2252,7 +2100,7 @@ def test_an_arrived_standoff_with_the_fresh_range_under_a_step_out_is_the_inspec
     assert converter.step(here, command).action == DiscreteAction.MOVE_FORWARD
     stepped = AgentPose(1.40, 0, 0, 0)
     command = p.plan(replace(observation(ep, 3, depth=0.95), pose=stepped))
-    assert p.closing.phase in ("STOP", "ADVANCE"), "the next frame, in range, is terminal"
+    assert p.closing.phase == "STOP", "the next frame, in range, is terminal"
     # Over the resumption cap the inspection runs to its own verdict instead of looping INSPECT / CLOSE.
     q, ep2, _ = arrived_at_a_kept_standoff(monkeypatch, max_inspection_resumptions=0)
     q.plan(replace(observation(ep2, 2, depth=1.8), pose=here))
@@ -2684,32 +2532,78 @@ def test_the_standoff_ring_widens_to_the_terminal_radius_when_no_standoff_point_
     assert math.dist(q.closing.path.goal_xyz[:2], q.closing.xyz[:2]) <= 0.75
 
 
-def test_floor_that_clears_the_body_radius_only_is_a_standoff_for_the_squeeze_planner(monkeypatch):
-    """The floor in front of a cabinet is often drawn narrower than the planner's own floor standoff (0.25 m): the
-    cell that clears the body radius (0.18 m) and no more is a standoff all the same, reached with the squeeze
-    planner and counted. The clearance is from everything not observed free, the cabinet and the unseen alike."""
-    p, ep, _ = locked_at_three_metres(monkeypatch)
+@pytest.mark.parametrize("configured_m", [None, 0.20])
+def test_a_standing_point_keeps_0_25_m_from_observed_obstacles_and_is_asked_again_closer_when_that_has_no_route(
+        monkeypatch, configured_m):
+    """The floor in front of a cabinet is often drawn narrower than the default planner's standoff (0.25 m). The
+    standing points are then asked once more of a planner of the closing's own, relaxed to the retry clearance, and
+    the standoff is counted. The retry clearance is the body radius (0.18 m) unless the settings name another: of
+    the two measured on 180 MP3D episodes (2026-11-16) the body radius reached more targets than 0.20 m did."""
+    overrides = {} if configured_m is None else {"standing_retry_clearance_m": configured_m}
+    p, ep, _ = locked_at_three_metres(monkeypatch, **overrides)
     memory = tuple(p.closing.xyz)
     world = cabinet_world(monkeypatch, p, 0.55)
     limit = p.settings.target_closing.terminal_distance_m - p.converter_params.goal_tolerance_m
-    (default, roomy_m), (squeeze, body_m) = p.closing.standing_planners()
-    assert default is None and squeeze is p.squeeze_planner and roomy_m == 0.25 and body_m == p.settings.body_radius_m == 0.18
-    assert nearest_standing_m(p, ep, world, 2, roomy_m)[0] > limit >= nearest_standing_m(p, ep, world, 2, body_m)[0]
+    (default, roomy_m), (retry, retry_m) = p.closing.standing_planners()
+    assert default is None and retry is p.standing_retry_planner and retry is not p.squeeze_planner
+    assert roomy_m == p.settings.min_clearance_m == 0.25
+    assert p.settings.target_closing.standing_retry_clearance_m == configured_m
+    assert retry_m == retry.params.inflate_floor_m == p.standing_retry_clearance_m()
+    assert retry_m == (p.settings.body_radius_m if configured_m is None else configured_m)
+    assert nearest_standing_m(p, ep, world, 2, roomy_m)[0] > limit >= nearest_standing_m(p, ep, world, 2, retry_m)[0]
     command = p.plan(observation(ep, 2, depth=3))
     path = p.closing.path
-    assert command.waypoints and command.info.get("squeeze") is True and path.goal_planner is squeeze
-    assert path.squeezed == 1 and p.closing.squeezed_standoffs == 1 and not path.widened
+    assert command.waypoints and command.info.get("squeeze") is True and path.goal_planner is retry
+    assert path.retried == 1 and p.closing.retry_standoffs == 1 and not path.widened
     assert math.dist(path.goal_xyz[:2], memory[:2]) <= limit
     gx, gy = world.world_to_grid(*path.goal_xyz[:2])
     assert (world.grid[gy - 1:gy + 2, gx - 1:gx + 2] == world.values.free).all(), "the body's own cells, all observed free"
-    assert p.closing.diagnostics()["squeezed_standoffs"] == 1
+    ys, xs = np.nonzero(world.grid == world.values.occupied)
+    assert np.hypot(xs - gx, ys - gy).min() * world.resolution >= retry_m, "and the retry clearance from the cabinet"
+    assert p.closing.diagnostics()["retry_standoffs"] == 1
+
+
+def test_floor_that_clears_the_body_radius_alone_is_a_standing_point_unless_the_settings_ask_for_more(monkeypatch):
+    """A cabinet 5 cm wider: only cells at the body radius (0.18 m) from it lie on the standoff ring. The default
+    retry takes one; a policy configured to keep 0.20 m takes none, and its ring widens for the default planner."""
+    p, ep, _ = locked_at_three_metres(monkeypatch)
+    world = cabinet_world(monkeypatch, p, 0.60)
+    limit = p.settings.target_closing.terminal_distance_m - p.converter_params.goal_tolerance_m
+    assert nearest_standing_m(p, ep, world, 2, 0.20)[0] > limit >= nearest_standing_m(p, ep, world, 2, 0.18)[0]
+    command = p.plan(observation(ep, 2, depth=3))
+    path = p.closing.path
+    assert command.waypoints and path.goal_planner is p.standing_retry_planner and not path.widened
+    assert path.retried == 1 and p.closing.retry_standoffs == 1 and p.closing.widened_standoffs == 0
+    q, ep, _ = locked_at_three_metres(monkeypatch, standing_retry_clearance_m=0.20)
+    world = cabinet_world(monkeypatch, q, 0.60)
+    command = q.plan(observation(ep, 2, depth=3))
+    path = q.closing.path
+    assert command.waypoints and path.goal_planner is None and path.widened
+    assert path.retried == 0 and q.closing.retry_standoffs == 0 and q.closing.widened_standoffs == 1
+
+
+def test_the_retry_clearance_lies_between_the_body_radius_and_the_default_standoff():
+    for bad in (0.0, True, "0.2", float("nan")):
+        with pytest.raises(ValueError, match="standing_retry_clearance_m"):
+            TargetClosingSettings(standing_retry_clearance_m=bad)
+    for bad in (0.10, 0.30):                                            # under the body radius; over the default standoff
+        with pytest.raises(ValueError, match="standing_retry_clearance_m"):
+            setup_policy(target_closing={"standing_retry_clearance_m": bad})
+    p, _ = setup_policy(target_closing={"standing_retry_clearance_m": 0.25})
+    assert p.closing.standing_planners() == [(None, 0.25)], "at the default standoff there is no second planner"
+    default, _ = setup_policy()
+    assert TargetClosingSettings().standing_retry_clearance_m is None, "the body radius, whatever body the policy is given"
+    assert default.standing_retry_clearance_m() == default.settings.body_radius_m == 0.18
+    assert "0.25 m from every observed obstacle, and 0.18 m when no route is found" in default.configuration()["standing_points"]
+    wide, _ = setup_policy(target_closing={"standing_retry_clearance_m": 0.20})
+    assert "and 0.20 m when no route is found" in wide.configuration()["standing_points"]
 
 
 def test_the_default_planner_is_asked_of_floor_hemmed_in_by_cells_nobody_has_observed(monkeypatch):
     """One floor, two planners. A strip of floor four cells wide, seen through unseen floor, has no cell whose
     whole 0.25 m disc is observed free -- and the first paired runs (2026-11-15) took such standoffs with the
-    squeeze planner, in 32 of 85 episodes, where the navigation-mesh runs had taken none in the same 85: the
-    squeeze planner trades a roomy way for a tight one half again as short. The body's own disc observed free is
+    second planner, in 32 of 85 episodes, where the navigation-mesh runs had taken none in the same 85: a planner
+    relaxed further trades a roomy way for a tight one half again as short. The body's own disc observed free is
     the rule; the default planner's standoff is from obstacles the map has SEEN, and unseen cells cast none."""
     p, ep, _ = locked_at_three_metres(monkeypatch)
     memory = tuple(p.closing.xyz)
@@ -2720,17 +2614,17 @@ def test_the_default_planner_is_asked_of_floor_hemmed_in_by_cells_nobody_has_obs
     world = OccupancyGrid2D(data, params)
     monkeypatch.setitem(p.mapping.__dict__, "update", lambda *a, **kw: world)
     obs = observation(ep, 2, depth=3)
-    (default, roomy_m), (squeeze, body_m) = p.closing.standing_planners()
-    assert default is None and squeeze is p.squeeze_planner and roomy_m == 0.25 and body_m == 0.18
+    (default, roomy_m), (retry, retry_m) = p.closing.standing_planners()
+    assert default is None and retry is p.standing_retry_planner and roomy_m == 0.25 and retry_m == 0.18
     assert not strict_standing_floor(world, (0.0, 0.0), roomy_m).reachable.any(), "no 0.25 m disc observed free anywhere"
     limit = p.settings.target_closing.terminal_distance_m - p.converter_params.goal_tolerance_m
-    for standoff_m in (roomy_m, body_m):
+    for standoff_m in (roomy_m, retry_m):
         assert nearest_standing_m(p, ep, world, 2, standoff_m)[0] <= limit, "and yet floor each planner can stop on"
     assert (p.closing.standing_floor(obs, world, roomy_m).reachable == p.closing.standing_floor(obs, world).reachable).all()
     command = p.plan(obs)
     path = p.closing.path
     assert command.waypoints and command.info.get("squeeze") is None and path.goal_planner is None
-    assert path.squeezed == 0 and p.closing.squeezed_standoffs == 0 and p.closing.phase == "CLOSE"
+    assert path.retried == 0 and p.closing.retry_standoffs == 0 and p.closing.phase == "CLOSE"
     assert math.dist(path.goal_xyz[:2], memory[:2]) <= limit
     gx, gy = world.world_to_grid(*path.goal_xyz[:2])
     assert (world.grid[gy - 1:gy + 2, gx - 1:gx + 2] == world.values.free).all(), "the body's own cells, all observed free"

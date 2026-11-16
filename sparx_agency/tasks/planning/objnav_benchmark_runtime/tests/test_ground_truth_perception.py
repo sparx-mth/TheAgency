@@ -13,6 +13,7 @@ run non-publishable; and ``--jobs max`` is bounded by scenes, cores and VRAM.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from types import SimpleNamespace
 
@@ -26,7 +27,7 @@ from sparx_agency.core.planning.objnav.types.actions import DiscreteAction as A
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.observation import ObjNavObservation
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
-from sparx_agency.core.planning.object_search.interfaces import RECOVERABLE_DETECTOR_CAUSES
+from sparx_agency.core.planning.object_search.interfaces import RECOVERABLE_DETECTOR_CAUSES, ground_truth_semantics
 from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
     PERCEPTION_GROUND_TRUTH, PERCEPTION_SERVICE, detector_flags, perception_flags)
@@ -567,6 +568,63 @@ def test_the_factory_builds_the_oracle_pair_with_masks_on_and_marks_the_run_non_
     assert method["segmenter"]["metadata"]["backend"] == GROUND_TRUTH_BACKEND
 
 
+@pytest.mark.parametrize("agent", ["rpt", "falcon-yolo"])
+def test_a_ground_truth_run_is_recorded_as_one_by_the_method_itself(agent, monkeypatch):
+    """``ground_truth_semantics`` in the policy's own record was the constant False until 2026-11-16, in a
+    ``--perception ground-truth`` run too; it is read from what the perception services declare."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.services import llm
+
+    class Verified(FakeLLM):
+        def __init__(self, client):
+            super().__init__()
+
+        def health(self):
+            return {"model": "fake", "digest": "0"}
+
+    monkeypatch.setattr(llm, "VerifiedLLMClient", Verified)
+    policy, method = build_policy(arguments(agent=agent), MAPPER, defaults={"body_height_m": 0.88, "body_radius_m": 0.18},
+                                  ground_truth=source_with({2: "chair"}))
+    assert isinstance(policy.detector, GroundTruthDetector)
+    assert method["ground_truth_semantics"] is True and policy.configuration()["ground_truth_semantics"] is True
+    assert method["ground_truth_stairs"] is False, "no stairs are read from the simulator in either mode"
+    assert ground_truth_semantics(policy.detector) is True and ground_truth_semantics(policy.segmenter) is True
+    json.dumps(policy.configuration())
+
+
+def test_the_run_record_names_the_oracles_model_beside_the_prompt_version_it_was_asked_under(monkeypatch, capsys):
+    """A wording is tuned per model: the record carries the model that answered the node oracle, the prompt version,
+    the model that version was tuned on and whether the two agree; a mismatch is said once at start-up."""
+    from sparx_agency.core.mapping.topology.search_node_prompts import DEFAULT_PROMPT, PROMPTS
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.services import llm
+
+    def verified(reasoning_model):
+        class Verified(FakeLLM):
+            def __init__(self, client):
+                super().__init__()
+
+            def health(self):
+                return {"model": "label-model", "reasoning_model": reasoning_model, "digest": "0",
+                        "models": {reasoning_model: {"digest": "sha256:abc"}, "label-model": {"digest": "0"}}}
+        return Verified
+
+    tuned_on = PROMPTS[DEFAULT_PROMPT].tuned_on
+    monkeypatch.setattr(llm, "VerifiedLLMClient", verified(tuned_on))
+    _, method = build_policy(arguments(agent="rpt"), MAPPER, ground_truth=source_with({2: "chair"}))
+    oracle = method["node_oracle"]
+    assert oracle["prompt"] == PROMPTS[DEFAULT_PROMPT].describe() and oracle["prompt"]["version"] == DEFAULT_PROMPT
+    assert oracle["model"] == {"name": tuned_on, "digest": "sha256:abc", "prompt_tuned_on_it": True}
+    assert "node oracle" not in capsys.readouterr().err, "the model the version was tuned on: nothing to say"
+    monkeypatch.setattr(llm, "VerifiedLLMClient", verified("some-larger-model"))
+    _, method = build_policy(arguments(agent="rpt"), MAPPER, ground_truth=source_with({2: "chair"}))
+    assert method["node_oracle"]["model"] == {"name": "some-larger-model", "digest": "sha256:abc",
+                                              "prompt_tuned_on_it": False}
+    said = capsys.readouterr().err
+    assert "some-larger-model is asked under prompt version %r, which was tuned on %s" % (DEFAULT_PROMPT, tuned_on) in said
+    _, baseline = build_policy(arguments(agent="falcon-yolo"), MAPPER, ground_truth=source_with({2: "chair"}))
+    assert "node_oracle" not in baseline or "model" not in (baseline.get("node_oracle") or {}), "no oracle, no model"
+    json.dumps(method)
+
+
 def test_the_factory_honours_a_policy_config_that_keeps_the_box_pipeline_and_the_declared_floor(tmp_path):
     config = tmp_path / "policy.json"
     config.write_text(json.dumps({"segmentation": False}))
@@ -577,34 +635,41 @@ def test_the_factory_honours_a_policy_config_that_keeps_the_box_pipeline_and_the
 
 
 def test_the_factory_merges_a_nested_default_group_with_the_configs_own_field_by_field(tmp_path):
-    """The HM3D entrypoint's ``target_closing`` defaults (the overshoot off) survive a policy config that names
-    another closing field; the config's own fields still win."""
+    """A caller's ``target_closing`` defaults survive a policy config that names another closing field; the
+    config's own fields still win."""
     config = tmp_path / "policy.json"
-    config.write_text(json.dumps({"target_closing": {"terminal_distance_m": 0.9, "stop_overshoot_max_actions": 7}}))
+    config.write_text(json.dumps({"target_closing": {"terminal_distance_m": 0.9, "max_verify_steps": 7}}))
     defaults = {"body_height_m": 0.88, "body_radius_m": 0.18,
-                "target_closing": {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0, "stop_overshoot_max_actions": 5}}
+                "target_closing": {"inspection_max_steps": 1, "weak_stop_max_holds": 0, "max_verify_steps": 5}}
     policy, _ = build_policy(arguments(policy_config=config), MAPPER, defaults=defaults, ground_truth=source_with({2: "chair"}))
     closing = policy.settings.target_closing
-    assert (closing.stop_overshoot_steps, closing.stop_overshoot_max_steps) == (0, 0), "the entrypoint's defaults"
-    assert closing.terminal_distance_m == 0.9 and closing.stop_overshoot_max_actions == 7, "the config's fields"
-    assert defaults["target_closing"]["stop_overshoot_max_actions"] == 5, "the caller's dict is not written into"
+    assert (closing.inspection_max_steps, closing.weak_stop_max_holds) == (1, 0), "the caller's defaults"
+    assert closing.terminal_distance_m == 0.9 and closing.max_verify_steps == 7, "the config's fields"
+    assert defaults["target_closing"]["max_verify_steps"] == 5, "the caller's dict is not written into"
 
 
-def test_the_hm3d_method_defaults_turn_the_stop_overshoot_off_under_the_view_point_evaluator():
-    """HM3D scores the distance to the goal's view points with a 0.1 m radius; the overshoot's step toward the
-    object walks Gibson's footprint margin and, on 70 recorded HM3D STOPs, never helped -- it took
-    00891-cvZr5TUy5C5/000006 from 0.02 m to 0.16 m. Off here, untouched for an evaluator that measures otherwise."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import PROTOCOLS
+def test_the_habitat_method_defaults_are_the_agents_body_and_the_datasets_published_success_zone():
+    """Until 2026-11-16 the entrypoint read what the evaluator measures the distance to (view points, 0.1 m) and
+    switched the closing's steps after a decided STOP by it and by recorded validation STOPs. What the benchmark
+    hands the method now is what it publishes: the body, and its success zone -- one distance and one measure per
+    dataset (``habitat/goal_zone.py``). Nothing of how a run is scored reaches the method, and no goal's position."""
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import PROTOCOLS as HM3D
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import PROTOCOLS as MP3D
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run import method_defaults
     from sparx_agency.core.planning.object_search.settings import RPTSettings
-    protocol = PROTOCOLS["v1"]
-    defaults = method_defaults(protocol)
-    assert defaults["body_height_m"] == protocol.agent_height_m and defaults["body_radius_m"] == protocol.agent_radius_m
-    assert defaults["target_closing"] == {"stop_overshoot_steps": 0, "stop_overshoot_max_steps": 0}
-    closing = RPTSettings(**defaults).target_closing
-    assert closing.stop_overshoot_max_steps == 0 and closing.stop_overshoot_steps == 0, "a valid closing configuration"
-    footprint = SimpleNamespace(agent_height_m=0.88, agent_radius_m=0.18, distance_to="footprint")   # the protocol refuses it; a stand-in
-    assert "target_closing" not in method_defaults(footprint)
+    for protocol, measure in ((HM3D["v1"], "planar"), (HM3D["v2"], "planar"), (MP3D["v1"], "euclidean")):
+        defaults = method_defaults(protocol)
+        assert defaults == {"body_height_m": protocol.agent_height_m, "body_radius_m": protocol.agent_radius_m,
+                            "target_closing": {"stop_within_m": 0.9, "stop_measure": measure}}
+        closing = RPTSettings(**defaults).target_closing
+        assert closing == replace(RPTSettings().target_closing, stop_within_m=0.9, stop_measure=measure), \
+            "every other field of the closing is the method's own"
+    # The scorer is not read: a protocol scored by another quantity gets the same defaults from the same zone.
+    zone = HM3D["v1"].goal_zone
+    for distance_to in ("view_points", "footprint"):
+        stand_in = SimpleNamespace(agent_height_m=0.88, agent_radius_m=0.18, distance_to=distance_to,
+                                   success_distance_m=0.1, goal_zone=zone)
+        assert method_defaults(stand_in)["target_closing"] == {"stop_within_m": 0.9, "stop_measure": "planar"}
 
 
 def test_the_factory_refuses_contradictions():
@@ -638,6 +703,7 @@ def test_a_service_runs_record_gains_no_key_so_runs_recorded_before_the_oracle_s
     _, method = build_policy(arguments(perception=PERCEPTION_SERVICE), MAPPER)
     assert "perception" not in method and "ground_truth" not in method
     assert method["detector_url"] == "http://127.0.0.1:1" and method["publishable"] is True
+    assert method["ground_truth_semantics"] is False, "a service infers from the image and declares nothing"
 
 
 def test_the_campaign_forwards_the_perception_flags_and_a_service_run_forwards_none():

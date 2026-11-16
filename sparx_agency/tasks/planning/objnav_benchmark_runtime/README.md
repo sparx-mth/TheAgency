@@ -411,46 +411,86 @@ confirmed as a bed from two; this runtime's map never merges classes since
 false` restores the historical recordable method error (**not**
 `ObjNavInternalError`: the harness finalizes failed metrics; its forced STOP is
 not a successful policy STOP and appears as `termination=agent_error`).
-**The STOP overshoot** (since 2026-10-14; `stop_overshoot_steps` 1,
-`stop_overshoot_max_steps` 2, `stop_overshoot_within_m` 0.90,
-`stop_overshoot_min_range_m` 0.45, `stop_overshoot_max_actions` 5;
-`TargetClosing._terminal`). Every terminal reading is biased short of the
-object's footprint -- the near edge of a box with floor in it, a centroid fused
-from the near surfaces -- and the evaluator measures to the footprint:
-Markleeville/000188 STOPped on a 0.84 m near edge 1.27 m from the toilet (DTG
-0.27, SR 0). Reading a small object's range from the fused memory instead was
-tried and flipped CLOSE and INSPECT on alternate frames for 25 actions (see
-`_fresh_measured`), so the remedy is after the decision, not in it: once a STOP
-is decided, on whichever of the seven paths of `_inspect`, the closing walks
-one more MOVE_FORWARD toward the 3-D memory -- and a second only while, after
-the first, the memory still stands farther than 0.90 m from the agent -- and
-STOPs then (phase `ADVANCE`). No frame is consulted meanwhile -- `observe`
-short-circuits, the memory stands, nothing is re-verified -- and the STOP
-follows whatever the detector shows. The memory, not the near edge, judges
-the second step: the memory is about the footprint's near face (000188: 1.25
-m where the footprint's disc began at 1.27), so a memory inside 0.90 m is a
-tenth inside the evaluator's radius, while the near edge is what decided the
-STOP and in 000188 undercut the memory by 0.41 m where the eight STOPs that
-succeeded agreed with it within 0.14. A step is taken only while the memory would still stand
-0.45 m beyond the agent after it and the deciding frame's near edge (when it
-measured one) at least the body radius; the agent must face within a quarter
-turn of the memory, and beyond one turn of it the converter turns toward the
-memory first (turns cost no path); a step the converter reports blocked ends
-the stage at once (`note_blocked`, from the policy's `notify_blocked`;
-`note_action` counts the steps), and the action bound ends it without the
-hooks. `stop_overshoot` in the command info and the diagnostics says how it
-ended; `overshoot_commands` counts the steps asked for. Verified in turn on
-the same ten episodes (round i, `…143259Z`: SR 0.80 / SPL 0.366): two steps
-always (`…155701Z`) SR 0.90 / SPL 0.450, Markleeville/000188 from DTG 0.27 to
-SPL 1.0 but every other STOP 0.01-0.07 SPL dearer; one step always
-(`…162832Z`) SR 0.80 / SPL 0.357, 000188 STOPped 3 cm outside the disc. On
-those nine deciding frames the rule above takes the second step twice (000188
-and Collierville/000023, memories at 1.25 and 1.19 m) and nowhere else --
-verified in `…170224Z`: SR 0.90 / SPL 0.456 / DTG 0.59 m, the best of the
-four.
-`stop_overshoot_max_steps` 0 restores the STOP on the deciding frame, which is
-how the shared test fixture runs the decision tests; 1 is one step and never
-a second.
+**The STOP is taken inside the benchmark's own success zone** (since
+2026-11-16). The closing DECIDES to stop on its own evidence -- a fresh,
+complete box of the target inside the terminal range (1.05 m) -- and how near
+the target it must then STAND is a criterion of its own, because it is not
+the method's to choose: a benchmark defines a success zone round each goal,
+and two benchmarks that both say "within 1 m" do not mean the same thing.
+So the criterion is two settings an adapter states from its benchmark's
+published definition, `target_closing.stop_within_m` and `stop_measure`
+(`core/.../closing/stop_criterion.py`):
+
+| benchmark | its success zone, as published | `stop_measure` | `stop_within_m` |
+|---|---|---|---|
+| HM3D v1, v2 (`hm3d/protocol.py`) | view points on a 0.09 m (v2: 0.085 m) grid out to 1.0 m from the object's box **in the horizontal plane**, whatever its height; a STOP within 0.1 m of one | `planar` | 0.9 |
+| MP3D v1 (`mp3d/protocol.py`) | the same grid, out to 1.0 m from the box **in 3-D from the floor**: the reach in the plane shrinks as the object is raised (1.00 m on the floor, 0.74 m with the underside 0.6-0.9 m up) | `euclidean` | 0.9 |
+| Gibson (`gibson/run.py`) | SemExp's: inside the goal footprint dilated by 1.0 m on the 5 cm map, in the plane; STOP not required | `planar` | 0.9 |
+
+`habitat/goal_zone.py` has the generator both Habitat datasets were made
+with, the measurement that tells them apart (every validation goal's view
+points against the object's box: HM3D's metre is horizontal, MP3D's is 3-D
+from the floor), how VLFM, ASCENT and ApexNav stop (all three by a planar
+range, on both datasets), and why the STOP is taken a decimetre inside the
+zone's edge (no place is farther than 0.064 m from a candidate of the grid,
+so one inside the zone is within the 0.1 m success distance of any STOP at
+0.9 m; 0.9 m is also VLFM's number). The planar range is to the target's
+nearest measured point; the Euclidean one lifts it by the height of the
+target's lowest measured point above the floor under the agent, as the two
+legs of a triangle (an underside under 0.30 m is an object on the floor).
+
+Once the STOP is decided and the range reads beyond the distance, the closing
+walks straight on toward the target (phase `ADVANCE`) and STOPs when the range
+is within it. No frame is consulted meanwhile: under a raised target the box
+leaves the top of the frame, before a low one it drops under it, and a frame
+that lost the box is not evidence against a target just verified. The walk
+also ends, and the STOP is taken where it ends, at a refused step; after four
+steps or seven actions; when another step would leave the memory under 0.30 m
+or the measured near edge inside the body radius (a target whose underside is
+raised by the stop distance or more is within it of no place on the floor,
+and is stood under that closely: `stop_approach_shortfalls`); when the
+memory stands more than a quarter turn off; or on the last action the
+episode's budget holds, so that a decided STOP is always called. The record carries
+`stop_decision` (what both measures read on the deciding frame),
+`stop_approach` (where the walk ended and what the range read there) and the
+counters `stop_approaches`, `stop_approach_steps`, `stop_approach_shortfalls`.
+The method's own default is `stop_within_m: 0` -- STOP on the deciding
+frame -- for a deployment with no such definition; the entry points set the
+criterion below `--policy-config`, so `{"target_closing": {"stop_within_m":
+0}}` is the arm without it.
+
+What reaches the method is one distance and one word per dataset, the same
+for every episode and every object. What does not: the position of any view
+point or goal, any distance to them, anything of an episode. That line is
+the difference from what stood here before. From 2026-10-14 the closing took
+one or two steps after every decided STOP (the *STOP overshoot*) because
+Gibson's evaluator measures to the footprint; the Habitat entry point
+switched it off under a view-point evaluator (2026-11-05) and a variant for
+RAISED targets came back (2026-11-10, up to three steps), sized on the
+distance of MP3D's validation view points from a raised object -- rules
+switched by which evaluator scores a run and fitted on recorded STOPs. They
+were removed on the morning of 2026-11-16, at a measured cost of eight
+successes in 180 MP3D episodes (every one a STOP with the target in view, a
+few decimetres outside the zone), and replaced the same day by the definition
+itself. The *frontal standoff* of raised planar targets (`frontal_standoff`,
+`perception/face_normal.py`), removed with them, is not restored: the
+standoff ring starts from the agent's own bearing to the target. A policy
+config that still names one of the removed settings is refused (`TypeError`).
+**Measured** on the 180-episode single-storey MP3D check (ground-truth
+perception, a stand-in LLM, CPU rendering; CHANGELOG of 2026-11-16): STOP on
+the deciding frame SR 74.4 % / SPL 0.332; the rules this replaced 78.9 % /
+0.346; MP3D's criterion (`euclidean`, 0.9 m) **82.2 % / 0.354** -- 14 won and
+none lost against the first, 6 won and none lost against the second, failed
+STOPs 24 -> 10. Taken apart: the walk alone, to the planar metre the method
+already had, is 77.8 % / 0.341 (6 won, none lost: STOPs a few centimetres
+outside the metre); the definition's radius and measure add 8 more and lose
+none -- 5 by stopping a decimetre inside the zone (`planar` 0.9 m, VLFM's
+rule: 80.6 % / 0.350) and 3 by MP3D's Euclidean measure, three pictures whose
+planar range already read inside 0.9 m while their 3-D distance from the
+floor did not. The walk acted in 116 of the 158 episodes
+that decided a STOP, for 155 forward steps in all (about one action an
+episode); on the episodes that succeed either way it costs 0.012 of SPL.
+**HM3D and Gibson have not been measured with it.**
 **A locked target with no safe path** (since 2026-10-05). Hanson/000002 spawned
 beside a bed with the potted plant in view 4.4 m away and spent 159 actions
 turning on "no safe target path": the floor under the camera's blind radius
@@ -510,10 +550,24 @@ release when even that finds nothing. The ring is tried again on every action
 as the floor between fills in. The standing floor is ONE floor -- observed
 free, the body's own 0.18 m disc observed free, joined to the agent -- and two
 planners are asked of it: the default planner of the cells that keep its
-0.25 m standoff from every observed obstacle, then the squeeze planner of all
-of them (unknown cells cast no standoff; `TargetClosing.standing_planners`).
-`squeezed_standoffs` counts the standoffs the squeeze planner took because
-the default planner had no route to a cell it can stop at, `standoffs_revoked`
+0.25 m standoff from every observed obstacle and, only when it finds no route,
+the retry planner of the cells the body radius (0.18 m) from every
+observed obstacle (`target_closing.standing_retry_clearance_m`, a planner of
+the closing's own since 2026-11-16 -- `None`, the default, is the body
+radius; until then the fallback's squeeze planner did this; unknown cells
+cast no standoff; `TargetClosing.standing_planners`). **The value was chosen
+on a measurement.** On the 0.1 m grid the body radius lets the nearest
+obstacle cell stand 0.200 m from the agent's cell, and 0.20 m pushes it to
+0.224 m. On the 180-episode single-storey check, the two differing in this
+number alone, 0.18 m gave SR 73.3 % and SPL 0.325 and 0.20 m gave 71.1 % and
+0.322 (2 won, 6 lost; not significant): the stricter rung reached fewer
+standing points (92 -> 52), gave a target up for want of a route more often
+(29 -> 49) and was refused fewer forward steps (6.79 -> 5.92 an episode). The
+better SR and SPL decided it; the refused steps are the price, and
+`{"target_closing": {"standing_retry_clearance_m": 0.20}}` is the other rung.
+`retry_standoffs` (`squeezed_standoffs` in rows recorded before) counts the
+standoffs the second planner took because the default planner had no route
+to a cell it can stop at, `standoffs_revoked`
 the ones given up because the map stopped showing them as standing floor.
 All thresholds are configurable under `RPTSettings.target_closing`; the phase,
 persistent lock, visibility, target xyz, projected goal, refinements, occluded path
@@ -546,7 +600,17 @@ turned at for twenty-four actions:
   consecutive chain across the frame, is faced, and once faced is stepped
   toward (`verify_step="towards the glimpsed candidate"`); the step does not
   run the verify clock, for at most `max_verify_approach_steps` (24) steps
-  per candidate (`glimpse_steps`, `verify_pauses`).
+  per candidate (`glimpse_steps`, `verify_pauses`). **Known and open: a
+  step the simulator refuses does not end it.** A refused step changes
+  neither the pose nor the frame, so the same step is asked again for the
+  whole of that allowance -- 36 to 70 blind steps in five of the 180 episodes
+  of the single-storey MP3D check (three of them with the navmesh still in
+  the closing). A fix that ended the stepping at the first refusal was
+  measured alone on 2026-11-16 (blind steps 314 -> 46, refused forward steps
+  7.87 -> 6.79 an episode, exactly the five episodes changed: three still
+  succeeded, two that had succeeded after their refused steps ran to the step
+  limit) and withdrawn the same day, to be handled on its own:
+  `LESSONS.md` has the cause.
 - **The inspection steps when the range is a step out, and does not oscillate.**
   Wiconisco/000193 (actions 476-499): the near edge at 1.0505 m against the
   1.05 m limit, the box 16-17 degrees off the centre on alternating sides --
@@ -856,9 +920,13 @@ the label tables, never the method:
    A Habitat dataset's `run.py` keeps only its `parser`, `prepare` and
    `ground_truth_issues`; its `main` is `habitat/entrypoint.py::run_main` with
    those handed in, and the method's defaults below `--policy-config` are the
-   shared `method_defaults(protocol)` -- the body, and under a view-point
-   evaluator the planar STOP overshoot off -- so no entrypoint tells the one
-   algorithm something another does not. Its campaign reuses `scene_pool.py`,
+   shared `method_defaults(protocol)` -- the body's height and radius, and
+   the dataset's published success zone as a STOP criterion
+   (`protocol.goal_zone`, `habitat/goal_zone.py`; a new dataset adapter
+   states its own zone and says how it was established) -- so no entrypoint
+   tells the one algorithm something another does not, and none hands it a
+   view point, a goal or a score.
+   Its campaign reuses `scene_pool.py`,
    `smoke_plan.py` and `campaign_common.py` from this directory.
 6. **Launcher.** A `run_benchmark.sh` that sources `benchmark_services.sh` for
    the services (`objnav_services_defaults` before its command line,
@@ -894,7 +962,6 @@ and a pose, and answers in world coordinates.
 | `rooms/scene_graph.py` | Observed rooms and doors, the room label image, the nodes handed to the oracle |
 | `rooms/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
 | `rooms/room_vantage.py` | Where to stand in a room to see it: the reachable interior cell of greatest clearance (distance transform of the room mask) |
-| `rooms/stair_nodes.py` | Staircases as nodes of the loop's RPT* instance: ids above every room pid, the facts the oracle values them by, the climb as a leaf charged on every arc |
 | `rooms/opening_nodes.py` | Doorways and gaps at the edge of the mapped floor -- a room's exits, its attributes to the oracle and its visit's to walk (`room_exits`); the peek that visits a target landmark, and the exits as nodes under the deprecated `exits_as_nodes` |
 | `rooms/house_context.py`, `rooms/oracle_retry.py` | The HOUSE line of the oracle's prompt; one bounded schema repair around its scoring |
 | `rooms/floor_context.py`, `rooms/discovery.py` | Per-storey policy state with shared ledgers; episode start, semantic interrupts and the resumption of a local task |
@@ -908,9 +975,8 @@ and a pose, and answers in world coordinates.
 | `exploration/path_glances.py`, `exploration/doorway_peek.py`, `exploration/doorway_candidates.py` | Informative glances along a route; the one-shot doorway inspection and its candidates |
 | `exploration/exploration_metrics.py` | Observed-area proxy, actions, revisits, stagnation and latency |
 | `multifloor/spawn_floor_guard.py` | Spawn-floor confinement under the default `allow_stair_traversal: false`: every seen staircase footprint and every cell observed more than `multifloor.floor_match_m` below the storey plane written occupied, and `_navigate` refusing a goal on those cells or on a storey further than `floor_plane_bound_m` (0.5 m) from the spawn height; never the cells the agent stands on or has stood on (`walked_exemption`); a spawn storey never walked level is provisional, and the first storey the agent settles on from it becomes the spawn plane (`rebase`, since 2026-10-26); inert when traversal is allowed |
-| `multifloor/multifloor_policy.py` | The building coordinator: the flights the robot's depth measured as portals per floor, the approach and climb of a chosen staircase, arrival bookkeeping. With traversal allowed a floor change is decided by the `floor_search_actions` allowance and RPT* over the seen portals (`_select`); the loop's stair nodes (`commit`) have no stair source since 2026-11-15, when the `ground_truth` one was removed. With traversal forbidden, a height departure the atlas reports (a flight walked down by a committed route, three treads before the atlas calls it one) is walked back up the storey trail (`_retreat_to_storey`, `retreat_started` / `retreat_ended` events, bounded by `multifloor.retreat_actions`) -- until 2026-10-25 it was an `AttributeError` on every remaining action of the episode |
+| `multifloor/multifloor_policy.py` | The building coordinator: the flights the robot's depth measured as portals per floor, the approach and climb of a chosen staircase, arrival bookkeeping. With traversal allowed a floor change is decided by the `floor_search_actions` allowance and RPT* over the seen portals (`_select`); the loop's stair nodes had no stair source from 2026-11-15, when the `ground_truth` one was removed, and were deleted on 2026-11-16 with the coordinator's `commit`, `portal_by_id` and `way_back_held` (until the multi-storey work). With traversal forbidden, a height departure the atlas reports (a flight walked down by a committed route, three treads before the atlas calls it one) is walked back up the storey trail (`_retreat_to_storey`, `retreat_started` / `retreat_ended` events, bounded by `multifloor.retreat_actions`) -- until 2026-10-25 it was an `AttributeError` on every remaining action of the episode |
 | `multifloor/floor_departure.py` | The optional (`doorway_peek.gate_floor_departure`, off by default) room-peek coverage gate before a floor choice, with its approach revalidation, movement guard and safe recovery from accidental early stair entry |
-| `multifloor/stair_approach.py` | Where a staircase offered as a node is entered from on the observed map, and what the climb costs (`approach_points`, `stair_cost_m`). Until 2026-11-15 this was `floor_decision.py` beside `stair_ground_truth.py`, `ground_truth_traversal.py` and `stair_sightings.py` -- the `stair_source: "ground_truth"` ablation (navmesh connectors from the episode metadata, a perfect stair detector, a polyline traversal, the fallback's up/down rule), removed as privileged scene geometry |
 | `world_model/stair_terrain.py`, `world_model/stair_grid.py`, `multifloor/stair_traversal.py` | Observed stairs (the default since 2026-10-21): measured support surfaces, step-connected candidate paths rising `stair_min_rise_m` in a flight's profile (`stair_profile`: `stair_min_risers` risers of `stair_riser_min_m`-`max_step_m`, treads at most `stair_max_tread_m`) -- the portals the capsule masks under the benchmark's confinement -- and, with traversal allowed, native-heading safety checks and the committed transition lifecycle |
 | `falcon/policy.py`, `falcon/regions.py` | Bounded hierarchy and persistent local region history |
 | `falcon/motion.py`, `falcon/routes.py`, `route_memory.py` | Safe motion and interruption-aware committed routes |
@@ -946,6 +1012,7 @@ action converter serialises the LOOK before the body action):
 | `habitat/simulator.py` | Synchronous registered RGB-D, native extrinsic checks and ENU pose, the semantic sensor and the annotations' boxes (`semantic_boxes_enu`); any Habitat dataset |
 | `habitat/env.py` | `HabitatObjNavEnv`: the habitat-lab ObjectNav episode, measurement, start validation, navmesh provenance and oracle hand-off every dataset adapter subclasses (`hm3d/env.py`, `mp3d/env.py` add their name and annotation naming) |
 | `habitat/geodesic.py` | habitat-lab's `DistanceToGoal` to the goal view points, reproduced against habitat-sim's pathfinder; the one quantity SR, SPL, SoftSPL and DTG are built from |
+| `habitat/goal_zone.py` | `GoalZone` (where a dataset's generator put a goal's view points: distance, measure, grid) and `stop_criterion(zone, success_distance_m)`, the method's STOP criterion derived from it; its notes hold the generator, the measurement of HM3D and MP3D and how VLFM, ASCENT and ApexNav stop |
 | `habitat/entrypoint.py` | What every Habitat `run.py` shares: `method_defaults(protocol)`, `run_main`, the geodesic preflight check, the oracle liveness gate, the runtime record, the GPU gate, the live hooks |
 | `habitat/stair_connectors.py` | Storeys and stair connectors read from a scene's navmesh, for ANALYSIS only (`hm3d/episode_levels.py`: which storey a goal is on). Ground truth: never attached to an episode, never handed to a policy |
 | `scene_pool.py`, `smoke_plan.py`, `campaign_common.py` | The scene process pool with its stall watchdog and `--jobs max`, the category-balanced smoke cover, and the child-argument and episode-plan rules every dataset's campaign shares |
@@ -1261,21 +1328,25 @@ refresh.
    `lingered_steps` (20) actions or more with at most one significant
    frontier left -- keeps `lingered_discount` (0.2) of the oracle's number
    in place of `entered_discount` (0.5): as good as scanned, whatever the
-   model writes (the prompt now says so too: "searched 20 s or longer with
-   frontier 0 or 1 is as good as scanned: 0-5"). The
-   two arithmetic floors below (`unexplored_floor`, `unexplored_elsewhere`)
-   are **off by default** -- they were the 3B era's defaults, and the model is
-   given the facts they encoded instead; each stays a knob. (A third floor,
-   `home_floor`, and the hard type exclusion, `type_prior`, were removed on
-   2026-11-15 with the hand-written tables they read, `room_priors.py`.) The storey/stairs
-   reasoning of the multi-storey development protocol is a supplement to
-   the prompt shown only when a staircase is a node. With nothing to offer
+   model writes. These discounts, and the boost and floor of a never-entered
+   room (`unvisited_boost` 1.5, `unvisited_floor` 0.15), are the CODE's
+   rules: since 2026-11-16 the prompt states none of them -- it states no
+   rule of judgement at all -- so they are the one hand-set adjustment left
+   between the model's probability and RPT*. The
+   arithmetic floor below (`unexplored_floor`)
+   is **off by default** -- it was the 3B era's default; it stays a knob. (Two
+   more floors and the hard type exclusion are gone: `home_floor` and
+   `type_prior` on 2026-11-15 with the hand-written tables they read,
+   `room_priors.py`; `unexplored_elsewhere` on 2026-11-16 with the
+   multi-storey supplement whose `home_here` verdict it read.) With nothing to offer
    -- the spawn room finished by the warm-up, no doorway seen yet -- the
    reasoning model is not spent (`oracle_calls_skipped`); the fallback
    carries the search until a node appears.
-   `tests/probe_node_oracle.py` runs five single-storey scenarios against
-   the live model and checks the judgement (all five pass on
-   `qwen2.5:14b-instruct`, ~30 s per call on a 32-thread CPU).
+   `tests/probe_node_oracle.py` asks a live model the scenarios of
+   `tests/probe_node_oracle_scenarios.py` (nineteen partial maps in two
+   sets, each with one ordinal claim that is never shown to the model) and
+   reports which claims its numbers honour; the figures recorded so far
+   are in `core/mapping/topology/README.md`.
 
    **What the geometry adds to the model's numbers (since 2026-10-13).**
    The oracle's probability is scaled before the supervisor filters on it
@@ -1372,7 +1443,9 @@ refresh.
    **The uncertainty floor** (`LoopSettings.unexplored_floor`, applied in
    `search_node_oracle.SearchNodeOracle`, since 2026-10-05; **0 -- off --
    by default since 2026-10-07**, when the rule moved into the prompt and
-   the 14B model was found to apply it; 0.25 restores the arithmetic). A
+   the 14B model was found to apply it; since 2026-11-16 the prompt states
+   no such rule either, and the never-entered room's floor is the loop's
+   `unvisited_floor`; 0.25 restores the arithmetic). A
    room never entered and still `unknown`, or an opening nothing was
    glimpsed through, is a place the search knows *nothing* about, and the
    least it owes such a place is a look: its probability is never read
@@ -1391,23 +1464,11 @@ refresh.
    now says `entered=no` instead of `ago=never`, and the prompt's rules
    2b and 2c say what that means (an unexplored place owes a look, never
    "too small"; a home-type object in a room of another type is the map's
-   merge showing). **The floor has one condition** (`LoopSettings.
-   unexplored_elsewhere`, since the Ranchester couch search of
-   2026-10-05; off by default since 2026-10-07, 0.10 restores it; only the
-   multi-storey supplement ever produces the verdict): the model's own
-   storey step, asked for as a structured verdict
-   `home_here` -- `found` (a room of the home type is on this storey),
-   `missing` (none yet, but it belongs here) or `elsewhere` (it lives on
-   another storey). The 3B model answers that reliably ("living rooms are
-   downstairs" at every loop point) and then writes the worked example's 25
-   on every upstairs gap all the same, so thirteen peeks (~25 actions each)
-   outranked the staircase it stood 0.9 m from at 0.60, and the 500 actions
-   ended upstairs. With `elsewhere` an unexplored place is read at 0.10
-   exactly (`capped` / `floored` in the estimate events, the verdict on the
-   HUD): rule 2b's "less", applied by the code because the model does not
-   apply it; the stairs come first and a door beside the route is still a
-   cheap peek. `found` and `missing` keep the 0.25 floor, and a reply
-   without the field (an older model's) is read as before.
+   merge showing). (The floor had one condition from 2026-10-05,
+   `LoopSettings.unexplored_elsewhere`: the multi-storey supplement's
+   `home_here` verdict -- "the target's home type lives on another storey"
+   -- read every unexplored place at 0.10 instead. It was off by default
+   from 2026-10-07 and was deleted on 2026-11-16 with the supplement.)
 
    **The clue rule holds in both modes**: one confirmed object names the
    room (`RoomLabelSettings.min_objects = 1`; a single class is a *weak*
@@ -1434,93 +1495,93 @@ refresh.
    level is removed from the free mask before the watershed runs
    (`ObservedSceneGraph.update(..., exclude=policy.room_exclusion(world))`),
    so no "room" is carved on a landing, labelled, valued or waited on; a
-   staircase enters the search only as a STAIRS node (below).
+   staircase is no node of the search either (the stair nodes were deleted
+   on 2026-11-16, until the multi-storey work).
 3. **Probability per node** -- the same call, to
    `core/mapping/topology/search_node_oracle.py`. The model is shown every
-   ROOM of the floor **that is still a node** (not finished, not ruled out
-   by type) -- type or `unknown`, size (since 2026-11-16 from the room
-   extents: final, or a lower bound while a wall is unseen) and how much
-   of its floor the camera has covered, frontier clusters left, its
-   **exits** (`exits=2 (1 doorway)`: the doorways and gaps at its edge to
-   space not yet seen and the objects glimpsed through them -- the room's
-   attributes since 2026-10-21, see *Exits are the room's attributes*
-   below), time
-   searched and how long ago it was last inside, objects seen, whether the
-   robot stands in it -- and every STAIRCASE off the floor -- up or
-   down, whether the other storey was visited and what was found and
-   searched there, whether the robot arrived by it -- plus
-   one line on this storey and each other storey known (under the
-   deprecated `openings.exits_as_nodes` every **OPENING** not folded into
-   an offered room is a node of its own as well). It answers, for
-   each node, the probability in percent that **going there and searching
-   finds the target**.
-   These are independent search-success estimates, **not mutually exclusive
-   location shares**, and are not restricted to the ten-action burst. Each is
+   ROOM of the floor **that is still a node** (not finished), one line
+   each, with everything the scene graph stores about the room except where
+   it is: type or `unknown` (`kitchen?` when the evidence is thin), size
+   and how much of its floor the camera has covered (the room extents:
+   `all sides mapped`, or `at least` while a side is unmapped), frontier
+   clusters left, its **exits** (`exits=2 (1 doorway, ~30m2 unseen behind
+   them)` and the objects glimpsed through them -- the room's attributes
+   since 2026-10-21, see *Exits are the room's attributes* below), its
+   status, the actions spent in it, the types of the rooms a door joins it
+   to, the objects seen in it with their counts, and -- when one of the
+   target's own kind is among them and the search still goes on --
+   `target: detected here, not reached` (under the deprecated
+   `openings.exits_as_nodes` every **OPENING** not folded into an offered
+   room is a node of its own as well). A node is the room **together with
+   the unseen space its exits open onto**, and the model answers, for each
+   node, the probability in percent that **the target is in the part of it
+   not checked yet** -- the room's floor that is left, and that unseen
+   space: the detector has looked at the covered floor in every frame and
+   not found the target there, so this is the probability that searching
+   the node finds it, which is what RPT* is handed.
+   These are independent estimates, **not mutually exclusive
+   location shares**. Each is
    converted to a fraction and clamped below 1, without cross-node normalisation.
    RPT* uses multiplicative survival; the legacy `elsewhere` diagnostic now means
    the product of failure probabilities, and `p_present` its complement. This is
    an explicit independence approximation, not proof that real rooms are independent.
-   The current room may remain the best choice for successive bursts. Everything the search
-   needs weighed is the model's to weigh, and the system prompt says how:
-   a type that rules the object out has low probability; a
-   room with all its walls seen and its floor covered reads low whatever
-   the time spent in it, and one of "at least" size or covered under half
-   keeps its value (coverage first, time second, since 2026-11-16; until
-   then "a room searched long and recently reads low"); a never-entered room of the
-   right type is the best bet; an `unknown` room is an **exploration node**
-   valued by its size, its frontier and the room types the target needs
-   that are still missing on this storey; a hallway with exits is valued
-   by what the home still lacks behind them; a room's exits raise it only
-   where its type fits the target (a bathroom's unlooked door for a toilet,
-   never a living room's gaps), and a toilet glimpsed through one of them
-   names the room behind it;
-   a staircase is the whole set of rooms the other
-   storey may hold, read from what this storey turned out to be (a kitchen
-   and a living room make a ground floor, so the bedrooms are upstairs),
-   discounted when that storey was searched, and not taken straight back
-   when the robot has just come from it. It is told, twice, **never to
-   reason about distance**: travel is the planner's. This is the one
-   judgement per loop point the search cannot afford to get wrong, so the
-   runtime routes it to the LLM client's reasoning model
-   (`LLM_REASONING_MODEL`, default `qwen2.5:14b-instruct`, with its own
-   timeout and context window; the 14B follows the rules and answers in
-   ~25 s on the laptop's CPU once loaded, and is the model for the
-   benchmark runs. Development runs since 2026-10-04 set it to
-   `qwen2.5:3b-instruct` for turnaround -- the finished
-   ledger now takes the exclusions the 3B used to get wrong out of its
-   hands, so what it is left to weigh is the unknown rooms against the
-   stairs) and
-   waits for it. The oracle
+   **Since 2026-11-16 the judgement is the model's own and the prompt gives
+   it none of ours.** The system prompt (about 3,500 characters, 14,751
+   before) tells the model to use its own reasoning and its own knowledge
+   of standard homes and buildings -- how they are laid out, in which rooms
+   furniture and objects of each kind are found -- and to derive every
+   probability from that; it names no room for any object, gives no number
+   or band, lists no goal categories, states no rule (what a covered room
+   is worth, when an exit raises a room, how the budget weighs) and shows
+   no worked example. What it states are FACTS: what a node is, what each
+   field of a line measures and how it was obtained, what the reply looks
+   like. The name of the object the episode searches for is on the
+   `TARGET:` line of every call (and in the question that ends the user
+   prompt). **Distance is not in the prompt at all**: no distance, no
+   position, and no `here=yes` on the room the robot stands in (dropped on
+   2026-11-16); the model is told that travel is the planner's.
+   **The wording is a named version, tuned per model**
+   (`core/mapping/topology/search_node_prompts.py`): what a large model
+   takes from one sentence a small one needs said field by field, so a
+   wording is written against one model and probed on it
+   (`tests/probe_node_oracle.py --prompt <version>`). The default,
+   `facts-qwen2.5-3b-v1`, is tuned on the model this laptop runs; a run on
+   another model names the version tuned for it with
+   `{"room_search": {"oracle_prompt": "<version>"}}` in the policy config.
+   The frozen configuration records `node_oracle.prompt` (version, the
+   model it was tuned on, the digest of its text) and `node_oracle.model`
+   (the model that answered, its digest, and whether it is the one the
+   version was tuned on -- a mismatch is also said once at start-up).
+   The call goes to the LLM client's reasoning model
+   (`LLM_REASONING_MODEL`, with its own timeout and context window: the
+   shared launcher's default is `qwen2.5:3b-instruct` since 2026-11-16,
+   the model the development laptop can hold and the one the default
+   prompt version is tuned on; the runs published before that date used
+   `qwen2.5:14b-instruct`, which a machine with the memory for it selects
+   by setting the variable -- with a prompt version tuned on it) and the
+   loop waits for it. What a 3B makes of a prompt with no rules in it, and
+   what the loop's own rescaling of its numbers then carries, is measured
+   in the CHANGELOG of 2026-11-16. The oracle
    reuses the model's last reply when the prompt it would show is
    byte-identical (effort numbers are shown in coarse steps for exactly
    that), so a loop point over an unchanged map costs no call
    (`oracle_reuses`). The per-node record in `room_search_loop.estimates`
    carries the probability, the model's reason and the distance charged.
-4. **Visit order** -- RPT* over the surviving nodes, rooms and staircases
-   together (`core/planning/object_search/rooms/stair_nodes.py`; **since
-   2026-11-15 no staircase is a node**: a stair node needs to know which
-   storey its flight leads to, only the removed navmesh stair source said so,
-   and the observed stair discovery measures a flight's treads, not its
-   destination -- what follows about staircases describes the loop's side,
-   kept for an observed source that does). A room enters the instance at its
-   entry point; a staircase at the foot of the flight on this floor's map,
-   with a **leaf** as long as the flight plus `MultiFloorParams
-   .floor_change_cost_m` (8 m, about thirty actions) charged on every arc
-   into and out of it -- so going upstairs puts every room down here that
-   much further away, which is exactly what the expected-time-to-find
-   objective must see. The expected visit is folded in as per-node service
-   time (`LoopSettings.service_steps()`: half the approach bound plus the
-   rotation under `scan`, `local_steps` under `sweep`); the order is
+4. **Visit order** -- RPT* over the surviving nodes. A room enters the
+   instance at its entry point. The expected visit is folded in as per-node
+   service time (`LoopSettings.service_steps()`: half the approach bound plus
+   the rotation under `scan`, `local_steps` under `sweep`); the order is
    re-solved at every loop point
    (`ObjectSearchParams.resolve_on_release`) and on semantic discovery events,
-   not merely on a timer. **A floor change is never gated on room coverage**
-   (unless `doorway_peek.gate_floor_departure` is turned on): the staircase
-   is a node like the rooms, taken when the order puts it first; the
-   existing 40-action arrival-return guard and the fallback rule still apply.
-   **All of this presumes `allow_stair_traversal: true`.** Under the benchmark
-   default (false) no staircase is offered to the oracle or the solver, `commit`
-   and the fallback's explicit rule refuse, an unplanned height departure starts
-   no traversal, and the spawn-floor guard keeps every goal on the spawn plane.
+   not merely on a timer. **No staircase is a node** (since 2026-11-15 for
+   want of a stair source that says where a flight leads; the loop's code for
+   it -- `rooms/stair_nodes.py`, the leaf of flight length plus
+   `floor_change_cost_m` on every arc, the way-back hold, the coordinator's
+   `commit` -- was deleted on 2026-11-16 and comes back with the multi-storey
+   work). Under the benchmark default (`allow_stair_traversal: false`) an
+   unplanned height departure starts no traversal and the spawn-floor guard
+   keeps every goal on the spawn plane; with traversal allowed a floor change
+   is the building coordinator's allowance rule alone.
    **A spawn on the stairs is the one departure that does start a traversal**
    (since 2026-10-26): until the agent has walked `multifloor.stable_distance_m`
    level on it the spawn storey is provisional (`MultiFloorSearch.storey_confirmed`

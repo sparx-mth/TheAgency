@@ -5,41 +5,37 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.floor_panels import Fl
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import render_search_panel
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
-    IN_A, STAIRS, NamingLLM, obs_at, see, stair_policy)
+    IN_A, NamingLLM, obs_at, see, stair_policy)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import (
     method_snapshot, render_dashboard, search_snapshot)
-def test_the_snapshot_carries_rooms_stairs_order_next_node_objects_and_the_oracles_split():
+def test_the_snapshot_carries_rooms_order_next_node_objects_and_the_oracles_split():
     # The relabel in transit is the historical rule (``transit_commitment=False``); the panel is what is under test.
-    policy, episode, world, rooms, _ = stair_policy(order=(1, STAIRS, 0), stair_prob=0.3,
-                                                    transit_commitment=False)
+    policy, episode, world, rooms, _ = stair_policy(order=(1, 0), transit_commitment=False)
     policy.graph.label_tracker.classifier._client = NamingLLM()
     policy.last_world = world
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     see(policy, {1: ["toilet"]}, step=1)
     policy.loop.plan(obs_at(episode, 1, IN_A), world)            # room B named a bathroom: re-solved, chosen again
     search = search_snapshot(policy)
-    assert search["target"] == "chair" and search["order"] == [1, STAIRS, 0] and search["next_room"] == 1
+    assert search["target"] == "chair" and search["order"] == [1, 0] and search["next_room"] == 1
     assert search["room_in_force"] is None and search["supervisor_state"] == "transit"
     assert 0.0 <= search["elsewhere"] <= 1.0 and search["p_present"] + search["elsewhere"] >= 1.0 - 1e-9
     by_id = {room["id"]: room for room in search["rooms"]}
     assert by_id[1]["label"] == "bathroom" and by_id[1]["kind"] == "room" and by_id[1]["objects"] == ["toilet"]
     assert by_id[0]["prob"] == 0.6 and by_id[0]["centroid"] == list(rooms[0].centroid)
     assert search["rooms"][0]["id"] == 0, "sorted by probability: the room worth most first"
-    [stairs] = search["stairs"]
-    assert stairs["id"] == STAIRS and stairs["kind"] == "stairs" and stairs["prob"] == 0.3 and stairs["direction"] == 1
-    assert stairs["leaf_m"] > 8.0 and stairs["portal_id"] == 0 and len(stairs["centroid"]) == 2
+    assert "stairs" not in search, "a seen staircase is no node of the search: the snapshot lists rooms and openings"
     assert [e["event"] for e in search["events"]][-3:] == ["relabel", "release", "transit"]
     assert search["local_budget"] == policy.loop.settings.local_steps
     assert search["floor"]["phase"] == "SEARCH" and search["floor"]["active_portal"] is None
     snapshot = method_snapshot(policy)
     assert snapshot["search"]["next_room"] == 1
 def test_the_search_column_and_the_node_overlay_render_from_the_snapshot():
-    policy, episode, world, rooms, _ = stair_policy(order=(STAIRS, 1, 0), stair_prob=0.9)
+    policy, episode, world, rooms, _ = stair_policy(order=(0, 1))
     policy.last_world = world
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     search = search_snapshot(policy)
-    assert search["next_room"] == STAIRS and search["floor"]["active_portal"] == 0
-    assert search["floor"]["selected_by"] == "rpt_star"
+    assert search["next_room"] == 0 and search["floor"]["active_portal"] is None, "room A, where the agent stands"
     column = render_search_panel(search, (320, 720))
     assert column.shape == (720, 320, 3) and (column > 60).any(), "text was drawn"
     blank = render_search_panel({}, (320, 720))
@@ -52,7 +48,7 @@ def test_the_search_column_and_the_node_overlay_render_from_the_snapshot():
     plain = panels.render(0, size=(640, 720))
     marked = panels.render(0, size=(640, 720), search=search)
     assert plain.shape == marked.shape == (720, 640, 3)
-    assert (plain != marked).any(), "the rooms, the stairs, the order and the next node are drawn on the active floor"
+    assert (plain != marked).any(), "the rooms, the order and the next node are drawn on the active floor"
     assert (panels.render(1, size=(640, 720), search=search) == panels.render(1, size=(640, 720))).all(), (
         "an inactive slot carries no node overlay")
 def test_the_dashboard_frame_keeps_its_size_with_the_search_column():
@@ -61,7 +57,7 @@ def test_the_dashboard_frame_keeps_its_size_with_the_search_column():
     command = policy.plan(obs)
     snapshot = method_snapshot(policy)
     assert "search" in snapshot and snapshot["search"]["target"] == "chair"
-    assert snapshot["search"]["stairs"] == [], "a single-storey scene offers no stairs"
+    assert "stairs" not in snapshot["search"], "no stair node exists to list"
     panels = FloorPanels(1, policy.settings, obs.pose)
     panels.capture(policy, obs)
     for floor_panels in (None, panels):

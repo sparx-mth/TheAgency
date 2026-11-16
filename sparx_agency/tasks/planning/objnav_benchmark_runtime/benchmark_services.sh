@@ -73,7 +73,11 @@ objnav_services_defaults() {
   export LLM_BACKEND="${LLM_BACKEND:-ollama}"
   export LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:11434}"
   export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b-instruct}"
-  export LLM_REASONING_MODEL="${LLM_REASONING_MODEL:-qwen2.5:14b-instruct}"
+  # The node oracle's model. The 3B since 2026-11-16: it is the model the development laptop can hold, and the
+  # one the default oracle prompt (facts-qwen2.5-3b-v1) is tuned on. A machine with the memory for a larger model
+  # sets this -- and a prompt version tuned on that model (QUICKSTART.md section 2.4); the runs published before
+  # that date used qwen2.5:14b-instruct.
+  export LLM_REASONING_MODEL="${LLM_REASONING_MODEL:-qwen2.5:3b-instruct}"
   export LLM_TIMEOUT_S="${LLM_TIMEOUT_S:-120}" LLM_SEED="${LLM_SEED:-17}" LLM_TEMPERATURE="${LLM_TEMPERATURE:-0}"
   export LLM_KEEP_ALIVE="${LLM_KEEP_ALIVE:-30m}" LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-768}"
   export LLM_REASONING_TIMEOUT_S="${LLM_REASONING_TIMEOUT_S:-900}" LLM_REASONING_MAX_TOKENS="${LLM_REASONING_MAX_TOKENS:-1536}"

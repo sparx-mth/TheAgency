@@ -252,15 +252,19 @@ is rejected here, by design.)
 
 ```bash
 export LLM_BACKEND=ollama LLM_BASE_URL=http://127.0.0.1:11435 LLM_MODEL=qwen2.5:3b-instruct LLM_TIMEOUT_S=120
-export LLM_REASONING_MODEL=qwen2.5:14b-instruct LLM_REASONING_TIMEOUT_S=600   # the search's one judgement per loop point
+export LLM_REASONING_MODEL=qwen2.5:3b-instruct LLM_REASONING_TIMEOUT_S=600   # the search's one judgement per loop point
 export HM3D_EPISODES_DIR="$DATA/objectnav/hm3d/v2/val"
 export HM3D_SCENES_DIR="$DATA/scene_datasets"
 RUN_FLAGS="--version v2 --detector-url http://127.0.0.1:18092 --seed 17 --explorer frontier"
 ```
 
-`LLM_REASONING_MODEL` defaults to `qwen2.5:14b-instruct` (~9 GB; `ollama pull` it like the 3B) and the
-run refuses to start without it. A 3B stand-in (`LLM_REASONING_MODEL=qwen2.5:3b-instruct`) is only for plumbing
-checks: the recorded configuration names the model, and a 3B double-counts search effort (see `llm_client.py`).
+`LLM_REASONING_MODEL` defaults to `qwen2.5:3b-instruct` in the launcher since 2026-11-16 (the model the
+development laptop can hold); a machine with the memory sets `LLM_REASONING_MODEL=qwen2.5:14b-instruct` (~9 GB;
+`ollama pull` it like the 3B), the model of the runs published before that date. The run refuses to start
+without the model it names. The oracle's prompt
+is a named version tuned per model (`core/mapping/topology/search_node_prompts.py`, since 2026-11-16): the
+default, `facts-qwen2.5-3b-v1`, is the 3B's, and the recorded configuration names the model, the prompt version
+and whether the version was tuned on that model (`node_oracle.model`, `node_oracle.prompt`).
 `LLM_TIMEOUT_S=120`: the CPU model needs ~2 s per room in the prompt. Add
 `--allow-shared-gpu` to `RUN_FLAGS` when GPU 0 also drives a desktop (the run
 otherwise refuses a card with > 512 MiB already in use). Scenes: v2 episodes need the name `scene_datasets/hm3d_v0.2`; when the downloader only made `hm3d`
@@ -369,13 +373,18 @@ EOF
 ```
 
 Embodiment (`body_height_m` 0.88, `body_radius_m` 0.18) is always taken from
-the HM3D agent and cannot be tuned away, and the closing's planar STOP overshoot
-is off under this benchmark's view-point evaluator (`target_closing.stop_overshoot_steps`
-and `stop_overshoot_max_steps` 0, the shared `habitat/entrypoint.py::method_defaults`,
-MP3D's too: the step toward the object that walks Gibson's footprint margin
-leaves the view points -- on 70 recorded HM3D STOPs it never helped and took
-00891/000006 from 0.02 m to 0.16 m; a RAISED target keeps its own steps,
-`stop_overshoot_elevated_max_steps`, since its view points stand closer);
+the HM3D agent and cannot be tuned away. With it the benchmark hands the method
+its STOP criterion -- `target_closing.stop_within_m` 0.9, `stop_measure`
+`planar`: the dataset's own success zone, view points out to 1.0 m from the
+object's box in the horizontal plane, less a decimetre (the shared
+`habitat/entrypoint.py::method_defaults`, MP3D's too, whose metre is 3-D from
+the floor; `PROTOCOL_AND_TUNING.md` says how the definition was established
+and that it has not been measured on HM3D episodes). The closing decides to
+stop on its own evidence and walks on until its range reads within the
+criterion -- see *The STOP is taken inside the benchmark's own success zone*
+in the runtime README. Until 2026-11-16 the entrypoint instead read how the
+benchmark scores a STOP and switched the closing's steps after a decided STOP
+by it; those rules are removed, with the frontal standoff of planar targets.
 `preferred_clearance_m` (0.30),
 `min_clearance_m` (0.25: the tightest standoff a route relaxes to -- HM3D moves
 the agent without sliding, so a 0.4 m gap the body radius admits on the grid is
@@ -813,7 +822,7 @@ issue.
 
 | file | what it holds |
 |---|---|
-| `protocol.py` | `HM3DProtocol`, `HM3D_V1`, `HM3D_V2`, the navmesh choice, the named ApexNav radius |
+| `protocol.py` | `HM3DProtocol`, `HM3D_V1`, `HM3D_V2`, the navmesh choice, the named ApexNav radius, and `GOAL_ZONES` -- where each version's generator put a goal's view points (1.0 m from the object's box in the horizontal plane), from which the method's STOP criterion is derived |
 | `dataset.py` | the published episodes and goals, scene-qualified ids, XYZW→WXYZ, the manifest |
 | `env.py` | `HM3DEnv`: the shared `habitat/env.py::HabitatObjNavEnv` (the episode with NO metadata -- nothing of the navmesh reaches the policy -- the measurement, start validation, navmesh provenance, the oracle hand-off of frames, depth, pose, camera and instance boxes) named for HM3D; since 2026-11-11 nothing else is written here |
 | `assets.py` | what is installed, what is missing, and the commands that would fix it (`--check --semantic` and step 5 for the HM3D-Semantics annotations) |

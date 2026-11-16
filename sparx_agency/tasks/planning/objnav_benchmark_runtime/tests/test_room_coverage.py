@@ -9,14 +9,13 @@ from sparx_agency.core.planning.objnav.action_converter.converter import Discret
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings, doorway_candidates
 from sparx_agency.core.planning.object_search.exploration.doorway_peek import DoorwayPeek
-from sparx_agency.core.planning.object_search.rooms.stair_nodes import stair_options
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_discovery import peek_rig, refresh
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_doorway_actions import moved
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import IN_A, STAIRS, obs_at, stair_policy
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import IN_A, obs_at, stair_policy
 
 
 def coverage_rig():
-    p, ep, world, rooms, _ = stair_policy(order=(STAIRS, 1, 0), stair_prob=0.99)
+    p, ep, world, rooms, _ = stair_policy(order=(1, 0))
     # The gate is an opt-in ablation since 2026-10-04; these are its own regressions.
     p.settings = replace(p.settings, doorway_peek=PeekSettings(gate_floor_departure=True))
     p.peek = DoorwayPeek(p)  # the real, initially empty ledger; no fixture readiness shortcut
@@ -32,24 +31,20 @@ def scanned(p, world, pid, xy):
                                reason="scanned", swept_degrees=180.0))
 
 
-def test_high_stair_probability_and_no_frontiers_do_not_waive_room_visits():
+def test_worthless_rooms_and_no_frontiers_do_not_waive_room_visits():
     p, ep, world, rooms = coverage_rig()
     obs = obs_at(ep, 0, IN_A)
-    cost = p.navigation_cost(world)
     p.graph.probs = {pid: 0.0 for pid in rooms}
     p.graph.facts = {pid: replace(fact, frontier_clusters=0) for pid, fact in p.graph.facts.items()}
     p.peek._remember_start(obs, world)
     assert p.peek.pending_rooms() == [0, 1]
-    assert not p.building.commit(obs, p.building.portals[0], (4.0, 1.0))
-    assert stair_options(p.building, obs, world, cost, p.floors.save()) == []
-    assert p.building.plan(obs, world, exhausted=True) is None
+    assert not p.building.can_leave_floor(obs)
+    assert p.building.plan(obs, world, exhausted=True) is None and p.building.active is None
     scanned(p, world, 1, (9.0, 3.0))
     assert not p.building.can_leave_floor(obs), "spawn room also needs a scan"
     p.peek.records = [r for r in p.peek.records if r["room"] != 0]
     scanned(p, world, 0, IN_A)
-    assert p.peek.floor_ready()
-    assert stair_options(p.building, obs, world, cost, p.floors.save())
-    assert p.building.commit(obs, p.building.portals[0], (4.0, 1.0))
+    assert p.peek.floor_ready() and p.building.can_leave_floor(obs)
 
 
 def test_floor_without_geometry_is_incomplete_but_attempted_rooms_are_exempt():
@@ -70,7 +65,8 @@ def test_a_new_room_revokes_an_already_selected_stair_approach():
     for pid, xy in ((0, IN_A), (1, (9.0, 3.0))):
         scanned(p, world, pid, xy)
     obs = obs_at(ep, 1, IN_A)
-    assert p.building.commit(obs, p.building.portals[0], (4.0, 1.0))
+    assert p.building.can_leave_floor(obs)
+    p.building.active = p.building.portals[0]                 # the coordinator's choice, as ``_select`` leaves it
     mask = np.zeros_like(rooms[1].mask)
     mask[2:20, 1:10] = True  # new region, not a resegmented child of a consumed room
     p.graph.registry.rooms[7] = replace(rooms[1], id=7, mask=mask, n_cells=int(mask.sum()))

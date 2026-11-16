@@ -7,7 +7,7 @@ glances, frontier sweep or probabilities. Everything that is not exploration is
 shared with the full method verbatim, so a run of the two on the same episodes
 isolates the exploration policy: observed map, A*, route memory, the YOLO
 perception cycle, the `TargetClosing` takeover (verification, standoff, pitch
-servo, inspection, STOP overshoot) with its legacy pursuit, the camera
+servo, inspection, the STOP and the benchmark's stop criterion) with its legacy pursuit, the camera
 controller, and the spawn-floor confinement.
 
 Code: `core/planning/object_search/baselines/falcon_yolo.py` (`FalconYoloBaseline`, `GoalFreeFalcon`,

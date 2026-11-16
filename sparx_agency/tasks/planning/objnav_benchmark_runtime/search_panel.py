@@ -4,11 +4,9 @@ One column beside the floor maps that reads, top to bottom, like the loop's
 own reasoning: independent node success estimates and their joint-failure
 approximation; the RPT* visit order with the node it is
 heading to; every room with its type, the oracle's probability and its
-reason, frontier left, time spent and the objects seen in it; every
-staircase offered with its probability, direction, the storey beyond and the
-climb's cost; every opening offered with its probability, the room it opens
-from and what was glimpsed through it; the objects on the floor; and the
-loop's last few events.
+reason, frontier left, time spent and the objects seen in it; every opening
+offered with its probability, the room it opens from and what was glimpsed
+through it; the objects on the floor; and the loop's last few events.
 Everything drawn here comes from :func:`~sparx_agency.tasks.planning
 .objnav_benchmark_runtime.visualization.method_snapshot`, so the video and
 ``steps.jsonl`` agree by construction.
@@ -23,11 +21,10 @@ import numpy as np
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 LINE_PX = 17
 WHITE, GREY, DIM = (230, 230, 230), (170, 170, 170), (110, 110, 110)
-GREEN, AMBER, RED, CYAN, BLUE = (80, 220, 80), (0, 200, 255), (90, 90, 235), (255, 200, 0), (255, 140, 60)
+GREEN, AMBER, RED, CYAN = (80, 220, 80), (0, 200, 255), (90, 90, 235), (255, 200, 0)
 VIOLET = (220, 120, 220)
-#: Node id bands: stairs from 100 000, openings from 200 000 (``stair_nodes`` / ``opening_nodes``); within the
-#: opening band, target landmarks from index 50 000.
-STAIR_BASE, OPENING_BASE, LANDMARK_INDEX_BASE = 100_000, 200_000, 50_000
+#: Node id bands: openings from 200 000 (``opening_nodes``); within that band, target landmarks from index 50 000.
+OPENING_BASE, LANDMARK_INDEX_BASE = 200_000, 50_000
 
 
 class _Column:
@@ -60,8 +57,6 @@ def _node_color(node, search):
         return AMBER
     if node["id"] == search.get("next_room"):
         return GREEN
-    if node.get("kind") == "stairs":
-        return BLUE
     if node.get("kind") == "landmark":
         return CYAN
     if node.get("kind") == "opening":
@@ -80,8 +75,6 @@ def _name(node):
     if kind in ("opening", "landmark") or nid >= OPENING_BASE:
         index = nid - OPENING_BASE if nid >= OPENING_BASE else nid
         return "T%d" % (index - LANDMARK_INDEX_BASE) if index >= LANDMARK_INDEX_BASE else "O%d" % index
-    if kind == "stairs" or nid >= STAIR_BASE:
-        return "S%d" % (nid - STAIR_BASE if nid >= STAIR_BASE else nid)
     return "R%d" % nid
 
 
@@ -121,20 +114,13 @@ def _header(col, search):
     if reading.get("pass"):
         col.line("LLM: pass = %s%s" % (reading["pass"].upper(),
                                         " -- finished rooms are nodes again" if reading["pass"] == "second" else ""), GREY)
-    if reading.get("storey"):
-        col.line("LLM: storey = %s" % reading["storey"], GREY)
-    if reading.get("home_here"):
-        col.line("LLM: home type %s on this storey%s" % (
-            {"found": "FOUND", "missing": "MISSING", "elsewhere": "ELSEWHERE"}.get(reading["home_here"], reading["home_here"]),
-            " -- unexplored places read at the elsewhere value" if reading["home_here"] == "elsewhere" else ""), GREY)
     col.gap()
 
 
 def _order(col, search):
     order, head = list(search.get("order") or ()), search.get("order_index", 0)
-    nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("stairs", ()))
-             + list(search.get("openings", ()))}
-    col.line("RPT* VISIT ORDER (rooms, stairs, openings; costs charged)", CYAN, bold=True)
+    nodes = {n["id"]: n for n in list(search.get("rooms", ())) + list(search.get("openings", ()))}
+    col.line("RPT* VISIT ORDER (rooms, openings; costs charged)", CYAN, bold=True)
     if not order:
         col.line("(no order: nothing in force)", DIM, indent=8)
     else:
@@ -163,8 +149,7 @@ def _order(col, search):
     elif search.get("next_room") is not None:
         node = nodes.get(search["next_room"], {"id": search["next_room"]})
         peek = search.get("peek") or {}
-        how = ("approaching the stairs" if node.get("kind") == "stairs" else
-               "walking to the threshold (%d/%d actions)" % (peek.get("approach_actions", 0), peek.get("approach_bound", 0))
+        how = ("walking to the threshold (%d/%d actions)" % (peek.get("approach_actions", 0), peek.get("approach_bound", 0))
                if node.get("kind") == "opening" else "in transit")
         col.line("NEXT: %s %s (%s)" % (_name(node), node.get("label", "?"), how), GREEN, indent=8)
     else:
@@ -212,20 +197,6 @@ def _rooms(col, search):
     col.gap()
 
 
-def _stairs(col, search):
-    stairs = search.get("stairs", ())
-    col.line("STAIRS (nodes)  p     climb m  storey beyond", CYAN, bold=True)
-    if not stairs:
-        col.line("(none reachable on the observed map)", DIM, indent=8)
-    for node in stairs:
-        col.line("%-5s %-5s %s  %6s  %s%s" % (
-            _name(node), "up" if node.get("direction", 0) > 0 else "down", _fmt(node.get("prob")),
-            _fmt(node.get("leaf_m"), 1, 6).strip(),
-            "visited" if node.get("destination_visited") else "unvisited",
-            " (arrived by)" if node.get("arrived_by") else ""), _node_color(node, search))
-        if node.get("why"):
-            col.line(node["why"], DIM, indent=24)
-    col.gap()
 
 
 def _openings(col, search):
@@ -280,7 +251,7 @@ def render_search_panel(search, size=(320, 720)):
     """Draw the search block of a snapshot as one text column of ``size`` (w, h)."""
     image = np.full((size[1], size[0], 3), 24, np.uint8)
     col = _Column(image)
-    for section in (_header, _order, _rooms, _stairs, _openings, _objects, _events):
+    for section in (_header, _order, _rooms, _openings, _objects, _events):
         section(col, search or {})
         if col.y > col.bottom:
             break

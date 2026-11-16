@@ -59,10 +59,12 @@ Set `DETECT_PY` if it is not at `~/.venvs/objnav-detector/bin/python`.
 
 ### 1.3 The room LLM (Ollama)
 
-Two models serve a run: `qwen2.5:3b-instruct` labels rooms from the objects seen in them
-(cheap, frequent) and `qwen2.5:14b-instruct` is the **node oracle** -- the one judgement
-per loop point that values every room of the home (about 30 s per call on a 32-thread
-CPU; 9 GB of RAM). Either:
+Two roles are served: labelling rooms from the objects seen in them (cheap, frequent) and
+the **node oracle** -- the one judgement per loop point that values every room of the
+home. Since 2026-11-16 the launcher gives both to `qwen2.5:3b-instruct` by default, the
+model the development laptop can hold; the runs recorded in this directory gave the
+oracle `qwen2.5:14b-instruct` (about 30 s per call on a 32-thread CPU; 9 GB of RAM),
+which `LLM_REASONING_MODEL=qwen2.5:14b-instruct` selects. Either:
 
 - **Docker (the default, `OLLAMA_MODE=docker`)** -- a CPU-only container named
   `ollama-scene-graph` listening on `127.0.0.1:11434`:
@@ -70,17 +72,17 @@ CPU; 9 GB of RAM). Either:
   docker run -d --name ollama-scene-graph -p 127.0.0.1:11434:11434 -v ollama-scene-graph:/root/.ollama \
       -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_MAX_LOADED_MODELS=2 -e OLLAMA_KEEP_ALIVE=30m ollama/ollama
   docker exec ollama-scene-graph ollama pull qwen2.5:3b-instruct
-  docker exec ollama-scene-graph ollama pull qwen2.5:14b-instruct
+  docker exec ollama-scene-graph ollama pull qwen2.5:14b-instruct   # only for LLM_REASONING_MODEL=qwen2.5:14b-instruct
   docker stop ollama-scene-graph      # the script starts and stops it itself
   ```
 - **Native (`OLLAMA_MODE=native`)** -- [install Ollama](https://ollama.com/download); the
-  script runs `ollama serve` on the CPU and pulls the two models the first time.
+  script runs `ollama serve` on the CPU and pulls the models it names the first time.
 - **External (`OLLAMA_MODE=external`)** -- anything OpenAI/Ollama-compatible you run
   yourself; point `LLM_BASE_URL` at it (and `LLM_BACKEND=openai LLM_API_KEY=...` for a
   hosted model). The script only checks it answers.
 
-`OLLAMA_MAX_LOADED_MODELS=2` matters: both models stay resident instead of the 14B being
-reloaded from disk at every loop point.
+`OLLAMA_MAX_LOADED_MODELS=2` matters when the two roles name different models: both stay
+resident instead of the larger one being reloaded from disk at every loop point.
 
 ### 1.4 Data (licensed; nothing here downloads it for you)
 
@@ -462,7 +464,7 @@ every layer, `0` CPU, empty = the server decides) is sent as Ollama's `num_gpu` 
 | `OLLAMA_CONTAINER` | `ollama-scene-graph` | the container name in docker mode |
 | `OLLAMA_CONTEXT_LENGTH` | `8192` | the context the native server loads a model with when the request names none: the room-label calls do not, and the model's own default loads `qwen2.5:3b-instruct` at 32k -- 2.3 GB of KV cache per slot for prompts of a few hundred tokens (measured 2026-10-22). The node oracle asks for `LLM_REASONING_NUM_CTX` itself |
 | `LLM_BASE_URL` | `http://127.0.0.1:11434` | where the LLM answers |
-| `LLM_MODEL` / `LLM_REASONING_MODEL` | `qwen2.5:3b-instruct` / `qwen2.5:14b-instruct` | room labels / the node oracle |
+| `LLM_MODEL` / `LLM_REASONING_MODEL` | `qwen2.5:3b-instruct` / `qwen2.5:3b-instruct` | room labels / the node oracle (the oracle's was `qwen2.5:14b-instruct` until 2026-11-16) |
 | `LLM_REASONING_TIMEOUT_S` | `900` | how long one oracle call may take (the search waits rather than guessing) |
 | `DETECTOR_PORT`, `DETECTOR_THREADS` | `18095`, `4` | the detector service |
 | `SEGMENTATION` | `0` | `1` starts the box-prompted Segment Anything service beside the detector and runs the policy with `segmentation=true`: the target's depth is read on its SAM mask, not its box (section 3.4) |

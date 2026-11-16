@@ -76,7 +76,8 @@ from sparx_agency.core.planning.object_search.perception.doors import DOOR_LABEL
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import (
     goal_rooms, shadow_exemption, split_exits)
 
-#: Opening node ids start here, above the stair band (100 000 - 199 999).
+#: Opening node ids start here, far above every room pid (the band below, 100 000 - 199 999, was the stair
+#: nodes' until 2026-11-16 and is left free for them).
 OPENING_NODE_BASE = 200_000
 #: Within the opening band, target landmarks take indices from here: ``OPENING_NODE_BASE + 50 000 + landmark id``.
 LANDMARK_INDEX_BASE = 50_000
@@ -89,7 +90,7 @@ def opening_node_id(index: int) -> int:
 
 
 def is_opening_node(node_id) -> bool:
-    """Whether a supervisor room id names an opening rather than a room or a staircase."""
+    """Whether a supervisor room id names an opening rather than a room."""
     return node_id is not None and int(node_id) >= OPENING_NODE_BASE
 
 
@@ -377,7 +378,7 @@ class Opening:
 
 @dataclass(frozen=True)
 class OpeningOption:
-    """One opening as the loop offers it to the supervisor and the solver (mirrors ``StairOption``)."""
+    """One opening as the loop offers it to the supervisor and the solver."""
 
     node_id: int
     opening: Opening
@@ -630,8 +631,8 @@ def detect_openings(policy, obs, world, settings: OpeningSettings, registry: Ope
     without its type rule -- a hallway named after the toilet glimpsed from
     it must still offer its doors), merged within ``merge_m``, at least
     ``min_cells`` wide, not yet peeked, and not at the foot or head of a
-    seen staircase -- the stairs are a node of their own, and the unknown
-    beyond a flight is the other storey, not a room of this one.
+    seen staircase -- the unknown beyond a flight is the other storey, not a
+    room of this one.
     """
     p = policy
     inventory = getattr(p.graph, "frontier_inventory", None)

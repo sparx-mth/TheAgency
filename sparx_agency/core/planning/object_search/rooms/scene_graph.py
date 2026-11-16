@@ -101,8 +101,9 @@ class ObservedSceneGraph:
             :attr:`facts` counts them with.
         probs: Independent per-room search-success estimates from the last
             oracle round, never renormalised across the candidate nodes.
-        stair_probs: The same for the staircase nodes the loop handed the
-            oracle beside the rooms, keyed by their node ids.
+        extra_probs: The same for the nodes the loop handed the oracle
+            beside the rooms -- the openings offered as nodes of their own
+            (the deprecated ``exits_as_nodes``) -- keyed by their node ids.
         p_present: Chance of some node succeeding under the RPT* independence
             approximation; ``1 - p_present`` is the legacy ``elsewhere`` field.
     """
@@ -115,7 +116,7 @@ class ObservedSceneGraph:
         self.oracle = SearchNodeOracle(client)
         self.segmentation = segmentation or DEFAULT_SEGMENTATION
         self.options, self.facts, self.probs, self.searched = [], {}, {}, {}
-        self.stair_probs = {}
+        self.extra_probs = {}
         self.queries = 0
         self.oracle_reuses = 0
         self.last_reasoning = {}
@@ -403,7 +404,7 @@ class ObservedSceneGraph:
         if not rooms:
             self.label_tracker.update({}, step, changed)
             self.last_reasoning = {}
-            self.options, self.probs, self.stair_probs = [], {}, {}
+            self.options, self.probs, self.extra_probs = [], {}, {}
             return
         if reason:
             self._reason(world, self._objects, target, step, changed)
@@ -453,10 +454,13 @@ class ObservedSceneGraph:
             target: The target labels (``query`` is what the model is asked about).
             step: The current action.
             extra_nodes: :class:`SearchNode` s beyond the rooms -- the
-                staircases the loop offers -- valued in the same call.
+                openings the loop offers as nodes of their own -- valued in
+                the same call.
             context: :class:`~search_node_oracle.SearchContext` on the home.
-            here_xy: The agent's position, to mark the room it stands in.
-            action_time_s: Seconds per action, to phrase "last inside N ago".
+            here_xy: The agent's position, to record the room it stands in
+                (``SearchNode.here``: for the record, never in the prompt).
+            action_time_s: Seconds per action, to turn the steps since the
+                agent was last inside a room into seconds.
             exclude: Room pids NOT shown to the model. They keep a
                 probability of 0.0 so nothing downstream reads them as
                 unvalued. Empty since the LLM-first loop of 2026-10-07: every
@@ -600,19 +604,31 @@ class ObservedSceneGraph:
         radius = float(getattr(landmark, "radius_m", None) or 0.0)
         return room_near_cell(labels, world, landmark.xy, radius + OBJECT_ROOM_REACH_M)
 
-    def nodes(self, world, step, here_xy=None, action_time_s=1.0, exclude=(), scanned=None, exits=None):
-        """Every room as a :class:`SearchNode`, with the facts the oracle values it by.
+    def nodes(self, world, step, here_xy=None, action_time_s=1.0, exclude=(), scanned=None, exits=None, target=None):
+        """Every room as a :class:`SearchNode`, with everything the graph stores about it that is not a position.
 
-        ``exits`` is ``{pid: RoomExits}`` -- the room's open doorways and gaps
-        to unseen space (:func:`~opening_nodes.room_exits`); a room without an
-        entry reads ``exits=0``.
+        The room's type and how firmly it is held, its size and coverage
+        (:attr:`extents`), the frontier left, the effort spent, the objects
+        credited to it -- one entry per object, so the oracle's line can
+        count them -- and the types of the rooms a door or a threshold joins
+        it to (:meth:`connections`). ``exits`` is ``{pid: RoomExits}`` -- the
+        room's open doorways and gaps to unseen space
+        (:func:`~opening_nodes.room_exits`); a room without an entry reads
+        ``exits=0``. ``here`` is recorded on the node and never shown to the
+        model: where the agent stands is distance, and distance is RPT*'s.
+        ``target`` -- the episode's :class:`TargetLabels` -- marks the rooms
+        whose confirmed objects include one of the target's own kind
+        (``target_seen``: found by the detector, and the search still on);
+        without it the mark is left unknown.
         """
+        wanted = None if target is None else frozenset(getattr(target, "accept_labels", ()) or ())
         labels = self.label_tracker.labels
         metadata = self.label_tracker.metadata
         here = self.room_at(world, here_xy) if here_xy is not None else None
         excluded = set(int(pid) for pid in exclude)
         scanned = scanned or {}
         exits = exits or {}
+        connections = self.connections()
         out = []
         for pid, room in self.registry.rooms.items():
             if pid in excluded:
@@ -639,6 +655,8 @@ class ObservedSceneGraph:
                 covered_m2=0.0 if extent is None else float(extent.covered_m2),
                 left_m2=0.0 if extent is None else float(extent.left_m2),
                 open_perimeter_m=0.0 if extent is None else float(extent.open_perimeter_m),
+                connected=tuple(connections.get(pid, ())),
+                target_seen=None if wanted is None else any(str(name) in wanted for name in objects),
                 frontier_clusters=0 if fact is None else int(fact.frontier_clusters),
                 searched_s=float(self.searched.get(pid, 0.0)),
                 last_inside_ago_s=None if inside is None else max(0.0, (int(step) - inside) * action_time_s),
@@ -651,19 +669,50 @@ class ObservedSceneGraph:
                 unseen_m2=0.0 if gaps is None else float(getattr(gaps, "unseen_m2", 0.0))))
         return out
 
+    def connections(self):
+        """``{pid: [type, ...]}`` -- the types of the rooms each room is joined to by a door or a threshold, sorted.
+
+        The scene graph's edges (:attr:`doors`, written by
+        :meth:`_door_links`): every confirmed door and every threshold the
+        agent walked or saw through, with the room pairs it joins. One entry
+        per neighbouring room, in the HOUSE line's words -- ``unknown`` for
+        a room not identified, a ``?`` on a type held weakly. A room with no
+        edge has no entry.
+        """
+        rooms = self.registry.rooms
+        labels = self.label_tracker.labels
+        metadata = self.label_tracker.metadata
+        neighbours = {}
+        for door in self.doors or ():
+            for pair in door.get("room_pairs", ()):
+                a, b = int(pair[0]), int(pair[1])
+                if a == b or a not in rooms or b not in rooms:
+                    continue
+                neighbours.setdefault(a, set()).add(b)
+                neighbours.setdefault(b, set()).add(a)
+        out = {}
+        for pid, others in neighbours.items():
+            words = []
+            for other in others:
+                label = labels[other].label if other in labels else "unknown"
+                weak = label != "unknown" and (metadata.get(other) or {}).get("strength") == "weak"
+                words.append(label + ("?" if weak else ""))
+            out[pid] = sorted(words)
+        return out
+
     def _reason(self, world, objects, target, step, changed, extra_nodes=(), context=None, here_xy=None,
                 action_time_s=1.0, exclude=(), scanned=None, exits=None):
         rooms = self.registry.rooms
         try:
             labels = self.label_tracker.update(objects, step, changed, facts=self._geometry)
             nodes = self.nodes(world, step, here_xy, action_time_s, exclude=exclude, scanned=scanned,
-                               exits=exits) + list(extra_nodes)
+                               exits=exits, target=target) + list(extra_nodes)
             if not nodes:
-                # Every room finished or ruled out and no staircase to offer:
+                # Every room finished or ruled out and no other node to offer:
                 # nothing to ask. The probabilities read zero and the loop's
-                # fallback carries the search (the stairs, by the explicit rule).
+                # fallback carries the search.
                 self.probs = {pid: 0.0 for pid in rooms}
-                self.stair_probs = {}
+                self.extra_probs = {}
                 self.options = [RoomOption(room_id=pid, label=labels[pid].label if pid in labels else "unknown",
                                            prob=0.0, xy=room.centroid) for pid, room in rooms.items()]
                 self.last_reasoning = {"labels": {str(pid): item for pid, item in self.label_tracker.metadata.items()},
@@ -687,7 +736,7 @@ class ObservedSceneGraph:
             self.queries += 1
         self.p_present = float(result.p_present)
         self.probs = {pid: float(result.probs.get(pid, 0.0)) for pid in rooms}
-        self.stair_probs = {nid: float(p) for nid, p in result.probs.items() if nid not in rooms}
+        self.extra_probs = {nid: float(p) for nid, p in result.probs.items() if nid not in rooms}
         self.options = [RoomOption(room_id=pid, label=labels[pid].label if pid in labels else "unknown",
                                    prob=self.probs[pid], xy=room.centroid) for pid, room in rooms.items()]
         self.last_reasoning = {"labels": {str(pid): item for pid, item in self.label_tracker.metadata.items()},

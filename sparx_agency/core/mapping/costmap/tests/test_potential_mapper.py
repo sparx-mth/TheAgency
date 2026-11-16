@@ -42,6 +42,17 @@ def _wall_depth(height: int = 240, width: int = 320) -> np.ndarray:
     return d
 
 
+def _step(mapper: PotentialMapper, depth_m: np.ndarray, intr: Intrinsics) -> None:
+    """One depth frame through the mapper: back-project it, then ``update`` with the cloud.
+
+    ``PotentialMapper.step(depth, intrinsics)`` did exactly this until it was
+    removed (9d5de68c, 2026-03-16) in favour of ``update(point_cloud)``, which
+    is what the nodes call; the tests below kept calling ``step`` and failed
+    with ``AttributeError`` from then on.
+    """
+    mapper.update(mapper._backproject(np.asarray(depth_m, dtype=np.float32), intr))
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -75,7 +86,7 @@ class TestPotentialMapperConfig:
         
         # Point at 3.0m in front (Forward axis)
         depth = _flat_depth(value=3.0)
-        mapper.step(depth, intr)
+        _step(mapper, depth, intr)
         
         prob = mapper.get_prob_map()
         assert np.any(prob > 0.0), "Occupancy map is empty despite valid input!"
@@ -97,7 +108,7 @@ class TestPotentialMapperGridShape:
         cfg = PotentialMapperConfig(size_m=10.0, resolution_m=0.5)
         mapper = PotentialMapper(cfg)
         intr = _make_intrinsics()
-        mapper.step(_flat_depth(value=3.0), intr)
+        _step(mapper, _flat_depth(value=3.0), intr)
         grad = mapper.get_gradient_field()
         n = int(round(10.0 / 0.5))
         assert grad.shape == (n, n, 2), f"Unexpected grad shape {grad.shape}"
@@ -106,7 +117,7 @@ class TestPotentialMapperGridShape:
         cfg = PotentialMapperConfig(size_m=10.0, resolution_m=0.5)
         mapper = PotentialMapper(cfg)
         intr = _make_intrinsics()
-        mapper.step(_flat_depth(value=3.0), intr)
+        _step(mapper, _flat_depth(value=3.0), intr)
         prob = mapper.get_prob_map()
         n = int(round(10.0 / 0.5))
         assert prob.shape == (n, n)
@@ -161,31 +172,47 @@ class TestExtrinsics:
 
 class TestAccumulationDecay:
     def test_map_grows_then_decays_to_zero(self):
-        """After adding obstacle, then running many empty-depth steps, M_acc → 0."""
+        """After adding obstacle, then running many empty-depth steps, M_acc → 0.
+
+        A frame with no point in range observes nothing (``M_temp`` is all
+        NaN), so the EMA has nothing to blend and the memory fades at
+        ``unknown_decay`` per frame -- the knob that replaced "EMA toward an
+        empty frame". The test sets it to 0.8 so that forty frames are enough;
+        at the default (0.995) the same map takes hundreds.
+        """
         cfg = PotentialMapperConfig(
             alpha=0.5, size_m=20.0, resolution_m=0.5,
             range_min_m=0.1, range_max_m=20.0,
-            z_band=(-3.0, 3.0),
+            z_band=(-3.0, 3.0), unknown_decay=0.8,
         )
         mapper = PotentialMapper(cfg)
         intr = _make_intrinsics(320, 240)
 
         # Load with wall depth (creates obstacles)
-        mapper.step(_wall_depth(), intr)
+        _step(mapper, _wall_depth(), intr)
         prob_after_obs = mapper.get_prob_map().max()
         assert prob_after_obs > 0.0, "No obstacle registered"
 
         # Feed zeros / very-far depth so no points hit the grid
         blank = np.full((240, 320), 50.0, dtype=np.float32)  # out of range_max_m
-        for _ in range(40):
-            mapper.step(blank, intr)
+        _step(mapper, blank, intr)
+        assert np.isnan(mapper.get_temp_map()).all(), "a frame with nothing in range observes nothing"
+        np.testing.assert_allclose(mapper.get_prob_map().max(), prob_after_obs * cfg.unknown_decay, rtol=1e-4,
+                                   err_msg="one unobserved frame fades the memory by unknown_decay")
+        for _ in range(39):
+            _step(mapper, blank, intr)
 
         prob_decayed = mapper.get_prob_map().max()
         assert prob_decayed < prob_after_obs, "Map should decay"
         assert prob_decayed < 0.01, f"Map did not fully decay: {prob_decayed}"
 
     def test_alpha_1_replaces_each_frame(self):
-        """With alpha=1.0, M_acc == M_temp exactly after each step."""
+        """With alpha=1.0, M_acc == M_temp exactly after each step -- wherever the frame observed.
+
+        ``M_temp`` is NaN where the frame saw nothing (unknown space is kept
+        apart from free space), and the EMA blends observed cells only: the
+        rest of ``M_acc`` is left as it was, zero on a fresh map.
+        """
         cfg = PotentialMapperConfig(
             alpha=1.0, size_m=20.0, resolution_m=0.5,
             range_min_m=0.1, range_max_m=20.0,
@@ -194,11 +221,15 @@ class TestAccumulationDecay:
         mapper = PotentialMapper(cfg)
         intr = _make_intrinsics(320, 240)
 
-        mapper.step(_wall_depth(), intr)
+        _step(mapper, _wall_depth(), intr)
+        acc, temp = mapper.get_prob_map(), mapper.get_temp_map()
+        observed = np.isfinite(temp)
+        assert observed.any() and not observed.all(), "the frame observed part of the grid"
         np.testing.assert_array_equal(
-            mapper.get_prob_map(), mapper.get_temp_map(),
-            err_msg="With alpha=1.0, M_acc must equal M_temp",
+            acc[observed], temp[observed],
+            err_msg="With alpha=1.0, M_acc must equal M_temp on every observed cell",
         )
+        assert np.all(acc[~observed] == 0.0), "unobserved cells are not written"
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +245,7 @@ class TestReset:
         )
         mapper = PotentialMapper(cfg)
         intr = _make_intrinsics()
-        mapper.step(_wall_depth(), intr)
+        _step(mapper, _wall_depth(), intr)
         assert mapper.get_prob_map().max() > 0.0, "Setup: map should not be empty"
 
         mapper.reset()
@@ -287,27 +318,43 @@ class TestObstacleRepulsionDirection:
 
 class TestNavigation:
     def test_target_navigation(self):
-        """Test that get_total_gradient includes a pull toward the goal."""
+        """Test that get_total_gradient includes a pull toward the goal.
+
+        In the mapper's frame the robot stands at the bottom-centre of the
+        grid (row 0, column n//2; rows run forward, columns run to the
+        right), the attractive potential is a quadratic basin within
+        ``att_radius_m`` of the goal and a cone beyond it, and the total
+        field and its descent direction are computed in ``update()``. (The
+        test used to read the pull at the grid's centre cell, where the
+        robot stood before 9d5de68c, expect ``zeta * (goal - pos)`` there and
+        skip the update; at that cell the goal now stands, and the pull is 0.)
+        """
         cfg = PotentialMapperConfig(size_m=10.0, resolution_m=1.0, zeta=1.0)
         mapper = PotentialMapper(cfg)
-        
-        # Set goal at (5, 0)
+
+        # Set goal 5 m straight ahead of the robot
         mapper.set_goal(5.0, 0.0)
-        
-        # At (0,0), repulsive grad is 0 (no obstacles).
-        # Attractive should point toward (5, 0).
-        # zeta * (Goal - Pos) = 1.0 * (5 - 0) = 5.0 in Forward dir.
-        total_grad = mapper.get_total_gradient()
-        
-        # find index of (0,0) in grid
-        # fwd_idx = (0 - (-5)) / 1.0 = 5
-        # left_idx = (5 - 0) / 1.0 = 5
-        mid_row, mid_col = 5, 5
-        center_grad = total_grad[mid_row, mid_col]
-        
-        # Forward component index 0 should be positive (toward 5)
-        np.testing.assert_allclose(center_grad[0], 5.0, atol=1e-3)
-        np.testing.assert_allclose(center_grad[1], 0.0, atol=1e-3)
+        assert not mapper.get_total_gradient().any(), "nothing is computed before a frame is processed"
+        mapper.update(np.zeros((0, 3), dtype=np.float32))      # a frame with no obstacle in it
+        total_grad = mapper.get_total_gradient()               # [..., 0] forward, [..., 1] left
+
+        robot_row, centre_col = 0, mapper.grid_shape[1] // 2
+        goal_row, goal_col = mapper._goal_to_cell(5.0, 0.0)
+        assert (goal_row, goal_col) == (5, centre_col)
+
+        # On the line from the robot to the goal the pull is forward, with no sideways component.
+        for row in range(robot_row, goal_row):
+            fwd, left = total_grad[row, centre_col]
+            assert fwd > 0.5, f"row {row}: the pull toward the goal should point forward, got {fwd}"
+            np.testing.assert_allclose(left, 0.0, atol=1e-3)
+        # It is bounded by the cone's slope: k_att * att_radius_m.
+        assert total_grad[robot_row:goal_row, centre_col, 0].max() <= cfg.k_att * cfg.att_radius_m + 1e-3
+        # At the goal the field is at its minimum: no pull.
+        np.testing.assert_allclose(total_grad[goal_row, goal_col], [0.0, 0.0], atol=1e-3)
+        # Beyond the goal the pull points back, and to either side it points inward.
+        assert total_grad[goal_row + 2, centre_col, 0] < -0.5
+        assert total_grad[goal_row, centre_col - 2, 1] < -0.5, "left of the goal (a smaller column): pulled right"
+        assert total_grad[goal_row, centre_col + 2, 1] > 0.5, "right of the goal: pulled left"
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +387,7 @@ class TestWallSegmentation:
         # Check that m_walls (cleaned map) has some probability along the wall
         assert np.sum(m_walls[5:13, 4:7]) > 0
 
+    def test_ray_aligned_flying_pixels_do_not_bridge_a_doorway(self):
         """A doorway with flying pixels (ray-aligned) shouldn't be bridged into a single wall."""
         cfg = PotentialMapperConfig(size_m=20.0, resolution_m=1.0, min_wall_length_m=2.0)
         mapper = PotentialMapper(cfg)

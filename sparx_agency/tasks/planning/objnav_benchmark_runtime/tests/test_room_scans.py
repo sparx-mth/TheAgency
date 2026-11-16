@@ -538,8 +538,8 @@ def test_excluded_cells_belong_to_no_room():
 
 
 def test_the_policy_excludes_seen_stair_footprints_from_the_partition(monkeypatch):
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import stair_policy, STAIRS
-    policy, episode, world, rooms, _ = stair_policy(order=(STAIRS, 1, 0))
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import stair_policy
+    policy, episode, world, rooms, _ = stair_policy(order=(1, 0))
     exclusion = policy.room_exclusion(world)
     assert exclusion is not None and exclusion.any(), "the seen flight's foot is on this floor"
     gx, gy = world.world_to_grid(4.0, 1.3)                       # the first treads; (4.0, 1.0) is the floor before them
@@ -554,8 +554,8 @@ def test_the_policy_excludes_seen_stair_footprints_from_the_partition(monkeypatc
 
 
 def test_the_floor_departure_gate_is_off_by_default_and_opt_in():
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import stair_policy, STAIRS
-    policy, episode, world, rooms, _ = stair_policy(order=(STAIRS, 1, 0))
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import stair_policy
+    policy, episode, world, rooms, _ = stair_policy(order=(1, 0))
     policy.peek.floor_ready = lambda: False                            # rooms still "pending" by the peek ledger
     assert policy.building.can_leave_floor(obs_at(episode, 0, IN_A)) is True
     assert not any(e.get("event") == "floor_change_held" for e in policy.building.events)
@@ -565,28 +565,6 @@ def test_the_floor_departure_gate_is_off_by_default_and_opt_in():
     assert policy.building.events[-1]["event"] == "floor_change_held"
     with pytest.raises(ValueError):
         PeekSettings(gate_floor_departure="yes")
-
-
-def test_the_way_back_is_withheld_while_this_storey_still_has_rooms_to_scan():
-    """Ranchester attempt 3: the 3B sent the agent back up the stairs it had just come down, twice,
-    with unscanned rooms on the list each time. The storey is looked at before the way back is a choice."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import stair_policy, STAIRS
-    policy, episode, world, rooms, reasoned = stair_policy(order=(STAIRS, 1, 0), stair_prob=0.9, visit="scan")
-    building = policy.building
-    building.arrived_by, building.arrived_step = 0, -1000             # came down these stairs long ago: the grace is spent
-    obs = obs_at(episode, 0, IN_A)
-    cost = policy.navigation_cost(world)
-    policy.loop._exclusions(obs, world)
-    assert policy.loop._excluded == {}, "both rooms unscanned"
-    assert policy.loop._stair_options(obs, world, cost) == [], "the way back is not a node yet"
-    assert policy.loop.stats["way_back_held_for_rooms"] == 1 and policy.loop.events[-1]["event"] == "way_back_held"
-    assert policy.loop.events[-1]["rooms_left"] == [0, 1]
-    policy.scans.record(obs, rooms[0], source="room_scan")
-    policy.scans.record(obs_at(episode, 1, IN_B), rooms[1], source="room_scan")
-    policy.loop._exclusions(obs_at(episode, 2, IN_A), world)
-    assert set(policy.loop._excluded) == {0, 1}
-    [option] = policy.loop._stair_options(obs_at(episode, 2, IN_A), world, cost)
-    assert option.node_id == STAIRS and option.node.arrived_by, "every room finished: the way back is offered, marked"
 
 
 def test_a_warmup_moved_mid_rotation_starts_its_circle_again():

@@ -1,7 +1,9 @@
 """Spawn-floor confinement when stair traversal is forbidden (``RPTSettings.allow_stair_traversal``).
 
-Standard ZSON benchmarks (Gibson, HM3D) score an episode on the storey the
-agent spawns on, so by default the search must never leave it. The guard
+The single-storey configuration of the method searches the storey the agent
+starts on and no other (multi-storey search is not part of it yet; a goal on
+another storey is then a failure the method owns, not one the benchmark
+excuses). So by default the search must never leave that storey. The guard
 does this at the one place every consumer shares -- the world the policy
 plans on -- rather than in each frontier, opening, peek and route module:
 
@@ -102,20 +104,31 @@ plans on -- rather than in each frontier, opening, peek and route module:
   the whole band from a provisional spawn storey, the atlas's
   ``departure_m`` from a storey walked level -- is free on the planning
   grid, never a drop, never a stair mask, and where the closing's standoffs
-  may lie. One bound for all four, and the atlas's own: from a storey walked
-  level, support further off than ``departure_m`` is where the atlas starts
-  a transition and the trail retreat walks the agent back, so it is not
-  offered (00835/000006 on the first cut, which freed the whole band: a
-  frontier route down a flight's treads toward a frontier 1.7 m below, 0.59 m
-  off the plane in one stride, then 18 actions of ``RETREAT``). Nothing
-  reachable is withheld by it: on habitat-sim's recomputed navmesh no
-  single-storey HM3D v1 val episode that starts on a level of floor size
-  (1,495 of 1,586) has a shortest path more than 0.45 m off the start
-  height, and every one whose goal lies 0.45-0.8 m off (20) starts on a
-  tread, a landing or a ramp -- the provisional spawn storey, whose
-  departure is walked as a traversal and rebased, not retreated from. The
-  GT-oracle sweep of 2026-10-28 solved 14 % of the single-storey episodes
-  whose shortest path changes height by 0.25-1.0 m. The step's verdict --
+  may lie. **Why the reach is bounded, and by what** -- three facts about the
+  agent itself, none about a benchmark. (1) *The body*: a step is support the
+  agent can walk onto, a riser of at most ``max_step_m`` with clearance to
+  body height (``StairTerrain.step_surfaces``); what it cannot climb is not
+  floor. (2) *Its own storey tracking*: from a storey walked level, support
+  further off the plane than the atlas's ``departure_m`` (0.45 m) is where
+  the atlas reads the agent as leaving the storey, starts a transition and
+  the trail retreat walks it back -- so the guard must not offer what the
+  agent's own storey rule will undo (00835/000006 on the first cut, which
+  freed the whole band: a frontier route down a flight's treads toward a
+  frontier 1.7 m below, 0.59 m off the plane in one stride, then 18 actions
+  of ``RETREAT``). One bound for the guard and the atlas. (3) *What a storey
+  is*: from a provisional spawn storey -- a tread, a landing or a ramp, never
+  walked level -- there is no storey yet to depart from, and the reach is the
+  whole band, which stays under the least separation of two storeys
+  (``min_floor_separation_m``, 1.5 m), so nothing within it is another
+  storey; a departure is walked as a traversal to the storey the agent
+  settles on, and rebased. The bound is the method's own and is NOT read
+  from, or sized by, an evaluator. (For the record: on 2026-10-31 it was
+  also CHECKED against the simulator's navigation mesh -- no single-storey
+  HM3D v1 val episode starting on a level of floor size has a shortest path
+  more than 0.45 m off its start height. That check used evaluation data
+  the agent never sees; it confirmed the bound and is not its reason, and
+  the paper lists it under development on the evaluation data.) The step's
+  verdict --
   within the reach of the plane or not -- is judged against the plane the
   camera last measured the cell under (:attr:`step_ref_z`, since
   2026-11-03; the plane in force at the cell's first terrain report while

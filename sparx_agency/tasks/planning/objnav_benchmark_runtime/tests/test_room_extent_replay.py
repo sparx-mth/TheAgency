@@ -198,8 +198,11 @@ def test_the_policy_reads_the_extents_every_action_and_the_oracle_is_shown_size_
     system, user = llm.oracle_prompts[-1]
     assert "covered=" in user and "observed=" not in user, user
     assert "at most" in user or "all of the mapped part" in user, "a lower-bound size: the share is a bound, or all mapped"
-    assert "wall not seen yet" in user or "walls not seen yet" in user, user
-    assert "is a LOWER BOUND" in system and "COVERAGE FIRST" in system and "TIME IS SECONDARY" in system
+    assert "sides not mapped yet" in user and "open edge" in user, user
+    assert "searched=0 actions" in user and "here=" not in user, "the loop's context gives the action time; no whereabouts"
+    assert '"at least": a side is not mapped yet' in " ".join(system.split())
+    assert "covered= floor of the room the detector has already checked" in " ".join(system.split())
+    assert "COVERAGE FIRST" not in system and "TIME IS SECONDARY" not in system, "what the two facts are worth is the model's to judge"
     record = policy.episode_info()["last_reasoning"]
     assert record["extents"] and all("size_status" in item for item in record["extents"].values())
     assert any(node.get("bounded") is False for node in record["nodes"] if node.get("kind") == "room")
@@ -251,19 +254,19 @@ def test_the_scene_graph_turns_a_room_of_the_map_into_the_size_and_coverage_the_
     graph.update(world, [], None, reason=False)
     assert list(graph.extents) == list(graph.registry.rooms) == [0]
     assert format_node(graph.nodes(world, 0)[0]) == (
-        "id=0  ROOM  type=unknown  size=20m2 (5x4m, all walls seen)  frontier=0  exits=0  status=never_entered  "
+        "id=0  ROOM  type=unknown  size=20m2 (5x4m, all sides mapped)  frontier=0  exits=0  status=never_entered  "
         "searched=0s  seen: nothing yet"), "no sight record was given: the size, and no coverage"
     observed = np.zeros(world.grid.shape, dtype=bool)
     observed[20:60, 20:45] = True                                   # the half nearer the door was looked at
     graph.observed_provider = lambda world: observed
     graph.update(world, [], None, reason=False)
-    assert "  size=20m2 (5x4m, all walls seen)  covered=10m2 (50% of the room, 10m2 left)  frontier=0  " in format_node(
+    assert "  size=20m2 (5x4m, all sides mapped)  covered=10m2 (50% of the room, 10m2 left)  frontier=0  " in format_node(
         graph.nodes(world, 0)[0])
     # The far wall beyond the camera's reach: the same floor is a lower bound, and its covered share an upper one.
     open_world = _walled_room_world(far_wall=False)
     graph.update(open_world, [], None, reason=False)
-    assert ("  size=at least 20m2 (5+ x 4m, 1 wall not seen yet)  covered=10m2 (at most 50% of the room, at least 10m2 "
-            "left)  frontier=1  ") in format_node(graph.nodes(open_world, 0)[0])
+    assert ("  size=at least 20m2 (5+ x 4m, 1 of 4 sides not mapped yet, open edge 4m)  covered=10m2 (at most 50% of "
+            "the room, at least 10m2 left)  frontier=1  ") in format_node(graph.nodes(open_world, 0)[0])
     assert graph.extent_of(0).open_sides and graph.extent_records()["0"]["size_status"] == "lower_bound"
 
 

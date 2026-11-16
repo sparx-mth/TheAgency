@@ -9,9 +9,10 @@ from typing import Any, Dict, Optional
 
 import pytest
 
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson import monitor as monitor_module
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.monitor import (
-    CSV_COLUMNS, EXIT_CODE_UNKNOWN, Monitor, episodes_csv_text, launcher_started, main, read_episode_scalars,
-    run_finished, status_line, write_episodes_csv)
+    CSV_COLUMNS, EXIT_CODE_UNKNOWN, STAMP_LAG_S, Monitor, episodes_csv_text, exit_code, file_clock_now,
+    launcher_started, main, read_episode_scalars, run_finished, status_line, write_episodes_csv)
 
 
 def episode_row(episode_id: str = "Darden/000000", success: bool = True, dtg: Optional[float] = 0.0,
@@ -86,6 +87,48 @@ def test_finished_is_judged_by_the_pid_and_an_exit_code_older_than_the_monitor_d
     stale.write_text("3\n")                                           # the launcher's trap wrote it just now
     assert run_finished(tmp_path, pid=dead, since=since) == 3
     assert run_finished(tmp_path, pid=None, since=since) == 3
+
+
+def test_an_exit_code_stamped_a_tick_before_a_wall_clock_since_is_the_runs_own(tmp_path):
+    """The failure of the test above, without the race (2026-11-16). The kernel stamps a file from its coarse clock,
+    which advances once per timer tick, so a file written just after ``time.time()`` carries a stamp up to a tick
+    BEFORE it -- 0.5 to 1.15 ms on the machine where this was found. The bare ``st_mtime < since`` then read the
+    launcher's exit code as a leftover: a failed run was reported "killed (no exit code recorded)", and a monitor
+    without a PID never saw the run end at all."""
+    since = time.time()
+    code = tmp_path / "exit_code.txt"
+    code.write_text("3\n")
+    os.utime(code, (since - 0.002, since - 0.002))                    # written after ``since``, stamped a tick earlier
+    assert exit_code(tmp_path, since) == 3
+    assert run_finished(tmp_path, pid=None, since=since) == 3, "the run ended: the monitor must see it"
+    assert run_finished(tmp_path, pid=2 ** 22 - 1, since=since) == 3, "... and say it FAILED with 3, not that it was killed"
+    assert 0.0 < STAMP_LAG_S <= 0.05, "a tick or two: a preflight's leftover is minutes old"
+    os.utime(code, (since - STAMP_LAG_S - 0.5, since - STAMP_LAG_S - 0.5))
+    assert exit_code(tmp_path, since) is None and run_finished(tmp_path, pid=None, since=since) is None, "half a second old: a leftover"
+    assert run_finished(tmp_path, pid=2 ** 22 - 1, since=since) == EXIT_CODE_UNKNOWN
+
+
+def test_the_monitors_own_start_is_read_on_the_clock_the_runs_files_are_stamped_with(tmp_path, monkeypatch):
+    """With no ``launcher.pid`` to anchor on, the monitor's start is "now" -- as the run directory's filesystem
+    stamps a file, not as the wall clock reads: two stamps of one clock are comparable on any filesystem, a stamp
+    and the wall clock are not (the coarse-clock lag; whole-second stamps; a file server whose clock is not ours)."""
+    before = time.time()
+    stamp = file_clock_now(tmp_path)
+    assert stamp is not None and before - 2.5 <= stamp <= time.time() + 1.0
+    assert list(tmp_path.iterdir()) == [], "the probe is removed"
+    assert file_clock_now(tmp_path / "nowhere") is None, "nothing to ask: the caller falls back to the wall clock"
+    leftover = tmp_path / "exit_code.txt"
+    leftover.write_text("0\n")                                        # a preflight's, well before the monitor
+    os.utime(leftover, (before - 100, before - 100))
+    # This machine's wall clock an hour ahead of the clock that stamps the run's files.
+    monkeypatch.setattr(monitor_module.time, "time", lambda: before + 3600.0)
+    watching = Monitor(tmp_path)                                      # no PID, no ``since``: the code file is the signal
+    assert watching.since == pytest.approx(before, abs=2.5), "the directory's clock, not the wall clock"
+    assert watching.finished() is None, "the leftover does not end the run"
+    leftover.write_text("7\n")                                        # the run's own trap, after the monitor started
+    assert watching.finished() == 7, "the run ended, whatever the wall clock reads"
+    assert Monitor(tmp_path / "nowhere").since == before + 3600.0, "an unwritable directory: the wall clock, as before"
+    assert Monitor(tmp_path, since=12.5).since == 12.5, "a given start is taken as given"
 
 
 def test_the_monitor_ticks_refreshes_the_csv_only_when_the_file_grew_and_concludes_with_the_summary(tmp_path, capsys):

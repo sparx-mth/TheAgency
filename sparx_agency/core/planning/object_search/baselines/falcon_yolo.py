@@ -65,6 +65,7 @@ from sparx_agency.core.planning.object_search.perception.doors import DoorSettin
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ExplorationFallback, FallbackSettings
 from sparx_agency.core.planning.object_search.exploration.exploration_metrics import ExplorationMetrics
 from sparx_agency.core.planning.object_search.falcon.motion import GroundMotion
+from sparx_agency.core.planning.object_search.interfaces import ground_truth_semantics
 from sparx_agency.core.mapping.objects.target_evidence import TargetEvidence, TargetEvidenceSettings
 from sparx_agency.core.planning.object_search.world_model.observed_map import ObservedMap
 from sparx_agency.core.planning.object_search.perception.cycle import PerceptionCycle
@@ -518,7 +519,7 @@ class FalconYoloBaseline:
                 "perception_fusion": "coherent-depth/floor-qualified-v1" + ("/target-masked" if s.segmentation else ""),
                 "segmentation": ({"enabled": True, "scope": "target boxes at or above detection_confidence"}
                                  if s.segmentation else {"enabled": False, "depth": "robust_bbox_depth over the shrunken box"}),
-                "ground_truth_semantics": False,
+                "ground_truth_semantics": ground_truth_semantics(self.detector, self.segmenter),
                 "ground_truth_stairs": False,
                 "stair_source": s.multifloor.stair_source, "training_free": True,
                 "allow_stair_traversal": s.allow_stair_traversal,

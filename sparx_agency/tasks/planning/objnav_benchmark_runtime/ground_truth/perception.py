@@ -85,6 +85,10 @@ class GroundTruthDetector:
             (``DEFAULT_ON_OBJECT_M``); 0 reports every pixel the sensor paints, as before 2026-11-10.
     """
 
+    #: What the policy's run record reads (``object_search.interfaces.GROUND_TRUTH_SEMANTICS``): these labels are
+    #: the simulator's annotations, not a detector's inference.
+    ground_truth_semantics = True
+
     def __init__(self, source: GroundTruthSource, min_pixels: int = DEFAULT_MIN_PIXELS,
                  on_object_m: float = DEFAULT_ON_OBJECT_M):
         if type(min_pixels) is not int or min_pixels < 1:
@@ -226,6 +230,9 @@ class GroundTruthSegmenter:
             resolved to the reported instance with the most pixels inside it, or
             an empty mask when there is none.
     """
+
+    #: As the detector's: these masks are the simulator's annotations.
+    ground_truth_semantics = True
 
     def __init__(self, detector: GroundTruthDetector):
         self.detector = detector

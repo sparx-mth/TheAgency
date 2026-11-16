@@ -64,14 +64,21 @@ carries storeys, stairs or a navmesh; and
 - **`habitat/stair_connectors.py` stays, for analysis only** -- the
   after-the-fact breakdown of results by the storey a goal is on
   (`hm3d/episode_levels.py`). It is never handed to a policy.
-- **Staircases as nodes have no stair source.** The loop's side
-  (`rooms/stair_nodes.py`, `MultiFloorSearch.commit`, the way-back hold, the
-  leaf of flight length plus `floor_change_cost_m`) is kept and tested on
-  hand-placed portals, but a staircase is offered only when its portal says
-  which storey the flight leads to, and the observed discovery measures a
-  flight's treads, not where it ends. Giving the observed source that
-  knowledge -- from the flight's measured rise, or from a storey once it has
-  been stood on -- is the open work.
+- **Staircases as nodes are gone, until the multi-storey work.** A staircase
+  could be offered only when its portal said which storey the flight leads
+  to, and the observed discovery measures a flight's treads, not where it
+  ends -- so since the removal above nothing could produce a stair node, and
+  on 2026-11-16 the dormant loop side was deleted rather than kept untested
+  against reality: `rooms/stair_nodes.py`, `multifloor/stair_approach.py`,
+  `MultiFloorSearch.commit` / `portal_by_id` / `way_back_held`, the leaf of
+  flight length plus `floor_change_cost_m`, `arrival_grace_actions`, the
+  oracle's STAIRS node with its multi-storey prompt supplement and
+  `home_here` verdict, and the stair rows of the search panel and the
+  recording. It is in the history at `f257a0ce` for the day an observed
+  source knows a flight's destination -- from its measured rise, or from a
+  storey once it has been stood on -- which is the open work. With traversal
+  allowed, a floor change is the building coordinator's allowance rule
+  (`_select`), as it was before stair nodes existed.
 - **Results recorded with it stay what they were.** The six tracked Gibson
   validation records of 2026-10-08 to 2026-10-18 (`gibson/results/*/run.json`:
   `"stair_source": "ground_truth"`, `"ground_truth_stairs": true`) were run
@@ -228,10 +235,12 @@ than mixing attempts. Runs are sequential and retain all episode outcomes.
 Outputs:
 
 - `index.html`: the five preselected episode videos (RGB detections, depth,
-  active-floor map with the rooms and stair nodes named and valued and the
+  active-floor map with the rooms named and valued and the
   RPT* order drawn through them, the search column -- visit order, next node,
-  per-node probability and the model's reason, the climb's cost, objects,
-  loop events -- route, executed floor trail, floor heights/links);
+  per-node probability and the model's reason, objects,
+  loop events -- route, executed floor trail, floor heights/links; the
+  campaign's own videos, recorded before 2026-11-16, also draw the stair
+  nodes and the climb's cost);
 - `RESULTS.md`, `statistics.json`: every outcome, SPL, action count, vertical
   range, observed floor/connection counts, native collisions and failures;
 - `campaign.json`, `locks/`: frozen job, source, model, sensor and data identities;
@@ -251,11 +260,12 @@ independent grids and target memory, paused floor clocks, coverage deduplication
 step-connected terrain versus cliffs, height-safe scoring and selective recording.
 `tests/test_stair_ground_truth.py` covers the navmesh reading on a synthetic
 two-storey house (the analysis module, nothing a policy sees);
-`tests/test_stair_nodes.py` covers the loop's side of staircases as nodes on
-hand-placed portals -- ids, facts, the leaf, the approach point that must see
-the entry, the way back marked `arrived_by`, `commit` and the climb ending the
-node's turn -- and that a flight the robot only measured is not a node and
-`stair_source: "ground_truth"` is refused; `tests/test_room_search_loop.py`
+`tests/test_stair_nodes.py` (the loop's side of staircases as nodes on
+hand-placed portals) was deleted with that code on 2026-11-16; that
+`stair_source: "ground_truth"` is refused is pinned in
+`core/planning/object_search/tests/test_no_privileged_geometry.py` and, for
+the baseline, in `tests/test_falcon_yolo_baseline.py`;
+`tests/test_room_search_loop.py`
 covers the staircase as a node of the order end to end on the same portals.
 The observed stair tests are in `tests/test_multistory_repair.py`,
 `tests/test_multifloor.py` and `tests/test_spawn_floor_guard.py`.

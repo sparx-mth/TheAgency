@@ -47,26 +47,9 @@ class MultiFloorParams:
             falling back to the observed source unannounced.
         floor_search_actions: Actions to search a floor before its portals
             are considered, when stair traversal is allowed.
-        floor_change_cost_m: The fixed cost of a storey change in metres of
-            walking, added to the flight's own length on every arc into or
-            out of a staircase node of the room-search loop
-            (``rooms/stair_nodes.py``): the climb's turns, the settle at the
-            top and the exit stub, whatever the flight's length. Eight
-            metres is about thirty actions at the benchmark's step. A cost,
-            not a budget: it makes RPT* prefer a room here to a storey there
-            at equal probability; it never forbids the stairs, and nothing
-            counts actions against it.
         approach_failures: Consecutive actions the approach to a chosen
             flight may fail to plan before the flight is deferred (the
             stair-spawn switch, ``multifloor/spawn_switch.py``).
-        arrival_grace_actions: Actions after arriving on a storey before the
-            staircase just climbed is offered again as a node of the
-            room-search loop. A storey entered two frames ago has one
-            tentative room and no frontier on its map, and the node oracle
-            -- told the agent had just arrived -- sent it straight back down
-            three times in one Pomaria episode (78, 270, 493): half the
-            episode on a flawless staircase. The decision to change floors,
-            once executed, is given at least this long to pay for itself.
         confirm_area_m2: The connected level support (the stair terrain's
             ``plateau_area``) under the agent before a spawn storey walked
             ``stable_distance_m`` level is CONFIRMED a storey rather than a
@@ -140,9 +123,7 @@ class MultiFloorParams:
     stair_min_tread_m: float = 0.20
     stair_max_tread_m: float = 0.55
     max_failures: int = 4
-    floor_change_cost_m: float = 8.0
     approach_failures: int = 3
-    arrival_grace_actions: int = 40
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
@@ -162,12 +143,9 @@ class MultiFloorParams:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be positive and finite" % name)
-        if (isinstance(self.floor_change_cost_m, bool) or not isinstance(self.floor_change_cost_m, (int, float))
-                or not math.isfinite(self.floor_change_cost_m) or self.floor_change_cost_m < 0):
-            raise ValueError("floor_change_cost_m must be finite and non-negative")
         for name in ("stable_samples", "floor_search_actions", "transition_actions",
                      "retreat_actions", "retreat_blocked", "portal_cooldown_actions", "max_failures",
-                     "approach_failures", "arrival_grace_actions", "stair_min_risers", "spawn_leave_after_actions", "spawn_departure_attempts",
+                     "approach_failures", "stair_min_risers", "spawn_leave_after_actions", "spawn_departure_attempts",
                      "spawn_switch_min_floor_actions", "spawn_switch_after_actions",
                      "spawn_switch_min_actions_left"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:

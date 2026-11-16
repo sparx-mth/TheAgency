@@ -49,7 +49,9 @@ from sparx_agency.core.planning.objnav.types.actions import (
     ALL_ACTIONS, DiscreteActionSpec)
 from sparx_agency.core.planning.objnav.types.camera import CameraSpec
 from sparx_agency.tasks.planning.objnav_benchmark.kinematics import KinematicTolerance
+from sparx_agency.core.planning.object_search.closing.stop_criterion import EUCLIDEAN
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import EvaluationSettings
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.goal_zone import GoalZone
 
 #: The success radius ApexNav's released configs use, in metres. It is not the
 #: official one; it exists here only so the deviation can be named, scored
@@ -61,6 +63,14 @@ APEXNAV_SUCCESS_DISTANCE_M = 0.2
 #: 90 buildings, each ``<scene>/<scene>.glb`` beside ``<scene>.navmesh``,
 #: ``<scene>.house`` and ``<scene>_semantic.ply``).
 SCENE_RELEASES = {"v1": "mp3d-habitat"}
+
+#: Dataset version -> where its generator put a goal's view points (``habitat/goal_zone.py`` has the generator, the
+#: measurement and the other methods' rules). MP3D measures its metre IN 3-D FROM THE FLOOR: on the validation
+#: goals (1,316 of 11 scenes, 291,810 view points) the farthest view point stands 1.00 m from the object's box in
+#: the plane for an object on the floor and nearer the higher its underside -- 0.89 m at 0.3-0.6 m up, 0.74 m at
+#: 0.6-0.9 m, 0.57 m at 0.9-1.0 m -- while its 3-D distance from the floor point stays at 1.0 m, and no goal's
+#: underside is 1.0 m up or more. HM3D's metre is planar (``hm3d/protocol.py``); the two are not one definition.
+GOAL_ZONES = {"v1": GoalZone(distance_m=1.0, measure=EUCLIDEAN, grid_m=0.09)}
 
 #: Dataset version -> the first path component every episode's ``scene_id``
 #: begins with, and therefore the directory name the scenes must be installed
@@ -174,6 +184,17 @@ class MP3DProtocol:
     def scene_release(self) -> str:
         """The Matterport3D scene release these episodes were generated against."""
         return SCENE_RELEASES[self.dataset_version]
+
+    @property
+    def goal_zone(self) -> GoalZone:
+        """Where this version's generator put a goal's view points (:data:`GOAL_ZONES`): the published success zone.
+
+        Not a field: it is a fact about the dataset, not a choice of this
+        protocol, so it is neither serialised into the manifest nor changed
+        by ``replace``. The method's STOP criterion is derived from it
+        (``habitat.entrypoint.method_defaults``).
+        """
+        return GOAL_ZONES[self.dataset_version]
 
     def camera(self) -> CameraSpec:
         """The registered RGB-D pinhole camera, from the published HFOV."""

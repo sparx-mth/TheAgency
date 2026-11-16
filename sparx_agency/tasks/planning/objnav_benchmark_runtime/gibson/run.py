@@ -12,6 +12,7 @@ import pickle
 import subprocess
 
 from sparx_agency.core.planning.objnav.agent.headless_agent import HeadlessObjNavAgent
+from sparx_agency.core.planning.object_search.closing.stop_criterion import PLANAR
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import CATEGORIES, gibson_label_mapper
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import default_run_dir
@@ -22,6 +23,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.env import Gibs
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.progress import (
     LeanHeadlessObjNavAgent, ProgressEnv, ProgressTracker)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL, SCENES
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.goal_zone import STOP_MARGIN_M
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import AGENT_CHOICES, AGENT_HELP, build_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (  # noqa: F401  (re-exported for the sibling CLIs)
     explicit_episodes, gpu_plan_record, select_episodes, source_fingerprint)
@@ -128,16 +130,37 @@ def _runtime(issues):
     return packages
 
 
+def method_defaults(protocol=PROTOCOL):
+    """The ``RPTSettings`` fields the Gibson entrypoints set below ``--policy-config``: the protocol's success zone.
+
+    SemExp's protocol counts an episode a success when the agent ends inside
+    the goal category's footprint on the 5 cm map dilated by
+    ``success_radius_m`` (``gibson/distance.py``): within a metre of the
+    object *in the plane*. So the method's STOP criterion here is planar
+    (``TargetClosingSettings.stop_within_m``, ``stop_measure``), taken the
+    same margin inside that radius as on the Habitat datasets
+    (``habitat/goal_zone.py::STOP_MARGIN_M``: a decimetre, two cells of
+    this evaluator's map; that module has the Habitat datasets' own
+    definitions, which differ). Stated on 2026-11-16 with the Habitat
+    adapters' and NOT measured on Gibson since: until that day this protocol
+    ran with a step taken after every decided STOP and a second while the
+    memory stood beyond 0.9 m.
+    """
+    return {"target_closing": {"stop_within_m": round(protocol.success_radius_m - STOP_MARGIN_M, 6),
+                               "stop_measure": PLANAR}}
+
+
 def _method(args, defaults=None):
     """The policy and its frozen description, bound to the Gibson label table (``policy_factory.build_policy``).
 
     Args:
         args: Parsed CLI; ``--policy-config`` JSON overrides every default.
         defaults: ``RPTSettings`` fields an entrypoint sets below the policy
-            config -- the multi-storey development protocol lifts
-            ``allow_stair_traversal``, whose benchmark default is False.
+            config and above :func:`method_defaults` -- the multi-storey
+            development protocol lifts ``allow_stair_traversal``, whose
+            benchmark default is False.
     """
-    return build_policy(args, gibson_label_mapper(), defaults=defaults)
+    return build_policy(args, gibson_label_mapper(), defaults=dict(method_defaults(), **(defaults or {})))
 
 
 def _gpu_gate(args):

@@ -140,11 +140,10 @@ def _method(args, protocol, ground_truth=None):
     One builder for every benchmark (``policy_factory.build_policy``); the
     defaults below ``--policy-config`` are the shared Habitat
     :func:`~...habitat.entrypoint.method_defaults` -- the benchmark's own
-    agent (body height and radius) and, under its view-point evaluator, the
-    planar STOP overshoot off (since the 2026-11-11 merge; HM3D's finding, the
-    same scoring rule here) -- so every other method knob (clearance, stop
-    distance, closing, peeks, ...) is ``RPTSettings``' default here exactly as
-    it is on Gibson and HM3D. Nothing here came from an MP3D score.
+    agent (body height and radius) and its published success zone as the
+    STOP criterion (``protocol.goal_zone``) -- so every other method knob
+    (clearance, closing, peeks, ...) is ``RPTSettings``' default here
+    exactly as it is on Gibson and HM3D.
     ``ground_truth`` is the semantic-frame source under ``--perception
     ground-truth``, built by :func:`prepare` beside the environment.
     """

@@ -58,9 +58,9 @@ class RPTSettings:
             True}`` restores them; the floor-departure gate they fed is a
             further option of their own (``gate_floor_departure``).
         allow_stair_traversal: Whether the search may change storeys. OFF
-            by default: the standard ZSON benchmarks (Gibson SemExp v1.1,
-            HM3D) score an episode on the spawn storey, so a staircase is
-            never a node of the room-search loop, never the exploration
+            by default: the single-storey configuration searches the storey
+            the agent starts on (multi-storey search is not part of it yet),
+            so a staircase is never the exploration
             fallback's last resort, never committed or climbed, and an
             unplanned height departure starts no traversal; every seen
             staircase and every observed drop below the storey plane is
@@ -98,12 +98,16 @@ class RPTSettings:
             (``SpawnFloorGuard.step_reach_m``). The map's
             fixed bands -- free within 0.10 m of the plane, obstacle from
             0.15 m above it, drop beyond ``step_down_m`` below it -- painted
-            every step occupied: of the single-storey HM3D v1 val episodes
-            whose shortest path changes height by 0.25-1.0 m the GT-oracle
-            sweep solved 14 %, and a spawn on a tread boxed the agent in from
-            the first action. 0.8 m: the goals 0.45-0.8 m off a spawn on
-            such a level there (20 of 1,586, the evaluator's navmesh); a
-            storey is 1.5 m and more away.
+            every step occupied, and a spawn on a tread boxed the agent in
+            from the first action. The band is bounded by what a storey is,
+            not by a benchmark: above the atlas's ``departure_m`` (0.45 m),
+            under which a level storey's own reach lies, and under the least
+            separation of two storeys (``multifloor.min_floor_separation_m``,
+            1.5 m), so that nothing within it is another storey. 0.8 m is a
+            hand-set value inside those limits, about half a storey's
+            separation. (Its value was looked at against validation goals on
+            2026-10-31; see ``spawn_floor_guard.py`` for what that check was
+            and was not.)
         stair_margin_m: The preferred half-width of the capsule written
             impassable around a SEEN staircase's centreline
             (``world_model/peek_stairs.stair_peek_mask``): a flight's
@@ -320,6 +324,9 @@ class RPTSettings:
             object.__setattr__(self, "target_closing", TargetClosingSettings(**self.target_closing))
         if not isinstance(self.target_closing, TargetClosingSettings):
             raise ValueError("target_closing must be TargetClosingSettings or parameter overrides")
+        retry = self.target_closing.standing_retry_clearance_m
+        if retry is not None and not self.body_radius_m <= retry <= self.min_clearance_m:
+            raise ValueError("target_closing.standing_retry_clearance_m must lie between body_radius_m and min_clearance_m")
         if isinstance(self.doorway_peek, dict):
             object.__setattr__(self, "doorway_peek", PeekSettings(**self.doorway_peek))
         if not isinstance(self.doorway_peek, PeekSettings):

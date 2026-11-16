@@ -56,12 +56,14 @@ from sparx_agency.core.mapping.objects.target_evidence import TargetEvidenceSett
 from sparx_agency.core.planning.object_search.exploration.escape_probe import EscapeProbe, EscapeSettings
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ExplorationFallback, FallbackSettings
 from sparx_agency.core.planning.object_search.rooms.floor_context import FloorContextBank
+from sparx_agency.core.planning.object_search.interfaces import ground_truth_semantics
 from sparx_agency.core.planning.object_search.exploration.frontier_sweep import FrontierSweep, SweepSettings
 from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningRegistry
 from sparx_agency.core.planning.object_search.exploration.path_glances import GlanceScheduler, GlanceSettings
 from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
 from sparx_agency.core.planning.object_search.world_model.map_ledger import MapChangeLedger
 from sparx_agency.core.mapping.topology.room_extent import ExtentParams
+from sparx_agency.core.mapping.topology.search_node_prompts import prompt_version
 from sparx_agency.core.planning.object_search.rooms.room_scans import RoomScanLedger
 from sparx_agency.core.planning.object_search.world_model.sightlines import SightLedger, SightSettings
 from sparx_agency.core.planning.object_search.multifloor.spawn_floor_guard import SpawnFloorGuard
@@ -120,6 +122,11 @@ class RPTSearchPolicy:
         # off the agent's own occupancy map and its partition alone (core/mapping/topology/room_extent.py).
         self.extent_params = ExtentParams()
 
+    def standing_retry_clearance_m(self):
+        """The clearance the closing's second standing-point planner keeps: the setting, or the body radius by default."""
+        retry = self.settings.target_closing.standing_retry_clearance_m
+        return float(self.settings.body_radius_m if retry is None else retry)
+
     def configuration(self):
         return {"method": self.name, "adaptation": asdict(self.settings),
                 "planner": asdict(self.planner_params), "converter": asdict(self.converter_params),
@@ -154,7 +161,9 @@ class RPTSearchPolicy:
                                           "partition, settled unknown, unseen unknown) and grouped into four sides by "
                                           "outward normal in the storey's wall frame; a side is seen when at most "
                                           "open_tolerance of its faces open onto unseen space in runs wider than "
-                                          "doorway_max_m; the size is FINAL with four seen sides, else a lower bound shown "
+                                          "doorway_max_m; with four seen sides no part of the room lies outside the map "
+                                          "('all sides mapped' -- not a final size: the partition may still join or "
+                                          "re-cut rooms), else the size is a lower bound shown "
                                           "as 'at least'; coverage is the room's share of the observed cells; recomputed "
                                           "from the live map and partition on every update, keyed by cell, never by room "
                                           "id; shown to the node oracle as size= and covered=; nothing but that map, its "
@@ -173,11 +182,13 @@ class RPTSearchPolicy:
                 "doorway_scrape": asdict(self.settings.doorway_scrape),
                 "doorway_look_down": asdict(self.settings.doorway_look_down),
                 "standing_points": "observed map only: a standoff, a back-off spot or a nearest-floor goal is a cell "
-                                   "observed free, with every cell within the planner's floor standoff of it (the body "
-                                   "radius, %.2f m, at the least) observed free too, joined to the agent through such "
-                                   "cells; unknown cells are never stood on, never counted as clearance and never "
-                                   "planned through; no simulator geometry (world_model/standing_floor.py)"
-                                   % self.settings.body_radius_m,
+                                   "observed free, with every cell within the body radius (%.2f m) of it observed "
+                                   "free too, joined to the agent through such cells; it keeps %.2f m from every "
+                                   "observed obstacle, and %.2f m when no route is found at that; unknown cells are "
+                                   "never stood on, never counted as clearance and never planned through; no "
+                                   "simulator geometry (world_model/standing_floor.py)"
+                                   % (self.settings.body_radius_m, self.settings.min_clearance_m,
+                                      self.standing_retry_clearance_m()),
                 "room_visit": self._room_visit_description(),
                 "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
                                   "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
@@ -185,19 +196,18 @@ class RPTSearchPolicy:
                                   % DEFAULT_SEGMENTATION.door_snap_reach_m,
                 "openings": (("every exit of the storey (a doorway or gap at the edge of the mapped floor) is an attribute "
                               "of the room it opens from -- exits=N (k doorways) and the objects glimpsed through them on "
-                              "the room's node line -- never a node with a number of its own; the model raises a room for "
-                              "its exits only where the room's type fits the target, the room's own frontier walk looks "
+                              "the room's node line -- never a node with a number of its own; what an exit is worth to "
+                              "its room is the model's to judge, the room's own frontier walk looks "
                               "through them, and a finished room with GAPs left to walk is offered again for them "
                               "(room-level GAPs, 2026-10-21)"
                               if self.loop_settings.room_level_gaps else
-                              "doorways and gaps at the edge of the mapped floor are nodes beside the rooms and the stairs "
+                              "doorways and gaps at the edge of the mapped floor are nodes beside the rooms "
                               "(DEPRECATED exits_as_nodes%s), visited by a peek (threshold, face the unknown, one look to each "
-                              "side) priced at %d actions; valued by the oracle (uncertainty floor %s, elsewhere value %s)"
+                              "side) priced at %d actions; valued by the oracle (uncertainty floor %s)"
                               % ("" if self.loop_settings.exploring else ", the %s visit's only way into an exit"
                                  % self.loop_settings.visit,
                                  self.loop_settings.openings.service_steps,
-                                 "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor,
-                                 "off" if not self.loop_settings.unexplored_elsewhere else "p=%.2f" % self.loop_settings.unexplored_elsewhere))
+                                 "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor))
                              + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
                                 "visited by a peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
                                                                     self.loop_settings.openings.landmark_standoff_m)
@@ -206,33 +216,43 @@ class RPTSearchPolicy:
                 "floor_exit_gate": ("unknown non-stair rooms get at most one peek attempt per episode before a floor change; "
                                     "initially classified, scanned and previously peeked rooms are exempt"
                                     if self.settings.doorway_peek.gate_floor_departure else
-                                    "none: a floor change is the RPT* order's or the fallback rule's to take at any time"),
+                                    "none: a floor change is the building coordinator's to take at any time"),
                 "node_oracle": {"nodes": "every room of the floor in force (finished ones shown with "
-                                         "their status) + its staircases" + (
+                                         "their status)" + (
                                     "" if not self.loop_settings.openings.enabled else
                                     "; each room's exits are attributes on its line, not nodes"
                                     if self.loop_settings.room_level_gaps else " + its openings"),
-                                "asks": "independent P(searching there finds target), without a fixed action horizon; "
-                                        "the model is briefed with the HOUSE line (room types found, rooms unidentified, "
-                                        "openings unlooked, the frontier state -- reachable, slivers, unreachable, none -- "
-                                        "actions used of the budget) and writes home/house/stage and a first|second pass "
-                                        "verdict before the numbers (LLM-first, 2026-10-07); where the target lives is "
-                                        "the model's own step 1 -- no hand-written category table, no type exclusion, "
-                                        "no home-object rule (room_priors.py removed 2026-11-15); the system prompt's "
-                                        "own examples of typical homes are the model's only briefing",
+                                "asks": "independent P(target is in the part of the node not checked yet) per node -- a "
+                                        "room together with the unseen space its exits open onto -- from the model's own "
+                                        "knowledge of standard homes and buildings; the system prompt (the version named "
+                                        "under 'prompt') states the task, facts about each field and the reply format "
+                                        "and nothing else -- no room named for any object, no number or band, no list of "
+                                        "goal categories, no rule of judgement, no worked example (2026-11-16; "
+                                        "room_priors.py removed 2026-11-15); the user prompt gives the name of the "
+                                        "episode's target, the HOUSE line (room types found, rooms unidentified, exits "
+                                        "unlooked, the frontier state, actions used of the budget) and one line per room "
+                                        "with everything the scene graph stores about it but its position: type, size, "
+                                        "coverage, frontier, exits, status, actions spent, the rooms it is joined to, "
+                                        "objects with counts, whether the target's kind was detected there; no distance "
+                                        "and no word on where the robot stands -- travel is RPT*'s; the reply keeps "
+                                        "home/house/stage and a first|second pass verdict before the numbers",
+                                # Which wording the model is asked under: the version's name, the model it was
+                                # tuned on and the digest of its text (``search_node_prompts.py``). The model that
+                                # answers is the LLM client's reasoning route, recorded by whoever builds the client
+                                # (the benchmark factory: ``model`` here, ``llm`` / ``llm_identity`` beside this record).
+                                "prompt": prompt_version(self.loop_settings.oracle_prompt).describe(),
                                 "probability_model": "independent_search_success",
                                 "flat_p": self.loop_settings.flat_p,
-                                "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor,
-                                                "unexplored_elsewhere": self.loop_settings.unexplored_elsewhere},
+                                "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor},
                                 "second_pass": self.loop_settings.second_pass,
                                 "route": "LLM_REASONING_MODEL",
                                 "cadence": "loop points and semantic discovery -- a room on or off the offer, a room's type "
                                            "(discovery.semantic_signature, 2026-11-09); geometry alone "
                                            "within reconsider_min_actions of the last call waits for the loop point; unchanged "
                                            "prompts reused"},
-                # A staircase is a node of the loop's order only when its portal says where it leads, and no
-                # stair source does (``rooms/stair_nodes.py``): the building coordinator's rule is all there is.
-                "floor_change_decision": "exploration fallback only",
+                # No staircase is a node of the loop's order (the stair-node code was deleted on 2026-11-16, until
+                # the multi-storey work): where traversal is allowed, the building coordinator's rule is all there is.
+                "floor_change_decision": "building coordinator only",
                 "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s)"
                                      "%s; synchronous frame processing, one full rotation (warm-up scan) before room "
                                      "selection on every storey first entered"
@@ -250,7 +270,9 @@ class RPTSearchPolicy:
                 "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
                 "falcon_running": self.settings.local_exploration == "falcon",
                 "falcon_source": dict(FALCON_SOURCE) if self.settings.local_exploration == "falcon" else None,
-                "ground_truth_semantics": False,
+                # What perceived for this run, as the services declare it (``interfaces.ground_truth_semantics``):
+                # True under ``--perception ground-truth``. Until 2026-11-16 the constant False.
+                "ground_truth_semantics": ground_truth_semantics(self.detector, self.segmenter),
                 "ground_truth_stairs": False,
                 "stair_source": self.settings.multifloor.stair_source, "training_free": True,
                 "allow_stair_traversal": self.settings.allow_stair_traversal,
@@ -306,6 +328,12 @@ class RPTSearchPolicy:
         # The exploration fallback's squeeze rung (since 2026-10-25): the same planner relaxing to the BODY radius,
         # for the frontier goals nothing reaches at ``min_clearance_m`` -- a doorway the map draws 0.4 m wide.
         self.squeeze_planner = WeightedAStarPlanner2D(replace(self.planner_params, inflate_floor_m=s.body_radius_m))
+        # The closing's second planner for a standing point (its own since 2026-11-16): the same planner relaxing
+        # to ``TargetClosingSettings.standing_retry_clearance_m``, asked when the default one (0.25 m) has no
+        # route. By default that is the body radius (0.18 m), as the squeeze planner above: 0.20 m was measured
+        # against it that day and gave the lower SR and SPL (see the setting).
+        self.standing_retry_planner = WeightedAStarPlanner2D(
+            replace(self.planner_params, inflate_floor_m=self.standing_retry_clearance_m()))
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
         self.fallback = ExplorationFallback(self, self.fallback_settings)
         # The fallback's rung before its idle turn: boxed in on the inflated map, one

@@ -112,20 +112,23 @@ CUDA_VISIBLE_DEVICES=-1 OLLAMA_HOST=127.0.0.1:11435 OLLAMA_MODELS="$MODELS/ollam
 OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_CONTEXT_LENGTH=8192 \
 OLLAMA_KEEP_ALIVE=30m OLLAMA_NO_CLOUD=1 ollama serve
 ```
-Two models serve the run -- `qwen2.5:3b-instruct` for the cheap, frequent room-type
-classification and `qwen2.5:14b-instruct` (9 GB, Q4_K_M) for the one node-oracle judgement
-per loop point -- so `OLLAMA_MAX_LOADED_MODELS=2` keeps both resident (~11 GB of RAM
-together) instead of reloading the 14B from disk at every loop point. First time only, in
-another shell:
+Two roles are served -- the cheap, frequent room-type classification and the one
+node-oracle judgement per loop point. **By default one model answers both since
+2026-11-16: `qwen2.5:3b-instruct`** (about 2 GB), the model the development laptop can
+hold. A machine with the memory for it gives the oracle `qwen2.5:14b-instruct` (9 GB,
+Q4_K_M; the model of the runs published before that date) by setting
+`LLM_REASONING_MODEL`; `OLLAMA_MAX_LOADED_MODELS=2` then keeps both resident (~11 GB of
+RAM together) instead of reloading the 14B from disk at every loop point. First time
+only, in another shell:
 ```bash
 OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct
-OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:14b-instruct
+OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:14b-instruct   # only for LLM_REASONING_MODEL=qwen2.5:14b-instruct
 ```
-Check: `curl -s http://127.0.0.1:11435/api/tags` lists both. On a box where Ollama runs as
-the scene-graph stack's Docker container instead (`ollama-scene-graph`, CPU-only, port
-11434, models in a named volume -- the development laptop), the equivalents are
-`docker start ollama-scene-graph`, `docker exec ollama-scene-graph ollama pull
-qwen2.5:14b-instruct`, and `LLM_BASE_URL=http://127.0.0.1:11434` below.
+Check: `curl -s http://127.0.0.1:11435/api/tags` lists what was pulled. On a box where
+Ollama runs as the scene-graph stack's Docker container instead (`ollama-scene-graph`,
+CPU-only, port 11434, models in a named volume -- the development laptop), the
+equivalents are `docker start ollama-scene-graph`, `docker exec ollama-scene-graph
+ollama pull qwen2.5:3b-instruct`, and `LLM_BASE_URL=http://127.0.0.1:11434` below.
 
 ### 2.2 Start the YOLO detector service (terminal 2, CPU only)
 
@@ -180,18 +183,26 @@ Omit `--multistory` for single-floor development starts (one episode per buildin
 
 ```bash
 export LLM_BACKEND=ollama LLM_BASE_URL=http://127.0.0.1:11435 LLM_MODEL=qwen2.5:3b-instruct LLM_TIMEOUT_S=120
-export LLM_REASONING_MODEL=qwen2.5:14b-instruct LLM_REASONING_TIMEOUT_S=600
+export LLM_REASONING_MODEL=qwen2.5:3b-instruct LLM_REASONING_TIMEOUT_S=600   # the launcher's default; a PC may name a larger model
 MANIFEST="$HOME/objnav_benchmark/multistory/episodes.json"
 RUN_FLAGS="--detector-url http://127.0.0.1:18095 --seed 17 --allow-sim-version-mismatch"
 ```
 
 `LLM_REASONING_MODEL`: the model the search's ONE judgement per loop point goes to
--- the node oracle that values every room and staircase from the whole map (P(going
-there next finds the target) per node). A 3B model is not enough for it: it
-double-counts search effort into semantics and cannot weigh a staircase against an
-unknown room. `qwen2.5:14b-instruct` is the default and the one measured here: it
-follows the prompt's rules and answers a four-node prompt in about a minute on the
-laptop's CPU (32 threads, no GPU). `qwen2.5:32b-instruct` (~20 GB at Q4, several
+-- the node oracle that values every room from the whole map (the probability, per
+node, that the target is in the part of it not checked yet). **Since 2026-11-16
+the oracle's prompt holds no rule of judgement and is a named VERSION tuned per
+model** (`core/mapping/topology/search_node_prompts.py`): the default version,
+`facts-qwen2.5-3b-v1`, is tuned on `qwen2.5:3b-instruct`, the model a laptop can
+hold and, since the same day, this launcher's default (`benchmark_services.sh`).
+`qwen2.5:14b-instruct` is the model of the runs measured before that date; it
+has no version of its own yet, so a run on it uses the 3B's wording and says so at
+start-up and in its record (`node_oracle.model.prompt_tuned_on_it: false`) -- tune
+one first (`tests/probe_node_oracle.py --prompt <version>`), then select it with
+`{"room_search": {"oracle_prompt": "<version>"}}` in the policy config. The 14B
+answers a four-node prompt in about a minute on a
+laptop's CPU (32 threads, no GPU) when it has the RAM (about 10.5 GB: check the
+Ollama container's memory limit first). `qwen2.5:32b-instruct` (~20 GB at Q4, several
 minutes per call) is better still but does not fit beside Habitat in 30 GB of RAM; use
 it on a box with more, or a hosted model via `LLM_BACKEND=openai`. Give the call a long
 `LLM_REASONING_TIMEOUT_S`: the search waits for the answer rather than running on a

@@ -101,12 +101,13 @@ class LLMConfig:
             a JSON fragment otherwise runs until ``timeout_s``, producing the
             same silent uniform-fallback tick.
         reasoning_model: The model for the REASONING call -- the search
-            oracle that values every node of the search (rooms and stairs)
-            from the whole state of the map. That judgement is where a small
-            model fails (a 3B double-counts search effort into semantics and
-            cannot weigh a staircase against an unknown room), and the search
-            makes it only at loop points, so a larger and slower model is
-            affordable here. ``qwen2.5:14b-instruct`` by default: ~9 GB at
+            oracle that values every node of the search from the whole
+            state of the map. That judgement is where a small model is
+            weakest, and the search makes it only at loop points, so a
+            larger and slower model is affordable here. The oracle's prompt
+            is a named version tuned per model
+            (``search_node_prompts.py``): name the version that goes with
+            the model named here. ``qwen2.5:14b-instruct`` by default: ~9 GB at
             Q4, which fits beside Habitat in the 30 GB of the development
             laptop and answers a dozen-node prompt in about a minute on its
             CPU; ``qwen2.5:32b-instruct`` (~20 GB, several minutes) where the
@@ -122,7 +123,7 @@ class LLMConfig:
         reasoning_num_ctx: Context window requested for that call (Ollama
             ``num_ctx``). The node prompt is ~1.5K tokens plus the reply;
             Ollama truncates a request that outgrows its window from the
-            FRONT, which would silently drop the system prompt's rules, so
+            FRONT, which would silently drop the system prompt, so
             the window is asked for explicitly rather than left to the
             server's default.
         num_ctx: Context window requested for the DEFAULT route (Ollama

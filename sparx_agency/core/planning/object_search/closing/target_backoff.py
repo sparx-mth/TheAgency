@@ -187,10 +187,10 @@ class BackoffManeuver:
         observed free, joined to the agent through such cells. It must be
         allowed by the floor guard and have a route that ends on it exactly.
         Asked first of the cells that keep the default planner's standoff
-        from every observed obstacle, then of all the standing floor, for
-        the squeeze planner (``TargetClosing.standing_planners``) -- a pose
-        of the agent's own trail beside a sofa is nearer the sofa than the
-        first allows.
+        (0.25 m) from every observed obstacle, then of the cells that keep
+        the retry clearance (the body radius, 0.18 m), for the retry planner
+        (``TargetClosing.standing_planners``) -- a pose of the agent's own
+        trail beside a sofa is nearer the sofa than the first allows.
         """
         p = self.policy
         for planner, standoff_m in p.closing.standing_planners():

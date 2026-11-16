@@ -14,17 +14,17 @@ from sparx_agency.core.localization.floor_atlas import MultiFloorParams
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
-    FLIGHT, IN_A, STAIRS, loop_policy, obs_at, place_stairs, stair_policy)
+    FLIGHT, IN_A, loop_policy, obs_at, place_stairs, stair_policy)
 
 
-def forbidden_stairs(order=(STAIRS, 1, 0), stair_prob=0.9, flight=FLIGHT, **loop_overrides):
+def forbidden_stairs(order=(1, 0), flight=FLIGHT, **loop_overrides):
     """``stair_policy`` under the benchmark default: the staircase is seen and placed, traversal forbidden.
 
     The flight is placed as the coordinator places one its depth has measured (``place_stairs``), and the
     spawn storey is confirmed -- walked level on support of floor size, as it is a few actions into most
     episodes -- so the guard's rules here are a storey's, not a provisional spawn's.
     """
-    policy, episode, world, rooms, _ = loop_policy(order=order, stair_prob=stair_prob, **loop_overrides)
+    policy, episode, world, rooms, _ = loop_policy(order=order, **loop_overrides)
     obs = obs_at(episode, 0, IN_A)
     policy.mapping.atlas.update(obs.pose)
     place_stairs(policy, obs, flight)
@@ -55,23 +55,22 @@ def test_the_default_forbids_stair_traversal_and_the_frozen_configuration_record
 
 
 def test_a_seen_staircase_is_neither_a_node_nor_committed_nor_the_fallbacks_last_resort():
-    policy, episode, world, rooms = forbidden_stairs(order=(STAIRS, 1, 0), stair_prob=0.9)
+    policy, episode, world, rooms = forbidden_stairs(order=(1, 0))
     building, obs = policy.building, obs_at(episode, 0, IN_A)
     command = policy.loop.plan(obs, world)
-    assert policy.reasoned_with[0]["stairs"] == [], "the oracle is shown rooms only"
-    assert policy.loop.stats["stairs_offered"] == 0 and policy.loop._stairs == {}
+    assert policy.reasoned_with[0]["extra"] == [], "the oracle is shown rooms only"
+    assert set(policy.loop.estimates) == set(rooms), "... and so is RPT*: no staircase is a node of the order"
     assert policy.loop.next_room in rooms and command.info["kind"] != "portal/0"
     assert building.active is None and building.phase == "SEARCH" and not building.committed
-    # Defence in depth: a direct commit and the fallback's explicit rule are refused too.
-    assert building.commit(obs, building.portals[0], FLIGHT[0][:2]) is False
-    assert building.events[-1]["event"] == "stairs_refused" and "allow_stair_traversal" in building.events[-1]["reason"]
+    # Defence in depth: the coordinator's own rule selects nothing either, even with the floor exhausted.
     assert building.plan(obs, world, exhausted=True) is None
     assert not [e for e in building.events if e["event"] in ("portal_selected", "floor_decision", "traversal_started")]
     assert building.diagnostics()["allow_stair_traversal"] is False
-    # The same scene with traversal allowed offers the node (the multi-storey regressions cover the climb).
-    allowed, episode, world, _, _ = stair_policy(order=(STAIRS, 1, 0), stair_prob=0.9)
+    # With traversal allowed the staircase is still no node of the loop (the stair-node code is deleted until the
+    # multi-storey work): a floor change is the coordinator's allowance rule alone.
+    allowed, episode, world, _, _ = stair_policy(order=(1, 0))
     allowed.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert allowed.reasoned_with[0]["stairs"] == [STAIRS] and allowed.loop.stats["stairs_offered"] == 1
+    assert allowed.reasoned_with[0]["extra"] == [] and set(allowed.loop.estimates) == {0, 1}
 
 
 def test_the_seen_staircase_footprint_is_impassable_and_no_goal_on_it_is_accepted():
@@ -113,7 +112,7 @@ def test_an_observed_drop_below_the_storey_plane_is_impassable_and_the_guard_is_
     assert (confined.grid[drops] == world.values.occupied).all()
     assert not policy.floor_guard.goal_allowed(obs, world, (6.0, 3.0), "frontier")
     assert policy.floor_guard.goal_allowed(obs, world, (4.5, 3.0), "frontier"), "the floor in between is fine"
-    allowed, episode, world, _, _ = stair_policy(order=(STAIRS, 1, 0))
+    allowed, episode, world, _, _ = stair_policy(order=(1, 0))
     allowed.mapping._anchor = 0.0
     same = allowed.floor_guard.observe(at(episode, 0, 3.0, 3.0, depth=3.0), world)
     assert same is world and allowed.floor_guard.mask is None and allowed.floor_guard.goal_allowed(obs, world, (6.0, 3.0), "x")

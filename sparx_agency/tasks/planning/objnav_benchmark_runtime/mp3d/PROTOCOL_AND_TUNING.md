@@ -157,12 +157,56 @@ vocabulary (which must not contain a goal word — `cabinet`, `desk`, `shower`,
 development run uses `--split train` or `val_mini` with `--episodes-per-scene`,
 is labelled a subset everywhere, and is never averaged into a val number.
 
-One default below `--policy-config` is the protocol's, not the method's, and is
-disclosed here as HM3D's is: the shared `habitat/entrypoint.py::method_defaults`
-sets `target_closing.stop_overshoot_steps` and `stop_overshoot_max_steps` to 0
-under a view-point evaluator (since the 2026-11-11 merge; judged on 70 recorded
-HM3D STOPs, where the planar step toward the object never helped and cost
-margin in 18). A raised target keeps `stop_overshoot_elevated_max_steps` (3),
-the finding of the MP3D single-storey set: its view points stand closer. The
-MP3D numbers recorded before the merge (entries 043-046) were taken with the
-planar overshoot on; see the regression check in the CHANGELOG of 2026-11-11.
+**The STOP criterion is the dataset's own definition of its success zone
+(since 2026-11-16).** The shared `habitat/entrypoint.py::method_defaults`
+hands the method the agent's body and, from `GOAL_ZONES` in `protocol.py`,
+`target_closing.stop_within_m` 0.9 and `stop_measure` `euclidean`. MP3D's
+view points lie on a 0.09 m grid out to 1.0 m from the object's box **in 3-D
+from the floor**, not in the plane: the reach shrinks as the object is raised
+(1.00 m in the plane for an object on the floor, 0.89 m with the underside
+0.3-0.6 m up, 0.74 m at 0.6-0.9 m, 0.57 m at 0.9-1.0 m; no goal's underside is
+a metre up), and an episode succeeds on a STOP within 0.1 m of one. So the
+closing, having decided to stop on its own evidence, walks on until the
+hypotenuse of its planar range to the target and the height of the target's
+lowest measured point above the floor reads within 0.9 m -- a decimetre
+inside the zone (`habitat/goal_zone.py`: the generator, the margin's
+argument, and how VLFM, ASCENT and ApexNav stop -- all three in the plane,
+which on this dataset is outside the zone of a goal raised more than about
+0.4 m). HM3D's metre is horizontal and its adapter says `planar`. What
+reaches the method is one distance and one word; no view point, no goal
+position and nothing of an episode does.
+
+*How the definition was established, disclosed:* the generator's surviving
+code tests the distance in the plane; the dataset does not follow it, and the
+3-D rule was found by measuring every validation goal's view points against
+the object's box as habitat-sim loads it (1,316 goals of 11 scenes, 291,810
+view points). That is a use of validation data and scene annotations during
+development.
+
+*What it replaced.* From the 2026-11-11 merge until 2026-11-16 the
+entrypoint set `target_closing.stop_overshoot_steps` and
+`stop_overshoot_max_steps` to 0 under a view-point evaluator (judged on 70
+recorded HM3D STOPs), a raised target kept
+`stop_overshoot_elevated_max_steps` (3: "its view points stand closer", the
+finding of this benchmark's single-storey set), and a raised planar target
+was approached from its front (the frontal standoff, sized on the view points
+of the set's 78 pictures). All three were switched by which evaluator scores
+a run and fitted on validation episodes; they are deleted, and the frontal
+standoff is not restored. **What the removal cost, and what the definition
+gives back, measured** on the 180-episode single-storey set (ground-truth
+perception, a stand-in LLM, CPU rendering): without them SR 78.9 % -> 74.4 %
+and SPL 0.346 -> 0.332 -- eight successes lost, none won, every one a STOP
+with the target in view 0.11-0.42 m from the nearest view point (five
+pictures, a cabinet, a sink, a chair). With the criterion SR is 82.2 % and
+SPL 0.354: 14 successes won and none lost against the STOP on the deciding
+frame (exact McNemar p = 0.0001), 6 won and none lost against the three rules
+it replaced (p = 0.03); failed STOPs fall from 24 to 10. Taken apart: the
+walk alone, to a planar metre, is 77.8 % / 0.341 (6 won, none lost); a
+decimetre inside the zone, still planar -- what HM3D's definition gives, and
+VLFM's stop rule -- is 80.6 % / 0.350 (5 more, none lost); and this
+dataset's Euclidean measure adds 3 and loses none, all three pictures whose
+planar range already read inside 0.9 m. At the zone's edge itself the
+Euclidean measure is 80.6 % / 0.352. See the
+CHANGELOG of 2026-11-16. The MP3D numbers recorded before the merge (entries
+043-046) were taken with the planar overshoot on, and every number recorded
+before 2026-11-16 with the raised target's steps and the frontal standoff.

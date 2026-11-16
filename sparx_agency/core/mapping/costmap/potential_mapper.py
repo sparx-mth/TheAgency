@@ -637,9 +637,11 @@ class PotentialMapper:
         )
 
         if lines is not None:
-            self._wall_segments = lines.squeeze(axis=1) # [N, 4]
+            # OpenCV 4.x returns the segments as (N, 1, 4), OpenCV 5 as (N, 4): one shape for both. (``squeeze(axis=1)``
+            # raised on the latter, and with it every ``update()`` that found a wall.)
+            self._wall_segments = np.asarray(lines).reshape(-1, 4)
             for line in self._wall_segments:
-                x1, y1, x2, y2 = line
+                x1, y1, x2, y2 = (int(v) for v in line)
                 # Draw the final merged straight walls into the probability map with thickness
                 cv2.line(m_walls, (x1, y1), (x2, y2), 1.0, thickness=1)
         else:

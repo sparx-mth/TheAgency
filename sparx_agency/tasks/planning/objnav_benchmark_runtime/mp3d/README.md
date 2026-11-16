@@ -258,8 +258,8 @@ re-run after every change, from a frozen copy of the source:
 mp3d/run_single_storey.sh baseline --jobs 3                      # the current code, every LLM answer recorded
 mp3d/run_single_storey.sh flat_p --policy-config mp3d/sets/policy_flat_p.json   # the oracle ablation on the same episodes
 # a later arm records into its own store and REPLAYs the earlier ones (two concurrent runs must not share a record dir)
-STORE=$PWD/runs/ss_fix_closing_llm_answers REPLAY=$PWD/runs/single_storey_v1_llm_answers \
-    mp3d/run_single_storey.sh fix_closing --policy-config mp3d/sets/policy_fix_closing.json --jobs 2
+STORE=$PWD/runs/ss_fix_wedge_llm_answers REPLAY=$PWD/runs/single_storey_v1_llm_answers \
+    mp3d/run_single_storey.sh fix_wedge --policy-config mp3d/sets/policy_fix_wedge.json --jobs 2
 "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.single_storey_report \
     baseline=runs/ss_baseline flat-p=runs/ss_flat_p                # SR, SPL, per-category SR, paired flips
 "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.single_storey_failures runs/ss_baseline
@@ -267,8 +267,12 @@ STORE=$PWD/runs/ss_fix_closing_llm_answers REPLAY=$PWD/runs/single_storey_v1_llm
 
 The per-fix arms of the 2026-11-10 study are the configs under `sets/`:
 `policy_fixes_off.json` turns every single-storey fix off (the baseline's
-behaviour under today's perception), `policy_fix_{closing,wedge,dining,shape}.json`
-turn one on at a time; no config is every fix on. The two labeller rules
+behaviour under today's perception), `policy_fix_{wedge,dining,shape}.json`
+turn one on at a time; no config is every fix on. (`policy_fix_closing.json`
+-- the raised target's steps after a decided STOP and the frontal standoff --
+was deleted on 2026-11-16 with the two rules it switched; the other configs
+lost their `target_closing` block the same day, and a config that still names
+those settings is refused.) The two labeller rules
 (`dining`, `shape`) are off by default since 2026-11-11 -- their configs turn
 them on for a comparison, nothing else does.
 
@@ -309,6 +313,96 @@ them on for a comparison, nothing else does.
   object's width the agent stands and how far off its normal -- `beside`,
   `in_band` or `far`. `--locks` dumps every lock with its visible extent (the
   sliver data); the labeller tally covers every episode.
+
+### The same set with no GPU and no model: a paired check of a change (since 2026-11-16)
+
+A change to the closing, the planner or the map is checked on the same 180
+episodes before and after it, with nothing else differing between the arms --
+and without the GPU, which is usually taken:
+
+```bash
+# arm "before": the code of a frozen copy of the commit before the change (rsync of the tracked tree)
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.cpu_stub_campaign \
+    --output runs/cpu_ab/before --tree ~/GIT/TheAgency_snapshots/before
+# arm "after": this tree (snapshot it too if it will be edited while the arm runs)
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.cpu_stub_campaign --output runs/cpu_ab/after
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.stuck_report \
+    before=runs/cpu_ab/before after=runs/cpu_ab/after          # refused steps, closing counters, identical trajectories
+"$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.single_storey_report \
+    before=runs/cpu_ab/before after=runs/cpu_ab/after          # SR, SPL, per-category, the flips
+```
+
+* **`cpu_stub_campaign.py`** runs one process per scene with ground-truth
+  perception, the frontier explorer, seed 17 and lean rows, under Mesa's
+  llvmpipe (`--software-render`, `/dev/dri` hidden in a user namespace), and
+  starts a scene only when its RAM is free (`ram_gate.RamGate`: 2-6 GiB a scene, a
+  4.5 GiB reserve) -- an arm takes about 3.5 hours on a 30 GB laptop, two
+  arms side by side about 5. `--only` runs a subset, `--shard N` cuts long
+  scenes, and what follows `--` goes to every scene's `mp3d.run` (`--
+  --policy-config rule_off.json`: an arm with one rule switched off).
+* **`../stub_llm.py`** stands in for the language model: every room is
+  `living_room` at 0.8 and the nodes of an oracle prompt get an equal share
+  of 90 %. It reads the node ids off the prompt and nothing else, so a change
+  to the prompt's wording leaves its answers, and a check's arms, as they
+  were; the frozen configuration names it (`method.llm_identity["stub"]`).
+  **The numbers of such an arm are not results of the method** -- the
+  stand-in orders the rooms by travel cost and exploration state alone --
+  only the paired differences are.
+* **`stuck_report.py`** is the paired table of what the outcome does not
+  show (refused forward steps, the closing's releases, relaxed standing
+  points, blind verification steps) and the pairing's own check: with a
+  deterministic stand-in, an episode in which the change never acted must be
+  the identical trajectory in both arms (same steps, same count of every
+  action, same path length, same place at the end). On 2026-11-16 all 123
+  episodes in which neither removed closing rule had acted were identical.
+* **One change per arm.** A change that is a setting is isolated by an arm
+  of its own (`-- --policy-config`), run only on the episodes in which the
+  arms on either side of it differ, plus controls: where they are identical
+  the change did not act, and the arm in between is the same trajectory. A
+  later root overrides an earlier one in both reports
+  (`after=runs/x/after,runs/x/rerun`), which is how a partial re-run is read.
+  The check of 2026-11-16, in two rounds. In the morning, four arms, each
+  differing from the one before it in one item of that day's change:
+
+  | per episode (180) | before | no evaluator-shaped rules | + blind-step fix | + 0.20 m retry clearance |
+  |---|---|---|---|---|
+  | success rate | 78.9 % | 74.4 % | 73.3 % | 71.1 % |
+  | SPL | 0.346 | 0.332 | 0.325 | 0.322 |
+  | refused forward steps | 7.95 | 7.87 | 6.79 | 5.92 |
+  | won / lost against the arm before (exact McNemar p) | -- | 0 / 8 (0.008) | 0 / 2 (0.5) | 2 / 6 (0.29) |
+  | trajectories identical to the arm before | -- | 124 | 175 | 138 |
+
+  The last two changes were withdrawn on those numbers (the blind-step fix
+  to be handled on its own; the retry clearance stays the body radius), so
+  the tree's base is the second column. In the evening the STOP criterion
+  was measured on it (`target_closing.stop_within_m`, `stop_measure`; the
+  runtime README has the rule), again one change an arm:
+
+  | per episode (180) | STOP on the deciding frame (the base) | + the walk, `planar` 1.0 m | + a decimetre inside the zone, `planar` 0.9 m | + MP3D's measure, `euclidean` 0.9 m (the default) | `euclidean` 1.0 m |
+  |---|---|---|---|---|---|
+  | success rate | 74.4 % | 77.8 % | 80.6 % | **82.2 %** | 80.6 % |
+  | SPL | 0.332 | 0.341 | 0.350 | **0.354** | 0.352 |
+  | failed STOPs (of 158) | 24 | 18 | 13 | 10 | 13 |
+  | won / lost against the base (exact McNemar p) | -- | 6 / 0 (0.03) | 11 / 0 (0.001) | 14 / 0 (0.0001) | 11 / 0 (0.001) |
+  | trajectories identical to the base | -- | 145 | 77 | 64 | 115 |
+
+  For reference, on the same base: the approach as it was at `f257a0ce`
+  (steps under a RAISED target only, sized on recorded STOPs) without its
+  frontal standoff is 79.4 % / 0.348 -- 9 won, none lost -- and with the
+  standoff 78.9 % / 0.346; the criterion wins the same nine and five targets
+  on the floor.
+
+  The partial arms (the two `planar` ones and `euclidean` 1.0 m) were run on the
+  episodes in which they can differ from the base -- a STOP decided at or
+  beyond that distance by that measure, which the full arm's `stop_decision`
+  record gives for every criterion at once -- and on controls.
+
+  The stand-in's numbers are not results of the method; the differences are
+  what each item moved (CHANGELOG of 2026-11-16).
+* Keep the arms. The check of 2026-11-15 was run from a scratch folder and
+  its launcher was not in the repository; its second arm could be reused a
+  day later only because the rows had been kept and the launcher, rebuilt
+  here, reproduced them (33 of 33 trajectories on two scenes).
 
 ### Freeze, then evaluate (for a number you intend to publish)
 
@@ -365,7 +459,7 @@ evidence and the deviations we name rather than apply.
 | File | Role |
 | --- | --- |
 | `run_benchmark.sh` | the one-button launcher (data → services → preflight → campaign → reports) |
-| `protocol.py` | every MP3D number, versioned; `MP3D_V1`, `protocol_for` |
+| `protocol.py` | every MP3D number, versioned; `MP3D_V1`, `protocol_for`; `GOAL_ZONES` -- where the generator put a goal's view points (1.0 m from the object's box in 3-D from the floor), from which the method's STOP criterion is derived |
 | `dataset.py` | the published release: episodes (sharded, or val_mini's single file), goals, scene assets, semantic assets and config, manifest |
 | `env.py` | `MP3DEnv`: the shared `../habitat/env.py::HabitatObjNavEnv` (reset, step, measure, start validation, the oracle hand-off) named for MP3D, with the one MP3D override -- an instance is named by both its `.house` category and its mpcat40 class |
 | `run.py` | the MP3D `parser`, `prepare` (preflight) and `ground_truth_issues`; `main` is the shared `../habitat/entrypoint.py::run_main`, and the method's defaults below `--policy-config` the shared `method_defaults(protocol)` |
@@ -380,6 +474,7 @@ evidence and the deviations we name rather than apply.
 | `single_storey_set.py`, `sets/` | the fixed single-storey evaluation set (180 same-storey episodes in the flat houses) and the level survey it is drawn from |
 | `run_single_storey.sh` | a campaign on that set from a frozen source snapshot, one LLM answer store for the whole study |
 | `single_storey_report.py`, `single_storey_failures.py` | baseline-versus-steps table (paired); per-failure mechanism from the recordings, the lock / sliver data, the labeller tally |
+| `cpu_stub_campaign.py`, `ram_gate.py`, `stuck_report.py`, `../stub_llm.py` | the paired before/after check on that set with no GPU and no model: the CPU launcher, the pool's start gate on free RAM (the first pending scene that fits), the stuck-indicator table with the identical-trajectory count, the stand-in for the language model |
 | `smooth_replay.py` | visualization-only smooth replay of a recording |
 | `../ground_truth/mp3d_categories.py` | the ground-truth perception's MP3D table (mpcat40 goal classes, context words) |
 | `../tests/test_mp3d*.py` | the adapter without Matterport3D, habitat-sim or a GPU (`test_mp3d_ground_truth.py`: the oracle path) |

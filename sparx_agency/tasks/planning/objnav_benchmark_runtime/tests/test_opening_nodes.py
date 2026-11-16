@@ -5,7 +5,7 @@ Room A (west) has an unexplored west end: a gap at x ~ 1.15 leading west. Room
 B (east) has a small unknown patch near the door and an unexplored east end:
 two openings. The scene graph is installed by hand and the frontier inventory
 is computed for real from it; the oracle is the fixture's counter (every extra
-node gets ``stair_prob``), the solver is fixed, and A* is real.
+node gets ``extra_prob``), the solver is fixed, and A* is real.
 """
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from sparx_agency.core.planning.object_search.rooms.opening_nodes import (
     OPENING_NODE_BASE, OpeningRegistry, OpeningSettings, detect_openings, is_opening_node, opening_index_of,
     opening_node_id, unknown_heading)
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
-from sparx_agency.core.planning.object_search.rooms.stair_nodes import is_stair_node, stair_node_id
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.search_panel import _name, render_search_panel
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
     IN_A, IN_B, OCC, UNK, NamingLLM, loop_policy, obs_at, see, two_room_world)
@@ -73,13 +72,12 @@ def peek_through(policy, episode, world, xy, start_step, start_yaw, max_turns=12
 
 
 # -- ids -------------------------------------------------------------------------------
-def test_opening_ids_live_in_their_own_band_above_rooms_and_stairs():
+def test_opening_ids_live_in_their_own_band_above_the_rooms():
     assert opening_node_id(3) == OPENING_NODE_BASE + 3 and opening_index_of(opening_node_id(3)) == 3
-    assert is_opening_node(opening_node_id(0)) and not is_opening_node(stair_node_id(0)) and not is_opening_node(7)
+    assert is_opening_node(opening_node_id(0)) and not is_opening_node(OPENING_NODE_BASE - 1) and not is_opening_node(7)
     assert not is_opening_node(None)
-    assert is_stair_node(stair_node_id(5)) and not is_stair_node(opening_node_id(5)), "the stair band ends where the openings begin"
     assert _name({"id": opening_node_id(3), "kind": "opening"}) == "O3"
-    assert _name({"id": opening_node_id(3)}) == "O3" and _name({"id": stair_node_id(2)}) == "S2" and _name({"id": 4}) == "R4"
+    assert _name({"id": opening_node_id(3)}) == "O3" and _name({"id": 4}) == "R4"
 
 
 def test_the_registry_keeps_an_openings_id_as_its_frontier_re_snaps_and_retires_what_was_peeked():
@@ -188,7 +186,7 @@ def test_openings_are_offered_to_the_oracle_and_the_solver_priced_as_a_peek_and_
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     ids = sorted(policy.loop._openings)
     assert len(ids) == 3 and all(is_opening_node(i) for i in ids)
-    assert sorted(policy.reasoned_with[0]["stairs"]) == ids, "the openings went to the oracle beside the rooms (as extra nodes)"
+    assert sorted(policy.reasoned_with[0]["extra"]) == ids, "the openings went to the oracle beside the rooms (as extra nodes)"
     assert policy.loop.stats["openings_offered"] == 3
     assert policy.loop.estimate_events[0]["openings"] == ids
     gap_id = next(i for i, o in policy.loop._openings.items() if o.opening.room_pid == 0)
@@ -374,23 +372,8 @@ def test_a_peek_that_overruns_the_visit_bound_is_released_budget_spent_and_the_o
     assert policy.loop.stats["budget_releases"] == 1
 
 
-def test_openings_count_as_rooms_left_so_the_way_back_upstairs_waits():
-    """The storey is looked at before the way back is a choice -- its unpeeked doors included."""
-    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import STAIRS, stair_policy
-    policy, episode, world, rooms, _ = stair_policy(order=(1, 0, STAIRS), visit="scan")
-    refresh(policy, world, IN_A)
-    policy.building.arrived_by, policy.building.arrived_step = 0, 0
-    grace = policy.settings.multifloor.arrival_grace_actions
-    for pid in rooms:                                              # every room finished: only the openings are left
-        policy.scans.record(obs_at(episode, 1, rooms[pid].centroid), rooms[pid])
-    policy.loop.plan(obs_at(episode, grace + 5, IN_A), world)
-    assert policy.loop._excluded.keys() == {0, 1} and policy.loop._openings
-    assert STAIRS not in policy.loop._stairs, "three openings to look into: the way back is held"
-    assert [e for e in policy.loop.events if e["event"] == "way_back_held"]
-
-
 def test_the_unknown_at_the_foot_of_a_seen_staircase_is_not_an_opening():
-    """The stairs are a node of their own; the unknown beyond a flight is the other storey."""
+    """The unknown beyond a flight is the other storey, not a room of this one."""
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import stair_policy
     policy, episode, world, rooms, _ = stair_policy(order=(1, 0), visit="scan")
     policy.sight.settings = replace(policy.sight.settings, enabled=False)   # the unknown strip is enclosed: a pocket otherwise
@@ -445,7 +428,7 @@ def test_a_new_opening_while_nothing_is_in_force_buys_the_oracle_a_call_at_most_
     policy.loop._needs_reason = False
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert reasoned == [0], "three openings the estimate has never seen: valued once"
-    policy.graph.stair_probs.pop(next(iter(policy.loop._openings)))  # as if one re-snapped to a new id
+    policy.graph.extra_probs.pop(next(iter(policy.loop._openings)))  # as if one re-snapped to a new id
     policy.loop.plan(obs_at(episode, 2, IN_A), world)
     assert reasoned == [0], "two actions later: not yet"
     policy.loop.plan(obs_at(episode, 5, IN_A), world)
@@ -538,8 +521,8 @@ def test_a_confirmed_landmark_of_the_targets_class_is_a_node_at_a_fixed_probabil
                                                                                 key=lambda nid: -next(c.prob for c in candidates if c.room_id == nid))
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
     assert node.node_id in policy.loop._openings and policy.loop.stats["landmarks_offered"] == 1
-    assert node.node_id not in policy.reasoned_with[0]["stairs"], "the oracle was not asked about it"
-    assert len(policy.reasoned_with[0]["stairs"]) == 3, "... only about the three exits"
+    assert node.node_id not in policy.reasoned_with[0]["extra"], "the oracle was not asked about it"
+    assert len(policy.reasoned_with[0]["extra"]) == 3, "... only about the three exits"
     assert policy.loop.estimate_events[0]["landmarks"] == [node.node_id]
     estimate = policy.loop.estimates[node.node_id]
     assert estimate["kind"] == "landmark" and estimate["prob"] == 0.85 and estimate["landmark_id"] == lid
@@ -620,8 +603,9 @@ def test_loop_settings_take_the_openings_as_a_dict():
 def test_openings_off_is_the_ablation_where_the_exits_are_the_fallbacks_alone():
     policy, episode, world, rooms, _ = opening_policy(order=(1, 0), openings=OpeningSettings(enabled=False))
     policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._openings == {} and policy.reasoned_with[0]["stairs"] == []
-    assert policy.configuration()["openings"].startswith("none") and policy.configuration()["node_oracle"]["nodes"].endswith("staircases")
+    assert policy.loop._openings == {} and policy.reasoned_with[0]["extra"] == []
+    assert policy.configuration()["openings"].startswith("none")
+    assert policy.configuration()["node_oracle"]["nodes"] == "every room of the floor in force (finished ones shown with their status)"
 
 
 def test_the_snapshot_and_the_panels_carry_the_openings():

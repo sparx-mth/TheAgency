@@ -40,6 +40,15 @@ the wire record into this one.
 Any other exception a service raises is treated as a frame failure too, so
 a fake detector in a test that raises ``RuntimeError`` exercises the
 back-off, never a dead episode.
+
+**What a service says about itself.** A detector or a segmenter whose labels
+or masks are read from an environment's annotations, instead of inferred
+from the image, sets ``ground_truth_semantics = True``
+(:data:`GROUND_TRUTH_SEMANTICS`). The method never branches on it -- it runs
+the same on either -- and reads it for one thing: the run record
+(``configuration()["ground_truth_semantics"]``, :func:`ground_truth_semantics`),
+which until 2026-11-16 was the constant ``False`` whatever perceived for
+the run.
 """
 from __future__ import annotations
 
@@ -96,6 +105,19 @@ class SegmenterFrameError(ValueError):
 #: package importing the transport library.
 RECOVERABLE_DETECTOR_CAUSES = (OSError, DetectorFrameError, ValueError, KeyError)
 RECOVERABLE_SEGMENTER_CAUSES = (OSError, SegmenterFrameError, ValueError, KeyError, TypeError)
+#: The attribute a perception service sets to ``True`` when its labels or masks come from an environment's
+#: annotations rather than from the image (see the module docstring).
+GROUND_TRUTH_SEMANTICS = "ground_truth_semantics"
+
+
+def ground_truth_semantics(*services: Any) -> bool:
+    """Whether any of ``services`` -- a detector, a segmenter; None is skipped -- declares ground-truth semantics.
+
+    Only the literal ``True`` counts: a service that says nothing, or a
+    test double that answers every attribute, perceives from the image as
+    far as the record is concerned.
+    """
+    return any(getattr(service, GROUND_TRUTH_SEMANTICS, False) is True for service in services if service is not None)
 
 
 class Detector(Protocol):

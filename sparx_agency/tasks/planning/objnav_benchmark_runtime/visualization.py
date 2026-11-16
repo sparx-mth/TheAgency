@@ -22,9 +22,8 @@ def search_snapshot(policy):
     """What the room-search loop believes and intends, JSON-ready, for the panel and the trace.
 
     Every node the loop can go to -- the rooms of the floor with the oracle's
-    probability, type, frontier, time searched and objects, and the
-    staircases it offered with their probability, direction and the storey
-    beyond -- plus the RPT* order, the node in force or in transit, the
+    probability, type, frontier, time searched and objects, and the openings
+    it offered -- plus the RPT* order, the node in force or in transit, the
     objects by room, the oracle's ``elsewhere`` and the loop's last events.
     Built from policy state only, so a frame and its ``steps.jsonl`` row
     cannot disagree.
@@ -67,16 +66,6 @@ def search_snapshot(policy):
                           "wall_distances_m": {k: (None if v is None else round(float(v), 2))
                                                for k, v in extent.distances().items()}}})
     rooms.sort(key=lambda r: -(r["prob"] or 0.0))
-    stairs = []
-    for nid, option in sorted(loop._stairs.items()):
-        estimate = dict(loop.estimates.get(nid, {}))
-        stairs.append({"id": nid, "kind": "stairs", "label": option.node.label, "direction": option.node.direction,
-                       "prob": estimate.get("prob", graph.stair_probs.get(nid)),
-                       "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
-                       "destination_visited": option.node.destination_visited, "destination": option.node.destination,
-                       "arrived_by": option.node.arrived_by, "leaf_m": round(option.leaf_m, 2),
-                       "approach_m": round(option.approach.distance_m, 2), "distance_m": estimate.get("distance_m"),
-                       "portal_id": option.portal["id"], "centroid": [float(v) for v in option.approach.xy]})
     openings = []
     folded = getattr(loop, "_folded_now", set())
     factors = getattr(loop, "_value_factors", {})
@@ -101,7 +90,7 @@ def search_snapshot(policy):
                          "gain_m2": round(float(getattr(o, "gain_m2", 0.0)), 2), "factor": factors.get(nid, 1.0),
                          "folded": nid in folded, "targeted": nid == targeted, "live": nid in loop._openings,
                          "prob": estimate.get("prob", loop.settings.openings.landmark_prob if landmark
-                                              else graph.stair_probs.get(nid)),
+                                              else graph.extra_probs.get(nid)),
                          "prob_source": estimate.get("prob_source"),
                          "why": estimate.get("why") or reasons.get(nid, reasons.get(str(nid), "")),
                          "distance_m": estimate.get("distance_m"), "centroid": [float(v) for v in o.xy]})
@@ -156,7 +145,7 @@ def search_snapshot(policy):
             "glance": policy.glances.state() if hasattr(policy, "glances") else None,
             "excluded": {str(pid): why for pid, why in sorted(loop._excluded.items())},
             "order": list(loop.order), "order_index": loop.order_index, "next_room": loop.next_room,
-            "rooms": rooms, "stairs": stairs, "openings": openings, "objects": objects,
+            "rooms": rooms, "openings": openings, "objects": objects,
             "floor": floor, "events": list(loop.events[-6:])}
 
 
@@ -310,12 +299,11 @@ def _text(image, value, origin, width=115, lines=4, color=(230, 230, 230)):
 def render_dashboard(policy, observation, trail, decision, episode_id, snapshot, final=False, floor_panels=None):
     """RGB predictions, depth, persistent observed floors, the search column and actual decision reasons.
 
-    Layout, left to right: the camera and depth; the floor maps (rooms and
-    stair nodes named and valued, the RPT* order drawn through them, the
-    next node ringed); the search column -- target, the oracle's split
-    between the nodes and elsewhere, the visit order, every room's
-    probability and reason, the staircases with the climb's cost, the
-    objects, the loop's last events.
+    Layout, left to right: the camera and depth; the floor maps (rooms
+    named and valued, the RPT* order drawn through them, the next node
+    ringed); the search column -- target, the oracle's split between the
+    nodes and elsewhere, the visit order, every room's probability and
+    reason, the openings, the objects, the loop's last events.
     """
     frame = np.full((900, 1600, 3), 20, np.uint8)
     action = "TERMINAL" if final else str(decision.get("action", "waiting"))

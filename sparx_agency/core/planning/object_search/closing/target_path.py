@@ -45,12 +45,14 @@ class TargetApproachPath:
     body radius of it observed free too, and joined to the agent through
     cells like it. The route is then planned to that cell exactly (the
     planner's goal snap is withheld): by the default planner, of the cells
-    that keep its standoff from every observed obstacle, and then by the
-    squeeze planner, of all of them (``TargetClosing.standing_planners``:
-    one floor, two planners -- the first paired runs asked the default
-    planner only of cells with its whole 0.25 m disc observed free, which a
-    map of a few frames rarely has, and the squeeze planner, which prefers
-    a tight short way, took a standoff in 32 of 85 episodes). Until then
+    that keep its standoff (0.25 m) from every observed obstacle, and --
+    when it has no route -- by the retry planner, of the cells that keep
+    the body radius (0.18 m; ``TargetClosing.standing_planners``,
+    ``TargetClosingSettings.standing_retry_clearance_m``: one floor, two
+    planners -- the first paired runs asked the default planner only of
+    cells with its whole 0.25 m disc observed free, which a map of a few
+    frames rarely has, and the second planner, which prefers a tight short
+    way, took a standoff in 32 of 85 episodes). Until then
     the point was projected onto the simulator's navigation mesh, which says
     where floor is whether or not the agent ever looked there, and when the
     known floor had no route the ring was planned THROUGH unknown cells to
@@ -91,17 +93,14 @@ class TargetApproachPath:
     while it lies within the terminal radius plus the tolerance
     (``stale_kept``).
 
-    **The ring of a planar target is tried about its facing normal first**
-    (since 2026-11-10, ``TargetClosingSettings.frontal_standoff``). The
-    ring's bearing is the agent's own, so a picture first seen at a grazing
-    angle was approached and STOPped on from beside it, where the evaluator
-    has no view point (``perception/face_normal.py`` has the cases). A lock
-    whose sightings measured a standing plane carries that plane's normal
-    (``TargetClosing.face_normal_xy``); its ring is tried about the normal
-    -- every bearing but the one into the wall -- and, when no such point
-    has a route, about the agent's bearing as before, at each radius in
-    turn. ``frontal`` says which ring the current goal came from (counted on
-    the closing as ``frontal_standoffs``).
+    **The ring is drawn about the agent's own bearing, for every target**
+    (again since 2026-11-16). From 2026-11-10 the ring of a raised planar
+    target -- a picture, a wall cabinet's front -- was tried about its
+    facing normal first, because the evaluator's view points of a thin
+    object lie only in front of it. That is a property of how view points
+    are generated, measured on validation goals, and nothing the agent
+    observes asks for it: the side the target was seen from is a side it is
+    seen from. The rule is removed (``TargetClosingSettings``).
 
     **Within a ring, the front arc with every planner before any point
     beside or behind, and a detour-long route last** (since 2026-11-05,
@@ -134,17 +133,14 @@ class TargetApproachPath:
     Walking round the wall first would be the 00891 failure again. With the
     front observed nothing waits but the detours, as before.
 
-    The order in full: ring (the normal's rings, the agent's, the widened),
-    then arc, then planner, then the bearing set, then the offsets of the
-    arc.
+    The order in full: ring (the standoff ring, then the widened ones), then
+    arc, then planner, then the offsets of the arc.
     """
 
     #: The bearings tried about the memory, from the agent's side round to behind it.
     OFFSETS_DEG = (0, 30, -30, 60, -60, 90, -90, 180)
     #: The front arc alone for the widened rings: beside and behind a big object is where its floor is not.
     FRONT_OFFSETS_DEG = (0, 30, -30, 60, -60)
-    #: About a planar target's facing normal: everything but the bearing into the wall, every 20 degrees.
-    WALL_OFFSETS_DEG = (0, 20, -20, 40, -40, 60, -60, 80, -80)
     #: Offsets of this magnitude and beyond are beside or behind the target: tried, with every planner, only after
     #: the front arc has been tried with every planner (``_arc``).
     BACK_ARC_FROM_DEG = 90
@@ -158,14 +154,12 @@ class TargetApproachPath:
         self.arrivals = 0                  # standoffs reached over this lock
         self.dropped = 0                   # arrived standoffs given up for a closer one
         self.goal_planner = None           # the planner the current goal's route was found with (None: the default)
-        self.squeezed = 0                  # standoffs the default planner had no route to (the squeeze planner's)
+        self.retried = 0                   # standoffs the default planner had no route to (the retry clearance's)
         self.revoked = 0                   # standoffs given up because the map stopped showing them as standing floor
         self.deferred = None               # the last selection's shortest detour-long standoff, for ``take_deferred``
         self.widened = False               # the current goal lies beyond the standoff ring: no closer point had a route
         self.widenings = 0                 # standoffs found on a widened ring over this lock
         self.stale_kept = 0                # stale goals kept because no ring point had a route
-        self.frontal = False               # the current goal came from the ring about the facing normal (``frontal_standoff``)
-        self.frontal_retry = False         # the one re-selection made when a normal arrived after an agent-ring goal
         self.behind = False                # the current goal lies beside or behind the target (the back arc)
         self.back_arc = 0                  # standoffs taken beside or behind the target over this lock
         self.detours = 0                   # standoffs taken on a detour-long route, nothing else left to try, over this lock
@@ -176,7 +170,7 @@ class TargetApproachPath:
         if self.goal_xyz is not None:
             self.dropped += 1
         self.goal_xyz = self.reference_xyz = self.deferred = None
-        self.arrived = self.widened = self.frontal = self.behind = False
+        self.arrived = self.widened = self.behind = False
         self.policy.route_memory.clear("standoff_dropped")
         self.policy._route = self.policy._goal = None
 
@@ -195,20 +189,9 @@ class TargetApproachPath:
             else:
                 previous = self.goal_xyz        # a goal carried out of the terminal radius: the ring's fallback
                 self.goal_xyz = None
-                self.arrived = self.widened = self.frontal = self.behind = False
+                self.arrived = self.widened = self.behind = False
                 p.route_memory.clear("target_refined")
                 p._route = p._goal = None
-        if (self.goal_xyz is not None and not self.frontal and not self.frontal_retry
-                and target.frontal_normal(obs) is not None):
-            # The goal came from the agent's ring before the lock had a facing normal (the first sighting's
-            # plane was poor, the mean settled later): re-select ONCE about the normal; the agent's ring is the
-            # fallback and finds the same point again when no frontal point has a route.
-            self.frontal_retry = True
-            target.frontal_reselections += 1
-            self.goal_xyz = None
-            self.arrived = self.widened = self.behind = False
-            p.route_memory.clear("frontal_reselect")
-            p._route = p._goal = None
         if self.goal_xyz is not None and not target.standing_floor(obs, world).standable_at(self.goal_xyz[:2]):
             # The map moved under the standoff: its cell, or one the body would cover there, no longer reads
             # FREE (an obstacle seen since, a cell the evidence has turned ambiguous). It is not a place to stand
@@ -217,7 +200,7 @@ class TargetApproachPath:
             self.revoked += 1
             target.standoffs_revoked += 1
             self.goal_xyz = None
-            self.arrived = self.widened = self.frontal = self.behind = False
+            self.arrived = self.widened = self.behind = False
             p.route_memory.clear("standoff_not_standing")
             p._route = p._goal = None
         if self.goal_xyz is not None:
@@ -232,37 +215,32 @@ class TargetApproachPath:
                 self.arrived = reached
                 return command
             self.goal_xyz = None
-            self.arrived = self.widened = self.frontal = self.behind = False
+            self.arrived = self.widened = self.behind = False
         tolerance = p.converter_params.goal_tolerance_m
         limit = s.terminal_distance_m - tolerance
         radius = max(p.settings.body_radius_m, limit - world.resolution)
-        bearings = self._ring_bearings(target, obs)
+        # The ring is drawn about the agent's own bearing from the memory: the side the target was seen from.
+        bearing = math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0])
         # The planners a standoff's route is asked of, each with the standing cells it can end on: the default
         # planner and the cells that keep its floor standoff from every observed obstacle, then -- since
         # 2026-10-25: the floor beside a sofa corner or a cabinet is often drawn narrower than
         # ``RPTSettings.min_clearance_m``, and 00890/000074 released its locked television, 3.5 m away in plain
-        # view, as "no safe path from here" -- the squeeze planner and every standing cell.
+        # view, as "no safe path from here" -- the retry planner and the cells that keep its clearance (0.18 m
+        # since 2026-11-16; the body radius until then).
         planners = target.standing_planners()
-        squeeze = getattr(p, "squeeze_planner", None)
+        retry = getattr(p, "standing_retry_planner", None)
         # The standoff ring first, with every bearing and both planners; then, when no point of it has a
         # route, wider rings in the front arc out to the terminal radius (since 2026-10-15): a goal there is
         # reached within the tolerance up to a forward step outside the terminal range, which the inspection
         # closes with a step (``TargetClosing._inspect``) and STOPs on when it cannot (``closest_approach``).
-        # The rings in the order tried: ``which`` names the bearings -- "frontal" (the normal's, planar targets
-        # only), "agent" (the agent's own), "both" (the widened rings' front arc about each).
-        rings = []
-        if bearings[0][0]:
-            # A planar target has nothing in front of it to collide with, and a picture in a 0.7 m corridor has
-            # its view points nearer than the standoff ring: the normal's ring, then closer rings about the
-            # normal, before the agent's ring at the standoff radius.
-            rings.append((radius, limit, "frontal"))
-            rings.extend((r, limit, "frontal") for r in s.frontal_inner_radii_m if r < radius)
-        rings.append((radius, limit, "agent"))
+        # The rings in the order tried, each with the offsets it is tried at: the widened ones in the front arc
+        # alone.
+        rings = [(radius, limit, self.OFFSETS_DEG)]
         widest = s.terminal_distance_m - world.resolution
         if widest > radius + world.resolution:
             reach = s.terminal_distance_m + world.resolution
-            rings.append((0.5 * (radius + widest), reach, "both"))
-            rings.append((widest, reach, "both"))
+            rings.append((0.5 * (radius + widest), reach, self.FRONT_OFFSETS_DEG))
+            rings.append((widest, reach, self.FRONT_OFFSETS_DEG))
         # A walk much longer than the straight line to the target goes round something -- the wall the target
         # stands against, the point on its far side (since 2026-11-05, ``standoff_detour_factor``; see the setting):
         # such a point is not taken here. The shortest is left in ``deferred`` for :meth:`take_deferred`.
@@ -271,10 +249,7 @@ class TargetApproachPath:
         detour = None
         front_unseen = self._front_unseen(target, obs, world, radius)
         tried = set()                      # (planner, cell): two ring points often share their nearest standing cell
-        for ring_radius, reach, which in rings:
-            sets = [(frontal, bearing, self.FRONT_OFFSETS_DEG if which == "both" else offsets)
-                    for frontal, bearing, offsets in bearings
-                    if not ((which == "frontal" and not frontal) or (which == "agent" and frontal))]
+        for ring_radius, reach, offsets in rings:
             # The front arc -- the side the target was seen from -- with every planner before any point beside
             # or behind it with any (since 2026-11-05). A toilet, a bed, a television stands against a wall: the
             # ring point behind it is in the wall or in the next room, and a known-floor route to it goes round
@@ -284,46 +259,43 @@ class TargetApproachPath:
             for arc in ("front", "back"):
                 for planner, standoff_m in planners:
                     floor = target.standing_floor(obs, world, standoff_m)
-                    for frontal, bearing, offsets in sets:
-                        for offset in self._arc(offsets, arc):
-                            angle = bearing + math.radians(offset)
-                            # The ring point is geometry about the target; where the agent can STAND near it is
-                            # the map's to say: the nearest cell observed free with the body's clearance all
-                            # observed free, joined to the agent through such cells. No such cell, no standoff.
-                            point = (target.xyz[0] + ring_radius * math.cos(angle),
-                                     target.xyz[1] + ring_radius * math.sin(angle))
-                            spot = floor.nearest(point, s.standing_snap_m)
-                            if spot is None or math.dist(spot, target.xyz[:2]) > reach:
+                    for offset in self._arc(offsets, arc):
+                        angle = bearing + math.radians(offset)
+                        # The ring point is geometry about the target; where the agent can STAND near it is
+                        # the map's to say: the nearest cell observed free with the body's clearance all
+                        # observed free, joined to the agent through such cells. No such cell, no standoff.
+                        point = (target.xyz[0] + ring_radius * math.cos(angle),
+                                 target.xyz[1] + ring_radius * math.sin(angle))
+                        spot = floor.nearest(point, s.standing_snap_m)
+                        if spot is None or math.dist(spot, target.xyz[:2]) > reach:
+                            continue
+                        key = (id(planner), spot)
+                        if key in tried:
+                            continue
+                        tried.add(key)
+                        goal = (spot[0], spot[1], float(obs.pose.z))
+                        behind = abs(offset) >= self.BACK_ARC_FROM_DEG
+                        # Two kinds of standoff are set aside rather than taken (``deferred``). One whose walk
+                        # over standing floor -- read off the floor itself, no route planned for it -- is a
+                        # detour long. And, while floor in FRONT of the target is still unobserved, one on the
+                        # target's far side: beside or behind it, or with something the map has seen standing
+                        # between it and the target. The front was where the routes through the unknown used
+                        # to go first; it is still to be looked at before the far side is walked to.
+                        far_side = front_unseen and (arc == "back" or not map_sight_clear(
+                            world, spot, target.xyz[:2], skip_to_m=MEMORY_SIGHT_MARGIN_M))
+                        if far_side or math.isfinite(allowance):
+                            gx, gy = world.world_to_grid(*spot)
+                            length = float(floor.geodesic_m()[gy, gx])
+                            if far_side or length > allowance:
+                                rank = (far_side, length)        # a detour that faces the target before the far side
+                                if detour is None or rank < detour[0]:
+                                    detour = (rank, ring_radius > radius, planner, goal, behind, length > allowance)
                                 continue
-                            key = (id(planner), spot)
-                            if key in tried:
-                                continue
-                            tried.add(key)
-                            goal = (spot[0], spot[1], float(obs.pose.z))
-                            behind = abs(offset) >= self.BACK_ARC_FROM_DEG
-                            # Two kinds of standoff are set aside rather than taken (``deferred``). One whose walk
-                            # over standing floor -- read off the floor itself, no route planned for it -- is a
-                            # detour long. And, while floor in FRONT of the target is still unobserved, one on the
-                            # target's far side: beside or behind it, or with something the map has seen standing
-                            # between it and the target. The front was where the routes through the unknown used
-                            # to go first; it is still to be looked at before the far side is walked to.
-                            far_side = front_unseen and (arc == "back" or not map_sight_clear(
-                                world, spot, target.xyz[:2], skip_to_m=MEMORY_SIGHT_MARGIN_M))
-                            if far_side or math.isfinite(allowance):
-                                gx, gy = world.world_to_grid(*spot)
-                                length = float(floor.geodesic_m()[gy, gx])
-                                if far_side or length > allowance:
-                                    rank = (far_side, length)        # a detour that faces the target before the far side
-                                    if detour is None or rank < detour[0]:
-                                        detour = (rank, ring_radius > radius, planner, goal, behind, frontal,
-                                                  length > allowance)
-                                    continue
-                            command = p._navigate(obs, world, spot, "target_closing", planner=planner, exact_goal=True)
-                            if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
-                                self.frontal = frontal
-                                self._adopt(target, obs, goal, planner, widened=ring_radius > radius,
-                                            squeezed=planner is not None and planner is squeeze, behind=behind)
-                                return command
+                        command = p._navigate(obs, world, spot, "target_closing", planner=planner, exact_goal=True)
+                        if command is not None and math.dist(command.waypoints[-1], target.xyz[:2]) <= reach:
+                            self._adopt(target, obs, goal, planner, widened=ring_radius > radius,
+                                        retried=planner is not None and planner is retry, behind=behind)
+                            return command
         self.deferred = detour
         if previous is not None and math.dist(previous[:2], target.xyz[:2]) <= s.terminal_distance_m + tolerance:
             # No ring point has a route, and the goal the refinement made stale -- by centimetres -- had one:
@@ -337,8 +309,7 @@ class TargetApproachPath:
                 if command is not None:
                     self.stale_kept += 1
                     target.stale_standoffs_kept += 1
-                    self.frontal = False                 # the old goal, from whatever ring found it
-                    self._adopt(target, obs, previous, planner, widened=True, squeezed=False)
+                    self._adopt(target, obs, previous, planner, widened=True, retried=False)
                     return command
         return None
 
@@ -354,7 +325,7 @@ class TargetApproachPath:
         """
         if self.deferred is None:
             return None
-        (far_side, _length), widened, planner, goal, behind, frontal, detour = self.deferred
+        (far_side, _length), widened, planner, goal, behind, detour = self.deferred
         self.deferred = None
         command = self.policy._navigate(obs, world, goal[:2], "target_closing", planner=planner, exact_goal=True)
         if command is None:
@@ -365,9 +336,8 @@ class TargetApproachPath:
         if far_side:
             self.far_side += 1
             target.far_side_standoffs += 1
-        self.frontal = frontal
         self._adopt(target, obs, goal, planner, widened=widened,
-                    squeezed=planner is not None and planner is getattr(self.policy, "squeeze_planner", None),
+                    retried=planner is not None and planner is getattr(self.policy, "standing_retry_planner", None),
                     behind=behind)
         return command
 
@@ -400,27 +370,13 @@ class TargetApproachPath:
                 return True
         return False
 
-    def _ring_bearings(self, target, obs):
-        """The bearings the standoff ring is tried about, in order: ``(frontal, bearing, offsets)`` each.
-
-        The agent's own bearing from the memory, as always -- preceded, for
-        a raised planar target (``frontal_standoff``, ``TargetClosing.frontal_normal``),
-        by the target's facing normal, so the standoff is in front of the
-        object as its view points are (``perception/face_normal.py``).
-        """
-        agent = (False, math.atan2(obs.pose.y - target.xyz[1], obs.pose.x - target.xyz[0]), self.OFFSETS_DEG)
-        normal = target.frontal_normal(obs)
-        if normal is not None:
-            return [(True, math.atan2(normal[1], normal[0]), self.WALL_OFFSETS_DEG), agent]
-        return [agent]
-
     def _arc(self, offsets, which):
         """The offsets of one arc: ``"front"`` under ``BACK_ARC_FROM_DEG``, ``"back"`` the rest (beside or behind the target)."""
         if which == "front":
             return tuple(o for o in offsets if abs(o) < self.BACK_ARC_FROM_DEG)
         return tuple(o for o in offsets if abs(o) >= self.BACK_ARC_FROM_DEG)
 
-    def _adopt(self, target, obs, goal, planner, widened, squeezed, behind=False):
+    def _adopt(self, target, obs, goal, planner, widened, retried, behind=False):
         """Take ``goal`` as the standoff and record how it was found."""
         p = self.policy
         self.goal_xyz, self.reference_xyz = tuple(goal), tuple(target.xyz)
@@ -433,11 +389,9 @@ class TargetApproachPath:
         self.arrived = p.route_memory.arrived(obs)      # a ring point the agent already stands on
         if self.arrived:
             self.arrivals += 1
-        if self.frontal:
-            target.frontal_standoffs += 1
         if widened:
             self.widenings += 1
             target.widened_standoffs += 1
-        if squeezed:
-            self.squeezed += 1
-            target.squeezed_standoffs += 1
+        if retried:
+            self.retried += 1
+            target.retry_standoffs += 1

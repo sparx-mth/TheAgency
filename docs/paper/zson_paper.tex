@@ -1,6 +1,6 @@
 % ============================================================================
 %  Zero-shot object-goal navigation by LLM-guided room search (single storey)
-%  FIRST DRAFT -- written against the code, 2026-11-15.
+%  FIRST DRAFT -- written against the code, 2026-11-15; revised 2026-11-16.
 %
 %  Single self-contained file: preamble, body, appendix and bibliography.
 %  Compile:  pdflatex zson_paper && pdflatex zson_paper   (no BibTeX run needed)
@@ -14,7 +14,7 @@
 %  its module; the constants of Appendix B were read from the policy's own
 %  configuration() dump). The prompt listings in Appendix C are copied verbatim
 %  from the code by a script, not typed:
-%     core/mapping/topology/search_node_oracle.py   (SYSTEM_PROMPT, USER_PROMPT_TEMPLATE)
+%     core/mapping/topology/search_node_prompts.py  (the default version: system prompt, user frame)
 %     core/mapping/topology/room_classifier.py      (SYSTEM_PROMPT_TEMPLATE, USER_PROMPT_TEMPLATE)
 %  Re-generate them whenever a prompt changes:
 %     python docs/paper/sync_prompts.py          (--check reports a stale paper)
@@ -23,8 +23,11 @@
 %     docs/progress/entries/047-hm3d-gt-oracle-14b-val.md
 %     docs/progress/entries/049-mp3d-14b-gt-full-split-stairs-off-on.md  (+ 049/)
 %  Both runs predate the removal of core/mapping/topology/room_priors.py
-%  (2026-11-15), the removal of the navigation-mesh query (2026-11-15) and the
-%  room size status and coverage in the probability query (2026-11-16);
+%  (2026-11-15), the removal of the navigation-mesh query (2026-11-15), the
+%  room size status and coverage in the probability query (2026-11-16), the
+%  rewrite of that query's prompt, the removal of the closing rules that
+%  were shaped by the evaluator and the stop criterion that replaced them
+%  (all 2026-11-16);
 %  Section 5.6 says so. Replace the numbers after the re-run.
 %
 %  This file supersedes docs/paper/zero_shot_objectnav_paper.tex,
@@ -109,8 +112,10 @@ expected time to find the target. From posed RGB-D frames the agent builds a
 2-D occupancy grid, partitions the observed free space into rooms with a
 clearance watershed constrained by detected doorways, and keeps a map of object
 landmarks. One LLM query labels each room from the objects observed in it; a
-second query estimates, for every candidate room, the probability that
-searching it next finds the target. These probabilities and geodesic travel
+second query estimates, for every candidate room, the probability that the
+target is in it, from the model's own knowledge of buildings: its prompt
+describes what the agent has measured and states nothing about where objects
+are found. These probabilities and geodesic travel
 times define a Hamiltonian-path problem with probabilistic terminals, which we
 solve with RPT* to obtain a visiting order of minimum expected time-to-find. A
 chosen room is searched by a view-gain frontier walk, routes are executed by a
@@ -158,8 +163,8 @@ worth checking.
 The agent maintains an online scene graph whose nodes are rooms, obtained by
 segmenting the observed free space. A language model names each room from the
 objects seen in it, and, given the whole picture of the home so far, estimates
-for every candidate room the probability that searching it next would find the
-target. Together with the travel time between rooms on the current map, these
+for every candidate room the probability that the target is in it. Together
+with the travel time between rooms on the current map, these
 probabilities define a classical optimal-search problem: visit the candidates
 in the order that minimises the \emph{expected time until the target is
 found}~\citep{stone1975theory,blum1994minimum}. We solve it with
@@ -531,24 +536,44 @@ by walking to a point $1.5\m$ from it and looking at it.
 
 \subsection{Per-room success probabilities from a language model}\label{sec:oracle}
 \paragraph{Query.} At a loop point the model is shown the whole picture in one
-prompt (\cref{app:prompts-oracle}) and asked, for each room, for the
-probability \emph{that going there next finds the target}. The prompt contains
-(i) the target category; (ii) a one-line summary of the home so far: the room
-types found and whether each was entered or finished, how many rooms are
-unidentified, how many exits have not been looked into, whether unexplored
-frontier is still reachable, and how many of the $500$ actions are used; and
-(iii) one line per room with its label (and whether the label is weak), its
-size and the floor area the camera has covered (both read from the agent's map,
-see below), number of frontier clusters, exits (count, how many at a detected
-doorway, unseen area behind them, objects glimpsed through them), status
-(never entered / entered / finished and how), time spent inside, and the
-objects confirmed in it (at most eight classes). The model is told not to
-reason about distance, which the planner accounts for, and to answer in JSON
-with three short pieces of reasoning (where the target usually is; what the
-rooms found imply about the rest of the home; how the remaining budget
-weighs), a verdict on whether the home has been covered once (recorded, but
-not acted upon in the configuration reported here), and, for every room, a
-justification of at most twelve words followed by one integer percentage.
+prompt (\cref{app:prompts-oracle}). A candidate is a room \emph{together with
+the unseen space that its exits open onto}, because a visit to a room looks
+through its exits (\cref{sec:visits}). The agent's detector has looked at the
+covered floor of every room in every frame without finding the target (a room
+in which a target was detected but not reached is marked as such). The model
+is therefore asked, for each candidate, for the probability \emph{that the
+target is in the part of it that has not been checked yet}: the floor of the
+room that is not covered, and the unseen space behind its exits. This is the
+probability that searching the candidate finds the target, and it is used as
+the $p(v)$ of \cref{eq:objective}. The prompt contains
+(i) the name of the target category of the current episode, in every query;
+(ii) a one-line summary of the home so far: the room types found and whether
+each was entered or finished, how many rooms are unidentified, how many exits
+have not been looked into, whether unexplored frontier is still reachable, and
+how many of the $500$ actions are used; and
+(iii) one line per room with everything the scene graph stores about the room
+except where it is: its label (and whether the label is weak), its size and
+the floor area the camera has covered (both read from the agent's map, see
+below), the number of frontier clusters, its exits (count, how many at a
+detected doorway, unseen area behind them, objects glimpsed through them), its
+status (never entered / entered / finished and how), the number of actions
+spent inside, the labels of the rooms that a doorway joins it to, the
+objects confirmed in it with their counts (at most eight classes; the line
+says when the list was cut), and whether an object of the target category is
+among them.
+\emph{No distance and no position enters the prompt}: not the distance to a
+room, not its coordinates, and not which room the agent is standing in. The
+division of labour is strict. The model supplies one probability per
+candidate; weighing the probabilities against travel is the planner's task
+(\cref{sec:rpt}), and the prompt says so in one sentence. The question is
+repeated, with the name of the target, at the end of the user prompt. The model
+answers in
+JSON with three short pieces of reasoning (where the target is normally found;
+what the rooms found say about the building; how far the search has got), a
+verdict on whether re-checking finished rooms is now worth more than what is
+left unexplored (recorded, but not acted upon in the configuration reported
+here), and, for every room, a justification of at most twelve words followed by
+one integer percentage.
 
 \paragraph{Room size and coverage.} Both are computed from the agent's
 occupancy map and the current room partition, with the sight ledger of
@@ -566,9 +591,10 @@ most $1.2\m$ wide with located boundary at both ends is not counted when at
 least half of the side is located (it is treated as a doorway in a wall that
 has been observed). When all
 four sides are located the prompt gives the room's area and its two dimensions
-as final. Otherwise it gives them as a lower bound (``at least''), marks each
-dimension that runs across a side that is not located, and says how many sides
-are not located. The area is that of the room's cells plus the cells they
+and says that all of its sides are mapped. Otherwise it gives them as a lower
+bound (``at least''), marks each dimension that runs across a side that is not
+located, and says how many sides are not located and how long the unmapped
+boundary is. The area is that of the room's cells plus the cells they
 enclose, such as furniture standing in the room. \emph{Coverage} is the part of
 this area that the camera has observed from at most $4\m$ with a free line of
 sight on the map, at a camera pitch at which an object between $0.3$ and
@@ -582,39 +608,71 @@ such. All of these quantities are recomputed from the map at every update; the
 only state kept between updates is the record of observed cells, which is
 attached to map cells and not to room identifiers, and each side's previous
 verdict. The quantities therefore remain correct when the partition merges,
-splits or renumbers rooms. A size reported as final is a
-statement about the map at that moment and can still change, most often
-because the partition later merges the room with a neighbour.
+splits or renumbers rooms.
 
-\paragraph{What the prompt supplies.} The system prompt is long and
-prescriptive, and this must be read as part of the method. Beyond describing
-the input format it contains hand-written guidance of four kinds.
-(i) \emph{Where objects are}: one sentence lists the typical rooms of a
-toilet, a bed, a sofa, a television, a chair and a potted plant, and of
-kitchen and bathroom fixtures (refrigerator, oven, stove, bathtub, shower).
-These are exactly the six goal categories of HM3D; of the 21 goal categories
-of Matterport3D, eight are covered by that sentence and thirteen are given no
-typical room.
-(ii) \emph{What a home looks like}: typical room counts (one kitchen, one
-living room, one to four bedrooms, one to three bathrooms) and room sizes.
-(iii) \emph{Numeric bands} that tie a room's number to its label and its
-exploration status, for example $0$--$2\%$ for a finished room of a type the
-target does not live in, at least $30\%$ for an unvisited room of a fitting
-type that still has frontier, and at least $60\%$ when objects glimpsed
-through a door name the fitting type. For a room that was entered but not
-finished the bands are stated in terms of coverage: $0$--$5\%$ when all four
-sides are located and at least $90\%$ of the room is covered, and no reduction
-for the time already spent inside while the size is a lower bound or less than
-half of the room is covered.
-(iv) A worked example with numbers.
-These are priors that \emph{we} give the model through the prompt; the
-probabilities are therefore not purely the model's own judgement, and for the
-HM3D categories the prompt states the object--room association outright.
-\TODO{Redesign the prompt so that it states the task and the evidence and
-leaves the reasoning about where objects are, and how large the numbers should
-be, to the model; re-evaluate.} Outside the two prompts no knowledge of where
-objects are found reaches the search: the code contains no table that maps
-object categories to rooms.
+``All sides mapped'' is a statement about the map and not a promise about the
+room: it says that no side of the room, as the partition draws it at that
+moment, borders unseen space. It does not say that the partition is settled,
+and the prompt tells the model so (``the map's division into rooms may still
+be revised''). An earlier revision called such a size \emph{final} and told
+the model that the room is ``that big and no bigger'', which the code cannot
+know. In $40$ recorded HM3D validation episodes, $73$ of the $252$ rooms that
+had been reported with all four sides located were more than a quarter larger
+at the end of the episode. Of the $233$ increases of more than a quarter after
+such a report, $178$ followed a merge of two rooms by the partition, $51$ a
+shift of the cut between two rooms, one concerned a fragment, and only three
+were a room that turned out to extend through a side read as located (all
+three within the first $28$ actions of an episode). In all but those three
+cases the additional floor was already on the map at the time of the report,
+listed under a neighbouring room. We therefore changed the wording and not
+the rule: a rule that withheld the statement wherever a side is a cut between
+two rooms would report mapped floor as unmapped, and whether the partition
+will later merge two rooms is not something the map shows.
+
+\paragraph{What the prompt supplies, and what it leaves to the model.} The
+system prompt (\cref{app:prompts-oracle}; about $3{,}500$ characters) tells the
+model to use its own reasoning and its own knowledge of standard homes and
+buildings (how they are laid out, and in which rooms furniture and objects of
+each kind are normally found) and to derive every probability from that. Beyond
+this it states \emph{facts} and fixes the reply format. The facts are: what a
+candidate is; that a detector looks for the target in every frame and has not
+found it on the covered floor; which part of a candidate the number is about;
+what each field of a room line measures (for instance, that a room labelled
+\code{unknown} has not been identified and may be of any kind, and that a size
+with all sides mapped can still change when the partition is revised); that
+the numbers are independent across candidates; and what the two ends of the
+scale mean. It contains no knowledge of ours about where objects are and no
+rule of judgement. It names no room for any object, gives no probability, band
+or typical value, does not list the goal categories of any benchmark, states
+no rule for how a field should move a number (what a covered room is worth,
+when an exit matters, how the remaining budget weighs) and contains no worked
+example. The target category of the episode is the only object the model is
+asked about, and it appears in the user prompt of every query.
+
+The wording is specific to a language model: a sentence that a large model
+reads correctly a small one may ignore. The code therefore keeps the prompt as
+named \emph{versions}, each written for one model and tested on it with a set
+of hand-written scenarios (\cref{sec:experiments-revisions}); a run names the
+version it uses, and its record carries the version, the digest of its text
+and the model that answered. A test fails if any version names an object or a
+room type, contains a number other than those of the reply format, or lacks
+the instruction to use the model's own knowledge (\cref{app:implementation}).
+The version listed in \cref{app:prompts-oracle} is the only one so far. It was
+written for Qwen2.5-3B-Instruct, the model that runs on the development
+machine, and states more of the facts explicitly than a larger model is likely
+to need. \TODO{Write and test a version for the 14B model used in
+\cref{sec:results}, and report which version each run used.}
+
+Earlier revisions, including those that produced the numbers of
+\cref{sec:results}, used a long prescriptive prompt with hand-written
+object--room associations, numeric bands and a worked example
+(\cref{sec:experiments-revisions}). Three things outside this prompt remain
+hand-designed and are not the model's judgement: the vocabulary of room types
+of the room labeller (\cref{sec:labels}), whose labels the model reads; the
+rescaling of the model's numbers by exploration state (below); and the fixed
+probability of a target-landmark node (\cref{sec:nodes}). Apart from the two
+prompts no knowledge of where objects are found reaches the search: the code
+contains no table that maps object categories to rooms.
 
 \paragraph{Parsing.} The percentages are divided by $100$ and clipped to
 $[0, 1-10^{-6}]$. They are \emph{not} normalised: several rooms may each hold
@@ -640,7 +698,11 @@ where $\tau$ is the number of actions already spent inside; if $\tau\ge20$ and
 at most one significant frontier is left in the room, the factor is at most
 $0.2$. The room the agent is standing in keeps its number. Rooms whose adjusted
 probability is below $0.05$ are not offered to the planner. These constants are
-hand-set.
+hand-set. The prompt does not state these rules, but the model is shown the
+evidence they act on (status, coverage and the actions spent in a room), so
+that evidence may now be counted twice: once by the model and once by the
+code. \TODO{Measure the search without this rescaling, now that the prompt
+leaves the judgement to the model.}
 
 \paragraph{When the model is queried.} The oracle is queried at every loop
 point, i.e.\ whenever a node has been searched and released, and once at the
@@ -822,7 +884,12 @@ at least $0.8$ overrides most rejection memories). The candidate becomes a
 \emph{lock} after two consecutive frames whose projections fall on the same
 object; while a candidate is active, boxes down to confidence $0.3$ count as
 re-sightings if they project onto it. Until the lock, the agent turns or steps
-so as to keep the box in view, for at most $12$ actions. Three special cases
+so as to keep the box in view, for at most $12$ actions. If the candidate is in
+view but its box has no usable depth, the agent steps towards it to obtain
+one; a step that the simulator refuses ends this at once, because a refused
+step changes neither the pose nor the frame and the same step would be asked
+again. The candidate is then kept at its last measured position and is
+approached later along a planned route. Three special cases
 are handled: a box without usable depth (too far) starts a bounded walk along
 its bearing until depth is available; a candidate first seen closer than
 $1.3\m$ is re-examined from a few steps back unless it was already seen in
@@ -841,10 +908,8 @@ cylinder around the line of sight to the remembered position.
 around the remembered position whose radius is chosen so that arriving puts
 the agent within $1\m$ of the target (about $0.65\m$ with our tolerances).
 Candidate points are tried in a fixed order: first on the side from which the
-target was seen, then beside and behind it; for each, the default planner and
-then the planner at body-radius clearance. For a target mounted above the
-floor whose visible surface is planar (e.g.\ a picture), a plane is fitted to
-its depth pixels and standoff points in front of that plane are tried first.
+target was seen, then beside and behind it; for each, the default planner and,
+if it finds no route, a planner at a smaller clearance (below).
 Wider rings are tried when no point of the first ring is reachable.
 
 \paragraph{Standing points.} Every point at which the closing asks the agent
@@ -857,10 +922,13 @@ centre has been observed free as well, so that neither an obstacle nor
 unobserved space lies under the agent's body; and
 (iii)~it is connected to the agent's position through cells that satisfy (i)
 and (ii).
-There is one such floor, and each planner is offered the part of it on which
-it can end a route: the default planner the standing cells farther than its
-minimum clearance ($0.25\m$) from every observed obstacle, and the planner at
-body-radius clearance, which is asked second, all of them. Unobserved cells
+There is one such floor, and two planners are asked for a route on it, the
+second only when the first finds none: the default planner, which keeps
+$0.25\m$ of clearance from every observed obstacle, and a planner that keeps
+the body radius ($0.18\m$). On the $0.1\m$ grid the centre of the nearest
+obstacle cell is then at least $0.28\m$ and $0.20\m$ from the agent's cell;
+no route is planned at a smaller clearance. (A second clearance of $0.20\m$
+was evaluated and not adopted, \cref{sec:experiments-revisions}.) Unobserved cells
 do not count towards the planner's clearance: beyond the body's own disc
 nothing has to have been observed. A
 candidate point is moved to the nearest standing-floor cell within $0.5\m$
@@ -889,14 +957,41 @@ box inside the image.
 range of at most $1.05\m$, or the agent has arrived within $1\m$ of the
 remembered position, the agent inspects: it centres the box by turning and
 tilting, may take up to three single steps if the range is within one step of
-the limit, and issues \code{STOP} on a fresh, complete box of the target within
-range. \code{STOP} is issued without a fresh box only in narrow cases: when
-the target was detected within the last $15$ actions of the approach and the
-map shows a free line of sight to the remembered position; or when no closer
-standing point is reachable and the last fresh range was within one step of
-the limit. For a target above the floor, up to three further forward steps are
-taken after the decision to stop, because the benchmark's success region for
-raised objects lies closer to the object (\cref{sec:handdesigned}).
+the limit, and \emph{decides} to stop on a fresh, complete box of the target
+within range. The decision is taken without a fresh box only in narrow cases:
+when the target was detected within the last $15$ actions of the approach and
+the map shows a free line of sight to the remembered position; or when no
+closer standing point is reachable and the last fresh range was within one
+step of the limit.
+
+How close to the target the agent must then \emph{stand} is not a choice of
+the method. A benchmark defines a success region around each goal object, and
+benchmarks that state the same distance do not measure it in the same way
+(\cref{sec:experiments-benchmarks}). The closing therefore takes a \emph{stop
+criterion} as a parameter: a distance $d_{\mathrm{stop}}$ and a measure. Let
+$r$ be the horizontal distance from the agent to the nearest measured point
+of the target, and $h$ the height of the lowest measured point of the target
+above the floor under the agent, taken as zero below $0.3\m$ (an object that
+stands on the floor). Under the \emph{planar} measure the range is $r$; under
+the \emph{Euclidean} measure it is $\sqrt{r^2+h^2}$. Both are distances from
+the agent's position on the floor to the extent of the object as the agent
+has measured it. Apart from the $0.3\m$ threshold, which changes a range of
+$0.9\m$ by less than $0.05\m$, neither is smaller than the true distance to
+the object's bounding box, so that an agent within the criterion by its own
+measurement is within it of the object. If the range exceeds $d_{\mathrm{stop}}$ when the stop
+is decided, the agent walks straight towards the remembered position and
+issues \code{STOP} as soon as the range is within $d_{\mathrm{stop}}$. The
+range is that of the deciding frame, carried forward by the agent's own
+displacement; no detection is consulted during the walk, because close to a
+raised target the box leaves the image. The walk also ends, with \code{STOP},
+when a step is refused, after four steps, when a further step would bring
+the agent within $0.3\m$ of the remembered position, or on the last action of
+the episode's budget; a target whose underside is higher than
+$d_{\mathrm{stop}}$ is thus approached as closely as the body allows. Without a stop criterion ($d_{\mathrm{stop}}=0$, the method's
+default) \code{STOP} is issued on the deciding frame. The criteria of the two
+benchmarks and the way they were obtained are given in
+\cref{sec:experiments-benchmarks}; the agent is given no goal position and no
+view point (\cref{sec:experiments-privileges}).
 
 \paragraph{Release.} A candidate is released when it is not confirmed within
 its budget, when no route to any standoff exists, when the approach stalls for
@@ -915,22 +1010,35 @@ agent's own depth as support surfaces that rise or fall in steps, and their
 footprint is written as impassable into the planning map; so is every cell
 whose observed floor lies more than $0.30\m$ below the storey plane, including
 cells that depth rays crossed below that level. Single steps and raised or
-sunken parts of the same storey, up to the height the agent can walk onto,
-remain free. A goal is refused if the floor the agent stands on is more than
-$0.5\m$ from the start height. No simulator geometry is used for any of this.
+sunken parts of the same storey remain free: floor that the agent's depth
+shows to be connected to the storey by risers it can climb (at most
+$0.24\m$, with head room for the body) and that lies within $0.45\m$ of the
+storey plane. That bound is the agent's own. It is the height difference at
+which the agent's storey tracking reads the agent as having left the storey,
+and it is well below the smallest height difference that the tracking accepts
+between two storeys ($1.5\m$); floor further from the plane is not offered
+because the same tracking would walk the agent back from it. A goal is refused
+if the floor the agent stands on is more than $0.5\m$ from the start height.
+No simulator geometry is used for any of this, and none of these bounds is
+taken from how a benchmark places or scores its goals (the one check of the
+$0.45\m$ bound against evaluation data is disclosed in
+\cref{sec:experiments-privileges}).
 
 \paragraph{Starts on a staircase.} Some episodes start on a stair tread or
 landing, where no floor is level with the agent. In that case the first storey
 the agent settles on becomes its storey: it walks the flight it sees to the
 nearer end. The implementation additionally allows such an episode \emph{one}
 switch to the storey at the other end of the same flight once the first storey
-has been searched out, and never back. In all other episodes the agent stays on
-its start storey. The search loop can offer a staircase to
-\cref{eq:objective} as a node beside the rooms, but only if it knows which
-storey the flight leads to, and the agent's own stair detection measures the
-steps of a flight, not where it ends. An earlier revision took this from the
-simulator's navigation mesh; that source has been removed
-(\cref{sec:experiments-revisions}), so that at present no staircase is offered.
+has been searched out, and never back. Until the agent has walked level on a
+storey, floor within $0.8\m$ of its start height counts as connected in the
+sense above (a hand-set value between the $0.45\m$ bound and the $1.5\m$
+separation of two storeys). In all other episodes the agent stays on
+its start storey. No staircase is a candidate node of \cref{eq:objective}.
+Offering one requires knowing which storey a flight leads to, and the agent's
+own stair detection measures the steps of a flight, not where it ends. An
+earlier revision took this from the simulator's navigation mesh; that source
+has been removed (\cref{sec:experiments-revisions}), and with it the code
+that offered staircases as nodes, which nothing could reach any more.
 \TODO{Multi-storey search with staircases, observed by the agent, as nodes of
 \cref{eq:objective}.}
 
@@ -939,9 +1047,11 @@ The method is training-free, but it is not free of design choices, and several
 of them encode knowledge about homes or about the benchmark. For transparency
 we list them in one place.
 \begin{itemize}[leftmargin=*,itemsep=1pt,topsep=2pt]
-  \item \textbf{The two prompts} (\cref{app:prompts}), in particular the
-        examples and numeric bands of the oracle's system prompt
-        (\cref{sec:oracle}).
+  \item \textbf{The two prompts} (\cref{app:prompts}). The oracle's system
+        prompt describes its input and output and contains no statement about
+        where objects are, no numeric band and no example
+        (\cref{sec:oracle}); the room labeller's prompt fixes the set of room
+        types (\cref{sec:labels}).
   \item \textbf{The rescaling of the model's probabilities} by exploration
         state (\cref{sec:oracle}) and the fixed probability of a
         target-landmark node (\cref{sec:nodes}).
@@ -962,10 +1072,22 @@ we list them in one place.
         shape.
   \item \textbf{The detector vocabulary}: the context words given to the
         detector besides the goal categories.
-  \item \textbf{Stopping rules shaped by the benchmark's success criterion}:
-        the $1\m$ terminal range, and the additional steps towards raised
-        targets, which follow from how the benchmark generates goal view
-        points.
+  \item \textbf{The stop criterion.} The closing decides to stop with the
+        target in view within $1\m$, and then stands within a distance and by
+        a measure that are given per benchmark: $0.9\m$, measured horizontally
+        on HM3D and in three dimensions from the floor on MP3D
+        (\cref{sec:closing,sec:experiments-benchmarks}). These values state
+        where each benchmark's published success region lies. They were read
+        from the generator of the datasets and confirmed on the validation
+        goals (\cref{sec:experiments-privileges}); the margin of $0.1\m$ and
+        the bounds of the walk (four steps, $0.3\m$) are set by hand, the
+        bounds after inspecting validation episodes
+        (\cref{sec:experiments-revisions}).
+        Earlier revisions instead took additional steps after the decision to
+        stop, depending on which evaluator scored the run, and approached
+        raised planar targets from the front, with values sized on recorded
+        validation episodes; these rules have been removed
+        (\cref{sec:experiments-revisions}).
   \item \textbf{All numeric thresholds} (\cref{app:hyperparams}). They were set
         by hand during development on the same validation episodes that we
         report (\cref{sec:experiments-privileges}).
@@ -997,6 +1119,54 @@ single seed. \TODO{Report the agreement between the start-to-goal geodesic
 distances computed by our adapter and those published with the episodes, as a
 check of the evaluation code.}
 
+\paragraph{The success region, and the stop criterion derived from it.}
+Success is defined through the view points that are published with each
+episode, so the place where an agent must stand is determined by how the
+authors of a dataset generated them. In the dataset generator of habitat-lab,
+candidate positions are laid out on a horizontal grid around the axis-aligned
+bounding box of a goal object, with a spacing of half the agent's radius
+($0.09\m$) and out to $1\m$ from the box; a candidate becomes a view point if
+it is navigable and the object is visible from it. We measured the view
+points of every validation goal against the bounding box of the object in
+the scene annotation and found that the two datasets differ in how this
+$1\m$ is measured.
+On HM3D ($432$ goals in $20$ scenes, $111{,}406$ view points) the farthest
+view point of a goal lies $1.00\m$ from the box \emph{in the horizontal
+plane}, whatever the height of the object, and no view point lies further
+than $1.01\m$: a television mounted $1.4\m$ above the floor has view points
+$1\m$ out, about $1.7\m$ from it in three dimensions.
+On MP3D ($1{,}316$ goals in $11$ scenes, $291{,}810$ view points) the
+horizontal reach decreases with the height of the object's underside: its
+median over goals is $1.00\m$ for objects on the floor, $0.89\m$ for an
+underside between $0.3$ and $0.6\m$, $0.74\m$ between $0.6$ and $0.9\m$, and
+$0.57\m$ between $0.9$ and $1.0\m$, while the three-dimensional distance from
+the view point on the floor to the box stays at $1.00\m$; no goal has its
+underside $1\m$ or more above the floor.\footnote{About $5\%$ of the MP3D view
+points lie further than $1\m$ from the box in the plane, where the generator
+moved them onto the navigation mesh. The generator code that is publicly
+available measures in the plane; the MP3D episodes do not follow it.}
+The success region of an HM3D goal is thus the floor within $1\m$ of the
+object in the plane, and that of an MP3D goal the floor within $1\m$ of the
+object in three dimensions. We give the method the corresponding stop criterion
+(\cref{sec:closing}): the planar measure on HM3D and the Euclidean measure on
+MP3D, with $d_{\mathrm{stop}}=0.9\m$ on both. The margin of $0.1\m$ is chosen
+so that a stop at $d_{\mathrm{stop}}$ is within the success distance of a grid
+candidate inside the region whatever the offset of the grid (no position is
+further than $0.064\m$ from a candidate), and leaves the remainder for the
+error of the agent's own range. This is the only information about the
+benchmark's scoring that the method receives
+(\cref{sec:experiments-privileges}).
+
+Published zero-shot methods stop on a horizontal range to the points of the
+target that they have mapped, on both datasets, according to their released
+code: VLFM~\citep{yokoyama2024vlfm} stops when that range is
+below $0.9\m$; ASCENT~\citep{gong2025stairway} steps towards the target once
+it is within $1\m$ and stops at $0.6\m$, or earlier when a step no longer
+brings it closer; ApexNav~\citep{zhang2025apexnav} plans to the free cell
+nearest a point $0.5\m$ from the object and stops within $0.2\m$ of it, and
+its released evaluation configuration also sets the success distance to
+$0.2\m$ instead of $0.1\m$. None of them measures in three dimensions.
+
 \subsection{Metrics}\label{sec:experiments-metrics}
 For episode $i$ let $S_i\in\{0,1\}$ denote success, $l_i$ the geodesic distance
 from the start to the nearest goal view point, $p_i$ the length of the path the
@@ -1020,9 +1190,12 @@ locally. The model receives text only; it never sees an image. We use
 temperature $0$ with a fixed seed, the server's JSON-constrained output mode, a
 context window of $8{,}192$ tokens, and reply limits of $768$ tokens for a room
 label and $1{,}536$ tokens for the probabilities. The model is used as
-released: there is no fine-tuning, no retrieval, and no in-context example
-other than the single worked example inside the system prompt
-(\cref{app:prompts}).
+released: there is no fine-tuning, no retrieval and no in-context example
+(the prompt of the two reported runs contained one worked example,
+\cref{sec:experiments-revisions}). The prompt of the probability query that
+\cref{app:prompts-oracle} lists was written after these runs, for a smaller
+model of the same family (Qwen2.5-3B-Instruct), and has not been used with the
+14B model (\cref{sec:oracle}).
 
 \subsection{Perception: simulator annotations in place of a detector}
 \label{sec:experiments-oracle}
@@ -1089,7 +1262,9 @@ the goal, a success signal, a collision flag (it infers a refused step from
 its own pose), or any scene geometry: it has no access to the simulator's
 navigation mesh or path finder, and it is given no storey or staircase
 annotations. In this respect it is on the footing of the zero-shot methods we
-compare with. The navigation mesh is used only outside the agent: by the
+compare with. Of the benchmark's definition of success it is given the stop
+criterion of \cref{sec:experiments-benchmarks}: one distance and one measure
+per dataset, the same for every episode and every object. The navigation mesh is used only outside the agent: by the
 simulator to move the agent, by the benchmark to place it and to measure the
 distances that are scored, and by our analysis of the results by storey
 (\cref{sec:results}). The episode description handed to the agent carries the
@@ -1115,7 +1290,19 @@ developed on recorded HM3D validation episodes, and its sizes were also checked
 once against the room outlines annotated in the Matterport3D scenes. The agent
 never receives these annotations and the checking tool is not part of this
 code base, but it is a use of scene annotations during development: state it
-here.}
+here.} One bound of the storey confinement was checked against the simulator's
+navigation mesh during development: that floor further than $0.45\m$ from the
+storey plane is not offered to the agent (\cref{sec:storey}). On the HM3D
+validation episodes whose goal is on the start storey and that start on level
+floor, no shortest path computed on the navigation mesh leaves that band. The
+bound itself is the agent's own (it is the height difference at which its
+storey tracking reads the agent as having left the storey), the agent never
+receives the mesh, and the check did not change the value; we list it because
+it is a use of evaluation data. The stop criterion of each benchmark
+(\cref{sec:experiments-benchmarks}) was established by measuring the published
+view points of the validation goals against the bounding boxes of the scene
+annotations. This too is a use of validation data and of scene annotations
+during development; the agent receives neither.
 
 \subsection{Which code produced the numbers}\label{sec:experiments-revisions}
 \Cref{sec:method} describes the current code. The two full-split runs reported
@@ -1179,26 +1366,219 @@ paired differences carry meaning. \TODO{Re-run both benchmarks with the current 
 then the numbers of \cref{sec:results} are results of a closing behaviour
 \emph{with} the navigation-mesh query.}
 
-\paragraph{Both runs: a room's area without its status, and no coverage, in
-the probability query.} At the time of both runs the line of a room in the
-probability query gave one number for its size, the area of its mapped free
-cells, without saying whether all of the room's sides had been observed, and
-gave no coverage. The system prompt therefore had no rules about coverage.
-Instead it told the model that the camera had seen most of an entered room,
-that an entered room with at most one frontier cluster and at least $20\,$s
-spent inside was as good as finished, and that a room's number should fall with
-the time already spent inside it. The current prompt replaces these three
-statements with the size status, the coverage and the rules about them
-described in \cref{sec:oracle}; \cref{app:prompts-oracle} shows the current
-prompt, not the one the two runs used. We have not measured the effect of this
-change in the configuration of \cref{sec:results}. \TODO{Re-run both benchmarks
-with the current code. Until then the numbers of \cref{sec:results} are results
-of a probability query \emph{without} size status and coverage. A paired
-comparison of an earlier variant of this change exists (200 HM3D val episodes,
-ground-truth perception, a 3B model in both roles, room priors still present;
-its differences were within noise): decide whether to report it.}
+\paragraph{Both runs: a prescriptive prompt for the probability query.} The
+prompt of \cref{sec:oracle,app:prompts-oracle} is not the prompt of the two
+runs. At the time of both runs the system prompt of the probability query was
+several times as long (about $12{,}000$ characters) and told the model how
+to judge. It contained
+(i) \emph{where objects are}: one sentence that listed the typical rooms of a
+toilet, a bed, a sofa, a television, a chair and a potted plant, and of
+kitchen and bathroom fixtures. These are exactly the six goal categories of
+HM3D; of the 21 goal categories of Matterport3D, eight were covered by that
+sentence and thirteen were given no typical room;
+(ii) \emph{what a home looks like}: typical room counts (one kitchen, one
+living room, one to four bedrooms, one to three bathrooms) and room sizes;
+(iii) \emph{numeric bands} that tied a room's number to its label and its
+exploration status, for example $0$--$2\%$ for a finished room of a type the
+target does not live in, at least $30\%$ for an unvisited room of a fitting
+type that still had frontier, and at least $60\%$ when objects glimpsed
+through a door named the fitting type;
+(iv) rules about exits, about the remaining budget and about spreading
+probability over unexplored places; and
+(v) a worked example with numbers.
+The model was also told which room the agent was standing in (and told not to
+use it). In addition, the line of a room gave one number for its size, the
+area of its mapped free cells, without saying whether all of the room's sides
+had been observed, and gave no coverage, no object counts and no neighbouring
+rooms; the prompt told the model instead that the camera had seen most of an
+entered room, that an entered room with at most one frontier cluster and at
+least $20\,$s spent inside was as good as finished, and that a room's number
+should fall with the time already spent inside it. The probabilities behind
+the numbers of \cref{sec:results} are therefore to a large part the
+application of our rules by the model, and for the HM3D categories the prompt
+stated the object--room association outright. The current prompt contains
+none of this (\cref{sec:oracle}). We have not measured the effect of the
+change on a benchmark. \TODO{Re-run both benchmarks with the current code.
+Until then the numbers of \cref{sec:results} are results of a probability
+query \emph{with} a prescriptive prompt. A paired comparison of the
+intermediate step that added size status and coverage to the prescriptive
+prompt exists (200 HM3D val episodes, ground-truth perception, a 3B model in
+both roles, room priors still present; its differences were within noise):
+decide whether to report it.}
 
-\paragraph{The MP3D run: an older execution stack.} Apart from the three
+\paragraph{A probe of the current prompt on a small model.} The only test of
+the current prompt so far is a probe on $19$ hand-written scenarios. Each is a
+partial map with two to six candidates and states one ordinal claim that a
+reasoner who knows homes should satisfy, for instance that a barely seen room
+of unknown type ranks above a room that was covered without the target being
+detected. The claims are not shown to the model. The model was
+Qwen2.5-3B-Instruct on a CPU at temperature $0$, with one call per scenario.
+With the prescriptive prompt the model's numbers satisfied $13$ of the $19$
+claims; with the current prompt they satisfied $9$. All $19$ replies were
+well-formed in both cases. After the adjustment by exploration state
+(\cref{sec:oracle}), which is applied to whatever the model writes, $16$ of
+the $19$ claims were satisfied with either prompt. In two scenarios a room of
+the fitting type has been covered completely without a detection and competes
+with a barely seen room of another type. These were satisfied with the
+prescriptive prompt, which stated the rule, and with none of the fact-only
+wordings we tried: the small model does not draw that conclusion from the
+stated facts, and it is the code's adjustment that ranks the two rooms
+correctly. The small model's own statements of where a target is normally
+found were plausible in most queries and wrong in some (a toilet ``in
+bathrooms or kitchens''). These counts come from single calls on a small set
+of scenarios that we wrote ourselves, and the replies of a small model change
+with small changes of wording, so they indicate a direction and do not
+measure search performance. \TODO{Repeat the probe with the 14B model and a
+version of the prompt written for it.}
+
+\paragraph{Both runs: closing rules shaped by the benchmark's scoring.} At the
+time of both runs the closing behaviour contained three rules that moved the
+stopping pose towards the benchmark's success region. They were switched by
+the kind of evaluator that scores a run, and their values were sized on
+recorded validation episodes.
+(i) \emph{Steps after the decision to stop, for raised targets.} For a target
+whose lowest measured point was at least $0.3\m$ above the floor (a picture, a
+wall cabinet, a cushion on a seat), up to three further forward steps were
+taken after the decision to stop, because the goal view points of raised
+objects lie closer to the object. Both runs had this rule.
+(ii) \emph{Steps after the decision to stop, for any target.} One or two
+forward steps towards any target after the decision to stop; the entry point
+of a benchmark switched this rule off when the benchmark scores the distance
+to view points. The MP3D run, started from an older branch, had it switched
+on; the HM3D run had it switched off.
+(iii) \emph{A frontal approach to raised planar targets.} A plane was fitted
+to the depth pixels of a raised target, standoff points in front of that plane
+were tried first, and a stop from beside the plane was deferred, because the
+view points of a thin wall-mounted object lie in front of it. Both runs had
+this rule.
+We have removed all three. Rules (i) and (ii) are replaced by the stop
+criterion of \cref{sec:closing}, which states the definition of each
+dataset's success region (\cref{sec:experiments-benchmarks}) instead of being
+fitted to recorded stops and applies to every target; rule (iii) has no
+replacement.
+
+We measured the replacement in steps with the paired check described above:
+the same $180$ single-storey MP3D episodes, ground-truth perception, a fixed
+stand-in for the language model, software rendering and a single seed, so
+that only paired differences carry meaning (\cref{tab:stop-check}).
+\emph{Without the rules.} With the code of the last revision that had the
+rules, switching (i) and (iii) off (rule (ii) was off in both arms) lowered
+the success rate from $78.9\%$ to $74.4\%$ (eight episodes lost, none gained;
+exact McNemar $p=0.008$) and the SPL from $0.346$ to $0.332$. In all eight
+lost episodes the agent called \code{STOP} with the target in view and within
+$1\m$ of it in the horizontal plane, between $0.11$ and $0.42\m$ from the
+nearest goal view point: five pictures, a cabinet, a sink and a chair. Seven
+of the eight had taken the additional steps of rule (i) and one the frontal
+approach of rule (iii).
+\emph{With a stop criterion.} We then added the stop criterion to the code
+without the rules, in three steps. First the walk alone, with the criterion
+that the method had applied to its decision all along, $1.0\m$ in the plane:
+the success rate rose to $77.8\%$ (six episodes gained, none lost; $p=0.03$)
+and the SPL to $0.341$. These six stops had been decided between $1.01$ and
+$1.04\m$ from the target, within the tolerance of the decision and outside
+the success region. Second, $d_{\mathrm{stop}}=0.9\m$ with the same measure,
+which is the stopping rule of VLFM and the criterion that the HM3D definition
+gives: $80.6\%$ (five more gained, none lost; $p=0.06$) and an SPL of $0.350$.
+Third, the Euclidean measure, which is the definition of MP3D: $82.2\%$
+(three more gained, none lost; $p=0.25$) and an SPL of $0.354$. All three are
+pictures whose horizontal range was already below $0.9\m$ when the stop was
+decided, while their three-dimensional distance from the floor was not. We
+also took the last two steps in the other order: with the Euclidean measure
+and $d_{\mathrm{stop}}=1.0\m$, the edge of the success region itself, the
+success rate was $80.6\%$ and the SPL $0.352$. The measure thus gained five
+episodes at $1.0\m$ and three at $0.9\m$, and the margin of $0.1\m$ gained
+five under the planar measure and three under the Euclidean one. No episode
+was lost in any of these steps. Against the revision with the three rules the
+final criterion gained six episodes and lost none ($p=0.03$). Of the $158$
+episodes in which the agent called \code{STOP}, $24$ failed without any rule,
+$16$ with the three rules and $10$ with the criterion.
+\emph{Cost.} The walk to the stop distance was taken in $116$ of the $158$
+episodes in which a stop was decided: one step in $89$ of them, two in $15$
+and three in $12$. In the episodes that succeed with and without it, it
+lowers the SPL by $0.012$; the SPL over all episodes rises because more
+episodes succeed. In $28$ of the $116$ walks the stop was issued before the
+range was within $d_{\mathrm{stop}}$, because a step was refused or the agent
+stood under the target; $22$ of these episodes succeeded.
+The pipeline is deterministic under the stand-in. The $64$ episodes in which
+the walk took no action have the same trajectories as without the criterion,
+and so do the counts of every other event of the closing; the three other
+arms with a criterion were run on the episodes in which they can differ from
+the arm without one and on control episodes, which reproduced their
+trajectories exactly.
+The limitations stated above for this check apply, and two more. The episodes
+are from MP3D only: the criterion has not been evaluated on HM3D. And the
+check is not independent of the method's development. The removed rules had
+been sized on these same episodes. The distance and the measure of the
+criterion were derived from the dataset's definition, but the two bounds of
+the walk (four steps, $0.3\m$ from the remembered position) were chosen
+after inspecting how the steps of rule (i) had ended on these episodes.
+\TODO{Evaluate the stop criterion on HM3D, and on MP3D scenes that were not
+used to establish the definition of the success region.} \TODO{Re-run both
+benchmarks with the current code. Until then the numbers of
+\cref{sec:results} are results of a closing behaviour \emph{with} the three
+rules.}
+
+\begin{table}[t]
+\centering
+\caption{The stopping rule in the paired check on $180$ single-storey MP3D
+episodes (ground-truth perception, a stand-in for the language model, one
+seed). SR in percent with the number of successes; SPL as a fraction. Only
+the differences between rows carry meaning. The last row is the method as
+described.}
+\label{tab:stop-check}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Stopping rule & SR & SPL \\
+\midrule
+Rules (i) and (iii), as in the reported runs      & 78.9 (142) & 0.346 \\
+No rule: \code{STOP} on the deciding frame        & 74.4 (134) & 0.332 \\
+Stop criterion, planar, $d_{\mathrm{stop}}=1.0\m$    & 77.8 (140) & 0.341 \\
+Stop criterion, planar, $d_{\mathrm{stop}}=0.9\m$    & 80.6 (145) & 0.350 \\
+Stop criterion, Euclidean, $d_{\mathrm{stop}}=1.0\m$ & 80.6 (145) & 0.352 \\
+Stop criterion, Euclidean, $d_{\mathrm{stop}}=0.9\m$ & 82.2 (148) & 0.354 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Two changes that were evaluated and not adopted.} Two further
+changes to target closing were evaluated after both runs with the same paired
+check, each in an arm that differs from the previous one in that change
+alone. Neither was adopted, and in both respects the code is as it was at the
+time of the runs.
+(i) \emph{Steps towards a candidate without depth.} When a candidate is in
+view but its box has no usable depth, the agent steps towards it to obtain
+one. A refused step leaves the pose and the frame unchanged, so the same step
+is requested again; nothing bounds this, because the action budget of the
+verification is paused while the candidate is in view. In five of the $180$
+episodes the agent took between $36$ and $70$ such steps. Ending the stepping
+at the first refused step changed exactly those five episodes. The number of
+such steps fell from $314$ to $46$ in total, and refused forward steps from
+$7.87$ to $6.79$ per episode. Three of the five episodes still succeeded (in
+$128$, $89$ and $80$ actions instead of $205$, $82$ and $116$); the other two,
+which had succeeded after their $70$ refused steps, ran into the step limit.
+The success rate went from $74.4\%$ to $73.3\%$ (none gained, two lost; exact
+McNemar $p=0.5$). The change was withdrawn so that it can be evaluated apart
+from the other changes of this revision; the repeated steps remain a known
+defect (\cref{sec:limitations}).
+(ii) \emph{Clearance of standing points.} When the default planner finds no
+route to a standing point, a second planner with a smaller clearance is
+asked; it keeps the body radius ($0.18\m$, \cref{sec:closing}). A clearance
+of $0.20\m$, which on the $0.1\m$ grid excludes the cells whose nearest
+obstacle cell is exactly $0.2\m$ away, changed $42$ episodes. Standing points
+reached at the smaller clearance fell from $92$ to $52$, targets given up
+because no standing point had a route rose from $29$ to $49$, and refused
+forward steps fell from $6.79$ to $5.92$ per episode. The success rate went
+from $73.3\%$ to $71.1\%$ (two gained, six lost; $p=0.29$) and the SPL from
+$0.325$ to $0.322$. We kept the body radius, which had the higher success
+rate and SPL; the price is the larger number of refused steps.
+Both arms were measured on the code without the scoring-shaped rules and
+before the stop criterion was introduced; $175$ and $138$ of the $180$
+trajectories were identical across the two steps, and control episodes that
+were run again reproduced their trajectories exactly. Neither difference is
+statistically significant at this sample size.
+
+\paragraph{The MP3D run: an older execution stack.} Apart from the
 differences above, the HM3D run used the current code. The MP3D run was started earlier
 from a different branch, whose execution stack predates several changes that
 \cref{sec:navigation,sec:closing} describe:
@@ -1212,9 +1592,8 @@ standoff points were not yet tried front-first with long detours last;
 a stop without a fresh detection was not yet restricted to targets seen within
 the last $15$ actions, and the rules for a target box cut by the image border
 and for re-sightings at the terminal range did not exist;
-and after the decision to stop, one or two further forward steps could be
-taken towards any target (now none for targets on the floor and up to three
-for raised ones).
+and after the decision to stop, one or two further forward steps were taken
+towards any target (rule (ii) above).
 The two benchmarks were therefore not evaluated with the same code, and the two
 rows of \cref{tab:main} must not be compared as one method on two datasets.
 
@@ -1464,7 +1843,9 @@ We collect here what the current evidence does and does not support.
 
 \paragraph{The numbers are not yet results of the described method.} Both runs
 predate the removal of hand-written room priors and of the navigation-mesh
-query in target closing, and the MP3D run predates several changes to
+query in target closing, the replacement of the prescriptive prompt of the
+probability query and the replacement of the closing rules shaped by the
+evaluator by a stop criterion, and the MP3D run predates several changes to
 execution (\cref{sec:experiments-revisions}). Re-running both benchmarks with
 the current code is the first open item.
 
@@ -1475,12 +1856,19 @@ evaluated end to end. Misses, false positives and confusions of a learned
 detector affect every stage: the room labels, the descriptions shown to the
 language model, the target candidates and the decision to stop.
 
-\paragraph{The language model is guided by hand.} The system prompt of the
-probability query states where the HM3D goal categories are usually found,
-describes a typical home and gives numeric bands (\cref{sec:oracle}), and the
-code rescales the model's numbers by exploration state. How much of the
-behaviour is the model's own judgement has not been measured. For the MP3D
-categories that the prompt does not mention, the model is on its own.
+\paragraph{The model's judgement is untested, and is still adjusted by hand.}
+The prompt of the probability query now leaves the judgement about where a
+target is to the language model (\cref{sec:oracle}), but the method in this
+form has not been run on a benchmark: the reported numbers were obtained with
+a prescriptive prompt. Whether the model's unaided numbers order the rooms as
+well as the hand-written rules did is open, and it depends on the model: in a
+small probe (\cref{sec:experiments-revisions}) the numbers of a 3B model
+satisfied fewer of our ordinal claims without the rules ($9$ of $19$ against
+$13$), and the same number ($16$) once the code's adjustment by exploration
+state had been applied. The code still rescales the model's numbers by exploration
+state and fixes the probability of a target-landmark node, and the room types
+the model reads come from a fixed vocabulary. How much of the behaviour is the
+model's own judgement has not been measured.
 
 \paragraph{No held-out evaluation.} Rules and thresholds were developed on the
 evaluated validation episodes (\cref{sec:experiments-privileges}).
@@ -1500,14 +1888,38 @@ a place to stand, has not been measured on the full splits. In the paired
 check of \cref{sec:experiments-revisions} the closing gave up a target because
 no standing point had a route about twice as often as with the query ($0.14$
 against $0.07$ times per episode), and the agent was refused a forward step
-more often where it had to approach at body-radius clearance.
+more often where it had to approach at body-radius clearance. Raising the
+smaller of the two clearances from the body radius to $0.20\m$ reduced the
+refused steps and made the closing give up a target for lack of a route more
+often still ($0.27$ against $0.16$ times per episode); the success rate in
+the check fell by $2.2$ points, which is not significant at $180$ episodes,
+and we kept the body radius (\cref{sec:experiments-revisions}).
+Refused steps are concentrated in few episodes. One known cause is not yet
+removed: when a candidate is in view without usable depth the agent steps
+towards it, and a refused step is requested again because neither the pose
+nor the image has changed; five of the $180$ episodes of the check took $36$
+to $70$ such steps (\cref{sec:experiments-revisions}). A probing step that
+the exploration fallback takes when the agent is enclosed on its inflated map
+is another.
 
 \paragraph{Idealised sensing and a benchmark-shaped controller.} Pose and
 depth are noise-free. The execution stack (the action lattice, the scrape and
 look-down rules, the stopping rules) is built for the discrete action space
-and the success criterion of the Habitat benchmark; it would have to be
-replaced by a continuous controller on a robot, and its stopping rules are
-tied to how the benchmark defines success (\cref{sec:handdesigned}).
+of the Habitat benchmark; it would have to be replaced by a continuous
+controller on a robot. Of the success criterion the method uses the stop
+criterion of each benchmark, one distance and one measure
+(\cref{sec:experiments-benchmarks}), and nothing else.
+
+\paragraph{The stop criterion has been measured on one benchmark.} The
+criterion was evaluated on $180$ MP3D episodes
+(\cref{sec:experiments-revisions}). On HM3D, whose success region is measured
+in the plane, it has not been evaluated; the only earlier evidence there
+concerns a different rule (an unconditional step after the decision to stop,
+which did not help on $70$ recorded stops). The definitions of the two success
+regions were established on validation goals
+(\cref{sec:experiments-privileges}); the other splits have not been examined.
+The walk to the stop distance consults neither the map nor a detection, and
+relies on the simulator to refuse a step that would collide.
 
 \paragraph{Modelling assumptions.} \Cref{eq:objective} treats the rooms as
 independent and takes the language model's numbers as probabilities. We have
@@ -1529,8 +1941,8 @@ exist.}
 \section{Conclusion}\label{sec:conclusion}
 We described a training-free system for object-goal navigation that reasons
 about rooms: it segments the observed floor into rooms, has a language model
-name them and estimate for each the probability that searching it finds the
-target, and orders the rooms by minimum expected time-to-find with RPT*,
+name them and estimate for each the probability that the target is in it,
+and orders the rooms by minimum expected time-to-find with RPT*,
 executing the plan with a planner over the benchmark's own discrete actions and
 a dedicated behaviour for approaching and stopping at the target. Under oracle
 semantic perception and confined to one storey, earlier revisions of the
@@ -1620,6 +2032,11 @@ Alberto Elfes.
 Samir~Yitzhak Gadre, Mitchell Wortsman, Gabriel Ilharco, Ludwig Schmidt, and Shuran Song.
 \newblock CoWs on pasture: Baselines and benchmarks for language-driven zero-shot object navigation.
 \newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2023.
+
+\bibitem[{Gong et~al.(2025)}]{gong2025stairway}
+Zeying Gong, Rong Li, Tianshuai Hu, Ronghe Qiu, Lingdong Kong, Lingfeng Zhang, Yiyi Ding, Leying Zhang, and Junwei Liang.
+\newblock Stairway to success: Zero-shot floor-aware object-goal navigation via {LLM}-driven coarse-to-fine exploration.
+\newblock \emph{arXiv preprint arXiv:2505.23019}, 2025.
 
 \bibitem[{Grimaud(1992)}]{grimaud1992new}
 Michel Grimaud.
@@ -1810,6 +2227,9 @@ Candidate nodes (\cref{sec:nodes}) &
   \path{o_s/rooms/scene_graph.py}, \path{o_s/rooms/opening_nodes.py} \\
 Probability query (\cref{sec:oracle}) &
   \path{core/mapping/topology/search_node_oracle.py},
+  \path{core/mapping/topology/search_node_prompts.py} (the prompt versions;
+  \path{core/mapping/topology/tests/test_search_node_prompts.py} holds each
+  to the rules of \cref{sec:oracle}),
   \path{o_s/rooms/house_context.py}, \path{o_s/rooms/oracle_retry.py},
   \path{o_s/rooms/discovery.py},
   \path{core/mapping/topology/llm_client.py} \\
@@ -1844,8 +2264,8 @@ Target closing (\cref{sec:closing}) &
   \path{o_s/closing/target_closing.py}, \path{o_s/closing/target_path.py},
   \path{o_s/closing/target_backoff.py}, \path{o_s/closing/approach_history.py},
   \path{o_s/closing/target_pursuit.py}, \path{o_s/closing/map_sight.py},
-  \path{o_s/perception/target_context.py},
-  \path{o_s/perception/face_normal.py}, \path{core/mapping/tracking/} \\
+  \path{o_s/closing/stop_criterion.py},
+  \path{o_s/perception/target_context.py}, \path{core/mapping/tracking/} \\
 Standing points (\cref{sec:closing}) &
   \path{o_s/world_model/standing_floor.py} \\
 Single-storey confinement (\cref{sec:storey}) &
@@ -1879,9 +2299,7 @@ No navigation mesh, path finder or storey data in the method
 described in \cref{sec:method}. All were set by hand
 (\cref{sec:handdesigned}). The same values are used for both benchmarks; the
 only settings of the method taken from a benchmark are the agent's body
-dimensions, the detector vocabulary of its goal categories and, for benchmarks
-that score the distance to view points, the absence of additional steps after
-the decision to stop at a target on the floor.
+dimensions and the detector vocabulary of its goal categories.
 
 \begin{longtable}{@{}p{0.60\linewidth}p{0.36\linewidth}@{}}
 \caption{Constants of the method (current code).}\label{tab:hyperparams}\\
@@ -1971,18 +2389,21 @@ Lock after; verification budget & $2$ frames; $12$ actions \\
 Close first sighting re-examined below & $1.3\m$ \\
 Height outside the class band & confidence $\times0.7$; $4$ frames, $0.3\m$ baseline \\
 Terminal range; tolerance; standoff radius & $1.0\m$; $0.05\m$; $0.65\m$ \\
-Standing floor: observed-free disc; obstacle clearance (default, body-radius planner) & $0.18\m$; $0.25\m$, $0.18\m$ \\
+Standing floor: observed-free disc; obstacle clearance (default, retry) & $0.18\m$; $0.25\m$, $0.18\m$ \\
 Standing point moved by at most (standoff; back-off spot) & $0.5\m$; $0.15\m$ \\
 Detour rule for a standoff & walk over standing floor $>1.5\times$ range $+1\m$ \\
 Look around for footing: unobserved share within & $\ge25\%$ within $1.2\m$ \\
-Inspection steps; steps towards a raised target & $\le3$; $\le3$ \\
-Raised target; frontal standoff from & $\ge0.3\m$; $\ge0.6\m$ above the floor \\
+Inspection steps & $\le3$ \\
+Stop criterion: distance; measure (HM3D, MP3D) & $0.9\m$; planar, Euclidean \\
+Stop criterion: an underside counts as raised from & $0.3\m$ \\
+Walk to the stop distance: steps, actions, closest range to the memory & $\le4$, $\le7$, $0.3\m$ \\
 Stop without a fresh box: last seen within & $15$ actions \\
 Release: stall, total budget & $20$, $160$ actions \\
 Rejection memory radius (after a failed inspection) & $1\m$ ($2\m$) \\
 \midrule
 \multicolumn{2}{@{}l}{\emph{Storey} (\cref{sec:storey})} \\
 Drop below the storey plane & $>0.30\m$ \\
+Connected floor of the same storey: riser, distance from the plane (before the storey is walked level) & $\le0.24\m$, $\le0.45\m$ ($\le0.8\m$) \\
 Goals accepted within (of the start height) & $0.5\m$ \\
 Staircase: total rise, risers, riser height & $\ge0.4\m$, $\ge3$, $0.10$--$0.24\m$ \\
 \end{longtable}
@@ -1990,19 +2411,16 @@ Staircase: total rise, risers, riser height & $\ge0.4\m$, $\ge3$, $0.10$--$0.24\
 \section{Prompts}\label{app:prompts}
 The listings in this appendix are copied from the code by a script
 (\path{docs/paper/sync_prompts.py}), not typed, and are the prompts of the
-current code. In the two evaluation runs of \cref{sec:results} the user prompt
-of the probability query carried one additional line, and its system prompt
-one sentence referring to that line (\cref{sec:experiments-revisions}). The
-code contains two supplements to the system prompt of the probability query
-for configurations that are not used in this draft, one for staircases offered
-as nodes and one for exits offered as nodes of their own; they are not listed.
-The supplement for staircases contains further hand-written statements (which
-rooms are usually on which storey) and must be disclosed when multi-storey
-search is reported. It also refers to a rank of the current storey among the
-storeys of the building, which only the removed navigation-mesh source of
-stairs supplied (\cref{sec:experiments-revisions}); the agent's own
-observations give no such rank, and the supplement has to be revised before it
-is used.
+current code. They are \emph{not} the prompts of the two evaluation runs of
+\cref{sec:results}: the probability query of those runs used a long
+prescriptive system prompt and one additional line in the user prompt
+(\cref{sec:experiments-revisions}). The code contains one supplement to the
+system prompt of the probability query, for a configuration that is not used
+in this draft (exits offered as nodes of their own); it explains the line of
+such a node and is not listed. A second supplement, for staircases offered as
+nodes, contained hand-written statements about which rooms are usually on
+which storey; it has been removed together with the staircase nodes
+(\cref{sec:storey}).
 
 \subsection{Room labels}\label{app:prompts-room}
 System prompt. The label set is inserted by the code and is shown as used.
@@ -2050,55 +2468,32 @@ Classify this room.
 %%PROMPT-END:labeller-user%%
 
 \subsection{Per-room probabilities}\label{app:prompts-oracle}
-System prompt.
+%%PROMPT-BEGIN:oracle-version%%
+Prompt version \code{facts-qwen2.5-3b-v1}, written for \code{qwen2.5:3b-instruct}; SHA-256 of its text \code{3ee6c00c94dc1753}\ldots{} System prompt.
+%%PROMPT-END:oracle-version%%
 %%PROMPT-BEGIN:oracle-system%%
 \begin{lstlisting}[style=prompt]
-You are the reasoning module of a robot searching ONE home for an instance of ONE target object category, within a fixed budget of actions. The robot has partly mapped the home into NODES. For EACH node you estimate the probability, in percent, that going there NEXT finds the target: the target is there and the robot would see it by going and looking. You reason like a person who knows how homes are laid out and where things are kept, and how big the target is: every number on a node line is a FINAL result computed for you; read it, do not recompute it.
+You are the reasoning module of a robot that searches a building for one object. The TARGET line names it. The robot has mapped part of the building and divided the map into rooms. Each line under NODES is one place it can search next: a room, together with the unseen space its exits open onto. A detector looks for the target in every camera frame; on the floor a line lists as covered it has looked and not found it. For every node, estimate the probability, in percent, that the target is in the part of it not checked yet: the floor of the room that is left, and the unseen space behind its exits.
 
-NODE LINES.
-ROOM: a region the robot segmented. type= was inferred from the objects seen in it (unknown = NOT IDENTIFIED YET, never "empty"; a type ending in "?" rests on a single kind of object and may be wrong -- a sink alone reads as a kitchen until a toilet shows). size= the room's floor area, read from the walls the depth camera has located: "12m2 (4x3m, all walls seen)" is FINAL -- the room is that big and no bigger; "at least 12m2 (5+ x 3m, 1 wall not seen yet)" is a LOWER BOUND -- a wall is still beyond the camera's reach or hidden, the "+" marks the dimension cut short, and the room may be much bigger than the part mapped so far (a living room seen from its door reads "at least 6m2" until its far wall is seen). covered= how much of the room's floor the camera has looked at from within detection range (about 4 m) -- where the detector has had its chance, NOT where the robot walked -- in m2, as a share of the WHOLE room, and what is LEFT: "10m2 (80% of the room, 2m2 left)". When the size is a lower bound the share is an UPPER bound and the remainder a lower one: "3m2 (at most 40% of the room, at least 4m2 left)" -- the rest of the room is neither mapped nor covered, and "all of the mapped part; the unmapped rest is unknown" means everything mapped was looked at and the room goes on beyond its unseen walls. frontier= unexplored boundaries still accessible inside it (0 is NOT proof that nothing is there). exits= the doorways and gaps at its edge that lead to space NOT seen yet -- rooms the robot has not entered. They are NOT nodes of their own: going to the room means walking its exits and looking through each; in brackets, how many stand at a seen door frame and about how much unexplored floor the camera could reach beyond them (exits=2 (1 doorway, ~30m2 unseen behind them)): a room whose exits open onto a large unseen area is where rooms not found yet must be, one whose exits open onto a few m2 leads nowhere new. glimpsed through its exits: objects seen beyond those thresholds -- they name the rooms BEHIND the exits (a toilet -> a bathroom; a bed -> a bedroom), not this room. status= one of: never_entered (only seen from outside, or not at all); entered (the robot stood in it but never completed a look-around: what is left of it is its uncovered part and what lies behind its frontier= boundaries and its exits=); scanned(<how>, <ago>) (the robot completed a full look-around in it, or saw most of it from one, <ago> ago -- what was visible then was seen ONCE by a detector that misses objects that are small, far, half-hidden, behind a door or under furniture; a scanned room with exits= left is offered again for what lies BEHIND them, not for itself). searched= time spent inside. seen= objects confirmed in it. here=yes: the robot stands in it now.
-The HOUSE line is the big picture: every room type found so far (scanned ones included), how many rooms are still unidentified, how many exits (openings) of the whole home are not yet looked into, whether any unexplored frontier is still reachable -- or only slivers of it, or frontier that no route from here reaches: then the home is NOT covered, the robot is cut off from the rest of it -- and the budget -- actions used of the total. Use ALL of it.
+Use your own reasoning and your own knowledge of standard homes and buildings: how they are laid out, and in which rooms furniture and objects of each kind are normally found. Decide for yourself where this target makes sense, read what each line says about its room, and derive every probability from that. No rules and no typical values are supplied: the judgement is yours.
 
-HOW MUCH IS LEFT -- COVERAGE FIRST. covered= is the MAIN fact for how much of a room is still to be searched; the size says what that remainder can hold. You know how big the target is: judge whether it fits in what is LEFT. 2m2 left of a 12m2 bedroom can hide a cup, a book or a chair, not a bed or a sofa; "at least 14m2 left" of a room of "at least 20m2" can hold anything, and the room may be far bigger. A room with all walls seen and covered 90% or more, the target not seen, is as good as scanned -- almost nothing is left to look at. A room of "at least" size, or covered under half, still holds most of itself unseen and stays promising. frontier= says where the uncovered part is reached from.
-TIME IS SECONDARY. searched= is read only beside covered=, and coverage overrides it: many actions in a big room at low coverage take NOTHING from it -- a big room reasonably takes many actions while much of it is left -- and a few actions in a room already covered are enough to give it up. Never lower a room for its searched= alone, and never keep a covered room up because it was searched briefly.
+Fields of a room line:
+type= the room's classification, inferred from the objects seen in it. "unknown": the robot has not determined yet what kind of room this is; it may be any kind. A trailing "?": tentative, the evidence is thin.
+size= floor area and dimensions on the current map. "all sides mapped": no part of the room lies outside the map, though the map's division into rooms may still be revised. "at least": a side is not mapped yet and the room continues beyond it ("+": that dimension is cut short; "open edge": the length of the unmapped side).
+covered= floor of the room the detector has already checked: its area and its share of the room. "left": floor it has not checked yet.
+frontier= boundaries to unexplored space that the robot can reach inside the room.
+exits= doorways and gaps on the room's edge that lead to space not seen yet; in brackets, how many are at a door frame and how much unseen floor lies behind them. "glimpsed through its exits:" objects detected beyond them, outside this room.
+status= never_entered (seen from outside only), entered (the robot has been inside), or scanned(<how>, <how long ago>) (its look at the room is complete; <how> says in what way).
+searched= how long the robot has spent inside the room so far.
+connected to: the types of the rooms it is joined to by a door or a doorway.
+seen: the kinds of object detected in the room so far ("xN": N of a kind; "+N more": kinds not listed).
+The HOUSE line summarises the building so far: room types found and their status, rooms not identified, openings (exits of any room) not yet looked into, whether unexplored frontier is reachable, and actions used out of the budget.
 
-EXITS. What lies behind a room's exits is decided by the HOME, never by the count alone: an exit leads to a room of this home, and the rooms the home still lacks say which. Exits RAISE a room ONLY when its type fits the target -- a bathroom with an unlooked door (a second bathroom or an en-suite beyond it) when the target is a toilet; a bedroom whose exit may be an en-suite's; a kitchen's exits for a refrigerator -- or when a glimpse through one of them names the home type (a toilet glimpsed through an exit of the hallway: that room is the bathroom seen from its door, 60 or more). Exits of a hallway, a corridor or an unidentified room are valued by what the home still lacks behind them: while the bathroom is missing, they are where it must be. Exits of a room whose type does NOT fit the target do NOT raise it, however many: three gaps off a living room, for a toilet, lead to strips of the living room or to rooms already found, and the living room stays low. A room with many exits and no fit is no more promising than one with none.
-
-HOW TO JUDGE. Work in this order and write steps 1-3 into the reply before any number.
-STEP 1 "home": the room types where this object normally lives, most likely first, and where it is rare. Typical homes: a toilet in a bathroom -- a separate one, or an en-suite reached through a bedroom; a bed in a bedroom; a sofa or couch in a living room (sometimes a family room or an office); a television in a living room, then a bedroom, rarely a kitchen, never a bathroom; a chair in a dining room, kitchen, office, bedroom or living room; a potted plant in a living room, hallway, kitchen or balcony; a refrigerator, oven or stove in a kitchen; a bathtub or shower in a bathroom. Small objects that travel (cup, book, bottle) have a home too, only a weaker one.
-STEP 2 "house": read the home from the rooms found. A typical home has ONE kitchen, ONE living room, ONE dining area, one to four bedrooms, one to three bathrooms (one often en-suite off the main bedroom), a hallway, perhaps an office, a laundry or a garage. If a type that occurs once has been FOUND, an unidentified room is unlikely to be another of it, and the odds of the target's home being among the unidentified rooms drop. If the home type is still MISSING, the unidentified rooms and the unlooked exits are where it must be: value them in proportion to how well their size fits the home type (bathrooms ARE small, 3-8 m2; bedrooms 9-20 m2; living rooms 15 m2 and up) and to what else the home still lacks -- never write a room off for its size, and never read a size of "at least" as the room's size: a room with walls not seen yet may be any type its lower bound allows. A home-type object seen in a room of ANOTHER type (a sink in a "living room", a bed in a "kitchen") means the map merged two rooms: value that room as the home type.
-STEP 3 "stage": weigh the budget. EARLY -- much budget left and unexplored places remain: the target is most likely somewhere not yet looked at; unexplored rooms and the rooms whose exits lead to them first, scanned rooms low. LATE -- most of the home seen, few or no unexplored places or frontier left, the home type found but the target not seen: the detector may have MISSED the target in a scanned room of a fitting type (a toilet behind a half-open door, a television on a wall the scan grazed, a chair under a table), and the chance that an unseen room holds it falls with every place looked at; raise the scanned rooms of the home type -- a second look from a different spot -- and lower the rest. Write "pass": "first" while an unexplored place in this home is still worth looking at before any scanned room is re-checked, else "second". The first pass over the home comes before the second, unless a scanned home-type room is the only candidate left.
-STEP 4 the numbers, one per node, independently, integers 0-100:
- - a scanned room of a type the target does not live in: 0-2.
- - a scanned room of the home type with the target not seen: 3-10 early in the budget, 15-40 late in it, less if it was scanned moments ago.
- - an entered but unscanned room: value only what is LEFT of it -- its covered= remainder and what its frontier= boundaries still hide -- at most HALF of what an unexplored room of the same type and size would get; under 10 when all walls are seen and 80% or more is covered. All walls seen and 90% or more covered, the target not seen, is as good as scanned: 0-5 whatever its type and whatever searched= reads. A room of "at least" size, or covered under half, keeps its value whatever searched= reads. Never write "known to contain" the target of a room the target was not seen in.
- - a never-entered room of unknown type: never below 15 while the home type is missing; by size fit and by what the home lacks once it is found. Its frontier= count measures the MAP, not the room: a never-entered room with frontier=0 or 1 is as unexplored as one with five -- clearing one boundary of an unentered room opens the whole of it and what lies beyond. Never lower a never-entered room for a low frontier count.
- - a never-entered room named as the home type by objects seen through its door, or a room whose exits' glimpse names the home type behind them: 60 or more.
- - a never-entered room of the home type with frontier left, target not seen: 30 or more; the same room entered: 10-20, more only if much of it is left (covered under half, or walls not seen yet).
- - prefer the places the robot has NOT been near: a room away from everything entered and scanned, or one whose exits lead away from it all, leads to a part of the home not seen at all; a gap at the edge of a scanned room usually shows a strip of it.
- - a hallway or corridor rarely holds the target, but one with exits LEADS to unseen rooms: value it by what the home still lacks behind them.
- - a scanned room re-offered late: the longer ago its scan, the more a second look from another spot is worth; scanned moments ago -> low, not zero.
- - SPREAD, do not copy: the unexplored rooms and the exits of the rooms found compete for the same missing rooms. A missing bathroom is ONE room, so five unlooked exits spread over three rooms share its chance -- the room whose type and exits fit it best gets most, the others about 10-15, never 35 on every room with an exit; with many exits and one or two missing home-type rooms, most such rooms get under 15. Several exits often lead to the same hallway. The sum over the unexplored places should be about the chance that the target is somewhere not yet looked at, not more.
-ALWAYS: NEVER use distance, travel time or here=yes as a reason -- the planner charges travel, and the room the robot stands in is judged exactly like the others. Several rooms may each hold an instance: the numbers are independent search-success probabilities, NOT shares of one distribution; do NOT make them sum to 100. Score EVERY node id given, and only those ids. Per node write "why" first (at most 12 words, lower case, naming the room's likely type and what decided it), then "p".
-Reply with ONLY this JSON, keys in this order:
-{"home":"<step 1, max 12 words>","house":"<step 2, max 25 words>","stage":"<step 3, max 20 words>",
- "pass":"first|second","nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
-EXAMPLE of the FORMAT and the style of reasoning -- a different home every time, so never copy its numbers or its words. TARGET toilet; HOUSE: rooms found: kitchen (scanned), living_room (scanned), bedroom (never entered), hallway (entered); 1 room unidentified; 3 openings not yet looked into; actions used about 150 of 500:
-id=2  ROOM  type=kitchen  size=12m2 (4x3m, all walls seen)  covered=11m2 (90% of the room, 1m2 left)  frontier=0  exits=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
-id=3  ROOM  type=living_room  size=24m2 (6x4m, all walls seen)  covered=20m2 (80% of the room, 4m2 left)  frontier=1  exits=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
-id=5  ROOM  type=bedroom  size=at least 9m2 (3.5+ x 3m, 1 wall not seen yet)  covered=4m2 (at most 50% of the room, at least 5m2 left)  frontier=1  exits=1 (1 doorway)  status=never_entered  searched=0s  seen: bed
-id=6  ROOM  type=unknown  size=at least 3m2 (2+ x 1.5+m, 2 of 4 walls not seen yet)  covered=1m2 (at most 40% of the room, at least 2m2 left)  frontier=1  exits=0  status=never_entered  searched=0s  seen: nothing yet
-id=7  ROOM  type=hallway  size=6m2 (4x1.5m, all walls seen)  covered=4m2 (70% of the room, 2m2 left)  frontier=1  exits=1 (1 doorway)  status=entered  searched=10s  here=yes  seen: nothing yet
-{"home":"bathroom; often an en-suite off a bedroom",
- "house":"kitchen and living room found and scanned; no bathroom yet; one unidentified room, at least 3m2 with two walls unseen, could be a bathroom; unlooked doorways off the bedroom and the hallway",
- "stage":"early, 150 of 500 used, unexplored places remain: first pass",
- "pass":"first",
- "nodes":[{"id":2,"why":"kitchen, scanned, 1m2 left, toilets are not in kitchens","p":1},
-{"id":3,"why":"living room, scanned, 4m2 left; its gap is no bathroom door","p":2},
-{"id":5,"why":"bedroom never entered, at least 5m2 unseen, its doorway may be an en-suite's","p":35},
-{"id":6,"why":"small unidentified room, mostly unseen, bathroom sized so far, bathroom missing","p":50},
-{"id":7,"why":"hallway, 2m2 left of it; its unlooked doorway leads to the missing bathroom","p":25}]}
-Had the HOUSE line read "every known room identified; 0 openings not yet looked into; no unexplored frontier left; actions used about 420 of 500" with a bathroom found and scanned 4 minutes ago, the pass would be "second": the scanned bathroom 35, the scanned bedroom 8 (an en-suite door the scan may have missed), and the scanned kitchen and living room 1 each.
+Judge every node on its own: several may each hold a target, so the numbers are independent and need not sum to 100. Leave travel out: a planner weighs your probabilities against the distances. Score every id given, and no other.
+Reply with ONLY this JSON, keys in this order, ending with one "nodes" entry per node:
+{"home":"<where this target is normally found, max 12 words>","house":"<what the rooms found say about this building, max 25 words>","stage":"<how far the search has got, max 20 words>","pass":"first|second","nodes":[{"id":<int>,"why":"<reason, max 12 words>","p":<int 0-100>}, ...]}
+"p": the probability in percent, from 0 (certain the target is not there) to 100 (certain it is).
+"pass": "second" if re-checking rooms already scanned is now worth more than what is left unexplored, else "first".
 \end{lstlisting}
 %%PROMPT-END:oracle-system%%
 User prompt template. \code{\{house\}} is the summary line and
@@ -2110,11 +2505,11 @@ configuration.
 TARGET: {target}
 
 HOUSE: {house}
-{storeys}
+
 NODES ({n}):
 {nodes}
 
-Score all {n} nodes independently. JSON only.
+For each of the {n} nodes: how likely is it that the target ({target}) is in the part of it not checked yet? Score them independently. JSON only.
 \end{lstlisting}
 %%PROMPT-END:oracle-user%%
 
@@ -2136,7 +2531,12 @@ Code revision (git) & \code{0dd7d39c} & \code{a77c946c} \\
 Hand-written room priors & present & present \\
 Navigation-mesh query in target closing & present & present \\
 Routes through unobserved cells in target closing & present & present \\
+Prescriptive prompt of the probability query & present & present \\
 Size status and coverage in the probability query & absent & absent \\
+Steps after the decision to stop: raised targets & present & present \\
+Steps after the decision to stop: any target & absent & present \\
+Frontal approach to raised planar targets & present & present \\
+Stop criterion of the benchmark (\cref{sec:closing}) & absent & absent \\
 Execution stack & current & older (\cref{sec:experiments-revisions}) \\
 Storey changes & off & off \\
 Source of staircases & agent's depth & agent's depth \\

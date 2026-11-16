@@ -1,102 +1,98 @@
-"""LLM node oracle: target + the nodes a search can go to next -> P(going there finds it).
+"""LLM node oracle: the target's name + the rooms mapped so far -> P(the target is in each room).
 
-The successor of :mod:`search_oracle` for the room-search loop. That module
-was written around a 3B model: it asked one narrow question (how typical is
-this object in a room of this type) and applied frontiers, search time and
-room size in code, because the small model double-counted them into its
-semantic judgement. This one is written for a capable model (the runtime
-routes it to ``LLMConfig.reasoning_model``, a 14B instruct model) and asks
-the WHOLE question at once, over every node the search could go to next:
+The room-search loop asks a language model one question per loop point, over
+every node the search could go to next. This module is the whole of that
+question: the prompt, the parse, and the contract the planner relies on. The
+runtime routes the call to ``LLMConfig.reasoning_model``.
 
-* a **room** the map has segmented on the storey the robot stands on --
-  identified by type from the objects seen in it, or still ``unknown`` --
-  with its size (final, or a lower bound while a wall is unseen) and how
-  much of its floor the camera has covered, the frontier (unexplored
-  boundary) left inside it, its
-  **exits** (the doorways and gaps at its edge leading to space not seen
-  yet, how many stand at a seen door frame, and what was glimpsed through
-  them -- since 2026-10-21 the room's attributes, not nodes of their own),
-  its **status** (never entered; entered but not looked around; scanned, and
-  how long ago), how long it was searched and the objects confirmed in it;
-* a **staircase** to another storey, when the search is allowed to change
-  storeys (the standard single-storey benchmarks never offer one);
-* an **opening** -- a doorway or gap at the edge of the mapped floor leading
-  to space not seen yet, valued by the room likely behind it -- only under
-  the deprecated exits-as-nodes mode (``OpeningSettings.exits_as_nodes``),
-  which brings :data:`OPENINGS_SUPPLEMENT` into the system prompt. The
-  room-level design values a room by its type AND its exits: a high exit
-  count raises a room only where its type fits the target's home (a
-  bathroom's unlooked door for a toilet, never a living room's gaps), and
-  the room's visit walks its exits itself.
+**The division of labour.** The model gives one thing: for each room, the
+probability that the target is in it. Distance, and the weighing of distance
+against every probability, is RPT*'s (``room_costs.build_instance`` charges
+the travel, the solver minimises the expected time to find). So the prompt
+carries no distance, no position and no word on where the robot stands
+(``here=yes`` was dropped on 2026-11-16; :attr:`SearchNode.here` is kept for
+the record and never rendered), and the model is told that travel is the
+planner's.
 
-**LLM-first (since 2026-10-07).** The model is given the big picture and
-asked to apply the knowledge a person has of homes: where the target
-normally lives (a toilet in a bathroom -- a separate one or an en-suite off a
-bedroom; a television in a living room, then a bedroom, rarely a kitchen,
-never a bathroom); what the rooms found so far say about the rooms not yet
-identified (a home has one kitchen and one living room, so once the living
-room is found an unidentified room is unlikely to be another, and the sofa's
-odds there drop; while no bathroom has been seen the small unidentified rooms
-and the unlooked doorways are where the toilet must be, so exploration comes
-first); and the **budget** -- early in the episode the target is most likely
-somewhere not yet looked at, late in it the chance that the detector missed
-it in a room already scanned rises while the chance that an unseen room holds
-it falls, so a second look at the scanned rooms of the right type becomes
-worth its actions. The model writes that judgement into the reply (``home``,
-``house``, ``stage``) before any number, and a structured ``pass`` verdict --
-``first`` while an unexplored place is still worth looking at before any
-scanned room is re-checked, ``second`` when the house has been covered -- which
-the loop reads to decide whether scanned rooms are offered as nodes at all.
+**The model's own knowledge, and none of ours (since 2026-11-16).** The
+system prompt tells the model to use its own reasoning and its own knowledge
+of standard homes and buildings -- how they are laid out, in which rooms
+furniture and objects of each kind are found -- and to derive every
+probability from that. It holds no category knowledge: no room named as the
+place of any object, no number or band a probability should fall in, no list
+of a benchmark's goal categories, no count of rooms a home has, no worked
+example. The only object it ever sees named is the one on the ``TARGET:``
+line of the user prompt -- the name of the object the current episode
+searches for (``TargetLabels.query``), given in every call. What the system
+prompt does hold is what a model cannot know: what each field of a line
+means, what the reply looks like, and that the numbers are independent. The
+conclusions -- what a covered room is worth, what an exit promises, when a
+second look pays -- are the model's. Until that day the prompt was 14,751
+characters of them: the rooms of each HM3D goal category, the rooms a
+typical home has, a band of numbers for every room status, "coverage first,
+time second", and a worked example (``CHANGELOG.md`` 2026-11-16, "the
+oracle's prompt").
 
-The reply gives independent per-node search-success estimates, not mutually
-exclusive target-location shares. The room-search loop hands these
-probabilities without renormalisation to RPT*, whose objective (expected
-time-to-find) weighs them against the travel cost the planner computes --
-which is why the model is told, twice, not to reason about distance.
+**What a room line holds: everything the scene graph stores about the room,
+except distance.** Its type (``unknown`` while unidentified, ``?`` on a
+type that rests on one kind of object); its size and how much of it the
+camera has covered (the room extents, ``room_extent.py``: the agent's own
+occupancy map and partition); the frontier left in it; its exits to unseen
+space, how many stand at a door frame, the unseen floor behind them and what
+was glimpsed through them; its status (never entered, entered, scanned and
+how long ago); the effort spent inside; the types of the rooms a door or
+doorway joins it to (the graph's edges); and the objects detected in it,
+with their counts. Left out, and why: the room's centroid, the lines its
+walls stand on and the agent's distance to each (position is distance), how
+long ago the robot was last inside (where the robot is), the classifier's
+confidence (the ``?`` is its reading), and the bookkeeping (ids of doors,
+partition revisions, the previous round's numbers).
+
+**"Mapped", not "final".** A room whose four sides are all located reads
+``size=12m2 (4x3m, all sides mapped)``; one with a side the camera has not
+reached reads ``size=at least 12m2 (5+ x 3m, 1 of 4 sides not mapped yet,
+open edge 2m)``. As first written (the room extents, earlier on 2026-11-16)
+the first read "all walls seen" and the
+prompt called it FINAL -- "the room is that big and no bigger". That
+promised more than the reading knows: of 252 rooms so declared in 40 HM3D
+recordings, 73 were over a quarter bigger by the end of the episode. Of the
+233 growths behind that, 229 were the PARTITION changing (178 merges of two
+rooms, 51 moved cuts) -- floor that was mapped, and listed under the
+neighbouring room, all along -- and 3 a side read as located that was not.
+What the extents know is that no side of the room opens onto unmapped space;
+they cannot know that the watershed will not join it to its neighbour. The
+words now say the first and the prompt says the second, in one clause. The
+alternative -- withholding the verdict wherever a side is a cut rather than
+a wall -- would have told the model that mapped floor is unmapped.
+
+**One unit of effort.** With :attr:`SearchContext.action_time_s` given, the
+durations on a line are written in actions (``searched=40 actions``,
+``scanned(full rotation, 120 actions ago)``), the unit the HOUSE line's
+budget is in; without it, in time (``40s``, ``2min``). Both in the same
+coarse steps, so an unchanged map gives an unchanged prompt.
+
+**The reply** is ``{"home", "house", "stage", "pass", "nodes": [{"id",
+"why", "p"}]}``, unchanged: three short readings in the model's words, kept
+for the recording; a ``pass`` verdict (``first`` / ``second``), recorded;
+and one integer percentage per node. The percentages are independent
+per-node estimates, not shares of one distribution, and are handed to RPT*
+without renormalisation.
 
 What stays in code is the contract, never the judgement: parse and clamp,
 drop invented ids, give an omitted node a small share rather than zero,
 derive joint failure under RPT*'s independence approximation, refuse a reply
-with no usable node (the caller repairs the schema once, then backs off), and
-reuse the last reply when the prompt is byte-identical -- the effort and
-budget numbers are shown in coarse steps so an unchanged map produces an
-unchanged prompt.
+with no usable node (the caller repairs the schema once, then backs off),
+and reuse the last reply when the prompt is byte-identical. One arithmetic
+floor remains as a knob and is OFF by default (``unexplored_floor``, the 3B
+era's guard against never-entered rooms written off at 0-1 %).
 
-**Size and coverage, final results only (since 2026-11-16).** The code does
-the arithmetic and the model is handed the results. A room line's ``size=``
-is read from the room extents (``room_extent.py``: the agent's own
-occupancy map and its partition, nothing else) -- FINAL (``12m2 (4x3m, all
-walls seen)``) only when every wall is located on the depth-derived map, a
-LOWER BOUND otherwise (``at least 12m2 (5+ x 3m, 1 wall not seen yet)``,
-the ``+`` marking the dimension the camera's reach cut short) -- and is
-followed by the coverage: the floor the camera has looked at from within
-detection range, in m2, as a share of the WHOLE room and as what is left
-(``covered=10m2 (80% of the room, 2m2 left)``), the share an upper bound and
-the remainder a lower one when the size is (``covered=3m2 (at most 40% of
-the room, at least 4m2 left)``). The rules put COVERAGE FIRST -- the main
-fact for how much of a room is left, the size saying what the remainder can
-hold, the model judging on its own whether the target fits -- and TIME
-SECOND: coverage overrides ``searched=`` both ways. The rest of the line
-(frontier, exits, status, time, ``here=yes``, objects) is as it was, and
-the agent's distance to each wall stays in the extent record, for the
-review alone: the model is told not to reason about distance.
-
-Two arithmetic floors remain available as knobs and are OFF by default
-(``unexplored_floor``, ``unexplored_elsewhere``). They were
-written for a 3B model that wrote off never-entered rooms at 0-1% and copied
-the worked example's numbers (the Hanson and Ranchester recordings of
-2026-10-04/05, see the git history of this file); a 14B model given the
-prompt below applies the same rules itself, and a floor that overrides it
-would be exactly the default value the search is meant to stop relying on.
-The multi-storey supplement's ``home_here`` verdict is still parsed, so a
-development run that lifts the stair ban can switch the floors back on.
-
-**No hand-written category table (since 2026-11-15).** Until then the user
-prompt carried a ``WHERE IT LIVES`` line rendered from a table of likely and
-rare room types per target category, a room holding a listed "home object" of
-the target could be floored (``home_floor``), and the system prompt told the
-model to copy that line into its ``home`` step. All three are gone with the
-table (``room_priors.py``): where a target lives is the model's own step 1.
+An **opening** -- a doorway or gap at the edge of the mapped floor -- is a
+node of its own only under the deprecated exits-as-nodes mode
+(``OpeningSettings.exits_as_nodes``), which appends
+:data:`OPENINGS_SUPPLEMENT`: the meaning of that line, nothing more. There
+is no staircase node and no multi-storey supplement: the search is
+single-storey, and both were deleted on 2026-11-16 until the multi-storey
+work brings them back.
 
 Python 3.8 syntax, standard library only.
 """
@@ -105,275 +101,44 @@ from __future__ import annotations
 import inspect
 import math
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
+
+from sparx_agency.core.mapping.topology.search_node_prompts import (
+    DEFAULT_PROMPT, NodeOraclePrompt, PROMPTS, prompt_version)
 
 ROOM = "room"
-STAIRS = "stairs"
 OPENING = "opening"
-KINDS = (ROOM, STAIRS, OPENING)
+KINDS = (ROOM, OPENING)
 
 #: Largest node probability handed on: RPT*'s heuristic divides by ``1 - p``.
 P_CEILING = 1.0 - 1e-6
 #: Share, in percent, given to a listed node the model did not score.
 OMITTED_PERCENT = 1.0
-#: Object classes shown per room; a longer list is answered about the list, not the room.
+#: Object classes shown per room, the most numerous first; a longer list is answered about the list, not the room.
 MAX_CLASSES_IN_PROMPT = 8
 #: Default probability floor for an unexplored node (a never-entered, unidentified room;
-#: an opening with nothing glimpsed through it). OFF: the model is asked to apply the
-#: rule itself (see the module docstring); ``SearchNodeOracle(unexplored_floor=0.25)``
-#: restores the 3B-era arithmetic.
+#: an opening with nothing glimpsed through it). OFF: the model's numbers stand (see the
+#: module docstring); ``SearchNodeOracle(unexplored_floor=0.25)`` restores the 3B-era arithmetic.
 UNEXPLORED_FLOOR = 0.0
-#: What an unexplored node is read at when the multi-storey supplement's ``home_here``
-#: verdict says the target's home type lives on another storey. OFF by default.
-UNEXPLORED_ELSEWHERE = 0.0
-#: The three answers to the multi-storey supplement's "is a room of the home type on this storey?".
-HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE = "found", "missing", "elsewhere"
-HOME_HERE = (HOME_FOUND, HOME_MISSING, HOME_ELSEWHERE)
-#: The two answers to "has the house been covered?": ``first`` while an unexplored place is
-#: still worth a look before any scanned room is re-checked, ``second`` once it is not.
+#: The two answers to "what is worth more now?": ``first`` while what is left unexplored is,
+#: ``second`` once re-checking the rooms already scanned is.
 PASS_FIRST, PASS_SECOND = "first", "second"
 PASSES = (PASS_FIRST, PASS_SECOND)
-#: Actions are shown to the model in steps of this many, so the prompt does not change
-#: on every action over an unchanged map.
+#: The budget is shown to the model in steps of this many actions, so the prompt does not change on every action
+#: over an unchanged map (a room's own durations are coarse too: :func:`coarse_duration`).
 BUDGET_STEP = 25
 #: The ``NodeOracleResult.source`` values the runtime flies on: the model's own numbers, or the flat
 #: ablation's (``SearchNodeOracle(flat_p=...)``). ``uniform_fallback`` -- a model that failed -- is refused.
 SOURCE_LLM, SOURCE_FLAT = "llm", "flat"
 USABLE_SOURCES = (SOURCE_LLM, SOURCE_FLAT)
 
-SYSTEM_PROMPT = """You are the reasoning module of a robot searching ONE home for an instance of \
-ONE target object category, within a fixed budget of actions. The robot has partly mapped \
-the home into NODES. For EACH node you estimate the probability, in percent, that going \
-there NEXT finds the target: the target is there and the robot would see it by going and \
-looking. You reason like a person who knows how homes are laid out and where things are kept, \
-and how big the target is: every number on a node line is a FINAL result computed for you; \
-read it, do not recompute it.
-
-NODE LINES.
-ROOM: a region the robot segmented. type= was inferred from the objects seen in it \
-(unknown = NOT IDENTIFIED YET, never "empty"; a type ending in "?" rests on a single kind \
-of object and may be wrong -- a sink alone reads as a kitchen until a toilet shows). \
-size= the room's floor area, read from the walls the depth camera has located: "12m2 (4x3m, \
-all walls seen)" is FINAL -- the room is that big and no bigger; "at least 12m2 (5+ x 3m, 1 \
-wall not seen yet)" is a LOWER BOUND -- a wall is still beyond the camera's reach or hidden, \
-the "+" marks the dimension cut short, and the room may be much bigger than the part mapped \
-so far (a living room seen from its door reads "at least 6m2" until its far wall is seen). \
-covered= how much of the room's floor the camera has looked at from within detection range \
-(about 4 m) -- where the detector has had its chance, NOT where the robot walked -- in m2, as \
-a share of the WHOLE room, and what is LEFT: "10m2 (80% of the room, 2m2 left)". When the \
-size is a lower bound the share is an UPPER bound and the remainder a lower one: "3m2 (at \
-most 40% of the room, at least 4m2 left)" -- the rest of the room is neither mapped nor \
-covered, and "all of the mapped part; the unmapped rest is unknown" means everything mapped \
-was looked at and the room goes on beyond its unseen walls. \
-frontier= unexplored boundaries still accessible inside it (0 is NOT \
-proof that nothing is there). exits= the doorways and gaps at its edge that lead to space \
-NOT seen yet -- rooms the robot has not entered. They are NOT nodes of their own: going to \
-the room means walking its exits and looking through each; in brackets, how many stand at a \
-seen door frame and about how much unexplored floor the camera could reach beyond them \
-(exits=2 (1 doorway, ~30m2 unseen behind them)): a room whose exits open onto a large unseen \
-area is where rooms not found yet must be, one whose exits open onto a few m2 leads nowhere \
-new. glimpsed through its exits: objects seen beyond \
-those thresholds -- they name the rooms BEHIND the exits (a toilet -> a bathroom; a bed -> a \
-bedroom), not this room. status= one of: never_entered (only seen from \
-outside, or not at all); entered (the robot stood in it but never completed a look-around: \
-what is left of it is its uncovered part and what lies behind its frontier= boundaries and \
-its exits=); \
-scanned(<how>, <ago>) (the robot completed a full look-around in it, or saw most of it from \
-one, <ago> ago -- what was visible then was seen ONCE by a detector that misses objects that \
-are small, far, half-hidden, behind a door or under furniture; a scanned room with exits= \
-left is offered again for what lies BEHIND them, not for itself). searched= time spent \
-inside. seen= objects confirmed in it. here=yes: the robot stands in it now.
-The HOUSE line is the big picture: every room type found so far (scanned ones included), how \
-many rooms are still unidentified, how many exits (openings) of the whole home are not yet \
-looked into, whether any unexplored frontier is still reachable -- or only slivers of it, or frontier that no route \
-from here reaches: then the home is NOT covered, the robot is cut off from the rest of it -- and the budget -- actions \
-used of the total. Use ALL of it.
-
-HOW MUCH IS LEFT -- COVERAGE FIRST. covered= is the MAIN fact for how much of a room is \
-still to be searched; the size says what that remainder can hold. You know how big the target \
-is: judge whether it fits in what is LEFT. 2m2 left of a 12m2 bedroom can hide a cup, a book \
-or a chair, not a bed or a sofa; "at least 14m2 left" of a room of "at least 20m2" can hold \
-anything, and the room may be far bigger. A room with all walls seen and covered 90% or \
-more, the target not seen, is as good as scanned -- almost nothing is left to look at. A \
-room of "at least" size, or covered under half, still holds most of itself unseen and stays \
-promising. frontier= says where the uncovered part is reached from.
-TIME IS SECONDARY. searched= is read only beside covered=, and coverage overrides it: many \
-actions in a big room at low coverage take NOTHING from it -- a big room reasonably takes \
-many actions while much of it is left -- and a few actions in a room already covered are \
-enough to give it up. Never lower a room for its searched= alone, and never keep a covered \
-room up because it was searched briefly.
-
-EXITS. What lies behind a room's exits is decided by the HOME, never by the count alone: an \
-exit leads to a room of this home, and the rooms the home still lacks say which. Exits RAISE \
-a room ONLY when its type fits the target -- a bathroom with an unlooked door (a second \
-bathroom or an en-suite beyond it) when the target is a toilet; a bedroom whose exit may be \
-an en-suite's; a kitchen's exits for a refrigerator -- or when a glimpse through one of them \
-names the home type (a toilet glimpsed through an exit of the hallway: that room is the \
-bathroom seen from its door, 60 or more). Exits of a hallway, a corridor or an unidentified \
-room are valued by what the home still lacks behind them: while the bathroom is missing, \
-they are where it must be. Exits of a room whose type does NOT fit the target do NOT raise \
-it, however many: three gaps off a living room, for a toilet, lead to strips of the living \
-room or to rooms already found, and the living room stays low. A room with many exits and no \
-fit is no more promising than one with none.
-
-HOW TO JUDGE. Work in this order and write steps 1-3 into the reply before any number.
-STEP 1 "home": the room types where this object normally lives, most likely first, and \
-where it is rare. Typical homes: a toilet in a bathroom -- a separate one, or an en-suite \
-reached through a bedroom; a bed in a bedroom; a sofa or couch in a living room (sometimes a \
-family room or an office); a television in a living room, then a bedroom, rarely a kitchen, \
-never a bathroom; a chair in a dining room, kitchen, office, bedroom or living room; a potted \
-plant in a living room, hallway, kitchen or balcony; a refrigerator, oven or stove in a \
-kitchen; a bathtub or shower in a bathroom. Small objects that travel (cup, book, bottle) \
-have a home too, only a weaker one.
-STEP 2 "house": read the home from the rooms found. A typical home has ONE kitchen, ONE \
-living room, ONE dining area, one to four bedrooms, one to three bathrooms (one often \
-en-suite off the main bedroom), a hallway, perhaps an office, a laundry or a garage. If a \
-type that occurs once has been FOUND, an unidentified room is unlikely to be another of it, \
-and the odds of the target's home being among the unidentified rooms drop. If the home type \
-is still MISSING, the unidentified rooms and the unlooked exits are where it must be: value \
-them in proportion to how well their size fits the home type (bathrooms ARE small, 3-8 m2; \
-bedrooms 9-20 m2; living rooms 15 m2 and up) and to what else the home still lacks -- \
-never write a room off for its size, and never read a size of "at least" as the room's \
-size: a room with walls not seen yet may be any type its lower bound allows. A home-type \
-object seen in a room of ANOTHER type (a sink in a "living room", a bed in a "kitchen") \
-means the map merged two rooms: value that room as the home type.
-STEP 3 "stage": weigh the budget. EARLY -- much budget left and unexplored places remain: \
-the target is most likely somewhere not yet looked at; unexplored rooms and the rooms whose \
-exits lead to them first, scanned rooms low. LATE -- most of the home seen, few or no \
-unexplored places or frontier \
-left, the home type found but the target not seen: the detector may have MISSED the target in a \
-scanned room of a fitting type (a toilet behind a half-open door, a television on a wall \
-the scan grazed, a chair under a table), and the chance that an unseen room holds it \
-falls with every place looked at; raise the scanned rooms of the home type -- a second look \
-from a different spot -- and lower the rest. Write "pass": "first" while an unexplored place \
-in this home is still worth looking at before any scanned room is re-checked, else "second". \
-The first pass over the home comes before the second, unless a scanned home-type room is \
-the only candidate left.
-STEP 4 the numbers, one per node, independently, integers 0-100:
- - a scanned room of a type the target does not live in: 0-2.
- - a scanned room of the home type with the target not seen: 3-10 early in the budget, \
-15-40 late in it, less if it was scanned moments ago.
- - an entered but unscanned room: value only what is LEFT of it -- its covered= remainder \
-and what its frontier= boundaries still hide -- at most HALF of what an unexplored room of the \
-same type and size would get; under 10 when all walls are seen and 80% or more is covered. All \
-walls seen and 90% or more covered, the target not seen, is as good as scanned: 0-5 whatever \
-its type and whatever searched= reads. A room of "at least" size, or covered under half, keeps \
-its value whatever searched= reads. Never write "known to contain" the target of a room the \
-target was not seen in.
- - a never-entered room of unknown type: never below 15 while the home type is missing; by \
-size fit and by what the home lacks once it is found. Its frontier= count measures the MAP, \
-not the room: a never-entered room with frontier=0 or 1 is as unexplored as one with five -- \
-clearing one boundary of an unentered room opens the whole of it and what lies beyond. \
-Never lower a never-entered room for a low frontier count.
- - a never-entered room named as the home type by objects seen through its door, or a room \
-whose exits' glimpse names the home type behind them: 60 or more.
- - a never-entered room of the home type with frontier left, target not seen: 30 or more; the \
-same room entered: 10-20, more only if much of it is left (covered under half, or walls not \
-seen yet).
- - prefer the places the robot has NOT been near: a room away from everything entered and \
-scanned, or one whose exits lead away from it all, leads to a part of the home not seen at \
-all; a gap at the edge of a scanned room usually shows a strip of it.
- - a hallway or corridor rarely holds the target, but one with exits LEADS to unseen rooms: \
-value it by what the home still lacks behind them.
- - a scanned room re-offered late: the longer ago its scan, the more a second look from \
-another spot is worth; scanned moments ago -> low, not zero.
- - SPREAD, do not copy: the unexplored rooms and the exits of the rooms found compete for the \
-same missing rooms. A missing bathroom is ONE room, so five unlooked exits spread over three \
-rooms share its chance -- the room whose type and exits fit it best gets most, the others \
-about 10-15, never 35 on every room with an exit; with many exits and one or two missing \
-home-type rooms, most such rooms get under 15. Several exits often lead to the same hallway. \
-The sum over the unexplored places should be about the chance that the target is somewhere \
-not yet looked at, not more.
-ALWAYS: NEVER use distance, travel time or here=yes as a reason -- the planner charges travel, \
-and the room the robot stands in is judged exactly like the others. Several rooms may each \
-hold an instance: the numbers are independent search-success probabilities, NOT shares of \
-one distribution; do NOT make them sum to 100. Score EVERY node id given, and only those \
-ids. Per node write "why" first (at most 12 words, lower case, naming the room's likely type \
-and what decided it), then "p".
-Reply with ONLY this JSON, keys in this order:
-{"home":"<step 1, max 12 words>","house":"<step 2, max 25 words>","stage":"<step 3, max 20 words>",
- "pass":"first|second","nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
-EXAMPLE of the FORMAT and the style of reasoning -- a different home every time, so never \
-copy its numbers or its words. TARGET toilet; HOUSE: rooms found: kitchen (scanned), \
-living_room (scanned), bedroom (never entered), hallway (entered); 1 room unidentified; 3 \
-openings not yet looked into; actions used about 150 of 500:
-id=2  ROOM  type=kitchen  size=12m2 (4x3m, all walls seen)  covered=11m2 (90% of the room, 1m2 left)  frontier=0  exits=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
-id=3  ROOM  type=living_room  size=24m2 (6x4m, all walls seen)  covered=20m2 (80% of the room, 4m2 left)  frontier=1  exits=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
-id=5  ROOM  type=bedroom  size=at least 9m2 (3.5+ x 3m, 1 wall not seen yet)  covered=4m2 (at most 50% of the room, at least 5m2 left)  frontier=1  exits=1 (1 doorway)  status=never_entered  searched=0s  seen: bed
-id=6  ROOM  type=unknown  size=at least 3m2 (2+ x 1.5+m, 2 of 4 walls not seen yet)  covered=1m2 (at most 40% of the room, at least 2m2 left)  frontier=1  exits=0  status=never_entered  searched=0s  seen: nothing yet
-id=7  ROOM  type=hallway  size=6m2 (4x1.5m, all walls seen)  covered=4m2 (70% of the room, 2m2 left)  frontier=1  exits=1 (1 doorway)  status=entered  searched=10s  here=yes  seen: nothing yet
-{"home":"bathroom; often an en-suite off a bedroom",
- "house":"kitchen and living room found and scanned; no bathroom yet; one unidentified room, at least 3m2 with two walls unseen, could be a bathroom; unlooked doorways off the bedroom and the hallway",
- "stage":"early, 150 of 500 used, unexplored places remain: first pass",
- "pass":"first",
- "nodes":[{"id":2,"why":"kitchen, scanned, 1m2 left, toilets are not in kitchens","p":1},
-{"id":3,"why":"living room, scanned, 4m2 left; its gap is no bathroom door","p":2},
-{"id":5,"why":"bedroom never entered, at least 5m2 unseen, its doorway may be an en-suite's","p":35},
-{"id":6,"why":"small unidentified room, mostly unseen, bathroom sized so far, bathroom missing","p":50},
-{"id":7,"why":"hallway, 2m2 left of it; its unlooked doorway leads to the missing bathroom","p":25}]}
-Had the HOUSE line read "every known room identified; 0 openings not yet looked into; no \
-unexplored frontier left; actions used about 420 of 500" with a bathroom found and scanned 4 \
-minutes ago, the pass would be "second": the scanned bathroom 35, the scanned bedroom 8 (an \
-en-suite door the scan may have missed), and the scanned kitchen and living room 1 each."""
-
-#: Appended to :data:`SYSTEM_PROMPT` when an OPENING node is offered -- the deprecated
-#: exits-as-nodes mode (``OpeningSettings.exits_as_nodes``, the 2026-10-04 design): an exit
-#: shown as a node of its own is valued by the room likely behind it and visited by a peek.
-OPENINGS_SUPPLEMENT = """
-OPENING NODES ARE ON OFFER. OPENING: a doorway or gap at the edge of the mapped floor leading \
-to space NOT seen yet -- a room the robot has not entered -- offered as a node of its own \
-(it is then not counted among its room's exits=). Going there is a quick look from the \
-threshold, cheaper than a room visit. Value it by the room likely BEHIND it: glimpsed objects \
-name that room (a toilet -> a bathroom; a bed -> a bedroom); nothing glimpsed -> an \
-unidentified room, judged by what the home still lacks. An opening whose glimpsed objects \
-name the home type of the target (a sink or a shower for a toilet; a sofa or a television for \
-a couch) is the home room seen from its door: the best node there is, 60 or more. Openings \
-compete with the unexplored rooms for the same missing rooms (SPREAD applies to them too). \
-Line format: id=200001  OPENING  doorway off room 7 (type=hallway)  to space NOT seen yet  \
-glimpsed through it: nothing yet -- in the example above, with the hallway's doorway offered \
-so, the opening would take the hallway's 25 and the hallway itself 5."""
-
-#: Appended to :data:`SYSTEM_PROMPT` when a STAIRS node is offered or another storey has been visited: the
-#: multi-storey rules. Its sentences about the storey's RANK ("the lowest of N known storeys ...") describe a
-#: line of the user prompt that nothing writes any more: the rank was computed from the storey levels of the
-#: simulator's navmesh, which the agent is no longer given (2026-11-15; the THIS STOREY line now holds only what
-#: the robot found on the storeys it stood on). The text is left exactly as the evaluated runs sent it -- under
-#: the observed stair source of those runs the rank line was absent too -- and is to be reworded with the
-#: multi-storey work, when the prompt is next changed on purpose.
-STAIRS_SUPPLEMENT = """
-THIS SEARCH MAY CHANGE STOREYS. STAIRS nodes are staircases to another storey (up or down). \
-Taking one means leaving this storey and searching the other one. The line says whether that \
-storey was visited before and, if so, what was found and how much was searched there, and \
-whether the robot arrived on this storey by these stairs a moment ago (arrived_by=yes). The \
-THIS STOREY line gives this storey's rank in the building (the lowest of N known storeys, the \
-highest, or how many lie below and above). Read the storey from the rooms found on it first \
--- a storey with a kitchen, dining or living room is the ground floor whatever its rank -- \
-and from the rank where none has: of two storeys the lowest is the ground floor and the \
-highest the bedroom floor; of three, the lowest is usually a basement, the middle the ground \
-floor and the highest the bedroom floor. Where rooms live in a house: kitchen, dining and \
-living room downstairs; bedrooms upstairs; the bathroom beside the bedrooms, so upstairs too \
-(a ground floor has at most a small toilet room); an office on either. Add to the reply, \
-before "nodes", the key "home_here": "found" (a room of the home type is on this storey), \
-"missing" (none found yet, but the home type belongs on this storey) or "elsewhere" (the home \
-type lives on another storey). STAIRS to an unvisited storey where the home type belongs can \
-be high without suppressing the other nodes; stairs to a visited storey where the home type \
-was FOUND and barely searched can be highly promising; arrived_by=yes: do not send the robot \
-straight back unless it left that storey almost unsearched. An unexplored place on this \
-storey is worth about 10 when home_here is "elsewhere" -- a look into it comes after the \
-storey the target lives on. Changing storeys costs many actions, but that is NOT your \
-concern: the planner adds travel and climbing cost itself."""
-
-USER_PROMPT_TEMPLATE = """TARGET: {target}
-
-HOUSE: {house}
-{storeys}
-NODES ({n}):
-{nodes}
-
-Score all {n} nodes independently. JSON only."""
-STOREY_LINES_TEMPLATE = """THIS STOREY: {storey}
-OTHER STOREYS: {others}
-"""
+#: The texts of the DEFAULT prompt version (``search_node_prompts.py`` holds every version and what all of them
+#: must hold to), under the names this module has always exported: the paper's listings
+#: (``docs/paper/sync_prompts.py``) and the tests read them. A run may use another version
+#: (``SearchNodeOracle(prompt=...)``); these three are then not what it sends.
+SYSTEM_PROMPT = PROMPTS[DEFAULT_PROMPT].system
+OPENINGS_SUPPLEMENT = PROMPTS[DEFAULT_PROMPT].openings_supplement
+USER_PROMPT_TEMPLATE = PROMPTS[DEFAULT_PROMPT].user_template
 
 
 @dataclass(frozen=True)
@@ -381,26 +146,29 @@ class SearchNode:
     """One place the search could go to next, as shown to the model.
 
     Attributes:
-        id: The loop's node id -- a room pid, or a staircase id offset far
+        id: The loop's node id -- a room pid, or an opening's id offset far
             above every pid. The model echoes it; nothing else about it matters.
-        kind: :data:`ROOM`, :data:`STAIRS` or :data:`OPENING`.
-        label: Room type (``unknown`` while unidentified), ``stairs up`` /
-            ``stairs down``, or ``doorway`` / ``gap`` for an opening.
+        kind: :data:`ROOM` or :data:`OPENING`.
+        label: Room type (``unknown`` while unidentified), or ``doorway`` /
+            ``gap`` for an opening.
         tentative: The room type rests on a single kind of object (a weak
             label); rendered as ``type=kitchen?`` so the model can weigh it.
-        area_m2: Room floor area; 0 when unknown or for stairs.
+        area_m2: Room floor area; 0 when unknown.
         frontier_clusters: Unexplored boundary clusters left in the room.
-        searched_s: Seconds the robot has spent inside the room.
+        searched_s: Seconds the robot has spent inside the room. Rendered in
+            actions when the context gives the action time
+            (``searched=40 actions``), else in time (``searched=40s``).
         last_inside_ago_s: Seconds since it was last inside; None = never.
-        here: The robot stands in this room now.
-        objects: Object classes confirmed in the room; for an opening, the
-            classes glimpsed through it.
-        direction: ``+1`` up / ``-1`` down for stairs, 0 for rooms.
-        destination_visited: Stairs: the other storey has been stood on.
-        destination: Stairs: one-line summary of that storey -- rooms found,
-            time searched, frontier left -- or None when unvisited.
-        arrived_by: Stairs: the robot came onto this storey by them.
-        arrived_ago_s: Stairs: seconds since that arrival, when ``arrived_by``.
+            Read for the status word only (``never_entered`` / ``entered``):
+            how long ago the robot left a room says where the robot is.
+        here: The robot stands in this room now. For the record: NEVER
+            rendered -- the room the robot stands in is the room at distance
+            zero, and distance is the planner's (``here=yes`` was on the
+            line until 2026-11-16).
+        objects: The confirmed objects in the room, one entry per object, so
+            a class repeats as often as it was found; rendered with the
+            counts, most numerous first (``seen: chair x4, table``). For an
+            opening, the classes glimpsed through it.
         via: Opening: the mapped room it opens from, in prompt words --
             ``room 6 (type=bathroom?)`` -- or None when unknown.
         scanned: How the room was finished by the scan ledger, in prompt
@@ -429,16 +197,19 @@ class SearchNode:
             ``area_m2`` is shown instead.
         length_m: Room: its extent along its longer axis, metres (0: unread).
         width_m: Room: its extent along its shorter axis, metres.
-        length_final: Room: both walls across the longer axis are located;
+        length_final: Room: both sides across the longer axis are located;
             False renders the dimension with a ``+`` (a lower bound).
         width_final: Room: the same across the shorter axis.
         walls_seen: Room: how many of its four sides are located -- a wall,
             a door cut or settled unknown along at most ``open_tolerance``
             of the side's faces open to unseen space in runs wider than a
             doorway. None when not read.
-        bounded: Room: all four walls located, so the size is FINAL;
-            False renders ``size=at least ...`` with the count of walls not
-            seen; None when not read (the size is shown as before).
+        bounded: Room: all four sides located, so no part of the room lies
+            outside the map -- rendered ``all sides mapped``, never as a
+            final size: the partition may still join the room to its
+            neighbour (see the module docstring). False renders ``size=at
+            least ...`` with the count of sides not mapped; None when not
+            read (the area alone is shown).
         covered_fraction: Room: the share of the WHOLE room the camera has
             covered from within detection range (the sight ledger's per-cell
             record, furniture islands credited from the floor around them),
@@ -452,7 +223,21 @@ class SearchNode:
             bounded, a lower bound when not.
         open_perimeter_m: Room: metres of its boundary open to unseen space
             in runs wider than a doorway -- where the camera's reach ended
-            inside the room. For the record; not rendered.
+            inside the room. Rendered in the size's brackets of a room with
+            a side not mapped (``open edge 2m``), from half a metre up.
+        connected: Room: the types of the rooms a confirmed door or a
+            doorway the robot walked or saw through joins it to (the scene
+            graph's edges, ``ObservedSceneGraph.doors``), one entry per
+            neighbouring room. Rendered as ``connected to: bedroom x2,
+            hallway``; nothing when empty.
+        target_seen: Room: an object of the target's own kind is among the
+            confirmed objects of this room -- the detector found it and the
+            search goes on all the same (the closing let it go: no route, a
+            failed inspection). True is rendered as ``target: detected
+            here, not reached``; False and None (not known) render nothing,
+            so a line without the note is a room in which the detector has
+            NOT found the target -- which is what lets the prompt say that
+            the covered floor was looked at without finding it.
     """
 
     id: int
@@ -465,11 +250,6 @@ class SearchNode:
     last_inside_ago_s: Optional[float] = None
     here: bool = False
     objects: Tuple[str, ...] = field(default_factory=tuple)
-    direction: int = 0
-    destination_visited: bool = False
-    destination: Optional[str] = None
-    arrived_by: bool = False
-    arrived_ago_s: Optional[float] = None
     via: Optional[str] = None
     scanned: Optional[str] = None
     scanned_ago_s: Optional[float] = None
@@ -488,6 +268,8 @@ class SearchNode:
     covered_m2: float = 0.0
     left_m2: float = 0.0
     open_perimeter_m: float = 0.0
+    connected: Tuple[str, ...] = field(default_factory=tuple)
+    target_seen: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -498,10 +280,9 @@ class SearchNode:
         """Whether the search knows nothing about this place yet, so the (optional) floor applies.
 
         A room never entered, never scanned, whose type is still ``unknown``;
-        an opening nothing has been glimpsed through. A staircase never is --
-        the other storey is valued by what this one turned out to be -- and
-        neither is an identified room or an opening with a glimpse, which
-        the model values on the evidence.
+        an opening nothing has been glimpsed through. An identified room and
+        an opening with a glimpse are not: the model values them on the
+        evidence.
         """
         if self.kind == ROOM:
             return (self.last_inside_ago_s is None and self.scanned is None
@@ -512,38 +293,40 @@ class SearchNode:
 
     @property
     def status(self) -> str:
-        """The room's ``status=`` word for the prompt: ``never_entered``, ``entered`` or ``scanned(...)``."""
+        """The room's ``status=`` word with its durations in time: ``never_entered``, ``entered`` or ``scanned(...)``."""
+        return self.status_words()
+
+    def status_words(self, action_time_s: Optional[float] = None) -> str:
+        """The room's ``status=`` word for the prompt; the scan's age in actions when ``action_time_s`` is given."""
         if self.scanned:
-            ago = coarse_seconds(self.scanned_ago_s)
-            return "scanned(%s%s)" % (self.scanned, "" if ago == "never" else ", %s ago" % ago)
+            if self.scanned_ago_s is None:
+                return "scanned(%s)" % self.scanned
+            return "scanned(%s, %s ago)" % (self.scanned, coarse_duration(self.scanned_ago_s, action_time_s))
         return "never_entered" if self.last_inside_ago_s is None else "entered"
 
 
 @dataclass(frozen=True)
 class SearchContext:
-    """What the model is told about the home around the nodes.
+    """What the model is told about the home around the nodes, and the unit its lines are written in.
 
     Attributes:
         house: The big-picture line: every room type found so far with its
             status, the rooms still unidentified, the openings not yet
             looked into, and the budget (``actions used about 150 of 500``,
             see :func:`budget_line`). Empty reads as ``nothing known yet``.
-        storey: Multi-storey only: one line on the storey the robot stands
-            on -- rooms found by type, time searched, rooms with frontier
-            left. Shown when a STAIRS node is offered or another storey has
-            been visited.
-        others: Multi-storey only: one line per other storey the robot has
-            stood on.
+        action_time_s: Seconds one action stands for. Given, the durations
+            on a node line are written in actions -- the unit of the HOUSE
+            line's budget (``searched=40 actions``); None (a rig that does
+            not count actions) writes them in time (``searched=40s``).
     """
 
     house: str = ""
-    storey: str = ""
-    others: Tuple[str, ...] = field(default_factory=tuple)
+    action_time_s: Optional[float] = None
 
-    @property
-    def multi_storey(self) -> bool:
-        """Whether another storey is known to the search (the supplement's lines are shown)."""
-        return bool(self.others)
+    def __post_init__(self) -> None:
+        if self.action_time_s is not None and not (math.isfinite(float(self.action_time_s))
+                                                   and float(self.action_time_s) > 0.0):
+            raise ValueError("action_time_s must be positive and finite or None, got %r" % (self.action_time_s,))
 
 
 @dataclass(frozen=True)
@@ -565,21 +348,17 @@ class NodeOracleResult:
         reused: The prompt was byte-identical to the last one answered, so
             the kept reply was re-read instead of spending a call.
         omitted: Node ids the model did not score (given :data:`OMITTED_PERCENT`).
-        reading: The model's steps 1-3 in its own words -- ``home`` (where
-            the target normally lives), ``house`` (what the rooms found say
-            about the rest), ``stage`` (how the budget weighs), plus the
-            multi-storey ``storey`` and ``home_here`` when given. Written
-            before the numbers so the model applies its own reading; kept so
-            the recording shows the judgement behind the distribution.
+        reading: The model's own words before its numbers -- ``home`` (where
+            the target is normally found), ``house`` (what the rooms found
+            say about the building), ``stage`` (how far the search has got)
+            and ``pass``. Kept so the recording shows the judgement behind
+            the distribution; nothing reads them for a decision.
         floored: Node ids raised to the uncertainty floor (when it is on).
-        capped: Node ids lowered to ``unexplored_elsewhere`` (when it is on).
-        home_here: The multi-storey supplement's STEP verdict -- ``found``,
-            ``missing`` or ``elsewhere`` -- or None when not given.
-        pass_verdict: The model's ``pass`` -- :data:`PASS_FIRST` while an
-            unexplored place is still worth looking at before any scanned
-            room is re-checked, :data:`PASS_SECOND` once the home has been
-            covered -- or None when not given. The loop reads it to decide
-            whether scanned rooms are offered as nodes.
+        pass_verdict: The model's ``pass`` -- :data:`PASS_FIRST` while what
+            is left unexplored is worth more than re-checking the rooms
+            already scanned, :data:`PASS_SECOND` once it is not -- or None
+            when not given. Shown and recorded; the loop's second pass is
+            opened by the geometry, not by this word.
     """
 
     probs: Dict[int, float]
@@ -594,8 +373,6 @@ class NodeOracleResult:
     reading: Dict[str, str] = field(default_factory=dict)
     probability_model: str = "independent_search_success"
     floored: Tuple[int, ...] = ()
-    capped: Tuple[int, ...] = ()
-    home_here: Optional[str] = None
     pass_verdict: Optional[str] = None
 
 
@@ -615,6 +392,24 @@ def coarse_seconds(seconds: Optional[float]) -> str:
     return "%dmin" % int(round(value / 60.0))
 
 
+def coarse_duration(seconds: Optional[float], action_time_s: Optional[float] = None) -> str:
+    """A duration for the prompt: in actions when ``action_time_s`` is given, else in time (:func:`coarse_seconds`).
+
+    ``40 actions`` -- the unit the HOUSE line's budget is in, so the model
+    can set the effort spent in a room beside the budget left. The steps are
+    :func:`coarse_seconds`'s own (tens of seconds under a minute, whole
+    minutes above), converted: the line changes exactly when the time
+    rendering would, never on every action. None reads ``never``.
+    """
+    if seconds is None:
+        return "never"
+    if action_time_s is None:
+        return coarse_seconds(seconds)
+    value = max(0.0, float(seconds))
+    bucket = round(value / 10.0) * 10.0 if value < 60.0 else round(value / 60.0) * 60.0
+    return "%d actions" % int(round(bucket / float(action_time_s)))
+
+
 def budget_line(actions_used: int, budget: int, step: int = BUDGET_STEP) -> str:
     """``actions used about 150 of 500`` -- the budget in :data:`BUDGET_STEP` steps, for an unchanged prompt.
 
@@ -628,43 +423,58 @@ def budget_line(actions_used: int, budget: int, step: int = BUDGET_STEP) -> str:
     return "actions used about %d of %d" % (coarse, total)
 
 
-def format_node(node: SearchNode) -> str:
-    """One prompt line for ``node``."""
-    if node.kind == STAIRS:
-        parts = ["id=%d" % node.id, "STAIRS %s" % ("up" if node.direction > 0 else "down")]
-        if node.destination_visited:
-            parts.append("to a storey ALREADY visited (%s)" % (node.destination or "no detail"))
-        else:
-            parts.append("to a storey NOT visited yet")
-        if node.arrived_by:
-            parts.append("the robot came %s these stairs %s ago (arrived_by=yes)" % (
-                "down" if node.direction > 0 else "up", coarse_seconds(node.arrived_ago_s)))
-        return "  ".join(parts)
+def counted(names: Sequence[str], limit: Optional[int] = None) -> str:
+    """``chair x4, table`` -- the distinct names in ``names`` with their counts, the most numerous first.
+
+    Case and surrounding space are folded; a name that occurs once carries
+    no count; ties are alphabetical, so the same room reads the same way
+    every time. ``limit`` keeps the first that many kinds and says how many
+    it left off (``chair x4, table, +3 more``): the list is what the model
+    reads the absence of an object from, so a cut must show. Empty for no
+    names.
+    """
+    counts = {}  # type: Dict[str, int]
+    for name in names:
+        key = str(name).strip().lower()
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    words = [name if count == 1 else "%s x%d" % (name, count) for name, count in ordered]
+    if limit is not None and len(words) > int(limit):
+        words = words[:int(limit)] + ["+%d more" % (len(words) - int(limit))]
+    return ", ".join(words)
+
+
+def kinds(names: Sequence[str]) -> Tuple[str, ...]:
+    """The distinct names in ``names``, case and surrounding space folded, sorted."""
+    return tuple(sorted({str(name).strip().lower() for name in names if str(name).strip()}))
+
+
+def format_node(node: SearchNode, action_time_s: Optional[float] = None) -> str:
+    """One prompt line for ``node``: everything stored about it but where it is (see the module docstring)."""
     if node.kind == OPENING:
-        names = sorted({str(c).strip().lower() for c in node.objects if str(c).strip()})
-        glimpsed = ", ".join(names[:MAX_CLASSES_IN_PROMPT]) if names else "nothing yet"
+        glimpsed = counted(kinds(node.objects), MAX_CLASSES_IN_PROMPT) or "nothing yet"
         origin = "off %s" % node.via if node.via else "off the mapped floor"
         return "  ".join(["id=%d" % node.id, "OPENING", "%s %s" % (node.label or "gap", origin),
                           "to space NOT seen yet", "glimpsed through it: %s" % glimpsed])
-    names = sorted({str(c).strip().lower() for c in node.objects if str(c).strip()})
-    seen = ", ".join(names[:MAX_CLASSES_IN_PROMPT]) if names else "nothing yet"
     label = node.label + ("?" if node.tentative and node.label != "unknown" else "")
-    # The size comes from the room extents when they were read (final, or "at least"), and the coverage follows
-    # it; the rest of the line is as it was.
     parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % format_size(node)]
     coverage = format_coverage(node)
     if coverage:
         parts.append("covered=%s" % coverage)
     parts += ["frontier=%d" % max(0, int(node.frontier_clusters)),
               "exits=%s" % format_exits(node.exits, node.doorways, node.unseen_m2),
-              "status=%s" % node.status,
-              "searched=%s" % coarse_seconds(node.searched_s)]
-    if node.here:
-        parts.append("here=yes")
-    parts.append("seen: %s" % seen)
-    glimpsed = sorted({str(c).strip().lower() for c in node.glimpsed if str(c).strip()})
+              "status=%s" % node.status_words(action_time_s),
+              "searched=%s" % coarse_duration(node.searched_s, action_time_s)]
+    connected = counted(node.connected)
+    if connected:
+        parts.append("connected to: %s" % connected)
+    parts.append("seen: %s" % (counted(node.objects, MAX_CLASSES_IN_PROMPT) or "nothing yet"))
+    if node.target_seen:
+        parts.append("target: detected here, not reached")
+    glimpsed = counted(kinds(node.glimpsed), MAX_CLASSES_IN_PROMPT)     # kinds, not counts: an exit shows a class, not a census
     if glimpsed:
-        parts.append("glimpsed through its exits: %s" % ", ".join(glimpsed[:MAX_CLASSES_IN_PROMPT]))
+        parts.append("glimpsed through its exits: %s" % glimpsed)
     return "  ".join(parts)
 
 
@@ -676,14 +486,18 @@ def coarse_metres(value: float, step: float = 0.5) -> str:
 
 
 def format_size(node: SearchNode) -> str:
-    """The ``size=`` value of a room line.
+    """The ``size=`` value of a room line, in words that claim what the extents know and no more.
 
     With the room extents read (``bounded`` not None): ``12m2 (3.5x3.5m,
-    all walls seen)`` when every wall is located, else ``at least 12m2
-    (5+ x 3.5m, 1 wall not seen yet)`` -- the ``+`` marks a dimension the
-    camera's reach cut short, and the area is what is mapped so far, never
-    presented as the room's. Without them: the area alone, as before
-    (``12m2``, ``under 1m2``, ``unknown size``).
+    all sides mapped)`` when every side is located -- no part of the room
+    lies outside the map; NOT "final": the partition may still join it to
+    its neighbour (see the module docstring) -- else ``at least 12m2
+    (5+ x 3.5m, 1 of 4 sides not mapped yet, open edge 2m)``: the ``+``
+    marks a dimension the camera's reach cut short, the open edge is the
+    length of boundary still open to unseen space (said from half a metre
+    up), and the area is what is mapped so far, never presented as the
+    room's. Without the extents: the area alone (``12m2``, ``under 1m2``,
+    ``unknown size``).
     """
     area = max(float(node.footprint_m2), float(node.area_m2))
     if node.bounded is None:
@@ -692,12 +506,14 @@ def format_size(node: SearchNode) -> str:
     width = coarse_metres(node.width_m) + ("" if node.width_final else "+")
     if node.bounded:
         area_text = "under 1m2" if area < 1.0 else "%dm2" % int(round(area))
-        return "%s (%sx%sm, all walls seen)" % (area_text, length, width)
+        return "%s (%sx%sm, all sides mapped)" % (area_text, length, width)
     missing = 4 - int(node.walls_seen or 0)
-    walls = "1 wall not seen yet" if missing == 1 else "%d of 4 walls not seen yet" % missing
+    sides = "%d of 4 sides not mapped yet" % missing
+    if float(node.open_perimeter_m) >= 0.5:
+        sides += ", open edge %sm" % coarse_metres(node.open_perimeter_m)
     if area < 1.0:
-        return "under 1m2 mapped so far (%s x %sm, %s)" % (length, width, walls)
-    return "at least %dm2 (%s x %sm, %s)" % (int(round(area)), length, width, walls)
+        return "under 1m2 mapped so far (%s x %sm, %s)" % (length, width, sides)
+    return "at least %dm2 (%s x %sm, %s)" % (int(round(area)), length, width, sides)
 
 
 def area_words(value: float) -> str:
@@ -711,16 +527,15 @@ def area_words(value: float) -> str:
 
 
 def format_coverage(node: SearchNode) -> Optional[str]:
-    """The ``covered=`` value of a room line: the floor the camera has looked at from detection range, as final results.
+    """The ``covered=`` value of a room line: the floor the camera has looked at from detection range, as results the model reads and does not compute.
 
-    A bounded room: ``10m2 (80% of the room, 2m2 left)`` -- the share of
-    the whole room rounded DOWN to tens, and what is left -- or ``12m2
-    (all of it)``. A room whose size is a lower bound: the share is an
-    UPPER bound rounded UP and the remainder a LOWER bound, ``3m2 (at most
-    40% of the room, at least 4m2 left)``; with everything mapped covered,
-    ``7m2 (all of the mapped part; the unmapped rest is unknown)``. The
-    model is handed the numbers it would otherwise derive. None when the
-    record was not read.
+    A room with every side mapped: ``10m2 (80% of the room, 2m2 left)`` --
+    the share of the whole room rounded DOWN to tens, and what is left --
+    or ``12m2 (all of it)``. A room whose size is a lower bound: the share
+    is an UPPER bound rounded UP and the remainder a LOWER bound, ``3m2 (at
+    most 40% of the room, at least 4m2 left)``; with everything mapped
+    covered, ``7m2 (all of the mapped part; the unmapped rest is
+    unknown)``. None when the record was not read.
     """
     if node.covered_fraction is None:
         return None
@@ -758,26 +573,26 @@ def format_exits(exits: int, doorways: int = 0, unseen_m2: float = 0.0) -> str:
     return "%d (%s)" % (count, ", ".join(details))
 
 
-def format_prompt(target: str, nodes: Sequence[SearchNode], context: Optional[SearchContext] = None) -> str:
-    """Everything the model is shown for this query."""
+def format_prompt(target: str, nodes: Sequence[SearchNode], context: Optional[SearchContext] = None,
+                  version: Union[str, NodeOraclePrompt, None] = None) -> str:
+    """Everything the model is shown for this query: the target's name, the HOUSE line and one line per node.
+
+    ``version`` names the prompt version whose frame is used (the default
+    version for None); the HOUSE line and the node lines are the same under all.
+    """
     context = context or SearchContext()
-    storeys = ""
-    if context.multi_storey or any(n.kind == STAIRS for n in nodes):
-        storeys = STOREY_LINES_TEMPLATE.format(
-            storey=context.storey or "the only storey mapped so far",
-            others="; ".join(context.others) if context.others else "none known")
-    return USER_PROMPT_TEMPLATE.format(
-        target=target, house=context.house or "nothing known yet", storeys=storeys,
-        n=len(nodes), nodes="\n".join(format_node(n) for n in nodes))
+    return prompt_version(version).user_template.format(
+        target=target, house=context.house or "nothing known yet", n=len(nodes),
+        nodes="\n".join(format_node(n, context.action_time_s) for n in nodes))
 
 
-def system_prompt(nodes: Sequence[SearchNode], context: Optional[SearchContext] = None) -> str:
-    """The system prompt for this query: the single-storey rules, plus the stairs supplement when a storey change is on offer, plus the openings supplement when an exit is offered as a node of its own (deprecated)."""
-    text = SYSTEM_PROMPT
-    if any(n.kind == STAIRS for n in nodes) or (context is not None and context.multi_storey):
-        text += STAIRS_SUPPLEMENT
+def system_prompt(nodes: Sequence[SearchNode], context: Optional[SearchContext] = None,
+                  version: Union[str, NodeOraclePrompt, None] = None) -> str:
+    """The system prompt of ``version`` (the default for None) for this query, plus its openings supplement when an exit is offered as a node of its own (deprecated)."""
+    chosen = prompt_version(version)
+    text = chosen.system
     if any(n.kind == OPENING for n in nodes):
-        text += OPENINGS_SUPPLEMENT
+        text += chosen.openings_supplement
     return text
 
 
@@ -842,46 +657,6 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
     return scores, elsewhere, reasons, omitted
 
 
-_HOME_HERE_WORDS = {
-    HOME_FOUND: ("found", "present", "here", "yes", "on this storey", "on this floor"),
-    HOME_MISSING: ("missing", "not found", "none found", "not yet", "not yet found", "nothing found", "no room",
-                   "unseen", "expected", "no"),
-    HOME_ELSEWHERE: ("elsewhere", "not here", "another storey", "other storey", "another floor", "other floor",
-                     "downstairs", "upstairs", "does not belong", "other level", "another level"),
-}
-
-
-def parse_home_here(reply: Any) -> Optional[str]:
-    """The multi-storey ``home_here`` verdict as one of :data:`HOME_HERE`, or None when absent or unreadable.
-
-    The three words are what the supplement asks for; a few phrasings a
-    model drifts to are accepted, the longest match first so "not found" is
-    ``missing`` and not ``found``. A negated "found" ("none found", "no
-    room ... found") is ``missing``; a bare "no" is ``missing`` too -- the
-    conservative verdict -- never ``elsewhere``, which lowers every
-    unexplored place on the storey when that floor is on.
-    """
-    if not isinstance(reply, dict):
-        return None
-    value = reply.get("home_here")
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip().lower()
-    for verdict in HOME_HERE:
-        if text == verdict:
-            return verdict
-    best = None
-    for verdict, words in _HOME_HERE_WORDS.items():
-        for word in words:
-            if word in text and (best is None or len(word) > len(best[1])):
-                best = (verdict, word)
-    if best is None:
-        return None
-    if best[0] == HOME_FOUND and any(negation in text for negation in ("not ", "no ", "none", "never", "n't")):
-        return HOME_MISSING
-    return best[0]
-
-
 _PASS_WORDS = {
     PASS_SECOND: ("second", "2nd", "re-check", "recheck", "revisit", "covered", "again"),
     PASS_FIRST: ("first", "1st", "explore", "unexplored"),
@@ -893,9 +668,7 @@ def parse_pass(reply: Any) -> Optional[str]:
 
     The two words are what the prompt asks for; a few phrasings a model
     drifts to are accepted, ``second`` tested first so "second, not first"
-    is read as second. A reply without the key is None: the loop then keeps
-    scanned rooms out of the nodes as the first pass does -- the
-    conservative reading, which never re-enters a room on a missing word.
+    is read as second. A reply without the key is None.
     """
     if not isinstance(reply, dict):
         return None
@@ -915,29 +688,16 @@ def parse_pass(reply: Any) -> Optional[str]:
 
 
 def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unexplored_floor: float,
-                     home_here: Optional[str] = None, unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE,
-                     ) -> Tuple[Dict[int, float], Tuple[int, ...], Tuple[int, ...]]:
-    """Apply the optional arithmetic floors to the unexplored nodes; return the new scores, the ids raised and the ids lowered.
+                     ) -> Tuple[Dict[int, float], Tuple[int, ...]]:
+    """Apply the optional arithmetic floor to the unexplored nodes; return the new scores and the ids raised.
 
-    The floor and the elsewhere value are fractions in ``[0, 1)``; the
-    scores are percentages. With ``home_here`` ``found`` or ``missing`` (or
-    unknown) every unexplored node is raised to ``unexplored_floor`` and a
-    node the model scored above it is left alone. With
-    ``home_here="elsewhere"`` -- the multi-storey reading that the target's
-    home type lives on another storey -- every unexplored node is read at
-    ``unexplored_elsewhere`` exactly. 0 disables the respective value; both
-    are 0 by default (see the module docstring).
+    The floor is a fraction in ``[0, 1)``; the scores are percentages. Every
+    unexplored node (:attr:`SearchNode.unexplored`) the model scored below
+    the floor is raised to it; a node scored above it is left alone. 0 (the
+    default) disables it: the model's numbers stand.
     """
     out = dict(scores)
-    floored, capped = [], []
-    if home_here == HOME_ELSEWHERE and unexplored_elsewhere > 0.0:
-        percent = 100.0 * float(unexplored_elsewhere)
-        for node in nodes:
-            nid = int(node.id)
-            if nid in out and node.unexplored and abs(out[nid] - percent) > 1e-9:
-                (floored if out[nid] < percent else capped).append(nid)
-                out[nid] = percent
-        return out, tuple(sorted(set(floored))), tuple(sorted(capped))
+    floored = []
     if unexplored_floor > 0.0:
         percent = 100.0 * float(unexplored_floor)
         for node in nodes:
@@ -945,7 +705,7 @@ def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unex
             if nid in out and node.unexplored and out[nid] < percent - 1e-9:
                 out[nid] = percent
                 floored.append(nid)
-    return out, tuple(sorted(set(floored))), ()
+    return out, tuple(sorted(set(floored)))
 
 
 def normalise(scores: Dict[int, float], elsewhere: float) -> Tuple[Dict[int, float], float]:
@@ -988,30 +748,34 @@ class SearchNodeOracle:
         unexplored_floor: The least probability an unexplored node
             (:attr:`SearchNode.unexplored`) is read at, whatever the model
             wrote; 0 (the default) leaves the model's numbers.
-        unexplored_elsewhere: What an unexplored node is read at when the
-            multi-storey supplement's verdict says the home type lives on
-            another storey; 0 (the default) leaves the model's numbers.
         flat_p: The ablation that measures what the oracle contributes: when
             given, every node is read at this probability and the model is
             never asked (``source='flat'``), so RPT* orders the nodes by
             travel cost alone -- the nearest first -- and nothing else in the
             search changes (the room labels, the exclusions, the landmarks at
             their fixed probability). None (the default) asks the model.
+        prompt: The prompt version the model is asked under: a registered
+            name (``search_node_prompts.PROMPTS``), a
+            :class:`~search_node_prompts.NodeOraclePrompt` (a wording under
+            trial), or None for the default version. Wordings are tuned per
+            model; :attr:`version` says which one this oracle sends.
 
     Attributes:
         reuses: Queries answered from the kept reply.
         queries: Calls actually made.
         unexplored_floor: As given.
-        unexplored_elsewhere: As given.
         flat_p: As given.
+        version: The :class:`~search_node_prompts.NodeOraclePrompt` in use.
+
+    Raises:
+        ValueError: A floor or a flat probability out of range, or a prompt
+            version no one registered.
     """
 
     def __init__(self, client, unexplored_floor: float = UNEXPLORED_FLOOR,
-                 unexplored_elsewhere: float = UNEXPLORED_ELSEWHERE,
-                 flat_p: Optional[float] = None) -> None:
-        for name, value in (("unexplored_floor", unexplored_floor), ("unexplored_elsewhere", unexplored_elsewhere)):
-            if not (0.0 <= float(value) < 1.0) or not math.isfinite(float(value)):
-                raise ValueError("%s must lie in [0, 1), got %r" % (name, value))
+                 flat_p: Optional[float] = None, prompt: Union[str, NodeOraclePrompt, None] = None) -> None:
+        if not (0.0 <= float(unexplored_floor) < 1.0) or not math.isfinite(float(unexplored_floor)):
+            raise ValueError("unexplored_floor must lie in [0, 1), got %r" % (unexplored_floor,))
         if flat_p is not None and (isinstance(flat_p, bool) or not math.isfinite(float(flat_p))
                                    or not 0.0 < float(flat_p) < 1.0):
             raise ValueError("flat_p must lie in (0, 1) or be None, got %r" % (flat_p,))
@@ -1019,29 +783,35 @@ class SearchNodeOracle:
         self._last_prompt = None  # type: Optional[str]
         self._last_reply = None   # type: Optional[Dict[str, Any]]
         self.unexplored_floor = float(unexplored_floor)
-        self.unexplored_elsewhere = float(unexplored_elsewhere)
         self.flat_p = None if flat_p is None else float(flat_p)
+        self.version = prompt_version(prompt)
         self.reuses = 0
         self.queries = 0
 
     def prompt(self, target: str, nodes: Sequence[SearchNode], context: Optional[SearchContext] = None) -> str:
         """The user prompt for ``nodes`` -- everything the model is shown beside the system prompt."""
-        return format_prompt(target, nodes, context)
+        return format_prompt(target, nodes, context, self.version)
+
+    def system(self, nodes: Sequence[SearchNode], context: Optional[SearchContext] = None) -> str:
+        """The system prompt for ``nodes`` under this oracle's prompt version."""
+        return system_prompt(nodes, context, self.version)
 
     def remember(self, prompt: str, reply: Dict[str, Any]) -> None:
         """Keep a usable reply as the answer to ``prompt``."""
         self._last_prompt, self._last_reply = prompt, reply
 
-    def ask(self, user: str, system: str = SYSTEM_PROMPT) -> Dict[str, Any]:
-        """One call to the model, on the reasoning route when the client has one."""
+    def ask(self, user: str, system: Optional[str] = None) -> Dict[str, Any]:
+        """One call to the model, on the reasoning route when the client has one (``system``: this version's, for None)."""
         self.queries += 1
+        if system is None:
+            system = self.version.system
         if _accepts_reasoning(self._client):
             return self._client.chat_json(system, user, reasoning=True)
         return self._client.chat_json(system, user)
 
     def probabilities(self, target: str, nodes: Sequence[SearchNode],
                       context: Optional[SearchContext] = None) -> NodeOracleResult:
-        """Return P(going there next finds ``target``) per node.
+        """Return P(``target`` is there) per node, in the model's judgement.
 
         Never raises on model trouble: a transport error or an unusable reply
         degrades to ``source='uniform_fallback'`` for the caller to refuse.
@@ -1053,15 +823,15 @@ class SearchNodeOracle:
             return self.flat(nodes, self.flat_p)
         user = self.prompt(target, nodes, context)
         if user == self._last_prompt and self._last_reply is not None:
-            kept = self.score(self._last_reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
+            kept = self.score(self._last_reply, nodes, self.unexplored_floor)
             if kept is not None:
                 self.reuses += 1
                 return replace(kept, reused=True)
         try:
-            reply = self.ask(user, system_prompt(nodes, context))
+            reply = self.ask(user, self.system(nodes, context))
         except Exception:
             return self.uniform(nodes, raw_reply=None)
-        result = self.score(reply, nodes, self.unexplored_floor, self.unexplored_elsewhere)
+        result = self.score(reply, nodes, self.unexplored_floor)
         if result is None:
             return self.uniform(nodes, raw_reply=reply if isinstance(reply, dict) else None)
         self.remember(user, reply)
@@ -1086,21 +856,18 @@ class SearchNodeOracle:
                                 raw_reply=raw_reply, spread=0.0)
 
     @staticmethod
-    def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0,
-              unexplored_elsewhere: float = 0.0) -> Optional[NodeOracleResult]:
-        """Parse, fill the omitted, apply the optional floors, normalise, clamp; read the verdicts."""
+    def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0) -> Optional[NodeOracleResult]:
+        """Parse, fill the omitted, apply the optional floor, normalise, clamp; read the pass verdict."""
         parsed = parse_reply(reply, nodes)
         if parsed is None:
             return None
         scores, elsewhere, reasons, omitted = parsed
-        home_here = parse_home_here(reply)
-        scores, floored, capped = floor_unexplored(scores, nodes, unexplored_floor, home_here, unexplored_elsewhere)
+        scores, floored = floor_unexplored(scores, nodes, unexplored_floor)
         probs, elsewhere = normalise(scores, elsewhere)
         values = list(probs.values())
-        reading = {key: str(reply[key])[:200] for key in ("home", "house", "stage", "pass", "storey", "home_here")
+        reading = {key: str(reply[key])[:200] for key in ("home", "house", "stage", "pass")
                    if isinstance(reply, dict) and isinstance(reply.get(key), str) and reply[key].strip()}
         return NodeOracleResult(probs=probs, elsewhere=elsewhere, p_present=1.0 - elsewhere,
                                 source=SOURCE_LLM, reasons=reasons, raw_reply=reply if isinstance(reply, dict) else None,
                                 spread=float(max(values) - min(values)) if values else 0.0, omitted=omitted,
-                                reading=reading, floored=floored, capped=capped, home_here=home_here,
-                                pass_verdict=parse_pass(reply))
+                                reading=reading, floored=floored, pass_verdict=parse_pass(reply))

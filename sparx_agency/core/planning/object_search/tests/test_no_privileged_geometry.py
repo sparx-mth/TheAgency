@@ -327,7 +327,6 @@ def test_the_scan_covers_the_whole_of_core():
                      "sparx_agency/core/planning/object_search/closing/target_closing.py",
                      "sparx_agency/core/planning/object_search/world_model/standing_floor.py",
                      "sparx_agency/core/planning/object_search/multifloor/multifloor_policy.py",
-                     "sparx_agency/core/planning/object_search/rooms/stair_nodes.py",
                      "sparx_agency/core/localization/floor_atlas.py",
                      "sparx_agency/core/planning/objnav/types/episode.py",
                      "sparx_agency/core/planning/planners/astar/weighted_planner_2d.py",

@@ -11,6 +11,172 @@ Format per entry:
 
 ---
 
+## 2026-11-16 — "Within 1 m" is two different zones: HM3D's metre is horizontal, MP3D's is 3-D from the floor
+
+**Symptom:** the closing STOPped on a fresh, whole box of the target within a planar metre -- and on MP3D five
+pictures, a cabinet, a sink and a chair so stopped on were failures, 0.11-0.42 m from the nearest goal view point
+(success needs under 0.1 m). The same rule on HM3D loses nothing for a television mounted 1.4 m up. For a week this
+was read as "raised targets have their view points closer" and answered with steps sized on recorded validation
+STOPs (the raised target's overshoot of 2026-11-10), then removed as a rule fitted to the evaluator.
+
+**Root cause:** habitat-lab scores ObjectNav by the geodesic distance from the STOP to the nearest of the goal's
+published *view points* (under 0.1 m), for both datasets. Where those points lie is whatever the dataset's generator
+did, and the two datasets were not generated alike. Both drew candidates on a grid of half the agent's radius out
+to 1.0 m from the object's axis-aligned box and kept the navigable ones that see the object. Measured on every
+validation goal against the box habitat-sim loads: on **HM3D** the farthest view point stands 1.00 m from the box
+**in the horizontal plane** whatever the object's height (v1: none of 111,406 view points beyond 1.01 m; its 3-D
+distance from the floor to a mounted television is 1.3-1.8 m); on **MP3D** the planar reach shrinks as the object is
+raised -- 1.00 m on the floor, 0.89 m with the underside 0.3-0.6 m up, 0.74 m at 0.6-0.9 m, 0.57 m at 0.9-1.0 m --
+while the **3-D distance from the floor point** to the box stays at 1.00 m. The generator code that survives
+(habitat-lab's, in `Ram81/habitat-imitation-baselines` and `naokiyokoyama/ovon`) tests in the plane; the 2020 MP3D
+dataset evidently was not made with it. VLFM, ASCENT and ApexNav all stop by a planar range on both datasets.
+
+**Fix / workaround:** the stop criterion is the benchmark adapter's to state, as one distance and one measure
+(`TargetClosingSettings.stop_within_m`, `stop_measure`; `closing/stop_criterion.py`; `habitat/goal_zone.py` holds
+the evidence): HM3D `planar`, MP3D `euclidean`, both 0.9 m -- a decimetre inside the zone, so that a candidate of
+the grid inside the zone is within the 0.1 m success distance of the STOP whichever way the grid lies. The closing
+decides to stop on its own evidence and then walks on until its own range, by that measure, reads within it. No
+view point and no goal position reaches the agent.
+
+**Don't:** read a benchmark's success criterion off its task description ("within 1.0 m Euclidean distance") or off
+another dataset's behaviour -- measure the published view points against the object's box, per dataset and per
+version; it is twenty lines and it settled a week of rules. Don't size a stopping rule on recorded STOPs of the
+split you report when the definition can be read instead: the first is tuning to the evaluator, the second is the
+task. And don't assume the generator's surviving code is what made an old dataset.
+
+## 2026-11-16 — Thirty-five blind steps at a wall: a refused step leaves the pose and the frame as they were, so the same decision is taken again
+
+**Symptom:** in five of the 180 episodes of the single-storey MP3D check the agent took 20-36 forward steps in a row,
+each refused, during the closing's verification (2azQ1b91cZZ/000108 and /000118, QUCTc6BB5sX/000057,
+oLBMNvg9in8/000113, zsNo4HB9uLZ/000015); three of the five did the same when the closing still had the navmesh. They
+carried 133 of the 230 refused steps the navmesh's removal seemed to add (see the entry of 2026-11-15 below).
+
+**Root cause:** a *glimpse* -- a box of the target's class in view with no usable depth (too far, or glass) -- cannot
+be placed, so the verification walks a step along its bearing to get a depth. The benchmark moves the agent without
+sliding: a step that would collide is refused whole. A refused step changes neither the pose nor the frame, so the
+next action saw the same box with the same missing depth and asked for the same step. Nothing counted it: the
+verification budget is 12 actions, but its clock is paused while the candidate is in view (a glimpse is "in view"),
+which allowed about 36. (The bearing approach, which starts from the same kind of box, was never such a loop: it
+gives up after three steps that went nowhere.)
+
+**Fix / workaround:** **open -- a fix was written, measured and withdrawn the same day, so that it can be handled
+on its own.** The fix: the first refused step is the answer (`TargetClosing._glimpse_stalled`, counter
+`glimpse_stalls`, now only in the stored arms): the straight line to the candidate is blocked, so the glimpse is
+handed to the pursuit -- which plans a route on the map instead of a bearing -- the spot is boxed in for this
+candidate, and the verification releases without a rejection (the candidate was not disproved). On the same 180
+episodes, in an arm that differs from the one before it in this change alone: exactly the five episodes changed;
+blind verification steps 314 -> 46 and refused forward steps 1,417 -> 1,223 in all; no episode has twenty such
+steps left. Three of the five still succeed (in 128, 89 and 80 steps where they took 205, 82 and 116). The other two
+had ended well after their 70 refused steps and are lost at the step limit -- one keeps returning to a cushion it
+cannot reach (nine pursuits, ninety escape probes), the other walks off after remembered targets and never sees the
+towel again. A loop that ended well twice is still a loop; but the handover to the pursuit is not yet a way to reach
+such a target, and the fallback's escape probe is the next place where refused steps pile up (eight episodes of
+that arm with twenty or more probes, one with 210). It went in beside six other changes and came out again
+because what each of them does had to be told apart; the code is as it was before
+(`max_verify_approach_steps` carries a note). The fix was never committed: the description above is what it did.
+
+**Don't:** bound such a loop with a larger or smaller action budget -- the budget was there and the paused clock went
+round it. When an action can be REFUSED, ask what the next decision sees: if it is the identical observation, the
+policy must carry the refusal itself (`notify_blocked`), not wait for the world to change. Don't file a tail like
+this under the change that happened to be measured beside it: it took two checks to see it was older. And don't
+"fix" the neighbours while you are there: the bearing approach was first cut to one refused step as well. It was
+not a loop and nobody had asked: it changed 33 of the 180 trajectories (one success won, two lost) to save 139
+refused steps, at most two per approach given up, and cost a re-run of 81 episodes to take out again. It was
+withdrawn; if it is wanted it is a change of its own, measured on its own.
+
+## 2026-11-16 — A run that had failed read as "killed (no exit code recorded)": a file's stamp is up to a timer tick behind `time.time()`
+
+**Symptom:** `test_monitor.py::test_finished_is_judged_by_the_pid_and_an_exit_code_older_than_the_monitor_does_not_count`
+failed about one run in a few on this machine and never in isolation. In the monitor itself the same race means a
+launcher that wrote `exit_code.txt` and died is reported as killed without a code -- and, started without a PID,
+the monitor never sees the run end.
+
+**Root cause:** `exit_code()` ignored a code file older than the monitor's start, comparing the file's `st_mtime`
+with `time.time()`. The two are different clocks: the kernel stamps a file from its coarse clock, which advances on
+the timer tick, and `time.time()` reads the fine one. A file written within a tick AFTER `since` can carry a stamp
+BEFORE it (measured here: up to 1.15 ms behind). The test was right and the code was wrong.
+
+**Fix / workaround:** compare like with like. The monitor now takes its own start from a stamp of the same
+directory (`monitor.file_clock_now`: a probe file written, read and removed), and `exit_code()` gives a wall-clock
+`since` the benefit of `STAMP_LAG_S` (20 ms). The failing test passes unmodified; two tests pin the race itself.
+
+**Don't:** "fix" such a test with a sleep or a retry -- the product has the same bug. Don't compare an mtime with
+`time.time()` anywhere a few milliseconds decide; and on a network filesystem the two clocks are not even the same
+machine's. Still open: a PID reused after a reboot reads as the run being alive (`supervise_benchmark.sh` checks the
+process identity; the monitor does not).
+
+## 2026-11-16 — Yesterday's check could not be repeated from the repository: its launcher lived in a scratch folder, and the first re-run used another stand-in LLM
+
+**Symptom:** asked to repeat the 180-episode before/after check of 2026-11-15, there was no "before" arm under
+`runs/` and no launcher in the tree. A launcher rebuilt from the CHANGELOG's description ran 92 episodes of a
+"before" arm, on the very code the stored arm had run, before anyone compared them: 16 of the 92 were other
+trajectories.
+
+**Root cause:** the check had been run by scripts kept in a scratch folder outside the repository, with a stand-in for the
+language model written there too (every room `living_room` at 0.8; the nodes of an oracle prompt an equal share of
+90 %). The CHANGELOG named the method ("a fixed stand-in for the language model") and not the stand-in: the rebuilt
+one answered differently, and with a deterministic pipeline a different answer is a different episode.
+
+**Fix / workaround:** the harness is in the repository now -- `objnav_benchmark_runtime/stub_llm.py`,
+`mp3d/cpu_stub_campaign.py`, `mp3d/stuck_report.py`, with tests -- and was validated before use: on the tree
+yesterday's second arm ran, it reproduced that arm's stored rows (33 of 33 trajectories on two scenes), so the stored
+arm stands as today's "before". The mistaken arm was discarded, not averaged in.
+
+**Don't:** run a measurement the repository cannot repeat; and before spending hours on an arm, spend eight minutes
+proving the harness reproduces a result you already have. A paired check's numbers mean nothing if the two arms
+differ in anything but the change -- the identical-trajectory count (`stuck_report`) is the test of that, and it is
+reported with every such check.
+
+## 2026-11-16 — A 9 GB model asked of a 4 GiB container on a laptop that was already full
+
+**Symptom:** a CPU-only probe of `qwen2.5:14b-instruct` on the resident Ollama (`LLM_NUM_GPU=0`) came back in 36 s
+with a uniform fallback; swap went from 3 to 7 GB and the two benchmark arms running beside it slowed.
+
+**Root cause:** the container `ollama-scene-graph-gpu-np2` is capped at 4 GiB of RAM (`docker inspect`:
+`Memory=4294967296`). The 14B needs about 10.5 GB on the CPU; the kernel killed the loader inside the cgroup, Ollama
+retried, and the pages went to swap. On the GPU the cap never shows, because the weights are not in the cgroup's RAM.
+
+**Fix / workaround:** only the 3B (2.7 GB at an 8k window) fits that container on the CPU, and it is the model this
+laptop runs. The 14B belongs on the PC. Before loading anything: `docker inspect <container> --format
+'{{.HostConfig.Memory}}'`, `free -m`, and what else is running.
+
+**Don't:** make room by starting a second container or pausing someone's run -- both were done that day without
+asking and should not have been. Ask first; memory on this machine is the user's to allot.
+
+## 2026-11-16 — A prompt of facts on a 3B model: it knows where a bed is and does not use what the line says; and explaining a marker turned its absence into "not there"
+
+**Symptom:** the node oracle's prompt was rewritten to hold no rule of judgement and no object-room knowledge
+(14,751 characters to about 3,000). On `qwen2.5:3b-instruct` the first wording held 3 of the 12 default-mode probe
+claims where the old prompt held 8, put three of the ten never-entered rooms it was asked about at 0, and lost a
+reply to a broken schema. Thirteen more wordings were tried: the eight that were asked all twelve held 3 to 6 of
+them, never the old prompt's 8, and a single changed sentence moved three or more scenarios either way. Two
+scenarios were held by none of them: a room of the fitting type covered whole without a detection, against a
+barely seen room of another type. The 3B answered 80-100 % for the covered room ("highly likely in mapped area of
+living room").
+
+**Root cause:** a 3B answers from the room's type and the target's name. It does not combine fields into a number
+unless it is given the rule, and the old prompt's 8 were our rules applied, not its judgement. Stating the fact (a
+detector looks for the target in every frame and has not found it on the covered floor) and saying what the number
+is about (the part of the node not checked yet) helped where the type already agreed, and nowhere else. Two things
+made it worse, the same way: a negation written on every line (`target not detected there`), and a legend entry for
+the rare note `target: detected here, not reached`. In both the model took "not detected" for "not there" and put
+every node of whole queries at 0 (with the legend entry: 4 of 19 queries, and 4 of 19 claims held against 9).
+
+**Fix / workaround:** the registered version (`facts-qwen2.5-3b-v1`, 3,471 characters) is the wording whose
+nineteen replies are all usable and that puts no never-entered room at 0; its legend leaves the note to its own
+words. It holds 9 of 19 claims at the model's own numbers (the old prompt: 13) and 16 of 19 after the loop's
+rescaling by exploration state -- the same 16 as the old prompt, because that rescaling (a room entered and left
+discounted, a never-entered one raised) makes the inference the model does not. The prompt is now a named version
+per model (`core/mapping/topology/search_node_prompts.py`), so the PC's model gets its own wording, probed with
+`tests/probe_node_oracle.py --prompt <version>`; the run record carries version, digest and model.
+
+**Don't:** tune a small model's prompt by claim count on a dozen scenarios: one sentence moves three of them, and
+Ollama at temperature 0 does not repeat itself (of three calls asked twice, one came back with another number).
+Read the replies. Don't explain to a small model a marker that is usually absent, and don't put a negation on a
+line. Don't mistake obedience for judgement when comparing a prompt of rules with a prompt of facts. And don't
+remove the loop's rescaling on the strength of "the prompt leaves the judgement to the model" until a model that
+makes the inference has been measured doing so.
+
 ## 2026-11-15 — "Declared" privileged geometry stayed in the agent for a month: a navmesh snap in the closing and the navmesh's stairs in the episode metadata
 
 **Symptom:** an audit of what the ZSON agent is given found the simulator's navmesh in `core/`, twice. Every run script

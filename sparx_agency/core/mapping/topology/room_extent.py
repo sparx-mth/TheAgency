@@ -36,7 +36,20 @@ geometry), for every room of the current partition:
   ending inside the room. A room with all four sides seen has a final size;
   otherwise its area and the dimension across each unseen side are lower
   bounds, and nothing here presents them as more
-  (:attr:`RoomExtent.bounded`, :attr:`RoomExtent.open_sides`);
+  (:attr:`RoomExtent.bounded`, :attr:`RoomExtent.open_sides`). **What FINAL
+  claims, and what it does not.** It is a statement about THIS room of THIS
+  partition on the map of this update: no side of it opens onto unseen
+  space, so none of it lies beyond the map. It is not a promise that the
+  room will not be bigger later: a side that is a cut to another room is
+  "seen" (the floor beyond it is mapped, and is that room's), and the
+  watershed may yet join the two or move the cut. Of 252 rooms read FINAL
+  in 40 HM3D recordings, 73 were over a quarter bigger by the end of the
+  episode; of the 233 growths behind that, 178 were merges and 51 moved
+  cuts -- mapped floor changing hands -- and 3 a side read as seen that was
+  not (``CHANGELOG.md`` 2026-11-16). The oracle's line therefore words it
+  ``all sides mapped`` and its prompt says the division into rooms may
+  still be revised (``search_node_oracle.format_size``); the identifier is
+  kept because recordings and the replay tool carry it;
 * **how much of it has been covered**: the floor the camera has seen from
   within detection range with a clear line of sight, as recorded per cell by
   the sight ledger (``observed``) -- not the cells the agent walked over --
@@ -216,7 +229,9 @@ class RoomExtent:
             ``length_m``.
         orientation_rad: Direction of the ``u`` axis in the world frame.
         sides: The four :class:`SideExtent` records, in :data:`SIDES` order.
-        bounded: Every side seen: the size is FINAL.
+        bounded: Every side seen: the size is FINAL -- of this room of this
+            partition, on this map (see the module docstring for what that
+            does not promise).
         open_sides: Names of the sides not seen (the size is a lower bound
             across them); empty when bounded.
         length_final: Both sides across the ``u`` axis are seen.

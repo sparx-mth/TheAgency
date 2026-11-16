@@ -52,6 +52,12 @@ PID_FILE = "launcher.pid"
 EXIT_CODE_FILE = "exit_code.txt"
 #: The exit code reported when the launcher vanished without writing ``exit_code.txt`` (killed).
 EXIT_CODE_UNKNOWN = -1
+#: How far the stamp the kernel puts on a file may lag the wall clock (``time.time()``). Files are stamped from the
+#: kernel's coarse clock, which advances once per timer tick -- 1 ms on this machine, 10 ms on the slowest common
+#: kernels -- so a file written just AFTER a wall-clock instant can carry a stamp just BEFORE it (measured here: up to
+#: 1.15 ms). Two of the slowest ticks. It matters only where a wall-clock time is compared with a file's stamp
+#: (:func:`exit_code`); the monitor itself compares two stamps of one filesystem (:func:`file_clock_now`).
+STAMP_LAG_S = 0.02
 
 
 def _utc(ts: Optional[float] = None) -> str:
@@ -179,11 +185,46 @@ def launcher_started(output: pathlib.Path) -> Optional[float]:
         return None
 
 
+def file_clock_now(directory: pathlib.Path) -> Optional[float]:
+    """"Now" as the filesystem holding ``directory`` stamps a file written this instant, or None when it cannot be asked.
+
+    A probe file is written, read and removed. Its stamp comes from the
+    clock -- and with the resolution -- every other file in the directory
+    is stamped with, so a file written after this call never reads as older
+    than the value returned: the comparison :func:`exit_code` makes is then
+    between two stamps of one clock, exact on any filesystem (a local one
+    stamped from the kernel's coarse clock, one that keeps whole seconds, a
+    network one whose server's clock is not this machine's).
+    """
+    probe = pathlib.Path(directory) / (".monitor.%d.stamp" % os.getpid())
+    try:
+        probe.write_bytes(b"")
+        return probe.stat().st_mtime
+    except OSError:
+        return None
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+
+
 def exit_code(output: pathlib.Path, since: float) -> Optional[int]:
-    """The launcher's recorded exit code, if ``exit_code.txt`` was written after ``since``."""
+    """The launcher's recorded exit code, if ``exit_code.txt`` was written after ``since``.
+
+    ``since`` is best a file stamp of the same directory
+    (:func:`launcher_started`, :func:`file_clock_now`). A wall-clock time is
+    accepted too, and the file is then given the benefit of
+    :data:`STAMP_LAG_S`: until 2026-11-16 the test was a bare
+    ``st_mtime < since``, and a code file written within a timer tick after
+    a wall-clock ``since`` -- stamped from the kernel's coarse clock, up to
+    a tick behind -- was read as older than it and ignored. With a PID that
+    reported a run that had FAILED with a code as "killed (no exit code
+    recorded)"; without one the monitor never saw the run end.
+    """
     path = output / EXIT_CODE_FILE
     try:
-        if path.stat().st_mtime < since:
+        if path.stat().st_mtime < since - STAMP_LAG_S:
             return None
         return int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
@@ -199,7 +240,8 @@ def run_finished(output: pathlib.Path, pid: Optional[int], since: float) -> Opti
     appearing after ``since`` is the signal. Either way a code file older than
     ``since`` is ignored -- a preflight into the same directory leaves one
     behind -- which is why ``since`` should be the launcher's start
-    (:func:`launcher_started`) rather than the monitor's.
+    (:func:`launcher_started`) rather than the monitor's. See :func:`exit_code`
+    for which clock ``since`` is read on.
     """
     code = exit_code(output, since)
     if pid is not None:
@@ -219,6 +261,10 @@ class Monitor:
         self.pid = pid
         self.log = log or self.output / LOG_FILE
         self.csv_path = csv_path or self.output / CSV_FILE
+        if since is None:
+            # The monitor's own start, on the clock the run's files are stamped with -- not the wall clock, which
+            # a file's stamp can lag (:data:`STAMP_LAG_S`) or, on a network filesystem, simply disagree with.
+            since = file_clock_now(self.output)
         self.since = time.time() if since is None else since
         self._csv_signature = None  # type: Optional[tuple]
 

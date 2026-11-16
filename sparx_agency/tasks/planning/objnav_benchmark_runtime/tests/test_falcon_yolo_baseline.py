@@ -41,10 +41,6 @@ class NoDetector:
 
 def baseline(detector=None, label="chair", actions=None, baseline_settings=None, **overrides):
     """The baseline on a 20 m synthetic map; ``overrides`` are RPTSettings fields."""
-    closing = dict(overrides.pop("target_closing", None) or {})
-    if not any(key.startswith("stop_overshoot") for key in closing):
-        closing.update(stop_overshoot_steps=0, stop_overshoot_max_steps=0)
-    overrides["target_closing"] = closing
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", label, PROTOCOL.camera(),
                             actions or BODY_ACTIONS_PROTOCOL.actions(), 500)
     policy = FalconYoloBaseline(detector or NoDetector(), RPTSettings(**dict({"map_size_m": 20.0}, **overrides)),
@@ -283,7 +279,7 @@ def confined_baseline(monkeypatch):
     obs = observation(episode, 0, pose=AgentPose(IN_A[0], IN_A[1], 0.0, 0.0))
     policy.mapping.atlas.update(obs.pose)
     policy.mapping._anchor = 0.0
-    place_stairs(policy, obs, FLIGHT, leads_to=False)          # as the coordinator places a flight its depth measured
+    place_stairs(policy, obs, FLIGHT)                          # as the coordinator places a flight its depth measured
     policy.building.storey_confirmed = True
     policy.building.observe(obs)
     assert len(policy.building.portals) == 1, "the seen staircase is placed: knowledge, not a destination"

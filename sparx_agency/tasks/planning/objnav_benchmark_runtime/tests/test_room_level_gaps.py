@@ -64,7 +64,7 @@ def test_the_oracle_is_shown_rooms_only_each_with_its_exits_and_no_exit_gets_a_n
     assert len(before) == 3, "room A's west end; room B's patch by the door and its east end"
     policy.graph.probs = {0: 0.0, 1: 0.6}
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert reasoned == [0] and policy.reasoned_with[0]["stairs"] == [], "the oracle saw the rooms, not the gaps"
+    assert reasoned == [0] and policy.reasoned_with[0]["extra"] == [], "the oracle saw the rooms, not the gaps"
     exits = policy.reasoned_with[0]["exits"]
     assert {pid: (e.count, e.doorways, e.glimpsed) for pid, e in exits.items()} == {0: (1, 0, ()), 1: (2, 0, ())}
     assert all(e.unseen_m2 > 0.0 for e in exits.values()), "and the unseen floor behind them rides along (2026-10-22)"
@@ -154,7 +154,7 @@ def test_a_room_a_rotation_finished_with_gaps_left_is_reopened_for_them_entered_
     gap = west_gap(openings_of(legacy, episode_l, world_l))
     legacy.loop.plan(obs_at(episode_l, 0, IN_A), world_l)
     assert legacy.loop._excluded == {0: "scanned:" + SCAN_POINT_INSIDE} and legacy.loop._reopened == set()
-    assert gap.node_id in legacy.reasoned_with[0]["stairs"]
+    assert gap.node_id in legacy.reasoned_with[0]["extra"]
     assert {pid: e.count for pid, e in legacy.reasoned_with[0]["exits"].items()} == {1: 2}
 
 

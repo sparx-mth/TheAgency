@@ -141,21 +141,43 @@ Keep the rest that way deliberately:
   `preferred_clearance_m` 0.30 is the A\* clearance preference above that
   radius, `min_clearance_m` 0.25 the tightest standoff a route relaxes to (a
   0.36 m body moved without sliding on a 30° heading grid needs a 0.5 m gap;
-  derived from the action quantisation, not from a score), and `stop_distance_m`
-  1.0 is where the dataset generator placed the
-  goal view points — the method aims for roughly a metre from the object
-  because that is where standing counts. The one default that is NOT of that
-  kind is disclosed here: `target_closing.stop_overshoot_steps` and
-  `stop_overshoot_max_steps` 0 (2026-11-05; `habitat/entrypoint.py::method_defaults`,
-  shared with MP3D since 2026-11-11 because both score to view points). The
-  overshoot walks the margin between a near-edge reading and Gibson's footprint
-  evaluator; this evaluator measures to the view points, where the deciding
-  frame already stands, and the step was judged on recorded validation episodes
-  (70 STOPs: never a help, 18 losses of margin, one success walked out to
-  0.16 m). A raised target -- a television, a picture -- keeps its own ceiling
-  (`stop_overshoot_elevated_max_steps` 3, the MP3D finding: its view points stand
-  closer), which the 70 STOPs did not cover. Override them with
-  `--policy-config` and the override is recorded in the run manifest.
+  derived from the action quantisation, not from a score).
+- **The STOP criterion is the dataset's own definition of its success zone**
+  (since 2026-11-16): `target_closing.stop_within_m` 0.9 and `stop_measure`
+  `planar`, from `GOAL_ZONES` in `protocol.py` through
+  `habitat/entrypoint.py::method_defaults`. HM3D's generator put a goal's view
+  points on a grid of half the agent's radius out to 1.0 m from the object's
+  axis-aligned box **in the horizontal plane**, whatever the object's height,
+  and an episode succeeds on a STOP within 0.1 m of one; the STOP is taken a
+  decimetre inside that metre (`habitat/goal_zone.py` has the generator, the
+  argument for the margin and how VLFM, ASCENT and ApexNav stop). The closing
+  decides to stop on its own evidence and then walks on until its own planar
+  range to the target reads within 0.9 m. What reaches the method is that one
+  distance and that one word; no view point, no goal position and nothing of
+  an episode does.
+  - *How the definition was established, disclosed:* read from the published
+    generator code and confirmed by measuring every validation goal's view
+    points against the object's box as habitat-sim loads it (v1: 432 goals of
+    20 scenes, none of 111,406 view points more than 1.01 m out in the plane,
+    a television 1.4 m up included; v2: 417 goals annotated as in v1). That is
+    a use of validation data and scene annotations during development.
+  - *Not measured on HM3D episodes.* The criterion was measured on MP3D's
+    180-episode single-storey set only (CHANGELOG of 2026-11-16). What is
+    known here is older and about another rule: on 70 recorded HM3D STOPs an
+    UNCONDITIONAL step after the STOP never helped, cost margin in 18 and
+    walked one success out to 0.16 m. The criterion steps only while the range
+    reads beyond 0.9 m, so that evidence does not transfer either way; run
+    `{"target_closing": {"stop_within_m": 0}}` beside the default to measure it.
+  - *What it replaced.* Until 2026-11-16 three rules stood here, and the
+    recorded numbers were taken with them: `target_closing.stop_overshoot_steps`
+    and `stop_overshoot_max_steps` 0 under this evaluator (2026-11-05: the
+    planar step after a decided STOP walks the margin of Gibson's footprint
+    evaluator and was judged on those 70 STOPs); a raised target's own steps
+    after the decision (`stop_overshoot_elevated_max_steps` 3, sized on MP3D's
+    view points); and the frontal standoff of a raised planar target (sized on
+    the view points of MP3D's pictures). They were switched by which evaluator
+    scores a run and fitted on recorded STOPs; all three are deleted, a policy
+    config that names one is refused, and the frontal standoff is not restored.
 - Keep an experiment log and report every variant. Do not tune against
   validation and publish only the best number.
 - A configuration lock is a **reproducibility commitment, not proof that

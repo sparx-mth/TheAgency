@@ -118,3 +118,58 @@ def test_a_sightline_to_an_open_rooms_own_frontier_adds_no_threshold_and_a_detec
     assert graph.room_at(world, IN_SLIVER) != graph.room_at(world, IN_ROOM)
     [edge] = [e for e in graph.doors if e["kind"] == "door"]
     assert edge["index"] == 7 and len(edge["room_pairs"]) == 1
+
+
+def test_the_graphs_edges_name_each_rooms_neighbours_by_type_and_the_oracles_node_carries_them():
+    """``connections()`` -- what the oracle's ``connected to:`` is made of: the types of the rooms a door or a
+    threshold joins a room to. A type and nothing of where: adjacency is in the scene graph, distance is RPT*'s."""
+    from types import SimpleNamespace
+    from sparx_agency.core.mapping.topology.search_node_oracle import format_node
+    world = glimpsed_world()
+    graph, target = graph_on(world)
+    assert graph.connections() == {}, "one room and no edge: nothing is connected to anything"
+    graph.update(world, [], target, doors=(SimpleNamespace(id=7, xy=DOORWAY_XY, count=3),), step=1, reason=False)
+    room, beyond = graph.room_at(world, IN_ROOM), graph.room_at(world, IN_SLIVER)
+    assert graph.connections() == {room: ["unknown"], beyond: ["unknown"]}, "a neighbour not identified yet"
+    tracker = graph.label_tracker
+    tracker.labels[room], tracker.metadata[room] = SimpleNamespace(label="bedroom"), {"strength": "strong"}
+    tracker.labels[beyond], tracker.metadata[beyond] = SimpleNamespace(label="hallway"), {"strength": "weak"}
+    assert graph.connections() == {room: ["hallway?"], beyond: ["bedroom"]}, "a weakly held type keeps its question mark"
+    nodes = {node.id: node for node in graph.nodes(world, step=2, here_xy=IN_ROOM)}
+    assert nodes[room].connected == ("hallway?",) and nodes[beyond].connected == ("bedroom",)
+    line = format_node(nodes[room])
+    assert "connected to: hallway?" in line
+    assert "here" not in line and "%.1f" % IN_ROOM[0] not in line, "the room the agent stands in is not marked: that is distance"
+    # An edge to a room the registry no longer holds (a merge) names nothing.
+    graph.doors.append({"index": 9, "kind": "door", "room_pairs": [[room, 99]]})
+    assert graph.connections() == {room: ["hallway?"], beyond: ["bedroom"]}
+
+
+def test_a_room_holding_a_confirmed_object_of_the_targets_own_kind_is_marked_and_the_oracle_is_told():
+    """``target_seen`` -- what lets the oracle's prompt say the covered floor was looked at WITHOUT finding the
+    target: a room whose confirmed objects include one of the target's own kind (found, let go by the closing, the
+    search still on) says so on its line; every other room says nothing; without the target the mark is unknown."""
+    from types import SimpleNamespace
+    world = glimpsed_world()
+    graph, target = graph_on(world)                                # the target is a toilet
+    door = SimpleNamespace(id=7, xy=DOORWAY_XY, count=3)
+    sink = SimpleNamespace(class_name="sink", xy=IN_ROOM, radius_m=0.3)
+    toilet = SimpleNamespace(class_name="toilet", xy=IN_SLIVER, radius_m=0.3)
+    graph.update(world, [sink, toilet], target, doors=(door,), step=1, reason=False)
+    room, beyond = graph.room_at(world, IN_ROOM), graph.room_at(world, IN_SLIVER)
+    marked = {node.id: node for node in graph.nodes(world, step=2, target=target)}
+    assert marked[room].target_seen is False and marked[beyond].target_seen is True
+    assert "target:" not in format_line(marked[room]) and format_line(marked[beyond]).endswith(
+        "seen: toilet  target: detected here, not reached")
+    assert all(node.target_seen is None for node in graph.nodes(world, step=2)), "no target given: not known, not said"
+    other = gibson_label_mapper().target_labels("bed")
+    assert not any(node.target_seen for node in graph.nodes(world, step=2, target=other)), "another target's kind is no mark"
+    # The loop's own query passes the episode's target, so what the model is shown carries the mark.
+    graph.reason(world, target, step=3)
+    shown = {node["id"]: node for node in graph.last_reasoning["nodes"]}
+    assert shown[beyond]["target_seen"] is True and shown[room]["target_seen"] is False
+
+
+def format_line(node):
+    from sparx_agency.core.mapping.topology.search_node_oracle import format_node
+    return format_node(node, 1.0)

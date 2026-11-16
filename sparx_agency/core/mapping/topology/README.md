@@ -54,7 +54,10 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   unknown, floor of no room -- grouped into four sides in the storey's wall
   frame), its dimensions and footprint area, whether that size is FINAL
   (every side seen: at most `ExtentParams.open_tolerance` of its faces open
-  onto unseen space in runs wider than a doorway) or a LOWER BOUND
+  onto unseen space in runs wider than a doorway -- a statement about this
+  room of this partition on this map, NOT a promise that the watershed will
+  not join it to a neighbour later; the oracle's line words it `all sides
+  mapped`, see `search_node_oracle.py` below) or a LOWER BOUND
   (`bounded`, `open_sides`), the agent's distance to each wall when it stands
   in the room, and how much of its floor the camera has covered from
   detection range (`covered_m2`; `covered_fraction`, the share of the whole
@@ -147,36 +150,87 @@ decides whether to keep a stale label — nothing is cached on failure.
   (`OracleResult.reused`, `SearchOracle.reuses`). A reply that fell back
   to uniform is never kept.
 - `search_node_oracle.py` — the successor of `search_oracle` for the
-  room-search loop, written for a capable model (the runtime routes it to
-  `LLMConfig.reasoning_model`, a 14B instruct model). One call per loop
-  point over every NODE the search could go to next -- **every room of the
-  storey**, finished ones included, each with its type (or `unknown`;
-  `kitchen?` when named from a single kind of object), size, frontier
-  left, `status=` (`never_entered` / `entered` / `scanned(<how>, <ago>)`),
-  time searched, objects seen; each opening with the room it opens from
-  and what was glimpsed through it; and, in the multi-storey development
-  protocol only, each staircase -- asking for the probability that going
-  there NEXT finds the target. **LLM-first since 2026-10-07:** the user
-  prompt carries a HOUSE line (every room type found with its status, the
-  rooms still unidentified, the openings not looked into, whether
-  unexplored frontier is reachable, and `actions used about N of 500`),
-  and the system prompt asks for three written steps before the numbers --
-  `home` (where the target lives: a toilet in a bathroom or an en-suite
-  reached through a bedroom; a television in a living room, then a
-  bedroom, rarely a kitchen, never a bathroom), `house` (one kitchen, one
-  living room, one to four bedrooms, one to three bathrooms: what the rooms
-  found say about the rest), `stage` (early: the unexplored first; late:
-  the detector may have missed the target in a scanned room of the right
-  type) -- plus a `pass` verdict (`first` / `second`) the loop reads to
-  decide whether scanned rooms are offered again. It forbids reasoning
-  about distance, which RPT* charges. Code keeps only the contract:
-  parse, drop invented ids, give an omitted node a small share, clamp
-  below 1, refuse a reply with no usable node, reuse the reply when the
-  prompt is byte-identical (effort and budget numbers are shown in coarse
-  steps for that). The two arithmetic floors (`unexplored_floor`,
-  `unexplored_elsewhere`) are knobs, **off by default**; the
-  storey/stairs rules (`home_here`) are a `STAIRS_SUPPLEMENT` appended only
-  when a staircase is a node. `LLMClient.chat_json` takes `reasoning=True`
+  room-search loop (the runtime routes it to `LLMConfig.reasoning_model`).
+  One call per loop point over every NODE the search could go to next --
+  the rooms of the storey that are still nodes (and, under the deprecated
+  exits-as-nodes mode, the openings). A node is a room **together with the
+  unseen space its exits open onto** (the room's visit looks through them),
+  and the model is asked for **the probability that the target is in the
+  part of the node not checked yet**: the room's floor that is left, and
+  that unseen space. The detector has looked at the covered floor in every
+  frame without finding the target, so this is the probability that
+  searching the node finds it -- the `p(v)` RPT* is handed.
+  **The division of labour:** the model gives that probability and nothing
+  else; distance, and the weighing of distance against the probabilities,
+  is RPT*'s. The prompt carries no distance, no position and no word on
+  where the robot stands (`here=yes` was dropped on 2026-11-16;
+  `SearchNode.here` is kept for the record and never rendered).
+  **The model's own knowledge, and none of ours (since 2026-11-16).** The
+  system prompt tells the model to use its own reasoning and its own
+  knowledge of standard homes and buildings -- how they are laid out, in
+  which rooms furniture and objects of each kind are found -- and to derive
+  every probability from that. It holds no category knowledge and no rule
+  of judgement: no room named as the place of any object, no number or band
+  a probability should fall in, no list of a benchmark's goal categories,
+  no count of the rooms a home has, no "coverage first, time second", no
+  rule on what an exit is worth or how the budget weighs, no worked
+  example. The only object it ever sees named is the one on the `TARGET:`
+  line of the user prompt -- the name of the object the current episode
+  searches for, in every call. What it does hold is FACTS a model cannot
+  know: what a node is, what each field of a line measures and how it was
+  obtained, the reply format, that the numbers are independent. Before that
+  day the prompt was 14,751 characters of our judgement.
+  **What a room line holds: everything the scene graph stores about the
+  room, except distance.** `type=` (or `unknown`; `kitchen?` when the
+  evidence is thin); `size=` and `covered=` from `room_extent.py`;
+  `frontier=`; `exits=` (how many stand at a door frame, the unseen floor
+  behind them) and what was glimpsed through them; `status=`
+  (`never_entered` / `entered` / `scanned(<how>, <ago>)`); `searched=`;
+  `connected to:` the types of the rooms a door or doorway joins it to (the
+  graph's edges, new on 2026-11-16); `seen:` the objects detected in it
+  with their counts, most numerous first (`chair x4, table`; a cut list
+  says so: `+3 more`); and `target: detected here, not reached` on a room
+  whose confirmed objects include one of the target's own kind
+  (`SearchNode.target_seen`) -- the one case in which "the detector looked
+  at the covered floor without finding it" is not true, said on the line.
+  With the action time in the context (`SearchContext.action_time_s`) the
+  durations are written in actions -- the unit of the HOUSE line's budget
+  (`searched=40 actions`) -- in the same coarse steps as the time
+  rendering. The HOUSE line (every room type found with its status, the
+  rooms unidentified, the exits not looked into, the frontier state,
+  `actions used about N of 500`) is unchanged.
+  **"Mapped", not "final".** A room whose four sides are all located reads
+  `size=12m2 (4x3m, all sides mapped)`; one with a side the camera has not
+  reached reads `size=at least 12m2 (5+ x 3m, 1 of 4 sides not mapped yet,
+  open edge 2m)`, followed by `covered=10m2 (80% of the room, 2m2 left)` or,
+  when the size is a lower bound, `covered=3m2 (at most 40% of the room, at
+  least 4m2 left)`. As first written the first form read "all walls seen"
+  and the prompt called it FINAL -- "that big and no bigger" -- which
+  promised more than the reading knows: of 252 rooms so declared in 40 HM3D
+  recordings, 73 were over a quarter bigger by the end of the episode, and
+  229 of the 233 growths behind that were the PARTITION changing (178
+  merges, 51 moved cuts) -- floor that was mapped, and listed under the
+  neighbouring room, all along. What the extents know is that no side of
+  the room opens onto unmapped space; the words now say that, and the
+  prompt adds that the map's division into rooms may still be revised. The
+  wording was changed rather than the code: withholding the verdict wherever
+  a side is a cut and not a wall would have told the model that mapped
+  floor is unmapped.
+  **The reply** is unchanged: `home`, `house`, `stage` (three short readings
+  in the model's words, recorded), a `pass` verdict (`first` / `second`,
+  recorded; the loop's second pass is opened by the geometry) and one
+  integer percentage per node, independent, never renormalised. Code keeps
+  only the contract: parse, drop invented ids, give an omitted node a small
+  share, clamp below 1, refuse a reply with no usable node, reuse the reply
+  when the prompt is byte-identical. One arithmetic floor remains as a knob
+  and is **off by default** (`unexplored_floor`).
+  **No staircase node and no multi-storey supplement** (deleted on
+  2026-11-16 with the loop's stair-node code, until the multi-storey work):
+  `STAIRS`, `STAIRS_SUPPLEMENT`, the storey lines of the user prompt, the
+  `home_here` verdict and `unexplored_elsewhere` are gone. The supplement
+  for an exit offered as a node of its own (the deprecated mode) is the
+  meaning of that line and nothing else.
+  **The call.** `LLMClient.chat_json` takes `reasoning=True`
   to select the reasoning model, its timeout, its reply cap and its
   context window (`LLM_REASONING_MODEL`, default `qwen2.5:14b-instruct`;
   `LLM_REASONING_TIMEOUT_S`; `LLM_REASONING_MAX_TOKENS`;
@@ -189,41 +243,93 @@ decides whether to keep a stale label — nothing is cached on failure.
   2026-10-28 got no oracle answer in 2,000 episodes (`LESSONS.md`). A reply
   whose `prompt_eval_count` shows the prompt was cut, or whose prompt and
   reply filled the window, raises (`_refuse_truncation`).
-  `tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py` runs
-  five single-storey scenarios against the live model and checks the
-  judgement, not just the schema. **Since 2026-11-09** the HOUSE line's
-  frontier statement is a tri-state (reachable / only slivers / unreachable
-  from here / none) rather than reachable-or-not, and a node under a square
-  metre is shown as `size=under 1m2` rather than rounded to `0m2`.
-  **No hand-written category table (since 2026-11-15).** From 2026-11-09 to
-  that date the user prompt also carried a `WHERE IT LIVES` line, rendered
-  from a table of the room types each target category is likely and rare
-  in, and the system prompt told the model to copy it into its `home` step;
-  a node could be flagged as holding a "home object" of the target and
-  floored (`home_floor`). All of that went with `room_priors.py` (below):
-  where a target lives is the model's own step 1. What the model is still
-  told about homes is what the system prompt itself says (its examples of
-  typical homes and its numeric bands) -- read `SYSTEM_PROMPT` before
-  claiming the judgement is the model's alone.
-  **Size and coverage from the room extents (since 2026-11-16).** A room
-  line's `size=` is read from `room_extent.py`: `12m2 (4x3m, all walls
-  seen)` when final, `at least 12m2 (5+ x 3m, 1 wall not seen yet)` when a
-  lower bound (the `+` marks the dimension cut short); it is followed by
-  `covered=10m2 (80% of the room, 2m2 left)` -- the floor the camera looked
-  at from detection range, as a share of the WHOLE room and as the
-  remainder, the share an upper bound and the remainder a lower bound when
-  the size is one (`covered=3m2 (at most 40% of the room, at least 4m2
-  left)`). The code does the arithmetic and the model is told to read the
-  numbers, not recompute them. The rules put coverage first (the main fact
-  for what is left of a room; the size says what the remainder can hold;
-  the model judges whether the target fits) and time second (coverage
-  overrides `searched=` both ways); the two sentences that read time, or
-  assumed an entered room was "mostly seen", where the coverage is now
-  given were replaced. Nothing else on the line changed: `frontier=`,
-  `exits=` with the unseen floor behind them, `status=`, `searched=`,
-  `here=yes` and `seen:` are as before. The coverage thresholds in the
-  rules (90 % covered with all walls seen is "as good as scanned") are more
-  hand-written numeric bands: the sentence above applies to them too.
+  **History.** LLM-first since 2026-10-07 (the HOUSE line, the three
+  written steps and the `pass` verdict); the frontier statement a tri-state
+  and `size=under 1m2` since 2026-11-09; the `WHERE IT LIVES` line and the
+  `home_floor` of 2026-11-09 went with `room_priors.py` on 2026-11-15 (below);
+  size and coverage from the room extents came on 2026-11-16, with two rules
+  ("coverage first", "time is secondary") that the same day's rewrite
+  removed with every other rule.
+- `search_node_prompts.py` — **the oracle's prompt, by version.** A wording
+  is read by one model and may be misread by the next, so the texts a model
+  is given beside the facts -- system prompt, openings supplement, the
+  frame of the user prompt -- are a named `NodeOraclePrompt`, written
+  against ONE model (`tuned_on`) and probed on it. `PROMPTS` holds them by
+  name; a run selects one with `LoopSettings.oracle_prompt` (policy config
+  `{"room_search": {"oracle_prompt": "<name>"}}`; an unregistered name is
+  refused at start-up); the run record carries the name, the model it was
+  tuned on and the SHA-256 of its text (`configuration()["node_oracle"]
+  ["prompt"]`), and the benchmark factory adds the model that answered and
+  whether it is that one (`["node_oracle"]["model"]`). A version is never
+  edited after a run has used it -- a changed wording is a new version, and
+  the digest shows when that rule is broken. `tests/
+  test_search_node_prompts.py` holds EVERY registered version to the
+  contract above (own knowledge; no object word, no room-type word, no
+  number but the reply's; no rule; no distance; the reply format; a legend
+  for exactly the fields a line carries), so a version added for another
+  model cannot slip past it. **To add one:** copy the nearest version under
+  a new name with the new model's tag, register it, probe it
+  (`tasks/planning/objnav_benchmark_runtime/tests/probe_node_oracle.py
+  --prompt <name>`, with `LLM_REASONING_MODEL` set to that model), reword
+  and repeat, then record its figures in the table below.
+
+  **The probe's figures** (`qwen2.5:3b-instruct`, CPU, temperature 0, seed
+  0, one call per scenario, 2026-11-16; each cell is *claims held at the
+  model's own numbers / replies usable / claims held as RPT\* receives them*):
+
+  | wording | tuned on | system prompt | 12 default-mode scenarios (`P`) | the first 7 (`O`) | a call takes |
+  |---|---|---|---|---|---|
+  | the prompt before 2026-11-16 (rules and priors; not a version) | -- | 14,751 chars | 8 / 12 / 10 | 5 / 7 / 6 | 91-130 s |
+  | the first facts-only wording of 2026-11-16 (not registered) | -- | 2,955 chars | 3 / 11 / 6 | 2 / 6 / 5 | 54-63 s |
+  | `facts-qwen2.5-3b-v1` (the default) | `qwen2.5:3b-instruct` | 3,471 chars | 5 / 12 / 10 | 4 / 7 / 6 | 50-56 s |
+
+  *As RPT\* receives them*: after the loop's rescaling by exploration state
+  (a never-entered room x1.5 and at least 0.15; an entered one x0.5 with a
+  20-action half-life; under 0.05 no node), which acts on whatever the model
+  wrote. Read the table for what it is -- nineteen hand-written scenarios,
+  one call each, a model that is brittle to wording (one sentence moves
+  three scenarios) and not bit-reproducible on Ollama at temperature 0 (of
+  three calls repeated, one came back with another number on one node): a
+  difference of one or two claims is noise. What it does show:
+  - **On the 3B the facts-only version holds fewer claims at the model's
+    own numbers than the prompt of rules did (9 of 19 against 13), and as
+    many once the loop has rescaled them (16 of 19 each).** Every reply is
+    usable and no never-entered room is put at 0 -- the most harmful
+    output, since the loop's floor for such a room applies only above 0;
+    the first wording did that in 4 of 19 queries.
+  - **The 3B's own knowledge is mostly sound; what it lacks is the
+    inference.** Its `home` reading -- where it says the target is normally
+    found -- is sensible in most of the nineteen queries ("beds are
+    typically found in bedrooms", "refrigerators are commonly found in
+    kitchens") and wrong in some (a toilet "typically found in bathrooms or
+    kitchens" in three, "in bedrooms or kitchens" in one). What it does not
+    do is combine fields. The two scenarios that ask exactly what coverage
+    without a detection means -- a room of the fitting type covered whole
+    against a barely seen room of another type (`P7`, `P11`) -- were held
+    by the old prompt, which stated the rule, and by none of the facts-only
+    wordings tried (twelve were asked `P7`, nine `P11`): the 3B answers 80
+    to 100 % for the covered room in all but one of those replies ("highly
+    likely in mapped area of living room"). The loop's discount of an
+    entered room is what carries both.
+  - **What helped, each a fact:** what a node is (the room and the unseen
+    space behind its exits); that a detector looks for the target in every
+    frame and has not found it on the covered floor; which part of a node
+    the number is about; that `unknown` may be any kind; the two ends of
+    the scale; the question restated, with the target's name, as the last
+    line of the user prompt; the reply format on one line, "ending with one
+    nodes entry per node" (a 3B closed the object after its three readings
+    otherwise).
+  - **What did not:** a negation on every line (`target not detected
+    there`: never-entered rooms at 0); explaining the `target: detected
+    here, not reached` note in the legend (the 3B read its absence as "not
+    there": every node of a query at 0 in 4 of 19 queries, 4 of 19 claims
+    held -- which is why the 3B's legend leaves the note to its own words);
+    the floor left as a field of its own (`left=`: two of twelve replies
+    unusable); an `unchecked=` framing; asking in the `home`/`house`
+    readings for the kinds of room and which were found; a shorter legend.
+  - **A larger model:** the first facts-only wording held 5 of the 7 `O`
+    claims on `qwen2.5:14b-instruct` (CPU, one run) where it held 2 on the
+    3B. No version has been tuned on it yet; the procedure is above.
 - `room_priors.py` — **deleted on 2026-11-15.** It held hand-written tables
   that told the search where things are: the room types a target category
   is likely and rare in (`TARGET_HOMES`, the `WHERE IT LIVES` prompt line),

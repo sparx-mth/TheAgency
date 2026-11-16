@@ -2,11 +2,11 @@
 
 The node oracle (``core/mapping/topology/search_node_oracle.py``) is asked to
 judge every node against the whole home -- which room types have been found
-(scanned ones included, so a living room already seen tells it a sofa is
-unlikely in the rooms still unidentified), how many rooms are still
-unidentified, how many openings are not yet looked into, and how much of the
-action budget is spent. This module writes that one line from the scene graph
-and the scan ledger. Nothing here judges: the words are facts in the prompt's
+(scanned ones included: what the rooms already found say about the rest is
+the model's own inference), how many rooms are still unidentified, how many
+openings are not yet looked into, and how much of the action budget is
+spent. This module writes that one line from the scene graph and the scan
+ledger. Nothing here judges: the words are facts in the prompt's
 vocabulary, and the budget is shown in coarse steps so an unchanged map gives
 an unchanged prompt (the oracle reuses a byte-identical prompt's reply).
 """

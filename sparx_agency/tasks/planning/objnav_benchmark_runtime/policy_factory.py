@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import sys
 
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
@@ -52,6 +53,33 @@ class StopDiagnostic:
 
     def plan(self, observation):
         return NavigationCommand.stop_here()
+
+
+def oracle_model_record(identity, reasoning_model, prompt):
+    """What a run record says of the model the node oracle asks, beside the prompt version it is asked under.
+
+    A wording is tuned per model (``core/mapping/topology/search_node_prompts.py``),
+    so the record names the model that answered and whether it is the one
+    the version was tuned on. A mismatch is no error -- any model may be
+    asked under any version -- and is said once on stderr, for whoever moved
+    the run to another model.
+
+    Args:
+        identity: The LLM service's verified identity (``VerifiedLLMClient.health()``):
+            the name is the service's own -- a stand-in answers as itself.
+        reasoning_model: The configured reasoning model, when the identity names none.
+        prompt: The policy's prompt record (``NodeOraclePrompt.describe()``).
+
+    Returns:
+        ``{"name", "digest", "prompt_tuned_on_it"}``.
+    """
+    name = identity.get("reasoning_model", reasoning_model)
+    if name != prompt["tuned_on"]:
+        print("[node oracle] %s is asked under prompt version %r, which was tuned on %s (room_search.oracle_prompt "
+              "selects another; core/mapping/topology/search_node_prompts.py lists them)"
+              % (name, prompt["version"], prompt["tuned_on"]), file=sys.stderr)
+    return {"name": name, "digest": (identity.get("models") or {}).get(name, {}).get("digest"),
+            "prompt_tuned_on_it": name == prompt["tuned_on"]}
 
 
 def build_policy(args, label_mapper, defaults=None, ground_truth=None):
@@ -201,6 +229,8 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         llm_config = asdict(config)
         llm_config.pop("api_key", None)
         info.update(llm=llm_config, llm_identity=identities["LLM"])
+        info["node_oracle"]["model"] = oracle_model_record(identities["LLM"], config.reasoning_model,
+                                                             info["node_oracle"]["prompt"])
         # Only when set, so a run recorded before they existed still resumes against its frozen config.
         if answers is not None:
             info.update(llm_answers=answers.describe())

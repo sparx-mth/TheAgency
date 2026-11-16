@@ -21,12 +21,13 @@ and attached to the episode metadata, sighted by a "perfect detector" and
 climbed along the connector's centreline. That was privileged scene geometry
 -- no published zero-shot baseline is told where the stairs are or how many
 storeys the building has -- and it is removed with everything that read it;
-asking for it raises (``floor_atlas.REMOVED_STAIR_SOURCES``). What it leaves
-behind is the room-search loop's side of "staircases as nodes"
-(:mod:`stair_nodes`, :meth:`MultiFloorSearch.commit`): a staircase is offered
-to the oracle and RPT* beside the rooms only when its portal says which
-storey it leads to, and the observed discovery measures a flight's treads,
-not where it ends. So today no staircase is a node of the search, and
+asking for it raises (``floor_atlas.REMOVED_STAIR_SOURCES``). It was also
+the only source that told a portal which storey its flight leads to, which
+the room-search loop needed to offer a staircase to the oracle and RPT* as a
+node beside the rooms; that side -- ``rooms/stair_nodes.py``,
+``stair_approach.py``, the commitment API here and the two parameters that
+priced it -- lay dormant from then and was deleted on 2026-11-16, until the
+multi-storey work brings it back. No staircase is a node of the search, and
 nothing but the allowance decides a floor change.
 
 The floor atlas, the per-floor contexts and the portal bookkeeping are as
@@ -77,8 +78,6 @@ from sparx_agency.core.planning.object_search.world_model.stair_terrain import S
 from sparx_agency.core.planning.object_search.multifloor.stair_traversal import StairTraversal
 from sparx_agency.core.planning.object_search.multifloor.spawn_switch import SpawnStairsSwitch
 
-#: Who chose the active portal, when it was the room-search loop's RPT* order (``commit``).
-SELECTED_BY_LOOP = "rpt_star"
 #: A flight's far end must lie this much (half a riser) farther from the storey plane than the mask geometry's before
 #: the mask takes the newer path.
 MASK_PATH_GROWTH_M = 0.08
@@ -131,7 +130,7 @@ class MultiFloorSearch:
         self._departure_ended = None           # the action the last one ended back at the spawn storey's height
         self._last_decision = None
         #: ``stairs_id`` of the stairs the agent last came up or down (None when its portal carries none -- every
-        #: portal of the observed discovery, see ``stair_nodes``), and the action it arrived on.
+        #: portal of the observed discovery), and the action it arrived on. For the record.
         self.arrived_by = None
         self.arrived_step = None
         self._departure_ignored = False  # one event per off-level excursion, not one per action
@@ -166,39 +165,9 @@ class MultiFloorSearch:
     def committed(self):
         return self.active is not None or self.traversing
 
-    def portal_by_id(self, portal_id):
-        """The portal record with this id, or None."""
-        return next((q for q in self.portals if q["id"] == portal_id), None)
-
     def can_leave_floor(self, obs=None):
         """Pending unknown rooms block departure; classified or attempted rooms do not."""
         return self.departure.ready(obs)
-
-    # -- the loop's decision --------------------------------------------------
-    def commit(self, obs, portal, approach_xy):
-        """The room-search loop's order put this staircase first: approach it and climb.
-
-        Idempotent for the portal already active. Clears the committed route
-        so the approach is planned afresh, and records who chose the portal
-        -- the recording can then tell an RPT* floor change from a fallback
-        one, and :meth:`_start` knows to end the node's turn in the loop.
-        """
-        if not self.allowed:
-            self.events.append({"action": obs.step, "event": "stairs_refused", "portal_id": portal["id"],
-                                "reason": "allow_stair_traversal is false"})
-            return False
-        if not self.can_leave_floor(obs):
-            return False
-        if self.active is portal and portal.get("selected_by") == SELECTED_BY_LOOP:
-            return True
-        self.active = portal
-        portal["approach_xy"] = list(approach_xy)
-        portal["selected_by"] = SELECTED_BY_LOOP
-        self.policy.route_memory.clear("stairs chosen by the room-search loop")
-        self.events.append({"action": obs.step, "event": "portal_selected", "portal_id": portal["id"],
-                            "direction": "up" if portal["direction"] > 0 else "down",
-                            "solver_source": SELECTED_BY_LOOP})
-        return True
 
     def prepare_observation(self, obs):
         """Current depth before atlas settlement; never previous-view support."""
@@ -546,13 +515,11 @@ class MultiFloorSearch:
         A portal is selected once the floor's ``floor_search_actions``
         allowance is spent, or at once when ``exhausted`` (the exploration
         fallback saying the floor has nothing left), by RPT* over the seen
-        portals (:meth:`_select`); an active portal -- that choice, or one
-        the room-search loop committed (:meth:`commit`) -- is approached and
-        its flight walked; otherwise a look-down inspection may be due.
+        portals (:meth:`_select`); an active portal is approached and its
+        flight walked; otherwise a look-down inspection may be due.
 
         With stair traversal forbidden nothing is selected, approached or
-        climbed here -- not by the loop's order, not by the allowance -- and
-        a portal somehow left active is deferred.
+        climbed here, and a portal somehow left active is deferred.
         """
         if not self.allowed and not self.traversing:
             # The one exception: the switch to the other storey of the flight a stair spawn came off (spawn_switch.py).
@@ -588,24 +555,11 @@ class MultiFloorSearch:
             arrived = self.policy.route_memory.kind == kind and self.policy.route_memory.arrived(obs)
             if math.dist(here, entry) <= 0.65 or arrived:
                 return self.transition.plan(obs) if self._start(obs) else None
-            approach = tuple(self.active.get("approach_xy", entry))
-            command = self.policy._navigate(obs, world, approach, kind)
+            command = self.policy._navigate(obs, world, entry, kind)
             if command is not None:
                 return command
             self._abandon(obs, "portal approach unavailable")
         return self._inspect(obs, exhausted)
-
-    def way_back_held(self, step) -> bool:
-        """Whether the staircase the agent arrived by is still withheld from the search's choices.
-
-        True for :attr:`MultiFloorParams.arrival_grace_actions` after an
-        arrival: the storey has to be looked at before "not here" means
-        anything. Read by :func:`stair_nodes.stair_options` (the loop's
-        node list); an unplanned walk onto the stairs is not a choice and
-        is not held.
-        """
-        return (self.arrived_by is not None and self.arrived_step is not None
-                and step - self.arrived_step < self.params.arrival_grace_actions)
 
     def _inspect(self, obs, exhausted):
         """Start a look-down sweep only at a natural pause, and say what asked for it.
@@ -684,12 +638,6 @@ class MultiFloorSearch:
                             "stair_source": self.params.stair_source,
                             "selected_by": self.active.get("selected_by", "unplanned"),
                             "room_coverage_complete": allowed})
-        if allowed and self.active.get("selected_by") == SELECTED_BY_LOOP:
-            # The climb has begun: the stair node's turn in the room-search loop is
-            # over, and the floor's supervisor is left in SELECT for the way back.
-            loop = getattr(self.policy, "loop", None)
-            if loop is not None:
-                loop.stairs_taken(obs, self.active)
         h = self.policy.hierarchy
         if h is not None:
             if h.regions.mask is not None:
@@ -766,6 +714,5 @@ class MultiFloorSearch:
                 "active_portal": self.active["id"] if self.active else None,
                 "selected_by": self.active.get("selected_by") if self.active else None,
                 "entered_step": self.entered_step, "arrived_by": self.arrived_by, "arrived_step": self.arrived_step,
-                "floor_change_cost_m": self.params.floor_change_cost_m,
                 "decides_floor_changes": "allowance (%d actions) + RPT* over portals" % self.params.floor_search_actions}
 

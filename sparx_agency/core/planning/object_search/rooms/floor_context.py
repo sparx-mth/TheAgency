@@ -32,8 +32,7 @@ class FloorContextBank:
                                if getattr(state.get("graph"), "registry", None) is not None])
         p.graph = ObservedSceneGraph(p.llm_client, label_settings=p.room_label_settings, first_pid=first_pid)
         p.graph.oracle = RepairingNodeOracle(p.llm_client, unexplored_floor=p.loop_settings.unexplored_floor,
-                                             unexplored_elsewhere=p.loop_settings.unexplored_elsewhere,
-                                             flat_p=p.loop_settings.flat_p)
+                                             flat_p=p.loop_settings.flat_p, prompt=p.loop_settings.oracle_prompt)
         # The frontier is read with the settled unknown written occupied: what the
         # camera looked through without a return, and the enclosed pockets.
         sight = getattr(p, "sight", None)

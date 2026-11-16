@@ -42,14 +42,19 @@ the body radius and make ONE floor. A planner that keeps a wider standoff
 from obstacles than the body radius (the default planner's 0.25 m) cannot
 end a route nearer an obstacle than that, so a floor may be asked for with
 a ``standoff_m``: the same floor without the standing cells nearer than the
-standoff to an OCCUPIED cell. Those cells are standing floor still -- the
-squeeze planner's -- only not where that planner can stop. Unknown cells
+standoff to an OCCUPIED cell. Those cells are standing floor still, only not
+where that planner can stop. The closing asks twice
+(``TargetClosing.standing_planners``): of the cells 0.25 m from every
+observed obstacle, for the default planner, and -- when that has no route --
+of the cells the body radius (0.18 m) from one, for a planner relaxed that
+far (``TargetClosingSettings.standing_retry_clearance_m``; 0.20 m was
+measured against it on 2026-11-16 and gave the lower SR and SPL). Unknown cells
 do not count for the standoff: beyond the body's own disc nothing has to
 have been observed, and a rule that asked for it kept the default planner
 from every standoff on a map of a few frames (in the first paired runs of
-2026-11-15 the squeeze planner took a standoff in 32 of 85 episodes where
-the navigation-mesh runs had taken none; the squeeze planner prefers a
-tight short way to a roomy long one). Whether the wider
+2026-11-15 the second planner took a standoff in 32 of 85 episodes where
+the navigation-mesh runs had taken none; a planner relaxed further prefers
+a tight short way to a roomy long one). Whether the wider
 planner can WALK to such a cell is its own to answer when the route is
 planned; the chain of rule 3 says only that a body-wide observed way exists.
 
@@ -99,7 +104,9 @@ def nearest_cell_in_sight(ids: np.ndarray, occupied: np.ndarray, gx: int, gy: in
 
     * by default the query cell alone -- a stair head's own cell may be
       marked occupied by the drop beyond it, and that is where the flight
-      begins (``stair_approach.approach_points``);
+      begins (the stair approach's use of it; ``stair_approach.py`` was
+      deleted with the stair nodes on 2026-11-16 and is in the history at
+      ``f257a0ce``, so nothing asks for this default until it returns);
     * with ``through_own_obstacle`` the whole run of occupied cells the
       line starts in -- a point inside a cabinet or a wall's thickness is
       moved to the floor in front of it (:meth:`StandingFloor.nearest`) --
