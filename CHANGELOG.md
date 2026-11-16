@@ -5,6 +5,122 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-16, room size and coverage for the node oracle, read off the agent's own occupancy map: the room extents of `feat/objnav-room-extents-nadav`, ported by hand)
+- **What came over, and how.** The room extents were written on 2026-11-11 on `feat/objnav-room-extents-nadav`
+  (`6739f3d3`, `acb837bd`, `991e9be8`), which forked from this branch at `0dd7d39c` -- before `room_priors.py` and the
+  navmesh were removed -- so nothing was merged: the room-size work was carried over by hand onto the current files,
+  and nothing those two removals deleted came back with it. The branch is untouched and still holds everything listed
+  under "left there" below.
+- **`core/mapping/topology/room_extent.py`** -- `room_extents()` reads, for every room of the live partition, its
+  boundary faces classified by what lies beyond them (a wall, another room, settled unknown, unseen unknown, floor of
+  no room) and grouped into four sides in the storey's wall frame (the dominant wall direction from local second
+  moments, so a diagonal wall's staircase is one side); a side is SEEN when at most `open_tolerance` (20 %) of its
+  faces open onto unseen space in runs wider than a doorway (`doorway_max_m` 1.2 m, a jamb at each end, in a side
+  that is mostly located); the room's dimensions along its axes and its footprint area (free cells plus enclosed
+  furniture islands); `bounded` (all four sides seen: the size is FINAL) or `open_sides` (a LOWER BOUND); and the
+  floor covered -- `covered_m2`, `covered_fraction` (the share of the whole room; an upper bound while a wall is
+  unseen) and `left_m2`, furniture islands credited from the observed floor around them. Recomputed from the live
+  map and partition on every update and keyed by cell, so a room the watershed merges, splits or renumbers reads
+  right. The reading itself is the branch's code, unchanged.
+- **It is given the agent's own map and nothing else.** `room_extents()` takes the storey's occupancy grid, the
+  partition the watershed cut out of that grid, the sight ledger's settled and observed cells, and the agent's
+  position. No navigation mesh, no pathfinder, no room or region annotation of the simulator or a dataset, nothing
+  of `room_priors.py` (which no longer exists): the module imports numpy and scipy and nothing of this repository.
+  Three things hold it there: `core/mapping/topology/tests/test_room_extent.py` pins the module's imports and the
+  parameters of `room_extents()`; `test_package_boundaries.py` lists it among the `core/mapping` modules that may
+  not import `core/planning`; and `test_no_privileged_geometry.py` names it, `scene_graph.py` and `sightlines.py`
+  among the modules its scan must have covered. A live test re-reads the size from `policy.last_world.grid`, the
+  graph's own labels and the ledger's two records and gets what the scene graph holds and the oracle was shown.
+  `configuration()["room_extents"]` records the thresholds and the rule ("observed map only: ...").
+- **`SightLedger.observed_mask`** (`world_model/sightlines.py`): per storey and per cell, the free cells seen within
+  `SightSettings.detect_range_m` (4 m, the loop's `scan_seen_range_m`) with a clear line of sight, at a pitch that
+  puts an object body `object_band_m` (0.3-1.0 m) tall in the frame (`object_band`, `cone_observed`) -- cast over
+  the agent's own map from its own poses. A disabled ledger returns no record (None) rather than an empty one, so a
+  rig without sight shows a size and no coverage instead of "0%".
+- **The oracle's room line** (`search_node_oracle.format_node`): `size=12m2 (4x3m, all walls seen)` when final,
+  `size=at least 12m2 (5+ x 3m, 1 wall not seen yet)` when not (the `+` marks the dimension cut short; a sliver reads
+  `under 1m2 mapped so far`), followed by `covered=10m2 (80% of the room, 2m2 left)` -- or, when the size is a lower
+  bound, `covered=3m2 (at most 40% of the room, at least 4m2 left)`, the share rounded up and the remainder a lower
+  bound. `SearchNode` carries `footprint_m2`, `length_m`, `width_m`, `length_final`, `width_final`, `walls_seen`,
+  `bounded`, `covered_fraction`, `covered_m2`, `left_m2`, `open_perimeter_m`; a node without them renders exactly as
+  before. Everything else on the line is unchanged: `frontier=`, `exits=` with the unseen floor behind them,
+  `status=`, `searched=`, `here=yes`, `seen:`, in the same order.
+- **The system prompt** explains the two fields, states that every number on a node line is a final result to be
+  read and not recomputed, and gains two rules: `HOW MUCH IS LEFT -- COVERAGE FIRST` (coverage is the main fact for
+  what is left of a room, the size says what the remainder can hold, the model judges whether the target fits) and
+  `TIME IS SECONDARY` (coverage overrides `searched=` both ways). Three sentences that read time, or an assumption,
+  where the coverage is now given were replaced with the branch's: the `entered` status no longer says the camera
+  "has seen most of what is mapped"; STEP 4's entered-room bullet values what is LEFT (all walls seen and 90 %
+  covered is as good as scanned) instead of "`searched=` 20s or longer with `frontier=` 0 or 1"; and "the longer
+  `searched=` reads on an entered room, the lower its number" is gone. STEP 2 adds that a size of "at least" is not
+  the room's size, and the worked example shows the new fields. The prompt is 14,751 characters (11,778 before);
+  the reasoning route asks for an 8,192-token window and refuses a truncated prompt.
+- **Recorded and shown:** `last_reasoning["extents"]` (every room's full record: sides, lines, wall distances), the
+  step snapshot's `extent` per room, a line under each room of the search column (`>=6m2 4.9x2.4 walls 3/4 cov
+  <=43% >=3m2 left`). `room_extent_replay.py` replays a recording's map journal and poses through the reading
+  offline and checks its promises (the observed floor conserved across partition changes; growth after a FINAL
+  reading classified as a merge, a moved cut, a fragment or a BREACH).
+- **Left on `feat/objnav-room-extents-nadav`, deliberately.** (1) `mp3d/room_extent_ground_truth.py` and its test:
+  it grades the sizes against Matterport's `.house` room polygons -- a dataset's region annotations -- and nothing
+  that reads those was brought, nor the accuracy figures it produced (they are in that branch's CHANGELOG). (2) The
+  united "unknown floor behind a room's frontiers" figure (`rooms/frontier_unknown.py`, `frontier=2 (~30m2 unknown
+  behind them)`) and with it the change of the `exits=` brackets: a different measurement from a room's size; this
+  branch keeps `exits=2 (1 doorway, ~30m2 unseen behind them)`. (3) The other prompt changes of `acb837bd` that are
+  not about size or coverage: dropping `here=yes`, the reordering of the line, "the probability that the target is
+  there" for "that going there NEXT finds the target", and the rewording of the "places the robot has NOT been near"
+  bullet. (4) The A/B harness (`hm3d/ab_room_extents.sh`, `ab_room_extents_report.py`), the fixed 200-episode set
+  (`hm3d/representative_set.py`, `sets/hm3d_v1_val_rep200*.json`) and the HANDOFF entries. (5) The prompt-word
+  helpers `room_extent.py` carried beside the oracle's own (`size_words`, `seen_words`, `coverage_words`,
+  `area_words`, `coarse_metres`, `coarse_fraction`: called only by their tests -- the phrasing has one copy, in
+  `search_node_oracle.py`) and `side_index` (unused). (6) The snapshot commit `95aae785`: already here, in newer
+  form.
+- **Checked.** Tests: the whole of `core` 3,883 passed with the 8 known failures of `test_potential_mapper.py`
+  (3,849 before), the benchmark harness and runtime 1,840 passed, 1 skipped, with the one failure of
+  `test_monitor.py` that fails on the untouched tree too (1,830 before); the three boundary files pass. The skip is
+  the replay of one named HM3D recording, which is not on this machine; pointed at the two recordings of that
+  episode that are (`OBJNAV_EXTENT_RECORDING`, `runs/glance_ab/{A,B}_gpu`), it passes. **The port
+  against the branch's own flight record:** the A/B's arm "with" (`runs/ab_room_extents_20261111T2000Z/with`) was
+  flown with the branch's code and logged every room's extent at every action; 40 of its recordings (2 per scene,
+  10,123 actions, 60,607 room-action readings) were replayed through this tree's `room_extents()`. At the 11,028
+  readings the live code made afresh, the area, length and width are equal in all of them, the covered floor
+  in all of them, and the verdict (final or lower bound, walls seen) in 10,944 (99.2 %). Of the other 84, 81 lie
+  inside the band the one-update hysteresis can move a side in (the live code carries its memory from its last
+  rebuild, the replay from the last action); 3 do not -- two of them a 1.9 m2 room at actions where the storey's
+  wall frame flipped (next bullet), the third at action 1 of an episode. **The promises, on recordings:** the
+  same 40 HM3D recordings -- 252 rooms declared final and seen again,
+  233 growths of over a quarter after a final reading: 178 merges, 51 moved cuts, 1 fragment, 3 breaches (a room
+  that grew through a side read as located; all within the first 28 actions of an episode); 36 MP3D recordings of
+  `runs/ss_gt_fixes_v4` (8 scenes, 8,350 actions) -- 167 such rooms, 93 merges, 29 moved cuts, 1 breach (action 2).
+  The observed floor is conserved across partition changes (median |delta| 0.24 and 0.38 m2).
+- **Seen while checking, and left as the branch had it.** (1) "FINAL" is a statement about the map of that action:
+  of the 252 HM3D rooms above, 73 were over a quarter bigger by the end of the episode, mostly through the merges
+  and moved cuts counted above -- which the reading is right to follow, but the prompt tells the model "the
+  room is that big and no bigger". (2) The storey's wall direction is estimated modulo 90 degrees, and in a house
+  aligned with the grid it alternates between about 0 and about 90 degrees -- on 312 of the 10,123 actions, in 36 of
+  the 40 recordings. The names of the four sides swap with it, and the per-side hysteresis is keyed by name, so it
+  is spent on the wrong side after each flip. The cost is small: of 52,213 room-action pairs whose own cells did
+  not change, the final / lower-bound status flipped in 124 and the count of walls seen changed in 461; with the
+  frame folded into (-45, 45] degrees (in the analysis only) 117 and 393. (3) The extents are shown to the model
+  and recorded; no code reads them for a decision. The code-side rescaling of an entered room's probability still
+  goes by actions spent inside and frontier count (`LoopSettings.entered_discount`, `dwell_*`), while the prompt
+  now tells the model that time is secondary. (4) The worked example in the prompt exceeds the limits the prompt
+  sets: its `house` string is 32 words (limit 25) and two of its `why` strings are 13 (limit 12).
+- **Not measured.** No episode was flown with this tree: no simulator, no language model, no GPU. What the model
+  does with the new lines is known only from the branch's A/B, which is not this configuration (the 3B model in
+  both roles, ground-truth perception, the room priors still in, and that branch's full prompt change): on 200
+  HM3D v1 val episodes SR 0.690 -> 0.670 (95 % CI of the difference [-0.060, 0.020], exact McNemar p 0.45), i.e.
+  within the noise, with the oracle's choice changed on identical evidence in 113 episodes and its stores holding
+  1,143 oracle answers against 1,064 without. The live-model probe (`tests/probe_node_oracle.py`) was not run.
+- **Not comparable with earlier runs, on purpose.** The oracle's prompt differs, so answer stores recorded before
+  this change no longer replay its answers (the room labeller's still do); the frozen configuration differs
+  (`room_extents`, two new `sight` fields), so `--resume` refuses a campaign recorded before it. Both full-split
+  runs behind `docs/paper/zson_paper.tex` predate it; the paper says so (Section 5.6 and the run table), describes
+  the reading (Section 4.6, the constants table, the module map), carries a TODO about the Matterport check in its
+  "Development on the evaluation data" paragraph (Section 5.5), and its Appendix C was regenerated from the code
+  (`docs/paper/sync_prompts.py`). The paper was not built here (no LaTeX on this machine).
+- Docs: this file, `LESSONS.md` (the branch's 2026-11-11 entry on the sliver seen through a door), the topology,
+  `object_search` and runtime READMEs, the paper.
+
 ### Removed (2026-11-15, the agent's privileged scene geometry: the navmesh projection of the closing's standing points and the ground-truth stair source)
 - **The ZSON agent is given no simulator geometry any more.** An audit found two things reaching `core/` that ASCENT,
   ApexNav, VLFM and MFNP do not give their agents. (1) Every run script bound `policy.target_projector` to the

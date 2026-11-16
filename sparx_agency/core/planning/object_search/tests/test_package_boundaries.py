@@ -44,6 +44,7 @@ MAPPING_EXTRACTIONS = (
     "core/mapping/objects/support_surface.py",
     "core/mapping/tracking/target_memory_3d.py",
     "core/mapping/topology/revisable_room_labels.py",
+    "core/mapping/topology/room_extent.py",
 )
 
 #: The scan must find at least this many modules; fewer means it is looking in the wrong place.

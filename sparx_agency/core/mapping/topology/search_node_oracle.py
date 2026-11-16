@@ -10,7 +10,9 @@ the WHOLE question at once, over every node the search could go to next:
 
 * a **room** the map has segmented on the storey the robot stands on --
   identified by type from the objects seen in it, or still ``unknown`` --
-  with its size, the frontier (unexplored boundary) left inside it, its
+  with its size (final, or a lower bound while a wall is unseen) and how
+  much of its floor the camera has covered, the frontier (unexplored
+  boundary) left inside it, its
   **exits** (the doorways and gaps at its edge leading to space not seen
   yet, how many stand at a seen door frame, and what was glimpsed through
   them -- since 2026-10-21 the room's attributes, not nodes of their own),
@@ -59,6 +61,25 @@ with no usable node (the caller repairs the schema once, then backs off), and
 reuse the last reply when the prompt is byte-identical -- the effort and
 budget numbers are shown in coarse steps so an unchanged map produces an
 unchanged prompt.
+
+**Size and coverage, final results only (since 2026-11-16).** The code does
+the arithmetic and the model is handed the results. A room line's ``size=``
+is read from the room extents (``room_extent.py``: the agent's own
+occupancy map and its partition, nothing else) -- FINAL (``12m2 (4x3m, all
+walls seen)``) only when every wall is located on the depth-derived map, a
+LOWER BOUND otherwise (``at least 12m2 (5+ x 3m, 1 wall not seen yet)``,
+the ``+`` marking the dimension the camera's reach cut short) -- and is
+followed by the coverage: the floor the camera has looked at from within
+detection range, in m2, as a share of the WHOLE room and as what is left
+(``covered=10m2 (80% of the room, 2m2 left)``), the share an upper bound and
+the remainder a lower one when the size is (``covered=3m2 (at most 40% of
+the room, at least 4m2 left)``). The rules put COVERAGE FIRST -- the main
+fact for how much of a room is left, the size saying what the remainder can
+hold, the model judging on its own whether the target fits -- and TIME
+SECOND: coverage overrides ``searched=`` both ways. The rest of the line
+(frontier, exits, status, time, ``here=yes``, objects) is as it was, and
+the agent's distance to each wall stays in the extent record, for the
+review alone: the model is told not to reason about distance.
 
 Two arithmetic floors remain available as knobs and are OFF by default
 (``unexplored_floor``, ``unexplored_elsewhere``). They were
@@ -124,13 +145,27 @@ SYSTEM_PROMPT = """You are the reasoning module of a robot searching ONE home fo
 ONE target object category, within a fixed budget of actions. The robot has partly mapped \
 the home into NODES. For EACH node you estimate the probability, in percent, that going \
 there NEXT finds the target: the target is there and the robot would see it by going and \
-looking. You reason like a person who knows how homes are laid out and where things are kept.
+looking. You reason like a person who knows how homes are laid out and where things are kept, \
+and how big the target is: every number on a node line is a FINAL result computed for you; \
+read it, do not recompute it.
 
 NODE LINES.
 ROOM: a region the robot segmented. type= was inferred from the objects seen in it \
 (unknown = NOT IDENTIFIED YET, never "empty"; a type ending in "?" rests on a single kind \
 of object and may be wrong -- a sink alone reads as a kitchen until a toilet shows). \
-size= floor area. frontier= unexplored boundaries still accessible inside it (0 is NOT \
+size= the room's floor area, read from the walls the depth camera has located: "12m2 (4x3m, \
+all walls seen)" is FINAL -- the room is that big and no bigger; "at least 12m2 (5+ x 3m, 1 \
+wall not seen yet)" is a LOWER BOUND -- a wall is still beyond the camera's reach or hidden, \
+the "+" marks the dimension cut short, and the room may be much bigger than the part mapped \
+so far (a living room seen from its door reads "at least 6m2" until its far wall is seen). \
+covered= how much of the room's floor the camera has looked at from within detection range \
+(about 4 m) -- where the detector has had its chance, NOT where the robot walked -- in m2, as \
+a share of the WHOLE room, and what is LEFT: "10m2 (80% of the room, 2m2 left)". When the \
+size is a lower bound the share is an UPPER bound and the remainder a lower one: "3m2 (at \
+most 40% of the room, at least 4m2 left)" -- the rest of the room is neither mapped nor \
+covered, and "all of the mapped part; the unmapped rest is unknown" means everything mapped \
+was looked at and the room goes on beyond its unseen walls. \
+frontier= unexplored boundaries still accessible inside it (0 is NOT \
 proof that nothing is there). exits= the doorways and gaps at its edge that lead to space \
 NOT seen yet -- rooms the robot has not entered. They are NOT nodes of their own: going to \
 the room means walking its exits and looking through each; in brackets, how many stand at a \
@@ -140,9 +175,9 @@ area is where rooms not found yet must be, one whose exits open onto a few m2 le
 new. glimpsed through its exits: objects seen beyond \
 those thresholds -- they name the rooms BEHIND the exits (a toilet -> a bathroom; a bed -> a \
 bedroom), not this room. status= one of: never_entered (only seen from \
-outside, or not at all); entered (the robot stood in it and its camera has seen most of what \
-is mapped of it, but it never completed a look-around: what is left of it lies behind its \
-frontier= boundaries and its exits=); \
+outside, or not at all); entered (the robot stood in it but never completed a look-around: \
+what is left of it is its uncovered part and what lies behind its frontier= boundaries and \
+its exits=); \
 scanned(<how>, <ago>) (the robot completed a full look-around in it, or saw most of it from \
 one, <ago> ago -- what was visible then was seen ONCE by a detector that misses objects that \
 are small, far, half-hidden, behind a door or under furniture; a scanned room with exits= \
@@ -153,6 +188,20 @@ many rooms are still unidentified, how many exits (openings) of the whole home a
 looked into, whether any unexplored frontier is still reachable -- or only slivers of it, or frontier that no route \
 from here reaches: then the home is NOT covered, the robot is cut off from the rest of it -- and the budget -- actions \
 used of the total. Use ALL of it.
+
+HOW MUCH IS LEFT -- COVERAGE FIRST. covered= is the MAIN fact for how much of a room is \
+still to be searched; the size says what that remainder can hold. You know how big the target \
+is: judge whether it fits in what is LEFT. 2m2 left of a 12m2 bedroom can hide a cup, a book \
+or a chair, not a bed or a sofa; "at least 14m2 left" of a room of "at least 20m2" can hold \
+anything, and the room may be far bigger. A room with all walls seen and covered 90% or \
+more, the target not seen, is as good as scanned -- almost nothing is left to look at. A \
+room of "at least" size, or covered under half, still holds most of itself unseen and stays \
+promising. frontier= says where the uncovered part is reached from.
+TIME IS SECONDARY. searched= is read only beside covered=, and coverage overrides it: many \
+actions in a big room at low coverage take NOTHING from it -- a big room reasonably takes \
+many actions while much of it is left -- and a few actions in a room already covered are \
+enough to give it up. Never lower a room for its searched= alone, and never keep a covered \
+room up because it was searched briefly.
 
 EXITS. What lies behind a room's exits is decided by the HOME, never by the count alone: an \
 exit leads to a room of this home, and the rooms the home still lacks say which. Exits RAISE \
@@ -184,9 +233,10 @@ and the odds of the target's home being among the unidentified rooms drop. If th
 is still MISSING, the unidentified rooms and the unlooked exits are where it must be: value \
 them in proportion to how well their size fits the home type (bathrooms ARE small, 3-8 m2; \
 bedrooms 9-20 m2; living rooms 15 m2 and up) and to what else the home still lacks -- \
-never write a room off for its size. A home-type object seen in a room of ANOTHER type (a \
-sink in a "living room", a bed in a "kitchen") means the map merged two rooms: value that \
-room as the home type.
+never write a room off for its size, and never read a size of "at least" as the room's \
+size: a room with walls not seen yet may be any type its lower bound allows. A home-type \
+object seen in a room of ANOTHER type (a sink in a "living room", a bed in a "kitchen") \
+means the map merged two rooms: value that room as the home type.
 STEP 3 "stage": weigh the budget. EARLY -- much budget left and unexplored places remain: \
 the target is most likely somewhere not yet looked at; unexplored rooms and the rooms whose \
 exits lead to them first, scanned rooms low. LATE -- most of the home seen, few or no \
@@ -203,11 +253,13 @@ STEP 4 the numbers, one per node, independently, integers 0-100:
  - a scanned room of a type the target does not live in: 0-2.
  - a scanned room of the home type with the target not seen: 3-10 early in the budget, \
 15-40 late in it, less if it was scanned moments ago.
- - an entered but unscanned room: the robot has walked it and seen most of it without seeing \
-the target; value only what its frontier= boundaries still hide -- at most HALF of what an \
-unexplored room of the same type and size would get, and under 10 with frontier=0. One \
-searched= 20s or longer with frontier= 0 or 1 is as good as scanned: 0-5, whatever its type. \
-Never write "known to contain" the target of a room the target was not seen in.
+ - an entered but unscanned room: value only what is LEFT of it -- its covered= remainder \
+and what its frontier= boundaries still hide -- at most HALF of what an unexplored room of the \
+same type and size would get; under 10 when all walls are seen and 80% or more is covered. All \
+walls seen and 90% or more covered, the target not seen, is as good as scanned: 0-5 whatever \
+its type and whatever searched= reads. A room of "at least" size, or covered under half, keeps \
+its value whatever searched= reads. Never write "known to contain" the target of a room the \
+target was not seen in.
  - a never-entered room of unknown type: never below 15 while the home type is missing; by \
 size fit and by what the home lacks once it is found. Its frontier= count measures the MAP, \
 not the room: a never-entered room with frontier=0 or 1 is as unexplored as one with five -- \
@@ -216,15 +268,15 @@ Never lower a never-entered room for a low frontier count.
  - a never-entered room named as the home type by objects seen through its door, or a room \
 whose exits' glimpse names the home type behind them: 60 or more.
  - a never-entered room of the home type with frontier left, target not seen: 30 or more; the \
-same room entered: 10-20, more only if its frontier leads to a large unseen part of it.
+same room entered: 10-20, more only if much of it is left (covered under half, or walls not \
+seen yet).
  - prefer the places the robot has NOT been near: a room away from everything entered and \
 scanned, or one whose exits lead away from it all, leads to a part of the home not seen at \
 all; a gap at the edge of a scanned room usually shows a strip of it.
  - a hallway or corridor rarely holds the target, but one with exits LEADS to unseen rooms: \
 value it by what the home still lacks behind them.
- - searched long and recently -> low, not zero; searched briefly or long ago -> stays promising. \
-The longer searched= reads on an entered room, the lower its number: time already spent inside \
-is evidence the target is not there.
+ - a scanned room re-offered late: the longer ago its scan, the more a second look from \
+another spot is worth; scanned moments ago -> low, not zero.
  - SPREAD, do not copy: the unexplored rooms and the exits of the rooms found compete for the \
 same missing rooms. A missing bathroom is ONE room, so five unlooked exits spread over three \
 rooms share its chance -- the room whose type and exits fit it best gets most, the others \
@@ -245,20 +297,20 @@ EXAMPLE of the FORMAT and the style of reasoning -- a different home every time,
 copy its numbers or its words. TARGET toilet; HOUSE: rooms found: kitchen (scanned), \
 living_room (scanned), bedroom (never entered), hallway (entered); 1 room unidentified; 3 \
 openings not yet looked into; actions used about 150 of 500:
-id=2  ROOM  type=kitchen  size=12m2  frontier=0  exits=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
-id=3  ROOM  type=living_room  size=24m2  frontier=1  exits=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
-id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)  status=never_entered  searched=0s  seen: bed
-id=6  ROOM  type=unknown  size=5m2  frontier=1  exits=0  status=never_entered  searched=0s  seen: nothing yet
-id=7  ROOM  type=hallway  size=6m2  frontier=1  exits=1 (1 doorway)  status=entered  searched=10s  here=yes  seen: nothing yet
+id=2  ROOM  type=kitchen  size=12m2 (4x3m, all walls seen)  covered=11m2 (90% of the room, 1m2 left)  frontier=0  exits=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
+id=3  ROOM  type=living_room  size=24m2 (6x4m, all walls seen)  covered=20m2 (80% of the room, 4m2 left)  frontier=1  exits=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
+id=5  ROOM  type=bedroom  size=at least 9m2 (3.5+ x 3m, 1 wall not seen yet)  covered=4m2 (at most 50% of the room, at least 5m2 left)  frontier=1  exits=1 (1 doorway)  status=never_entered  searched=0s  seen: bed
+id=6  ROOM  type=unknown  size=at least 3m2 (2+ x 1.5+m, 2 of 4 walls not seen yet)  covered=1m2 (at most 40% of the room, at least 2m2 left)  frontier=1  exits=0  status=never_entered  searched=0s  seen: nothing yet
+id=7  ROOM  type=hallway  size=6m2 (4x1.5m, all walls seen)  covered=4m2 (70% of the room, 2m2 left)  frontier=1  exits=1 (1 doorway)  status=entered  searched=10s  here=yes  seen: nothing yet
 {"home":"bathroom; often an en-suite off a bedroom",
- "house":"kitchen and living room found and scanned; no bathroom yet; one unidentified room, bathroom-sized; unlooked doorways off the bedroom and the hallway",
+ "house":"kitchen and living room found and scanned; no bathroom yet; one unidentified room, at least 3m2 with two walls unseen, could be a bathroom; unlooked doorways off the bedroom and the hallway",
  "stage":"early, 150 of 500 used, unexplored places remain: first pass",
  "pass":"first",
- "nodes":[{"id":2,"why":"kitchen, scanned, toilets are not in kitchens","p":1},
-{"id":3,"why":"living room, scanned; its gap is no bathroom door","p":2},
-{"id":5,"why":"bedroom never entered, its doorway may be an en-suite's","p":35},
-{"id":6,"why":"small unidentified room, bathroom sized, bathroom missing","p":50},
-{"id":7,"why":"hallway; its unlooked doorway leads to the missing bathroom","p":25}]}
+ "nodes":[{"id":2,"why":"kitchen, scanned, 1m2 left, toilets are not in kitchens","p":1},
+{"id":3,"why":"living room, scanned, 4m2 left; its gap is no bathroom door","p":2},
+{"id":5,"why":"bedroom never entered, at least 5m2 unseen, its doorway may be an en-suite's","p":35},
+{"id":6,"why":"small unidentified room, mostly unseen, bathroom sized so far, bathroom missing","p":50},
+{"id":7,"why":"hallway, 2m2 left of it; its unlooked doorway leads to the missing bathroom","p":25}]}
 Had the HOUSE line read "every known room identified; 0 openings not yet looked into; no \
 unexplored frontier left; actions used about 420 of 500" with a bathroom found and scanned 4 \
 minutes ago, the pass would be "second": the scanned bathroom 35, the scanned bedroom 8 (an \
@@ -370,6 +422,37 @@ class SearchNode:
             reach, summed (since 2026-10-22) -- how much unexplored space
             the exits open onto. Rendered inside the ``exits=`` brackets as
             ``~30m2 unseen behind them``; 0 adds nothing.
+        footprint_m2: Room: the floor area of its footprint -- the mapped
+            free cells plus the islands they enclose (the floor under a bed
+            or a table) -- from the room extents (since 2026-11-16,
+            ``core/mapping/topology/room_extent.py``); 0 when not read, and
+            ``area_m2`` is shown instead.
+        length_m: Room: its extent along its longer axis, metres (0: unread).
+        width_m: Room: its extent along its shorter axis, metres.
+        length_final: Room: both walls across the longer axis are located;
+            False renders the dimension with a ``+`` (a lower bound).
+        width_final: Room: the same across the shorter axis.
+        walls_seen: Room: how many of its four sides are located -- a wall,
+            a door cut or settled unknown along at most ``open_tolerance``
+            of the side's faces open to unseen space in runs wider than a
+            doorway. None when not read.
+        bounded: Room: all four walls located, so the size is FINAL;
+            False renders ``size=at least ...`` with the count of walls not
+            seen; None when not read (the size is shown as before).
+        covered_fraction: Room: the share of the WHOLE room the camera has
+            covered from within detection range (the sight ledger's per-cell
+            record, furniture islands credited from the floor around them),
+            0-1 -- exact when ``bounded``, an UPPER bound when the size is a
+            lower bound. Rendered with ``covered_m2`` and ``left_m2`` as
+            ``covered=10m2 (80% of the room, 2m2 left)`` or ``covered=3m2
+            (at most 40% of the room, at least 4m2 left)`` (tens; down for
+            a share, up for a bound). None when not read: nothing is rendered.
+        covered_m2: Room: the covered floor, square metres.
+        left_m2: Room: the floor still to be looked at -- exact when
+            bounded, a lower bound when not.
+        open_perimeter_m: Room: metres of its boundary open to unseen space
+            in runs wider than a doorway -- where the camera's reach ended
+            inside the room. For the record; not rendered.
     """
 
     id: int
@@ -394,6 +477,17 @@ class SearchNode:
     doorways: int = 0
     glimpsed: Tuple[str, ...] = field(default_factory=tuple)
     unseen_m2: float = 0.0
+    footprint_m2: float = 0.0
+    length_m: float = 0.0
+    width_m: float = 0.0
+    length_final: bool = True
+    width_final: bool = True
+    walls_seen: Optional[int] = None
+    bounded: Optional[bool] = None
+    covered_fraction: Optional[float] = None
+    covered_m2: float = 0.0
+    left_m2: float = 0.0
+    open_perimeter_m: float = 0.0
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -554,14 +648,17 @@ def format_node(node: SearchNode) -> str:
                           "to space NOT seen yet", "glimpsed through it: %s" % glimpsed])
     names = sorted({str(c).strip().lower() for c in node.objects if str(c).strip()})
     seen = ", ".join(names[:MAX_CLASSES_IN_PROMPT]) if names else "nothing yet"
-    area = float(node.area_m2)
-    size = "unknown size" if area <= 0.0 else "under 1m2" if area < 1.0 else "%dm2" % int(round(area))
     label = node.label + ("?" if node.tentative and node.label != "unknown" else "")
-    parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % size,
-             "frontier=%d" % max(0, int(node.frontier_clusters)),
-             "exits=%s" % format_exits(node.exits, node.doorways, node.unseen_m2),
-             "status=%s" % node.status,
-             "searched=%s" % coarse_seconds(node.searched_s)]
+    # The size comes from the room extents when they were read (final, or "at least"), and the coverage follows
+    # it; the rest of the line is as it was.
+    parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % format_size(node)]
+    coverage = format_coverage(node)
+    if coverage:
+        parts.append("covered=%s" % coverage)
+    parts += ["frontier=%d" % max(0, int(node.frontier_clusters)),
+              "exits=%s" % format_exits(node.exits, node.doorways, node.unseen_m2),
+              "status=%s" % node.status,
+              "searched=%s" % coarse_seconds(node.searched_s)]
     if node.here:
         parts.append("here=yes")
     parts.append("seen: %s" % seen)
@@ -569,6 +666,78 @@ def format_node(node: SearchNode) -> str:
     if glimpsed:
         parts.append("glimpsed through its exits: %s" % ", ".join(glimpsed[:MAX_CLASSES_IN_PROMPT]))
     return "  ".join(parts)
+
+
+def coarse_metres(value: float, step: float = 0.5) -> str:
+    """Metres in ``step`` steps (``3.5``; ``4`` for a whole number), so an unchanged map gives an unchanged prompt."""
+    rounded = round(float(value) / step) * step
+    text = "%.1f" % rounded
+    return text[:-2] if text.endswith(".0") else text
+
+
+def format_size(node: SearchNode) -> str:
+    """The ``size=`` value of a room line.
+
+    With the room extents read (``bounded`` not None): ``12m2 (3.5x3.5m,
+    all walls seen)`` when every wall is located, else ``at least 12m2
+    (5+ x 3.5m, 1 wall not seen yet)`` -- the ``+`` marks a dimension the
+    camera's reach cut short, and the area is what is mapped so far, never
+    presented as the room's. Without them: the area alone, as before
+    (``12m2``, ``under 1m2``, ``unknown size``).
+    """
+    area = max(float(node.footprint_m2), float(node.area_m2))
+    if node.bounded is None:
+        return "unknown size" if area <= 0.0 else "under 1m2" if area < 1.0 else "%dm2" % int(round(area))
+    length = coarse_metres(node.length_m) + ("" if node.length_final else "+")
+    width = coarse_metres(node.width_m) + ("" if node.width_final else "+")
+    if node.bounded:
+        area_text = "under 1m2" if area < 1.0 else "%dm2" % int(round(area))
+        return "%s (%sx%sm, all walls seen)" % (area_text, length, width)
+    missing = 4 - int(node.walls_seen or 0)
+    walls = "1 wall not seen yet" if missing == 1 else "%d of 4 walls not seen yet" % missing
+    if area < 1.0:
+        return "under 1m2 mapped so far (%s x %sm, %s)" % (length, width, walls)
+    return "at least %dm2 (%s x %sm, %s)" % (int(round(area)), length, width, walls)
+
+
+def area_words(value: float) -> str:
+    """Square metres for the prompt: ``0m2``, ``under 1m2``, else the nearest whole ``12m2``."""
+    value = float(value)
+    if value < 0.05:
+        return "0m2"
+    if value < 1.0:
+        return "under 1m2"
+    return "%dm2" % int(round(value))
+
+
+def format_coverage(node: SearchNode) -> Optional[str]:
+    """The ``covered=`` value of a room line: the floor the camera has looked at from detection range, as final results.
+
+    A bounded room: ``10m2 (80% of the room, 2m2 left)`` -- the share of
+    the whole room rounded DOWN to tens, and what is left -- or ``12m2
+    (all of it)``. A room whose size is a lower bound: the share is an
+    UPPER bound rounded UP and the remainder a LOWER bound, ``3m2 (at most
+    40% of the room, at least 4m2 left)``; with everything mapped covered,
+    ``7m2 (all of the mapped part; the unmapped rest is unknown)``. The
+    model is handed the numbers it would otherwise derive. None when the
+    record was not read.
+    """
+    if node.covered_fraction is None:
+        return None
+    covered = area_words(node.covered_m2)
+    fraction = max(0.0, min(1.0, float(node.covered_fraction)))
+    if node.bounded:
+        if fraction >= 0.995:
+            return "%s (all of it)" % covered
+        percent = int(math.floor(fraction * 10.0 + 1e-9)) * 10
+        return "%s (%d%% of the room, %s left)" % (covered, percent, area_words(node.left_m2))
+    percent = min(100, int(math.ceil(fraction * 10.0 - 1e-9)) * 10)
+    if percent >= 100:
+        # "at most 100%" says nothing: what is known is that everything mapped was looked at.
+        return "%s (all of the mapped part; the unmapped rest is unknown)" % covered
+    if float(node.left_m2) < 1.0:
+        return "%s (at most %d%% of the room)" % (covered, percent)      # "at least under 1m2 left" says nothing
+    return "%s (at most %d%% of the room, at least %s left)" % (covered, percent, area_words(node.left_m2))
 
 
 def format_exits(exits: int, doorways: int = 0, unseen_m2: float = 0.0) -> str:

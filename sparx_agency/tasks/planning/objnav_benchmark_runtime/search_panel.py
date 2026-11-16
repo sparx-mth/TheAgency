@@ -192,6 +192,17 @@ def _rooms(col, search):
             "  [%s]" % excluded[str(room["id"])].split(":")[0] if str(room["id"]) in excluded else ""),
             DIM if str(room["id"]) in excluded else _node_color(room, search))
         detail = []
+        extent = room.get("extent")
+        if extent:
+            # The room's size and coverage as the oracle reads them: final or a lower bound; the covered share
+            # of the whole room (an upper bound, "<=", when the size is a lower bound) and what is left.
+            bound = extent.get("size_status") != "final"
+            detail.append("%s%dm2 %.1fx%.1f %s cov %s%d%% %s%.0fm2 left" % (
+                ">=" if bound else "", round(extent.get("area_m2", 0.0)),
+                extent.get("length_m", 0.0), extent.get("width_m", 0.0),
+                "walls %d/4" % extent.get("walls_seen", 4 if not bound else 0),
+                "<=" if bound else "", round(100 * (extent.get("covered_fraction") or 0.0)),
+                ">=" if bound else "", extent.get("left_m2", 0.0)))
         if room.get("why"):
             detail.append(room["why"])
         if room.get("objects"):

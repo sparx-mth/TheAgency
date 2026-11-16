@@ -47,6 +47,33 @@ hospital sim, ported from the old stack's `semantic_mapper_node.py`:
   (`door_room_pairs`), frontier cluster counting
   (`count_frontier_clusters`), room-at-cell majority-vote lookup
   (`room_at_cell`), and the golden-ratio room color (`room_color`).
+- `room_extent.py` — `room_extents()` (since 2026-11-16; written 2026-11-11
+  on `feat/objnav-room-extents-nadav` and ported by hand): for every room of
+  the live partition, where its walls are (its boundary faces classified by
+  what lies beyond them -- a wall, another room, settled unknown, unseen
+  unknown, floor of no room -- grouped into four sides in the storey's wall
+  frame), its dimensions and footprint area, whether that size is FINAL
+  (every side seen: at most `ExtentParams.open_tolerance` of its faces open
+  onto unseen space in runs wider than a doorway) or a LOWER BOUND
+  (`bounded`, `open_sides`), the agent's distance to each wall when it stands
+  in the room, and how much of its floor the camera has covered from
+  detection range (`covered_m2`; `covered_fraction`, the share of the whole
+  room and an upper bound while a wall is unseen; `left_m2`; furniture
+  islands credited from the observed floor around them). Recomputed from the
+  map and the partition on every update and keyed by cell, so a room
+  renumbered, merged or split by the watershed reads right.
+  **It is read off the agent's own map and nothing else.** What
+  `room_extents()` is handed is the whole of what it knows: the occupancy
+  grid, the partition the watershed cut out of that same grid, the sight
+  ledger's two per-cell records (the unknown it settled, the floor it
+  observed) and the agent's position. No navigation mesh, no path query, no
+  dataset's room or region annotation, no table of typical room sizes: the
+  module imports numpy and scipy and nothing of this repository, and
+  `tests/test_room_extent.py` pins both its imports and its signature. The
+  words the oracle is shown are `search_node_oracle.format_size` and
+  `format_coverage` (one copy of the phrasing, with the prompt it belongs
+  to); `tasks/planning/objnav_benchmark_runtime/room_extent_replay.py`
+  replays a recording through the reading offline.
 - `frontier_split.py` — the cut shared by `count_frontier_clusters` and
   the planning side's goal maker (`core/planning/exploration/room_costs.py`
   `frontier_clusters`): a frontier component that wraps round a block of
@@ -178,6 +205,25 @@ decides whether to keep a stale label — nothing is cached on failure.
   told about homes is what the system prompt itself says (its examples of
   typical homes and its numeric bands) -- read `SYSTEM_PROMPT` before
   claiming the judgement is the model's alone.
+  **Size and coverage from the room extents (since 2026-11-16).** A room
+  line's `size=` is read from `room_extent.py`: `12m2 (4x3m, all walls
+  seen)` when final, `at least 12m2 (5+ x 3m, 1 wall not seen yet)` when a
+  lower bound (the `+` marks the dimension cut short); it is followed by
+  `covered=10m2 (80% of the room, 2m2 left)` -- the floor the camera looked
+  at from detection range, as a share of the WHOLE room and as the
+  remainder, the share an upper bound and the remainder a lower bound when
+  the size is one (`covered=3m2 (at most 40% of the room, at least 4m2
+  left)`). The code does the arithmetic and the model is told to read the
+  numbers, not recompute them. The rules put coverage first (the main fact
+  for what is left of a room; the size says what the remainder can hold;
+  the model judges whether the target fits) and time second (coverage
+  overrides `searched=` both ways); the two sentences that read time, or
+  assumed an entered room was "mostly seen", where the coverage is now
+  given were replaced. Nothing else on the line changed: `frontier=`,
+  `exits=` with the unseen floor behind them, `status=`, `searched=`,
+  `here=yes` and `seen:` are as before. The coverage thresholds in the
+  rules (90 % covered with all walls seen is "as good as scanned") are more
+  hand-written numeric bands: the sentence above applies to them too.
 - `room_priors.py` — **deleted on 2026-11-15.** It held hand-written tables
   that told the search where things are: the room types a target category
   is likely and rare in (`TARGET_HOMES`, the `WHERE IT LIVES` prompt line),

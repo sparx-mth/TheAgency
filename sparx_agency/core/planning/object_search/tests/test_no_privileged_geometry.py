@@ -331,7 +331,11 @@ def test_the_scan_covers_the_whole_of_core():
                      "sparx_agency/core/localization/floor_atlas.py",
                      "sparx_agency/core/planning/objnav/types/episode.py",
                      "sparx_agency/core/planning/planners/astar/weighted_planner_2d.py",
-                     "sparx_agency/core/mapping/topology/search_node_oracle.py"):
+                     "sparx_agency/core/mapping/topology/search_node_oracle.py",
+                     # Where a room's size comes from, and what it is read off: the agent's own map only.
+                     "sparx_agency/core/mapping/topology/room_extent.py",
+                     "sparx_agency/core/planning/object_search/rooms/scene_graph.py",
+                     "sparx_agency/core/planning/object_search/world_model/sightlines.py"):
         assert expected in names, "the scan missed %s" % expected
     assert not [n for n in names if "/tests/" in n], "tests are not the agent"
 

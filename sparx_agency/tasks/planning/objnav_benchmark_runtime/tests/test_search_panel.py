@@ -70,3 +70,18 @@ def test_the_dashboard_frame_keeps_its_size_with_the_search_column():
         assert frame.shape == (900, 1600, 3)
         assert (frame[40:760, 1280:] > 60).any(), "the search column is drawn"
     assert isinstance(np.asarray(frame), np.ndarray)
+def test_a_rooms_size_and_coverage_ride_in_the_snapshot_and_are_drawn_under_its_row():
+    """The room extents (2026-11-16) of every room: the snapshot's ``extent`` and a line of the search column."""
+    policy, episode = setup_policy("desk")
+    for step in range(4):
+        policy.plan(observation(episode, step, depth=3.0))
+    search = search_snapshot(policy)
+    rooms = [room for room in search["rooms"] if room.get("extent")]
+    assert rooms and rooms[0]["extent"]["size_status"] == "lower_bound" and rooms[0]["extent"]["area_m2"] > 0.0
+    assert set(rooms[0]["extent"]["wall_distances_m"]) == {"+u", "-u", "+v", "-v"}
+    column = render_search_panel(search, (320, 720))
+    bare = dict(search, rooms=[dict(room, extent=None) for room in search["rooms"]])
+    assert (column != render_search_panel(bare, (320, 720))).any(), "the size and coverage line is drawn"
+    final = dict(search, rooms=[dict(room, extent=dict(room["extent"], size_status="final", walls_seen=4))
+                                for room in rooms])
+    assert render_search_panel(final, (320, 720)).shape == (720, 320, 3), "a final size renders too"

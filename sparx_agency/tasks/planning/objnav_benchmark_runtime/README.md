@@ -808,6 +808,7 @@ tasks/planning/objnav_benchmark_runtime/   THIS TREE: the adapters and the opera
     mp3d/              the next Habitat dataset, on its own branch (feat/objnav-habitat-mp3d-*); same shape as hm3d/
     recording.py, visualization.py, floor_panels.py, search_panel.py, dashboard.py   the step log, the map journal, video, HUD, live page
     review_recording.py   read a recording by step from the log (summary, timeline, step N, map N, events)
+    room_extent_replay.py   replay a recording's maps and poses through the room extents, offline (sizes, coverage, the FINAL promise)
     tests/             the method's regression rig (fake services, the benchmark camera, synthetic maps) and the adapter tests
 ```
 
@@ -953,6 +954,7 @@ action converter serialises the LOOK before the body action):
 | `gibson/gpu_plan.py` | Who gets the one GPU -- LLM, then YOLO-World, then Habitat -- from the free VRAM and explicit footprints; the rest on the CPU; the plan recorded in every run |
 | `recording.py`, `floor_panels.py`, `search_panel.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels with the rooms and visit order drawn on the active floor, the search column, grids and video; `floor_panels.py` also keeps the per-action **map journal** (`map_journal.npz`) |
 | `review_recording.py` | The log-side review of a recording: `summary`, `timeline`, `step N` (everything the log holds about one action, and the map of that action by sector round the agent), `map N` (the map of that action as text), `events`. A review pointed at a step reads this, never a video frame |
+| `room_extent_replay.py` | A recording replayed offline through the room extents (`core/mapping/topology/room_extent.py`, since 2026-11-16): the journal's maps and partitions action by action, the per-cell observed record rebuilt from the recorded poses with the benchmark camera, `room_extents()` on each. It reads the recording's own map and poses and nothing else -- no simulator, no dataset. Its checks say whether the observed floor was conserved across the partition's changes and classify every growth after a FINAL reading as a merge, a moved cut, a fragment or a BREACH -- a room that grew through a side the reading had called located (`--json` keeps the records) |
 | `gibson/run.py`, `hm3d/run.py`, their `frozen_eval.py`, `run_development.py` | Per-task protocol execution and frozen source/model/data checks |
 | `tests/trace_room_search_loop.py` | Development probe: the loop on the production map size with fake services and the real action converter on a point agent; not a test |
 
@@ -1436,7 +1438,9 @@ refresh.
 3. **Probability per node** -- the same call, to
    `core/mapping/topology/search_node_oracle.py`. The model is shown every
    ROOM of the floor **that is still a node** (not finished, not ruled out
-   by type) -- type or `unknown`, size, frontier clusters left, its
+   by type) -- type or `unknown`, size (since 2026-11-16 from the room
+   extents: final, or a lower bound while a wall is unseen) and how much
+   of its floor the camera has covered, frontier clusters left, its
    **exits** (`exits=2 (1 doorway)`: the doorways and gaps at its edge to
    space not yet seen and the objects glimpsed through them -- the room's
    attributes since 2026-10-21, see *Exits are the room's attributes*
@@ -1459,7 +1463,10 @@ refresh.
    The current room may remain the best choice for successive bursts. Everything the search
    needs weighed is the model's to weigh, and the system prompt says how:
    a type that rules the object out has low probability; a
-   room searched long and recently reads low; a never-entered room of the
+   room with all its walls seen and its floor covered reads low whatever
+   the time spent in it, and one of "at least" size or covered under half
+   keeps its value (coverage first, time second, since 2026-11-16; until
+   then "a room searched long and recently reads low"); a never-entered room of the
    right type is the best bet; an `unknown` room is an **exploration node**
    valued by its size, its frontier and the room types the target needs
    that are still missing on this storey; a hallway with exits is valued

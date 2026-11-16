@@ -26,7 +26,7 @@ from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.core.planning.object_search.rooms.room_scans import FRAGMENT, SEEN_THROUGH
 from sparx_agency.core.planning.object_search.world_model.sightlines import (
-    SightLedger, SightSettings, cone_seen, enclosed_pockets, floor_band)
+    SightLedger, SightSettings, cone_observed, cone_seen, enclosed_pockets, floor_band, object_band)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_opening_nodes import openings_of, refresh
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_room_search_loop import (
@@ -68,6 +68,76 @@ def test_cone_seen_reaches_free_cells_in_the_cone_and_stops_at_unknown_and_walls
     assert not seen[world.world_to_grid(8.5, 3.0)[::-1]], "beyond the depth range"
     seen = cone_seen(world, IN_A, math.pi, HALF_HFOV, 5.0)
     assert seen[world.world_to_grid(1.5, 3.0)[::-1]] and not seen[world.world_to_grid(0.5, 3.0)[::-1]], "unknown ends a ray"
+
+
+# -- the observed record: where the detector has had its chance (2026-11-16) ----------------------
+def test_the_object_band_is_where_the_body_of_an_object_is_in_the_frame():
+    """A cell is OBSERVED when an object standing on it would be in the image, not when its floor is."""
+    args = (CAMERA.height_m, HALF_VFOV, 0.0, CAMERA.max_depth_m)
+
+    def band(pitch_deg, low=0.3, high=1.0):
+        return object_band(args[0], math.radians(pitch_deg), args[1], args[2], args[3], low, high)
+    assert band(0.0) == pytest.approx((0.0, CAMERA.max_depth_m)), "level: a body up to 1 m tall is in view out to the depth range"
+    near, far = band(60.0)
+    assert near == 0.0 and far == pytest.approx((CAMERA.height_m - 0.3) / math.tan(math.radians(60.0) - HALF_VFOV), abs=0.01)
+    floor_far = floor_band(CAMERA.height_m, math.radians(60.0), HALF_VFOV, CAMERA.min_depth_m, CAMERA.max_depth_m)[1]
+    assert far < 1.2 < floor_far, "tilted 60 degrees down the frame still holds floor 1.6 m out, but no object on it"
+    # A low object (0.1-0.5 m, wholly under the camera) leaves a level frame's bottom edge close by ...
+    near, far = band(0.0, 0.1, 0.5)
+    assert near == pytest.approx((CAMERA.height_m - 0.5) / math.tan(HALF_VFOV), abs=0.01) and far == pytest.approx(CAMERA.max_depth_m)
+    assert band(-30.0, 0.1, 0.5) is None, "... and a camera tilted up does not see it at all"
+    assert band(30.0, 0.1, 0.5)[0] < near, "tilted down, it is in the frame from nearer"
+
+
+def test_cone_observed_credits_free_cells_in_the_band_and_passes_over_the_unknown_under_the_camera_only():
+    world, _ = two_room_world()
+    seen = cone_observed(world, IN_A, 0.0, HALF_HFOV, 0.0, 4.0, blind_m=1.5)
+    at = lambda x, y: bool(seen[world.world_to_grid(x, y)[::-1]])
+    assert at(4.0, 3.0) and at(6.9, 3.0), "straight ahead, within detection range"
+    assert not at(7.5, 3.0), "free, but beyond the 4 m the detector is credited with"
+    assert not at(2.0, 3.0) and not at(3.0, 5.0), "behind the camera, outside the cone"
+    assert not (seen & (world.grid != world.values.free)).any(), "only free cells are ever observed"
+    assert not cone_observed(world, IN_A, 0.0, HALF_HFOV, 2.0, 4.0)[world.world_to_grid(4.0, 3.0)[::-1]], "nearer than the band"
+    # Unknown floor inside the camera's blind radius is passed over, as the look-through cast passes it; beyond
+    # it an unknown cell ends the ray, like a wall: nothing is seen through what the depth did not resolve.
+    grid = world.grid.copy()
+    gx, gy = world.world_to_grid(*IN_A)
+    grid[gy, gx + 5:gx + 8] = world.values.unknown                       # 0.5-0.8 m ahead: under the camera
+    blind = OccupancyGrid2D(grid, world.params, values=world.values)
+    assert cone_observed(blind, IN_A, 0.0, HALF_HFOV, 0.0, 4.0, blind_m=1.5)[gy, gx + 20], "seen over the blind patch"
+    grid = world.grid.copy()
+    grid[gy - 30:gy + 30, gx + 20] = world.values.unknown                # 2 m ahead: a strip the depth should have resolved
+    hole = OccupancyGrid2D(grid, world.params, values=world.values)
+    beyond = cone_observed(hole, IN_A, 0.0, HALF_HFOV, 0.0, 4.0, blind_m=1.5)
+    assert beyond[gy, gx + 15] and not beyond[gy, gx + 25], "not seen through unresolved unknown in the band"
+    assert not cone_observed(world, (float("nan"), 0.0), 0.0, HALF_HFOV, 0.0, 4.0).any()
+
+
+def test_the_ledger_keeps_the_observed_cells_per_storey_and_a_disabled_ledger_keeps_no_record():
+    policy, episode, world, _, _ = loop_policy()
+    ledger = SightLedger(policy)
+    assert not ledger.observed_mask(world).any(), "nothing observed before the first frame"
+    ledger.observe(pitched(episode, 0, IN_A, yaw=0.0), world)
+    first = ledger.observed_mask(world).copy()
+    assert first[world.world_to_grid(4.0, 3.0)[::-1]] and not first[world.world_to_grid(2.0, 3.0)[::-1]]
+    assert ledger.stats["cells_observed"] == int(first.sum()) > 0
+    ledger.observe(pitched(episode, 1, IN_A, yaw=math.pi), world)
+    both = ledger.observed_mask(world)
+    assert both[world.world_to_grid(2.0, 3.0)[::-1]] and (both & first).sum() == first.sum(), "the record only grows"
+    assert ledger.diagnostics()["floors"]["0"]["observed_cells"] == int(both.sum())
+    assert not ledger.observed_mask(world, floor_id=1).any(), "another storey has its own record"
+    # Tilted far down, a frame observes only what is close: the object band, not the floor band.
+    down = SightLedger(policy)
+    down.observe(pitched(episode, 0, IN_A, yaw=0.0, pitch=math.radians(60.0)), world)
+    assert down.observed_mask(world)[world.world_to_grid(3.5, 3.0)[::-1]]
+    assert not down.observed_mask(world)[world.world_to_grid(4.5, 3.0)[::-1]], "1.5 m out: floor in the frame, no object"
+    off = SightLedger(policy, SightSettings(enabled=False))
+    off.observe(pitched(episode, 0, IN_A, yaw=0.0), world)
+    assert off.observed_mask(world) is None, "no record -- not a record that says nothing was observed"
+    for kwargs in (dict(detect_range_m=0.0), dict(object_band_m=(1.0, 0.3)), dict(object_band_m=(0.3,)),
+                   dict(object_band_m=(-0.1, 1.0)), dict(object_band_m=(0.3, float("inf")))):
+        with pytest.raises(ValueError):
+            SightSettings(**kwargs)
 
 
 def test_a_small_enclosed_unknown_region_is_a_pocket_the_open_ends_and_the_edge_of_the_map_are_not():

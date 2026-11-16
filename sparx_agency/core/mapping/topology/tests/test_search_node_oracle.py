@@ -7,8 +7,8 @@ from sparx_agency.core.mapping.topology.search_node_oracle import (
     OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, SOURCE_FLAT,
     SOURCE_LLM, STAIRS, STAIRS_SUPPLEMENT, SYSTEM_PROMPT, UNEXPLORED_ELSEWHERE, UNEXPLORED_FLOOR, USABLE_SOURCES,
     SearchContext, SearchNode, SearchNodeOracle,
-    budget_line, coarse_seconds, floor_unexplored, format_exits, format_node, format_prompt, normalise, parse_home_here,
-    parse_pass, parse_reply, system_prompt)
+    area_words, budget_line, coarse_metres, coarse_seconds, floor_unexplored, format_coverage, format_exits, format_node,
+    format_prompt, format_size, normalise, parse_home_here, parse_pass, parse_reply, system_prompt)
 
 
 class Scripted:
@@ -94,7 +94,8 @@ def test_a_rooms_exits_are_attributes_on_its_line_and_the_rule_ties_them_to_the_
                  "Exits of a hallway, a corridor or an unidentified room are valued by what the home still lacks",
                  "offered again for what lies BEHIND them"):
         assert rule in SYSTEM_PROMPT, rule
-    assert "id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)" in SYSTEM_PROMPT, (
+    assert ("id=5  ROOM  type=bedroom  size=at least 9m2 (3.5+ x 3m, 1 wall not seen yet)  covered=4m2 (at most 50% of the "
+            "room, at least 5m2 left)  frontier=1  exits=1 (1 doorway)") in SYSTEM_PROMPT, (
         "the worked example values rooms by their exits")
     assert "  OPENING  " not in SYSTEM_PROMPT, "no opening node line in the room-level prompt"
     assert system_prompt([hallway, KITCHEN], SearchContext(HOUSE)) == SYSTEM_PROMPT, "no exit node offered: no supplement"
@@ -102,6 +103,118 @@ def test_a_rooms_exits_are_attributes_on_its_line_and_the_rule_ties_them_to_the_
     assert format_prompt("toilet", [hallway]) != format_prompt("toilet", [SearchNode(7, ROOM, "hallway", frontier_clusters=1,
                                                                                       last_inside_ago_s=4.0)])
     assert format_prompt("toilet", [hallway]) == format_prompt("toilet", [hallway])
+
+
+def _covered(covered_m2, fraction, left_m2, bounded):
+    """The ``covered=`` words for a room with these numbers."""
+    return format_coverage(SearchNode(0, ROOM, "unknown", bounded=bounded, covered_fraction=fraction,
+                                      covered_m2=covered_m2, left_m2=left_m2))
+
+
+def test_a_rooms_size_says_whether_its_walls_are_seen_and_its_coverage_is_handed_over_as_final_results():
+    """Room extents (2026-11-16): the size is FINAL only when every wall is located, a LOWER BOUND otherwise; the
+    coverage is given in m2, as a share of the WHOLE room (an upper bound when the size is one) and as what is left,
+    so the model computes nothing itself. Both follow ``type=``; the rest of the line is as it was."""
+    bounded = SearchNode(3, ROOM, "bedroom", area_m2=11.2, footprint_m2=12.6, length_m=4.1, width_m=3.05,
+                         walls_seen=4, bounded=True, covered_fraction=0.87, covered_m2=10.9, left_m2=1.7, last_inside_ago_s=5.0)
+    assert format_node(bounded) == ("id=3  ROOM  type=bedroom  size=13m2 (4x3m, all walls seen)  covered=11m2 (80% of the "
+                                    "room, 2m2 left)  frontier=0  exits=0  status=entered  searched=0s  seen: nothing yet")
+    partial = SearchNode(4, ROOM, "unknown", area_m2=6.0, footprint_m2=6.0, length_m=4.9, width_m=2.4,
+                         length_final=False, width_final=True, walls_seen=3, bounded=False,
+                         covered_fraction=0.43, covered_m2=2.6, left_m2=3.4, frontier_clusters=1)
+    assert format_size(partial) == "at least 6m2 (5+ x 2.5m, 1 wall not seen yet)"
+    assert format_coverage(partial) == "3m2 (at most 50% of the room, at least 3m2 left)", "a bound rounds UP, a share DOWN"
+    assert ("  size=at least 6m2 (5+ x 2.5m, 1 wall not seen yet)  covered=3m2 (at most 50% of the room, at least 3m2 left)"
+            "  frontier=1  ") in format_node(partial)
+    done = SearchNode(5, ROOM, "kitchen", footprint_m2=12.0, bounded=True, covered_fraction=0.996, covered_m2=11.95, left_m2=0.05)
+    assert format_coverage(done) == "12m2 (all of it)"
+    sliver = SearchNode(6, ROOM, "unknown", area_m2=0.3, footprint_m2=0.3, length_m=0.9, width_m=0.3,
+                        length_final=False, width_final=False, walls_seen=1, bounded=False,
+                        covered_fraction=1.0, covered_m2=0.3, left_m2=0.0)
+    assert format_size(sliver) == "under 1m2 mapped so far (1+ x 0.5+m, 3 of 4 walls not seen yet)"
+    assert format_coverage(sliver) == "under 1m2 (all of the mapped part; the unmapped rest is unknown)"
+    far = SearchNode(7, ROOM, "unknown", footprint_m2=7.0, bounded=False, covered_fraction=0.0, covered_m2=0.0, left_m2=7.0)
+    assert format_coverage(far) == "0m2 (at most 0% of the room, at least 7m2 left)", "seen from beyond detection range"
+    # The size's three shapes, as the extents of a 5 x 4 m room give them: walled, one wall unseen, no wall seen.
+    room = dict(footprint_m2=20.0, area_m2=20.0, length_m=5.0, width_m=4.0)
+    assert format_size(SearchNode(0, ROOM, "unknown", walls_seen=4, bounded=True, **room)) == "20m2 (5x4m, all walls seen)"
+    assert format_size(SearchNode(0, ROOM, "unknown", walls_seen=3, bounded=False, length_final=False, **room)) == (
+        "at least 20m2 (5+ x 4m, 1 wall not seen yet)")
+    assert format_size(SearchNode(0, ROOM, "unknown", walls_seen=0, bounded=False, length_final=False, width_final=False,
+                                  **room)) == "at least 20m2 (5+ x 4+m, 4 of 4 walls not seen yet)"
+    # The footprint (the floor under the furniture included) is the size; the labelled free cells alone are not.
+    assert format_size(SearchNode(0, ROOM, "unknown", area_m2=18.5, footprint_m2=20.0, length_m=5.0, width_m=4.0,
+                                  walls_seen=4, bounded=True)).startswith("20m2 ")
+    assert coarse_metres(3.26) == "3.5" and coarse_metres(3.74) == "3.5" and coarse_metres(4.1) == "4"
+    assert area_words(0.02) == "0m2" and area_words(0.6) == "under 1m2" and area_words(11.5) == "12m2"
+    # Without the extents (an older rig, a storey before its first frame) the line reads as before.
+    assert format_size(UNKNOWN) == "18m2" and format_coverage(UNKNOWN) is None
+    assert "covered=" not in format_node(UNKNOWN)
+    assert format_size(SearchNode(6, ROOM, "unknown", area_m2=0.4)) == "under 1m2"
+    assert format_size(SearchNode(7, ROOM, "unknown")) == "unknown size"
+    # With the extents but no observation record (no sight ledger) the size is said and the coverage is not.
+    unobserved = SearchNode(8, ROOM, "unknown", footprint_m2=12.0, length_m=4.0, width_m=3.0, walls_seen=4, bounded=True)
+    assert "size=12m2 (4x3m, all walls seen)  frontier=0" in format_node(unobserved)
+    # Coverage is shown in tens, so a frame that saw three more cells does not change the prompt.
+    a = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, covered_fraction=0.81, covered_m2=9.7, left_m2=2.3)])
+    b = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, covered_fraction=0.89, covered_m2=9.7, left_m2=2.3)])
+    assert a == b
+    assert a != format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, covered_fraction=0.90, covered_m2=9.7, left_m2=2.3)])
+
+
+def test_the_coverage_words_hand_the_model_final_results():
+    assert _covered(10.4, 0.87, 1.6, bounded=True) == "10m2 (80% of the room, 2m2 left)"
+    assert _covered(11.95, 0.996, 0.05, bounded=True) == "12m2 (all of it)"
+    assert _covered(0.0, 0.0, 12.0, bounded=True) == "0m2 (0% of the room, 12m2 left)"
+    assert _covered(10.4, 0.87, 0.6, bounded=True) == "10m2 (80% of the room, under 1m2 left)"
+    assert _covered(2.6, 0.43, 3.4, bounded=False) == "3m2 (at most 50% of the room, at least 3m2 left)"
+    assert _covered(0.3, 1.0, 0.0, bounded=False) == "under 1m2 (all of the mapped part; the unmapped rest is unknown)"
+    assert _covered(6.8, 0.97, 0.2, bounded=False) == "7m2 (all of the mapped part; the unmapped rest is unknown)", (
+        "a bound that rounds up to 100% says nothing")
+    assert _covered(5.5, 0.88, 0.7, bounded=False) == "6m2 (at most 90% of the room)", "no 'at least under 1m2'"
+    assert _covered(0.0, 0.0, 7.0, bounded=False) == "0m2 (at most 0% of the room, at least 7m2 left)"
+    assert _covered(3.0, 1.7, 0.0, bounded=True) == "3m2 (all of it)" and _covered(3.0, -0.2, 9.0, bounded=True) == (
+        "3m2 (0% of the room, 9m2 left)"), "a share outside 0-1 is clamped, never printed"
+
+
+def test_the_rules_put_coverage_first_and_time_second():
+    """What the model is told to do with the two facts: coverage is the main fact for what is left of a room, the
+    size says what the remainder can hold, and time spent decides nothing by itself."""
+    for rule in ("is FINAL -- the room is that big and no bigger", "is a LOWER BOUND", "covered=", "NOT where the robot walked",
+                 "HOW MUCH IS LEFT -- COVERAGE FIRST", "the size says what that remainder can hold",
+                 "judge whether it fits in what is LEFT", "TIME IS SECONDARY", "coverage overrides it",
+                 "take NOTHING from it", "enough to give it up", "Never lower a room for its searched= alone",
+                 "never read a size of \"at least\" as the room's", "every number on a node line is a FINAL result",
+                 "the planner charges travel"):
+        assert rule in SYSTEM_PROMPT, rule
+    # The two rules that read time, or an assumption, where the coverage is now given are gone with it.
+    assert "The longer searched= reads" not in SYSTEM_PROMPT and "seen most of what is mapped" not in SYSTEM_PROMPT
+    assert "size=12m2 (4x3m, all walls seen)  covered=11m2 (90% of the room, 1m2 left)" in SYSTEM_PROMPT, (
+        "the example shows the new fields")
+    assert "observed=" not in SYSTEM_PROMPT
+    # Nothing else about the line changed: the robot's room is still marked, and the exits still carry their unseen floor.
+    assert "here=yes: the robot stands in it now" in SYSTEM_PROMPT and "unseen behind them" in SYSTEM_PROMPT
+
+
+def test_the_worked_examples_lines_are_lines_the_code_writes():
+    """The example shows the model the format of a room line: a line the code could not write teaches it one it never sees."""
+    example = [
+        SearchNode(2, ROOM, "kitchen", footprint_m2=12.0, length_m=4.0, width_m=3.0, walls_seen=4, bounded=True,
+                   covered_fraction=0.92, covered_m2=11.0, left_m2=1.0, searched_s=30.0, last_inside_ago_s=120.0,
+                   objects=("oven", "refrigerator", "sink"), scanned="full rotation", scanned_ago_s=120.0),
+        SearchNode(3, ROOM, "living_room", footprint_m2=24.0, length_m=6.0, width_m=4.0, walls_seen=4, bounded=True,
+                   covered_fraction=0.83, covered_m2=20.0, left_m2=4.0, frontier_clusters=1, exits=1, searched_s=40.0,
+                   last_inside_ago_s=60.0, objects=("sofa", "television"), scanned="full rotation", scanned_ago_s=60.0),
+        SearchNode(5, ROOM, "bedroom", footprint_m2=9.0, length_m=3.5, width_m=3.0, length_final=False, walls_seen=3,
+                   bounded=False, covered_fraction=0.44, covered_m2=4.0, left_m2=5.0, frontier_clusters=1, exits=1,
+                   doorways=1, objects=("bed",)),
+        SearchNode(6, ROOM, "unknown", footprint_m2=3.0, length_m=2.0, width_m=1.5, length_final=False, width_final=False,
+                   walls_seen=2, bounded=False, covered_fraction=0.33, covered_m2=1.0, left_m2=2.0, frontier_clusters=1),
+        SearchNode(7, ROOM, "hallway", footprint_m2=6.0, length_m=4.0, width_m=1.5, walls_seen=4, bounded=True,
+                   covered_fraction=0.7, covered_m2=4.2, left_m2=1.8, frontier_clusters=1, exits=1, doorways=1,
+                   searched_s=10.0, last_inside_ago_s=0.0, here=True)]
+    for node in example:
+        assert "\n%s\n" % format_node(node) in SYSTEM_PROMPT, format_node(node)
 
 
 def test_the_single_storey_prompt_has_no_storey_lines_and_no_stairs_rules():
