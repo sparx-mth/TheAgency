@@ -56,3 +56,10 @@ def test_the_sample_is_a_sorted_reproducible_subset_of_the_asked_size():
     assert first == sample_names(names, 40, seed=17) == sorted(first) and len(set(first)) == 40 and set(first) <= set(names)
     assert first != sample_names(names, 40, seed=18)
     assert sample_names(names, 99, seed=17) == names
+
+
+def test_a_view_mostly_looking_out_of_the_room_is_never_selected_and_one_without_the_measure_still_is():
+    out_of_room = dict(candidate({0, 1, 2, 3}), inside=0.3)
+    in_room = dict(candidate({0, 1}), inside=0.9)
+    assert select([out_of_room, in_room], count=2, with_objects=False) == [1]
+    assert select([candidate({0, 1})], count=1, with_objects=False) == [0]

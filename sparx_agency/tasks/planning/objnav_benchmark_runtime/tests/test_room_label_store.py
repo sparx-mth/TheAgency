@@ -2,7 +2,7 @@ import csv
 
 import pytest
 
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.label_store import ROOM_TYPES, LabelStore
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.label_store import OPEN_PLAN, ROOM_TYPES, LabelStore
 
 
 def test_a_label_is_kept_and_read_back(tmp_path):
@@ -38,3 +38,9 @@ def test_only_listed_room_types_are_accepted(tmp_path):
 
 def test_the_list_has_the_ways_out_and_no_duplicates():
     assert "unsure" in ROOM_TYPES and "not a room" in ROOM_TYPES and len(set(ROOM_TYPES)) == len(ROOM_TYPES)
+
+
+def test_an_open_plan_room_can_be_named_as_such(tmp_path):
+    store = LabelStore(tmp_path / "labels.csv")
+    store.set("00009_r12", OPEN_PLAN)
+    assert LabelStore(tmp_path / "labels.csv").get("00009_r12") == OPEN_PLAN

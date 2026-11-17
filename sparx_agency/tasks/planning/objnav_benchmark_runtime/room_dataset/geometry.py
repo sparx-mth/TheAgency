@@ -141,3 +141,22 @@ def wall_hits(depth_m, camera_xz_yaw, perimeter_xz, width, hfov_deg, tolerance_m
     points = np.asarray(perimeter_xz, dtype=float)
     gap = np.hypot(points[:, None, 0] - hit_x[None, :], points[:, None, 1] - hit_z[None, :])
     return gap.min(axis=1) <= tolerance_m
+
+
+def hits_in_room_share(depth_m, camera_xz_yaw, room_cells_xz, width, hfov_deg, max_gap_m, stride=4):
+    """The share of the camera's depth rays at the horizon row that end within ``max_gap_m`` of a room cell: low when it looks out through a door."""
+    depth = np.asarray(depth_m, dtype=float)
+    columns = np.arange(0, width, stride)
+    metres = depth[depth.shape[0] // 2, columns]
+    valid = np.isfinite(metres) & (metres > 0)
+    if not valid.any():
+        return 0.0
+    metres, columns = metres[valid], columns[valid]
+    cam_x, cam_z, yaw = camera_xz_yaw
+    ahead, right = (-math.sin(yaw), -math.cos(yaw)), (math.cos(yaw), -math.sin(yaw))
+    sideways = (columns - width / 2) / ((width / 2) / math.tan(math.radians(hfov_deg) / 2)) * metres
+    hit_x = cam_x + metres * ahead[0] + sideways * right[0]
+    hit_z = cam_z + metres * ahead[1] + sideways * right[1]
+    cells = np.asarray(room_cells_xz, dtype=float)
+    gap = np.hypot(cells[:, None, 0] - hit_x[None, :], cells[:, None, 1] - hit_z[None, :]).min(axis=0)
+    return float((gap <= max_gap_m).mean())

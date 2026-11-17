@@ -167,3 +167,27 @@ def test_a_pixel_without_depth_hits_nothing():
 
 def test_the_view_turns_with_the_yaw_when_hitting_the_perimeter():
     assert hits(3.0, [(-3.0, 0.0)], camera=(0.0, 0.0, np.pi / 2)) == [True]
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import hits_in_room_share
+
+
+def inside_share(depth_m, room_cells, camera=(0.0, 0.0, 0.0)):
+    return hits_in_room_share(np.full((48, 64), depth_m), camera, np.array(room_cells), width=64, hfov_deg=90.0, max_gap_m=1.0)
+
+
+def test_a_view_that_ends_on_surfaces_next_to_room_floor_is_all_in_the_room():
+    assert inside_share(3.0, [(x, -2.5) for x in np.arange(-3.0, 3.1, 0.5)]) == 1.0
+
+
+def test_a_view_that_ends_far_from_any_room_floor_is_not_in_the_room():
+    assert inside_share(3.0, [(0.0, 0.0), (0.5, 0.5)]) == 0.0
+
+
+def test_the_share_is_the_part_of_the_view_whose_hits_are_in_the_room():
+    cells = [(x, -2.5) for x in np.arange(-3.0, -0.9, 0.5)]
+    assert 0.4 < inside_share(3.0, cells) < 0.6
+
+
+def test_a_view_without_any_depth_has_no_hits_in_the_room():
+    assert inside_share(0.0, [(0.0, -2.5)]) == 0.0

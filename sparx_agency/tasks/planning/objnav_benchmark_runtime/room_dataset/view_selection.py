@@ -5,7 +5,7 @@ from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import habitat_position
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.projection import box_floor_point
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import (
-    greedy_views, near_room, near_share, object_coverage, visible_cells, wall_hits)
+    greedy_views, hits_in_room_share, near_room, near_share, object_coverage, visible_cells, wall_hits)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import far_fraction
 
 NEAR_M = 1.0
@@ -16,6 +16,8 @@ MIN_CONF = 0.3
 SAME_OBJECT_M = 0.6
 ROOM_GAP_M = 0.5
 WALL_TOLERANCE_M = 0.5
+MIN_IN_ROOM_SHARE = 0.7
+IN_ROOM_GAP_M = 1.0
 
 
 def objects_in_room(detector, rgb, depth, camera, room_cells, protocol):
@@ -38,13 +40,14 @@ def describe_candidates(poses, render, room_cells, protocol, detector, perimeter
         camera = (*habitat_position(dict(zip("xyz", pose))), yaw)
         found.append({"cell": cell, "yaw": yaw, "near": near_share(depth, NEAR_M), "far_fraction": far_fraction(depth),
                       "cells": visible_cells(depth, camera, room_cells, protocol.width, protocol.height, protocol.hfov_deg),
+                      "inside": hits_in_room_share(depth, (camera[0], camera[2], yaw), room_cells[:, [0, 2]], protocol.width, protocol.hfov_deg, IN_ROOM_GAP_M),
                       "objects": objects_in_room(detector, rgb, depth, camera, room_cells, protocol) if detector and near_share(depth, NEAR_M) <= MAX_NEAR_SHARE else [],
                       "walls": None if perimeter is None else wall_hits(depth, (camera[0], camera[2], yaw), perimeter, protocol.width, protocol.hfov_deg, WALL_TOLERANCE_M)})
     return found
 
 
 def usable(candidates):
-    return [i for i, c in enumerate(candidates) if c["near"] <= MAX_NEAR_SHARE]
+    return [i for i, c in enumerate(candidates) if c["near"] <= MAX_NEAR_SHARE and c.get("inside", 1.0) >= MIN_IN_ROOM_SHARE]
 
 
 def select(candidates, count, with_objects):
