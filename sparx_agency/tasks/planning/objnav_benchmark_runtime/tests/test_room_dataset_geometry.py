@@ -107,3 +107,33 @@ def test_the_near_share_counts_pixels_closer_than_the_limit_and_pixels_without_d
     depth = np.array([[0.5, 3.0], [0.0, np.nan]])
     assert near_share(depth, near_m=1.0) == 0.75
     assert near_share(np.full((2, 2), 3.0), near_m=1.0) == 0.0
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import near_room, object_coverage
+
+
+def test_weights_make_a_few_heavy_elements_outweigh_many_light_ones():
+    heavy_first = [np.array([True, False, False, False, False]), np.array([False, True, True, True, True])]
+    weights = np.array([10.0, 1.0, 1.0, 1.0, 1.0])
+    assert greedy_views(heavy_first, count=1, min_new=0.5, weights=weights) == [0]
+
+
+def test_with_a_repeat_credit_views_that_only_re_see_things_still_fill_the_remaining_slots_most_new_first():
+    views = masks({0, 1, 2}, {0, 1}, {0}, {3, 4})
+    assert greedy_views(views, count=4, min_new=0.1, repeat_credit=0.5) == [0, 3, 1, 2]
+
+
+def test_a_view_is_never_picked_twice_even_when_its_repeat_credit_is_the_best_left():
+    assert greedy_views(masks({0, 1}, {0}), count=5, min_new=0.1, repeat_credit=0.5) == [0, 1]
+
+
+def test_one_object_seen_from_two_views_is_one_object_and_a_second_class_at_the_same_place_is_another():
+    chair, same_chair, bed = {"cls": "chair", "point": (1.0, 1.0)}, {"cls": "chair", "point": (1.3, 1.0)}, {"cls": "bed", "point": (1.1, 1.0)}
+    objects, masks_ = object_coverage([[chair], [same_chair, bed], []], radius_m=0.6)
+    assert [o["cls"] for o in objects] == ["chair", "bed"]
+    assert [list(m) for m in masks_] == [[True, False], [True, True], [False, False]]
+
+
+def test_a_point_is_near_the_room_when_a_room_cell_is_within_the_gap():
+    cells = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    assert near_room((1.3, 0.0), cells, max_gap_m=0.5) and not near_room((3.0, 0.0), cells, max_gap_m=0.5)

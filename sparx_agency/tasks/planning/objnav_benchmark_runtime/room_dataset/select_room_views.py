@@ -1,4 +1,4 @@
-"""Pick the views of chosen HM3D rooms that together see the most of the room's floor, and draw them beside the old compass-heading views for a visual check."""
+"""Pick the views of chosen HM3D rooms that together see the most of the room's floor and of its detected objects, and draw them beside the old compass-heading views."""
 import argparse
 import json
 import os
@@ -8,16 +8,23 @@ import cv2
 import numpy as np
 
 from sparx_agency.core.planning.objnav.errors import EnvContractError
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.run_detectors import DEFAULT_VOCABULARY
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.sample_frames import yaw_quaternion_wxyz
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import habitat_position
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.projection import box_floor_point
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.build_room_frames import DEPTH_MM_MAX
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import compass_yaws, greedy_views, near_share, spread_points, visible_cells
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import (
+    compass_yaws, greedy_views, near_room, near_share, object_coverage, spread_points, visible_cells)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import FONT, far_fraction, floor_map, pick_frames
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
 
-MIN_NEW_CELL_SHARE = 0.02
-MIN_NEW_CELLS = 3
+MIN_GAIN = 0.02
+REPEAT_CREDIT = 0.5
+MIN_CONF = 0.3
+SAME_OBJECT_M = 0.6
+ROOM_GAP_M = 0.5
 NEAR_M = 1.0
 MAX_NEAR_SHARE = 0.4
 SHOWN_PER_SIDE = 6
@@ -37,30 +44,44 @@ def render(simulator, glb, navmesh, cell, yaw):
     return rgb, depth, (float(pose.x), float(pose.y), float(pose.z))
 
 
-def select_views(simulator, glb, navmesh, room_cells, protocol, args):
+def objects_in_room(detector, rgb, depth, camera, room_cells, protocol):
+    placed = []
+    for d in detector.detect(rgb):
+        point = box_floor_point(d.xyxy, depth, (camera[0], camera[2], camera[3]), protocol.width, protocol.height, protocol.hfov_deg) if d.conf >= MIN_CONF else None
+        if point is not None and near_room(point, room_cells, ROOM_GAP_M):
+            placed.append({"cls": d.cls, "point": point})
+    return placed
+
+
+def select_views(simulator, glb, navmesh, room_cells, protocol, args, detector):
     poses = [(room_cells[i], yaw) for i in spread_points(room_cells[:, [0, 2]], args.candidates) for yaw in compass_yaws(args.headings)]
-    rendered, masks = [], []
+    rendered, cell_masks, found = [], [], []
     for cell, yaw in poses:
         try:
-            _, depth, pose = render(simulator, glb, navmesh, cell, yaw)
+            rgb, depth, pose = render(simulator, glb, navmesh, cell, yaw)
         except EnvContractError:
             continue
         if near_share(depth, NEAR_M) > MAX_NEAR_SHARE:
             continue
+        camera = (*habitat_position(dict(zip("xyz", pose))), yaw)
         rendered.append((cell, yaw))
-        masks.append(visible_cells(depth, (*habitat_position(dict(zip("xyz", pose))), yaw), room_cells, protocol.width, protocol.height, protocol.hfov_deg))
-    chosen = greedy_views(masks, args.frames, max(MIN_NEW_CELLS, int(MIN_NEW_CELL_SHARE * len(room_cells))))
-    return [(rendered[i], int(masks[i].sum())) for i in chosen]
+        cell_masks.append(visible_cells(depth, camera, room_cells, protocol.width, protocol.height, protocol.hfov_deg))
+        found.append(objects_in_room(detector, rgb, depth, camera, room_cells, protocol) if detector else [])
+    objects, object_masks = object_coverage(found, SAME_OBJECT_M)
+    masks = [np.concatenate([c, o]) for c, o in zip(cell_masks, object_masks)]
+    weights = np.concatenate([np.full(len(room_cells), 1 / len(room_cells)), np.full(len(objects), 1 / max(1, len(objects)))])
+    chosen = greedy_views(masks, args.frames, MIN_GAIN, weights, REPEAT_CREDIT)
+    return [(rendered[i], int(cell_masks[i].sum()), int(object_masks[i].sum())) for i in chosen], len(objects)
 
 
-def write_view(simulator, glb, navmesh, folder, room, order, pose, seen):
+def write_view(simulator, glb, navmesh, folder, room, order, pose, seen, objects):
     (cell, yaw) = pose
     rgb, depth, (x, y, z) = render(simulator, glb, navmesh, cell, yaw)
     name = "%s_v%d" % (room["room"], order)
     cv2.imwrite(str(folder / "frames" / (name + ".jpg")), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
     cv2.imwrite(str(folder / "depth" / (name + ".png")), np.clip(np.nan_to_num(depth.astype(np.float64)) * 1000, 0, DEPTH_MM_MAX).astype(np.uint16))
     return {"room": room["room"], "scene": room["scene"], "region": room["region"], "spot": order, "heading": 0, "frame": name, "x": x, "y": y, "z": z,
-            "yaw": yaw, "seen_cells": seen, "far_fraction": far_fraction(depth)}
+            "yaw": yaw, "seen_cells": seen, "seen_objects": objects, "far_fraction": far_fraction(depth)}
 
 
 def side(folder, cells, room, views, title):
@@ -84,9 +105,12 @@ def main(argv=None):
     p.add_argument("--candidates", type=int, default=60)
     p.add_argument("--headings", type=int, default=12)
     p.add_argument("--frames", type=int, default=SHOWN_PER_SIDE)
+    p.add_argument("--detector-url", help="a running detection server; without it only the room floor is scored")
+    p.add_argument("--backend", default="yolo_world")
     args = p.parse_args(argv)
     protocol = protocol_for("v1").with_split("train")
     scenes = Path(args.scenes_dir)
+    detector = HttpDetector(args.detector_url, [w for w in DEFAULT_VOCABULARY.read_text().strip().split(",") if w], timeout_s=120.0, expected_backend=args.backend) if args.detector_url else None
     (args.out / "sheets").mkdir(parents=True, exist_ok=True)
     for room_name in args.rooms:
         old_folder, room = room_in(args.views, room_name)
@@ -101,15 +125,15 @@ def main(argv=None):
         simulator = HabitatRGBDSimulator(
             protocol.camera(), protocol.actions(), protocol.agent_radius_m, protocol.allow_sliding, 0, height_m=protocol.agent_height_m,
             navmesh=protocol.navmesh, depth_holes=protocol.depth_holes())
-        picked = select_views(simulator, glb, navmesh, room_cells, protocol, args)
-        new = [write_view(simulator, glb, navmesh, folder, room, i, pose, seen) for i, (pose, seen) in enumerate(picked)]
+        picked, distinct_objects = select_views(simulator, glb, navmesh, room_cells, protocol, args, detector)
+        new = [write_view(simulator, glb, navmesh, folder, room, i, pose, seen, objects) for i, (pose, seen, objects) in enumerate(picked)]
         simulator.close()
         (folder / ("views_%s.json" % room_name)).write_text(json.dumps(new))
         old = pick_frames([json.loads(line) for line in (old_folder / "views.jsonl").read_text().splitlines() if json.loads(line)["room"] == room_name], count=SHOWN_PER_SIDE)
         image = np.vstack([side(old_folder, cells, room, old, "%s before: spots in the room, compass headings" % room_name),
-                           side(folder, cells, room, new, "%s after: views chosen to see the most room floor (%d of %d cells)" % (room_name, len(new), len(room_cells)))])
+                           side(folder, cells, room, new, "%s after: %d views chosen by room floor seen and objects seen (%d objects found)" % (room_name, len(new), distinct_objects))])
         cv2.imwrite(str(args.out / "sheets" / (room_name + ".jpg")), image, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        print(room_name, [seen for _, seen in picked], "of", len(room_cells), flush=True)
+        print(room_name, [(cells_, objects_) for _, cells_, objects_ in picked], "cells and objects seen; room has", len(room_cells), "cells,", distinct_objects, "objects", flush=True)
     return 0
 
 

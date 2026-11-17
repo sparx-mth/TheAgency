@@ -73,18 +73,38 @@ def visible_cells(depth_m, camera_xyz_yaw, cells_xyz, width, height, hfov_deg, t
     return inside & np.isfinite(surface) & (surface > 0) & (surface >= forward - tolerance_m)
 
 
-def greedy_views(seen_masks, count, min_new):
-    """Indices of up to ``count`` views, each adding the most cells no earlier pick saw; stops below ``min_new`` new cells."""
-    covered = np.zeros(len(seen_masks[0]), dtype=bool)
+def greedy_views(seen_masks, count, min_new, weights=None, repeat_credit=0.0):
+    """Indices of up to ``count`` views, each adding the most weight; an element seen ``k`` times before counts ``repeat_credit ** k``. Stops below ``min_new``."""
+    weights = np.ones(len(seen_masks[0])) if weights is None else np.asarray(weights, dtype=float)
+    times_seen = np.zeros(len(weights))
     chosen = []
     while len(chosen) < count:
-        gains = [int((mask & ~covered).sum()) for mask in seen_masks]
+        credit = weights * repeat_credit ** times_seen
+        gains = [-1.0 if i in chosen else float(credit[mask].sum()) for i, mask in enumerate(seen_masks)]
         best = int(np.argmax(gains))
         if gains[best] < min_new:
             break
         chosen.append(best)
-        covered |= seen_masks[best]
+        times_seen[seen_masks[best]] += 1
     return chosen
+
+
+def object_coverage(detections_per_view, radius_m):
+    """The distinct objects over all views (same class within ``radius_m`` is one object) and, per view, which of them it shows."""
+    objects = []
+    for detections in detections_per_view:
+        for d in detections:
+            if not any(o["cls"] == d["cls"] and math.dist(o["point"], d["point"]) <= radius_m for o in objects):
+                objects.append(d)
+    masks = [np.array([any(o["cls"] == d["cls"] and math.dist(o["point"], d["point"]) <= radius_m for d in detections) for o in objects], dtype=bool)
+             for detections in detections_per_view]
+    return objects, masks
+
+
+def near_room(point_xz, room_cells_xyz, max_gap_m):
+    """Whether a floor-plan point has a room cell within ``max_gap_m``: the object stands in the room."""
+    cells = np.asarray(room_cells_xyz, dtype=float)
+    return bool(np.hypot(cells[:, 0] - point_xz[0], cells[:, 2] - point_xz[1]).min() <= max_gap_m)
 
 
 def near_share(depth_m, near_m):
